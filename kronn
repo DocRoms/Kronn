@@ -1,0 +1,310 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ─── Bash version check ─────────────────────────────────────────────────────
+# macOS ships Bash 3.2 (2007). Kronn needs Bash 4+ for some features.
+if (( BASH_VERSINFO[0] < 4 )); then
+    echo ""
+    printf "\033[0;33m  ⚠  Bash %s détecté — version 4+ recommandée.\033[0m\n" "$BASH_VERSION"
+    echo ""
+    if command -v brew >/dev/null 2>&1; then
+        printf "\033[0;36m  Installer via Homebrew :\033[0m\n"
+        printf "\033[2m    brew install bash\033[0m\n"
+        printf "\033[2m    Puis relancer : /opt/homebrew/bin/bash %s\033[0m\n" "$(printf '%q ' "$0" "$@")"
+    else
+        printf "\033[0;36m  Installer Homebrew d'abord :\033[0m\n"
+        printf '\033[2m    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"\033[0m\n'
+        printf "\033[2m    brew install bash\033[0m\n"
+    fi
+    echo ""
+    printf "\033[0;33m  Tentative de lancement en mode compatibilité...\033[0m\n"
+    echo ""
+fi
+
+# ─── Resolve kronn's own directory (follow symlinks) ─────────────────────────
+KRONN_SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$KRONN_SOURCE" ]]; do
+    KRONN_SOURCE="$(readlink "$KRONN_SOURCE")"
+done
+KRONN_DIR="$(cd "$(dirname "$KRONN_SOURCE")" && pwd)"
+KRONN_CONFIG_DIR="${HOME}/.config/kronn"
+
+# ─── Source libraries ────────────────────────────────────────────────────────
+source "$KRONN_DIR/lib/ui.sh"
+source "$KRONN_DIR/lib/agents.sh"
+source "$KRONN_DIR/lib/mcps.sh"
+source "$KRONN_DIR/lib/tron.sh"
+source "$KRONN_DIR/lib/analyze.sh"
+source "$KRONN_DIR/lib/repos.sh"
+
+# ─── Config ──────────────────────────────────────────────────────────────────
+
+load_config() {
+    local config_file="$KRONN_CONFIG_DIR/config.toml"
+    mkdir -p "$KRONN_CONFIG_DIR"
+
+    SCAN_PATH=""
+
+    if [[ -f "$config_file" ]]; then
+        SCAN_PATH=$(awk -F'"' '/^scan_path/ {print $2}' "$config_file" 2>/dev/null || true)
+    fi
+
+    # Default: parent directory of kronn repo
+    if [[ -z "$SCAN_PATH" ]]; then
+        SCAN_PATH="$(dirname "$KRONN_DIR")"
+    fi
+}
+
+save_config() {
+    mkdir -p "$KRONN_CONFIG_DIR"
+    cat > "$KRONN_CONFIG_DIR/config.toml" <<TOML
+# Kronn configuration
+scan_path = "$SCAN_PATH"
+agent = "${SELECTED_AGENT:-}"
+TOML
+}
+
+# ─── Commands ────────────────────────────────────────────────────────────────
+
+cmd_start() {
+    banner
+
+    # 1. Agent detection
+    select_agent
+
+    # 2. Web interface or CLI?
+    menu_choice "Mode d'utilisation" \
+        "Lancer l'interface web" \
+        "Rester en CLI"
+
+    if [[ "$REPLY" == "1" ]]; then
+        cmd_web
+        return
+    fi
+
+    # 3. CLI flow: scan repos
+    cmd_repos
+}
+
+cmd_web() {
+    step "Lancement de l'interface web"
+
+    # Check docker
+    if ! command -v docker >/dev/null 2>&1; then
+        fail "Docker n'est pas installé."
+        printf "  ${DIM}https://docs.docker.com/get-docker/${RESET}\n"
+        return 1
+    fi
+
+    # Check make
+    if ! command -v make >/dev/null 2>&1; then
+        warn "make n'est pas installé."
+        if ask_yn "Installer make ?"; then
+            install_make
+        else
+            fail "make est requis pour l'interface web."
+            return 1
+        fi
+    fi
+
+    info "Build & démarrage..."
+    (cd "$KRONN_DIR" && make start)
+}
+
+cmd_repos() {
+    step "Scan des dépôts"
+
+    info "Scan de : $SCAN_PATH"
+    scan_repos "$SCAN_PATH"
+
+    if [[ ${#REPO_PATHS[@]} -eq 0 ]]; then
+        warn "Aucun dépôt git trouvé dans $SCAN_PATH"
+        return
+    fi
+
+    success "${#REPO_PATHS[@]} dépôt(s) trouvé(s)"
+
+    # Loop: let user configure repos or launch web
+    while true; do
+        select_repo
+        local chosen=$REPLY
+
+        if [[ "$chosen" == "0" ]]; then
+            save_config
+            cmd_web
+            return
+        fi
+
+        local idx=$((chosen - 1))
+        init_repo "${REPO_PATHS[$idx]}"
+
+        # Refresh status after config
+        REPO_STATUS[$idx]=$(detect_ai_context "${REPO_PATHS[$idx]}")
+    done
+}
+
+cmd_mcp() {
+    local subcmd="${1:-sync}"
+    case "$subcmd" in
+        sync)
+            load_config
+            scan_repos "$SCAN_PATH"
+            sync_mcp_all
+            ;;
+        check)
+            step "Prérequis MCP"
+            check_mcp_prereqs
+            ;;
+        secrets)
+            init_secrets
+            ;;
+        *)
+            echo "Usage: kronn mcp [sync|check|secrets]"
+            ;;
+    esac
+}
+
+cmd_status() {
+    banner
+    load_config
+
+    step "Agents"
+    detect_agents
+    show_detected_agents || warn "Aucun agent détecté"
+
+    step "Dépôts ($SCAN_PATH)"
+    scan_repos "$SCAN_PATH"
+
+    if [[ ${#REPO_PATHS[@]} -eq 0 ]]; then
+        warn "Aucun dépôt trouvé"
+        return
+    fi
+
+    for i in "${!REPO_NAMES[@]}"; do
+        local name="${REPO_NAMES[$i]}"
+        local status="${REPO_STATUS[$i]}"
+        if [[ "$status" == "non configuré" ]]; then
+            printf "  ${DIM}%s — %s${RESET}\n" "$name" "$status"
+        else
+            printf "  ${GREEN}%s${RESET} — %s\n" "$name" "$status"
+        fi
+    done
+
+    step "Secrets MCP"
+    if secrets_configured; then
+        success "Secrets configurés dans $KRONN_CONFIG_DIR/secrets.toml"
+    else
+        warn "Secrets non configurés — lancer : kronn mcp secrets"
+    fi
+}
+
+cmd_init() {
+    local target="${1:-.}"
+    target=$(cd "$target" 2>/dev/null && pwd)
+
+    if [[ ! -d "$target/.git" ]]; then
+        fail "$target n'est pas un dépôt git."
+        return 1
+    fi
+
+    init_repo "$target"
+}
+
+cmd_help() {
+    banner
+    printf "${BOLD}Usage :${RESET} kronn [commande]\n"
+    echo
+    printf "  ${CYAN}start${RESET}          Flow interactif (défaut)\n"
+    printf "  ${CYAN}status${RESET}         Vue d'ensemble\n"
+    printf "  ${CYAN}init [path]${RESET}    Configurer un dépôt\n"
+    printf "  ${CYAN}mcp sync${RESET}       Synchroniser les .mcp.json\n"
+    printf "  ${CYAN}mcp check${RESET}      Vérifier les prérequis MCP\n"
+    printf "  ${CYAN}mcp secrets${RESET}    Configurer les tokens\n"
+    printf "  ${CYAN}help${RESET}           Cette aide\n"
+    echo
+}
+
+# ─── Utility ─────────────────────────────────────────────────────────────────
+
+install_make() {
+    if command -v apt >/dev/null 2>&1; then
+        sudo apt update && sudo apt install -y make
+    elif command -v dnf >/dev/null 2>&1; then
+        sudo dnf install -y make
+    elif command -v pacman >/dev/null 2>&1; then
+        sudo pacman -S --noconfirm make
+    elif command -v brew >/dev/null 2>&1; then
+        brew install make
+    else
+        fail "Impossible de détecter le gestionnaire de paquets."
+        echo "Installer make manuellement."
+        return 1
+    fi
+}
+
+# ─── Self-install ────────────────────────────────────────────────────────────
+
+ensure_in_path() {
+    local link_dir="$HOME/.local/bin"
+    local link_path="$link_dir/kronn"
+
+    # Already accessible as `kronn`?
+    local current
+    current=$(command -v kronn 2>/dev/null || true)
+    if [[ -n "$current" ]]; then
+        # Resolve symlink to check it points here
+        local resolved
+        resolved=$(readlink -f "$current" 2>/dev/null || echo "$current")
+        if [[ "$resolved" == "$KRONN_DIR/kronn" ]]; then
+            return 0
+        fi
+    fi
+
+    echo
+    info "kronn n'est pas dans votre PATH."
+    if ask_yn "Créer un lien dans $link_dir ?"; then
+        mkdir -p "$link_dir"
+        ln -sf "$KRONN_DIR/kronn" "$link_path"
+        success "Lien créé : $link_path -> $KRONN_DIR/kronn"
+
+        # Check if ~/.local/bin is in PATH
+        if [[ ":$PATH:" != *":$link_dir:"* ]]; then
+            warn "$link_dir n'est pas dans votre PATH."
+            printf "  ${DIM}Ajouter à ~/.bashrc ou ~/.zshrc :${RESET}\n"
+            printf "  ${DIM}  export PATH=\"\$HOME/.local/bin:\$PATH\"${RESET}\n"
+            echo
+            # Add it for this session
+            export PATH="$link_dir:$PATH"
+        fi
+
+        success "kronn est maintenant accessible partout."
+    fi
+}
+
+# ─── Main ────────────────────────────────────────────────────────────────────
+
+main() {
+    load_config
+
+    local cmd="${1:-start}"
+    shift 2>/dev/null || true
+
+    case "$cmd" in
+        start)
+            ensure_in_path
+            cmd_start
+            ;;
+        status)      cmd_status ;;
+        init)        cmd_init "$@" ;;
+        mcp)         cmd_mcp "$@" ;;
+        web)         cmd_web ;;
+        help|--help|-h) cmd_help ;;
+        *)
+            fail "Commande inconnue : $cmd"
+            cmd_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

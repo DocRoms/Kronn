@@ -1,0 +1,375 @@
+#!/usr/bin/env bash
+# ─── TRON-style progress loader ──────────────────────────────────────────────
+# Animated loader with task steps and progress bar.
+# Inspired by the 1982 TRON digital aesthetic.
+
+# Colors — use $'...' for immediate escape interpretation
+TRON_BLUE=$'\033[38;5;39m'
+TRON_CYAN=$'\033[38;5;51m'
+TRON_WHITE=$'\033[38;5;15m'
+TRON_DIM=$'\033[38;5;24m'
+TRON_GLOW=$'\033[38;5;123m'
+
+# Shared state files
+_tron_done_file=""
+_tron_progress_file=""
+_tron_step_file=""
+_tron_prev_step_file=""
+_tron_start_time=""
+_tron_target_dir=""
+_tron_log_file=""
+_tron_agent_name=""
+_TRON_PROGRESS_FILE=".kronn-progress.md"
+
+# Analysis steps (label + percentage threshold) — used for .kronn-progress.md
+_TRON_STEPS=(
+    "10:ai/index.md"
+    "20:ai/repo-map.md"
+    "30:ai/coding-rules.md"
+    "40:ai/testing-quality.md"
+    "50:ai/architecture/overview.md"
+    "60:ai/glossary.md"
+    "70:ai/operations/debug-operations.md"
+    "80:ai/operations/mcp-servers.md"
+    "90:ai/inconsistencies-tech-debt.md"
+    "100:Relecture et finalisation"
+)
+
+# ─── Public API ──────────────────────────────────────────────────────────────
+
+tron_init() {
+    local target_dir="${1:-}"
+    _tron_done_file=$(mktemp /tmp/kronn-tron-done-XXXXXX)
+    _tron_progress_file=$(mktemp /tmp/kronn-tron-prog-XXXXXX)
+    _tron_step_file=$(mktemp /tmp/kronn-tron-step-XXXXXX)
+    _tron_prev_step_file=$(mktemp /tmp/kronn-tron-prev-XXXXXX)
+    _tron_start_time=$(date +%s)
+    _tron_target_dir="$target_dir"
+    echo "0" > "$_tron_progress_file"
+    echo "" > "$_tron_done_file"
+    echo "" > "$_tron_step_file"
+    echo "" > "$_tron_prev_step_file"
+
+    # Create progress file in target repo
+    if [[ -n "$_tron_target_dir" ]]; then
+        _tron_write_progress_file
+    fi
+}
+
+tron_progress() {
+    [[ -n "$_tron_progress_file" ]] && echo "$1" > "$_tron_progress_file"
+    # Update progress file in target repo
+    [[ -n "$_tron_target_dir" ]] && _tron_write_progress_file "$1"
+}
+
+# Set the current step label. Triggers red flash on previous step.
+tron_set_step() {
+    local label="$1"
+    if [[ -n "$_tron_step_file" ]]; then
+        local current
+        current=$(cat "$_tron_step_file" 2>/dev/null || echo "")
+        if [[ -n "$current" && "$current" != "$label" ]]; then
+            echo "$current" > "$_tron_prev_step_file"
+        fi
+        echo "$label" > "$_tron_step_file"
+    fi
+}
+
+tron_set_log() {
+    _tron_log_file="${1:-}"
+}
+
+tron_set_agent() {
+    _tron_agent_name="${1:-}"
+}
+
+tron_signal_done() {
+    [[ -n "$_tron_done_file" ]] && echo "done" > "$_tron_done_file"
+}
+
+tron_loader_run() {
+    local message="${1:-Analyse en cours...}"
+    _tron_loader_loop "$message"
+}
+
+tron_cleanup() {
+    # Remove progress file from target repo
+    if [[ -n "$_tron_target_dir" ]]; then
+        rm -f "$_tron_target_dir/$_TRON_PROGRESS_FILE" 2>/dev/null
+    fi
+    rm -f "$_tron_done_file" "$_tron_progress_file" "$_tron_step_file" "$_tron_prev_step_file" 2>/dev/null
+    _tron_done_file=""
+    _tron_progress_file=""
+    _tron_step_file=""
+    _tron_prev_step_file=""
+    _tron_start_time=""
+    _tron_target_dir=""
+    _tron_log_file=""
+    _tron_agent_name=""
+}
+
+# ─── Progress file ────────────────────────────────────────────────────────────
+
+# Write a .kronn-progress.md checklist in the target repo.
+# Shows completed steps (checked) and remaining steps (unchecked).
+_tron_write_progress_file() {
+    local current_pct="${1:-0}"
+    local file="$_tron_target_dir/$_TRON_PROGRESS_FILE"
+
+    local elapsed=""
+    if [[ -n "$_tron_start_time" ]]; then
+        local now
+        now=$(date +%s)
+        local secs=$((now - _tron_start_time))
+        elapsed=$(_tron_format_elapsed "$secs")
+    fi
+
+    {
+        echo "# Kronn — Analyse en cours"
+        echo ""
+        echo "> Ce fichier est auto-genere par Kronn et sera supprime a la fin de l'analyse."
+        echo "> Ne pas modifier manuellement."
+        echo ""
+        echo "**Progression : ${current_pct}%** | **Temps : ${elapsed:-0m00s}**"
+        echo ""
+        echo "## Etapes"
+        echo ""
+
+        for entry in "${_TRON_STEPS[@]}"; do
+            local threshold="${entry%%:*}"
+            local text="${entry#*:}"
+            if ((current_pct >= threshold)); then
+                echo "- [x] ${text}"
+            else
+                echo "- [ ] ${text}"
+            fi
+        done
+
+        echo ""
+        echo "---"
+        echo "*Derniere mise a jour : $(date '+%H:%M:%S')*"
+    } > "$file"
+}
+
+# ─── Loader loop ─────────────────────────────────────────────────────────────
+
+_tron_loader_loop() {
+    local message="$1"
+    local frame=0
+    local prev_flash=0  # countdown frames for red flash
+
+    # Exact line count of _tron_render output:
+    # 1=top 2=title 3=sep 4=bar 5=step 6-8=log 9=bottom 10=tail_hint
+    local total_lines=10
+
+    printf "${HIDE_CURSOR}"
+
+    # Reserve screen space
+    local i
+    for ((i=0; i<total_lines; i++)); do echo; done
+    printf "\033[%dA" "$total_lines"
+
+    trap 'printf "${SHOW_CURSOR}"' RETURN
+
+    local last_step=""
+
+    while true; do
+        # Check done
+        if [[ "$(cat "$_tron_done_file" 2>/dev/null)" == "done" ]]; then
+            break
+        fi
+
+        local progress
+        progress=$(cat "$_tron_progress_file" 2>/dev/null || echo "0")
+        local step_label
+        step_label=$(cat "$_tron_step_file" 2>/dev/null || echo "...")
+
+        # Detect step change -> trigger red flash
+        local prev_step=""
+        if [[ "$step_label" != "$last_step" && -n "$last_step" ]]; then
+            prev_step=$(cat "$_tron_prev_step_file" 2>/dev/null || echo "")
+            prev_flash=8  # flash for ~8 frames (~1.2s)
+        fi
+        last_step="$step_label"
+
+        # Read prev step for flash display
+        if ((prev_flash > 0)); then
+            prev_step=$(cat "$_tron_prev_step_file" 2>/dev/null || echo "")
+            prev_flash=$((prev_flash - 1))
+        else
+            prev_step=""
+        fi
+
+        _tron_render "$progress" "$step_label" "$message" "$frame" "$total_lines" "$prev_step"
+
+        frame=$((frame + 1))
+        sleep 0.15
+    done
+
+    # Final render at 100%
+    _tron_render "100" "Termine" "$message" "$frame" "$total_lines" ""
+    sleep 0.3
+
+    # Clear all lines
+    printf "\033[%dA" "$total_lines"
+    for ((i=0; i<total_lines; i++)); do
+        printf "${CLEAR_LINE}\r\n"
+    done
+    printf "\033[%dA" "$total_lines"
+    printf "${SHOW_CURSOR}"
+}
+
+_tron_format_elapsed() {
+    local secs=$1
+    local mins=$((secs / 60))
+    local s=$((secs % 60))
+    printf "%dm%02ds" "$mins" "$s"
+}
+
+# Pad or truncate a string to exactly N visible chars.
+# Usage: _tron_pad "text" 36
+# Result in variable: _PAD_RESULT
+# Pad or truncate a string to exactly N visible chars.
+# Uses char length (not byte length) to avoid printf multi-byte bugs.
+_tron_pad() {
+    local text="$1" width=$2
+    local charlen=${#text}
+    if ((charlen > width)); then
+        _PAD_RESULT="${text:0:$((width - 3))}..."
+    elif ((charlen < width)); then
+        local pad=$((width - charlen))
+        printf -v _PAD_SPACES "%${pad}s" ""
+        _PAD_RESULT="${text}${_PAD_SPACES}"
+    else
+        _PAD_RESULT="$text"
+    fi
+}
+
+_tron_render() {
+    local progress=$1 step_label="$2" message="$3" frame=$4 total_lines=$5 prev_step="${6:-}"
+
+    # Box inner width (between the two ║)
+    local W=38
+    local BAR_W=36  # W - 2 (one space each side)
+
+    # Elapsed time
+    local elapsed="0m00s"
+    if [[ -n "$_tron_start_time" ]]; then
+        local now
+        now=$(date +%s)
+        elapsed=$(_tron_format_elapsed $((now - _tron_start_time)))
+    fi
+
+    # ── Build output with CLEAR_LINE on every line ──
+    local output=""
+    local CL="${CLEAR_LINE}\r"
+
+    # 1. Top border
+    local border_top="══════════════════════════════════════"
+    output+="${CL}  ${TRON_DIM}╔${border_top}╗${RESET}\n"
+
+    # 2. Title + percentage
+    local pct_s="${progress}%"
+    local title_content="${message}"
+    local title_right="${pct_s}"
+    local title_pad=$((BAR_W - ${#title_content} - ${#title_right}))
+    if ((title_pad < 1)); then
+        # Truncate message if needed
+        local max_msg=$((BAR_W - ${#title_right} - 1))
+        title_content="${title_content:0:$((max_msg - 3))}..."
+        title_pad=$((BAR_W - ${#title_content} - ${#title_right}))
+    fi
+    printf -v spaces "%${title_pad}s" ""
+    output+="${CL}  ${TRON_DIM}║${RESET} ${TRON_GLOW}${title_content}${RESET}${spaces}${TRON_WHITE}${title_right}${RESET} ${TRON_DIM}║${RESET}\n"
+
+    # 3. Separator
+    output+="${CL}  ${TRON_DIM}╠${border_top}╣${RESET}\n"
+
+    # 4. Progress bar
+    local filled=$(( progress * BAR_W / 100 ))
+    if ((filled > BAR_W)); then filled=$BAR_W; fi
+    local empty=$((BAR_W - filled))
+
+    local bar=""
+    local c
+    for ((c=0; c<filled; c++)); do
+        local dist=$((filled - c))
+        if ((dist <= 1)); then
+            bar+="${TRON_WHITE}█"
+        elif ((dist <= 3)); then
+            bar+="${TRON_GLOW}█"
+        elif ((dist <= 5)); then
+            bar+="${TRON_CYAN}█"
+        else
+            bar+="${TRON_BLUE}█"
+        fi
+    done
+    for ((c=0; c<empty; c++)); do
+        if (( (c + frame) % 4 == 0 )); then
+            bar+="${TRON_DIM}░"
+        else
+            bar+="${TRON_DIM}─"
+        fi
+    done
+    output+="${CL}  ${TRON_DIM}║${RESET} ${bar}${RESET} ${TRON_DIM}║${RESET}\n"
+
+    # 5. Step label (red flash or current)
+    if [[ -n "$prev_step" ]]; then
+        _tron_pad "✓ ${prev_step}" "$BAR_W"
+        output+="${CL}  ${TRON_DIM}║${RESET} ${RED}${_PAD_RESULT}${RESET} ${TRON_DIM}║${RESET}\n"
+    else
+        _tron_pad "$step_label" "$BAR_W"
+        output+="${CL}  ${TRON_DIM}║${RESET} ${TRON_CYAN}${_PAD_RESULT}${RESET} ${TRON_DIM}║${RESET}\n"
+    fi
+
+    # 6-8. Live agent output (3 lines)
+    local log_lines=()
+    if [[ -n "$_tron_log_file" && -f "$_tron_log_file" ]]; then
+        while IFS= read -r rawline; do
+            log_lines+=("$rawline")
+        done < <(grep -v '^[[:space:]]*$' "$_tron_log_file" 2>/dev/null | tail -3)
+    fi
+
+    local r
+    for ((r=0; r<3; r++)); do
+        local logline="${log_lines[$r]:-}"
+        if [[ -n "$logline" ]]; then
+            _tron_pad "$logline" "$BAR_W"
+            output+="${CL}  ${TRON_DIM}║ ${_PAD_RESULT}${RESET} ${TRON_DIM}║${RESET}\n"
+        else
+            # Subtle animated dots for empty lines
+            local line=""
+            for ((c=0; c<BAR_W; c++)); do
+                if (( (r * 7 + c * 3 + frame) % 23 == 0 )); then
+                    line+="${TRON_DIM}·"
+                else
+                    line+=" "
+                fi
+            done
+            output+="${CL}  ${TRON_DIM}║${RESET} ${line}${RESET} ${TRON_DIM}║${RESET}\n"
+        fi
+    done
+
+    # 9. Bottom border with agent name + elapsed time
+    # Format: ╚══(claude)══════════════════ ⏱ 8m12s ═╣
+    # Total inner = W = 38 chars between ╚ and ╣
+    local agent="${_tron_agent_name:-agent}"
+    local left_label="(${agent})"
+    local right_label="${elapsed}"
+    # Fixed: ══ + left_label + ═...═ + space + right_label + space + ═
+    local fixed=$((2 + ${#left_label} + 1 + ${#right_label} + 1 + 1))
+    local mid_eq=$((W - fixed))
+    if ((mid_eq < 2)); then mid_eq=2; fi
+    local eq_mid=""
+    for ((c=0; c<mid_eq; c++)); do eq_mid+="═"; done
+    output+="${CL}  ${TRON_DIM}╚══${RESET}${TRON_CYAN}${left_label}${RESET}${TRON_DIM}${eq_mid} ${TRON_WHITE}${right_label}${RESET} ${TRON_DIM}═╣${RESET}\n"
+
+    # 10. Status line
+    local spinner_chars=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
+    local spinner="${spinner_chars[$((frame % ${#spinner_chars[@]}))]}"
+    output+="${CL}  ${TRON_CYAN}${spinner}${RESET} ${DIM}Agent en cours — surveillance ai/${RESET}\n"
+
+    # Draw: move up, write all
+    printf "\033[%dA" "$total_lines"
+    printf "%b" "$output"
+}

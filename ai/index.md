@@ -1,0 +1,199 @@
+# AI context index — Single entry point
+
+**Project:** Kronn — Self-hosted CLI + web UI for managing AI coding agents (Claude Code, Codex, Vibe, OpenCode) across git repositories. Unified workflow engine for cron, multi-step pipelines, tracker-driven automation, and manual triggers.
+
+> **All files under `ai/` are in English by default.** AI context documentation must be written in English.
+> **ATTENTION — This is the reference file for all AI agents.**
+> Read this file first, then follow the context loading strategy below.
+> Do not read the other config files (.cursorrules, copilot-instructions, etc.) — they redirect here.
+
+> **CRITICAL — Never hallucinate.**
+> - **Never invent information** (tech stack, conventions, architecture, file paths...).
+> - If you are unsure about something: **check the `ai/` documentation first**.
+> - If you still don't find the answer: **ask the user** rather than guessing.
+> - After getting the answer: **update the relevant `ai/` file** so the knowledge is captured.
+> - Getting it right matters more than answering fast — hallucinations waste everyone's time.
+
+> **CRITICAL — MCP tool usage.**
+> Before calling any MCP tool, **read the matching context file** in `ai/operations/mcp-servers/<mcp-name>.md`.
+> These files contain project-specific rules, constraints, and examples that prevent hallucinations and misuse.
+> If no context file exists for an MCP you need to use, ask the user before proceeding.
+
+**Unknown term?** → `ai/glossary.md` first.
+
+This folder (`ai/`) contains AI-optimized project context (not human docs). Use paths relative to repo root.
+
+---
+
+## 1. Entry procedure (mandatory)
+
+### Tiered context loading strategy
+
+#### Tier 1 — Always read
+- `ai/index.md` (this file)
+
+**Trivial tasks** (typos, config tweaks, simple style fixes): Tier 1 may suffice.
+
+#### Common tasks — load exactly these files
+
+| Task | Files to load |
+|------|---------------|
+| Backend API changes | `ai/repo-map.md`, `ai/coding-rules.md` |
+| Frontend UI changes | `ai/repo-map.md`, `ai/coding-rules.md` |
+| Add new API endpoint | `ai/repo-map.md`, `ai/architecture/overview.md` |
+| Workflow engine work | `ai/architecture/overview.md`, `ai/inconsistencies-tech-debt.md`, `ai/coding-rules.md` |
+| Docker / deployment | `ai/operations/debug-operations.md` |
+| Fix known issue | `ai/inconsistencies-tech-debt.md` |
+
+#### Tier 2 — For needs not covered above (max 3 files)
+
+| Need | File |
+|------|------|
+| repo structure / code placement | `ai/repo-map.md` |
+| testing / quality | `ai/testing-quality.md` |
+| coding rules | `ai/coding-rules.md` |
+| known issues / tech debt | `ai/inconsistencies-tech-debt.md` |
+| term definitions / project jargon | `ai/glossary.md` |
+
+#### Tier 3 — Escalation
+Only if Tier 1 + 2 are insufficient: state which file you need and why, read it, or ask the user.
+Never load everything "just in case".
+- Architecture overview → `ai/architecture/overview.md`
+
+---
+
+## 2. Prerequisites before running commands
+
+- **Docker + Docker Compose** required for running the full stack.
+- Start: `./kronn start` or `make start` (builds and runs all services).
+- Dev backend only: `make dev-backend` (cargo watch with auto-reload).
+- Dev frontend only: `make dev-frontend` (Vite dev server on :5173).
+- After changing Rust models with `#[derive(TS)]`: run `make typegen` to regenerate `frontend/src/types/generated.ts`.
+- After `docker compose build`, always restart the gateway: `docker compose restart gateway` or `docker compose down && docker compose up -d`.
+
+---
+
+## 3. DO NOT (common mistakes)
+
+- Do **not** guess when information is missing — ask the user.
+- Do **not** load all Tier 2 files at once — pick up to 3 max.
+- Do **not** modify business code when the task is only about AI context — edit `ai/` only.
+- Do **not** edit `frontend/src/types/generated.ts` by hand — run `make typegen`.
+- Do **not** register two `.route()` calls with the same path in axum — chain methods: `.route("/path", get(h1).post(h2))`.
+- Do **not** forget `#[derive(PartialEq)]` on enums used in comparisons (`AgentType`, `MessageRole`).
+
+---
+
+## 4. Development constraints
+
+- **Docker-first**: the full app runs via `docker compose`. Backend, frontend, and gateway are separate services.
+- **Quality is mandatory**: `cargo check` and `cargo clippy` must pass. Frontend must build with `npm run build`.
+- **Type generation**: Rust models are the source of truth. TypeScript types are auto-generated via `ts-rs`.
+- If stdout/stderr is missing: ask the user to copy/paste the full output.
+
+---
+
+## 5. Source of truth
+
+- AI context: `ai/`.
+- Rust data models: `backend/src/models/mod.rs`.
+- TypeScript types: `frontend/src/types/generated.ts` (auto-generated from Rust).
+- API routes: `backend/src/main.rs` (router definition).
+- Database schema: `backend/src/db/sql/001_initial.sql`.
+- Docker config: `docker-compose.yml`.
+
+---
+
+## 6. Code placement
+
+Use `ai/repo-map.md` to decide.
+- New API endpoints: add handler in `backend/src/api/<domain>.rs`, register route in `backend/src/main.rs`.
+- Workflow engine code: `backend/src/workflows/`.
+- New frontend pages: `frontend/src/pages/`.
+- New hooks: `frontend/src/hooks/`.
+- API client functions: `frontend/src/lib/api.ts`.
+- Data models: `backend/src/models/mod.rs` (+ `make typegen`).
+
+---
+
+## 7. Code generation (critical behavior)
+
+- Search the repo for similar implementations before writing.
+- Use `ai/repo-map.md` to decide where code goes.
+- If info is missing or ambiguous: ask questions; do not guess.
+- If a "logical fix" requires a large/risky refactor: add an entry to `ai/inconsistencies-tech-debt.md`.
+
+### AI context maintenance rule
+After completing a task: if you discovered something non-obvious (a gotcha, a missing pattern, an outdated doc), update the relevant `ai/` file before closing. Keep entries factual and concise.
+
+---
+
+## 8. Stack (facts)
+
+| Layer | Technology |
+|-------|------------|
+| Backend | Rust (axum 0.7, tokio, serde, anyhow) |
+| Frontend | React 19 + TypeScript (Vite, Lucide icons) |
+| Styling | Inline styles (no CSS framework) |
+| Type bridge | ts-rs (Rust → TypeScript) |
+| Database | SQLite (`kronn.db`, WAL mode, foreign keys) |
+| Streaming | SSE (Server-Sent Events) for agent responses and workflow run updates |
+| Container | Docker Compose (backend + frontend + nginx gateway) |
+| Agents | Claude Code CLI, OpenAI Codex CLI, Vibe (Mistral), OpenCode (planned) |
+| MCP sync | 3 formats: `.mcp.json` (Claude), `.vibe/config.toml` (Vibe), `~/.codex/config.toml` (Codex) |
+
+---
+
+## 9. UI structure
+
+Dashboard tabs (current / planned):
+
+| Tab | Status | Content |
+|-----|--------|---------|
+| Projets | Done | Project list, AI audit pipeline (template → audit → validation), MCP overview |
+| Discussions | Done | Single/multi-agent chat, @mentions, orchestration, global discussions |
+| MCPs | Done | MCP registry and management |
+| Workflows | Done | Workflow list, creation wizard (5-step: infos → trigger → steps → config → resume), detail + runs with live SSE progress, manual trigger, run deletion (individual + bulk). MCP tools auto-injected into agent prompts. Symphony import planned. |
+| Config | Done | Tokens, language, agent detection + permissions, DB management (export/import) |
+
+Note: the old "Agents" tab has been merged into Config. Nav order: Projets → Discussions → MCPs → Workflows → Config.
+
+### AI audit pipeline (4-state badge system)
+
+Projects display 3 badges next to the title: `[FileCode] AI context`, `[Cpu] AI audit`, `[ShieldCheck] Validated`.
+
+| State | AI context | AI audit | Validated | Meaning |
+|-------|-----------|----------|-----------|---------|
+| NoTemplate | gray | gray | hidden | No `ai/` directory |
+| TemplateInstalled | green | orange | gray | Template copied, audit pending |
+| Audited | green | green | gray | 10-step audit completed |
+| Validated | green | green | green | Validation discussion resolved all TODOs |
+
+- **Template install**: copies `ai/` skeleton + redirector files (CLAUDE.md, .cursorrules, etc.) + injects bootstrap prompt
+- **AI audit**: 10-step SSE streaming, ~20 min, high token usage. Fills all `ai/` files.
+- **Validation**: opens a prefilled discussion (locked title/prompt) where the AI asks questions about ambiguities. AI updates `ai/` files after each answer. Project page shows "validation en cours" + link to discussion (no validate button on project page).
+- When the AI finishes all questions, it includes `KRONN:VALIDATION_COMPLETE` in its last message. This triggers a green banner in the discussion with a "Marquer l'audit comme valide" button.
+- **Mark as validated**: injects `<!-- KRONN:VALIDATED:date -->` marker into `ai/index.md`.
+- AI config file badges (CLAUDE.md, .cursorrules, etc.) shown on a second line below the status badges.
+
+---
+
+## 10. Multi-agent configuration
+
+Redirectors to this file: `CLAUDE.md`.
+
+**Maintenance rule**: all content lives in `ai/`. Redirectors never need changes.
+
+---
+
+## 11. AI Exchanges (read on arrival)
+
+- hasActualConversation: OFF
+- currentConversation: none
+- Template: `ai/templates/exchanges.md`
+
+---
+
+## 12. Last updated
+
+AI context last reviewed: **2026-03-09**.

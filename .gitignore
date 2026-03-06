@@ -1,0 +1,21 @@
+# Rust
+backend/target/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Config (generated at first run)
+kronn.toml
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Docker
+.docker/data/
+.mcp.json
+.vibe/

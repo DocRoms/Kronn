@@ -1,0 +1,1 @@
+{"root":["./src/App.tsx","./src/main.tsx","./src/hooks/useApi.ts","./src/lib/api.ts","./src/pages/Dashboard.tsx","./src/pages/McpPage.tsx","./src/pages/SetupWizard.tsx","./src/types/generated.ts"],"version":"5.9.3"}

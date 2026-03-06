@@ -1,0 +1,69 @@
+[package]
+name = "kronn"
+version = "0.1.0"
+edition = "2021"
+description = "Self-hosted AI dev workflow control plane"
+license = "MIT"
+
+[[bin]]
+name = "kronn"
+path = "src/main.rs"
+
+[dependencies]
+# Web framework
+axum = { version = "0.7", features = ["ws", "macros"] }
+axum-extra = { version = "0.9", features = ["typed-header"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "fs", "trace"] }
+tokio = { version = "1", features = ["full"] }
+hyper = "1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Database (embedded)
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Scheduling
+cron = "0.12"
+chrono = { version = "0.4", features = ["serde"] }
+
+# File system
+walkdir = "2"
+notify = "6"          # File watcher
+globset = "0.4"
+
+# Process management
+which = "6"           # Find executables in PATH
+sysinfo = "0.30"
+
+# Async streams
+futures = "0.3"
+tokio-stream = "0.1"
+async-stream = "0.3"
+
+# Crypto
+aes-gcm = "0.10"
+base64 = "0.22"
+rand = "0.8"
+
+# HTTP client (for tracker APIs)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+async-trait = "0.1"
+
+# Utilities
+uuid = { version = "1", features = ["v4", "serde"] }
+regex-lite = "0.1"
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+directories = "5"     # XDG paths
+
+# TypeScript type generation
+ts-rs = { version = "9", features = ["chrono-impl", "uuid-impl", "serde-json-impl"] }
+
+[dev-dependencies]
+tokio-test = "0.4"
