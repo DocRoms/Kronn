@@ -1,9 +1,10 @@
 import { useState, useRef } from 'react';
 import { mcps as mcpsApi } from '../lib/api';
+import { useT } from '../lib/I18nContext';
 import type { Project, McpConfigDisplay, McpDefinition, McpOverview } from '../types/generated';
 import {
   Server, Plus, Trash2, Eye, Check, RefreshCw, Square, CheckSquare,
-  X, Key, Pencil, FileText, ExternalLink, Save,
+  X, Key, Pencil, FileText, ExternalLink, Save, Search, ChevronRight,
 } from 'lucide-react';
 
 const isHiddenPath = (path: string) => path.split('/').some(s => s.startsWith('.'));
@@ -17,6 +18,7 @@ interface McpPageProps {
 }
 
 export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: McpPageProps) {
+  const { t } = useT();
   const [editingLabelId, setEditingLabelId] = useState<string | null>(null);
   const [editingLabelText, setEditingLabelText] = useState('');
   const [showAddMcp, setShowAddMcp] = useState(false);
@@ -34,6 +36,12 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
   // MCP context editor
   const [contextEditor, setContextEditor] = useState<{ projectId: string; projectName: string; slug: string; content: string } | null>(null);
   const [contextSaving, setContextSaving] = useState(false);
+  // Search & collapse
+  const [mcpSearch, setMcpSearch] = useState('');
+  const [expandedServers, setExpandedServers] = useState<Set<string>>(new Set());
+  // "Show more" for project toggles per config
+  const [expandedProjectLists, setExpandedProjectLists] = useState<Set<string>>(new Set());
+  const PROJECT_TOGGLE_LIMIT = 10;
 
   // ── Handlers ──
 
@@ -179,9 +187,34 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
 
   const configuredServerIds = new Set(configs.map(c => c.server_id));
   const availableRegistry = mcpRegistry.filter(m =>
-    (!addMcpSearch || m.name.toLowerCase().includes(addMcpSearch.toLowerCase()) || m.tags.some(t => t.includes(addMcpSearch.toLowerCase())))
+    (!addMcpSearch || m.name.toLowerCase().includes(addMcpSearch.toLowerCase()) || m.tags.some(tag => tag.includes(addMcpSearch.toLowerCase())))
   );
   const selectedDef = mcpRegistry.find(m => m.id === addMcpSelected);
+
+  // Filter configs by search
+  const searchLower = mcpSearch.toLowerCase();
+  const filteredConfigsByServer = new Map<string, { serverId: string; serverName: string; configs: McpConfigDisplay[] }>();
+  for (const [serverName, group] of configsByServer) {
+    if (!mcpSearch) {
+      filteredConfigsByServer.set(serverName, group);
+    } else {
+      const nameMatch = serverName.toLowerCase().includes(searchLower);
+      const filteredConfigs = group.configs.filter(c =>
+        nameMatch || c.label.toLowerCase().includes(searchLower) ||
+        c.project_names.some(n => n.toLowerCase().includes(searchLower))
+      );
+      if (filteredConfigs.length > 0) {
+        filteredConfigsByServer.set(serverName, { ...group, configs: filteredConfigs });
+      }
+    }
+  }
+  const toggleServer = (name: string) => {
+    setExpandedServers(prev => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name); else next.add(name);
+      return next;
+    });
+  };
 
   // ── Render ──
 
@@ -189,17 +222,17 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
     <div>
       <div style={s.pageHeader}>
         <div>
-          <h1 style={s.h1}>MCP Servers</h1>
+          <h1 style={s.h1}>{t('mcp.title')}</h1>
           <p style={s.meta}>
-            {totalConfigs} config{totalConfigs > 1 ? 's' : ''} · {servers.length} serveur{servers.length > 1 ? 's' : ''} · {globalConfigs.length} global{globalConfigs.length > 1 ? 'es' : 'e'}
+            {totalConfigs} {totalConfigs > 1 ? t('mcp.configPlural') : t('mcp.config')} · {servers.length} {servers.length > 1 ? t('mcp.serverPlural') : t('mcp.server')} · {globalConfigs.length} {globalConfigs.length > 1 ? t('mcp.globalPlural') : t('mcp.global')}
           </p>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
-          <button style={{ ...s.scanBtn, background: 'rgba(200,255,0,0.1)', color: '#c8ff00' }} onClick={() => { setShowAddMcp(true); setAddMcpSelected(null); setAddMcpSearch(''); }} title="Ajouter un MCP">
-            <Plus size={14} /> Ajouter
+          <button style={{ ...s.scanBtn, background: 'rgba(200,255,0,0.1)', color: '#c8ff00' }} onClick={() => { setShowAddMcp(true); setAddMcpSelected(null); setAddMcpSearch(''); }} title={t('mcp.addTitle')}>
+            <Plus size={14} /> {t('mcp.add')}
           </button>
-          <button style={s.scanBtn} onClick={async () => { await mcpsApi.refresh(); refetchMcps(); }} title="Re-detecter les MCPs">
-            <RefreshCw size={14} /> Detecter
+          <button style={s.scanBtn} onClick={async () => { await mcpsApi.refresh(); refetchMcps(); }} title={t('mcp.detect')}>
+            <RefreshCw size={14} /> {t('mcp.detect')}
           </button>
         </div>
       </div>
@@ -209,7 +242,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
         <div ref={addMcpRef} style={{ ...s.card, marginBottom: 20, border: '1px solid rgba(200,255,0,0.2)' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
             <h3 style={{ fontSize: 14, fontWeight: 600, color: '#c8ff00', margin: 0 }}>
-              {addMcpSelected ? `Configurer ${selectedDef?.name ?? addMcpLabel}` : 'Ajouter un MCP'}
+              {addMcpSelected ? t('mcp.configure', selectedDef?.name ?? addMcpLabel) : t('mcp.addTitle')}
             </h3>
             <button style={s.iconBtn} onClick={() => { setShowAddMcp(false); setAddMcpSelected(null); }}>
               <X size={14} />
@@ -220,7 +253,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
             <>
               <input
                 style={{ ...s.input, marginBottom: 10 }}
-                placeholder="Rechercher un MCP..."
+                placeholder={t('mcp.searchRegistry')}
                 value={addMcpSearch}
                 onChange={(e) => setAddMcpSearch(e.target.value)}
                 autoFocus
@@ -228,20 +261,20 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
               <div style={{ display: 'flex', flexDirection: 'column', gap: 2, maxHeight: 400, overflowY: 'auto' }}>
                 {(() => {
                   const categoryMap: Record<string, string> = {
-                    git: 'Git & Code', code: 'Git & Code',
-                    database: 'Bases de donnees', sql: 'Bases de donnees', cache: 'Bases de donnees', embedded: 'Bases de donnees',
-                    cloud: 'Cloud & Infra', containers: 'Cloud & Infra', devops: 'Cloud & Infra',
-                    search: 'Recherche & Web', web: 'Recherche & Web', http: 'Recherche & Web', browser: 'Recherche & Web', scraping: 'Recherche & Web',
-                    monitoring: 'Monitoring', analytics: 'Monitoring', errors: 'Monitoring',
-                    communication: 'Communication', chat: 'Communication', email: 'Communication', mailing: 'Communication',
-                    'project-management': 'Gestion de projet', issues: 'Gestion de projet',
-                    core: 'Utilitaires', filesystem: 'Utilitaires', docs: 'Utilitaires', libraries: 'Utilitaires',
+                    git: t('mcp.cat.gitCode'), code: t('mcp.cat.gitCode'),
+                    database: t('mcp.cat.databases'), sql: t('mcp.cat.databases'), cache: t('mcp.cat.databases'), embedded: t('mcp.cat.databases'),
+                    cloud: t('mcp.cat.cloud'), containers: t('mcp.cat.cloud'), devops: t('mcp.cat.cloud'),
+                    search: t('mcp.cat.search'), web: t('mcp.cat.search'), http: t('mcp.cat.search'), browser: t('mcp.cat.search'), scraping: t('mcp.cat.search'),
+                    monitoring: t('mcp.cat.monitoring'), analytics: t('mcp.cat.monitoring'), errors: t('mcp.cat.monitoring'),
+                    communication: t('mcp.cat.communication'), chat: t('mcp.cat.communication'), email: t('mcp.cat.communication'), mailing: t('mcp.cat.communication'),
+                    'project-management': t('mcp.cat.projectMgmt'), issues: t('mcp.cat.projectMgmt'),
+                    core: t('mcp.cat.utilities'), filesystem: t('mcp.cat.utilities'), docs: t('mcp.cat.utilities'), libraries: t('mcp.cat.utilities'),
                   };
                   const getCategory = (tags: string[]) => {
-                    for (const t of tags) { if (categoryMap[t]) return categoryMap[t]; }
-                    return 'Autres';
+                    for (const tag of tags) { if (categoryMap[tag]) return categoryMap[tag]; }
+                    return t('mcp.cat.other');
                   };
-                  const categoryOrder = ['Git & Code', 'Bases de donnees', 'Cloud & Infra', 'Recherche & Web', 'Monitoring', 'Communication', 'Gestion de projet', 'Utilitaires', 'Autres'];
+                  const categoryOrder = [t('mcp.cat.gitCode'), t('mcp.cat.databases'), t('mcp.cat.cloud'), t('mcp.cat.search'), t('mcp.cat.monitoring'), t('mcp.cat.communication'), t('mcp.cat.projectMgmt'), t('mcp.cat.utilities'), t('mcp.cat.other')];
                   const grouped = new Map<string, typeof availableRegistry>();
                   for (const m of availableRegistry) {
                     const cat = getCategory(m.tags);
@@ -269,8 +302,8 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                             <div style={{ flex: 1 }}>
                               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                                 <span style={{ fontWeight: 600, fontSize: 12 }}>{m.name}</span>
-                                {alreadyAdded && <span style={s.alreadyBadge}>deja present</span>}
-                                {m.env_keys.length > 0 && <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.3)' }}>{m.env_keys.length} cle{m.env_keys.length > 1 ? 's' : ''}</span>}
+                                {alreadyAdded && <span style={s.alreadyBadge}>{t('mcp.alreadyAdded')}</span>}
+                                {m.env_keys.length > 0 && <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.3)' }}>{m.env_keys.length} {m.env_keys.length > 1 ? t('mcp.keysPlural') : t('mcp.keys')}</span>}
                               </div>
                               <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', marginTop: 1 }}>{m.description}</div>
                             </div>
@@ -287,7 +320,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
             <>
               {/* Label */}
               <div style={{ marginBottom: 10 }}>
-                <label style={s.fieldLabel}>Nom / Label</label>
+                <label style={s.fieldLabel}>{t('mcp.label')}</label>
                 <input
                   style={s.input}
                   value={addMcpLabel}
@@ -301,7 +334,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                 return envKeys.length > 0 ? (
                 <div style={{ marginBottom: 10 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                    <label style={{ ...s.fieldLabel, margin: 0 }}>Variables d'environnement</label>
+                    <label style={{ ...s.fieldLabel, margin: 0 }}>{t('mcp.envVars')}</label>
                     {selectedDef?.token_url && (
                       <a
                         href={selectedDef.token_url}
@@ -310,7 +343,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                         style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, color: '#00d4ff', textDecoration: 'none' }}
                       >
                         <ExternalLink size={10} />
-                        {selectedDef.token_help ?? 'Obtenir un token'}
+                        {selectedDef.token_help ?? t('mcp.getToken')}
                       </a>
                     )}
                     {!selectedDef?.token_url && selectedDef?.token_help && (
@@ -324,7 +357,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                         style={{ ...s.input, flex: 1, fontFamily: 'monospace', fontSize: 11 }}
                         value={addMcpEnv[k] ?? ''}
                         onChange={(e) => setAddMcpEnv(prev => ({ ...prev, [k]: e.target.value }))}
-                        placeholder="valeur..."
+                        placeholder={t('mcp.value')}
                         type="password"
                       />
                     </div>
@@ -335,7 +368,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
               <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center' }}>
                 <button style={s.projectToggle(addMcpGlobal)} onClick={() => setAddMcpGlobal(!addMcpGlobal)}>
                   {addMcpGlobal ? <CheckSquare size={11} style={{ color: '#c8ff00' }} /> : <Square size={11} />}
-                  Global (tous les projets)
+                  {t('mcp.globalAll')}
                 </button>
               </div>
               {/* Actions */}
@@ -344,10 +377,10 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                   style={{ ...s.scanBtn, background: 'rgba(200,255,0,0.15)', color: '#c8ff00' }}
                   onClick={handleAddMcpFromRegistry}
                 >
-                  <Check size={14} /> Ajouter
+                  <Check size={14} /> {t('mcp.addBtn')}
                 </button>
                 <button style={s.scanBtn} onClick={() => setAddMcpSelected(null)}>
-                  Retour
+                  {t('mcp.back')}
                 </button>
               </div>
             </>
@@ -355,31 +388,60 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
         </div>
       )}
 
+      {/* ── Search bar ── */}
+      {totalConfigs > 3 && (
+        <div style={{ position: 'relative', marginBottom: 16 }}>
+          <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'rgba(255,255,255,0.25)', pointerEvents: 'none' }} />
+          <input
+            style={{ ...s.input, paddingLeft: 32, width: '100%' }}
+            placeholder={t('mcp.search')}
+            value={mcpSearch}
+            onChange={(e) => setMcpSearch(e.target.value)}
+          />
+          {mcpSearch && (
+            <button
+              style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: 'rgba(255,255,255,0.3)', padding: 2 }}
+              onClick={() => setMcpSearch('')}
+            >
+              <X size={12} />
+            </button>
+          )}
+        </div>
+      )}
+
       {/* ── Configured MCPs ── */}
       {totalConfigs > 0 ? (
         <>
-          {[...configsByServer.entries()].map(([serverName, group]) => (
-            <div key={serverName} style={{ marginBottom: 20 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+          {[...filteredConfigsByServer.entries()].map(([serverName, group]) => {
+            const isExpanded = expandedServers.has(serverName) || !!mcpSearch;
+            const linkedCount = group.configs.reduce((sum, c) => sum + (c.is_global ? projects.length : c.project_ids.length), 0);
+            return (
+            <div key={serverName} style={{ marginBottom: 12 }}>
+              <div
+                style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: isExpanded ? 8 : 0, cursor: 'pointer', padding: '4px 0' }}
+                onClick={() => toggleServer(serverName)}
+              >
+                <ChevronRight size={13} style={{ color: '#c8ff00', transform: isExpanded ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s', flexShrink: 0 }} />
                 <Server size={13} style={{ color: '#c8ff00' }} />
                 <h2 style={s.sectionLabel}>
                   {serverName}
                 </h2>
                 <span style={{ fontWeight: 400, fontSize: 11, color: 'rgba(255,255,255,0.3)' }}>
-                  {group.configs.length} config{group.configs.length > 1 ? 's' : ''}
+                  {group.configs.length} {group.configs.length > 1 ? t('mcp.configPlural') : t('mcp.config')}
+                  {!isExpanded && linkedCount > 0 && ` · ${linkedCount} ${linkedCount > 1 ? t('mcp.projectPlural') : t('mcp.project')}`}
                 </span>
                 {group.configs.some(c => c.env_keys.length > 0) && (
                   <button
                     style={{ ...s.iconBtn, marginLeft: 4, color: 'rgba(255,255,255,0.3)' }}
-                    onClick={() => handleAddDuplicateConfig(group.serverId, serverName)}
-                    title={`Ajouter une autre config ${serverName}`}
+                    onClick={(e) => { e.stopPropagation(); handleAddDuplicateConfig(group.serverId, serverName); }}
+                    title={t('mcp.addAnother', serverName)}
                   >
                     <Plus size={12} />
                   </button>
                 )}
               </div>
 
-              {group.configs.map(cfg => {
+              {isExpanded && group.configs.map(cfg => {
                 const isEditingLabel = editingLabelId === cfg.id;
                 return (
                   <div key={cfg.id} style={s.mcpCard}>
@@ -401,15 +463,17 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                             <span
                               style={{ fontWeight: 600, fontSize: 13, cursor: 'pointer' }}
                               onClick={() => { setEditingLabelId(cfg.id); setEditingLabelText(cfg.label); }}
-                              title="Cliquer pour renommer"
+                              title={t('mcp.clickToRename')}
                             >
                               {cfg.label}
                               <Pencil size={9} style={{ marginLeft: 4, color: 'rgba(255,255,255,0.2)' }} />
                             </span>
                           )}
                           {cfg.project_names.length > 0 && (
-                            <span style={s.sourceBadge}>
-                              {cfg.project_names.join(', ')}
+                            <span style={s.sourceBadge} title={cfg.project_names.join(', ')}>
+                              {cfg.project_names.length <= 3
+                                ? cfg.project_names.join(', ')
+                                : `${cfg.project_names.slice(0, 3).join(', ')} +${cfg.project_names.length - 3}`}
                             </span>
                           )}
                         </div>
@@ -425,7 +489,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                               <button
                                 style={{ ...s.iconBtn, marginLeft: 4 }}
                                 onClick={() => handleStartEditSecrets(cfg.id)}
-                                title={editingEnvId === cfg.id ? 'Fermer' : 'Modifier les cles'}
+                                title={editingEnvId === cfg.id ? t('mcp.close') : t('mcp.editKeys')}
                               >
                                 <Pencil size={11} style={{ color: editingEnvId === cfg.id ? '#c8ff00' : 'rgba(255,255,255,0.3)' }} />
                               </button>
@@ -443,7 +507,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                                       style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, color: '#00d4ff', marginBottom: 8, textDecoration: 'none' }}
                                     >
                                       <ExternalLink size={10} />
-                                      {def.token_help ?? 'Obtenir un token'}
+                                      {def.token_help ?? t('mcp.getToken')}
                                     </a>
                                   )}
                                   {!def?.token_url && def?.token_help && (
@@ -457,12 +521,12 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                                         value={editingEnv[k] ?? ''}
                                         onChange={e => setEditingEnv(prev => ({ ...prev, [k]: e.target.value }))}
                                         type={visibleFields.has(k) ? 'text' : 'password'}
-                                        placeholder="valeur..."
+                                        placeholder={t('mcp.value')}
                                       />
                                       <button
                                         style={{ ...s.iconBtn, padding: '4px 6px', flexShrink: 0 }}
                                         onClick={() => toggleFieldVisibility(k)}
-                                        title={visibleFields.has(k) ? 'Masquer' : 'Afficher'}
+                                        title={visibleFields.has(k) ? t('mcp.hide') : t('mcp.show')}
                                       >
                                         <Eye size={11} style={{ color: visibleFields.has(k) ? '#c8ff00' : 'rgba(255,255,255,0.25)' }} />
                                       </button>
@@ -474,9 +538,9 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                                       onClick={handleSaveSecrets}
                                       disabled={editingEnvLoading}
                                     >
-                                      <Save size={12} /> {editingEnvLoading ? 'Sauvegarde...' : 'Sauvegarder'}
+                                      <Save size={12} /> {editingEnvLoading ? t('mcp.saving') : t('mcp.save')}
                                     </button>
-                                    <button style={s.scanBtn} onClick={() => setEditingEnvId(null)}>Annuler</button>
+                                    <button style={s.scanBtn} onClick={() => setEditingEnvId(null)}>{t('mcp.cancel')}</button>
                                   </div>
                                 </div>
                               );
@@ -489,42 +553,66 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                           <span
                             style={s.globalLabel(cfg.is_global)}
                             onClick={() => handleToggleConfigGlobal(cfg)}
-                            title={cfg.is_global ? 'Desactiver global — garder uniquement les projets coches' : 'Activer sur tous les projets'}
+                            title={cfg.is_global ? t('mcp.disableGlobal') : t('mcp.enableGlobal')}
                           >
                             Global
                           </span>
                           <span style={{ color: 'rgba(255,255,255,0.12)', fontSize: 11 }}>|</span>
-                          {projects.filter(p => !isHiddenPath(p.path)).sort((a, b) => {
-                            const aLinked = (cfg.is_global || cfg.project_ids.includes(a.id)) ? 0 : 1;
-                            const bLinked = (cfg.is_global || cfg.project_ids.includes(b.id)) ? 0 : 1;
-                            return aLinked - bLinked || a.name.localeCompare(b.name);
-                          }).map(proj => {
-                            const isLinked = cfg.is_global || cfg.project_ids.includes(proj.id);
-                            return (
-                              <span key={proj.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 0 }}>
-                                <button
-                                  style={s.projectToggle(isLinked)}
-                                  onClick={() => handleToggleConfigProject(cfg.id, proj.id, isLinked)}
-                                >
-                                  {isLinked ? <CheckSquare size={11} style={{ color: '#c8ff00' }} /> : <Square size={11} />}
-                                  {proj.name}
-                                </button>
-                                {isLinked && (() => {
-                                  const slug = slugify(cfg.label);
-                                  const isCustomized = mcpOverview.customized_contexts.includes(`${slug}:${proj.id}`);
-                                  return (
+                          {(() => {
+                            const sorted = projects.filter(p => !isHiddenPath(p.path)).sort((a, b) => {
+                              const aLinked = (cfg.is_global || cfg.project_ids.includes(a.id)) ? 0 : 1;
+                              const bLinked = (cfg.is_global || cfg.project_ids.includes(b.id)) ? 0 : 1;
+                              return aLinked - bLinked || a.name.localeCompare(b.name);
+                            });
+                            const showAll = expandedProjectLists.has(cfg.id);
+                            const visible = showAll ? sorted : sorted.slice(0, PROJECT_TOGGLE_LIMIT);
+                            const hiddenCount = sorted.length - visible.length;
+                            return (<>
+                              {visible.map(proj => {
+                                const isLinked = cfg.is_global || cfg.project_ids.includes(proj.id);
+                                return (
+                                  <span key={proj.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 0 }}>
                                     <button
-                                      style={{ ...s.iconBtn, padding: '3px 5px', marginLeft: -1, borderLeft: 'none', borderTopLeftRadius: 0, borderBottomLeftRadius: 0 }}
-                                      onClick={() => handleOpenContext(proj.id, proj.name, cfg.label)}
-                                      title={`Editer le contexte de ${cfg.label} pour ${proj.name}${isCustomized ? ' (personnalise)' : ' (par defaut)'}`}
+                                      style={s.projectToggle(isLinked)}
+                                      onClick={() => handleToggleConfigProject(cfg.id, proj.id, isLinked)}
                                     >
-                                      <FileText size={10} style={{ color: isCustomized ? '#c8ff00' : 'rgba(255,255,255,0.2)' }} />
+                                      {isLinked ? <CheckSquare size={11} style={{ color: '#c8ff00' }} /> : <Square size={11} />}
+                                      {proj.name}
                                     </button>
-                                  );
-                                })()}
-                              </span>
-                            );
-                          })}
+                                    {isLinked && (() => {
+                                      const slug = slugify(cfg.label);
+                                      const isCustomized = mcpOverview.customized_contexts.includes(`${slug}:${proj.id}`);
+                                      return (
+                                        <button
+                                          style={{ ...s.iconBtn, padding: '3px 5px', marginLeft: -1, borderLeft: 'none', borderTopLeftRadius: 0, borderBottomLeftRadius: 0 }}
+                                          onClick={() => handleOpenContext(proj.id, proj.name, cfg.label)}
+                                          title={`${t('mcp.editContext', cfg.label, proj.name)}${isCustomized ? ' ' + t('mcp.customized') : ' ' + t('mcp.default')}`}
+                                        >
+                                          <FileText size={10} style={{ color: isCustomized ? '#c8ff00' : 'rgba(255,255,255,0.2)' }} />
+                                        </button>
+                                      );
+                                    })()}
+                                  </span>
+                                );
+                              })}
+                              {hiddenCount > 0 && (
+                                <button
+                                  style={{ background: 'none', border: '1px solid rgba(200,255,0,0.15)', borderRadius: 4, color: '#c8ff00', fontSize: 10, padding: '2px 8px', cursor: 'pointer', fontFamily: 'inherit' }}
+                                  onClick={() => setExpandedProjectLists(prev => { const n = new Set(prev); n.add(cfg.id); return n; })}
+                                >
+                                  {t('mcp.moreProjects', hiddenCount)}
+                                </button>
+                              )}
+                              {showAll && sorted.length > PROJECT_TOGGLE_LIMIT && (
+                                <button
+                                  style={{ background: 'none', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 4, color: 'rgba(255,255,255,0.4)', fontSize: 10, padding: '2px 8px', cursor: 'pointer', fontFamily: 'inherit' }}
+                                  onClick={() => setExpandedProjectLists(prev => { const n = new Set(prev); n.delete(cfg.id); return n; })}
+                                >
+                                  {t('mcp.lessProjects')}
+                                </button>
+                              )}
+                            </>);
+                          })()}
                         </div>
                       </div>
 
@@ -532,7 +620,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                       <button
                         style={{ ...s.iconBtn, color: '#ff4d6a' }}
                         onClick={() => handleDeleteMcpConfig(cfg.id)}
-                        title="Supprimer cette config"
+                        title={t('mcp.deleteConfig')}
                       >
                         <Trash2 size={12} />
                       </button>
@@ -541,13 +629,14 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                 );
               })}
             </div>
-          ))}
+          );
+          })}
         </>
       ) : !showAddMcp ? (
         <div style={{ ...s.card, textAlign: 'center', padding: 40 }}>
           <Server size={32} style={{ color: 'rgba(255,255,255,0.15)', marginBottom: 12 }} />
           <p style={{ color: 'rgba(255,255,255,0.4)', fontSize: 13 }}>
-            Aucun MCP configure. Cliquez "Ajouter" pour en installer un ou "Detecter" pour scanner vos projets.
+            {t('mcp.empty')}
           </p>
         </div>
       ) : null}
@@ -568,10 +657,10 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
               <div>
                 <h3 style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>
                   <FileText size={14} style={{ marginRight: 6, color: '#c8ff00' }} />
-                  Contexte MCP — {contextEditor.slug.replace(/-/g, ' ')}
+                  {t('mcp.contextTitle', contextEditor.slug.replace(/-/g, ' '))}
                 </h3>
                 <p style={{ margin: '4px 0 0', fontSize: 11, color: 'rgba(255,255,255,0.35)' }}>
-                  Projet: {contextEditor.projectName} · Fichier: ai/operations/mcp-servers/{contextEditor.slug}.md
+                  {t('mcp.contextInfo', contextEditor.projectName, contextEditor.slug)}
                 </p>
               </div>
               <button style={s.iconBtn} onClick={() => setContextEditor(null)}><X size={14} /></button>
@@ -584,17 +673,17 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
               }}
               value={contextEditor.content}
               onChange={e => setContextEditor(prev => prev ? { ...prev, content: e.target.value } : null)}
-              placeholder="Instructions pour les agents utilisant ce MCP dans ce projet..."
+              placeholder={t('mcp.contextPlaceholder')}
             />
 
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-              <button style={s.scanBtn} onClick={() => setContextEditor(null)}>Annuler</button>
+              <button style={s.scanBtn} onClick={() => setContextEditor(null)}>{t('mcp.cancel')}</button>
               <button
                 style={{ ...s.scanBtn, background: 'rgba(200,255,0,0.15)', color: '#c8ff00' }}
                 onClick={handleSaveContext}
                 disabled={contextSaving}
               >
-                {contextSaving ? 'Sauvegarde...' : 'Sauvegarder'}
+                {contextSaving ? t('mcp.saving') : t('mcp.save')}
               </button>
             </div>
           </div>

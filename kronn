@@ -210,11 +210,30 @@ cmd_init() {
     init_repo "$target"
 }
 
+cmd_stop() {
+    step "Arrêt de Kronn"
+    (cd "$KRONN_DIR" && make stop)
+    success "Kronn arrêté."
+}
+
+cmd_restart() {
+    cmd_stop
+    echo
+    cmd_web
+}
+
+cmd_logs() {
+    (cd "$KRONN_DIR" && make logs)
+}
+
 cmd_help() {
     banner
     printf "${BOLD}Usage :${RESET} kronn [commande]\n"
     echo
     printf "  ${CYAN}start${RESET}          Flow interactif (défaut)\n"
+    printf "  ${CYAN}stop${RESET}           Arrêter les services\n"
+    printf "  ${CYAN}restart${RESET}        Redémarrer les services\n"
+    printf "  ${CYAN}logs${RESET}           Afficher les logs\n"
     printf "  ${CYAN}status${RESET}         Vue d'ensemble\n"
     printf "  ${CYAN}init [path]${RESET}    Configurer un dépôt\n"
     printf "  ${CYAN}mcp sync${RESET}       Synchroniser les .mcp.json\n"
@@ -294,6 +313,9 @@ main() {
             ensure_in_path
             cmd_start
             ;;
+        stop)        cmd_stop ;;
+        restart)     cmd_restart ;;
+        logs)        cmd_logs ;;
         status)      cmd_status ;;
         init)        cmd_init "$@" ;;
         mcp)         cmd_mcp "$@" ;;

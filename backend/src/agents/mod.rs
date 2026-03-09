@@ -38,6 +38,7 @@ async fn detect_agent(def: &AgentDef) -> AgentDetection {
             name: def.name.to_string(),
             agent_type: def.agent_type.clone(),
             installed: true,
+            enabled: true,
             path: Some(path),
             version,
             latest_version: None,
@@ -49,6 +50,7 @@ async fn detect_agent(def: &AgentDef) -> AgentDetection {
             name: def.name.to_string(),
             agent_type: def.agent_type.clone(),
             installed: false,
+            enabled: true,
             path: None,
             version: None,
             latest_version: None,
@@ -132,5 +134,33 @@ pub async fn install_agent(agent_type: &AgentType) -> Result<String> {
     } else {
         let err = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!("Installation failed: {}", err)
+    }
+}
+
+/// Uninstall an agent
+pub async fn uninstall_agent(agent_type: &AgentType) -> Result<String> {
+    let def = KNOWN_AGENTS.iter()
+        .find(|d| std::mem::discriminant(&d.agent_type) == std::mem::discriminant(agent_type))
+        .ok_or_else(|| anyhow::anyhow!("Unknown agent type"))?;
+
+    let uninstall_cmd = match def.agent_type {
+        AgentType::ClaudeCode => "npm uninstall -g @anthropic-ai/claude-code",
+        AgentType::Codex => "npm uninstall -g @openai/codex",
+        AgentType::Vibe => "uv tool uninstall mistral-vibe 2>/dev/null || pipx uninstall mistral-vibe 2>/dev/null || pip3 uninstall -y mistral-vibe",
+        AgentType::Custom => anyhow::bail!("Cannot uninstall custom agents"),
+    };
+
+    tracing::info!("Uninstalling agent: {}", uninstall_cmd);
+
+    let output = tokio::process::Command::new("sh")
+        .args(["-c", uninstall_cmd])
+        .output()
+        .await?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        let err = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Uninstall failed: {}", err)
     }
 }

@@ -1,4 +1,5 @@
 import { useState, useRef } from 'react';
+import { useT } from '../lib/I18nContext';
 import { workflows as workflowsApi } from '../lib/api';
 import { useApi } from '../hooks/useApi';
 import type {
@@ -15,6 +16,7 @@ import {
 
 interface WorkflowsPageProps {
   projects: Project[];
+  installedAgentTypes?: AgentType[];
 }
 
 const TRIGGER_LABELS: Record<string, string> = {
@@ -44,7 +46,10 @@ const AGENT_LABELS: Record<string, string> = {
   Vibe: 'Vibe',
 };
 
-export function WorkflowsPage({ projects }: WorkflowsPageProps) {
+const ALL_AGENT_TYPES: AgentType[] = ['ClaudeCode', 'Codex', 'Vibe'];
+
+export function WorkflowsPage({ projects, installedAgentTypes }: WorkflowsPageProps) {
+  const { t } = useT();
   const { data: workflowList, refetch } = useApi(() => workflowsApi.list(), []);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
@@ -168,11 +173,11 @@ export function WorkflowsPage({ projects }: WorkflowsPageProps) {
       `}</style>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
         <div>
-          <h1 style={ws.h1}>Workflows</h1>
-          <p style={ws.meta}>Automatisation: triggers, steps</p>
+          <h1 style={ws.h1}>{t('wf.title')}</h1>
+          <p style={ws.meta}>{t('wf.subtitle')}</p>
         </div>
         <button style={ws.createBtn} onClick={() => setShowCreate(true)}>
-          <Plus size={14} /> Nouveau workflow
+          <Plus size={14} /> {t('wf.new')}
         </button>
       </div>
 
@@ -180,6 +185,7 @@ export function WorkflowsPage({ projects }: WorkflowsPageProps) {
       {showCreate && (
         <WorkflowWizard
           projects={projects}
+          installedAgentTypes={installedAgentTypes}
           onDone={() => { setShowCreate(false); refetch(); }}
           onCancel={() => setShowCreate(false)}
         />
@@ -189,6 +195,7 @@ export function WorkflowsPage({ projects }: WorkflowsPageProps) {
       {editingWorkflow && (
         <WorkflowWizard
           projects={projects}
+          installedAgentTypes={installedAgentTypes}
           editWorkflow={editingWorkflow}
           onDone={() => { setEditingWorkflow(null); refetch(); if (editingWorkflow) openDetail(editingWorkflow.id); }}
           onCancel={() => setEditingWorkflow(null)}
@@ -199,9 +206,9 @@ export function WorkflowsPage({ projects }: WorkflowsPageProps) {
       {!showCreate && !editingWorkflow && workflows.length === 0 && (
         <div style={ws.empty}>
           <Zap size={32} style={{ color: 'rgba(255,255,255,0.15)', marginBottom: 8 }} />
-          <p>Aucun workflow configure</p>
+          <p>{t('wf.empty')}</p>
           <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginTop: 4 }}>
-            Creez un workflow pour automatiser vos taches
+            {t('wf.emptyHint')}
           </p>
         </div>
       )}
@@ -225,7 +232,7 @@ export function WorkflowsPage({ projects }: WorkflowsPageProps) {
                   <button
                     style={{ ...ws.iconBtn, color: wf.enabled ? '#34d399' : 'rgba(255,255,255,0.3)' }}
                     onClick={(e) => { e.stopPropagation(); handleToggle(wf); }}
-                    title={wf.enabled ? 'Actif' : 'Inactif'}
+                    title={wf.enabled ? t('wf.active') : t('wf.inactive')}
                   >
                     {wf.enabled ? <ToggleRight size={16} /> : <ToggleLeft size={16} />}
                   </button>
@@ -265,13 +272,13 @@ export function WorkflowsPage({ projects }: WorkflowsPageProps) {
                     disabled={!wf.enabled || triggering === wf.id}
                   >
                     {triggering === wf.id ? <Loader2 size={10} className="spin" /> : <Play size={10} />}
-                    Lancer
+                    {t('wf.trigger')}
                   </button>
                   <button
                     style={{ ...ws.smallBtn, color: '#ff4d6a', borderColor: 'rgba(255,77,106,0.2)' }}
                     onClick={(e) => { e.stopPropagation(); handleDelete(wf.id); }}
                   >
-                    <Trash2 size={10} /> Suppr.
+                    <Trash2 size={10} /> {t('wf.delete')}
                   </button>
                 </div>
               </div>
@@ -311,7 +318,7 @@ export function WorkflowsPage({ projects }: WorkflowsPageProps) {
             {!selectedId && (
               <div style={ws.empty}>
                 <Eye size={24} style={{ color: 'rgba(255,255,255,0.15)', marginBottom: 8 }} />
-                <p>Selectionnez un workflow</p>
+                <p>{t('wf.selectOne')}</p>
               </div>
             )}
           </div>
@@ -344,6 +351,7 @@ function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit,
   onDeleteAllRuns: () => void;
   triggering: boolean;
 }) {
+  const { t } = useT();
   const [showRuns, setShowRuns] = useState(true);
 
   const triggerLabel = (() => {
@@ -351,7 +359,7 @@ function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit,
       case 'Cron': return `Cron: ${workflow.trigger.schedule}`;
       case 'Tracker': return `Tracker: ${(workflow.trigger.source as any)?.owner}/${(workflow.trigger.source as any)?.repo}`;
       case 'Manual': return 'Manuel';
-      default: return 'Inconnu';
+      default: return t('wf.unknown');
     }
   })();
 
@@ -360,10 +368,10 @@ function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit,
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
         <h2 style={{ fontSize: 16, fontWeight: 700, flex: 1, margin: 0 }}>{workflow.name}</h2>
         <button style={ws.smallBtn} onClick={onEdit}>
-          <Settings size={10} /> Editer
+          <Settings size={10} /> {t('wf.edit')}
         </button>
         <button style={ws.smallBtn} onClick={onRefresh}>
-          <RefreshCw size={10} /> Rafraichir
+          <RefreshCw size={10} /> {t('wf.refresh')}
         </button>
         <button
           style={{ ...ws.smallBtn, background: 'rgba(200,255,0,0.08)' }}
@@ -371,7 +379,7 @@ function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit,
           disabled={!workflow.enabled || triggering}
         >
           {triggering ? <Loader2 size={10} /> : <Play size={10} />}
-          Lancer
+          {t('wf.launch')}
         </button>
       </div>
 
@@ -413,7 +421,7 @@ function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit,
           {step.on_result && step.on_result.length > 0 && (
             <div style={{ marginTop: 4, fontSize: 10, color: '#ffc800' }}>
               {step.on_result.map((r, j) => (
-                <span key={j}>si contient "{r.contains}" → {r.action.type} </span>
+                <span key={j}>{t('wiz.ifContains')} "{r.contains}" → {r.action.type} </span>
               ))}
             </div>
           )}
@@ -430,7 +438,7 @@ function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit,
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
             <Loader2 size={12} style={{ color: '#00d4ff', animation: 'spin 1s linear infinite' }} />
             <span style={{ fontSize: 12, fontWeight: 700, color: '#00d4ff' }}>
-              Exécution en cours
+              {t('wf.running')}
             </span>
             {liveRun.totalSteps > 0 && (
               <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.4)' }}>
@@ -555,10 +563,10 @@ function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit,
             fontSize: 12, fontWeight: 600,
             color: liveRun.status === 'Success' ? '#34d399' : '#ff4d6a',
           }}>
-            Run terminé — {liveRun.status}
+            {t('wf.runDone', liveRun.status ?? '')}
           </span>
           <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)' }}>
-            {liveRun.completedSteps.length} steps exécutés
+            {t('wf.stepsExecuted', liveRun.completedSteps.length)}
           </span>
         </div>
       )}
@@ -573,7 +581,7 @@ function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit,
             style={{ ...ws.smallBtn, color: '#ff4d6a', background: 'rgba(255,77,106,0.06)', border: '1px solid rgba(255,77,106,0.15)' }}
             onClick={onDeleteAllRuns}
           >
-            <Trash2 size={9} /> Tout supprimer
+            <Trash2 size={9} /> {t('wf.deleteAll')}
           </button>
         )}
         <button style={ws.iconBtn} onClick={() => setShowRuns(!showRuns)}>
@@ -582,7 +590,7 @@ function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit,
       </div>
 
       {showRuns && runs.length === 0 && (
-        <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.25)', marginTop: 8 }}>Aucun run</p>
+        <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.25)', marginTop: 8 }}>{t('wf.noRuns')}</p>
       )}
 
       {showRuns && runs.map(run => (
@@ -595,11 +603,12 @@ function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit,
 // ─── Run Detail (expandable steps) ───────────────────────────────────────────
 
 function RunDetail({ run, onDelete }: { run: WorkflowRun; onDelete: () => void }) {
+  const { t } = useT();
   const [expandedStep, setExpandedStep] = useState<number | null>(null);
 
   const CONDITION_LABELS: Record<string, string> = {
     Stop: 'Stop',
-    Skip: 'Skip step suivant',
+    Skip: t('wf.skipNext'),
   };
 
   const conditionLabel = (cr: string): string => {
@@ -736,12 +745,18 @@ function parseCronExpr(expr: string): { every: number; unit: 'minutes' | 'hours'
   return { every: 1, unit: 'days', at: `${hour.padStart(2, '0')}:${min.padStart(2, '0')}` };
 }
 
-function WorkflowWizard({ projects, editWorkflow, onDone, onCancel }: {
+function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAgentTypes }: {
   projects: Project[];
   editWorkflow?: Workflow;
   onDone: () => void;
   onCancel: () => void;
+  installedAgentTypes?: AgentType[];
 }) {
+  const { t } = useT();
+  const availableAgents = (installedAgentTypes && installedAgentTypes.length > 0
+    ? installedAgentTypes
+    : ALL_AGENT_TYPES
+  ).map(at => ({ type: at, label: AGENT_LABELS[at] ?? at }));
   const isEdit = !!editWorkflow;
   const initTrigger = editWorkflow?.trigger;
   const initCron = initTrigger?.type === 'Cron' ? parseCronExpr(initTrigger.schedule) : null;
@@ -794,11 +809,11 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel }: {
   const cronHumanLabel = (): string => {
     const [hh, mm] = cronAt.split(':');
     const atStr = `${hh ?? '00'}:${mm ?? '00'}`;
-    const unitLabels: Record<string, string> = { minutes: 'minutes', hours: 'heures', days: 'jours', weeks: 'semaines', months: 'mois' };
+    const unitLabels: Record<string, string> = { minutes: t('wiz.minutes'), hours: t('wiz.hours'), days: t('wiz.days'), weeks: t('wiz.weeks'), months: t('wiz.months') };
     if (cronUnit === 'minutes' || cronUnit === 'hours') {
-      return `Toutes les ${cronEvery} ${unitLabels[cronUnit]}`;
+      return `${t('wiz.every')} ${cronEvery} ${unitLabels[cronUnit]}`;
     }
-    return `Tous les ${cronEvery} ${unitLabels[cronUnit]} a ${atStr}`;
+    return `${t('wiz.every')} ${cronEvery} ${unitLabels[cronUnit]} ${t('wiz.at')} ${atStr}`;
   };
 
   const [steps, setSteps] = useState<WorkflowStep[]>(editWorkflow?.steps ?? [{
@@ -910,7 +925,7 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel }: {
     }
   };
 
-  const WIZARD_STEPS = ['Infos', 'Trigger', 'Steps', 'Config', 'Resume'];
+  const WIZARD_STEPS = [t('wiz.infos'), t('wiz.trigger'), t('wiz.steps'), t('wiz.config'), t('wiz.summary')];
   const lastStep = WIZARD_STEPS.length - 1;
 
   return (
@@ -933,17 +948,17 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel }: {
       {/* Step 0: Name + Project */}
       {wizardStep === 0 && (
         <div>
-          <label style={ws.label}>Nom du workflow</label>
+          <label style={ws.label}>{t('wiz.name')}</label>
           <input
             style={ws.input}
             value={name}
             onChange={e => setName(e.target.value)}
-            placeholder="ex: Auto-fix 5xx errors"
+            placeholder={t('wiz.namePlaceholder')}
           />
 
-          <label style={{ ...ws.label, marginTop: 12 }}>Projet {isEdit ? '' : '(optionnel)'}</label>
+          <label style={{ ...ws.label, marginTop: 12 }}>{isEdit ? t('wiz.project') : t('wiz.projectOptional')}</label>
           <select style={ws.select} value={projectId} onChange={e => setProjectId(e.target.value)} disabled={isEdit}>
-            <option value="">Aucun projet</option>
+            <option value="">{t('wiz.noProject')}</option>
             {projects.map(p => (
               <option key={p.id} value={p.id}>{p.name}</option>
             ))}
@@ -954,32 +969,32 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel }: {
       {/* Step 1: Trigger */}
       {wizardStep === 1 && (
         <div>
-          <label style={ws.label}>Type de trigger</label>
+          <label style={ws.label}>{t('wiz.triggerType')}</label>
           <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
-            {(['Manual', 'Cron', 'Tracker'] as const).map(t => (
+            {(['Manual', 'Cron', 'Tracker'] as const).map(tt => (
               <button
-                key={t}
+                key={tt}
                 style={{
                   ...ws.triggerBtn,
-                  background: triggerType === t ? 'rgba(200,255,0,0.1)' : 'rgba(255,255,255,0.03)',
-                  borderColor: triggerType === t ? 'rgba(200,255,0,0.3)' : 'rgba(255,255,255,0.08)',
-                  color: triggerType === t ? '#c8ff00' : 'rgba(255,255,255,0.4)',
+                  background: triggerType === tt ? 'rgba(200,255,0,0.1)' : 'rgba(255,255,255,0.03)',
+                  borderColor: triggerType === tt ? 'rgba(200,255,0,0.3)' : 'rgba(255,255,255,0.08)',
+                  color: triggerType === tt ? '#c8ff00' : 'rgba(255,255,255,0.4)',
                 }}
-                onClick={() => setTriggerType(t)}
+                onClick={() => setTriggerType(tt)}
               >
-                {t === 'Manual' && <Zap size={12} />}
-                {t === 'Cron' && <Clock size={12} />}
-                {t === 'Tracker' && <GitBranch size={12} />}
-                {t}
+                {tt === 'Manual' && <Zap size={12} />}
+                {tt === 'Cron' && <Clock size={12} />}
+                {tt === 'Tracker' && <GitBranch size={12} />}
+                {tt}
               </button>
             ))}
           </div>
 
           {triggerType === 'Cron' && (
             <>
-              <label style={ws.label}>Frequence</label>
+              <label style={ws.label}>{t('wiz.frequency')}</label>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)' }}>Tous les</span>
+                <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)' }}>{t('wiz.every')}</span>
                 <input
                   type="number" min={1} max={60}
                   style={{ ...ws.input, width: 60, textAlign: 'center' as const }}
@@ -991,15 +1006,15 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel }: {
                   value={cronUnit}
                   onChange={e => setCronUnit(e.target.value as typeof cronUnit)}
                 >
-                  <option value="minutes">minutes</option>
-                  <option value="hours">heures</option>
-                  <option value="days">jours</option>
-                  <option value="weeks">semaines</option>
-                  <option value="months">mois</option>
+                  <option value="minutes">{t('wiz.minutes')}</option>
+                  <option value="hours">{t('wiz.hours')}</option>
+                  <option value="days">{t('wiz.days')}</option>
+                  <option value="weeks">{t('wiz.weeks')}</option>
+                  <option value="months">{t('wiz.months')}</option>
                 </select>
                 {(cronUnit === 'days' || cronUnit === 'weeks' || cronUnit === 'months') && (
                   <>
-                    <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)' }}>a</span>
+                    <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)' }}>{t('wiz.at')}</span>
                     <input
                       type="time"
                       style={{ ...ws.input, width: 100 }}
@@ -1034,9 +1049,9 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel }: {
                   <input style={ws.input} value={trackerRepo} onChange={e => setTrackerRepo(e.target.value)} placeholder="repo" />
                 </div>
               </div>
-              <label style={{ ...ws.label, marginTop: 8 }}>Labels (virgule)</label>
+              <label style={{ ...ws.label, marginTop: 8 }}>{t('wiz.labels')}</label>
               <input style={ws.input} value={trackerLabels} onChange={e => setTrackerLabels(e.target.value)} placeholder="bug-5xx, auto-fix" />
-              <label style={{ ...ws.label, marginTop: 8 }}>Intervalle de poll (cron)</label>
+              <label style={{ ...ws.label, marginTop: 8 }}>{t('wiz.pollInterval')}</label>
               <input style={ws.input} value={trackerInterval} onChange={e => setTrackerInterval(e.target.value)} placeholder="*/5 * * * *" />
             </>
           )}
@@ -1058,21 +1073,21 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel }: {
             onClick={() => setShowVarHelp(!showVarHelp)}
           >
             <HelpCircle size={12} />
-            Variables disponibles
+            {t('wiz.availableVars')}
             <ChevronRight size={10} style={{ transform: showVarHelp ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s' }} />
           </button>
 
           {showVarHelp && (
             <div style={ws.helpPanel}>
               <div style={ws.helpSection}>
-                <div style={ws.helpTitle}>Variables de trigger (Tracker)</div>
+                <div style={ws.helpTitle}>{t('wiz.triggerVars')}</div>
                 <div style={ws.helpGrid}>
                   {[
-                    ['{{issue.title}}', 'Titre de l\'issue'],
-                    ['{{issue.body}}', 'Contenu de l\'issue'],
-                    ['{{issue.number}}', 'Numero (#42)'],
-                    ['{{issue.url}}', 'Lien vers l\'issue'],
-                    ['{{issue.labels}}', 'Labels (virgule)'],
+                    ['{{issue.title}}', t('wiz.issueTitle')],
+                    ['{{issue.body}}', t('wiz.issueBody')],
+                    ['{{issue.number}}', t('wiz.issueNumber')],
+                    ['{{issue.url}}', t('wiz.issueUrl')],
+                    ['{{issue.labels}}', t('wiz.issueLabels')],
                   ].map(([v, d]) => (
                     <div key={v} style={ws.helpRow}>
                       <code style={ws.helpCode}>{v}</code>
@@ -1083,11 +1098,11 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel }: {
               </div>
 
               <div style={ws.helpSection}>
-                <div style={ws.helpTitle}>Chainage entre steps</div>
+                <div style={ws.helpTitle}>{t('wiz.stepChaining')}</div>
                 <div style={ws.helpGrid}>
                   {[
-                    ['{{previous_step.output}}', 'Sortie du step precedent'],
-                    ['{{steps.<nom>.output}}', 'Sortie d\'un step par nom'],
+                    ['{{previous_step.output}}', t('wiz.prevOutput')],
+                    ['{{steps.<nom>.output}}', t('wiz.namedOutput')],
                   ].map(([v, d]) => (
                     <div key={v} style={ws.helpRow}>
                       <code style={ws.helpCode}>{v}</code>
@@ -1098,7 +1113,7 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel }: {
               </div>
 
               <div style={ws.helpSection}>
-                <div style={ws.helpTitle}>Exemple : workflow multi-step</div>
+                <div style={ws.helpTitle}>{t('wiz.example')}</div>
                 <div style={{
                   padding: '10px 12px', borderRadius: 6,
                   background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.06)',
@@ -1137,16 +1152,16 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel }: {
                     style={{ ...ws.input, flex: 1 }}
                     value={step.name}
                     onChange={e => updateStep(i, { name: e.target.value })}
-                    placeholder="Nom du step"
+                    placeholder={t('wiz.stepName')}
                   />
                   <select
                     style={{ ...ws.select, width: 120 }}
                     value={step.agent}
                     onChange={e => updateStep(i, { agent: e.target.value as AgentType })}
                   >
-                    <option value="ClaudeCode">Claude Code</option>
-                    <option value="Codex">Codex</option>
-                    <option value="Vibe">Vibe</option>
+                    {availableAgents.map(a => (
+                      <option key={a.type} value={a.type}>{a.label}</option>
+                    ))}
                   </select>
                   {steps.length > 1 && (
                     <button style={ws.iconBtn} onClick={() => removeStep(i)}>
@@ -1183,7 +1198,7 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel }: {
                   onClick={() => setExpandedStepAdvanced(isAdvOpen ? null : i)}
                 >
                   <Settings size={10} />
-                  Avance{hasAdvanced ? ' *' : ''}
+                  {t('wiz.advanced')}{hasAdvanced ? ' *' : ''}
                   {isAdvOpen ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
                 </button>
 
@@ -1191,7 +1206,7 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel }: {
                   <div style={ws.advancedPanel}>
                     {/* Mode: Normal / Debate */}
                     <div style={{ marginBottom: 10 }}>
-                      <label style={ws.label}>Mode</label>
+                      <label style={ws.label}>{t('wiz.mode')}</label>
                       <div style={{ display: 'flex', gap: 6 }}>
                         <button
                           style={{ ...ws.modeBtn, ...(step.mode.type === 'Normal' ? ws.modeBtnActive : {}) }}
@@ -1206,9 +1221,9 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel }: {
 
                     {step.mode.type === 'Debate' && (
                       <div style={{ marginBottom: 10, padding: '8px 10px', borderRadius: 6, background: 'rgba(255,200,0,0.04)', border: '1px solid rgba(255,200,0,0.1)' }}>
-                        <label style={ws.label}>Agents du debat</label>
+                        <label style={ws.label}>{t('wiz.debateAgents')}</label>
                         <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
-                          {(['ClaudeCode', 'Codex', 'Vibe'] as AgentType[]).map(a => {
+                          {availableAgents.map(({ type: a }) => {
                             const inList = step.mode.type === 'Debate' && step.mode.agents.includes(a);
                             return (
                               <button key={a} style={{
@@ -1228,7 +1243,7 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel }: {
                             );
                           })}
                         </div>
-                        <label style={ws.label}>Rounds max</label>
+                        <label style={ws.label}>{t('wiz.maxRounds')}</label>
                         <input
                           type="number" min={1} max={10}
                           style={{ ...ws.input, width: 60 }}
@@ -1244,10 +1259,10 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel }: {
 
                     {/* Agent settings */}
                     <div style={{ marginBottom: 10 }}>
-                      <label style={ws.label}>Agent settings (optionnel)</label>
+                      <label style={ws.label}>{t('wiz.agentSettings')}</label>
                       <div style={{ display: 'flex', gap: 6 }}>
                         <div style={{ flex: 1 }}>
-                          <label style={{ ...ws.label, fontSize: 9 }}>Model</label>
+                          <label style={{ ...ws.label, fontSize: 9 }}>{t('wiz.model')}</label>
                           <input
                             style={ws.input}
                             value={step.agent_settings?.model ?? ''}
@@ -1290,7 +1305,7 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel }: {
                     {/* Stall timeout */}
                     <div style={{ display: 'flex', gap: 12, marginBottom: 10 }}>
                       <div>
-                        <label style={ws.label}>Stall timeout (sec)</label>
+                        <label style={ws.label}>{t('wiz.stallTimeout')}</label>
                         <input
                           type="number" min={0}
                           style={{ ...ws.input, width: 90 }}
@@ -1303,7 +1318,7 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel }: {
                       </div>
 
                       <div>
-                        <label style={ws.label}>Delai apres (sec)</label>
+                        <label style={ws.label}>{t('wiz.delayAfter')}</label>
                         <input
                           type="number" min={0}
                           style={{ ...ws.input, width: 90 }}
@@ -1317,7 +1332,7 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel }: {
 
                       {/* Retry */}
                       <div style={{ flex: 1 }}>
-                        <label style={ws.label}>Retry</label>
+                        <label style={ws.label}>{t('wiz.retry')}</label>
                         <div style={{ display: 'flex', gap: 6 }}>
                           <input
                             type="number" min={0} max={10}
@@ -1350,10 +1365,10 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel }: {
 
                     {/* on_result conditions */}
                     <div>
-                      <label style={ws.label}>Conditions (on_result)</label>
+                      <label style={ws.label}>{t('wiz.conditions')}</label>
                       {(step.on_result ?? []).map((cond, j) => (
                         <div key={j} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-                          <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', whiteSpace: 'nowrap' }}>si contient</span>
+                          <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', whiteSpace: 'nowrap' }}>{t('wiz.ifContains')}</span>
                           <input
                             style={{ ...ws.input, flex: 1, fontSize: 11, borderColor: !cond.contains ? 'rgba(255,77,106,0.4)' : undefined }}
                             value={cond.contains}
@@ -1396,7 +1411,7 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel }: {
                           <button
                             style={{ ...ws.addStepBtn, padding: '3px 8px', fontSize: 9, width: 'auto', borderStyle: 'solid' }}
                             onClick={() => updateStep(i, { on_result: [{ contains: 'NO_RESULTS', action: { type: 'Stop' } }] })}
-                          >Aucun resultat &rarr; Stop</button>
+                          >{t('wiz.noResultsStop')}</button>
                         </div>
                       )}
                       <p style={{ fontSize: 9, color: 'rgba(255,255,255,0.2)', margin: '4px 0 0' }}>
@@ -1409,7 +1424,7 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel }: {
             );
           })}
           <button style={ws.addStepBtn} onClick={addStep}>
-            <Plus size={12} /> Ajouter un step
+            <Plus size={12} /> {t('wiz.addStep')}
           </button>
         </div>
       )}
@@ -1421,23 +1436,23 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel }: {
           <div style={{ marginBottom: 16 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
               <Shield size={14} style={{ color: 'rgba(255,255,255,0.4)' }} />
-              <span style={{ fontSize: 13, fontWeight: 600, color: 'rgba(255,255,255,0.6)' }}>Securite</span>
+              <span style={{ fontSize: 13, fontWeight: 600, color: 'rgba(255,255,255,0.6)' }}>{t('wiz.security')}</span>
             </div>
 
             <div style={{ display: 'flex', gap: 12, marginBottom: 8 }}>
               <label style={ws.checkboxLabel}>
                 <input type="checkbox" checked={safety.sandbox} onChange={e => setSafety({ ...safety, sandbox: e.target.checked })} />
-                <span>Sandbox (Docker)</span>
+                <span>{t('wiz.sandbox')}</span>
               </label>
               <label style={ws.checkboxLabel}>
                 <input type="checkbox" checked={safety.require_approval} onChange={e => setSafety({ ...safety, require_approval: e.target.checked })} />
-                <span>Approbation requise</span>
+                <span>{t('wiz.requireApproval')}</span>
               </label>
             </div>
 
             <div style={{ display: 'flex', gap: 8 }}>
               <div>
-                <label style={ws.label}>Max fichiers modifies</label>
+                <label style={ws.label}>{t('wiz.maxFiles')}</label>
                 <input
                   type="number" min={0}
                   style={{ ...ws.input, width: 90 }}
@@ -1447,7 +1462,7 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel }: {
                 />
               </div>
               <div>
-                <label style={ws.label}>Max lignes modifiees</label>
+                <label style={ws.label}>{t('wiz.maxLines')}</label>
                 <input
                   type="number" min={0}
                   style={{ ...ws.input, width: 90 }}
@@ -1461,7 +1476,7 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel }: {
 
           {/* Concurrency */}
           <div style={{ marginBottom: 16 }}>
-            <label style={ws.label}>Limite de concurrence (runs simultanes)</label>
+            <label style={ws.label}>{t('wiz.concurrency')}</label>
             <input
               type="number" min={1} max={20}
               style={{ ...ws.input, width: 90 }}
@@ -1475,17 +1490,17 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel }: {
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
               <GitBranch size={14} style={{ color: 'rgba(255,255,255,0.4)' }} />
-              <span style={{ fontSize: 13, fontWeight: 600, color: 'rgba(255,255,255,0.6)' }}>Hooks de workspace (optionnel)</span>
+              <span style={{ fontSize: 13, fontWeight: 600, color: 'rgba(255,255,255,0.6)' }}>{t('wiz.hooks')}</span>
             </div>
             <p style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)', margin: '0 0 8px' }}>
-              Commandes shell executees a chaque phase du worktree git
+              {t('wiz.hooksHint')}
             </p>
 
             {([
-              ['after_create', 'Apres creation', wsHookAfterCreate, setWsHookAfterCreate, 'npm install'],
-              ['before_run', 'Avant execution', wsHookBeforeRun, setWsHookBeforeRun, 'git pull origin main'],
-              ['after_run', 'Apres execution', wsHookAfterRun, setWsHookAfterRun, 'npm run lint'],
-              ['before_remove', 'Avant suppression', wsHookBeforeRemove, setWsHookBeforeRemove, 'git stash'],
+              ['after_create', t('wiz.hookAfterCreate'), wsHookAfterCreate, setWsHookAfterCreate, 'npm install'],
+              ['before_run', t('wiz.hookBeforeRun'), wsHookBeforeRun, setWsHookBeforeRun, 'git pull origin main'],
+              ['after_run', t('wiz.hookAfterRun'), wsHookAfterRun, setWsHookAfterRun, 'npm run lint'],
+              ['before_remove', t('wiz.hookBeforeRemove'), wsHookBeforeRemove, setWsHookBeforeRemove, 'git stash'],
             ] as [string, string, string, (v: string) => void, string][]).map(([key, label, value, setter, placeholder]) => (
               <div key={key} style={{ marginBottom: 6 }}>
                 <label style={{ ...ws.label, fontSize: 10 }}>{label} ({key})</label>
@@ -1552,7 +1567,7 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel }: {
       {/* Navigation */}
       <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 20 }}>
         <button style={ws.cancelBtn} onClick={wizardStep === 0 ? onCancel : () => setWizardStep(wizardStep - 1)}>
-          {wizardStep === 0 ? 'Annuler' : 'Precedent'}
+          {wizardStep === 0 ? t('common.cancel') : t('wiz.previous')}
         </button>
         {wizardStep < lastStep ? (
           <button
@@ -1560,7 +1575,7 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel }: {
             onClick={() => setWizardStep(wizardStep + 1)}
             disabled={wizardStep === 0 && !name}
           >
-            Suivant <ChevronRight size={12} />
+            {t('wiz.next')} <ChevronRight size={12} />
           </button>
         ) : (
           <button
@@ -1569,7 +1584,7 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel }: {
             disabled={saving || !name || steps.some(s => !s.prompt_template || (s.on_result ?? []).some(r => !r.contains))}
           >
             {saving ? <Loader2 size={12} /> : <Check size={12} />}
-            {isEdit ? 'Enregistrer' : 'Creer'}
+            {isEdit ? t('wiz.save') : t('wiz.create')}
           </button>
         )}
       </div>

@@ -107,6 +107,7 @@ pub fn default_config() -> AppConfig {
             },
         },
         language: "fr".into(),
+        disabled_agents: vec![],
         encryption_secret: Some(super::crypto::generate_secret()),
     }
 }

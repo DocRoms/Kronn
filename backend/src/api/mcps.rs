@@ -188,11 +188,12 @@ pub async fn update_config(
             new_hash.as_deref(),
         )?;
 
-        // Sync .mcp.json to disk
+        // Sync .mcp.json to disk — always sync all when secrets change
+        let secrets_changed = req.env.is_some();
         let global_changed = req.is_global.map(|g| g != old_config.is_global).unwrap_or(false);
         let new_global = req.is_global.unwrap_or(old_config.is_global);
-        if global_changed || new_global {
-            // Global flag changed or is active → sync all projects
+        if secrets_changed || global_changed || new_global {
+            // Secrets changed, global flag changed, or is global → sync all projects
             mcp_scanner::sync_all_projects(conn, &secret);
         } else {
             mcp_scanner::sync_affected_projects(conn, &old_config.project_ids, &secret);

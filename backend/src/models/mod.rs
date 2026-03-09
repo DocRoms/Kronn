@@ -16,6 +16,8 @@ pub struct AppConfig {
     #[serde(default = "default_language")]
     pub language: String,
     #[serde(default)]
+    pub disabled_agents: Vec<AgentType>,
+    #[serde(default)]
     #[ts(skip)]
     pub encryption_secret: Option<String>,
 }
@@ -88,12 +90,16 @@ pub struct AgentDetection {
     pub name: String,
     pub agent_type: AgentType,
     pub installed: bool,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     pub path: Option<String>,
     pub version: Option<String>,
     pub latest_version: Option<String>,
     pub origin: String,
     pub install_command: Option<String>,
 }
+
+fn default_true() -> bool { true }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../frontend/src/types/generated.ts")]

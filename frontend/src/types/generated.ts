@@ -62,6 +62,7 @@ export interface AgentDetection {
   name: string;
   agent_type: AgentType;
   installed: boolean;
+  enabled: boolean;
   path: string | null;
   version: string | null;
   latest_version: string | null;
