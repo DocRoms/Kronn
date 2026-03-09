@@ -182,6 +182,8 @@ export const projects = {
 export const agents = {
   detect: () => api<AgentDetection[]>('GET', '/agents'),
   install: (agentType: AgentType) => api<string>('POST', '/agents/install', agentType),
+  uninstall: (agentType: AgentType) => api<string>('POST', '/agents/uninstall', agentType),
+  toggle: (agentType: AgentType) => api<boolean>('POST', '/agents/toggle', agentType),
 };
 
 // ─── MCPs ───────────────────────────────────────────────────────────────────

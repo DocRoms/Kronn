@@ -111,6 +111,8 @@ async fn main() -> anyhow::Result<()> {
         // ── Agents ──
         .route("/api/agents", get(api::agents::detect))
         .route("/api/agents/install", post(api::agents::install))
+        .route("/api/agents/uninstall", post(api::agents::uninstall))
+        .route("/api/agents/toggle", post(api::agents::toggle))
         // ── MCPs ──
         .route("/api/mcps", get(api::mcps::overview))
         .route("/api/mcps/registry", get(api::mcps::list_registry))

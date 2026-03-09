@@ -4,6 +4,8 @@ import remarkGfm from 'remark-gfm';
 import { projects as projectsApi, mcps as mcpsApi, agents as agentsApi, discussions as discussionsApi, config as configApi } from '../lib/api';
 import { useApi } from '../hooks/useApi';
 import type { Project, AgentDetection, Discussion, AgentType } from '../types/generated';
+import { useT } from '../lib/I18nContext';
+import { UI_LOCALES } from '../lib/i18n';
 import { McpPage } from './McpPage';
 import { WorkflowsPage } from './WorkflowsPage';
 import {
@@ -22,7 +24,7 @@ interface DashboardProps {
 
 const isHiddenPath = (path: string) => path.split('/').some(s => s.startsWith('.'));
 
-const isAiReady = (p: Project) => p.ai_config.detected;
+const isAiReady = (p: Project) => p.audit_status !== 'NoTemplate';
 
 const isValidationDisc = (title: string) => title === 'Validation audit AI';
 
@@ -52,14 +54,17 @@ const readinessScore = (p: Project) => {
 };
 
 export function Dashboard({ onReset }: DashboardProps) {
+  const { t, locale, setLocale } = useT();
   const [page, setPage] = useState<Page>('projects');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [showHidden, setShowHidden] = useState(false);
+  const [projectSearch, setProjectSearch] = useState('');
+  const [projectDisplayLimit, setProjectDisplayLimit] = useState(20);
   const [installing, setInstalling] = useState<string | null>(null);
   const [activeDiscussionId, setActiveDiscussionId] = useState<string | null>(null);
   const [showNewDiscussion, setShowNewDiscussion] = useState(false);
   const [newDiscTitle, setNewDiscTitle] = useState('');
-  const [newDiscAgent, setNewDiscAgent] = useState<AgentType>('ClaudeCode');
+  const [newDiscAgent, setNewDiscAgent] = useState<AgentType | ''>('');
   const [newDiscProjectId, setNewDiscProjectId] = useState<string>('');
   const [newDiscPrompt, setNewDiscPrompt] = useState('');
   const [newDiscPrefilled, setNewDiscPrefilled] = useState(false);
@@ -67,6 +72,7 @@ export function Dashboard({ onReset }: DashboardProps) {
   const [sendingMap, setSendingMap] = useState<Record<string, boolean>>({});
   const [streamingMap, setStreamingMap] = useState<Record<string, string>>({});
   const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
+  const [collapsedDiscGroups, setCollapsedDiscGroups] = useState<Set<string>>(new Set());
   const [editingText, setEditingText] = useState('');
   const abortControllers = useRef<Record<string, AbortController>>({});
   const [showDebatePopover, setShowDebatePopover] = useState(false);
@@ -123,15 +129,18 @@ export function Dashboard({ onReset }: DashboardProps) {
   const LANGUAGES: { code: string; label: string; flag: string }[] = [
     { code: 'fr', label: 'Francais', flag: 'FR' },
     { code: 'en', label: 'English', flag: 'EN' },
+    { code: 'es', label: 'Español', flag: 'ES' },
     { code: 'zh', label: '中文', flag: 'ZH' },
     { code: 'br', label: 'Brezhoneg', flag: 'BR' },
   ];
 
-  const AGENT_MENTIONS: { trigger: string; type: AgentType; label: string }[] = [
+  const ALL_AGENT_MENTIONS: { trigger: string; type: AgentType; label: string }[] = [
     { trigger: '@claude', type: 'ClaudeCode', label: 'Claude Code' },
     { trigger: '@codex', type: 'Codex', label: 'Codex' },
     { trigger: '@vibe', type: 'Vibe', label: 'Vibe' },
   ];
+  const activeAgentTypes = new Set(agents.filter(a => a.installed && a.enabled).map(a => a.agent_type));
+  const AGENT_MENTIONS = ALL_AGENT_MENTIONS.filter(m => activeAgentTypes.has(m.type));
 
   // Track "last seen" message count for unread badges (persisted in localStorage)
   // Only update when the user explicitly selects a discussion (not on data refresh)
@@ -263,12 +272,12 @@ export function Dashboard({ onReset }: DashboardProps) {
           <span style={s.navTitle}>Kronn</span>
         </div>
         {([
-          ['projects', Folder, 'Projets'],
-          ['discussions', MessageSquare, 'Discussions'],
-          ['mcps', Server, 'MCPs'],
-          ['workflows', Workflow, 'Workflows'],
-          ['settings', Settings, 'Config'],
-        ] as const).map(([id, Icon, label]) => (
+          ['projects', Folder, t('nav.projects')],
+          ['discussions', MessageSquare, t('nav.discussions')],
+          ['mcps', Server, t('nav.mcps')],
+          ['workflows', Workflow, t('nav.workflows')],
+          ['settings', Settings, t('nav.config')],
+        ] as [string, typeof Folder, string][]).map(([id, Icon, label]) => (
           <button key={id} style={{ ...s.navBtn(page === id), position: 'relative' }} onClick={() => setPage(id as Page)}>
             <Icon size={14} /> {label}
             {id === 'discussions' && totalUnseen > 0 && (
@@ -283,7 +292,7 @@ export function Dashboard({ onReset }: DashboardProps) {
         ))}
         <div style={{ flex: 1 }} />
         <button style={s.scanBtn} onClick={handleScan}>
-          <Search size={14} /> Scanner
+          <Search size={14} /> {t('nav.scan')}
         </button>
       </nav>
 
@@ -295,30 +304,60 @@ export function Dashboard({ onReset }: DashboardProps) {
           const visibleProjects = projects.filter(p => !isHiddenPath(p.path));
           const hiddenProjects = projects.filter(p => isHiddenPath(p.path));
           const baseProjects = showHidden ? projects : visibleProjects;
+          // Filter by search
+          const searchLower = projectSearch.toLowerCase();
+          const filteredProjects = projectSearch
+            ? baseProjects.filter(p => p.name.toLowerCase().includes(searchLower) || p.path.toLowerCase().includes(searchLower))
+            : baseProjects;
           // Sort: AI+MCP > AI only > MCP only > nothing, then by name
-          const displayProjects = [...baseProjects].sort((a, b) => {
+          const sortedProjects = [...filteredProjects].sort((a, b) => {
             const diff = readinessScore(a) - readinessScore(b);
             return diff !== 0 ? diff : a.name.localeCompare(b.name);
           });
+          const displayProjects = projectSearch ? sortedProjects : sortedProjects.slice(0, projectDisplayLimit);
+          const remainingCount = sortedProjects.length - displayProjects.length;
           const aiCount = visibleProjects.filter(isAiReady).length;
           return (
           <div>
             <div style={s.pageHeader}>
               <div>
-                <h1 style={s.h1}>Projets</h1>
+                <h1 style={s.h1}>{t('projects.title')}</h1>
                 <p style={s.meta}>
-                  {aiCount}/{visibleProjects.length} AI-ready
+                  {aiCount}/{visibleProjects.length} {t('projects.aiReady')}
                   {hiddenProjects.length > 0 && (
-                    <span style={{ color: 'rgba(255,255,255,0.25)' }}> + {hiddenProjects.length} cache{hiddenProjects.length > 1 ? 's' : ''}</span>
+                    <span style={{ color: 'rgba(255,255,255,0.25)' }}> + {hiddenProjects.length} {hiddenProjects.length > 1 ? t('projects.hiddenPlural') : t('projects.hidden')}</span>
                   )}
                 </p>
               </div>
-              {hiddenProjects.length > 0 && (
-                <button style={s.iconBtn} onClick={() => setShowHidden(!showHidden)} title={showHidden ? 'Masquer les caches' : 'Voir les caches'}>
-                  <Eye size={14} style={{ color: showHidden ? '#c8ff00' : undefined }} />
-                </button>
-              )}
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                {hiddenProjects.length > 0 && (
+                  <button style={s.iconBtn} onClick={() => setShowHidden(!showHidden)} title={showHidden ? t('projects.hideHidden') : t('projects.showHidden')}>
+                    <Eye size={14} style={{ color: showHidden ? '#c8ff00' : undefined }} />
+                  </button>
+                )}
+              </div>
             </div>
+
+            {/* Search bar for projects */}
+            {baseProjects.length > 3 && (
+              <div style={{ position: 'relative', marginBottom: 12 }}>
+                <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'rgba(255,255,255,0.25)', pointerEvents: 'none' }} />
+                <input
+                  style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 6, padding: '8px 12px 8px 32px', color: '#e8eaed', fontSize: 12, fontFamily: 'inherit', width: '100%', outline: 'none' }}
+                  placeholder={t('projects.search')}
+                  value={projectSearch}
+                  onChange={(e) => setProjectSearch(e.target.value)}
+                />
+                {projectSearch && (
+                  <button
+                    style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: 'rgba(255,255,255,0.3)', padding: 2 }}
+                    onClick={() => setProjectSearch('')}
+                  >
+                    <X size={12} />
+                  </button>
+                )}
+              </div>
+            )}
 
             {displayProjects.map((proj: Project) => {
               const isOpen = expandedId === proj.id;
@@ -399,7 +438,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                                 <button
                                   style={s.iconBtn}
                                   onClick={() => setPage('mcps')}
-                                  title="Gerer dans MCPs"
+                                  title={t('projects.manageMcps')}
                                 >
                                   <ChevronRight size={12} />
                                 </button>
@@ -407,7 +446,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                             ))}
                             {projMcps.length === 0 && (
                               <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.25)', padding: '4px 0' }}>
-                                Aucun MCP — <button style={{ ...s.iconBtn, fontSize: 11, color: '#c8ff00' }} onClick={() => setPage('mcps')}>configurer</button>
+                                {t('projects.noMcp').split(' — ')[0]} — <button style={{ ...s.iconBtn, fontSize: 11, color: '#c8ff00' }} onClick={() => setPage('mcps')}>{t('projects.noMcp').split(' — ')[1]}</button>
                               </div>
                             )}
                           </div>
@@ -441,7 +480,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                           style={{ ...s.iconBtn, marginTop: 8, fontSize: 11, gap: 4 }}
                           onClick={() => { setPage('discussions'); setShowNewDiscussion(true); setNewDiscProjectId(proj.id); }}
                         >
-                          <Plus size={12} /> Nouvelle discussion
+                          <Plus size={12} /> {t('disc.newTitle')}
                         </button>
                       </div>
 
@@ -450,14 +489,14 @@ export function Dashboard({ onReset }: DashboardProps) {
                         <div style={s.sectionHeader}>
                           <FileCode size={14} /> <span style={s.sectionTitle}>AI Context</span>
                           <span style={s.count}>
-                            {proj.audit_status === 'Validated' ? 'valide' : validationInProgress ? 'validation...' : proj.audit_status === 'Audited' ? 'audit OK' : proj.audit_status === 'TemplateInstalled' ? 'template' : 'aucun'}
+                            {proj.audit_status === 'Validated' ? t('projects.status.valid') : validationInProgress ? t('projects.status.validating') : proj.audit_status === 'Audited' ? t('projects.status.auditOk') : proj.audit_status === 'TemplateInstalled' ? t('projects.status.template') : t('projects.status.none')}
                           </span>
                         </div>
 
                         {proj.audit_status === 'NoTemplate' && (
                           <div style={{ padding: '8px 0' }}>
                             <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', margin: '0 0 8px' }}>
-                              Aucun template AI installe. Installez le template pour structurer la documentation AI du projet.
+                              {t('audit.noTemplate')}
                             </p>
                             <button
                               style={{ ...s.iconBtn, fontSize: 11, gap: 4, color: '#c8ff00', borderColor: 'rgba(200,255,0,0.2)' }}
@@ -466,7 +505,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                             >
                               {installingTemplate === proj.id
                                 ? <><Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> Installation...</>
-                                : <><Download size={12} /> Installer le template AI</>
+                                : <><Download size={12} /> {t('audit.installTemplate')}</>
                               }
                             </button>
                           </div>
@@ -475,16 +514,16 @@ export function Dashboard({ onReset }: DashboardProps) {
                         {proj.audit_status === 'TemplateInstalled' && !auditState[proj.id]?.active && (
                           <div style={{ padding: '8px 0' }}>
                             <p style={{ fontSize: 11, color: 'rgba(255,200,0,0.7)', margin: '0 0 8px', display: 'flex', alignItems: 'center', gap: 4 }}>
-                              <AlertTriangle size={11} /> L'audit AI analyse l'integralite du projet en 10 etapes et remplit la doc ai/.
+                              <AlertTriangle size={11} /> {t('audit.description')}
                             </p>
                             <p style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)', margin: '0 0 8px' }}>
-                              Duree estimee : ~20 minutes. Consommation elevee de tokens.
+                              {t('audit.warning')}
                             </p>
                             <button
                               style={{ ...s.iconBtn, fontSize: 11, gap: 4, color: '#c8ff00', borderColor: 'rgba(200,255,0,0.2)' }}
                               onClick={() => handleLaunchAudit(proj.id)}
                             >
-                              <Play size={12} /> Lancer l'audit AI
+                              <Play size={12} /> {t('audit.launch')}
                             </button>
                           </div>
                         )}
@@ -494,7 +533,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
                               <Loader2 size={14} style={{ animation: 'spin 1s linear infinite', color: '#c8ff00' }} />
                               <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)' }}>
-                                Etape {auditState[proj.id].step}/{auditState[proj.id].totalSteps} — {auditState[proj.id].currentFile}
+                                {t('audit.step', auditState[proj.id].step, auditState[proj.id].totalSteps, auditState[proj.id].currentFile)}
                               </span>
                             </div>
                             <div style={{ height: 3, background: 'rgba(255,255,255,0.06)', borderRadius: 2, overflow: 'hidden' }}>
@@ -514,22 +553,22 @@ export function Dashboard({ onReset }: DashboardProps) {
                             {validationInProgress ? (
                               <>
                                 <p style={{ fontSize: 11, color: 'rgba(255,200,0,0.7)', margin: '0 0 8px', display: 'flex', alignItems: 'center', gap: 4 }}>
-                                  <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> Validation en cours — {validationDisc.messages.length} messages echanges.
+                                  <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> {t('audit.validationInProgress', validationDisc.messages.length)}
                                 </p>
                                 <p style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)', margin: '0 0 8px' }}>
-                                  La validation se termine depuis la discussion, quand l'IA confirme que tout est resolu.
+                                  {t('audit.validationHint')}
                                 </p>
                                 <button
                                   style={{ ...s.iconBtn, fontSize: 11, gap: 4, color: '#c8ff00', borderColor: 'rgba(200,255,0,0.2)' }}
                                   onClick={() => { setActiveDiscussionId(validationDisc.id); setPage('discussions'); }}
                                 >
-                                  <MessageSquare size={12} /> Reprendre la validation
+                                  <MessageSquare size={12} /> {t('audit.resumeValidation')}
                                 </button>
                               </>
                             ) : (
                               <>
                                 <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', margin: '0 0 8px' }}>
-                                  Documentation AI generee. Validez l'audit pour resoudre les zones d'ambiguite avec l'IA.
+                                  {t('audit.readyToValidate')}
                                 </p>
                                 <button
                                   style={{ ...s.iconBtn, fontSize: 11, gap: 4, color: '#c8ff00', borderColor: 'rgba(200,255,0,0.2)' }}
@@ -542,7 +581,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                                     setNewDiscPrompt(`Voici le contexte AI du projet (dossier ai/). Analyse l'ensemble des fichiers ai/, identifie les zones d'ambiguite, les questions non resolues, les marqueurs <!-- TODO --> et les incoherences. Pose-moi tes questions une par une. Important : a chaque reponse de ma part, mets immediatement a jour les fichiers ai/ concernes avant de poser la question suivante — cela evite de repeter les memes questions et garde la documentation a jour en continu. Quand toutes mes reponses seront comprises, n'hesite pas a poser des questions de suivi. Une fois tout clarifie, termine ton message par la phrase exacte : "KRONN:VALIDATION_COMPLETE".`);
                                   }}
                                 >
-                                  <ShieldCheck size={12} /> Valider l'audit
+                                  <ShieldCheck size={12} /> {t('audit.validate')}
                                 </button>
                               </>
                             )}
@@ -551,14 +590,14 @@ export function Dashboard({ onReset }: DashboardProps) {
 
                         {proj.audit_status === 'Validated' && !auditState[proj.id]?.active && (
                           <div style={{ padding: '4px 0', fontSize: 11, color: 'rgba(200,255,0,0.5)', display: 'flex', alignItems: 'center', gap: 4 }}>
-                            <ShieldCheck size={11} /> Audit valide. Documentation AI prete dans ai/.
+                            <ShieldCheck size={11} /> {t('audit.done')}
                           </div>
                         )}
                       </div>
 
                       <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 12, paddingTop: 12, borderTop: '1px solid rgba(255,255,255,0.05)' }}>
                         <button style={s.dangerBtn} onClick={() => handleDeleteProject(proj.id)}>
-                          <Trash2 size={12} /> Supprimer
+                          <Trash2 size={12} /> {t('projects.delete')}
                         </button>
                       </div>
                     </div>
@@ -567,11 +606,29 @@ export function Dashboard({ onReset }: DashboardProps) {
               );
             })}
 
+            {/* Show more / less buttons */}
+            {remainingCount > 0 && (
+              <button
+                style={{ display: 'block', width: '100%', padding: '10px 0', background: 'rgba(200,255,0,0.04)', border: '1px solid rgba(200,255,0,0.1)', borderRadius: 8, color: '#c8ff00', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit', marginTop: 8 }}
+                onClick={() => setProjectDisplayLimit(prev => prev + 20)}
+              >
+                {t('projects.showMore', remainingCount, remainingCount > 1 ? 's' : '', remainingCount > 1 ? 's' : '')}
+              </button>
+            )}
+            {!projectSearch && projectDisplayLimit > 20 && remainingCount === 0 && sortedProjects.length > 20 && (
+              <button
+                style={{ display: 'block', width: '100%', padding: '8px 0', background: 'transparent', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 8, color: 'rgba(255,255,255,0.3)', fontSize: 11, cursor: 'pointer', fontFamily: 'inherit', marginTop: 8 }}
+                onClick={() => setProjectDisplayLimit(20)}
+              >
+                {t('projects.collapse')}
+              </button>
+            )}
+
             {displayProjects.length === 0 && (
               <div style={{ ...s.card(false), textAlign: 'center', padding: 40 }}>
                 <Folder size={32} style={{ color: 'rgba(255,255,255,0.15)', marginBottom: 12 }} />
                 <p style={{ color: 'rgba(255,255,255,0.4)', fontSize: 13 }}>
-                  Aucun projet. Cliquez sur "Scanner" pour detecter vos depots.
+                  {projectSearch ? t('projects.emptySearch') : t('projects.empty')}
                 </p>
               </div>
             )}
@@ -586,12 +643,16 @@ export function Dashboard({ onReset }: DashboardProps) {
 
         {/* ════════ WORKFLOWS ════════ */}
         {page === 'workflows' && (
-          <WorkflowsPage projects={projects} />
+          <WorkflowsPage projects={projects} installedAgentTypes={agents.filter(a => a.installed && a.enabled).map(a => a.agent_type)} />
         )}
 
         {/* ════════ DISCUSSIONS ════════ */}
         {page === 'discussions' && (() => {
-          const installedAgents = agents.filter(a => a.installed);
+          const installedAgents = agents.filter(a => a.installed && a.enabled);
+          // Auto-select first installed agent if current selection is invalid
+          if (installedAgents.length > 0 && !installedAgents.some(a => a.agent_type === newDiscAgent)) {
+            setNewDiscAgent(installedAgents[0].agent_type);
+          }
           // Group discussions by project (null = global)
           const discByProject = new Map<string | null, Discussion[]>();
           for (const d of allDiscussions) {
@@ -609,13 +670,13 @@ export function Dashboard({ onReset }: DashboardProps) {
           };
 
           const handleCreateDiscussion = async () => {
-            if (!newDiscPrompt.trim()) return;
+            if (!newDiscPrompt.trim() || !newDiscAgent) return;
             const prompt = newDiscPrompt.trim();
             const title = newDiscTitle.trim() || prompt.slice(0, 60);
             const disc = await discussionsApi.create({
               project_id: newDiscProjectId || null,
               title,
-              agent: newDiscAgent,
+              agent: newDiscAgent as AgentType,
               language: configLanguage ?? 'fr',
               initial_prompt: prompt,
             });
@@ -677,8 +738,11 @@ export function Dashboard({ onReset }: DashboardProps) {
 
           const handleStop = () => {
             if (!activeDiscussionId) return;
-            const controller = abortControllers.current[activeDiscussionId];
+            const discId = activeDiscussionId;
+            const controller = abortControllers.current[discId];
             if (controller) controller.abort();
+            // Ensure UI clears even if SSE abort callback doesn't fire
+            cleanupStream(discId);
           };
 
           const handleRetry = async () => {
@@ -806,7 +870,7 @@ export function Dashboard({ onReset }: DashboardProps) {
               <div style={ds.sidebarHeader}>
                 <span style={{ fontWeight: 600, fontSize: 13 }}>Discussions</span>
                 <button style={s.scanBtn} onClick={() => { setShowNewDiscussion(true); }}>
-                  <Plus size={12} /> Nouvelle
+                  <Plus size={12} /> {t('disc.new')}
                 </button>
               </div>
 
@@ -816,10 +880,18 @@ export function Dashboard({ onReset }: DashboardProps) {
                 {(() => {
                   const globalDiscs = discByProject.get(null) ?? [];
                   if (globalDiscs.length === 0) return null;
+                  const isCollapsed = collapsedDiscGroups.has('__global__');
                   return (
                     <div>
-                      <div style={{ ...ds.projectGroup, color: 'rgba(200,255,0,0.5)' }}>General</div>
-                      {globalDiscs.sort((a, b) => b.updated_at.localeCompare(a.updated_at)).map(disc => (
+                      <div
+                        style={{ ...ds.projectGroup, borderTop: 'none', cursor: 'pointer', userSelect: 'none' as const }}
+                        onClick={() => setCollapsedDiscGroups(prev => { const n = new Set(prev); isCollapsed ? n.delete('__global__') : n.add('__global__'); return n; })}
+                      >
+                        <ChevronRight size={10} style={{ transform: isCollapsed ? 'none' : 'rotate(90deg)', transition: 'transform 0.15s' }} />
+                        <MessageSquare size={10} /> {t('disc.general')}
+                        <span style={{ fontWeight: 400, opacity: 0.5, marginLeft: 'auto' }}>{globalDiscs.length}</span>
+                      </div>
+                      {!isCollapsed && globalDiscs.sort((a, b) => b.updated_at.localeCompare(a.updated_at)).map(disc => (
                         <button
                           key={disc.id}
                           style={ds.discItem(disc.id === activeDiscussionId)}
@@ -857,10 +929,18 @@ export function Dashboard({ onReset }: DashboardProps) {
                 {projects.filter(p => !isHiddenPath(p.path)).map(proj => {
                   const projDiscs = discByProject.get(proj.id) ?? [];
                   if (projDiscs.length === 0) return null;
+                  const isCollapsed = collapsedDiscGroups.has(proj.id);
                   return (
                     <div key={proj.id}>
-                      <div style={ds.projectGroup}>{proj.name}</div>
-                      {projDiscs.sort((a, b) => b.updated_at.localeCompare(a.updated_at)).map(disc => (
+                      <div
+                        style={{ ...ds.projectGroup, cursor: 'pointer', userSelect: 'none' as const }}
+                        onClick={() => setCollapsedDiscGroups(prev => { const n = new Set(prev); isCollapsed ? n.delete(proj.id) : n.add(proj.id); return n; })}
+                      >
+                        <ChevronRight size={10} style={{ transform: isCollapsed ? 'none' : 'rotate(90deg)', transition: 'transform 0.15s' }} />
+                        <Folder size={10} /> {proj.name}
+                        <span style={{ fontWeight: 400, opacity: 0.5, marginLeft: 'auto' }}>{projDiscs.length}</span>
+                      </div>
+                      {!isCollapsed && projDiscs.sort((a, b) => b.updated_at.localeCompare(a.updated_at)).map(disc => (
                         <button
                           key={disc.id}
                           style={ds.discItem(disc.id === activeDiscussionId)}
@@ -895,8 +975,8 @@ export function Dashboard({ onReset }: DashboardProps) {
                 })}
 
                 {allDiscussions.length === 0 && !showNewDiscussion && (
-                  <div style={{ padding: 24, textAlign: 'center', color: 'rgba(255,255,255,0.25)', fontSize: 12 }}>
-                    Aucune discussion.<br />Cliquez "Nouvelle" pour commencer.
+                  <div style={{ padding: 24, textAlign: 'center', color: 'rgba(255,255,255,0.25)', fontSize: 12, whiteSpace: 'pre-line' }}>
+                    {t('disc.empty')}
                   </div>
                 )}
               </div>
@@ -912,46 +992,46 @@ export function Dashboard({ onReset }: DashboardProps) {
                     onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && newDiscPrompt.trim()) handleCreateDiscussion(); }}
                   >
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-                      <span style={{ fontWeight: 700, fontSize: 15, color: '#e8eaed' }}>Nouvelle discussion</span>
+                      <span style={{ fontWeight: 700, fontSize: 15, color: '#e8eaed' }}>{t('disc.newTitle')}</span>
                       <button style={s.iconBtn} onClick={() => { setShowNewDiscussion(false); setNewDiscPrefilled(false); }}><X size={14} /></button>
                     </div>
 
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
                       <div>
-                        <label style={ds.label}>Projet (optionnel)</label>
+                        <label style={ds.label}>{t('disc.project')}</label>
                         <select style={{ ...ds.selectStyled, ...(newDiscPrefilled ? { opacity: 0.5, pointerEvents: 'none' as const } : {}) }} value={newDiscProjectId} onChange={e => setNewDiscProjectId(e.target.value)} disabled={newDiscPrefilled}>
-                          <option value="">Aucun projet</option>
+                          <option value="">{t('disc.noProject')}</option>
                           {projects.filter(p => !isHiddenPath(p.path)).map(p => (
                             <option key={p.id} value={p.id}>{p.name}</option>
                           ))}
                         </select>
                       </div>
                       <div>
-                        <label style={ds.label}>Agent</label>
+                        <label style={ds.label}>{t('disc.agent')}</label>
                         <select style={ds.selectStyled} value={newDiscAgent} onChange={e => setNewDiscAgent(e.target.value as AgentType)}>
                           {installedAgents.map(a => (
                             <option key={a.name} value={a.agent_type}>{a.name}</option>
                           ))}
                           {installedAgents.length === 0 && (
-                            <option value="ClaudeCode">Claude Code (non installe)</option>
+                            <option value="" disabled>{t('disc.noAgent')}</option>
                           )}
                         </select>
                       </div>
                     </div>
 
-                    <label style={ds.label}>Titre (optionnel)</label>
+                    <label style={ds.label}>{t('disc.title')}</label>
                     <input
                       style={{ ...ds.inputStyled, ...(newDiscPrefilled ? { opacity: 0.5, cursor: 'not-allowed' } : {}) }}
-                      placeholder="Auto-genere depuis le prompt..."
+                      placeholder={t('disc.titlePlaceholder')}
                       value={newDiscTitle}
                       onChange={e => !newDiscPrefilled && setNewDiscTitle(e.target.value)}
                       readOnly={newDiscPrefilled}
                     />
 
-                    <label style={{ ...ds.label, marginTop: 12 }}>Prompt initial</label>
+                    <label style={{ ...ds.label, marginTop: 12 }}>{t('disc.prompt')}</label>
                     <textarea
                       style={{ ...ds.textareaStyled, ...(newDiscPrefilled ? { opacity: 0.5, cursor: 'not-allowed' } : {}) }}
-                      placeholder="Decrivez ce que vous souhaitez..."
+                      placeholder={t('disc.promptPlaceholder')}
                       value={newDiscPrompt}
                       onChange={e => !newDiscPrefilled && setNewDiscPrompt(e.target.value)}
                       readOnly={newDiscPrefilled}
@@ -963,10 +1043,10 @@ export function Dashboard({ onReset }: DashboardProps) {
                     {newDiscPrefilled && (
                       <div style={{ marginTop: 12, padding: '10px 12px', borderRadius: 8, background: 'rgba(255,200,0,0.06)', border: '1px solid rgba(255,200,0,0.12)' }}>
                         <p style={{ fontSize: 11, color: 'rgba(255,200,0,0.7)', margin: '0 0 6px', display: 'flex', alignItems: 'center', gap: 4 }}>
-                          <AlertTriangle size={11} /> L'IA va analyser l'ensemble du contexte AI et du projet. Cette premiere analyse peut prendre quelques minutes et consommer des tokens.
+                          <AlertTriangle size={11} /> {t('disc.auditWarn')}
                         </p>
                         <p style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', margin: 0 }}>
-                          Il peut y avoir plusieurs questions. La conversation peut etre reprise a tout moment depuis l'onglet Discussions.
+                          {t('disc.auditHint')}
                         </p>
                       </div>
                     )}
@@ -981,9 +1061,9 @@ export function Dashboard({ onReset }: DashboardProps) {
                         transition: 'all 0.15s',
                       }}
                       onClick={handleCreateDiscussion}
-                      disabled={!newDiscPrompt.trim()}
+                      disabled={!newDiscPrompt.trim() || !newDiscAgent}
                     >
-                      <MessageSquare size={14} /> Demarrer la discussion
+                      <MessageSquare size={14} /> {t('disc.start')}
                       <span style={{ fontSize: 10, opacity: 0.6, marginLeft: 4 }}>Ctrl+Enter</span>
                     </button>
                   </div>
@@ -1001,7 +1081,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                         {activeDiscussion.title}
                       </div>
                       <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', marginTop: 2 }}>
-                        {activeDiscussion.project_id ? (projects.find(p => p.id === activeDiscussion.project_id)?.name ?? '?') : 'General'} · {activeDiscussion.agent}
+                        {activeDiscussion.project_id ? (projects.find(p => p.id === activeDiscussion.project_id)?.name ?? '?') : t('disc.general')} · {activeDiscussion.agent}
                       </div>
                     </div>
                     <button
@@ -1037,7 +1117,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                           )}
                           {msg.role === 'System' && (
                             <div style={{ ...ds.msgAgent, color: '#ff4d6a' }}>
-                              <AlertTriangle size={10} /> Systeme
+                              <AlertTriangle size={10} /> {t('disc.system')}
                             </div>
                           )}
                           {isEditing ? (
@@ -1058,14 +1138,14 @@ export function Dashboard({ onReset }: DashboardProps) {
                                   style={{ ...s.iconBtn, fontSize: 11, padding: '4px 10px', color: 'rgba(255,255,255,0.4)' }}
                                   onClick={() => { setEditingMsgId(null); setEditingText(''); }}
                                 >
-                                  Annuler
+                                  {t('disc.cancel')}
                                 </button>
                                 <button
                                   style={{ ...s.scanBtn, fontSize: 11, padding: '4px 10px' }}
                                   onClick={handleEditMessage}
                                   disabled={!editingText.trim()}
                                 >
-                                  <Send size={10} /> Renvoyer
+                                  <Send size={10} /> {t('disc.resend')}
                                   <span style={{ fontSize: 9, opacity: 0.5, marginLeft: 4 }}>Ctrl+Enter</span>
                                 </button>
                               </div>
@@ -1079,10 +1159,10 @@ export function Dashboard({ onReset }: DashboardProps) {
                                 style={{ ...s.scanBtn, fontSize: 11, padding: '5px 12px' }}
                                 onClick={() => setPage('settings')}
                               >
-                                <Key size={11} /> Override cle API
+                                <Key size={11} /> {t('disc.overrideKey')}
                               </button>
                               <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)', alignSelf: 'center' }}>
-                                ou verifiez que votre agent local est connecte
+                                {t('disc.orCheckAgent')}
                               </span>
                             </div>
                           )}
@@ -1096,7 +1176,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                                   <button
                                     style={{ ...s.iconBtn, padding: '2px 6px', fontSize: 10, color: 'rgba(255,255,255,0.3)' }}
                                     onClick={() => { setEditingMsgId(msg.id); setEditingText(msg.content); }}
-                                    title="Editer et relancer"
+                                    title={t('disc.editResend')}
                                   >
                                     <Pencil size={10} />
                                   </button>
@@ -1105,7 +1185,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                                   <button
                                     style={{ ...s.iconBtn, padding: '2px 6px', fontSize: 10, color: 'rgba(255,255,255,0.3)' }}
                                     onClick={handleRetry}
-                                    title="Relancer la reponse"
+                                    title={t('disc.retryResponse')}
                                   >
                                     <RotateCcw size={10} />
                                   </button>
@@ -1130,7 +1210,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                             <MarkdownContent content={streamingText} />
                           ) : (
                             <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.3)', fontStyle: 'italic' }}>
-                              Agent en cours d'execution...
+                              {t('disc.running')}
                             </div>
                           )}
                         </div>
@@ -1154,7 +1234,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                                 }}>
                                   <Cpu size={10} /> {as_.agent}
                                   <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.2)', marginLeft: 4 }}>
-                                    {as_.round === 'synthesis' ? 'Synthese' : `Round ${as_.round}`}
+                                    {as_.round === 'synthesis' ? t('disc.synthesis') : `Round ${as_.round}`}
                                   </span>
                                   {!as_.done && <Loader2 size={9} style={{ animation: 'spin 1s linear infinite', marginLeft: 4 }} />}
                                 </div>
@@ -1162,7 +1242,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                                   <MarkdownContent content={as_.text} />
                                 ) : !as_.done ? (
                                   <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.3)', fontStyle: 'italic' }}>
-                                    {as_.agent} reflechit...
+                                    {t('disc.thinking', as_.agent)}
                                   </div>
                                 ) : null}
                               </div>
@@ -1183,7 +1263,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                       return (
                         <div style={{ margin: '12px 16px', padding: '12px 16px', borderRadius: 10, background: 'rgba(200,255,0,0.06)', border: '1px solid rgba(200,255,0,0.15)' }}>
                           <p style={{ fontSize: 12, color: 'rgba(200,255,0,0.8)', margin: '0 0 8px', display: 'flex', alignItems: 'center', gap: 6 }}>
-                            <ShieldCheck size={14} /> L'IA confirme que la validation est terminee.
+                            <ShieldCheck size={14} /> {t('audit.validationComplete')}
                           </p>
                           <button
                             style={{
@@ -1198,7 +1278,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                               refetchDiscussions();
                             }}
                           >
-                            <Check size={12} /> Marquer l'audit comme valide
+                            <Check size={12} /> {t('audit.markValid')}
                           </button>
                         </div>
                       );
@@ -1213,9 +1293,9 @@ export function Dashboard({ onReset }: DashboardProps) {
                       <input
                         ref={chatInputRef}
                         style={ds.chatInput}
-                        placeholder={activeDiscussion && (activeDiscussion.participants?.length ?? 0) > 1
-                          ? "@claude, @codex, @vibe pour cibler un agent..."
-                          : "Votre message..."}
+                        placeholder={activeDiscussion && (activeDiscussion.participants?.length ?? 0) > 1 && AGENT_MENTIONS.length > 0
+                          ? t('disc.mentionHint', AGENT_MENTIONS.map(m => m.trigger).join(', '))
+                          : t('disc.messagePlaceholder')}
                         value={chatInput}
                         onChange={e => {
                           const val = e.target.value;
@@ -1300,7 +1380,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                           setShowDebatePopover(!showDebatePopover);
                         }}
                         disabled={sending}
-                        title="Debat multi-agents"
+                        title={t('debate.title')}
                       >
                         <Users size={16} />
                       </button>
@@ -1312,10 +1392,10 @@ export function Dashboard({ onReset }: DashboardProps) {
                           boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
                         }}>
                           <div style={{ fontSize: 12, fontWeight: 700, color: '#8b5cf6', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
-                            <Users size={12} /> Debat inter-agents
+                            <Users size={12} /> {t('debate.header')}
                           </div>
                           <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginBottom: 10, lineHeight: 1.4 }}>
-                            Selectionnez au moins 2 agents. Ils debattront sur 3 rounds puis l'agent principal fera la synthese.
+                            {t('debate.instructions')}
                           </p>
                           {installedAgents.map(a => {
                             const isPrincipal = a.agent_type === activeDiscussion?.agent;
@@ -1343,7 +1423,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                                 <Cpu size={11} style={{ color: isPrincipal ? '#c8ff00' : '#8b5cf6' }} />
                                 {a.name}
                                 {isPrincipal && (
-                                  <span style={{ fontSize: 9, color: '#c8ff00', marginLeft: 'auto' }}>principal</span>
+                                  <span style={{ fontSize: 9, color: '#c8ff00', marginLeft: 'auto' }}>{t('debate.main')}</span>
                                 )}
                               </label>
                             );
@@ -1358,7 +1438,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                             disabled={debateAgents.length < 2}
                             onClick={handleOrchestrate}
                           >
-                            Lancer le debat ({debateAgents.length} agents)
+                            {t('debate.launch', debateAgents.length)}
                           </button>
                         </div>
                       )}
@@ -1372,7 +1452,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                           color: '#ff4d6a',
                         }}
                         onClick={handleStop}
-                        title="Arreter la reflexion"
+                        title={t('disc.stopThinking')}
                       >
                         <StopCircle size={16} />
                       </button>
@@ -1390,7 +1470,7 @@ export function Dashboard({ onReset }: DashboardProps) {
               ) : !showNewDiscussion && (
                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, color: 'rgba(255,255,255,0.2)' }}>
                   <MessageSquare size={48} style={{ marginBottom: 16, opacity: 0.3 }} />
-                  <p style={{ fontSize: 14 }}>Selectionnez ou creez une discussion</p>
+                  <p style={{ fontSize: 14 }}>{t('disc.selectOrCreate')}</p>
                 </div>
               )}
             </div>
@@ -1425,17 +1505,47 @@ export function Dashboard({ onReset }: DashboardProps) {
           return (
           <div>
             <h1 style={s.h1}>Configuration</h1>
-            <p style={{ ...s.meta, marginBottom: 20 }}>Parametres generaux de Kronn</p>
+            <p style={{ ...s.meta, marginBottom: 20 }}>{t('config.subtitle')}</p>
 
-            {/* Language */}
+            {/* UI Language */}
             <div style={s.card(false)}>
               <div style={{ padding: '16px 20px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
                   <MessageSquare size={14} style={{ color: '#c8ff00' }} />
-                  <span style={{ fontWeight: 600, fontSize: 14 }}>Langue de sortie</span>
+                  <span style={{ fontWeight: 600, fontSize: 14 }}>{t('config.uiLanguage')}</span>
                 </div>
                 <p style={{ color: 'rgba(255,255,255,0.35)', fontSize: 12, marginBottom: 12 }}>
-                  Langue dans laquelle les agents repondront par defaut.
+                  {t('config.uiLanguageHint')}
+                </p>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  {UI_LOCALES.map(l => (
+                    <button
+                      key={l.code}
+                      style={{
+                        padding: '8px 16px', borderRadius: 6, cursor: 'pointer',
+                        fontFamily: 'inherit', fontSize: 12, fontWeight: 600,
+                        background: locale === l.code ? 'rgba(200,255,0,0.15)' : 'rgba(255,255,255,0.04)',
+                        color: locale === l.code ? '#c8ff00' : 'rgba(255,255,255,0.4)',
+                        border: locale === l.code ? '1px solid rgba(200,255,0,0.3)' : '1px solid rgba(255,255,255,0.08)',
+                      }}
+                      onClick={() => setLocale(l.code)}
+                    >
+                      {l.flag} {l.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Output Language */}
+            <div style={s.card(false)}>
+              <div style={{ padding: '16px 20px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                  <MessageSquare size={14} style={{ color: '#c8ff00' }} />
+                  <span style={{ fontWeight: 600, fontSize: 14 }}>{t('config.outputLanguage')}</span>
+                </div>
+                <p style={{ color: 'rgba(255,255,255,0.35)', fontSize: 12, marginBottom: 12 }}>
+                  {t('config.outputLanguageHint')}
                 </p>
                 <div style={{ display: 'flex', gap: 8 }}>
                   {LANGUAGES.map(l => (
@@ -1465,19 +1575,19 @@ export function Dashboard({ onReset }: DashboardProps) {
               <div style={{ padding: '16px 20px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
                   <Cpu size={14} style={{ color: '#c8ff00' }} />
-                  <span style={{ fontWeight: 600, fontSize: 14 }}>Agents IA</span>
+                  <span style={{ fontWeight: 600, fontSize: 14 }}>{t('config.agents')}</span>
                   <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginLeft: 'auto' }}>
-                    {agents.filter(a => a.installed).length}/{agents.length} installe{agents.filter(a => a.installed).length > 1 ? 's' : ''}
+                    {agents.filter(a => a.installed).length}/{agents.length} {agents.filter(a => a.installed).length > 1 ? t('config.installedPlural') : t('config.installed')}
                   </span>
-                  <button style={s.iconBtn} onClick={() => refetchAgents()} title="Rafraichir">
+                  <button style={s.iconBtn} onClick={() => refetchAgents()} title={t('config.refresh')}>
                     <RefreshCw size={12} />
                   </button>
                 </div>
 
                 {agents.map(agent => {
-                  const permFlag: Record<string, { flag: string; desc: string }> = {
-                    ClaudeCode: { flag: '--dangerously-skip-permissions', desc: 'Autorise l\'acces web, la modification de fichiers et l\'execution de commandes.' },
-                    Codex: { flag: '--full-auto', desc: 'Applique automatiquement les modifications sans confirmation.' },
+                  const permFlag: Record<string, { flag: string; descKey: string }> = {
+                    ClaudeCode: { flag: '--dangerously-skip-permissions', descKey: 'config.fullAccess' },
+                    Codex: { flag: '--full-auto', descKey: 'config.autoApply' },
                   };
                   const perm = permFlag[agent.agent_type];
                   const isFullAccess = agent.agent_type === 'ClaudeCode'
@@ -1489,7 +1599,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                   return (
                   <div key={agent.name} style={{ padding: '10px 0', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                      <div style={s.dot(agent.installed)} />
+                      <div style={s.dot(agent.installed && agent.enabled)} />
                       <div style={{ flex: 1 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                           <span style={{ fontWeight: 600, fontSize: 12 }}>{agent.name}</span>
@@ -1506,7 +1616,45 @@ export function Dashboard({ onReset }: DashboardProps) {
                         )}
                       </div>
                       {agent.installed ? (
-                        <span style={s.badgeOk}><Check size={10} /> OK</span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <button
+                            style={{
+                              ...s.iconBtn,
+                              fontSize: 10,
+                              padding: '2px 8px',
+                              borderRadius: 4,
+                              background: agent.enabled ? 'rgba(200,255,0,0.1)' : 'rgba(255,100,0,0.1)',
+                              border: agent.enabled ? '1px solid rgba(200,255,0,0.2)' : '1px solid rgba(255,100,0,0.2)',
+                              color: agent.enabled ? '#c8ff00' : '#ff8c00',
+                            }}
+                            title={agent.enabled ? t('config.toggleDisable') : t('config.toggleEnable')}
+                            onClick={async () => {
+                              try {
+                                await agentsApi.toggle(agent.agent_type);
+                              } catch { /* ignore */ }
+                              refetchAgents();
+                            }}
+                            disabled={installing !== null}
+                          >
+                            {agent.enabled ? t('config.enabled') : t('config.disabled')}
+                          </button>
+                          <button
+                            style={{ ...s.iconBtn, color: 'rgba(255,255,255,0.2)' }}
+                            title={t('config.uninstall')}
+                            onClick={async () => {
+                              if (!confirm(t('config.uninstallConfirm', agent.name))) return;
+                              setInstalling(agent.name);
+                              try {
+                                await agentsApi.uninstall(agent.agent_type);
+                              } catch { /* ignore */ }
+                              refetchAgents();
+                              setInstalling(null);
+                            }}
+                            disabled={installing !== null}
+                          >
+                            <Trash2 size={11} />
+                          </button>
+                        </div>
                       ) : (
                         <button
                           style={{ ...s.installBtn, padding: '4px 10px', fontSize: 11 }}
@@ -1544,7 +1692,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                           <code style={{ fontSize: 10, color: isFullAccess ? '#c8ff00' : 'rgba(255,255,255,0.4)' }}>{perm.flag}</code>
                         </div>
                         <p style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', marginTop: 4, marginLeft: 38 }}>
-                          {perm.desc}
+                          {t(perm.descKey)}
                         </p>
                       </div>
                     )}
@@ -1559,13 +1707,13 @@ export function Dashboard({ onReset }: DashboardProps) {
               <div style={{ padding: '16px 20px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
                   <Key size={14} style={{ color: '#c8ff00' }} />
-                  <span style={{ fontWeight: 600, fontSize: 14 }}>Cles API (optionnel)</span>
+                  <span style={{ fontWeight: 600, fontSize: 14 }}>{t('config.apiKeys')}</span>
                 </div>
                 <p style={{ color: 'rgba(255,255,255,0.35)', fontSize: 12, marginBottom: 6 }}>
-                  Vos agents locaux utilisent leur propre authentification (abonnements).
+                  {t('config.apiKeysHint1')}
                 </p>
                 <p style={{ color: 'rgba(255,255,255,0.25)', fontSize: 11, marginBottom: 16 }}>
-                  Si vous souhaitez utiliser une cle API specifique a la place, vous pouvez la renseigner ici en override.
+                  {t('config.apiKeysHint2')}
                 </p>
 
                 {TOKEN_FIELDS.map(({ key, label, hint, agents: agentNames }) => {
@@ -1581,7 +1729,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                           </span>
                         ) : (
                           <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: 'rgba(255,255,255,0.04)', color: 'rgba(255,255,255,0.3)' }}>
-                            auth locale
+                            {t('config.localAuth')}
                           </span>
                         )}
                         <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.2)', marginLeft: 'auto' }}>{agentNames}</span>
@@ -1603,10 +1751,10 @@ export function Dashboard({ onReset }: DashboardProps) {
                     onClick={handleSaveTokens}
                     disabled={tokenSaving || (!tokenInputs.anthropic && !tokenInputs.openai)}
                   >
-                    <Save size={12} /> {tokenSaving ? 'Sauvegarde...' : 'Sauvegarder'}
+                    <Save size={12} /> {tokenSaving ? t('config.save') + '...' : t('config.save')}
                   </button>
                   {tokenSaved && (
-                    <span style={{ fontSize: 12, color: '#34d399' }}><Check size={12} /> Sauvegarde !</span>
+                    <span style={{ fontSize: 12, color: '#34d399' }}><Check size={12} /> {t('config.saved')}</span>
                   )}
                 </div>
               </div>
@@ -1617,7 +1765,7 @@ export function Dashboard({ onReset }: DashboardProps) {
               <div style={{ padding: '16px 20px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
                   <HardDrive size={14} style={{ color: '#c8ff00' }} />
-                  <span style={{ fontWeight: 600, fontSize: 14 }}>Base de donnees</span>
+                  <span style={{ fontWeight: 600, fontSize: 14 }}>{t('config.database')}</span>
                   {dbInfo && (
                     <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginLeft: 'auto' }}>
                       {dbInfo.size_bytes < 1024 * 1024
@@ -1630,11 +1778,11 @@ export function Dashboard({ onReset }: DashboardProps) {
                 {dbInfo && (
                   <div style={{ display: 'flex', gap: 16, marginBottom: 16 }}>
                     {[
-                      { label: 'Projets', value: dbInfo.project_count },
-                      { label: 'Discussions', value: dbInfo.discussion_count },
-                      { label: 'Messages', value: dbInfo.message_count },
-                      { label: 'MCPs', value: dbInfo.mcp_count },
-                      { label: 'Taches', value: dbInfo.task_count },
+                      { label: t('config.dbProjects'), value: dbInfo.project_count },
+                      { label: t('config.dbDiscussions'), value: dbInfo.discussion_count },
+                      { label: t('config.dbMessages'), value: dbInfo.message_count },
+                      { label: t('config.dbMcps'), value: dbInfo.mcp_count },
+                      { label: t('config.dbTasks'), value: dbInfo.task_count },
                     ].map(({ label, value }) => (
                       <div key={label} style={{ textAlign: 'center' }}>
                         <div style={{ fontSize: 18, fontWeight: 700, color: '#c8ff00' }}>{value}</div>
@@ -1659,7 +1807,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                       URL.revokeObjectURL(url);
                     }}
                   >
-                    <Download size={12} /> Exporter
+                    <Download size={12} /> {t('config.export')}
                   </button>
                   <button
                     style={s.scanBtn}
@@ -1674,22 +1822,22 @@ export function Dashboard({ onReset }: DashboardProps) {
                           const text = await file.text();
                           const data = JSON.parse(text);
                           if (!data.version || !data.projects || !data.discussions) {
-                            alert('Fichier invalide');
+                            alert(t('config.importInvalid'));
                             return;
                           }
-                          if (!confirm('Cela remplacera toutes les donnees actuelles. Continuer ?')) return;
+                          if (!confirm(t('config.importConfirm'))) return;
                           await configApi.importData(data);
                           refetch();
                           refetchDiscussions();
                           refetchDbInfo();
                         } catch {
-                          alert('Erreur lors de l\'import');
+                          alert(t('config.importError'));
                         }
                       };
                       input.click();
                     }}
                   >
-                    <Upload size={12} /> Importer
+                    <Upload size={12} /> {t('config.import')}
                   </button>
                 </div>
               </div>
@@ -1703,10 +1851,10 @@ export function Dashboard({ onReset }: DashboardProps) {
                 </p>
                 <div style={{ borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: 16 }}>
                   <p style={{ color: 'rgba(255,255,255,0.35)', fontSize: 12, marginBottom: 12 }}>
-                    Remettre a zero la configuration et relancer l'assistant de setup.
+                    {t('config.resetHint')}
                   </p>
                   <button style={s.dangerBtn} onClick={onReset}>
-                    <Trash2 size={12} /> Reset configuration
+                    <Trash2 size={12} /> {t('config.reset')}
                   </button>
                 </div>
               </div>
@@ -1831,9 +1979,14 @@ const ds = {
   sidebar: { width: 280, borderRight: '1px solid rgba(255,255,255,0.07)', background: '#0e1117', display: 'flex', flexDirection: 'column' as const, flexShrink: 0 },
   sidebarHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '14px 14px 10px', borderBottom: '1px solid rgba(255,255,255,0.06)' } as const,
   sidebarList: { flex: 1, overflowY: 'auto' as const, padding: '8px 0' },
-  projectGroup: { fontSize: 10, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.05em', color: 'rgba(255,255,255,0.3)', padding: '12px 14px 4px' },
+  projectGroup: {
+    fontSize: 10, fontWeight: 700, textTransform: 'uppercase' as const, letterSpacing: '0.06em',
+    color: 'rgba(200,255,0,0.5)', padding: '14px 14px 6px',
+    marginTop: 4, borderTop: '1px solid rgba(255,255,255,0.05)',
+    display: 'flex', alignItems: 'center', gap: 6,
+  },
   discItem: (active: boolean) => ({
-    display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '10px 14px', border: 'none',
+    display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '8px 14px 8px 22px', border: 'none',
     background: active ? 'rgba(200,255,0,0.06)' : 'transparent',
     borderLeft: active ? '2px solid #c8ff00' : '2px solid transparent',
     color: active ? '#e8eaed' : 'rgba(255,255,255,0.5)',

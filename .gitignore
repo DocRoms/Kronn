@@ -8,6 +8,9 @@ frontend/dist/
 # Config (generated at first run)
 kronn.toml
 
+# Claude Code
+.claude/
+
 # IDE
 .idea/
 .vscode/

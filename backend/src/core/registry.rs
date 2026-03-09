@@ -207,6 +207,20 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             token_url: Some("https://id.atlassian.com/manage-profile/security/api-tokens".into()),
             token_help: Some("API token for Jira & Confluence (same token for both)".into()),
         },
+        // ── Design ──────────────────────────────────────────────────────────
+        McpDefinition {
+            id: "mcp-figma".into(),
+            name: "Figma".into(),
+            description: "Read Figma files, components, styles and variables — official Figma Dev Mode server".into(),
+            transport: McpTransport::Stdio {
+                command: "npx".into(),
+                args: vec!["-y".into(), "figma-developer-mcp".into(), "--stdio".into()],
+            },
+            env_keys: vec!["FIGMA_API_KEY".into()],
+            tags: vec!["design".into(), "ui".into()],
+            token_url: Some("https://www.figma.com/developers/api#access-tokens".into()),
+            token_help: Some("Personal access token from Figma Settings > Security".into()),
+        },
         // ── Files & Utilities ───────────────────────────────────────────────
         McpDefinition {
             id: "mcp-filesystem".into(),
