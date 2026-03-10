@@ -38,13 +38,15 @@ You manage all of that... manually. **Kronn fixes that.**
 | | Without Kronn | With Kronn |
 |---|---|---|
 | **Agents** | Switch between 3 CLIs, each with different flags | One dashboard, all agents, `@mentions` |
-| **MCPs** | Copy-paste `.mcp.json` across repos | Configure once, sync to all projects and agents |
+| **MCPs** | Maintain `.mcp.json`, `.vibe/config.toml`, `~/.codex/config.toml` separately per agent per repo | Configure once, sync to all projects and all agents automatically |
 | **Architecture decisions** | Ask one model, get one opinion | Multi-agent debate: agents argue, then synthesize |
 | **Recurring tasks** | Run manually, forget, repeat | Cron workflows with multi-step, multi-agent pipelines |
 | **Incident response** | Alert → human reads logs → human fixes | Alert → agent diagnoses → agent fixes → PR + email |
 | **Legacy projects** | "Nobody knows how this works" | 20-min AI audit → fully documented, AI-ready codebase |
-| **Tokens** | No idea what you're spending | Per-project, per-provider visibility (`soon`) |
+| **Tokens** | No idea what you're spending | Per-message token tracking (Claude Code via stream-json, Codex via stderr), per-project visibility |
+| **API Keys** | One key per provider, no switching | Multiple named keys per provider (personal, enterprise...) with one-click activation and per-provider override toggle |
 | **Security** | Tokens in plaintext in dotfiles | AES-256-GCM encrypted, self-hosted, nothing leaves your network |
+| **Language** | English-only UI | French, English, Spanish — switch in one click |
 
 ---
 
@@ -52,9 +54,9 @@ You manage all of that... manually. **Kronn fixes that.**
 
 ### 💬 Multi-Agent Discussions
 
-Chat with agents in project context. Use `@claude` or `@codex` to target specific agents. **Debate mode**: agents discuss in rounds and a primary agent synthesizes — get diverse perspectives, not just one model's opinion.
+Chat with agents in project context. Use `@claude` or `@codex` to target specific agents. **Debate mode**: agents discuss in configurable rounds (1–3, default 2) and a primary agent synthesizes — get diverse perspectives, not just one model's opinion.
 
-Stop, retry, or edit messages mid-conversation. Unread badges with browser tab notifications. Persistent conversations backed by SQLite.
+Stop, retry, or edit messages mid-conversation. Unread badges with browser tab notifications. Persistent conversations backed by SQLite. Full i18n support (French, English, Spanish). Claude Code responses streamed token-by-token via `--output-format stream-json` with per-message token tracking.
 
 ![Multi-agent discussion with debate mode](docs/screenshots/discussions.png)
 
@@ -200,12 +202,16 @@ NoTemplate → TemplateInstalled → Audited → Validated
 
 | Agent | CLI | Color | Status |
 |-------|-----|-------|--------|
-| Claude Code | `claude` | `#c8ff00` | Supported |
-| OpenAI Codex | `codex` | `#00d4ff` | Supported |
-| Vibe | `vibe` | `#ff6b6b` | Supported |
+| Claude Code | `claude` | `#D4714E` (terracotta) | Supported |
+| OpenAI Codex | `codex` | `#10a37f` (OpenAI green) | Supported |
+| Vibe | `vibe` | `#FF7000` (Mistral orange) | Supported |
+| Gemini CLI | `gemini` | `#4285f4` (Google blue) | Supported |
+| DeepSeek | `deepseek` | — | Planned |
 | OpenCode | `opencode` | — | Planned |
 
-Auto-detected at setup. Spawned in non-interactive mode, responses streamed via SSE. Per-agent permissions toggle in Config (`--dangerously-skip-permissions`, `--full-auto`).
+Auto-detected at setup with runtime probe fallback (npx). Even without a local binary, agents available via npx are marked "runtime OK" and fully usable. Spawned in non-interactive mode, responses streamed via SSE. Per-agent permissions toggle in Config (`--dangerously-skip-permissions`, `--full-auto`, `--yolo`). Agents can be toggled on/off or uninstalled from the dashboard.
+
+![Multi API key management per agent](docs/screenshots/multiApiKeyByAgent.png)
 
 ---
 
@@ -213,7 +219,10 @@ Auto-detected at setup. Spawned in non-interactive mode, responses streamed via 
 
 ```bash
 ./kronn start           # Interactive flow: detect agents, choose CLI or web
+./kronn stop            # Stop all services
+./kronn restart         # Stop and restart services
 ./kronn web             # Launch web interface directly
+./kronn logs            # View service logs
 ./kronn status          # Overview: agents, repos, MCP secrets
 ./kronn init [path]     # Configure AI context for a repo
 ./kronn mcp sync        # Sync .mcp.json across repos
@@ -256,7 +265,7 @@ kronn/
 │       ├── pages/          # SetupWizard, Dashboard (5 tabs)
 │       ├── hooks/          # useApi
 │       ├── types/          # generated.ts (from Rust — DO NOT EDIT)
-│       └── lib/            # Typed API client + SSE streaming
+│       └── lib/            # Typed API client + SSE streaming + i18n (fr/en/es)
 ├── ai/                 # AI context documentation (for agents working on this repo)
 ├── templates/          # AI context templates (for projects managed by Kronn)
 ├── Makefile
@@ -276,9 +285,17 @@ Generated at first run in `~/.config/kronn/config.toml`:
 host = "127.0.0.1"
 port = 3140
 
-[tokens]
-anthropic = "sk-ant-..."
-openai = "sk-..."
+[[tokens.keys]]
+id = "abc-123"
+name = "Personal API Key"
+provider = "anthropic"
+active = true
+
+[[tokens.keys]]
+id = "def-456"
+name = "Enterprise Key"
+provider = "openai"
+active = true
 
 [scan]
 paths = ["~/projects", "~/work"]

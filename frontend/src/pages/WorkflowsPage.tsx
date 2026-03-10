@@ -35,18 +35,20 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 const AGENT_COLORS: Record<string, string> = {
-  ClaudeCode: '#c8ff00',
-  Codex: '#00d4ff',
-  Vibe: '#ff6b6b',
+  ClaudeCode: '#D4714E',
+  Codex: '#10a37f',
+  Vibe: '#FF7000',
+  GeminiCli: '#4285f4',
 };
 
 const AGENT_LABELS: Record<string, string> = {
   ClaudeCode: 'Claude Code',
   Codex: 'Codex',
   Vibe: 'Vibe',
+  GeminiCli: 'Gemini CLI',
 };
 
-const ALL_AGENT_TYPES: AgentType[] = ['ClaudeCode', 'Codex', 'Vibe'];
+const ALL_AGENT_TYPES: AgentType[] = ['ClaudeCode', 'Codex', 'Vibe', 'GeminiCli'];
 
 export function WorkflowsPage({ projects, installedAgentTypes }: WorkflowsPageProps) {
   const { t } = useT();

@@ -3,17 +3,17 @@
 # Compatible Bash 3.2+ (macOS default)
 
 # Parallel arrays instead of associative arrays (bash 3 compat)
-# Index: 0=claude, 1=codex, 2=vibe
-_AGENT_NAMES=(claude codex vibe)
-_AGENT_ORIGINS=(US US EU)
-_AGENT_PKGS=("npm:@anthropic-ai/claude-code" "npm:@openai/codex" "pypi:mistral-vibe")
-_AGENT_LABELS=("Claude Code (Anthropic)" "Codex (OpenAI)" "Vibe (Mistral)")
-_AGENT_NODE_MINS=(18 18 0)
+# Index: 0=claude, 1=codex, 2=vibe, 3=gemini
+_AGENT_NAMES=(claude codex vibe gemini)
+_AGENT_ORIGINS=(US US EU US)
+_AGENT_PKGS=("npm:@anthropic-ai/claude-code" "npm:@openai/codex" "pypi:mistral-vibe" "npm:@google/gemini-cli")
+_AGENT_LABELS=("Claude Code (Anthropic)" "Codex (OpenAI)" "Vibe (Mistral)" "Gemini CLI (Google)")
+_AGENT_NODE_MINS=(18 18 0 18)
 
 # Detection results (populated by detect_agents)
-_AGENT_PATHS=("" "" "")
-_AGENT_VERSIONS=("" "" "")
-_AGENT_LATESTS=("" "" "")
+_AGENT_PATHS=("" "" "" "")
+_AGENT_VERSIONS=("" "" "" "")
+_AGENT_LATESTS=("" "" "" "")
 
 # ─── Index lookup ─────────────────────────────────────────────────────────────
 
@@ -73,9 +73,9 @@ _get_latest_version() {
 # ─── Detection ───────────────────────────────────────────────────────────────
 
 detect_agents() {
-    _AGENT_PATHS=("" "" "")
-    _AGENT_VERSIONS=("" "" "")
-    _AGENT_LATESTS=("" "" "")
+    _AGENT_PATHS=("" "" "" "")
+    _AGENT_VERSIONS=("" "" "" "")
+    _AGENT_LATESTS=("" "" "" "")
 
     local i cmd version
     for i in "${!_AGENT_NAMES[@]}"; do
@@ -220,6 +220,16 @@ install_agent() {
                 printf "  ${DIM}https://github.com/mistralai/mistral-vibe${RESET}\n"
                 return 1
             fi
+            ;;
+        gemini)
+            step "Installation de Gemini CLI (Google)"
+            if ! command -v npm >/dev/null 2>&1; then
+                fail "npm requis pour installer Gemini CLI"
+                printf "  ${DIM}https://github.com/google-gemini/gemini-cli${RESET}\n"
+                return 1
+            fi
+            _check_node_version gemini || return 1
+            _npm_install_global @google/gemini-cli
             ;;
         *)
             fail "Agent inconnu : $agent"

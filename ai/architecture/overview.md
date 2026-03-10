@@ -21,19 +21,21 @@ Three Docker services behind nginx gateway:
 
 ### SSE streaming
 - Agent responses stream via Server-Sent Events (not WebSocket).
-- Events: `chunk` (text delta), `done`, `error`.
+- Events: `chunk` (text delta — raw concatenation, no separator), `done`, `error`.
 - Orchestration adds: `system`, `round`, `agent_start`, `agent_done`.
 - Workflow runs use SSE for real-time progress: `RunEvent` enum with `StepStart`, `StepDone`, `RunDone`, `RunError`. Frontend shows a live progress panel with step indicators (pulse animation for current, check/X for completed).
 - Frontend uses `ReadableStream` reader + manual SSE parsing in `api.ts:_streamSSE()`.
 - `AbortController` + `signal` for cancellation. `finished` boolean guard prevents double `onDone`.
 
 ### Agent execution
-- `agents/runner.rs` spawns CLI processes (`claude`, `codex`, `vibe`) with `--print` / non-interactive flags.
-- Stdout is streamed line-by-line back to the SSE response.
+- `agents/runner.rs` spawns CLI processes (`claude`, `codex`, `vibe`, `gemini`) with `--print` / non-interactive flags.
+- **Two output modes**: `Text` (line-by-line stdout, default for Codex/Vibe/Gemini) and `StreamJson` (Claude Code with `--output-format stream-json --verbose --include-partial-messages`). In StreamJson mode, each line is a JSON event parsed by `parse_claude_stream_line()` — text deltas from `stream_event` events, token usage from `result` event.
 - Agents run in the project's directory context (or temp dir for global discussions).
+- **Runtime probe**: if no local binary is found, `probe_runtime()` tests npx availability (15s timeout, 5min cache). `AgentDetection.runtime_available` distinguishes "installed locally" from "runnable via npx". Frontend uses `isUsable(agent) = (installed || runtime_available) && enabled`.
 - MCPs work with all 3 agents: Claude Code (`.mcp.json`), Codex (`~/.codex/config.toml`), Vibe (`.vibe/config.toml`). Disk sync writes all formats simultaneously.
 - `AgentConfig` has `full_access: bool` field (persisted in config.toml). When enabled, runner adds `--dangerously-skip-permissions` (Claude) or `--full-auto` (Codex).
 - API: `GET/POST /api/config/agent-access` to read/set the full_access flag. UI toggle in Config > Agents card.
+- **Agent lifecycle**: agents can be uninstalled (`POST /api/agents/uninstall`) or toggled on/off (`POST /api/agents/toggle`). Disabled agents tracked in `AppConfig.disabled_agents: Vec<AgentType>`. `AgentDetection` includes `enabled: bool`. Uninstall uses platform-specific commands (npm for Claude/Codex, uv/pipx/pip3 for Vibe).
 - **Known issue — file permissions**: agents run as `root` inside the Docker container. Files created/modified on host-mounted volumes (`:rw`) end up owned by `root:root` on the host. Fix: pass host UID/GID via `KRONN_UID`/`KRONN_GID` env vars in docker-compose, then run agent processes with `--user $KRONN_UID:$KRONN_GID` or use `tokio::process::Command` with `.uid()/.gid()`.
 - **Path resolution**: `resolve_host_path` uses Docker mount priority (prefers /host-home over /home/priol).
 
@@ -57,8 +59,17 @@ Three Docker services behind nginx gateway:
 - `make typegen` generates `frontend/src/types/generated.ts`.
 - Rust is source of truth; TypeScript follows.
 
+### i18n (internationalization)
+- Lightweight custom translation system (no external lib).
+- 3 UI locales: `fr`, `en`, `es` — defined in `frontend/src/lib/i18n.ts`.
+- UI language stored in `localStorage` (`kronn:ui-locale`), separate from agent output language (backend config).
+- `I18nContext.tsx` provides `useT()` hook returning `t(key, ...args)` for components.
+- Translation keys use dot notation: `nav.projects`, `projects.search`, `config.tokens.title`, etc.
+- String interpolation with `{0}`, `{1}` positional placeholders.
+- Default locale: `fr`.
+
 ### Multi-agent orchestration
-- Discussion can involve multiple agents debating in rounds (max 3).
+- Discussion can involve multiple agents debating in configurable rounds (1–3, default 2 in UI).
 - Primary agent (discussion owner) speaks last each round and produces final synthesis.
 - Anti-repetition prompts keep rounds concise.
 - Language configurable globally (fr/en/zh/br), injected into all agent prompts.
@@ -179,9 +190,10 @@ NoTemplate → TemplateInstalled → Audited → Validated
 - UI in Config page with counters, export button, import button.
 
 ### Agent colors (consistent everywhere)
-- Claude: `#c8ff00`
-- Codex: `#00d4ff`
-- Vibe: `#ff6b6b`
+- Claude Code: `#D4714E` (terracotta)
+- Codex: `#10a37f` (OpenAI green)
+- Vibe: `#FF7000` (Mistral orange)
+- Gemini CLI: `#4285f4` (Google blue)
 
 ## Separation of concerns
 

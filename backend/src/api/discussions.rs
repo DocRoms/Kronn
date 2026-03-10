@@ -67,6 +67,8 @@ pub async fn create(
         content: req.initial_prompt,
         agent_type: None,
         timestamp: now,
+        tokens_used: 0,
+        auth_mode: None,
     };
 
     let discussion = Discussion {
@@ -146,6 +148,8 @@ pub async fn send_message(
         content: req.content.clone(),
         agent_type: None,
         timestamp: Utc::now(),
+        tokens_used: 0,
+        auth_mode: None,
     };
     let disc_id = id.clone();
     let msg = user_msg.clone();
@@ -217,10 +221,13 @@ async fn make_agent_stream(
         let fa = match agent_type {
             AgentType::ClaudeCode => config.agents.claude_code.full_access,
             AgentType::Codex => config.agents.codex.full_access,
+            AgentType::GeminiCli => config.agents.gemini_cli.full_access,
             _ => false,
         };
         (config.tokens.clone(), fa)
     };
+
+    let auth_mode_str = auth_mode_for(&agent_type, &tokens);
 
     let state_clone = state.clone();
     let disc_id = discussion_id.clone();
@@ -228,18 +235,46 @@ async fn make_agent_stream(
     let stream: SseStream = Box::pin(async_stream::try_stream! {
         yield Event::default().event("start").data("{}");
 
+        yield Event::default().event("meta").data(
+            serde_json::json!({ "auth_mode": auth_mode_str }).to_string()
+        );
+
         match runner::start_agent(&agent_type, &project_path, &prompt, &tokens, full_access).await {
             Ok(mut process) => {
                 let mut full_response = String::new();
+                let mut stream_json_tokens: u64 = 0;
+                let is_stream_json = process.output_mode == runner::OutputMode::StreamJson;
 
                 while let Some(line) = process.next_line().await {
-                    if !full_response.is_empty() {
-                        full_response.push('\n');
-                    }
-                    full_response.push_str(&line);
+                    if is_stream_json {
+                        // Parse Claude Code stream-json events
+                        match runner::parse_claude_stream_line(&line) {
+                            runner::StreamJsonEvent::Text(text) => {
+                                full_response.push_str(&text);
+                                let chunk = serde_json::json!({ "text": text });
+                                yield Event::default().event("chunk").data(chunk.to_string());
+                            }
+                            runner::StreamJsonEvent::Usage { input_tokens, output_tokens } => {
+                                stream_json_tokens = stream_json_tokens.max(input_tokens + output_tokens);
+                            }
+                            runner::StreamJsonEvent::Skip => {}
+                        }
+                    } else {
+                        // Plain text mode — each line from stdout is a complete line.
+                        // Append newline so the frontend can concatenate chunks directly.
+                        if !full_response.is_empty() {
+                            full_response.push('\n');
+                        }
+                        full_response.push_str(&line);
 
-                    let chunk = serde_json::json!({ "text": line });
-                    yield Event::default().event("chunk").data(chunk.to_string());
+                        let text_with_nl = if full_response.len() > line.len() {
+                            format!("\n{}", line)
+                        } else {
+                            line.clone()
+                        };
+                        let chunk = serde_json::json!({ "text": text_with_nl });
+                        yield Event::default().event("chunk").data(chunk.to_string());
+                    }
                 }
 
                 let status = process.child.wait().await;
@@ -256,15 +291,27 @@ async fn make_agent_stream(
                     }
                 }
 
+                let stderr_lines = process.captured_stderr();
+
                 if full_response.is_empty() && !success {
                     // Show captured stderr when agent fails silently
-                    let stderr_lines = process.captured_stderr();
                     if stderr_lines.is_empty() {
                         full_response = "[Agent exited with error]".to_string();
                     } else {
                         full_response = format!("[Agent exited with error]\n\n{}", stderr_lines.join("\n"));
                     }
                 }
+
+                // Token usage: stream-json parsed inline, others use parse_token_usage
+                let tokens_used = if stream_json_tokens > 0 {
+                    stream_json_tokens
+                } else {
+                    let (cleaned, count) = runner::parse_token_usage(&agent_type, &full_response, &stderr_lines);
+                    if count > 0 {
+                        full_response = cleaned;
+                    }
+                    count
+                };
 
                 // Save agent response to DB
                 let agent_msg = DiscussionMessage {
@@ -273,6 +320,8 @@ async fn make_agent_stream(
                     content: full_response,
                     agent_type: Some(agent_type.clone()),
                     timestamp: Utc::now(),
+                    tokens_used,
+                    auth_mode: Some(auth_mode_str.clone()),
                 };
 
                 let did = disc_id.clone();
@@ -281,7 +330,7 @@ async fn make_agent_stream(
                     crate::db::discussions::insert_message(conn, &did, &msg)
                 }).await;
 
-                let done = serde_json::json!({ "message_id": agent_msg.id, "success": success });
+                let done = serde_json::json!({ "message_id": agent_msg.id, "success": success, "tokens_used": tokens_used });
                 yield Event::default().event("done").data(done.to_string());
             }
             Err(e) => {
@@ -293,6 +342,8 @@ async fn make_agent_stream(
                     content: format!("Erreur: {}", e),
                     agent_type: None,
                     timestamp: Utc::now(),
+                    tokens_used: 0,
+                    auth_mode: None,
                 };
 
                 let did = disc_id.clone();
@@ -368,6 +419,7 @@ pub async fn orchestrate(
         let access = |a: &AgentType| match a {
             AgentType::ClaudeCode => config.agents.claude_code.full_access,
             AgentType::Codex => config.agents.codex.full_access,
+            AgentType::GeminiCli => config.agents.gemini_cli.full_access,
             _ => false,
         };
         let access_map: std::collections::HashMap<String, bool> = agents.iter()
@@ -412,6 +464,8 @@ pub async fn orchestrate(
                 content: sys_text.clone(),
                 agent_type: None,
                 timestamp: Utc::now(),
+                tokens_used: 0,
+                auth_mode: None,
             };
             let did = disc_id.clone();
             let _ = state_clone.db.with_conn(move |conn| {
@@ -443,31 +497,59 @@ pub async fn orchestrate(
                 match runner::start_agent(agent_type, &project_path, &prompt, &tokens, fa).await {
                     Ok(mut process) => {
                         let mut full_response = String::new();
+                        let mut orch_stream_tokens: u64 = 0;
+                        let orch_is_stream_json = process.output_mode == runner::OutputMode::StreamJson;
 
                         while let Some(line) = process.next_line().await {
-                            if !full_response.is_empty() { full_response.push('\n'); }
-                            full_response.push_str(&line);
-
-                            let chunk = serde_json::json!({
-                                "text": line, "agent": agent_name,
-                                "agent_type": agent_type, "round": round,
-                            });
-                            yield Event::default().event("chunk").data(chunk.to_string());
+                            if orch_is_stream_json {
+                                match runner::parse_claude_stream_line(&line) {
+                                    runner::StreamJsonEvent::Text(text) => {
+                                        full_response.push_str(&text);
+                                        let chunk = serde_json::json!({
+                                            "text": text, "agent": agent_name,
+                                            "agent_type": agent_type, "round": round,
+                                        });
+                                        yield Event::default().event("chunk").data(chunk.to_string());
+                                    }
+                                    runner::StreamJsonEvent::Usage { input_tokens, output_tokens } => {
+                                        orch_stream_tokens = orch_stream_tokens.max(input_tokens + output_tokens);
+                                    }
+                                    runner::StreamJsonEvent::Skip => {}
+                                }
+                            } else {
+                                let nl = if full_response.is_empty() { "" } else { "\n" };
+                                full_response.push_str(&format!("{}{}", nl, line));
+                                let chunk = serde_json::json!({
+                                    "text": format!("{}{}", nl, line), "agent": agent_name,
+                                    "agent_type": agent_type, "round": round,
+                                });
+                                yield Event::default().event("chunk").data(chunk.to_string());
+                            }
                         }
 
                         let status = process.child.wait().await;
                         let orch_success = status.map(|s| s.success()).unwrap_or(false);
 
+                        let orch_stderr = process.captured_stderr();
+
                         if full_response.is_empty() && !orch_success {
-                            let stderr_lines = process.captured_stderr();
-                            if stderr_lines.is_empty() {
+                            if orch_stderr.is_empty() {
                                 full_response = "[Agent exited with error]".to_string();
                             } else {
-                                full_response = format!("[Agent exited with error]\n\n{}", stderr_lines.join("\n"));
+                                full_response = format!("[Agent exited with error]\n\n{}", orch_stderr.join("\n"));
                             }
                         } else if full_response.is_empty() {
                             full_response = "[No response]".to_string();
                         }
+
+                        // Token usage: stream-json parsed inline, others use parse_token_usage
+                        let tokens_used = if orch_stream_tokens > 0 {
+                            orch_stream_tokens
+                        } else {
+                            let (cleaned, count) = runner::parse_token_usage(agent_type, &full_response, &orch_stderr);
+                            if count > 0 { full_response = cleaned; }
+                            count
+                        };
 
                         // Save to DB
                         {
@@ -477,6 +559,8 @@ pub async fn orchestrate(
                                 content: full_response.clone(),
                                 agent_type: Some(agent_type.clone()),
                                 timestamp: Utc::now(),
+                                tokens_used,
+                                auth_mode: Some(auth_mode_for(agent_type, &tokens)),
                             };
                             let did = disc_id.clone();
                             let _ = state_clone.db.with_conn(move |conn| {
@@ -533,16 +617,46 @@ pub async fn orchestrate(
             match runner::start_agent(&primary_agent_type, &project_path, &synth_prompt, &tokens, synth_fa).await {
                 Ok(mut process) => {
                     let mut full_response = String::new();
+                    let mut synth_stream_tokens: u64 = 0;
+                    let synth_is_stream_json = process.output_mode == runner::OutputMode::StreamJson;
+
                     while let Some(line) = process.next_line().await {
-                        if !full_response.is_empty() { full_response.push('\n'); }
-                        full_response.push_str(&line);
-                        let chunk = serde_json::json!({
-                            "text": line, "agent": primary_name,
-                            "agent_type": primary_agent_type, "round": "synthesis",
-                        });
-                        yield Event::default().event("chunk").data(chunk.to_string());
+                        if synth_is_stream_json {
+                            match runner::parse_claude_stream_line(&line) {
+                                runner::StreamJsonEvent::Text(text) => {
+                                    full_response.push_str(&text);
+                                    let chunk = serde_json::json!({
+                                        "text": text, "agent": primary_name,
+                                        "agent_type": primary_agent_type, "round": "synthesis",
+                                    });
+                                    yield Event::default().event("chunk").data(chunk.to_string());
+                                }
+                                runner::StreamJsonEvent::Usage { input_tokens, output_tokens } => {
+                                    synth_stream_tokens = synth_stream_tokens.max(input_tokens + output_tokens);
+                                }
+                                runner::StreamJsonEvent::Skip => {}
+                            }
+                        } else {
+                            let nl = if full_response.is_empty() { "" } else { "\n" };
+                            full_response.push_str(&format!("{}{}", nl, line));
+                            let chunk = serde_json::json!({
+                                "text": format!("{}{}", nl, line), "agent": primary_name,
+                                "agent_type": primary_agent_type, "round": "synthesis",
+                            });
+                            yield Event::default().event("chunk").data(chunk.to_string());
+                        }
                     }
                     let _ = process.child.wait().await;
+                    let synth_stderr = process.captured_stderr();
+
+                    // Token usage: stream-json parsed inline, others use parse_token_usage
+                    let tokens_used = if synth_stream_tokens > 0 {
+                        synth_stream_tokens
+                    } else {
+                        let (cleaned, count) = runner::parse_token_usage(&primary_agent_type, &full_response, &synth_stderr);
+                        if count > 0 { full_response = cleaned; }
+                        count
+                    };
 
                     // Save synthesis to DB
                     {
@@ -552,6 +666,8 @@ pub async fn orchestrate(
                             content: format!("[Synthese]\n\n{}", full_response),
                             agent_type: Some(primary_agent_type.clone()),
                             timestamp: Utc::now(),
+                            tokens_used,
+                            auth_mode: Some(auth_mode_for(&primary_agent_type, &tokens)),
                         };
                         let did = disc_id.clone();
                         let _ = state_clone.db.with_conn(move |conn| {
@@ -580,11 +696,24 @@ pub async fn orchestrate(
     Sse::new(stream)
 }
 
+fn auth_mode_for(agent_type: &AgentType, tokens: &TokensConfig) -> String {
+    let provider = match agent_type {
+        AgentType::ClaudeCode => "anthropic",
+        AgentType::Codex => "openai",
+        AgentType::GeminiCli => "google",
+        _ => "",
+    };
+    let has_key = tokens.active_key_for(provider).is_some();
+    let is_disabled = tokens.disabled_overrides.iter().any(|d| d == provider);
+    if has_key && !is_disabled { "override".to_string() } else { "local".to_string() }
+}
+
 fn agent_display_name(agent_type: &AgentType) -> String {
     match agent_type {
         AgentType::ClaudeCode => "Claude Code".into(),
         AgentType::Codex => "Codex".into(),
         AgentType::Vibe => "Vibe".into(),
+        AgentType::GeminiCli => "Gemini CLI".into(),
         AgentType::Custom => "Custom".into(),
     }
 }

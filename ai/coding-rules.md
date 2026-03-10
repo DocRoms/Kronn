@@ -31,6 +31,7 @@
 - **API calls**: use functions from `../lib/api.ts` — never raw `fetch` in components.
 - **Styling**: inline `style={{}}` objects. No CSS files, no Tailwind, no styled-components.
 - **State**: local `useState` / `useEffect`. No global state library.
+- **i18n**: use `useT()` hook from `I18nContext.tsx`. All user-visible strings must use `t('key.name')`. Translation keys in `lib/i18n.ts`. 3 locales: `fr`, `en`, `es`.
 - **SSE handling**: use `_streamSSE` helper in api.ts with `AbortController` for cancellation.
 - **Linter**: TypeScript compiler (`tsc --noEmit`)
 - **Build**: `npm run build`

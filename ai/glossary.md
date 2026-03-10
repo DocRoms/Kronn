@@ -32,7 +32,7 @@ Project-specific terms. For deep dives, follow the linked `ai/architecture/` fil
 
 **Discussion** — A chat conversation with one or more AI agents, optionally tied to a project (`project_id: Option<String>`). Supports single-agent and multi-agent (orchestration) modes. Global discussions (no project) appear under "Général" in the sidebar.
 
-**Orchestration** — Multi-agent debate: multiple agents discuss in rounds (max 3). Primary agent speaks last and synthesizes.
+**Orchestration** — Multi-agent debate: multiple agents discuss in configurable rounds (1–3, default 2 in UI). Primary agent speaks last and synthesizes. Round count configurable from the debate popover.
 
 **MCP (Model Context Protocol)** — Standardized protocol for giving AI agents access to tools/data. Kronn uses a 3-tier model: servers → configs → project linkages.
 
@@ -56,7 +56,13 @@ Project-specific terms. For deep dives, follow the linked `ai/architecture/` fil
 
 **customized_contexts** — `Vec<String>` of `"slug:projectId"` pairs in `McpOverview` where the context file has been customized (not default template). Used by frontend to color FileText icons.
 
-**AgentType** — Enum: `ClaudeCode`, `Codex`, `Vibe`, `Custom`. Determines which CLI to spawn. `OpenCode` planned.
+**AgentType** — Enum: `ClaudeCode`, `Codex`, `Vibe`, `GeminiCli`, `Custom`. Determines which CLI to spawn. `DeepSeek` and `OpenCode` planned.
+
+**disabled_agents** — `Vec<AgentType>` in `AppConfig` (persisted in config.toml). Agents in this list are installed but inactive (toggled off). Controlled via `POST /api/agents/toggle`.
+
+**UILocale** — Frontend UI language type: `'fr' | 'en' | 'es'`. Stored in `localStorage` under `kronn:ui-locale`. Default: `fr`. Separate from backend agent output language.
+
+**useT()** — React hook from `I18nContext.tsx`. Returns `t(key, ...args)` function for translating UI strings using the current locale.
 
 **DetectedRepo** — A git repository found by the scanner in configured scan paths.
 
@@ -123,9 +129,17 @@ Project-specific terms. For deep dives, follow the linked `ai/architecture/` fil
 
 **Vibe** — Mistral's CLI coding agent (`vibe` command via `uvx --from mistral-vibe`). Config: `.vibe/config.toml` per-project.
 
+**Gemini CLI** — Google's CLI coding agent (`gemini` command via `npm install -g @google/gemini-cli`). Headless mode: `gemini -p "prompt"`. Full access: `--yolo`. API key env: `GEMINI_API_KEY`. Color: `#4285f4`.
+
+**DeepSeek** — Planned agent support (waiting for official CLI).
+
 **OpenCode** — Planned agent support.
 
-**Agent Runner** — `backend/src/agents/runner.rs` — spawns CLI processes and streams stdout.
+**Agent Runner** — `backend/src/agents/runner.rs` — spawns CLI processes and streams stdout. Two output modes: `Text` (line-by-line) and `StreamJson` (Claude Code stream-json with token tracking). Frontend concatenates chunks directly (no separator).
+
+**OutputMode** — Enum in `runner.rs`: `Text` (Codex, Vibe, Gemini — line-by-line stdout) or `StreamJson` (Claude Code — `--output-format stream-json` with delta events). Determines how `parse_claude_stream_line()` extracts text and token usage.
+
+**runtime_available** — Boolean on `AgentDetection`. True when the agent is runnable via npx/uvx fallback even without a local binary. Probed with a 15s timeout, cached for 5 minutes. Frontend helper: `isUsable(agent) = (installed || runtime_available) && enabled`.
 
 ## UI
 

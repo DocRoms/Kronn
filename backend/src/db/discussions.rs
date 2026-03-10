@@ -114,7 +114,7 @@ pub fn update_discussion_participants(conn: &Connection, id: &str, participants:
 
 pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<DiscussionMessage>> {
     let mut stmt = conn.prepare(
-        "SELECT id, role, content, agent_type, timestamp
+        "SELECT id, role, content, agent_type, timestamp, tokens_used, auth_mode
          FROM messages WHERE discussion_id = ?1
          ORDER BY sort_order, timestamp"
     )?;
@@ -129,6 +129,8 @@ pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<Discu
             content: row.get(2)?,
             agent_type: agent_type_str.map(|s| parse_agent_type(&s)),
             timestamp: parse_dt(row.get::<_, String>(4)?),
+            tokens_used: row.get::<_, i64>(5).unwrap_or(0) as u64,
+            auth_mode: row.get(6)?,
         })
     })?.filter_map(|r| r.ok()).collect();
 
@@ -144,8 +146,8 @@ pub fn insert_message(conn: &Connection, discussion_id: &str, msg: &DiscussionMe
     )?;
 
     conn.execute(
-        "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, sort_order)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, sort_order, tokens_used, auth_mode)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             msg.id,
             discussion_id,
@@ -154,6 +156,8 @@ pub fn insert_message(conn: &Connection, discussion_id: &str, msg: &DiscussionMe
             msg.agent_type.as_ref().map(format_agent_type),
             msg.timestamp.to_rfc3339(),
             next_order,
+            msg.tokens_used as i64,
+            msg.auth_mode,
         ],
     )?;
 
@@ -187,6 +191,14 @@ pub fn edit_last_user_message(conn: &Connection, discussion_id: &str, content: &
     Ok(affected > 0)
 }
 
+pub fn update_message_tokens(conn: &Connection, message_id: &str, tokens_used: u64, auth_mode: Option<&str>) -> Result<()> {
+    conn.execute(
+        "UPDATE messages SET tokens_used = ?1, auth_mode = ?2 WHERE id = ?3",
+        params![tokens_used as i64, auth_mode, message_id],
+    )?;
+    Ok(())
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 fn parse_dt(s: String) -> DateTime<Utc> {
@@ -200,6 +212,7 @@ fn parse_agent_type(s: &str) -> AgentType {
         "ClaudeCode" => AgentType::ClaudeCode,
         "Codex" => AgentType::Codex,
         "Vibe" => AgentType::Vibe,
+        "GeminiCli" => AgentType::GeminiCli,
         _ => AgentType::Custom,
     }
 }
@@ -209,6 +222,7 @@ fn format_agent_type(a: &AgentType) -> String {
         AgentType::ClaudeCode => "ClaudeCode".into(),
         AgentType::Codex => "Codex".into(),
         AgentType::Vibe => "Vibe".into(),
+        AgentType::GeminiCli => "GeminiCli".into(),
         AgentType::Custom => "Custom".into(),
     }
 }

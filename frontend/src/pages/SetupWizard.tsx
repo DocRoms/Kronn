@@ -30,7 +30,7 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
   const [paths, setPaths] = useState<string[]>([]);
   const [newPath, setNewPath] = useState('');
 
-  const installedCount = agents.filter(a => a.installed).length;
+  const installedCount = agents.filter(a => a.installed || a.runtime_available).length;
 
   useEffect(() => {
     refreshAgents();
@@ -168,7 +168,7 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
               <div style={styles.agentList}>
                 {agents.map((agent) => (
                   <div key={agent.name} style={styles.agentRow}>
-                    <div style={styles.dot(agent.installed)} />
+                    <div style={styles.dot(agent.installed || agent.runtime_available)} />
                     <div style={{ flex: 1 }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                         <span style={styles.agentName}>{agent.name}</span>
@@ -181,13 +181,18 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
                             <span style={styles.updateBadge}>&#x2B06; {agent.latest_version}</span>
                           )}
                         </div>
+                      ) : agent.runtime_available ? (
+                        <div style={styles.agentMeta}>
+                          <span style={{ color: 'rgba(52,211,153,0.7)', fontSize: 11 }}>runtime OK</span>
+                          <span style={{ color: 'rgba(255,255,255,0.2)', fontSize: 10 }}> — via npx</span>
+                        </div>
                       ) : (
                         <div style={styles.agentMeta}>
                           <code style={styles.code}>{agent.install_command}</code>
                         </div>
                       )}
                     </div>
-                    {!agent.installed && (
+                    {!agent.installed && !agent.runtime_available && (
                       <button
                         style={styles.btnInstall}
                         onClick={() => handleInstallAgent(agent)}
@@ -200,7 +205,7 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
                         )}
                       </button>
                     )}
-                    {agent.installed && (
+                    {(agent.installed || agent.runtime_available) && (
                       <span style={styles.badgeOk}><Check size={12} /> OK</span>
                     )}
                   </div>

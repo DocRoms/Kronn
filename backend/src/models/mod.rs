@@ -32,8 +32,64 @@ pub struct ServerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../frontend/src/types/generated.ts")]
 pub struct TokensConfig {
+    /// Legacy fields — kept for backward compat when reading old config.toml
+    #[serde(default, skip_serializing)]
     pub anthropic: Option<String>,
+    #[serde(default, skip_serializing)]
     pub openai: Option<String>,
+    #[serde(default, skip_serializing)]
+    pub google: Option<String>,
+    /// All API keys (new multi-key system)
+    #[serde(default)]
+    pub keys: Vec<ApiKey>,
+    #[serde(default)]
+    pub disabled_overrides: Vec<String>,
+}
+
+impl TokensConfig {
+    /// Get the active key value for a provider, or None
+    pub fn active_key_for(&self, provider: &str) -> Option<&str> {
+        self.keys.iter()
+            .find(|k| k.provider == provider && k.active)
+            .map(|k| k.value.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+pub struct ApiKey {
+    pub id: String,
+    pub name: String,
+    pub provider: String,
+    #[ts(skip)]
+    pub value: String,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+pub struct ApiKeyDisplay {
+    pub id: String,
+    pub name: String,
+    pub provider: String,
+    pub masked_value: String,
+    pub active: bool,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+pub struct SaveApiKeyRequest {
+    pub id: Option<String>,
+    pub name: String,
+    pub provider: String,
+    pub value: String,
+}
+
+#[derive(Debug, Serialize, TS)]
+#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+pub struct ApiKeysResponse {
+    pub keys: Vec<ApiKeyDisplay>,
+    pub disabled_overrides: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -48,12 +104,15 @@ pub struct ScanConfig {
 pub struct AgentsConfig {
     pub claude_code: AgentConfig,
     pub codex: AgentConfig,
+    #[serde(default)]
+    pub gemini_cli: AgentConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../frontend/src/types/generated.ts")]
 pub struct AgentConfig {
     pub path: Option<String>,
+    #[serde(default)]
     pub installed: bool,
     pub version: Option<String>,
     #[serde(default)]
@@ -97,6 +156,13 @@ pub struct AgentDetection {
     pub latest_version: Option<String>,
     pub origin: String,
     pub install_command: Option<String>,
+    #[serde(default)]
+    pub host_managed: bool,
+    #[serde(default)]
+    pub host_label: Option<String>,
+    /// Agent is runnable via npx/uvx fallback even when no local binary is found
+    #[serde(default)]
+    pub runtime_available: bool,
 }
 
 fn default_true() -> bool { true }
@@ -107,6 +173,7 @@ pub enum AgentType {
     ClaudeCode,
     Codex,
     Vibe,
+    GeminiCli,
     Custom,
 }
 
@@ -588,6 +655,24 @@ pub struct ProjectUsage {
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+pub struct AgentUsageSummary {
+    pub agent_type: String,
+    pub total_tokens: u64,
+    pub message_count: u32,
+    pub by_project: Vec<AgentProjectUsage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+pub struct AgentProjectUsage {
+    pub project_id: String,
+    pub project_name: String,
+    pub tokens_used: u64,
+    pub message_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
 pub struct DailyUsage {
     pub date: String,
     pub anthropic: u64,
@@ -621,6 +706,10 @@ pub struct DiscussionMessage {
     pub content: String,
     pub agent_type: Option<AgentType>,
     pub timestamp: DateTime<Utc>,
+    #[serde(default)]
+    pub tokens_used: u64,
+    #[serde(default)]
+    pub auth_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -640,6 +729,10 @@ pub enum MessageRole {
 pub struct SaveTokensRequest {
     pub anthropic: Option<String>,
     pub openai: Option<String>,
+    #[serde(default)]
+    pub google: Option<String>,
+    #[serde(default)]
+    pub disabled_overrides: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, TS)]
