@@ -108,7 +108,7 @@ init_repo() {
     local repo_dir="$1"
     local repo_name
     repo_name=$(basename "$repo_dir")
-    local template_dir="$KRONN_DIR/templates"
+    local template_dir="${KRONN_DIR:?KRONN_DIR is not set}/templates"
 
     step "Configuration de $repo_name"
 
@@ -206,6 +206,7 @@ init_repo() {
 
 ensure_gitignore() {
     local repo_dir="$1"
+    [[ -d "$repo_dir" ]] || return 1
     local gitignore="$repo_dir/.gitignore"
     local entries=(".env.mcp" ".mcp.json" "ai/var/")
 

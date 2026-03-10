@@ -30,6 +30,7 @@ struct GhLabel {
     name: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct GhPr {
     html_url: String,

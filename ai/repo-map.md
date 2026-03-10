@@ -61,25 +61,32 @@ Kronn/
 │               └── github.rs   # GitHub API v3 implementation (reqwest + rustls)
 │
 ├── frontend/                   # React + TypeScript (Vite)
-│   ├── package.json
+│   ├── package.json            # engines: node>=23.6.0
 │   ├── tsconfig.json           # ES2020, strict, react-jsx
-│   ├── vite.config.ts
+│   ├── vite.config.ts          # Build config + test config (vitest) + code splitting
+│   ├── eslint.config.js        # ESLint 10 flat config (typescript-eslint strict)
 │   └── src/
 │       ├── main.tsx            # React DOM entry
-│       ├── App.tsx             # Router (setup wizard vs dashboard)
+│       ├── App.tsx             # Router (setup wizard vs dashboard) + ErrorBoundary + React.lazy code splitting
 │       ├── pages/
 │       │   ├── Dashboard.tsx   # Main UI shell (projects, discussions, workflows, settings) — routes to sub-pages
 │       │   ├── McpPage.tsx     # MCP management (registry, configs, inline secret editing with per-field visibility, context files, project toggles)
 │       │   ├── WorkflowsPage.tsx # Workflow management (list, 5-step create wizard, detail + live run progress via SSE, run deletion, manual trigger)
 │       │   └── SetupWizard.tsx # First-run setup flow
 │       ├── hooks/
-│       │   └── useApi.ts       # Generic fetch hook with loading/error state
+│       │   └── useApi.ts       # Generic fetch hook with loading/error/refetch + race condition protection
 │       ├── lib/
 │       │   ├── api.ts          # API client (typed wrappers + SSE streaming helpers)
 │       │   ├── i18n.ts         # Lightweight i18n system (fr/en/es). Translation dictionaries + locale persistence (localStorage)
-│       │   └── I18nContext.tsx  # React context provider for UI locale (useT() hook)
-│       └── types/
-│           └── generated.ts    # Auto-generated from Rust models (DO NOT EDIT)
+│       │   ├── I18nContext.tsx  # React context provider for UI locale (useT() hook)
+│       │   └── constants.ts    # Shared constants: AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES, agentColor()
+│       ├── types/
+│       │   └── generated.ts    # Auto-generated from Rust models (DO NOT EDIT)
+│       ├── test/
+│       │   └── setup.ts        # Test setup (@testing-library/jest-dom)
+│       ├── __tests__/          # App-level tests (App.tsx, ErrorBoundary)
+│       ├── hooks/__tests__/    # Hook tests (useApi)
+│       └── lib/__tests__/      # Lib tests (i18n, api, constants, types, regression)
 │
 ├── ai/                         # AI context documentation (for this repo)
 ├── templates/                  # AI context templates (for projects managed by Kronn)
@@ -110,5 +117,8 @@ Kronn/
 ## Notes
 - `README.md` is not guaranteed to be up-to-date; prefer actual config files as source of truth.
 - `frontend/src/types/generated.ts` is auto-generated — never edit manually.
-- Dashboard.tsx (~1900 lines) is the main shell with projects, discussions, and settings pages. MCP page extracted to McpPage.tsx (~625 lines), Workflows to WorkflowsPage.tsx (~1600 lines, includes wizard + live progress + run management).
+- Dashboard.tsx (~2250 lines) is the main shell with projects, discussions, and settings pages. MCP page extracted to McpPage.tsx (~715 lines), Workflows to WorkflowsPage.tsx (~1660 lines, includes wizard + live progress + run management).
+- Shared constants (AGENT_COLORS, AGENT_LABELS) extracted to `lib/constants.ts` — imported by Dashboard and WorkflowsPage.
+- Frontend tests in `__tests__/` directories alongside source (9 suites, 71 tests). See `ai/testing-quality.md`.
+- Shell scripts in `lib/` have NO tests — `bats-core` or integration tests needed.
 - `templates/` directory contains the AI context template files (ai/ skeleton, CLAUDE.md, .cursorrules, etc.) mounted at `/app/templates:ro` in Docker.

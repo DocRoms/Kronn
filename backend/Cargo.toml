@@ -5,6 +5,10 @@ edition = "2021"
 description = "Self-hosted AI dev workflow control plane"
 license = "MIT"
 
+[lib]
+name = "kronn"
+path = "src/lib.rs"
+
 [[bin]]
 name = "kronn"
 path = "src/main.rs"
@@ -12,11 +16,8 @@ path = "src/main.rs"
 [dependencies]
 # Web framework
 axum = { version = "0.7", features = ["ws", "macros"] }
-axum-extra = { version = "0.9", features = ["typed-header"] }
-tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "fs", "trace"] }
-tokio = { version = "1", features = ["full"] }
-hyper = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "process", "sync", "time", "io-util"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -32,16 +33,12 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # File system
 walkdir = "2"
-notify = "6"          # File watcher
-globset = "0.4"
 
 # Process management
 which = "6"           # Find executables in PATH
-sysinfo = "0.30"
 
 # Async streams
 futures = "0.3"
-tokio-stream = "0.1"
 async-stream = "0.3"
 
 # Crypto
@@ -66,4 +63,20 @@ directories = "5"     # XDG paths
 ts-rs = { version = "9", features = ["chrono-impl", "uuid-impl", "serde-json-impl"] }
 
 [dev-dependencies]
-tokio-test = "0.4"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+
+# ── Build profiles ───────────────────────────────────────────────────────────
+
+[profile.dev]
+# Compile deps with optimizations, keep local code in debug mode
+# Dramatically speeds up runtime AND reduces dep recompilation on code changes
+opt-level = 0
+
+[profile.dev.package."*"]
+opt-level = 1
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

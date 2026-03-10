@@ -152,6 +152,19 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             token_help: Some("Auth token with project:read scope".into()),
         },
         McpDefinition {
+            id: "mcp-grafana".into(),
+            name: "Grafana".into(),
+            description: "Dashboards, datasources, alerts, incidents — official Grafana server".into(),
+            transport: McpTransport::Stdio {
+                command: "npx".into(),
+                args: vec!["-y".into(), "@grafana/mcp-server-grafana".into()],
+            },
+            env_keys: vec!["GRAFANA_URL".into(), "GRAFANA_API_KEY".into()],
+            tags: vec!["monitoring".into(), "dashboards".into(), "observability".into()],
+            token_url: Some("https://grafana.com/docs/grafana/latest/administration/service-accounts/".into()),
+            token_help: Some("Service account token with Viewer role minimum".into()),
+        },
+        McpDefinition {
             id: "mcp-google-analytics".into(),
             name: "Google Analytics".into(),
             description: "GA4 data, reports, realtime — community server".into(),

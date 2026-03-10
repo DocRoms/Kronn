@@ -80,8 +80,9 @@ PROMPT
 )
 
     # Prepend bootstrap prompt to index.md
+    # Create temp in same directory to avoid cross-filesystem mv failures
     local tmp
-    tmp=$(mktemp)
+    tmp=$(mktemp "$repo_dir/ai/.index.md.XXXXXX")
     echo "$prompt" > "$tmp"
     cat "$index_file" >> "$tmp"
     mv "$tmp" "$index_file"
@@ -99,12 +100,13 @@ remove_bootstrap_prompt() {
     local index_file="$repo_dir/ai/index.md"
     [[ -f "$index_file" ]] || return 0
     # macOS BSD sed requires -i '' (with space), GNU sed uses -i (no arg)
+    # Use | as delimiter to avoid conflicts with / in marker text
     if sed --version >/dev/null 2>&1; then
         # GNU sed
-        sed -i "/$BOOTSTRAP_MARKER_START/,/$BOOTSTRAP_MARKER_END/d" "$index_file"
+        sed -i "\|$BOOTSTRAP_MARKER_START|,\|$BOOTSTRAP_MARKER_END|d" "$index_file"
     else
         # BSD sed (macOS)
-        sed -i '' "/$BOOTSTRAP_MARKER_START/,/$BOOTSTRAP_MARKER_END/d" "$index_file"
+        sed -i '' "\|$BOOTSTRAP_MARKER_START|,\|$BOOTSTRAP_MARKER_END|d" "$index_file"
     fi
 }
 

@@ -4,6 +4,10 @@ pub mod discussions;
 pub mod mcps;
 pub mod workflows;
 
+#[cfg(test)]
+#[path = "tests.rs"]
+mod tests;
+
 use std::path::PathBuf;
 use anyhow::{Context, Result};
 use rusqlite::Connection;
@@ -26,6 +30,15 @@ impl Database {
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("kronn.db");
         Self::open_path(&path)
+    }
+
+    /// Open an in-memory database (useful for testing).
+    pub fn open_in_memory() -> Result<Self> {
+        let conn = Connection::open_in_memory()
+            .context("Failed to open in-memory database")?;
+        conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+        migrations::run(&conn)?;
+        Ok(Self { conn: Mutex::new(conn), path: PathBuf::from(":memory:") })
     }
 
     /// Open a database at a specific path (useful for testing).

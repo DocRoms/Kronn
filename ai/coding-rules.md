@@ -24,14 +24,26 @@
 
 ## TypeScript / React (frontend)
 
+- **Node**: >= 23.6.0 (native TS support). Version managed via `fnm` or `.node-version`.
 - **Target**: ES2020, strict mode.
-- **Bundler**: Vite.
+- **Bundler**: Vite 5 with code splitting (React.lazy + Suspense, vendor chunks).
 - **Icons**: Lucide React (`lucide-react`).
-- **Types**: import from `../types/generated` — never define API types manually.
+- **Types**: import from `../types/generated` — never define API types manually. Use `type` imports (`import type { ... }`).
 - **API calls**: use functions from `../lib/api.ts` — never raw `fetch` in components.
+- **Shared constants**: agent colors, labels, types → `lib/constants.ts`. Do not duplicate in pages.
 - **Styling**: inline `style={{}}` objects. No CSS files, no Tailwind, no styled-components.
-- **State**: local `useState` / `useEffect`. No global state library.
-- **i18n**: use `useT()` hook from `I18nContext.tsx`. All user-visible strings must use `t('key.name')`. Translation keys in `lib/i18n.ts`. 3 locales: `fr`, `en`, `es`.
-- **SSE handling**: use `_streamSSE` helper in api.ts with `AbortController` for cancellation.
-- **Linter**: TypeScript compiler (`tsc --noEmit`)
-- **Build**: `npm run build`
+- **State**: local `useState` / `useEffect` / `useMemo` / `useCallback`. No global state library.
+- **i18n**: use `useT()` hook from `I18nContext.tsx`. All user-visible strings must use `t('key.name')`. Translation keys in `lib/i18n.ts`. 3 UI locales: `fr`, `en`, `es`. Output languages (for agents) are separate and include `zh`, `br`.
+- **Error boundaries**: wrap lazy-loaded routes with `ErrorBoundary` (see App.tsx).
+- **SSE handling**: use `_streamSSE` helper in api.ts with `AbortController` for cancellation. Cleanup AbortControllers on component unmount.
+- **Linter**: ESLint 10 (`npm run lint`) — strict config with typescript-eslint. 0 errors required.
+- **Tests**: Vitest 4 (`npm test`). Use @testing-library/react for component tests. Wrap state-triggering calls in `act()`.
+- **Coverage**: `npm run test:coverage` — @vitest/coverage-v8 with text + lcov reporters.
+- **Build**: `npm run build` (tsc + vite build)
+
+## Shell scripts (lib/*.sh)
+
+- **Compat**: Bash 3.2+ (macOS + Linux + WSL). No associative arrays, no `readarray`.
+- **Portability**: detect GNU/BSD variants for `sed -i`, `cp -rn`, `timeout`.
+- **Lint**: use `shellcheck` (not enforced yet, but recommended).
+- **Tests**: none yet — planned with `bats-core`.

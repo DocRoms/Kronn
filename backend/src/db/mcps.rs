@@ -98,6 +98,7 @@ pub fn upsert_server(conn: &Connection, server: &McpServer) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn delete_server(conn: &Connection, id: &str) -> Result<bool> {
     let affected = conn.execute("DELETE FROM mcp_servers WHERE id = ?1", params![id])?;
     Ok(affected > 0)
@@ -227,6 +228,7 @@ pub fn link_config_project(conn: &Connection, config_id: &str, project_id: &str)
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn unlink_config_project(conn: &Connection, config_id: &str, project_id: &str) -> Result<()> {
     conn.execute(
         "DELETE FROM mcp_config_projects WHERE config_id = ?1 AND project_id = ?2",

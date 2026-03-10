@@ -13,8 +13,6 @@ import type {
   CreateMcpConfigRequest,
   UpdateMcpConfigRequest,
   LinkMcpConfigRequest,
-  ScheduledTask,
-  CreateTaskRequest,
   Discussion,
   CreateDiscussionRequest,
   SendMessageRequest,
@@ -210,15 +208,6 @@ export const mcps = {
   updateContext: (projectId: string, slug: string, content: string) => api<void>('PUT', `/mcps/context/${projectId}/${slug}`, { content }),
 };
 
-// ─── Tasks ──────────────────────────────────────────────────────────────────
-
-export const tasks = {
-  list: (projectId: string) => api<ScheduledTask[]>('GET', `/projects/${projectId}/tasks`),
-  create: (projectId: string, req: CreateTaskRequest) => api<ScheduledTask>('POST', `/projects/${projectId}/tasks`, req),
-  delete: (projectId: string, taskId: string) => api<void>('DELETE', `/projects/${projectId}/tasks/${taskId}`),
-  toggle: (projectId: string, taskId: string) => api<boolean>('PATCH', `/projects/${projectId}/tasks/${taskId}/toggle`),
-};
-
 // ─── Discussions ────────────────────────────────────────────────────────────
 
 export const discussions = {
@@ -226,6 +215,7 @@ export const discussions = {
   get: (id: string) => api<Discussion>('GET', `/discussions/${id}`),
   create: (req: CreateDiscussionRequest) => api<Discussion>('POST', '/discussions', req),
   delete: (id: string) => api<void>('DELETE', `/discussions/${id}`),
+  update: (id: string, body: { title?: string; archived?: boolean }) => api<void>('PATCH', `/discussions/${id}`, body),
 
   /** Stream SSE helper shared by sendMessage and run. */
   _streamSSE: async (

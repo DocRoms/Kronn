@@ -1,10 +1,14 @@
+# syntax=docker/dockerfile:1
 # Build
-FROM node:20-alpine AS builder
+FROM node:23-alpine AS builder
 WORKDIR /app
-RUN npm install -g pnpm
+
+# corepack enables pnpm natively — no global npm install needed
+RUN corepack enable && corepack prepare pnpm@latest --activate
 
 COPY package.json pnpm-lock.yaml* ./
-RUN pnpm install --frozen-lockfile || pnpm install
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    pnpm install --frozen-lockfile || pnpm install
 
 COPY . .
 RUN pnpm build

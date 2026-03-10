@@ -171,17 +171,17 @@ impl WorkflowEngine {
 
         tracing::info!("Spawning workflow run {} for '{}'", run.id, wf.name);
 
-        // Read config for tokens and full_access
+        // Read config for tokens and agents
         let config = self.config.read().await;
         let tokens = config.tokens.clone();
-        let full_access = config.agents.claude_code.full_access; // TODO: per-agent full_access
+        let agents = config.agents.clone();
 
         let db2 = self.db.clone();
         let workflow = wf.clone();
 
         // Execute in background
         tokio::spawn(async move {
-            if let Err(e) = runner::execute_run(db2, &workflow, &mut run, &tokens, full_access, None).await {
+            if let Err(e) = runner::execute_run(db2, &workflow, &mut run, &tokens, &agents, None).await {
                 tracing::error!("Workflow run {} failed: {}", run.id, e);
             }
         });

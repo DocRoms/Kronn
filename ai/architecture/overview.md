@@ -50,7 +50,11 @@ Three Docker services behind nginx gateway:
 - `Database` struct wraps `Mutex<Connection>` with `with_conn()` async accessor.
 - Data persisted in `kronn.db` with WAL mode and foreign keys enabled.
 - Migrations run via `backend/src/db/migrations.rs` (versioned SQL files, executed before Mutex wrap to avoid blocking_lock panic).
-- Frontend: `useApi` hook for data fetching. Dashboard.tsx is the main shell; sub-pages (McpPage.tsx) receive data as props. UI state managed locally with `useState`.
+- Frontend: `useApi` hook for data fetching. Dashboard.tsx is the main shell; sub-pages (McpPage.tsx, WorkflowsPage.tsx) receive data as props. UI state managed locally with `useState`.
+- `useMemo` for computed values (agent mentions filtering, unread counts). Conditional polling (only active tab).
+- `ErrorBoundary` class component wraps lazy-loaded routes. `React.lazy` + `Suspense` for code splitting (SetupWizard, Dashboard).
+- `AbortController` cleanup on component unmount for SSE streams.
+- Shared constants extracted to `lib/constants.ts` (AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES).
 - Unread badges persisted in localStorage.
 - No global state library (no Redux, Zustand, etc.).
 

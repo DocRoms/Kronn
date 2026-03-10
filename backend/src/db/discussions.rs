@@ -9,7 +9,7 @@ use crate::models::*;
 pub fn list_discussions(conn: &Connection) -> Result<Vec<Discussion>> {
     let mut stmt = conn.prepare(
         "SELECT id, project_id, title, agent, language, participants_json,
-                created_at, updated_at
+                created_at, updated_at, archived
          FROM discussions ORDER BY updated_at DESC"
     )?;
 
@@ -26,6 +26,7 @@ pub fn list_discussions(conn: &Connection) -> Result<Vec<Discussion>> {
             language: row.get(4)?,
             participants: serde_json::from_str(&participants_str).unwrap_or_default(),
             messages: vec![], // loaded separately
+            archived: row.get::<_, i32>(8).unwrap_or(0) != 0,
             created_at: parse_dt(row.get::<_, String>(6)?),
             updated_at: parse_dt(row.get::<_, String>(7)?),
         }))
@@ -42,7 +43,7 @@ pub fn list_discussions(conn: &Connection) -> Result<Vec<Discussion>> {
 pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>> {
     let mut stmt = conn.prepare(
         "SELECT id, project_id, title, agent, language, participants_json,
-                created_at, updated_at
+                created_at, updated_at, archived
          FROM discussions WHERE id = ?1"
     )?;
 
@@ -58,6 +59,7 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
             language: row.get(4)?,
             participants: serde_json::from_str(&participants_str).unwrap_or_default(),
             messages: vec![],
+            archived: row.get::<_, i32>(8).unwrap_or(0) != 0,
             created_at: parse_dt(row.get::<_, String>(6)?),
             updated_at: parse_dt(row.get::<_, String>(7)?),
         })
@@ -73,8 +75,8 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
 
 pub fn insert_discussion(conn: &Connection, disc: &Discussion) -> Result<()> {
     conn.execute(
-        "INSERT INTO discussions (id, project_id, title, agent, language, participants_json, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO discussions (id, project_id, title, agent, language, participants_json, created_at, updated_at, archived)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             disc.id,
             disc.project_id,
@@ -84,6 +86,7 @@ pub fn insert_discussion(conn: &Connection, disc: &Discussion) -> Result<()> {
             serde_json::to_string(&disc.participants)?,
             disc.created_at.to_rfc3339(),
             disc.updated_at.to_rfc3339(),
+            disc.archived as i32,
         ],
     )?;
     Ok(())
@@ -91,6 +94,38 @@ pub fn insert_discussion(conn: &Connection, disc: &Discussion) -> Result<()> {
 
 pub fn delete_discussion(conn: &Connection, id: &str) -> Result<bool> {
     let affected = conn.execute("DELETE FROM discussions WHERE id = ?1", params![id])?;
+    Ok(affected > 0)
+}
+
+pub fn update_discussion(conn: &Connection, id: &str, title: Option<&str>, archived: Option<bool>) -> Result<bool> {
+    let mut sets = Vec::new();
+    let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+    if let Some(t) = title {
+        sets.push("title = ?");
+        values.push(Box::new(t.to_string()));
+    }
+    if let Some(a) = archived {
+        sets.push("archived = ?");
+        values.push(Box::new(a as i32));
+    }
+
+    if sets.is_empty() {
+        return Ok(false);
+    }
+
+    sets.push("updated_at = ?");
+    values.push(Box::new(Utc::now().to_rfc3339()));
+
+    values.push(Box::new(id.to_string()));
+
+    let sql = format!(
+        "UPDATE discussions SET {} WHERE id = ?",
+        sets.join(", ")
+    );
+
+    let params: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|v| v.as_ref()).collect();
+    let affected = conn.execute(&sql, params.as_slice())?;
     Ok(affected > 0)
 }
 

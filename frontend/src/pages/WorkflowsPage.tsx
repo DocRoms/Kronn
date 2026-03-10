@@ -2,21 +2,23 @@ import { useState, useRef } from 'react';
 import { useT } from '../lib/I18nContext';
 import { workflows as workflowsApi } from '../lib/api';
 import { useApi } from '../hooks/useApi';
+import { AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES } from '../lib/constants';
 import type {
   Project, WorkflowSummary, Workflow, WorkflowRun, WorkflowTrigger,
-  WorkflowStep, AgentType, WorkflowSafety,
+  WorkflowStep, AgentType, WorkflowSafety, AgentsConfig,
   WorkspaceConfig, StepConditionRule, StepResult,
   CreateWorkflowRequest,
 } from '../types/generated';
 import {
   Plus, Trash2, Play, Loader2, Check, X, ChevronRight, ChevronDown,
   Clock, GitBranch, Zap, Eye, HelpCircle, Settings, Shield,
-  ToggleLeft, ToggleRight, RefreshCw,
+  ToggleLeft, ToggleRight, RefreshCw, AlertTriangle,
 } from 'lucide-react';
 
 interface WorkflowsPageProps {
   projects: Project[];
   installedAgentTypes?: AgentType[];
+  agentAccess?: AgentsConfig;
 }
 
 const TRIGGER_LABELS: Record<string, string> = {
@@ -34,23 +36,18 @@ const STATUS_COLORS: Record<string, string> = {
   WaitingApproval: '#c8ff00',
 };
 
-const AGENT_COLORS: Record<string, string> = {
-  ClaudeCode: '#D4714E',
-  Codex: '#10a37f',
-  Vibe: '#FF7000',
-  GeminiCli: '#4285f4',
-};
+/** Check if an agent has full_access disabled (restricted mode = can't write files) */
+function checkAgentRestricted(agentAccess: AgentsConfig | undefined, agentType: AgentType): boolean {
+  if (!agentAccess) return false;
+  const map: Record<string, boolean | undefined> = {
+    ClaudeCode: agentAccess.claude_code?.full_access,
+    Codex: agentAccess.codex?.full_access,
+    GeminiCli: agentAccess.gemini_cli?.full_access,
+  };
+  return map[agentType] === false;
+}
 
-const AGENT_LABELS: Record<string, string> = {
-  ClaudeCode: 'Claude Code',
-  Codex: 'Codex',
-  Vibe: 'Vibe',
-  GeminiCli: 'Gemini CLI',
-};
-
-const ALL_AGENT_TYPES: AgentType[] = ['ClaudeCode', 'Codex', 'Vibe', 'GeminiCli'];
-
-export function WorkflowsPage({ projects, installedAgentTypes }: WorkflowsPageProps) {
+export function WorkflowsPage({ projects, installedAgentTypes, agentAccess }: WorkflowsPageProps) {
   const { t } = useT();
   const { data: workflowList, refetch } = useApi(() => workflowsApi.list(), []);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -188,6 +185,7 @@ export function WorkflowsPage({ projects, installedAgentTypes }: WorkflowsPagePr
         <WorkflowWizard
           projects={projects}
           installedAgentTypes={installedAgentTypes}
+          agentAccess={agentAccess}
           onDone={() => { setShowCreate(false); refetch(); }}
           onCancel={() => setShowCreate(false)}
         />
@@ -198,6 +196,7 @@ export function WorkflowsPage({ projects, installedAgentTypes }: WorkflowsPagePr
         <WorkflowWizard
           projects={projects}
           installedAgentTypes={installedAgentTypes}
+          agentAccess={agentAccess}
           editWorkflow={editingWorkflow}
           onDone={() => { setEditingWorkflow(null); refetch(); if (editingWorkflow) openDetail(editingWorkflow.id); }}
           onCancel={() => setEditingWorkflow(null)}
@@ -314,6 +313,7 @@ export function WorkflowsPage({ projects, installedAgentTypes }: WorkflowsPagePr
                   refetch();
                 }}
                 triggering={triggering === detailWorkflow.id}
+                agentAccess={agentAccess}
               />
             )}
 
@@ -342,7 +342,7 @@ interface LiveRunState {
   status: string | null;
 }
 
-function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering }: {
+function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess }: {
   workflow: Workflow;
   runs: WorkflowRun[];
   liveRun: LiveRunState | null;
@@ -352,6 +352,7 @@ function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit,
   onDeleteRun: (runId: string) => void;
   onDeleteAllRuns: () => void;
   triggering: boolean;
+  agentAccess?: AgentsConfig;
 }) {
   const { t } = useT();
   const [showRuns, setShowRuns] = useState(true);
@@ -360,7 +361,7 @@ function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit,
     switch (workflow.trigger.type) {
       case 'Cron': return `Cron: ${workflow.trigger.schedule}`;
       case 'Tracker': return `Tracker: ${(workflow.trigger.source as any)?.owner}/${(workflow.trigger.source as any)?.repo}`;
-      case 'Manual': return 'Manuel';
+      case 'Manual': return t('wf.manual');
       default: return t('wf.unknown');
     }
   })();
@@ -411,9 +412,10 @@ function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit,
             <span style={{ fontSize: 10, color: AGENT_COLORS[step.agent] ?? '#888', fontWeight: 600 }}>
               {AGENT_LABELS[step.agent] ?? step.agent}
             </span>
-            {step.mode.type === 'Debate' && (
-              <span style={{ fontSize: 10, color: '#ffc800', background: 'rgba(255,200,0,0.1)', padding: '1px 6px', borderRadius: 4 }}>
-                Debate
+            {checkAgentRestricted(agentAccess, step.agent) && (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10, color: '#ffc800' }}>
+                <AlertTriangle size={10} />
+                {t('config.restrictedStep')}
               </span>
             )}
           </div>
@@ -534,13 +536,13 @@ function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit,
                     fontSize: 9, color: '#00d4ff', fontWeight: 600,
                     animation: 'pulse 1.5s ease-in-out infinite',
                   }}>
-                    en cours...
+                    {t('wf.inProgress')}
                   </span>
                 )}
 
                 {isPending && (
                   <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.1)' }}>
-                    en attente
+                    {t('wf.pending')}
                   </span>
                 )}
               </div>
@@ -641,7 +643,7 @@ function RunDetail({ run, onDelete }: { run: WorkflowRun; onDelete: () => void }
             color: 'rgba(255,255,255,0.2)', display: 'flex', alignItems: 'center',
           }}
           onClick={(e) => { e.stopPropagation(); onDelete(); }}
-          title="Supprimer ce run"
+          title={t('wf.deleteRun')}
         >
           <Trash2 size={10} />
         </button>
@@ -715,11 +717,11 @@ function RunDetail({ run, onDelete }: { run: WorkflowRun; onDelete: () => void }
                       maxHeight: 400, overflowY: 'auto',
                       wordBreak: 'break-word',
                     }}>
-                      {sr.output || '(aucune sortie)'}
+                      {sr.output || t('wf.noOutput')}
                     </div>
                     <div style={{ display: 'flex', gap: 12, marginTop: 6, fontSize: 10, color: 'rgba(255,255,255,0.25)' }}>
-                      <span>Statut: <span style={{ color: STATUS_COLORS[sr.status] ?? '#888' }}>{sr.status}</span></span>
-                      {sr.duration_ms > 0 && <span>Duree: {(sr.duration_ms / 1000).toFixed(1)}s</span>}
+                      <span>{t('wf.status')}: <span style={{ color: STATUS_COLORS[sr.status] ?? '#888' }}>{sr.status}</span></span>
+                      {sr.duration_ms > 0 && <span>{t('wf.duration')}: {(sr.duration_ms / 1000).toFixed(1)}s</span>}
                       {sr.tokens_used > 0 && <span>Tokens: {sr.tokens_used}</span>}
                       {sr.condition_result && <span>Condition: <span style={{ color: '#ffc800' }}>{conditionLabel(sr.condition_result)}</span></span>}
                     </div>
@@ -747,12 +749,13 @@ function parseCronExpr(expr: string): { every: number; unit: 'minutes' | 'hours'
   return { every: 1, unit: 'days', at: `${hour.padStart(2, '0')}:${min.padStart(2, '0')}` };
 }
 
-function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAgentTypes }: {
+function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAgentTypes, agentAccess }: {
   projects: Project[];
   editWorkflow?: Workflow;
   onDone: () => void;
   onCancel: () => void;
   installedAgentTypes?: AgentType[];
+  agentAccess?: AgentsConfig;
 }) {
   const { t } = useT();
   const availableAgents = (installedAgentTypes && installedAgentTypes.length > 0
@@ -1141,7 +1144,7 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAge
           {steps.map((step, i) => {
             const isAdvOpen = expandedStepAdvanced === i;
             const hasAdvanced = (step.on_result && step.on_result.length > 0) ||
-              step.mode.type === 'Debate' || step.agent_settings ||
+              step.agent_settings ||
               step.stall_timeout_secs || step.retry || step.delay_after_secs;
 
             return (
@@ -1171,6 +1174,19 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAge
                     </button>
                   )}
                 </div>
+                {checkAgentRestricted(agentAccess, step.agent) && (
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px', marginBottom: 6,
+                    borderRadius: 6, background: 'rgba(255,200,0,0.06)', border: '1px solid rgba(255,200,0,0.15)',
+                    fontSize: 11, color: '#ffc800',
+                  }}>
+                    <AlertTriangle size={12} />
+                    <span>{t('config.restrictedStep')}</span>
+                    <span style={{ cursor: 'pointer', textDecoration: 'underline', marginLeft: 4 }}
+                      onClick={() => window.location.hash = '#config'}
+                    >{t('config.restrictedAgentLink')}</span>
+                  </div>
+                )}
                 <textarea
                   style={ws.textarea}
                   rows={3}
@@ -1206,59 +1222,6 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAge
 
                 {isAdvOpen && (
                   <div style={ws.advancedPanel}>
-                    {/* Mode: Normal / Debate */}
-                    <div style={{ marginBottom: 10 }}>
-                      <label style={ws.label}>{t('wiz.mode')}</label>
-                      <div style={{ display: 'flex', gap: 6 }}>
-                        <button
-                          style={{ ...ws.modeBtn, ...(step.mode.type === 'Normal' ? ws.modeBtnActive : {}) }}
-                          onClick={() => updateStep(i, { mode: { type: 'Normal' } })}
-                        >Normal</button>
-                        <button
-                          style={{ ...ws.modeBtn, ...(step.mode.type === 'Debate' ? ws.modeBtnActive : {}) }}
-                          onClick={() => updateStep(i, { mode: { type: 'Debate', agents: ['ClaudeCode', 'Codex'], max_rounds: 3 } })}
-                        >Debate</button>
-                      </div>
-                    </div>
-
-                    {step.mode.type === 'Debate' && (
-                      <div style={{ marginBottom: 10, padding: '8px 10px', borderRadius: 6, background: 'rgba(255,200,0,0.04)', border: '1px solid rgba(255,200,0,0.1)' }}>
-                        <label style={ws.label}>{t('wiz.debateAgents')}</label>
-                        <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
-                          {availableAgents.map(({ type: a }) => {
-                            const inList = step.mode.type === 'Debate' && step.mode.agents.includes(a);
-                            return (
-                              <button key={a} style={{
-                                ...ws.modeBtn, fontSize: 10,
-                                background: inList ? 'rgba(200,255,0,0.06)' : 'transparent',
-                                borderColor: inList ? 'rgba(200,255,0,0.2)' : 'rgba(255,255,255,0.08)',
-                                color: inList ? (AGENT_COLORS[a] ?? '#e8eaed') : 'rgba(255,255,255,0.3)',
-                              }} onClick={() => {
-                                if (step.mode.type !== 'Debate') return;
-                                const agents = inList
-                                  ? step.mode.agents.filter(x => x !== a)
-                                  : [...step.mode.agents, a];
-                                if (agents.length >= 2) updateStep(i, { mode: { ...step.mode, agents } });
-                              }}>
-                                {AGENT_LABELS[a] ?? a}
-                              </button>
-                            );
-                          })}
-                        </div>
-                        <label style={ws.label}>{t('wiz.maxRounds')}</label>
-                        <input
-                          type="number" min={1} max={10}
-                          style={{ ...ws.input, width: 60 }}
-                          value={step.mode.type === 'Debate' ? step.mode.max_rounds : 3}
-                          onChange={e => {
-                            if (step.mode.type === 'Debate') {
-                              updateStep(i, { mode: { ...step.mode, max_rounds: Math.max(1, parseInt(e.target.value) || 1) } });
-                            }
-                          }}
-                        />
-                      </div>
-                    )}
-
                     {/* Agent settings */}
                     <div style={{ marginBottom: 10 }}>
                       <label style={ws.label}>{t('wiz.agentSettings')}</label>
@@ -1534,7 +1497,6 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAge
           {steps.map((s, i) => (
             <div key={i} style={{ ...ws.summaryRow, paddingLeft: 20 }}>
               {i + 1}. <span style={{ color: AGENT_COLORS[s.agent] ?? '#888', fontWeight: 600 }}>{s.name}</span> ({AGENT_LABELS[s.agent] ?? s.agent})
-              {s.mode.type === 'Debate' && <span style={{ color: '#ffc800', fontSize: 10 }}> [Debate]</span>}
               {s.on_result && s.on_result.length > 0 && <span style={{ color: 'rgba(255,255,255,0.3)', fontSize: 10 }}> [{s.on_result.length} condition{s.on_result.length > 1 ? 's' : ''}]</span>}
               {s.retry && <span style={{ color: 'rgba(255,255,255,0.3)', fontSize: 10 }}> [retry x{s.retry.max_retries}]</span>}
               {s.stall_timeout_secs && <span style={{ color: 'rgba(255,255,255,0.3)', fontSize: 10 }}> [timeout {s.stall_timeout_secs}s]</span>}

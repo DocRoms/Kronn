@@ -109,7 +109,8 @@ sync_mcp_for_repo() {
     AWS_REGION=$(secret_get "aws" "region")
 
     if command -v envsubst >/dev/null 2>&1; then
-        envsubst < "$template" > "$output"
+        # Restrict substitution to known Kronn secrets only — prevent leaking $HOME, $PATH, etc.
+        envsubst '$ATLASSIAN_URL $JIRA_USERNAME $JIRA_API_TOKEN $CONFLUENCE_USERNAME $CONFLUENCE_API_TOKEN $GITHUB_PERSONAL_ACCESS_TOKEN $AWS_ACCESS_KEY_ID $AWS_SECRET_ACCESS_KEY $AWS_REGION' < "$template" > "$output"
         success ".mcp.json généré pour $(basename "$repo_dir")"
     else
         fail "envsubst non trouvé — installer gettext"

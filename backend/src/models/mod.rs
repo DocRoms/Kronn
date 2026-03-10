@@ -108,6 +108,18 @@ pub struct AgentsConfig {
     pub gemini_cli: AgentConfig,
 }
 
+impl AgentsConfig {
+    /// Get the full_access setting for a given agent type.
+    pub fn full_access_for(&self, agent: &AgentType) -> bool {
+        match agent {
+            AgentType::ClaudeCode => self.claude_code.full_access,
+            AgentType::Codex => self.codex.full_access,
+            AgentType::GeminiCli => self.gemini_cli.full_access,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../frontend/src/types/generated.ts")]
 pub struct AgentConfig {
@@ -194,8 +206,6 @@ pub struct Project {
     pub audit_status: AiAuditStatus,
     #[serde(default)]
     pub ai_todo_count: u32,
-    pub mcps: Vec<McpInstance>,
-    pub tasks: Vec<ScheduledTask>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -351,64 +361,6 @@ pub struct McpDefinition {
     pub token_help: Option<String>,
 }
 
-// Legacy type kept for Project struct compatibility
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
-pub struct McpInstance {
-    pub id: String,
-    pub definition_id: String,
-    pub name: String,
-    pub description: String,
-    pub enabled: bool,
-    #[ts(type = "any")]
-    pub config: Option<serde_json::Value>,
-    pub transport: Option<McpTransport>,
-    pub source: String,
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Scheduled Tasks (legacy — kept for migration compatibility)
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
-pub struct ScheduledTask {
-    pub id: String,
-    pub name: String,
-    pub cron_expr: String,
-    pub human_interval: String,
-    pub agent: AgentType,
-    pub prompt: String,
-    pub active: bool,
-    pub last_run: Option<DateTime<Utc>>,
-    pub last_status: Option<TaskStatus>,
-    pub tokens_used: u64,
-    pub created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
-pub enum TaskStatus {
-    Success,
-    Failed { error: String },
-    Running,
-    Cancelled,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
-pub struct TaskRun {
-    pub id: String,
-    pub task_id: String,
-    pub project_id: String,
-    pub status: TaskStatus,
-    pub started_at: DateTime<Utc>,
-    pub finished_at: Option<DateTime<Utc>>,
-    pub tokens_input: u64,
-    pub tokens_output: u64,
-    pub output_log: String,
-}
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // Workflows (replaces scheduled tasks)
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -482,10 +434,6 @@ pub struct WorkflowStep {
 #[serde(tag = "type")]
 pub enum StepMode {
     Normal,
-    Debate {
-        agents: Vec<AgentType>,
-        max_rounds: u32,
-    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -694,6 +642,8 @@ pub struct Discussion {
     pub language: String,
     pub participants: Vec<AgentType>,
     pub messages: Vec<DiscussionMessage>,
+    #[serde(default)]
+    pub archived: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -724,31 +674,10 @@ pub enum MessageRole {
 // API Request/Response types
 // ═══════════════════════════════════════════════════════════════════════════════
 
-#[derive(Debug, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
-pub struct SaveTokensRequest {
-    pub anthropic: Option<String>,
-    pub openai: Option<String>,
-    #[serde(default)]
-    pub google: Option<String>,
-    #[serde(default)]
-    pub disabled_overrides: Vec<String>,
-}
-
 #[derive(Debug, Deserialize, TS)]
 #[ts(export, export_to = "../../frontend/src/types/generated.ts")]
 pub struct SetScanPathsRequest {
     pub paths: Vec<String>,
-}
-
-#[derive(Debug, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
-pub struct CreateTaskRequest {
-    pub name: String,
-    pub cron_expr: String,
-    pub human_interval: String,
-    pub agent: AgentType,
-    pub prompt: String,
 }
 
 // ─── Workflow API requests ────────────────────────────────────────────────
@@ -807,6 +736,7 @@ pub struct WorkflowRunSummary {
     pub tokens_used: u64,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize, TS)]
 #[ts(export, export_to = "../../frontend/src/types/generated.ts")]
 pub struct ImportWorkflowRequest {
@@ -863,6 +793,13 @@ pub struct CreateDiscussionRequest {
     #[serde(default = "default_language")]
     pub language: String,
     pub initial_prompt: String,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+pub struct UpdateDiscussionRequest {
+    pub title: Option<String>,
+    pub archived: Option<bool>,
 }
 
 fn default_language() -> String {
@@ -951,3 +888,7 @@ impl<T: Serialize> ApiResponse<T> {
         Self { success: false, data: None, error: Some(msg.into()) }
     }
 }
+
+#[cfg(test)]
+#[path = "tests.rs"]
+mod tests;

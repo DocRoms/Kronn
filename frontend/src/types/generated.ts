@@ -50,6 +50,11 @@ export interface ApiKeysResponse {
   disabled_overrides: string[];
 }
 
+export interface SaveTokensRequest {
+  anthropic: string | null;
+  openai: string | null;
+}
+
 export interface ScanConfig {
   paths: string[];
   ignore: string[];
@@ -123,8 +128,6 @@ export interface Project {
   ai_config: AiConfigStatus;
   audit_status: AiAuditStatus;
   ai_todo_count: number;
-  mcps: McpInstance[];
-  tasks: ScheduledTask[];
   created_at: string; // ISO 8601
   updated_at: string;
 }
@@ -217,51 +220,6 @@ export interface McpDefinition {
   token_help: string | null;
 }
 
-export interface McpInstance {
-  id: string;
-  definition_id: string;
-  name: string;
-  description: string;
-  enabled: boolean;
-  config: unknown | null;
-  transport: McpTransport | null;
-  source: string;
-}
-
-// ─── Tasks ──────────────────────────────────────────────────────────────────
-
-export interface ScheduledTask {
-  id: string;
-  name: string;
-  cron_expr: string;
-  human_interval: string;
-  agent: AgentType;
-  prompt: string;
-  active: boolean;
-  last_run: string | null;
-  last_status: TaskStatus | null;
-  tokens_used: number;
-  created_at: string;
-}
-
-export type TaskStatus =
-  | "Success"
-  | { Failed: { error: string } }
-  | "Running"
-  | "Cancelled";
-
-export interface TaskRun {
-  id: string;
-  task_id: string;
-  project_id: string;
-  status: TaskStatus;
-  started_at: string;
-  finished_at: string | null;
-  tokens_input: number;
-  tokens_output: number;
-  output_log: string;
-}
-
 // ─── Workflows ─────────────────────────────────────────────────────────────
 
 export interface Workflow {
@@ -301,8 +259,7 @@ export interface WorkflowStep {
 }
 
 export type StepMode =
-  | { type: "Normal" }
-  | { type: "Debate"; agents: AgentType[]; max_rounds: number };
+  | { type: "Normal" };
 
 export interface AgentSettings {
   model?: string | null;
@@ -353,7 +310,7 @@ export interface WorkflowRun {
   id: string;
   workflow_id: string;
   status: RunStatus;
-  trigger_context: any | null;
+  trigger_context: WorkflowTrigger | null;
   step_results: StepResult[];
   tokens_used: number;
   workspace_path: string | null;
@@ -473,6 +430,7 @@ export interface Discussion {
   language: string;
   participants: AgentType[];
   messages: DiscussionMessage[];
+  archived: boolean;
   created_at: string; // ISO 8601
   updated_at: string;
 }
@@ -503,23 +461,8 @@ export interface UpdateMcpContextRequest {
 
 // ─── API Requests ───────────────────────────────────────────────────────────
 
-export interface SaveTokensRequest {
-  anthropic: string | null;
-  openai: string | null;
-  google: string | null;
-  disabled_overrides?: string[];
-}
-
 export interface SetScanPathsRequest {
   paths: string[];
-}
-
-export interface CreateTaskRequest {
-  name: string;
-  cron_expr: string;
-  human_interval: string;
-  agent: AgentType;
-  prompt: string;
 }
 
 export interface CreateMcpConfigRequest {
