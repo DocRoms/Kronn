@@ -9,7 +9,7 @@ services:
       - kronn-data:/data
       - ${HOME}:/host-home:ro
       - ${KRONN_REPOS_DIR:-${HOME}/Repositories}:/host-home/Repositories:rw  # rw for .mcp.json writes
-      - /usr/local/bin:/host-bin/global:ro
+      - ${KRONN_GLOBAL_BIN:-/usr/local/bin}:/host-bin/global:ro
       - ${HOME}/.local/bin:/host-bin/local:ro
       - ${HOME}/.local/share:/host-home/.local/share:ro  # Symlink targets (claude, vibe)
       - npm-cache:/root/.npm  # Persistent npm cache for npx agent execution
@@ -27,6 +27,7 @@ services:
       - KRONN_DATA_DIR=/data
       - KRONN_HOST_HOME=${HOME}
       - KRONN_HOST_BIN=/host-bin/local:/host-bin/global
+      - KRONN_HOST_OS=${KRONN_HOST_OS:-Linux}
       - RUST_LOG=kronn=debug,tower_http=debug
 
   frontend:

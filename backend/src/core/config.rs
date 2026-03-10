@@ -4,7 +4,7 @@ use directories::ProjectDirs;
 use tokio::fs;
 
 use crate::models::{
-    AgentConfig, AgentsConfig, AppConfig, ScanConfig, ServerConfig, TokensConfig,
+    AgentConfig, AgentsConfig, ApiKey, AppConfig, ScanConfig, ServerConfig, TokensConfig,
 };
 
 const CONFIG_FILE: &str = "config.toml";
@@ -42,14 +42,47 @@ pub async fn load() -> Result<Option<AppConfig>> {
     let mut config: AppConfig = toml::from_str(&content)
         .context("Failed to parse config file")?;
 
+    let mut needs_save = false;
+
     // Ensure encryption secret exists (migrate older configs)
     if config.encryption_secret.is_none() {
         config.encryption_secret = Some(super::crypto::generate_secret());
-        // Save back so the secret persists
+        needs_save = true;
+        tracing::info!("Generated encryption secret for existing config");
+    }
+
+    // Migrate legacy single-key fields to multi-key system
+    if config.tokens.keys.is_empty() {
+        let legacy_keys: Vec<(&str, &Option<String>)> = vec![
+            ("anthropic", &config.tokens.anthropic),
+            ("openai", &config.tokens.openai),
+            ("google", &config.tokens.google),
+        ];
+        for (provider, key_opt) in legacy_keys {
+            if let Some(ref val) = key_opt {
+                config.tokens.keys.push(ApiKey {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    name: "Personal API Key".into(),
+                    provider: provider.into(),
+                    value: val.clone(),
+                    active: true,
+                });
+            }
+        }
+        if !config.tokens.keys.is_empty() {
+            // Clear legacy fields (skip_serializing prevents them from being written)
+            config.tokens.anthropic = None;
+            config.tokens.openai = None;
+            config.tokens.google = None;
+            needs_save = true;
+            tracing::info!("Migrated {} legacy API key(s) to multi-key format", config.tokens.keys.len());
+        }
+    }
+
+    if needs_save {
         let updated = toml::to_string_pretty(&config)
             .context("Failed to serialize config")?;
         tokio::fs::write(&path, updated).await?;
-        tracing::info!("Generated encryption secret for existing config");
     }
 
     Ok(Some(config))
@@ -80,6 +113,9 @@ pub fn default_config() -> AppConfig {
         tokens: TokensConfig {
             anthropic: None,
             openai: None,
+            google: None,
+            keys: vec![],
+            disabled_overrides: vec![],
         },
         scan: ScanConfig {
             paths: vec![],
@@ -105,6 +141,7 @@ pub fn default_config() -> AppConfig {
                 version: None,
                 full_access: false,
             },
+            gemini_cli: AgentConfig::default(),
         },
         language: "fr".into(),
         disabled_agents: vec![],

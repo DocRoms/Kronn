@@ -1,7 +1,18 @@
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::Instant;
 use anyhow::Result;
 use crate::models::{AgentDetection, AgentType};
 
 pub mod runner;
+
+/// Cache for runtime probe results (npx availability).
+/// Key: binary name, Value: (available, probed_at)
+static RUNTIME_CACHE: std::sync::LazyLock<Mutex<HashMap<String, (bool, Instant)>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// How long to cache a runtime probe result
+const RUNTIME_CACHE_TTL_SECS: u64 = 300; // 5 minutes
 
 struct AgentDef {
     name: &'static str,
@@ -15,7 +26,31 @@ const KNOWN_AGENTS: &[AgentDef] = &[
     AgentDef { name: "Claude Code", agent_type: AgentType::ClaudeCode, binary: "claude", origin: "US", install_cmd: "npm install -g @anthropic-ai/claude-code" },
     AgentDef { name: "Codex", agent_type: AgentType::Codex, binary: "codex", origin: "US", install_cmd: "npm install -g @openai/codex" },
     AgentDef { name: "Vibe", agent_type: AgentType::Vibe, binary: "vibe", origin: "EU", install_cmd: "uv tool install mistral-vibe" },
+    AgentDef { name: "Gemini CLI", agent_type: AgentType::GeminiCli, binary: "gemini", origin: "US", install_cmd: "npm install -g @google/gemini-cli" },
 ];
+
+/// Detect the host platform label (WSL, macOS, Linux, etc.)
+/// The backend runs inside Docker (always Linux), so we use runtime
+/// heuristics rather than compile-time cfg!() checks.
+fn detect_host_label() -> String {
+    // Docker on WSL2 shares the kernel — /proc/version contains "microsoft"
+    if let Ok(version) = std::fs::read_to_string("/proc/version") {
+        if version.contains("microsoft") || version.contains("WSL") {
+            return "WSL".into();
+        }
+    }
+    // Docker Desktop on macOS uses a LinuxKit VM — check /proc/version
+    if let Ok(version) = std::fs::read_to_string("/proc/version") {
+        if version.contains("linuxkit") || version.contains("Docker Desktop") {
+            return "macOS".into();
+        }
+    }
+    // Env var fallback: docker-compose can pass KRONN_HOST_OS=macOS
+    if let Ok(host_os) = std::env::var("KRONN_HOST_OS") {
+        return host_os;
+    }
+    "host".into()
+}
 
 /// Detect all known agents on the system
 pub async fn detect_all() -> Vec<AgentDetection> {
@@ -26,26 +61,32 @@ pub async fn detect_all() -> Vec<AgentDetection> {
     agents
 }
 
-/// Detect a single agent by checking if its binary exists in PATH or host bin dirs
+/// Detect a single agent by checking if its binary exists in PATH or host bin dirs.
+/// If no local binary is found but the agent has an npx package, probe runtime availability.
 async fn detect_agent(def: &AgentDef) -> AgentDetection {
     // Check standard PATH first, then host-mounted bin directories
     let found = find_binary(def.binary);
 
-    if let Some(path) = found {
+    if let Some(loc) = found {
         // Version detection may fail if symlinks are broken inside container
-        let version = get_version_from(&path).await.ok();
+        let version = get_version_from(&loc.path).await.ok();
         AgentDetection {
             name: def.name.to_string(),
             agent_type: def.agent_type.clone(),
             installed: true,
             enabled: true,
-            path: Some(path),
+            path: Some(loc.path),
             version,
             latest_version: None,
             origin: def.origin.to_string(),
             install_command: Some(def.install_cmd.to_string()),
+            host_managed: loc.host_managed,
+            host_label: if loc.host_managed { Some(detect_host_label()) } else { None },
+            runtime_available: true,
         }
     } else {
+        // No local binary — probe npx/uvx fallback
+        let runtime_available = probe_runtime(def).await;
         AgentDetection {
             name: def.name.to_string(),
             agent_type: def.agent_type.clone(),
@@ -56,18 +97,79 @@ async fn detect_agent(def: &AgentDef) -> AgentDetection {
             latest_version: None,
             origin: def.origin.to_string(),
             install_command: Some(def.install_cmd.to_string()),
+            host_managed: false,
+            host_label: None,
+            runtime_available,
         }
     }
+}
+
+/// Probe whether an agent is runnable via npx/uvx, with caching.
+/// Uses the same fallback path as the runner: `npx --yes <pkg> --version`.
+async fn probe_runtime(def: &AgentDef) -> bool {
+    let npx_pkg = match def.agent_type {
+        AgentType::ClaudeCode => Some("@anthropic-ai/claude-code"),
+        AgentType::Codex => Some("@openai/codex"),
+        AgentType::GeminiCli => Some("@google/gemini-cli"),
+        AgentType::Vibe => None, // uvx, handled differently
+        AgentType::Custom => None,
+    };
+
+    let Some(pkg) = npx_pkg else { return false };
+
+    // Check cache
+    let cache_key = def.binary.to_string();
+    if let Ok(cache) = RUNTIME_CACHE.lock() {
+        if let Some((available, probed_at)) = cache.get(&cache_key) {
+            if probed_at.elapsed().as_secs() < RUNTIME_CACHE_TTL_SECS {
+                return *available;
+            }
+        }
+    }
+
+    // Probe: npx --yes <pkg> --version with 15s timeout
+    tracing::info!("Probing runtime for {} via npx {}", def.name, pkg);
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        tokio::process::Command::new("npx")
+            .args(["--yes", pkg, "--version"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+    ).await;
+
+    let available = match result {
+        Ok(Ok(output)) => output.status.success(),
+        _ => false,
+    };
+
+    // Update cache
+    if let Ok(mut cache) = RUNTIME_CACHE.lock() {
+        cache.insert(cache_key, (available, Instant::now()));
+    }
+
+    tracing::info!("Runtime probe for {}: {}", def.name, if available { "OK" } else { "unavailable" });
+    available
+}
+
+/// Result of finding a binary: path + whether it comes from the host
+pub struct BinaryLocation {
+    pub path: String,
+    pub host_managed: bool,
 }
 
 /// Find a binary in PATH or KRONN_HOST_BIN directories.
 /// Symlinks from the host may be broken inside the container,
 /// so we check for the entry's existence in the directory listing
 /// rather than following the symlink.
-pub fn find_binary(name: &str) -> Option<String> {
+pub fn find_binary(name: &str) -> Option<BinaryLocation> {
     // Standard PATH
     if let Ok(path) = which::which(name) {
-        return Some(path.to_string_lossy().to_string());
+        return Some(BinaryLocation {
+            path: path.to_string_lossy().to_string(),
+            host_managed: false,
+        });
     }
 
     // Host-mounted bin directories (KRONN_HOST_BIN=dir1:dir2:...)
@@ -77,7 +179,10 @@ pub fn find_binary(name: &str) -> Option<String> {
             if let Ok(entries) = std::fs::read_dir(dir_path) {
                 for entry in entries.flatten() {
                     if entry.file_name() == name {
-                        return Some(entry.path().to_string_lossy().to_string());
+                        return Some(BinaryLocation {
+                            path: entry.path().to_string_lossy().to_string(),
+                            host_managed: true,
+                        });
                     }
                 }
             }
@@ -147,6 +252,7 @@ pub async fn uninstall_agent(agent_type: &AgentType) -> Result<String> {
         AgentType::ClaudeCode => "npm uninstall -g @anthropic-ai/claude-code",
         AgentType::Codex => "npm uninstall -g @openai/codex",
         AgentType::Vibe => "uv tool uninstall mistral-vibe 2>/dev/null || pipx uninstall mistral-vibe 2>/dev/null || pip3 uninstall -y mistral-vibe",
+        AgentType::GeminiCli => "npm uninstall -g @google/gemini-cli",
         AgentType::Custom => anyhow::bail!("Cannot uninstall custom agents"),
     };
 

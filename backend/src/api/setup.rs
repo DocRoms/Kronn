@@ -1,4 +1,4 @@
-use axum::{extract::State, Json};
+use axum::{extract::{Path, State}, Json};
 use chrono::Utc;
 use crate::models::*;
 use crate::core::{config, scanner};
@@ -98,38 +98,151 @@ pub async fn complete(
 }
 
 /// GET /api/config/tokens
-/// Returns token config with masked values
+/// Returns all API keys (masked) grouped by provider
 pub async fn get_tokens(
     State(state): State<AppState>,
-) -> Json<ApiResponse<SaveTokensRequest>> {
+) -> Json<ApiResponse<ApiKeysResponse>> {
     let config = state.config.read().await;
-    Json(ApiResponse::ok(SaveTokensRequest {
-        anthropic: config.tokens.anthropic.as_ref().map(|t| mask_token(t)),
-        openai: config.tokens.openai.as_ref().map(|t| mask_token(t)),
+    let keys = config.tokens.keys.iter().map(|k| ApiKeyDisplay {
+        id: k.id.clone(),
+        name: k.name.clone(),
+        provider: k.provider.clone(),
+        masked_value: mask_token(&k.value),
+        active: k.active,
+    }).collect();
+    Json(ApiResponse::ok(ApiKeysResponse {
+        keys,
+        disabled_overrides: config.tokens.disabled_overrides.clone(),
     }))
 }
 
-/// POST /api/config/tokens
-/// Save API tokens
-pub async fn save_tokens(
+/// POST /api/config/api-keys
+/// Create or update an API key
+pub async fn save_api_key(
     State(state): State<AppState>,
-    Json(req): Json<SaveTokensRequest>,
+    Json(req): Json<SaveApiKeyRequest>,
+) -> Json<ApiResponse<ApiKeyDisplay>> {
+    let mut config = state.config.write().await;
+
+    if req.value.is_empty() || req.value.contains('*') {
+        return Json(ApiResponse::err("Invalid key value"));
+    }
+
+    let key = if let Some(ref id) = req.id {
+        // Update existing
+        if let Some(k) = config.tokens.keys.iter_mut().find(|k| &k.id == id) {
+            k.name = req.name.clone();
+            k.value = req.value.clone();
+            k.clone()
+        } else {
+            return Json(ApiResponse::err("Key not found"));
+        }
+    } else {
+        // Create new
+        let is_first = !config.tokens.keys.iter().any(|k| k.provider == req.provider);
+        let new_key = ApiKey {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: req.name,
+            provider: req.provider,
+            value: req.value,
+            active: is_first, // First key for this provider is auto-activated
+        };
+        config.tokens.keys.push(new_key.clone());
+        new_key
+    };
+
+    match config::save(&config).await {
+        Ok(_) => Json(ApiResponse::ok(ApiKeyDisplay {
+            id: key.id,
+            name: key.name,
+            provider: key.provider,
+            masked_value: mask_token(&key.value),
+            active: key.active,
+        })),
+        Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
+    }
+}
+
+/// DELETE /api/config/api-keys/:id
+/// Delete an API key
+pub async fn delete_api_key(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
 ) -> Json<ApiResponse<()>> {
     let mut config = state.config.write().await;
 
-    // Only update non-empty, non-masked values
-    if let Some(ref v) = req.anthropic {
-        if !v.is_empty() && !v.contains('*') {
-            config.tokens.anthropic = Some(v.clone());
+    let idx = config.tokens.keys.iter().position(|k| k.id == id);
+    if let Some(i) = idx {
+        let removed = config.tokens.keys.remove(i);
+        // If the deleted key was active, activate the next key for this provider
+        if removed.active {
+            if let Some(next) = config.tokens.keys.iter_mut().find(|k| k.provider == removed.provider) {
+                next.active = true;
+            }
         }
-    }
-    if let Some(ref v) = req.openai {
-        if !v.is_empty() && !v.contains('*') {
-            config.tokens.openai = Some(v.clone());
+        match config::save(&config).await {
+            Ok(_) => Json(ApiResponse::ok(())),
+            Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
         }
+    } else {
+        Json(ApiResponse::err("Key not found"))
     }
+}
+
+/// POST /api/config/api-keys/:id/activate
+/// Set this key as the active one for its provider
+pub async fn activate_api_key(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<()>> {
+    let mut config = state.config.write().await;
+
+    let provider = config.tokens.keys.iter()
+        .find(|k| k.id == id)
+        .map(|k| k.provider.clone());
+
+    if let Some(provider) = provider {
+        for k in config.tokens.keys.iter_mut() {
+            if k.provider == provider {
+                k.active = k.id == id;
+            }
+        }
+        match config::save(&config).await {
+            Ok(_) => Json(ApiResponse::ok(())),
+            Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
+        }
+    } else {
+        Json(ApiResponse::err("Key not found"))
+    }
+}
+
+/// POST /api/config/toggle-token-override
+/// Toggle whether a provider's API key override is active.
+/// When disabling, also removes the key from agent auth files.
+/// When re-enabling, writes the key back.
+pub async fn toggle_token_override(
+    State(state): State<AppState>,
+    Json(provider): Json<String>,
+) -> Json<ApiResponse<bool>> {
+    let mut config = state.config.write().await;
+    let disabled = &mut config.tokens.disabled_overrides;
+    let is_now_enabled = if disabled.contains(&provider) {
+        disabled.retain(|d| d != &provider);
+        true
+    } else {
+        disabled.push(provider.clone());
+        false
+    };
+
+    // Sync agent auth files: write key if enabled, remove if disabled
+    if provider == "openai" {
+        sync_codex_auth(
+            if is_now_enabled { config.tokens.active_key_for("openai") } else { None },
+        );
+    }
+
     match config::save(&config).await {
-        Ok(_) => Json(ApiResponse::ok(())),
+        Ok(_) => Json(ApiResponse::ok(is_now_enabled)),
         Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
     }
 }
@@ -173,12 +286,63 @@ pub async fn set_agent_access(
     match req.agent {
         AgentType::ClaudeCode => config.agents.claude_code.full_access = req.full_access,
         AgentType::Codex => config.agents.codex.full_access = req.full_access,
+        AgentType::GeminiCli => config.agents.gemini_cli.full_access = req.full_access,
         _ => return Json(ApiResponse::err("Agent does not support access flags")),
     }
     match config::save(&config).await {
         Ok(_) => Json(ApiResponse::ok(())),
         Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
     }
+}
+
+/// Write or remove the OpenAI key from ~/.codex/auth.json
+fn sync_codex_auth(key: Option<&str>) {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
+    let codex_dir = std::path::PathBuf::from(home).join(".codex");
+    let codex_auth_path = codex_dir.join("auth.json");
+
+    match key {
+        Some(k) => {
+            // Create .codex dir if needed
+            let _ = std::fs::create_dir_all(&codex_dir);
+            let content = serde_json::json!({
+                "auth_mode": "apikey",
+                "OPENAI_API_KEY": k,
+            });
+            match std::fs::write(&codex_auth_path, serde_json::to_string_pretty(&content).unwrap()) {
+                Ok(_) => tracing::info!("Synced OpenAI key to {}", codex_auth_path.display()),
+                Err(e) => tracing::warn!("Failed to write {}: {}", codex_auth_path.display(), e),
+            }
+        }
+        None => {
+            // Delete the auth file so Codex falls back to its own login/subscription
+            match std::fs::remove_file(&codex_auth_path) {
+                Ok(_) => tracing::info!("Removed {} (Codex will use local auth)", codex_auth_path.display()),
+                Err(e) => tracing::warn!("Failed to remove {}: {}", codex_auth_path.display(), e),
+            }
+        }
+    }
+}
+
+/// POST /api/config/sync-agent-tokens
+/// Write API tokens into agent-specific auth files (e.g. ~/.codex/auth.json)
+pub async fn sync_agent_tokens(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<Vec<String>>> {
+    let config = state.config.read().await;
+    let mut synced: Vec<String> = Vec::new();
+
+    // ── Codex: ~/.codex/auth.json ──
+    if let Some(openai_key) = config.tokens.active_key_for("openai") {
+        if !config.tokens.disabled_overrides.contains(&"openai".to_string()) {
+            sync_codex_auth(Some(openai_key));
+            synced.push("Codex".into());
+        }
+    }
+
+    // Future: Gemini CLI, Claude Code, etc. can be added here
+
+    Json(ApiResponse::ok(synced))
 }
 
 fn mask_token(token: &str) -> String {

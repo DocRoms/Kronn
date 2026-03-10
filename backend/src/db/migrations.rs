@@ -15,6 +15,7 @@ pub fn run(conn: &Connection) -> Result<()> {
         ("001_initial", include_str!("sql/001_initial.sql")),
         ("002_mcp_redesign", include_str!("sql/002_mcp_redesign.sql")),
         ("003_workflows", include_str!("sql/003_workflows.sql")),
+        ("004_token_tracking", include_str!("sql/004_token_tracking.sql")),
     ];
 
     for (name, sql) in migrations {

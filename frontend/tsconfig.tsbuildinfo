@@ -1,1 +1,1 @@
-{"root":["./src/App.tsx","./src/main.tsx","./src/hooks/useApi.ts","./src/lib/api.ts","./src/pages/Dashboard.tsx","./src/pages/McpPage.tsx","./src/pages/SetupWizard.tsx","./src/types/generated.ts"],"version":"5.9.3"}
+{"root":["./src/App.tsx","./src/main.tsx","./src/hooks/useApi.ts","./src/lib/I18nContext.tsx","./src/lib/api.ts","./src/lib/i18n.ts","./src/pages/Dashboard.tsx","./src/pages/McpPage.tsx","./src/pages/SetupWizard.tsx","./src/pages/WorkflowsPage.tsx","./src/types/generated.ts"],"version":"5.9.3"}

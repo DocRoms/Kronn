@@ -93,7 +93,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/setup/complete", post(api::setup::complete))
         .route("/api/setup/reset", post(api::setup::reset))
         // ── Config ──
-        .route("/api/config/tokens", get(api::setup::get_tokens).post(api::setup::save_tokens))
+        .route("/api/config/tokens", get(api::setup::get_tokens))
+        .route("/api/config/api-keys", post(api::setup::save_api_key))
+        .route("/api/config/api-keys/:id", delete(api::setup::delete_api_key))
+        .route("/api/config/api-keys/:id/activate", post(api::setup::activate_api_key))
+        .route("/api/config/sync-agent-tokens", post(api::setup::sync_agent_tokens))
+        .route("/api/config/toggle-token-override", post(api::setup::toggle_token_override))
         .route("/api/config/language", get(api::setup::get_language).post(api::setup::save_language))
         .route("/api/config/agent-access", get(api::setup::get_agent_access).post(api::setup::set_agent_access))
         .route("/api/config/db-info", get(api::setup::db_info))
@@ -145,6 +150,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/discussions/:id/orchestrate", post(api::discussions::orchestrate))
         // ── Stats ──
         .route("/api/stats/tokens", get(api::stats::token_usage))
+        .route("/api/stats/agent-usage", get(api::stats::agent_usage))
         // ── Middleware ──
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())

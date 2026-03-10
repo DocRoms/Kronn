@@ -19,8 +19,35 @@ export interface ServerConfig {
 }
 
 export interface TokensConfig {
-  anthropic: string | null;
-  openai: string | null;
+  keys: ApiKey[];
+  disabled_overrides: string[];
+}
+
+export interface ApiKey {
+  id: string;
+  name: string;
+  provider: string;
+  active: boolean;
+}
+
+export interface ApiKeyDisplay {
+  id: string;
+  name: string;
+  provider: string;
+  masked_value: string;
+  active: boolean;
+}
+
+export interface SaveApiKeyRequest {
+  id: string | null;
+  name: string;
+  provider: string;
+  value: string;
+}
+
+export interface ApiKeysResponse {
+  keys: ApiKeyDisplay[];
+  disabled_overrides: string[];
 }
 
 export interface ScanConfig {
@@ -31,6 +58,7 @@ export interface ScanConfig {
 export interface AgentsConfig {
   claude_code: AgentConfig;
   codex: AgentConfig;
+  gemini_cli: AgentConfig;
 }
 
 export interface SetAgentAccessRequest {
@@ -68,9 +96,13 @@ export interface AgentDetection {
   latest_version: string | null;
   origin: string;
   install_command: string | null;
+  host_managed: boolean;
+  host_label: string | null;
+  /** Agent is runnable via npx/uvx fallback even when no local binary is found */
+  runtime_available: boolean;
 }
 
-export type AgentType = "ClaudeCode" | "Codex" | "Vibe" | "Custom";
+export type AgentType = "ClaudeCode" | "Codex" | "Vibe" | "GeminiCli" | "Custom";
 
 // ─── AI Audit ────────────────────────────────────────────────────────────────
 
@@ -417,6 +449,20 @@ export interface DailyUsage {
   mistral: number;
 }
 
+export interface AgentUsageSummary {
+  agent_type: string;
+  total_tokens: number;
+  message_count: number;
+  by_project: AgentProjectUsage[];
+}
+
+export interface AgentProjectUsage {
+  project_id: string;
+  project_name: string;
+  tokens_used: number;
+  message_count: number;
+}
+
 // ─── Discussions ────────────────────────────────────────────────────────────
 
 export interface Discussion {
@@ -437,6 +483,8 @@ export interface DiscussionMessage {
   content: string;
   agent_type: AgentType | null;
   timestamp: string; // ISO 8601
+  tokens_used: number;
+  auth_mode: string | null;
 }
 
 export type MessageRole = "User" | "Agent" | "System";
@@ -458,6 +506,8 @@ export interface UpdateMcpContextRequest {
 export interface SaveTokensRequest {
   anthropic: string | null;
   openai: string | null;
+  google: string | null;
+  disabled_overrides?: string[];
 }
 
 export interface SetScanPathsRequest {

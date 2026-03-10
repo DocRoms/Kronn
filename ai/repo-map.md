@@ -25,11 +25,11 @@ Kronn/
 │       │   ├── mcps.rs         # MCP 3-tier API: overview, configs CRUD, registry, refresh, secrets
 │       │   ├── tasks.rs        # Legacy scheduled tasks (being replaced by workflows)
 │       │   ├── workflows.rs    # [planned] Workflow CRUD + trigger + runs
-│       │   ├── agents.rs       # Agent detection + install
+│       │   ├── agents.rs       # Agent detection + install + uninstall + toggle (enable/disable)
 │       │   └── stats.rs        # Token usage stats
 │       ├── agents/             # Agent runner (CLI execution)
 │       │   ├── mod.rs          # Re-exports
-│       │   └── runner.rs       # Spawns agent CLIs, streams stdout as SSE. MCP contexts injected into prompts
+│       │   └── runner.rs       # Spawns agent CLIs, streams stdout as SSE. Two output modes: Text (line-by-line) and StreamJson (Claude Code stream-json with token tracking). Runtime probe (npx fallback, 5min cache). MCP contexts injected into prompts
 │       ├── db/                 # SQLite persistence layer
 │       │   ├── mod.rs          # Database struct (Mutex<Connection>), with_conn() async accessor, init
 │       │   ├── migrations.rs   # Versioned migration runner (run before Mutex wrap)
@@ -39,7 +39,8 @@ Kronn/
 │       │   ├── workflows.rs    # Workflow + WorkflowRun CRUD, run deletion (individual + bulk)
 │       │   └── sql/
 │       │       ├── 001_initial.sql      # Schema: projects, tasks, discussions, messages
-│       │       └── 002_mcp_redesign.sql # 3-tier MCP: mcp_servers, mcp_configs, mcp_config_projects
+│       │       ├── 002_mcp_redesign.sql # 3-tier MCP: mcp_servers, mcp_configs, mcp_config_projects
+│       │       └── 004_token_tracking.sql # Token tracking tables
 │       ├── core/               # Business logic
 │       │   ├── mod.rs          # Re-exports
 │       │   ├── config.rs       # Config load/save (~/.config/kronn/)
@@ -74,7 +75,9 @@ Kronn/
 │       ├── hooks/
 │       │   └── useApi.ts       # Generic fetch hook with loading/error state
 │       ├── lib/
-│       │   └── api.ts          # API client (typed wrappers + SSE streaming helpers)
+│       │   ├── api.ts          # API client (typed wrappers + SSE streaming helpers)
+│       │   ├── i18n.ts         # Lightweight i18n system (fr/en/es). Translation dictionaries + locale persistence (localStorage)
+│       │   └── I18nContext.tsx  # React context provider for UI locale (useT() hook)
 │       └── types/
 │           └── generated.ts    # Auto-generated from Rust models (DO NOT EDIT)
 │

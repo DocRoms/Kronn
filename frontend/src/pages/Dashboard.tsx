@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { projects as projectsApi, mcps as mcpsApi, agents as agentsApi, discussions as discussionsApi, config as configApi } from '../lib/api';
+import { projects as projectsApi, mcps as mcpsApi, agents as agentsApi, discussions as discussionsApi, config as configApi, stats as statsApi } from '../lib/api';
 import { useApi } from '../hooks/useApi';
 import type { Project, AgentDetection, Discussion, AgentType } from '../types/generated';
 import { useT } from '../lib/I18nContext';
@@ -13,7 +13,7 @@ import {
   Plus, Trash2, Search, Zap, Settings, Eye,
   Download, Upload, Check, Loader2, RefreshCw,
   MessageSquare, Send, X, Key, AlertTriangle, Save, Users,
-  StopCircle, RotateCcw, Pencil, HardDrive, Play, FileCode, ShieldCheck,
+  StopCircle, RotateCcw, Pencil, HardDrive, Play, FileCode, ShieldCheck, ExternalLink, EyeOff,
 } from 'lucide-react';
 
 type Page = 'projects' | 'mcps' | 'workflows' | 'discussions' | 'settings';
@@ -25,6 +25,9 @@ interface DashboardProps {
 const isHiddenPath = (path: string) => path.split('/').some(s => s.startsWith('.'));
 
 const isAiReady = (p: Project) => p.audit_status !== 'NoTemplate';
+
+/** Agent is usable: locally installed OR available via npx/uvx runtime fallback */
+const isUsable = (a: AgentDetection) => (a.installed || a.runtime_available) && a.enabled;
 
 const isValidationDisc = (title: string) => title === 'Validation audit AI';
 
@@ -39,10 +42,12 @@ const AI_CONFIG_LABELS: Record<string, string> = {
 };
 
 const AGENT_COLORS: Record<string, string> = {
-  'ClaudeCode': '#c8ff00',
-  'Claude Code': '#c8ff00',
-  'Codex': '#00d4ff',
-  'Vibe': '#ff6b6b',
+  'ClaudeCode': '#D4714E',
+  'Claude Code': '#D4714E',
+  'Codex': '#10a37f',
+  'Vibe': '#FF7000',
+  'GeminiCli': '#4285f4',
+  'Gemini CLI': '#4285f4',
 };
 
 const agentColor = (agentType: string | null | undefined): string =>
@@ -77,6 +82,7 @@ export function Dashboard({ onReset }: DashboardProps) {
   const abortControllers = useRef<Record<string, AbortController>>({});
   const [showDebatePopover, setShowDebatePopover] = useState(false);
   const [debateAgents, setDebateAgents] = useState<AgentType[]>([]);
+  const [debateRounds, setDebateRounds] = useState(2);
   // Orchestration live state: per-discussion, tracks current agent streaming and round
   const [orchState, setOrchState] = useState<Record<string, {
     active: boolean;
@@ -92,9 +98,9 @@ export function Dashboard({ onReset }: DashboardProps) {
     try { return JSON.parse(localStorage.getItem('kronn:lastSeenMsgCount') ?? '{}'); } catch { return {}; }
   });
   const chatInputRef = useRef<HTMLInputElement>(null);
-  const [tokenInputs, setTokenInputs] = useState({ anthropic: '', openai: '' });
-  const [tokenSaving, setTokenSaving] = useState(false);
-  const [tokenSaved, setTokenSaved] = useState(false);
+  const [newKeyInputs, setNewKeyInputs] = useState<Record<string, { name: string; value: string }>>({});
+  const [addingKeyFor, setAddingKeyFor] = useState<string | null>(null);
+  const [tokenVisible, setTokenVisible] = useState<Set<string>>(new Set());
   const chatEndRef = useRef<HTMLDivElement>(null);
   // AI audit state
   const [installingTemplate, setInstallingTemplate] = useState<string | null>(null);
@@ -114,6 +120,9 @@ export function Dashboard({ onReset }: DashboardProps) {
   const { data: configLanguage, refetch: refetchLanguage } = useApi(() => configApi.getLanguage(), []);
   const { data: dbInfo, refetch: refetchDbInfo } = useApi(() => configApi.dbInfo(), []);
   const { data: agentAccess, refetch: refetchAgentAccess } = useApi(() => configApi.getAgentAccess(), []);
+  const { data: agentUsageData, refetch: refetchAgentUsage } = useApi(() => statsApi.agentUsage(), []);
+  const [usageExpanded, setUsageExpanded] = useState<string | null>(null);
+  const [usageSearch, setUsageSearch] = useState('');
 
   const projects = projectList ?? [];
   const mcpRegistry = registry ?? [];
@@ -139,7 +148,7 @@ export function Dashboard({ onReset }: DashboardProps) {
     { trigger: '@codex', type: 'Codex', label: 'Codex' },
     { trigger: '@vibe', type: 'Vibe', label: 'Vibe' },
   ];
-  const activeAgentTypes = new Set(agents.filter(a => a.installed && a.enabled).map(a => a.agent_type));
+  const activeAgentTypes = new Set(agents.filter(isUsable).map(a => a.agent_type));
   const AGENT_MENTIONS = ALL_AGENT_MENTIONS.filter(m => activeAgentTypes.has(m.type));
 
   // Track "last seen" message count for unread badges (persisted in localStorage)
@@ -643,12 +652,12 @@ export function Dashboard({ onReset }: DashboardProps) {
 
         {/* ════════ WORKFLOWS ════════ */}
         {page === 'workflows' && (
-          <WorkflowsPage projects={projects} installedAgentTypes={agents.filter(a => a.installed && a.enabled).map(a => a.agent_type)} />
+          <WorkflowsPage projects={projects} installedAgentTypes={agents.filter(isUsable).map(a => a.agent_type)} />
         )}
 
         {/* ════════ DISCUSSIONS ════════ */}
         {page === 'discussions' && (() => {
-          const installedAgents = agents.filter(a => a.installed && a.enabled);
+          const installedAgents = agents.filter(isUsable);
           // Auto-select first installed agent if current selection is invalid
           if (installedAgents.length > 0 && !installedAgents.some(a => a.agent_type === newDiscAgent)) {
             setNewDiscAgent(installedAgents[0].agent_type);
@@ -694,7 +703,7 @@ export function Dashboard({ onReset }: DashboardProps) {
             setStreamingMap(prev => ({ ...prev, [discId]: '' }));
             await discussionsApi.runAgent(
               discId,
-              (text) => setStreamingMap(prev => ({ ...prev, [discId]: prev[discId] ? prev[discId] + '\n' + text : text })),
+              (text) => setStreamingMap(prev => ({ ...prev, [discId]: (prev[discId] ?? '') + text })),
               () => cleanupStream(discId),
               (error) => { console.error('Agent error:', error); cleanupStream(discId); },
               controller.signal,
@@ -724,7 +733,7 @@ export function Dashboard({ onReset }: DashboardProps) {
             await discussionsApi.sendMessageStream(
               discId,
               { content: msg, target_agent: targetAgent },
-              (text) => setStreamingMap(prev => ({ ...prev, [discId]: prev[discId] ? prev[discId] + '\n' + text : text })),
+              (text) => setStreamingMap(prev => ({ ...prev, [discId]: (prev[discId] ?? '') + text })),
               () => cleanupStream(discId),
               (error) => { console.error('Agent error:', error); cleanupStream(discId); },
               controller.signal,
@@ -757,7 +766,7 @@ export function Dashboard({ onReset }: DashboardProps) {
             setStreamingMap(prev => ({ ...prev, [discId]: '' }));
             await discussionsApi.runAgent(
               discId,
-              (text) => setStreamingMap(prev => ({ ...prev, [discId]: prev[discId] ? prev[discId] + '\n' + text : text })),
+              (text) => setStreamingMap(prev => ({ ...prev, [discId]: (prev[discId] ?? '') + text })),
               () => cleanupStream(discId),
               (error) => { console.error('Agent error:', error); cleanupStream(discId); },
               controller.signal,
@@ -779,7 +788,7 @@ export function Dashboard({ onReset }: DashboardProps) {
             setStreamingMap(prev => ({ ...prev, [discId]: '' }));
             await discussionsApi.runAgent(
               discId,
-              (text) => setStreamingMap(prev => ({ ...prev, [discId]: prev[discId] ? prev[discId] + '\n' + text : text })),
+              (text) => setStreamingMap(prev => ({ ...prev, [discId]: (prev[discId] ?? '') + text })),
               () => cleanupStream(discId),
               (error) => { console.error('Agent error:', error); cleanupStream(discId); },
               controller.signal,
@@ -798,7 +807,7 @@ export function Dashboard({ onReset }: DashboardProps) {
               [discId]: { active: true, round: 0, totalRounds: 3, currentAgent: null, agentStreams: [], systemMessages: [] },
             }));
 
-            await discussionsApi.orchestrate(discId, { agents: debateAgents, max_rounds: 3 }, {
+            await discussionsApi.orchestrate(discId, { agents: debateAgents, max_rounds: debateRounds }, {
               onSystem: (text) => {
                 setOrchState(prev => {
                   const s = prev[discId];
@@ -827,7 +836,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                   if (!s) return prev;
                   const streams = [...s.agentStreams];
                   const last = [...streams].reverse().find((st: typeof streams[0]) => st.agent === agent && !st.done);
-                  if (last) last.text = last.text ? last.text + '\n' + text : text;
+                  if (last) last.text = (last.text ?? '') + text;
                   return { ...prev, [discId]: { ...s, agentStreams: streams } };
                 });
               },
@@ -1167,8 +1176,18 @@ export function Dashboard({ onReset }: DashboardProps) {
                             </div>
                           )}
                           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 4 }}>
-                            <div style={ds.msgTime}>
+                            <div style={{ ...ds.msgTime, display: 'flex', alignItems: 'center', gap: 6 }}>
                               {new Date(msg.timestamp).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}
+                              {msg.tokens_used > 0 && (
+                                <span style={{ color: 'rgba(255,255,255,0.2)', fontSize: 9 }}>
+                                  {msg.tokens_used.toLocaleString()} tok
+                                </span>
+                              )}
+                              {msg.auth_mode && (
+                                <span style={{ color: msg.auth_mode === 'override' ? 'rgba(200,255,0,0.3)' : 'rgba(255,255,255,0.15)', fontSize: 9 }}>
+                                  {msg.auth_mode === 'override' ? 'API key' : 'auth locale'}
+                                </span>
+                              )}
                             </div>
                             {!sending && !isEditing && (isLastUser || isLastAgent) && (
                               <div style={{ display: 'flex', gap: 4 }}>
@@ -1428,9 +1447,26 @@ export function Dashboard({ onReset }: DashboardProps) {
                               </label>
                             );
                           })}
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10 }}>
+                            <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>Rounds</span>
+                            {[1, 2, 3].map(n => (
+                              <button
+                                key={n}
+                                style={{
+                                  width: 28, height: 28, borderRadius: 6, border: 'none', fontFamily: 'inherit',
+                                  fontSize: 12, fontWeight: 700, cursor: 'pointer',
+                                  background: debateRounds === n ? '#8b5cf6' : 'rgba(255,255,255,0.06)',
+                                  color: debateRounds === n ? '#fff' : 'rgba(255,255,255,0.4)',
+                                }}
+                                onClick={() => setDebateRounds(n)}
+                              >
+                                {n}
+                              </button>
+                            ))}
+                          </div>
                           <button
                             style={{
-                              marginTop: 10, width: '100%', padding: '8px 12px', borderRadius: 6,
+                              marginTop: 8, width: '100%', padding: '8px 12px', borderRadius: 6,
                               border: 'none', fontFamily: 'inherit', fontSize: 12, fontWeight: 700, cursor: 'pointer',
                               background: debateAgents.length >= 2 ? '#8b5cf6' : 'rgba(255,255,255,0.06)',
                               color: debateAgents.length >= 2 ? '#fff' : 'rgba(255,255,255,0.25)',
@@ -1480,28 +1516,6 @@ export function Dashboard({ onReset }: DashboardProps) {
 
         {/* ════════ CONFIG ════════ */}
         {page === 'settings' && (() => {
-          const handleSaveTokens = async () => {
-            setTokenSaving(true);
-            setTokenSaved(false);
-            try {
-              await configApi.saveTokens({
-                anthropic: tokenInputs.anthropic || null,
-                openai: tokenInputs.openai || null,
-              });
-              setTokenSaved(true);
-              setTokenInputs({ anthropic: '', openai: '' });
-              refetchTokens();
-              setTimeout(() => setTokenSaved(false), 3000);
-            } finally {
-              setTokenSaving(false);
-            }
-          };
-
-          const TOKEN_FIELDS = [
-            { key: 'anthropic' as const, label: 'Anthropic', hint: 'ANTHROPIC_API_KEY', agents: 'Claude Code' },
-            { key: 'openai' as const, label: 'OpenAI', hint: 'OPENAI_API_KEY', agents: 'Codex' },
-          ];
-
           return (
           <div>
             <h1 style={s.h1}>Configuration</h1>
@@ -1577,29 +1591,49 @@ export function Dashboard({ onReset }: DashboardProps) {
                   <Cpu size={14} style={{ color: '#c8ff00' }} />
                   <span style={{ fontWeight: 600, fontSize: 14 }}>{t('config.agents')}</span>
                   <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginLeft: 'auto' }}>
-                    {agents.filter(a => a.installed).length}/{agents.length} {agents.filter(a => a.installed).length > 1 ? t('config.installedPlural') : t('config.installed')}
+                    {agents.filter(a => a.installed || a.runtime_available).length}/{agents.length} {agents.filter(a => a.installed || a.runtime_available).length > 1 ? t('config.installedPlural') : t('config.installed')}
                   </span>
                   <button style={s.iconBtn} onClick={() => refetchAgents()} title={t('config.refresh')}>
                     <RefreshCw size={12} />
                   </button>
                 </div>
 
+                {(() => {
+                  const isWSL = agents.some(a => a.host_label === 'WSL');
+                  const hasDockerAgent = agents.some(a => a.installed && !a.host_managed);
+                  return isWSL && hasDockerAgent ? (
+                    <div style={{ padding: '8px 12px', marginBottom: 8, borderRadius: 6, background: 'rgba(255,180,0,0.06)', border: '1px solid rgba(255,180,0,0.15)', display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+                      <AlertTriangle size={12} style={{ color: '#ffb400', flexShrink: 0, marginTop: 2 }} />
+                      <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.5)', lineHeight: 1.4 }}>{t('config.wslWarning')}</span>
+                    </div>
+                  ) : null;
+                })()}
+
                 {agents.map(agent => {
                   const permFlag: Record<string, { flag: string; descKey: string }> = {
                     ClaudeCode: { flag: '--dangerously-skip-permissions', descKey: 'config.fullAccess' },
                     Codex: { flag: '--full-auto', descKey: 'config.autoApply' },
+                    GeminiCli: { flag: '--yolo', descKey: 'config.fullAccess' },
                   };
                   const perm = permFlag[agent.agent_type];
+                  const tokenField: Record<string, { key: 'anthropic' | 'openai' | 'google'; hint: string; url: string }> = {
+                    ClaudeCode: { key: 'anthropic', hint: 'ANTHROPIC_API_KEY', url: 'https://console.anthropic.com/settings/keys' },
+                    Codex: { key: 'openai', hint: 'OPENAI_API_KEY', url: 'https://platform.openai.com/api-keys' },
+                    GeminiCli: { key: 'google', hint: 'GEMINI_API_KEY', url: 'https://aistudio.google.com/apikey' },
+                  };
+                  const tf = tokenField[agent.agent_type];
                   const isFullAccess = agent.agent_type === 'ClaudeCode'
                     ? agentAccess?.claude_code?.full_access ?? false
                     : agent.agent_type === 'Codex'
                       ? agentAccess?.codex?.full_access ?? false
-                      : false;
+                      : agent.agent_type === 'GeminiCli'
+                        ? agentAccess?.gemini_cli?.full_access ?? false
+                        : false;
 
                   return (
                   <div key={agent.name} style={{ padding: '10px 0', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                      <div style={s.dot(agent.installed && agent.enabled)} />
+                      <div style={s.dot((agent.installed || agent.runtime_available) && agent.enabled)} />
                       <div style={{ flex: 1 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                           <span style={{ fontWeight: 600, fontSize: 12 }}>{agent.name}</span>
@@ -1609,13 +1643,18 @@ export function Dashboard({ onReset }: DashboardProps) {
                             <span style={s.updateBadge}>&#x2B06; {agent.latest_version}</span>
                           )}
                         </div>
-                        {!agent.installed && (
+                        {!agent.installed && !agent.runtime_available && (
                           <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)', marginTop: 2 }}>
                             <code style={s.code}>{agent.install_command}</code>
                           </div>
                         )}
+                        {!agent.installed && agent.runtime_available && (
+                          <div style={{ fontSize: 10, color: 'rgba(52,211,153,0.5)', marginTop: 2 }}>
+                            runtime OK <span style={{ color: 'rgba(255,255,255,0.2)' }}>— via npx</span>
+                          </div>
+                        )}
                       </div>
-                      {agent.installed ? (
+                      {(agent.installed || agent.runtime_available) ? (
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                           <button
                             style={{
@@ -1638,6 +1677,9 @@ export function Dashboard({ onReset }: DashboardProps) {
                           >
                             {agent.enabled ? t('config.enabled') : t('config.disabled')}
                           </button>
+                          {agent.host_managed && (
+                            <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.25)', marginLeft: 2 }} title={t('config.hostManaged')}>{agent.host_label ?? 'host'}</span>
+                          )}
                           <button
                             style={{ ...s.iconBtn, color: 'rgba(255,255,255,0.2)' }}
                             title={t('config.uninstall')}
@@ -1646,7 +1688,17 @@ export function Dashboard({ onReset }: DashboardProps) {
                               setInstalling(agent.name);
                               try {
                                 await agentsApi.uninstall(agent.agent_type);
-                              } catch { /* ignore */ }
+                              } catch {
+                                alert(t('config.uninstallFailed'));
+                                setInstalling(null);
+                                return;
+                              }
+                              // Re-detect: if agent is still installed, uninstall had no effect
+                              const updated = await agentsApi.detect();
+                              const still = updated?.find((a: AgentDetection) => a.agent_type === agent.agent_type);
+                              if (still?.installed) {
+                                alert(t('config.uninstallFailed'));
+                              }
                               refetchAgents();
                               setInstalling(null);
                             }}
@@ -1669,7 +1721,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                         </button>
                       )}
                     </div>
-                    {perm && agent.installed && (
+                    {perm && (agent.installed || agent.runtime_available) && (
                       <div style={{ marginLeft: 22, marginTop: 8, padding: '8px 12px', borderRadius: 6, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
                         <div
                           style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}
@@ -1696,69 +1748,253 @@ export function Dashboard({ onReset }: DashboardProps) {
                         </p>
                       </div>
                     )}
+                    {tf && (agent.installed || agent.runtime_available) && (() => {
+                      const providerKeys = tokenConfig?.keys?.filter(k => k.provider === tf.key) ?? [];
+                      const isDisabled = tokenConfig?.disabled_overrides?.includes(tf.key);
+                      const isAdding = addingKeyFor === tf.key;
+                      const newInput = newKeyInputs[tf.key] ?? { name: '', value: '' };
+                      return (
+                      <div style={{ marginLeft: 22, marginTop: 6 }}>
+                        {/* Provider-level override toggle */}
+                        {providerKeys.length > 0 && (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                            <Key size={10} style={{ color: 'rgba(255,255,255,0.25)', flexShrink: 0 }} />
+                            <button
+                              style={{ ...s.iconBtn, padding: 0 }}
+                              title={isDisabled ? t('config.enableOverride') : t('config.disableOverride')}
+                              onClick={async () => {
+                                await configApi.toggleTokenOverride(tf.key);
+                                refetchTokens();
+                              }}
+                            >
+                              {isDisabled
+                                ? <Play size={10} style={{ color: 'rgba(255,255,255,0.25)' }} />
+                                : <StopCircle size={10} style={{ color: 'rgba(52,211,153,0.5)' }} />}
+                            </button>
+                            <span style={{ fontSize: 10, color: isDisabled ? 'rgba(255,255,255,0.25)' : 'rgba(52,211,153,0.6)' }}>
+                              {isDisabled ? t('config.overrideDisabled') : t('config.overrideActive')}
+                            </span>
+                            <a
+                              href={tf.url} target="_blank" rel="noopener noreferrer"
+                              style={{ display: 'flex', alignItems: 'center', color: 'rgba(255,255,255,0.25)', flexShrink: 0, marginLeft: 'auto' }}
+                              title={t('config.getKey')}
+                            >
+                              <ExternalLink size={10} />
+                            </a>
+                          </div>
+                        )}
+
+                        {/* Existing keys list */}
+                        {providerKeys.map(k => {
+                          const isVis = tokenVisible.has(k.id);
+                          return (
+                          <div key={k.id} style={{
+                            display: 'flex', alignItems: 'center', gap: 6, padding: '2px 0 2px 16px',
+                            opacity: isDisabled ? 0.4 : 1,
+                          }}>
+                            {/* Active indicator / activate button */}
+                            {k.active ? (
+                              <Check size={9} style={{ color: 'rgba(52,211,153,0.7)', flexShrink: 0 }} />
+                            ) : (
+                              <button style={{ ...s.iconBtn, padding: 0 }} title={t('config.activateKey')}
+                                onClick={async () => { await configApi.activateApiKey(k.id); refetchTokens(); }}>
+                                <div style={{ width: 9, height: 9, borderRadius: '50%', border: '1px solid rgba(255,255,255,0.2)' }} />
+                              </button>
+                            )}
+                            <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.5)', minWidth: 60, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {k.name}
+                            </span>
+                            <span style={{
+                              fontSize: 10, padding: '1px 6px', borderRadius: 4, fontFamily: isVis ? 'monospace' : 'inherit',
+                              background: isDisabled ? 'rgba(255,255,255,0.04)' : 'rgba(52,211,153,0.1)',
+                              color: isDisabled ? 'rgba(255,255,255,0.25)' : 'rgba(52,211,153,0.7)',
+                              textDecoration: isDisabled ? 'line-through' : 'none',
+                            }}>
+                              {isVis ? k.masked_value : k.masked_value.replace(/[^.]/g, '\u2022')}
+                            </span>
+                            <button style={{ ...s.iconBtn, padding: 0 }} title={isVis ? 'Hide' : 'Show'}
+                              onClick={() => setTokenVisible(prev => {
+                                const next = new Set(prev);
+                                if (next.has(k.id)) next.delete(k.id); else next.add(k.id);
+                                return next;
+                              })}>
+                              {isVis ? <EyeOff size={9} style={{ color: '#c8ff00' }} /> : <Eye size={9} style={{ color: 'rgba(255,255,255,0.25)' }} />}
+                            </button>
+                            <button style={{ ...s.iconBtn, padding: 0 }} title={t('config.deleteKey')}
+                              onClick={async () => {
+                                if (confirm(t('config.deleteKeyConfirm').replace('{0}', k.name))) {
+                                  await configApi.deleteApiKey(k.id);
+                                  refetchTokens();
+                                }
+                              }}>
+                              <Trash2 size={9} style={{ color: 'rgba(255,107,107,0.5)' }} />
+                            </button>
+                          </div>
+                          );
+                        })}
+
+                        {/* No keys yet */}
+                        {providerKeys.length === 0 && !isAdding && (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, paddingLeft: 16 }}>
+                            <Key size={10} style={{ color: 'rgba(255,255,255,0.25)', flexShrink: 0 }} />
+                            <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)' }}>{t('config.localAuth')}</span>
+                            <a href={tf.url} target="_blank" rel="noopener noreferrer"
+                              style={{ display: 'flex', alignItems: 'center', color: 'rgba(255,255,255,0.25)', flexShrink: 0 }}
+                              title={t('config.getKey')}>
+                              <ExternalLink size={10} />
+                            </a>
+                          </div>
+                        )}
+
+                        {/* Add key button / form */}
+                        {isAdding ? (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 0 2px 16px' }}>
+                            <input
+                              type="text"
+                              style={{ ...s.input, fontSize: 10, padding: '3px 6px', width: 100 }}
+                              placeholder={t('config.keyName')}
+                              value={newInput.name}
+                              onChange={e => setNewKeyInputs(prev => ({ ...prev, [tf.key]: { ...newInput, name: e.target.value } }))}
+                            />
+                            <input
+                              type="password"
+                              style={{ ...s.input, flex: 1, fontSize: 10, padding: '3px 6px', maxWidth: 180 }}
+                              placeholder={tf.hint}
+                              value={newInput.value}
+                              onChange={e => setNewKeyInputs(prev => ({ ...prev, [tf.key]: { ...newInput, value: e.target.value } }))}
+                            />
+                            {newInput.value && (
+                              <button style={{ ...s.iconBtn, fontSize: 10, color: '#c8ff00' }}
+                                onClick={async () => {
+                                  try {
+                                    await configApi.saveApiKey({
+                                      id: null,
+                                      name: newInput.name || t('config.defaultKeyName'),
+                                      provider: tf.key,
+                                      value: newInput.value,
+                                    });
+                                    setNewKeyInputs(prev => ({ ...prev, [tf.key]: { name: '', value: '' } }));
+                                    setAddingKeyFor(null);
+                                    refetchTokens();
+                                    if (confirm(t('config.syncTokensConfirm'))) {
+                                      const synced = await configApi.syncAgentTokens();
+                                      if (synced.length > 0) {
+                                        alert(t('config.syncTokensDone').replace('{0}', synced.join(', ')));
+                                      } else {
+                                        alert(t('config.syncTokensNone'));
+                                      }
+                                    }
+                                  } catch { /* done */ }
+                                }}>
+                                <Save size={10} />
+                              </button>
+                            )}
+                            <button style={{ ...s.iconBtn, padding: 0 }} onClick={() => setAddingKeyFor(null)}>
+                              <X size={10} style={{ color: 'rgba(255,255,255,0.3)' }} />
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            style={{ ...s.iconBtn, fontSize: 10, color: 'rgba(255,255,255,0.3)', padding: '2px 0 0 16px', display: 'flex', alignItems: 'center', gap: 4 }}
+                            onClick={() => {
+                              setAddingKeyFor(tf.key);
+                              setNewKeyInputs(prev => ({
+                                ...prev,
+                                [tf.key]: { name: providerKeys.length === 0 ? t('config.defaultKeyName') : '', value: '' },
+                              }));
+                            }}
+                          >
+                            <Plus size={9} /> {t('config.addKey')}
+                          </button>
+                        )}
+                      </div>
+                      );
+                    })()}
                   </div>
                   );
                 })}
               </div>
             </div>
 
-            {/* API Keys */}
-            <div id="api-keys" style={s.card(false)}>
+            {/* Token Usage per Agent */}
+            {agentUsageData && agentUsageData.length > 0 && (
+            <div style={s.card(false)}>
               <div style={{ padding: '16px 20px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                  <Key size={14} style={{ color: '#c8ff00' }} />
-                  <span style={{ fontWeight: 600, fontSize: 14 }}>{t('config.apiKeys')}</span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                  <Zap size={14} style={{ color: '#c8ff00' }} />
+                  <span style={{ fontWeight: 600, fontSize: 14 }}>{t('config.tokenUsage')}</span>
+                  <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginLeft: 'auto' }}>
+                    {agentUsageData.reduce((s, a) => s + a.total_tokens, 0).toLocaleString()} tokens
+                  </span>
+                  <button style={s.iconBtn} onClick={() => refetchAgentUsage()} title={t('config.refresh')}>
+                    <RefreshCw size={12} />
+                  </button>
                 </div>
-                <p style={{ color: 'rgba(255,255,255,0.35)', fontSize: 12, marginBottom: 6 }}>
-                  {t('config.apiKeysHint1')}
-                </p>
-                <p style={{ color: 'rgba(255,255,255,0.25)', fontSize: 11, marginBottom: 16 }}>
-                  {t('config.apiKeysHint2')}
-                </p>
 
-                {TOKEN_FIELDS.map(({ key, label, hint, agents: agentNames }) => {
-                  const current = tokenConfig?.[key];
-                  const isSet = !!current;
+                {agentUsageData.map(agent => {
+                  const isExpanded = usageExpanded === agent.agent_type;
+                  const color = AGENT_COLORS[agent.agent_type] ?? '#8b5cf6';
+                  const filteredProjects = isExpanded
+                    ? agent.by_project.filter(p => !usageSearch || p.project_name.toLowerCase().includes(usageSearch.toLowerCase()))
+                    : [];
+
                   return (
-                    <div key={key} style={{ marginBottom: 14 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-                        <label style={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.6)' }}>{label}</label>
-                        {isSet ? (
-                          <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: 'rgba(52,211,153,0.1)', color: 'rgba(52,211,153,0.7)' }}>
-                            <Check size={9} /> override: {current}
-                          </span>
-                        ) : (
-                          <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: 'rgba(255,255,255,0.04)', color: 'rgba(255,255,255,0.3)' }}>
-                            {t('config.localAuth')}
-                          </span>
-                        )}
-                        <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.2)', marginLeft: 'auto' }}>{agentNames}</span>
-                      </div>
-                      <input
-                        type="password"
-                        style={s.input}
-                        placeholder={hint}
-                        value={tokenInputs[key]}
-                        onChange={e => setTokenInputs(prev => ({ ...prev, [key]: e.target.value }))}
-                      />
+                  <div key={agent.agent_type} style={{ marginBottom: 8 }}>
+                    <div
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', cursor: 'pointer',
+                        borderRadius: 6, background: isExpanded ? 'rgba(255,255,255,0.04)' : 'transparent',
+                      }}
+                      onClick={() => setUsageExpanded(isExpanded ? null : agent.agent_type)}
+                    >
+                      <ChevronRight size={12} style={{ color: 'rgba(255,255,255,0.3)', transform: isExpanded ? 'rotate(90deg)' : 'none', transition: 'transform .15s' }} />
+                      <Cpu size={12} style={{ color }} />
+                      <span style={{ fontWeight: 600, fontSize: 12, color }}>{agent.agent_type}</span>
+                      <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginLeft: 'auto' }}>
+                        {agent.total_tokens.toLocaleString()} tok
+                      </span>
+                      <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.2)' }}>
+                        {agent.message_count} msg
+                      </span>
                     </div>
+
+                    {isExpanded && (
+                      <div style={{ paddingLeft: 32, paddingRight: 12, paddingBottom: 8 }}>
+                        {agent.by_project.length > 5 && (
+                          <input
+                            type="text"
+                            placeholder={t('projects.search')}
+                            value={usageSearch}
+                            onChange={e => setUsageSearch(e.target.value)}
+                            style={{ ...s.input, fontSize: 10, padding: '4px 8px', marginBottom: 6, width: '100%' }}
+                          />
+                        )}
+                        {filteredProjects.map(p => (
+                          <div key={p.project_id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '3px 0', fontSize: 11 }}>
+                            <span style={{ color: 'rgba(255,255,255,0.6)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {p.project_name}
+                            </span>
+                            <span style={{ color: 'rgba(255,255,255,0.3)', fontSize: 10, flexShrink: 0 }}>
+                              {p.tokens_used.toLocaleString()} tok
+                            </span>
+                            <span style={{ color: 'rgba(255,255,255,0.15)', fontSize: 9, flexShrink: 0 }}>
+                              {p.message_count} msg
+                            </span>
+                          </div>
+                        ))}
+                        {filteredProjects.length === 0 && usageSearch && (
+                          <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.2)', padding: '4px 0' }}>
+                            {t('projects.noResult')}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
                   );
                 })}
-
-                <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 8 }}>
-                  <button
-                    style={{ ...s.scanBtn, opacity: (tokenInputs.anthropic || tokenInputs.openai) ? 1 : 0.4 }}
-                    onClick={handleSaveTokens}
-                    disabled={tokenSaving || (!tokenInputs.anthropic && !tokenInputs.openai)}
-                  >
-                    <Save size={12} /> {tokenSaving ? t('config.save') + '...' : t('config.save')}
-                  </button>
-                  {tokenSaved && (
-                    <span style={{ fontSize: 12, color: '#34d399' }}><Check size={12} /> {t('config.saved')}</span>
-                  )}
-                </div>
               </div>
             </div>
+            )}
 
             {/* Database */}
             <div style={s.card(false)}>

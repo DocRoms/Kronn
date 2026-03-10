@@ -66,6 +66,9 @@ Never load everything "just in case".
 
 - **Docker + Docker Compose** required for running the full stack.
 - Start: `./kronn start` or `make start` (builds and runs all services).
+- Stop: `./kronn stop` or `make stop`.
+- Restart: `./kronn restart`.
+- Logs: `./kronn logs` or `make logs`.
 - Dev backend only: `make dev-backend` (cargo watch with auto-reload).
 - Dev frontend only: `make dev-frontend` (Vite dev server on :5173).
 - After changing Rust models with `#[derive(TS)]`: run `make typegen` to regenerate `frontend/src/types/generated.ts`.
@@ -135,12 +138,15 @@ After completing a task: if you discovered something non-obvious (a gotcha, a mi
 | Backend | Rust (axum 0.7, tokio, serde, anyhow) |
 | Frontend | React 19 + TypeScript (Vite, Lucide icons) |
 | Styling | Inline styles (no CSS framework) |
+| i18n | Custom lightweight system (fr/en/es), localStorage, no external lib |
 | Type bridge | ts-rs (Rust → TypeScript) |
 | Database | SQLite (`kronn.db`, WAL mode, foreign keys) |
 | Streaming | SSE (Server-Sent Events) for agent responses and workflow run updates |
 | Container | Docker Compose (backend + frontend + nginx gateway) |
-| Agents | Claude Code CLI, OpenAI Codex CLI, Vibe (Mistral), OpenCode (planned) |
-| MCP sync | 3 formats: `.mcp.json` (Claude), `.vibe/config.toml` (Vibe), `~/.codex/config.toml` (Codex) |
+| Agents | Claude Code CLI, OpenAI Codex CLI, Vibe (Mistral), Gemini CLI (Google), OpenCode (planned), DeepSeek (planned) |
+| MCP sync | 3 formats: `.mcp.json` (Claude, Gemini), `.vibe/config.toml` (Vibe), `~/.codex/config.toml` (Codex) |
+| API keys | Multi-key per provider (named keys, active selection), stored in `config.toml` as `[[tokens.keys]]` array. Agent auth files synced (e.g. `~/.codex/auth.json`). Override toggle per provider without deleting keys. |
+| Token tracking | Per-message `tokens_used` + `auth_mode` (override/local). Codex: parsed from stderr. Claude Code: `--output-format stream-json --verbose --include-partial-messages` (tokens from `result` event and `message_delta`). Gemini/Vibe: TODO. |
 
 ---
 
@@ -154,7 +160,7 @@ Dashboard tabs (current / planned):
 | Discussions | Done | Single/multi-agent chat, @mentions, orchestration, global discussions |
 | MCPs | Done | MCP registry and management |
 | Workflows | Done | Workflow list, creation wizard (5-step: infos → trigger → steps → config → resume), detail + runs with live SSE progress, manual trigger, run deletion (individual + bulk). MCP tools auto-injected into agent prompts. Symphony import planned. |
-| Config | Done | Tokens, language, agent detection + permissions, DB management (export/import) |
+| Config | Done | Multi-key API management (named keys, per-provider activation), token usage tracking, language, agent detection + permissions, DB management (export/import) |
 
 Note: the old "Agents" tab has been merged into Config. Nav order: Projets → Discussions → MCPs → Workflows → Config.
 
@@ -196,4 +202,4 @@ Redirectors to this file: `CLAUDE.md`.
 
 ## 12. Last updated
 
-AI context last reviewed: **2026-03-09**.
+AI context last reviewed: **2026-03-10**.

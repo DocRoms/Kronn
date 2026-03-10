@@ -145,14 +145,24 @@ async fn run_agent_with_timeout(
     ).await.map_err(|e| anyhow::anyhow!(e))?;
 
     let mut output = String::new();
+    let is_stream_json = agent_process.output_mode == crate::agents::runner::OutputMode::StreamJson;
 
     loop {
         match timeout(stall_timeout, agent_process.next_line()).await {
             Ok(Some(line)) => {
-                if !output.is_empty() {
-                    output.push('\n');
+                if is_stream_json {
+                    match crate::agents::runner::parse_claude_stream_line(&line) {
+                        crate::agents::runner::StreamJsonEvent::Text(text) => {
+                            output.push_str(&text);
+                        }
+                        _ => {} // Skip usage/metadata in workflow steps (tokens tracked separately)
+                    }
+                } else {
+                    if !output.is_empty() {
+                        output.push('\n');
+                    }
+                    output.push_str(&line);
                 }
-                output.push_str(&line);
             }
             Ok(None) => {
                 // Stream ended — agent finished

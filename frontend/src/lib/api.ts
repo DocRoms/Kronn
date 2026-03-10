@@ -1,7 +1,9 @@
 import type {
   SetupStatus,
   SetScanPathsRequest,
-  SaveTokensRequest,
+  SaveApiKeyRequest,
+  ApiKeyDisplay,
+  ApiKeysResponse,
   Project,
   DetectedRepo,
   McpDefinition,
@@ -33,6 +35,7 @@ import type {
   StepResult,
   CreateWorkflowRequest,
   UpdateWorkflowRequest,
+  AgentUsageSummary,
 } from '../types/generated';
 
 // ─── Generic API wrapper ────────────────────────────────────────────────────
@@ -81,8 +84,12 @@ export const setup = {
 // ─── Config ─────────────────────────────────────────────────────────────────
 
 export const config = {
-  getTokens: () => api<SaveTokensRequest>('GET', '/config/tokens'),
-  saveTokens: (req: SaveTokensRequest) => api<void>('POST', '/config/tokens', req),
+  getTokens: () => api<ApiKeysResponse>('GET', '/config/tokens'),
+  saveApiKey: (req: SaveApiKeyRequest) => api<ApiKeyDisplay>('POST', '/config/api-keys', req),
+  deleteApiKey: (id: string) => api<void>('DELETE', `/config/api-keys/${id}`),
+  activateApiKey: (id: string) => api<void>('POST', `/config/api-keys/${id}/activate`),
+  syncAgentTokens: () => api<string[]>('POST', '/config/sync-agent-tokens'),
+  toggleTokenOverride: (provider: string) => api<boolean>('POST', '/config/toggle-token-override', provider),
   getLanguage: () => api<string>('GET', '/config/language'),
   saveLanguage: (lang: string) => api<void>('POST', '/config/language', lang),
   getAgentAccess: () => api<AgentsConfig>('GET', '/config/agent-access'),
@@ -469,4 +476,5 @@ export const workflows = {
 
 export const stats = {
   tokenUsage: () => api<TokenUsageSummary>('GET', '/stats/tokens'),
+  agentUsage: () => api<AgentUsageSummary[]>('GET', '/stats/agent-usage'),
 };

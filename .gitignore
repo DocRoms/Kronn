@@ -19,6 +19,7 @@ kronn.toml
 .DS_Store
 
 # Docker
+.env
 .docker/data/
 .mcp.json
 .vibe/
