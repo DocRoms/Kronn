@@ -79,6 +79,7 @@ pub async fn create(
         language,
         participants: vec![req.agent.clone()],
         messages: vec![initial_message.clone()],
+        archived: false,
         created_at: now,
         updated_at: now,
     };
@@ -91,6 +92,23 @@ pub async fn create(
         Ok(())
     }).await {
         Ok(()) => Json(ApiResponse::ok(discussion)),
+        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
+/// PATCH /api/discussions/:id
+pub async fn update(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateDiscussionRequest>,
+) -> Json<ApiResponse<()>> {
+    let title = req.title;
+    let archived = req.archived;
+    match state.db.with_conn(move |conn| {
+        crate::db::discussions::update_discussion(conn, &id, title.as_deref(), archived)
+    }).await {
+        Ok(true) => Json(ApiResponse::ok(())),
+        Ok(false) => Json(ApiResponse::err("Discussion not found or no fields to update")),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
 }
@@ -218,12 +236,7 @@ async fn make_agent_stream(
 
     let (tokens, full_access) = {
         let config = state.config.read().await;
-        let fa = match agent_type {
-            AgentType::ClaudeCode => config.agents.claude_code.full_access,
-            AgentType::Codex => config.agents.codex.full_access,
-            AgentType::GeminiCli => config.agents.gemini_cli.full_access,
-            _ => false,
-        };
+        let fa = config.agents.full_access_for(&agent_type);
         (config.tokens.clone(), fa)
     };
 
@@ -278,6 +291,7 @@ async fn make_agent_stream(
                 }
 
                 let status = process.child.wait().await;
+                process.fix_ownership();
                 let success = status.map(|s| s.success()).unwrap_or(false);
 
                 // Detect authentication errors and add helpful guidance
@@ -416,14 +430,8 @@ pub async fn orchestrate(
 
     let (tokens, agent_access) = {
         let config = state.config.read().await;
-        let access = |a: &AgentType| match a {
-            AgentType::ClaudeCode => config.agents.claude_code.full_access,
-            AgentType::Codex => config.agents.codex.full_access,
-            AgentType::GeminiCli => config.agents.gemini_cli.full_access,
-            _ => false,
-        };
         let access_map: std::collections::HashMap<String, bool> = agents.iter()
-            .map(|a| (format!("{:?}", a), access(a)))
+            .map(|a| (format!("{:?}", a), config.agents.full_access_for(a)))
             .collect();
         (config.tokens.clone(), access_map)
     };
@@ -528,6 +536,7 @@ pub async fn orchestrate(
                         }
 
                         let status = process.child.wait().await;
+                        process.fix_ownership();
                         let orch_success = status.map(|s| s.success()).unwrap_or(false);
 
                         let orch_stderr = process.captured_stderr();
@@ -647,6 +656,7 @@ pub async fn orchestrate(
                         }
                     }
                     let _ = process.child.wait().await;
+                    process.fix_ownership();
                     let synth_stderr = process.captured_stderr();
 
                     // Token usage: stream-json parsed inline, others use parse_token_usage

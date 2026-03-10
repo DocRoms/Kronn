@@ -181,6 +181,7 @@ async fn run_agent_with_timeout(
     // Wait for process to finish
     let status = agent_process.child.wait().await
         .context("Failed to wait for agent process")?;
+    agent_process.fix_ownership();
 
     if !status.success() {
         let stderr = agent_process.captured_stderr().join("\n");

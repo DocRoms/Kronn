@@ -90,7 +90,7 @@ Never load everything "just in case".
 ## 4. Development constraints
 
 - **Docker-first**: the full app runs via `docker compose`. Backend, frontend, and gateway are separate services.
-- **Quality is mandatory**: `cargo check` and `cargo clippy` must pass. Frontend must build with `npm run build`.
+- **Quality is mandatory**: `cargo check` and `cargo clippy` must pass. Frontend: `npm run build`, `npm run lint` (0 errors), `npm test` (71 tests must pass).
 - **Type generation**: Rust models are the source of truth. TypeScript types are auto-generated via `ts-rs`.
 - If stdout/stderr is missing: ask the user to copy/paste the full output.
 
@@ -136,7 +136,7 @@ After completing a task: if you discovered something non-obvious (a gotcha, a mi
 | Layer | Technology |
 |-------|------------|
 | Backend | Rust (axum 0.7, tokio, serde, anyhow) |
-| Frontend | React 19 + TypeScript (Vite, Lucide icons) |
+| Frontend | React 18 + TypeScript (Vite 5, Lucide icons, Node >= 23.6.0) |
 | Styling | Inline styles (no CSS framework) |
 | i18n | Custom lightweight system (fr/en/es), localStorage, no external lib |
 | Type bridge | ts-rs (Rust → TypeScript) |

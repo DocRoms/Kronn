@@ -28,6 +28,8 @@ services:
       - KRONN_HOST_HOME=${HOME}
       - KRONN_HOST_BIN=/host-bin/local:/host-bin/global
       - KRONN_HOST_OS=${KRONN_HOST_OS:-Linux}
+      - KRONN_HOST_UID=${UID:-1000}
+      - KRONN_HOST_GID=${GID:-1000}
       - RUST_LOG=kronn=debug,tower_http=debug
 
   frontend:

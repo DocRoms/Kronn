@@ -418,18 +418,11 @@ pub async fn import_data(
         return Json(ApiResponse::err(format!("Failed to clear DB: {}", e)));
     }
 
-    // Import projects with their MCPs and tasks
+    // Import projects
     for project in &data.projects {
         let p = project.clone();
         if let Err(e) = state.db.with_conn(move |conn| crate::db::projects::insert_project(conn, &p)).await {
             return Json(ApiResponse::err(format!("Import project error: {}", e)));
-        }
-        let pid = project.id.clone();
-        // MCPs are now managed via mcp_configs system, not per-project
-        for task in &project.tasks {
-            let t = task.clone();
-            let id = pid.clone();
-            let _ = state.db.with_conn(move |conn| crate::db::projects::insert_task(conn, &id, &t)).await;
         }
     }
 

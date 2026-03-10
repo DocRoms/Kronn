@@ -100,8 +100,6 @@ pub async fn create(
         },
         audit_status: AiAuditStatus::NoTemplate,
         ai_todo_count: 0,
-        mcps: vec![], // MCPs now managed via mcp_configs system
-        tasks: vec![],
         created_at: now,
         updated_at: now,
     };

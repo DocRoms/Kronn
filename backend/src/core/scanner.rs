@@ -36,9 +36,27 @@ pub async fn scan_paths(
         repos.extend(found);
     }
 
-    // Deduplicate by path
+    // Filter out repos whose host path doesn't exist (ghost paths from symlink resolution)
+    repos.retain(|r| {
+        let exists = Path::new(&r.path).exists()
+            || resolve_host_path(&r.path).exists();
+        if !exists {
+            tracing::debug!("Filtering non-existent repo path: {}", r.path);
+        }
+        exists
+    });
+
+    // Deduplicate by canonical path (handles macOS symlinks like /Users -> /private/var/Users)
     repos.sort_by(|a, b| a.path.cmp(&b.path));
-    repos.dedup_by(|a, b| a.path == b.path);
+    repos.dedup_by(|a, b| {
+        if a.path == b.path {
+            return true;
+        }
+        // Compare canonical paths to catch symlink duplicates
+        let canon_a = std::fs::canonicalize(&a.path).unwrap_or_else(|_| PathBuf::from(&a.path));
+        let canon_b = std::fs::canonicalize(&b.path).unwrap_or_else(|_| PathBuf::from(&b.path));
+        canon_a == canon_b
+    });
 
     tracing::info!("Scan complete: {} repositories found", repos.len());
     Ok(repos)

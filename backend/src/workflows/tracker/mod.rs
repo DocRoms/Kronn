@@ -20,6 +20,7 @@ pub struct TrackedIssue {
 }
 
 /// Trait for issue tracker integrations.
+#[allow(dead_code)]
 #[async_trait::async_trait]
 pub trait TrackerSource: Send + Sync {
     /// Poll for new issues matching the query/labels.

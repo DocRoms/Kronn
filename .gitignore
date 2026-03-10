@@ -3,7 +3,9 @@ backend/target/
 
 # Node
 frontend/node_modules/
+frontend/node_modules_old/
 frontend/dist/
+frontend/.pnpm-store/
 
 # Config (generated at first run)
 kronn.toml
@@ -23,3 +25,4 @@ kronn.toml
 .docker/data/
 .mcp.json
 .vibe/
+.env

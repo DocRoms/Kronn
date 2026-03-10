@@ -103,6 +103,13 @@ const fr: TranslationDict = {
   'disc.overrideKey': 'Activer ou remplacer la clé API',
   'disc.orCheckAgent': 'ou verifiez que votre agent local est connecte',
   'disc.stopThinking': 'Arreter la reflexion',
+  'disc.agentDisabled': 'L\'agent {0} est actuellement desactive ou desinstalle.',
+  'disc.agentDisabledLink': 'Gerer les agents',
+  'disc.archive': 'Archiver',
+  'disc.delete': 'Supprimer',
+  'disc.archived': 'Archives',
+  'disc.unarchive': 'Desarchiver',
+  'disc.editTitle': 'Renommer',
 
   // ── Debate ──
   'debate.title': 'Debat multi-agents',
@@ -110,6 +117,7 @@ const fr: TranslationDict = {
   'debate.instructions': 'Selectionnez au moins 2 agents. Ils debattront sur 3 rounds puis l\'agent principal fera la synthese.',
   'debate.main': 'principal',
   'debate.launch': 'Lancer le debat ({0} agents)',
+  'debate.rounds': 'Rounds',
 
   // ── Config ──
   'config.subtitle': 'Parametres generaux de Kronn',
@@ -123,6 +131,11 @@ const fr: TranslationDict = {
   'config.refresh': 'Rafraichir',
   'config.fullAccess': 'Autorise l\'acces web, la modification de fichiers et l\'execution de commandes.',
   'config.autoApply': 'Applique automatiquement les modifications sans confirmation.',
+  'config.restrictedAgent': 'L\'agent {0} n\'a pas le mode "full access" active — il ne pourra pas modifier de fichiers.',
+  'config.restrictedAgentLink': 'Activer dans Config > Agents',
+  'config.restrictedDebate': 'Certains agents n\'ont pas le mode "full access" — ils ne pourront pas modifier de fichiers.',
+  'config.restrictedStep': 'Cet agent n\'a pas le mode "full access" — il ne pourra pas modifier de fichiers.',
+  'config.fullAccessBadge': 'Full access',
   'config.uninstallConfirm': 'Desinstaller {0} ?',
   'config.uninstall': 'Desinstaller',
   'config.hostManaged': 'Installe sur l\'hote',
@@ -166,6 +179,7 @@ const fr: TranslationDict = {
   'config.importError': "Erreur lors de l'import",
   'config.resetHint': "Remettre a zero la configuration et relancer l'assistant de setup.",
   'config.reset': 'Reset configuration',
+  'config.configFile': 'Fichier de config',
 
   // ── MCPs ──
   'mcp.title': 'MCP Servers',
@@ -247,6 +261,13 @@ const fr: TranslationDict = {
   'wf.deleteAll': 'Tout supprimer',
   'wf.noRuns': 'Aucun run',
   'wf.skipNext': 'Skip step suivant',
+  'wf.manual': 'Manuel',
+  'wf.inProgress': 'en cours...',
+  'wf.pending': 'en attente',
+  'wf.deleteRun': 'Supprimer ce run',
+  'wf.noOutput': '(aucune sortie)',
+  'wf.status': 'Statut',
+  'wf.duration': 'Duree',
 
   // ── Workflow wizard ──
   'wiz.infos': 'Infos',
@@ -401,6 +422,13 @@ const en: TranslationDict = {
   'disc.overrideKey': 'Activate or Override API Key',
   'disc.orCheckAgent': 'or check that your local agent is connected',
   'disc.stopThinking': 'Stop thinking',
+  'disc.agentDisabled': 'Agent {0} is currently disabled or uninstalled.',
+  'disc.agentDisabledLink': 'Manage agents',
+  'disc.archive': 'Archive',
+  'disc.delete': 'Delete',
+  'disc.archived': 'Archives',
+  'disc.unarchive': 'Unarchive',
+  'disc.editTitle': 'Rename',
 
   // ── Debate ──
   'debate.title': 'Multi-agent debate',
@@ -408,6 +436,7 @@ const en: TranslationDict = {
   'debate.instructions': 'Select at least 2 agents. They will debate for 3 rounds, then the main agent will synthesize.',
   'debate.main': 'main',
   'debate.launch': 'Launch debate ({0} agents)',
+  'debate.rounds': 'Rounds',
 
   // ── Config ──
   'config.subtitle': 'General Kronn settings',
@@ -421,6 +450,11 @@ const en: TranslationDict = {
   'config.refresh': 'Refresh',
   'config.fullAccess': 'Allows web access, file modifications and command execution.',
   'config.autoApply': 'Automatically applies changes without confirmation.',
+  'config.restrictedAgent': 'Agent {0} does not have "full access" mode enabled — it won\'t be able to modify files.',
+  'config.restrictedAgentLink': 'Enable in Config > Agents',
+  'config.restrictedDebate': 'Some agents don\'t have "full access" mode — they won\'t be able to modify files.',
+  'config.restrictedStep': 'This agent does not have "full access" mode — it won\'t be able to modify files.',
+  'config.fullAccessBadge': 'Full access',
   'config.uninstallConfirm': 'Uninstall {0}?',
   'config.uninstall': 'Uninstall',
   'config.hostManaged': 'Installed on host',
@@ -464,6 +498,7 @@ const en: TranslationDict = {
   'config.importError': 'Error during import',
   'config.resetHint': 'Reset configuration and relaunch the setup wizard.',
   'config.reset': 'Reset configuration',
+  'config.configFile': 'Config file',
 
   // ── MCPs ──
   'mcp.title': 'MCP Servers',
@@ -544,6 +579,13 @@ const en: TranslationDict = {
   'wf.deleteAll': 'Delete all',
   'wf.noRuns': 'No runs',
   'wf.skipNext': 'Skip next step',
+  'wf.manual': 'Manual',
+  'wf.inProgress': 'in progress...',
+  'wf.pending': 'pending',
+  'wf.deleteRun': 'Delete this run',
+  'wf.noOutput': '(no output)',
+  'wf.status': 'Status',
+  'wf.duration': 'Duration',
 
   // ── Workflow wizard ──
   'wiz.infos': 'Info',
@@ -698,6 +740,13 @@ const es: TranslationDict = {
   'disc.overrideKey': 'Activar o reemplazar clave API',
   'disc.orCheckAgent': 'o verifique que su agente local esta conectado',
   'disc.stopThinking': 'Detener pensamiento',
+  'disc.agentDisabled': 'El agente {0} esta actualmente desactivado o desinstalado.',
+  'disc.agentDisabledLink': 'Gestionar agentes',
+  'disc.archive': 'Archivar',
+  'disc.delete': 'Eliminar',
+  'disc.archived': 'Archivos',
+  'disc.unarchive': 'Desarchivar',
+  'disc.editTitle': 'Renombrar',
 
   // ── Debate ──
   'debate.title': 'Debate multi-agente',
@@ -705,6 +754,7 @@ const es: TranslationDict = {
   'debate.instructions': 'Seleccione al menos 2 agentes. Debatiran durante 3 rondas y luego el agente principal hara la sintesis.',
   'debate.main': 'principal',
   'debate.launch': 'Lanzar debate ({0} agentes)',
+  'debate.rounds': 'Rondas',
 
   // ── Config ──
   'config.subtitle': 'Configuracion general de Kronn',
@@ -718,6 +768,11 @@ const es: TranslationDict = {
   'config.refresh': 'Actualizar',
   'config.fullAccess': 'Permite acceso web, modificacion de archivos y ejecucion de comandos.',
   'config.autoApply': 'Aplica automaticamente los cambios sin confirmacion.',
+  'config.restrictedAgent': 'El agente {0} no tiene el modo "full access" activado — no podra modificar archivos.',
+  'config.restrictedAgentLink': 'Activar en Config > Agents',
+  'config.restrictedDebate': 'Algunos agentes no tienen el modo "full access" — no podran modificar archivos.',
+  'config.restrictedStep': 'Este agente no tiene el modo "full access" — no podra modificar archivos.',
+  'config.fullAccessBadge': 'Full access',
   'config.uninstallConfirm': 'Desinstalar {0}?',
   'config.uninstall': 'Desinstalar',
   'config.hostManaged': 'Instalado en el host',
@@ -761,6 +816,7 @@ const es: TranslationDict = {
   'config.importError': 'Error durante la importacion',
   'config.resetHint': 'Restablecer la configuracion y relanzar el asistente de setup.',
   'config.reset': 'Restablecer configuracion',
+  'config.configFile': 'Archivo de config',
 
   // ── MCPs ──
   'mcp.title': 'MCP Servers',
@@ -841,6 +897,13 @@ const es: TranslationDict = {
   'wf.deleteAll': 'Eliminar todo',
   'wf.noRuns': 'Sin ejecuciones',
   'wf.skipNext': 'Saltar siguiente step',
+  'wf.manual': 'Manual',
+  'wf.inProgress': 'en curso...',
+  'wf.pending': 'pendiente',
+  'wf.deleteRun': 'Eliminar este run',
+  'wf.noOutput': '(sin salida)',
+  'wf.status': 'Estado',
+  'wf.duration': 'Duracion',
 
   // ── Workflow wizard ──
   'wiz.infos': 'Info',

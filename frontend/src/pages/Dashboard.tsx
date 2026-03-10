@@ -1,19 +1,18 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import { projects as projectsApi, mcps as mcpsApi, agents as agentsApi, discussions as discussionsApi, config as configApi, stats as statsApi } from '../lib/api';
+import { useState, useCallback } from 'react';
+import { projects as projectsApi, mcps as mcpsApi, agents as agentsApi, discussions as discussionsApi, config as configApi } from '../lib/api';
 import { useApi } from '../hooks/useApi';
-import type { Project, AgentDetection, Discussion, AgentType } from '../types/generated';
+import type { Project, AgentDetection, AgentType } from '../types/generated';
 import { useT } from '../lib/I18nContext';
-import { UI_LOCALES } from '../lib/i18n';
 import { McpPage } from './McpPage';
 import { WorkflowsPage } from './WorkflowsPage';
+import { SettingsPage } from './SettingsPage';
+import { DiscussionsPage } from './DiscussionsPage';
 import {
   Folder, Server, ChevronRight, Cpu, Workflow,
   Plus, Trash2, Search, Zap, Settings, Eye,
-  Download, Upload, Check, Loader2, RefreshCw,
-  MessageSquare, Send, X, Key, AlertTriangle, Save, Users,
-  StopCircle, RotateCcw, Pencil, HardDrive, Play, FileCode, ShieldCheck, ExternalLink, EyeOff,
+  Download, Loader2,
+  MessageSquare, X, AlertTriangle,
+  Play, FileCode, ShieldCheck,
 } from 'lucide-react';
 
 type Page = 'projects' | 'mcps' | 'workflows' | 'discussions' | 'settings';
@@ -41,69 +40,25 @@ const AI_CONFIG_LABELS: Record<string, string> = {
   Custom: 'custom',
 };
 
-const AGENT_COLORS: Record<string, string> = {
-  'ClaudeCode': '#D4714E',
-  'Claude Code': '#D4714E',
-  'Codex': '#10a37f',
-  'Vibe': '#FF7000',
-  'GeminiCli': '#4285f4',
-  'Gemini CLI': '#4285f4',
-};
-
-const agentColor = (agentType: string | null | undefined): string =>
-  AGENT_COLORS[agentType ?? ''] ?? '#8b5cf6';
-
 // Sort score for project readiness
 const readinessScore = (p: Project) => {
   return p.ai_config.detected ? 0 : 1;
 };
 
 export function Dashboard({ onReset }: DashboardProps) {
-  const { t, locale, setLocale } = useT();
+  const { t } = useT();
   const [page, setPage] = useState<Page>('projects');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [showHidden, setShowHidden] = useState(false);
   const [projectSearch, setProjectSearch] = useState('');
   const [projectDisplayLimit, setProjectDisplayLimit] = useState(20);
-  const [installing, setInstalling] = useState<string | null>(null);
-  const [activeDiscussionId, setActiveDiscussionId] = useState<string | null>(null);
-  const [showNewDiscussion, setShowNewDiscussion] = useState(false);
-  const [newDiscTitle, setNewDiscTitle] = useState('');
-  const [newDiscAgent, setNewDiscAgent] = useState<AgentType | ''>('');
-  const [newDiscProjectId, setNewDiscProjectId] = useState<string>('');
-  const [newDiscPrompt, setNewDiscPrompt] = useState('');
-  const [newDiscPrefilled, setNewDiscPrefilled] = useState(false);
-  const [chatInput, setChatInput] = useState('');
-  const [sendingMap, setSendingMap] = useState<Record<string, boolean>>({});
-  const [streamingMap, setStreamingMap] = useState<Record<string, string>>({});
-  const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
-  const [collapsedDiscGroups, setCollapsedDiscGroups] = useState<Set<string>>(new Set());
-  const [editingText, setEditingText] = useState('');
-  const abortControllers = useRef<Record<string, AbortController>>({});
-  const [showDebatePopover, setShowDebatePopover] = useState(false);
-  const [debateAgents, setDebateAgents] = useState<AgentType[]>([]);
-  const [debateRounds, setDebateRounds] = useState(2);
-  // Orchestration live state: per-discussion, tracks current agent streaming and round
-  const [orchState, setOrchState] = useState<Record<string, {
-    active: boolean;
-    round: number | string;
-    totalRounds: number;
-    currentAgent: string | null;
-    agentStreams: { agent: string; agentType: string; round: number | string; text: string; done: boolean }[];
-    systemMessages: string[];
-  }>>({});
-  const [mentionQuery, setMentionQuery] = useState<string | null>(null);
-  const [mentionIndex, setMentionIndex] = useState(0);
-  const [lastSeenMsgCount, setLastSeenMsgCount] = useState<Record<string, number>>(() => {
-    try { return JSON.parse(localStorage.getItem('kronn:lastSeenMsgCount') ?? '{}'); } catch { return {}; }
-  });
-  const chatInputRef = useRef<HTMLInputElement>(null);
-  const [newKeyInputs, setNewKeyInputs] = useState<Record<string, { name: string; value: string }>>({});
-  const [addingKeyFor, setAddingKeyFor] = useState<string | null>(null);
-  const [tokenVisible, setTokenVisible] = useState<Set<string>>(new Set());
-  const chatEndRef = useRef<HTMLDivElement>(null);
+  // Cross-page prefill for discussion creation (e.g. "validate audit" from Projects)
+  const [discPrefill, setDiscPrefill] = useState<{ projectId: string; title: string; prompt: string } | null>(null);
+  // Unseen count received from DiscussionsPage for nav badge
+  const [totalUnseen, setTotalUnseen] = useState(0);
   // AI audit state
   const [installingTemplate, setInstallingTemplate] = useState<string | null>(null);
+  const [auditAgentChoice, setAuditAgentChoice] = useState<Record<string, AgentType>>({});
   const [auditState, setAuditState] = useState<Record<string, {
     active: boolean;
     step: number;
@@ -116,13 +71,8 @@ export function Dashboard({ onReset }: DashboardProps) {
   const { data: mcpOverviewData, refetch: refetchMcps } = useApi(() => mcpsApi.overview(), []);
   const { data: agentList, refetch: refetchAgents } = useApi(() => agentsApi.detect(), []);
   const { data: discussionList, refetch: refetchDiscussions } = useApi(() => discussionsApi.list(), []);
-  const { data: tokenConfig, refetch: refetchTokens } = useApi(() => configApi.getTokens(), []);
   const { data: configLanguage, refetch: refetchLanguage } = useApi(() => configApi.getLanguage(), []);
-  const { data: dbInfo, refetch: refetchDbInfo } = useApi(() => configApi.dbInfo(), []);
   const { data: agentAccess, refetch: refetchAgentAccess } = useApi(() => configApi.getAgentAccess(), []);
-  const { data: agentUsageData, refetch: refetchAgentUsage } = useApi(() => statsApi.agentUsage(), []);
-  const [usageExpanded, setUsageExpanded] = useState<string | null>(null);
-  const [usageSearch, setUsageSearch] = useState('');
 
   const projects = projectList ?? [];
   const mcpRegistry = registry ?? [];
@@ -130,68 +80,8 @@ export function Dashboard({ onReset }: DashboardProps) {
   const agents = agentList ?? [];
   const allDiscussions = discussionList ?? [];
 
-  const activeDiscussion = allDiscussions.find(d => d.id === activeDiscussionId) ?? null;
-
-  const sending = activeDiscussionId ? !!sendingMap[activeDiscussionId] : false;
-  const streamingText = activeDiscussionId ? (streamingMap[activeDiscussionId] ?? '') : '';
-
-  const LANGUAGES: { code: string; label: string; flag: string }[] = [
-    { code: 'fr', label: 'Francais', flag: 'FR' },
-    { code: 'en', label: 'English', flag: 'EN' },
-    { code: 'es', label: 'Español', flag: 'ES' },
-    { code: 'zh', label: '中文', flag: 'ZH' },
-    { code: 'br', label: 'Brezhoneg', flag: 'BR' },
-  ];
-
-  const ALL_AGENT_MENTIONS: { trigger: string; type: AgentType; label: string }[] = [
-    { trigger: '@claude', type: 'ClaudeCode', label: 'Claude Code' },
-    { trigger: '@codex', type: 'Codex', label: 'Codex' },
-    { trigger: '@vibe', type: 'Vibe', label: 'Vibe' },
-  ];
-  const activeAgentTypes = new Set(agents.filter(isUsable).map(a => a.agent_type));
-  const AGENT_MENTIONS = ALL_AGENT_MENTIONS.filter(m => activeAgentTypes.has(m.type));
-
-  // Track "last seen" message count for unread badges (persisted in localStorage)
-  // Only update when the user explicitly selects a discussion (not on data refresh)
-  const markDiscussionSeen = useCallback((discId: string, msgCount: number) => {
-    setLastSeenMsgCount(prev => {
-      const next = { ...prev, [discId]: msgCount };
-      localStorage.setItem('kronn:lastSeenMsgCount', JSON.stringify(next));
-      return next;
-    });
-  }, []);
-
-  // Mark active discussion as seen when user selects it or when messages arrive while viewing
-  useEffect(() => {
-    if (activeDiscussionId && activeDiscussion && !sendingMap[activeDiscussionId]) {
-      // Only mark as seen when the agent is NOT currently streaming
-      // This way, the badge stays until the user actually "sees" the final result
-      markDiscussionSeen(activeDiscussionId, activeDiscussion.messages.length);
-    }
-  }, [activeDiscussionId, activeDiscussion?.messages.length, sendingMap]);
-
-  // Poll discussions every 10s to catch agent responses that complete in the background
-  useEffect(() => {
-    const interval = setInterval(() => {
-      refetchDiscussions();
-    }, 10000);
-    return () => clearInterval(interval);
-  }, [refetchDiscussions]);
-
-  // Compute total unseen count for tab indicator
-  const totalUnseen = allDiscussions.reduce((acc, disc) => {
-    const unseen = disc.messages.length - (lastSeenMsgCount[disc.id] ?? 0);
-    return acc + (unseen > 0 && disc.id !== activeDiscussionId ? unseen : 0);
-  }, 0);
-
-  // Update document title with unread indicator
-  useEffect(() => {
-    document.title = totalUnseen > 0 ? `(${totalUnseen}) Kronn` : 'Kronn';
-  }, [totalUnseen]);
-
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [activeDiscussion?.messages.length, streamingText]);
+  // Stable callback for prefill consumed
+  const handlePrefillConsumed = useCallback(() => setDiscPrefill(null), []);
 
   const handleDeleteProject = async (id: string) => {
     await projectsApi.delete(id);
@@ -216,7 +106,8 @@ export function Dashboard({ onReset }: DashboardProps) {
       [projectId]: { active: true, step: 0, totalSteps: 10, currentFile: 'Demarrage...' }
     }));
     try {
-      await projectsApi.auditStream(projectId, { agent: 'ClaudeCode' }, {
+      const auditAgent = auditAgentChoice[projectId] ?? agents.filter(isUsable)[0]?.agent_type ?? 'ClaudeCode';
+      await projectsApi.auditStream(projectId, { agent: auditAgent }, {
         onStepStart: (step, total, file) => {
           setAuditState(prev => ({
             ...prev,
@@ -257,18 +148,6 @@ export function Dashboard({ onReset }: DashboardProps) {
       }
     }
     refetch();
-  };
-
-  const handleInstallAgent = async (agent: AgentDetection) => {
-    setInstalling(agent.name);
-    try {
-      await agentsApi.install(agent.agent_type);
-      refetchAgents();
-    } catch {
-      // silently fail
-    } finally {
-      setInstalling(null);
-    }
   };
 
   return (
@@ -402,7 +281,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                         {proj.audit_status === 'Validated' ? (
                           <span style={s.badgeGreen}><ShieldCheck size={9} /> Validated</span>
                         ) : validationInProgress ? (
-                          <span style={{ ...s.badgeOrange, cursor: 'pointer' }} onClick={(e) => { e.stopPropagation(); setActiveDiscussionId(validationDisc.id); setPage('discussions'); }}>
+                          <span style={{ ...s.badgeOrange, cursor: 'pointer' }} onClick={(e) => { e.stopPropagation(); setPage('discussions'); }}>
                             <Loader2 size={9} style={{ animation: 'spin 1s linear infinite' }} /> Validation
                           </span>
                         ) : (proj.audit_status === 'Audited' || proj.audit_status === 'TemplateInstalled') ? (
@@ -480,14 +359,14 @@ export function Dashboard({ onReset }: DashboardProps) {
                                 {disc.messages.length} msg · {disc.agent}
                               </span>
                             </div>
-                            <button style={s.iconBtn} onClick={() => { setActiveDiscussionId(disc.id); setPage('discussions'); }}>
+                            <button style={s.iconBtn} onClick={() => { setPage('discussions'); }}>
                               <ChevronRight size={12} />
                             </button>
                           </div>
                         ))}
                         <button
                           style={{ ...s.iconBtn, marginTop: 8, fontSize: 11, gap: 4 }}
-                          onClick={() => { setPage('discussions'); setShowNewDiscussion(true); setNewDiscProjectId(proj.id); }}
+                          onClick={() => { setDiscPrefill({ projectId: proj.id, title: '', prompt: '' }); setPage('discussions'); }}
                         >
                           <Plus size={12} /> {t('disc.newTitle')}
                         </button>
@@ -528,12 +407,27 @@ export function Dashboard({ onReset }: DashboardProps) {
                             <p style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)', margin: '0 0 8px' }}>
                               {t('audit.warning')}
                             </p>
-                            <button
-                              style={{ ...s.iconBtn, fontSize: 11, gap: 4, color: '#c8ff00', borderColor: 'rgba(200,255,0,0.2)' }}
-                              onClick={() => handleLaunchAudit(proj.id)}
-                            >
-                              <Play size={12} /> {t('audit.launch')}
-                            </button>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                              <select
+                                style={{ ...auditSelectStyle, width: 'auto', minWidth: 140, fontSize: 12, padding: '6px 32px 6px 10px' }}
+                                value={auditAgentChoice[proj.id] ?? agents.filter(isUsable)[0]?.agent_type ?? 'ClaudeCode'}
+                                onChange={e => setAuditAgentChoice(prev => ({ ...prev, [proj.id]: e.target.value as AgentType }))}
+                              >
+                                {agents.filter(isUsable).map(a => (
+                                  <option key={a.agent_type} value={a.agent_type}>{a.name}</option>
+                                ))}
+                                {agents.filter(isUsable).length === 0 && (
+                                  <option value="" disabled>{t('disc.noAgent')}</option>
+                                )}
+                              </select>
+                              <button
+                                style={{ ...s.iconBtn, fontSize: 11, gap: 4, color: '#c8ff00', borderColor: 'rgba(200,255,0,0.2)' }}
+                                onClick={() => handleLaunchAudit(proj.id)}
+                                disabled={agents.filter(isUsable).length === 0}
+                              >
+                                <Play size={12} /> {t('audit.launch')}
+                              </button>
+                            </div>
                           </div>
                         )}
 
@@ -569,7 +463,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                                 </p>
                                 <button
                                   style={{ ...s.iconBtn, fontSize: 11, gap: 4, color: '#c8ff00', borderColor: 'rgba(200,255,0,0.2)' }}
-                                  onClick={() => { setActiveDiscussionId(validationDisc.id); setPage('discussions'); }}
+                                  onClick={() => { setPage('discussions'); }}
                                 >
                                   <MessageSquare size={12} /> {t('audit.resumeValidation')}
                                 </button>
@@ -582,12 +476,12 @@ export function Dashboard({ onReset }: DashboardProps) {
                                 <button
                                   style={{ ...s.iconBtn, fontSize: 11, gap: 4, color: '#c8ff00', borderColor: 'rgba(200,255,0,0.2)' }}
                                   onClick={() => {
+                                    setDiscPrefill({
+                                      projectId: proj.id,
+                                      title: 'Validation audit AI',
+                                      prompt: `Voici le contexte AI du projet (dossier ai/). Analyse l'ensemble des fichiers ai/, identifie les zones d'ambiguite, les questions non resolues, les marqueurs <!-- TODO --> et les incoherences. Pose-moi tes questions une par une. Important : a chaque reponse de ma part, mets immediatement a jour les fichiers ai/ concernes avant de poser la question suivante — cela evite de repeter les memes questions et garde la documentation a jour en continu. Quand toutes mes reponses seront comprises, n'hesite pas a poser des questions de suivi. Une fois tout clarifie, termine ton message par la phrase exacte : "KRONN:VALIDATION_COMPLETE".`,
+                                    });
                                     setPage('discussions');
-                                    setShowNewDiscussion(true);
-                                    setNewDiscPrefilled(true);
-                                    setNewDiscProjectId(proj.id);
-                                    setNewDiscTitle('Validation audit AI');
-                                    setNewDiscPrompt(`Voici le contexte AI du projet (dossier ai/). Analyse l'ensemble des fichiers ai/, identifie les zones d'ambiguite, les questions non resolues, les marqueurs <!-- TODO --> et les incoherences. Pose-moi tes questions une par une. Important : a chaque reponse de ma part, mets immediatement a jour les fichiers ai/ concernes avant de poser la question suivante — cela evite de repeter les memes questions et garde la documentation a jour en continu. Quand toutes mes reponses seront comprises, n'hesite pas a poser des questions de suivi. Une fois tout clarifie, termine ton message par la phrase exacte : "KRONN:VALIDATION_COMPLETE".`);
                                   }}
                                 >
                                   <ShieldCheck size={12} /> {t('audit.validate')}
@@ -652,1458 +546,56 @@ export function Dashboard({ onReset }: DashboardProps) {
 
         {/* ════════ WORKFLOWS ════════ */}
         {page === 'workflows' && (
-          <WorkflowsPage projects={projects} installedAgentTypes={agents.filter(isUsable).map(a => a.agent_type)} />
+          <WorkflowsPage projects={projects} installedAgentTypes={agents.filter(isUsable).map(a => a.agent_type)} agentAccess={agentAccess ?? undefined} />
         )}
 
         {/* ════════ DISCUSSIONS ════════ */}
-        {page === 'discussions' && (() => {
-          const installedAgents = agents.filter(isUsable);
-          // Auto-select first installed agent if current selection is invalid
-          if (installedAgents.length > 0 && !installedAgents.some(a => a.agent_type === newDiscAgent)) {
-            setNewDiscAgent(installedAgents[0].agent_type);
-          }
-          // Group discussions by project (null = global)
-          const discByProject = new Map<string | null, Discussion[]>();
-          for (const d of allDiscussions) {
-            const key = d.project_id ?? null;
-            const list = discByProject.get(key) ?? [];
-            list.push(d);
-            discByProject.set(key, list);
-          }
-
-          const cleanupStream = (discId: string) => {
-            setSendingMap(prev => ({ ...prev, [discId]: false }));
-            setStreamingMap(prev => { const n = { ...prev }; delete n[discId]; return n; });
-            delete abortControllers.current[discId];
-            refetchDiscussions();
-          };
-
-          const handleCreateDiscussion = async () => {
-            if (!newDiscPrompt.trim() || !newDiscAgent) return;
-            const prompt = newDiscPrompt.trim();
-            const title = newDiscTitle.trim() || prompt.slice(0, 60);
-            const disc = await discussionsApi.create({
-              project_id: newDiscProjectId || null,
-              title,
-              agent: newDiscAgent as AgentType,
-              language: configLanguage ?? 'fr',
-              initial_prompt: prompt,
-            });
-            setShowNewDiscussion(false);
-            setNewDiscTitle('');
-            setNewDiscPrompt('');
-            setNewDiscPrefilled(false);
-            setActiveDiscussionId(disc.id);
-            refetchDiscussions();
-
-            const discId = disc.id;
-            const controller = new AbortController();
-            abortControllers.current[discId] = controller;
-            setSendingMap(prev => ({ ...prev, [discId]: true }));
-            setStreamingMap(prev => ({ ...prev, [discId]: '' }));
-            await discussionsApi.runAgent(
-              discId,
-              (text) => setStreamingMap(prev => ({ ...prev, [discId]: (prev[discId] ?? '') + text })),
-              () => cleanupStream(discId),
-              (error) => { console.error('Agent error:', error); cleanupStream(discId); },
-              controller.signal,
-            );
-          };
-
-          const parseMention = (text: string): { targetAgent?: AgentType } => {
-            for (const m of AGENT_MENTIONS) {
-              if (text.toLowerCase().startsWith(m.trigger + ' ') || text.toLowerCase() === m.trigger) {
-                return { targetAgent: m.type };
-              }
-            }
-            return {};
-          };
-
-          const handleSendMessage = async () => {
-            if (!activeDiscussionId || !chatInput.trim() || sending) return;
-            const discId = activeDiscussionId;
-            const msg = chatInput.trim();
-            const { targetAgent } = parseMention(msg);
-            setChatInput('');
-            setMentionQuery(null);
-            const controller = new AbortController();
-            abortControllers.current[discId] = controller;
-            setStreamingMap(prev => ({ ...prev, [discId]: '' }));
-
-            await discussionsApi.sendMessageStream(
-              discId,
-              { content: msg, target_agent: targetAgent },
-              (text) => setStreamingMap(prev => ({ ...prev, [discId]: (prev[discId] ?? '') + text })),
-              () => cleanupStream(discId),
-              (error) => { console.error('Agent error:', error); cleanupStream(discId); },
-              controller.signal,
-              () => {
-                // Backend has added the user message — refetch to show it, then show streaming
-                refetchDiscussions();
-                setSendingMap(prev => ({ ...prev, [discId]: true }));
-              },
-            );
-          };
-
-          const handleStop = () => {
-            if (!activeDiscussionId) return;
-            const discId = activeDiscussionId;
-            const controller = abortControllers.current[discId];
-            if (controller) controller.abort();
-            // Ensure UI clears even if SSE abort callback doesn't fire
-            cleanupStream(discId);
-          };
-
-          const handleRetry = async () => {
-            if (!activeDiscussionId || sending) return;
-            const discId = activeDiscussionId;
-            // Delete trailing agent messages, then re-run
-            await discussionsApi.deleteLastAgentMessages(discId);
-            await refetchDiscussions();
-            const controller = new AbortController();
-            abortControllers.current[discId] = controller;
-            setSendingMap(prev => ({ ...prev, [discId]: true }));
-            setStreamingMap(prev => ({ ...prev, [discId]: '' }));
-            await discussionsApi.runAgent(
-              discId,
-              (text) => setStreamingMap(prev => ({ ...prev, [discId]: (prev[discId] ?? '') + text })),
-              () => cleanupStream(discId),
-              (error) => { console.error('Agent error:', error); cleanupStream(discId); },
-              controller.signal,
-            );
-          };
-
-          const handleEditMessage = async () => {
-            if (!activeDiscussionId || !editingMsgId || !editingText.trim() || sending) return;
-            const discId = activeDiscussionId;
-            // Delete trailing agent messages, edit the user message, then re-run
-            await discussionsApi.deleteLastAgentMessages(discId);
-            await discussionsApi.editLastUserMessage(discId, editingText.trim());
-            setEditingMsgId(null);
-            setEditingText('');
-            await refetchDiscussions();
-            const controller = new AbortController();
-            abortControllers.current[discId] = controller;
-            setSendingMap(prev => ({ ...prev, [discId]: true }));
-            setStreamingMap(prev => ({ ...prev, [discId]: '' }));
-            await discussionsApi.runAgent(
-              discId,
-              (text) => setStreamingMap(prev => ({ ...prev, [discId]: (prev[discId] ?? '') + text })),
-              () => cleanupStream(discId),
-              (error) => { console.error('Agent error:', error); cleanupStream(discId); },
-              controller.signal,
-            );
-          };
-
-          const handleOrchestrate = async () => {
-            if (!activeDiscussionId || debateAgents.length < 2) return;
-            const discId = activeDiscussionId;
-            const controller = new AbortController();
-            abortControllers.current[discId] = controller;
-            setShowDebatePopover(false);
-            setSendingMap(prev => ({ ...prev, [discId]: true }));
-            setOrchState(prev => ({
-              ...prev,
-              [discId]: { active: true, round: 0, totalRounds: 3, currentAgent: null, agentStreams: [], systemMessages: [] },
-            }));
-
-            await discussionsApi.orchestrate(discId, { agents: debateAgents, max_rounds: debateRounds }, {
-              onSystem: (text) => {
-                setOrchState(prev => {
-                  const s = prev[discId];
-                  return s ? { ...prev, [discId]: { ...s, systemMessages: [...s.systemMessages, text] } } : prev;
-                });
-              },
-              onRound: (round, total) => {
-                setOrchState(prev => {
-                  const s = prev[discId];
-                  return s ? { ...prev, [discId]: { ...s, round, totalRounds: total } } : prev;
-                });
-              },
-              onAgentStart: (agent, agentType, round) => {
-                setOrchState(prev => {
-                  const s = prev[discId];
-                  if (!s) return prev;
-                  return { ...prev, [discId]: {
-                    ...s, currentAgent: agent,
-                    agentStreams: [...s.agentStreams, { agent, agentType, round, text: '', done: false }],
-                  }};
-                });
-              },
-              onChunk: (text, agent, _agentType, _round) => {
-                setOrchState(prev => {
-                  const s = prev[discId];
-                  if (!s) return prev;
-                  const streams = [...s.agentStreams];
-                  const last = [...streams].reverse().find((st: typeof streams[0]) => st.agent === agent && !st.done);
-                  if (last) last.text = (last.text ?? '') + text;
-                  return { ...prev, [discId]: { ...s, agentStreams: streams } };
-                });
-              },
-              onAgentDone: (agent) => {
-                setOrchState(prev => {
-                  const s = prev[discId];
-                  if (!s) return prev;
-                  const streams = s.agentStreams.map(st =>
-                    st.agent === agent && !st.done ? { ...st, done: true } : st
-                  );
-                  return { ...prev, [discId]: { ...s, currentAgent: null, agentStreams: streams } };
-                });
-              },
-              onDone: () => {
-                setSendingMap(prev => ({ ...prev, [discId]: false }));
-                delete abortControllers.current[discId];
-                setOrchState(prev => {
-                  const s = prev[discId];
-                  return s ? { ...prev, [discId]: { ...s, active: false, currentAgent: null } } : prev;
-                });
-                refetchDiscussions();
-              },
-              onError: (error) => {
-                console.error('Orchestration error:', error);
-                setSendingMap(prev => ({ ...prev, [discId]: false }));
-                delete abortControllers.current[discId];
-                setOrchState(prev => {
-                  const s = prev[discId];
-                  return s ? { ...prev, [discId]: { ...s, active: false } } : prev;
-                });
-                refetchDiscussions();
-              },
-            }, controller.signal);
-          };
-
-          return (
-          <div style={{ display: 'flex', height: 'calc(100vh - 56px)', margin: '-24px -20px', overflow: 'hidden' }}>
-            {/* Sidebar */}
-            <div style={ds.sidebar}>
-              <div style={ds.sidebarHeader}>
-                <span style={{ fontWeight: 600, fontSize: 13 }}>Discussions</span>
-                <button style={s.scanBtn} onClick={() => { setShowNewDiscussion(true); }}>
-                  <Plus size={12} /> {t('disc.new')}
-                </button>
-              </div>
-
-              {/* Discussion list grouped by project */}
-              <div style={ds.sidebarList}>
-                {/* Global discussions (no project) */}
-                {(() => {
-                  const globalDiscs = discByProject.get(null) ?? [];
-                  if (globalDiscs.length === 0) return null;
-                  const isCollapsed = collapsedDiscGroups.has('__global__');
-                  return (
-                    <div>
-                      <div
-                        style={{ ...ds.projectGroup, borderTop: 'none', cursor: 'pointer', userSelect: 'none' as const }}
-                        onClick={() => setCollapsedDiscGroups(prev => { const n = new Set(prev); isCollapsed ? n.delete('__global__') : n.add('__global__'); return n; })}
-                      >
-                        <ChevronRight size={10} style={{ transform: isCollapsed ? 'none' : 'rotate(90deg)', transition: 'transform 0.15s' }} />
-                        <MessageSquare size={10} /> {t('disc.general')}
-                        <span style={{ fontWeight: 400, opacity: 0.5, marginLeft: 'auto' }}>{globalDiscs.length}</span>
-                      </div>
-                      {!isCollapsed && globalDiscs.sort((a, b) => b.updated_at.localeCompare(a.updated_at)).map(disc => (
-                        <button
-                          key={disc.id}
-                          style={ds.discItem(disc.id === activeDiscussionId)}
-                          onClick={() => { setActiveDiscussionId(disc.id); markDiscussionSeen(disc.id, disc.messages.length); }}
-                        >
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ fontSize: 12, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 4 }}>
-                              {isValidationDisc(disc.title) && <ShieldCheck size={10} style={{ color: '#c8ff00', flexShrink: 0 }} />}
-                              {disc.title}
-                              {(() => {
-                                const unseen = disc.messages.length - (lastSeenMsgCount[disc.id] ?? 0);
-                                return unseen > 0 && disc.id !== activeDiscussionId ? (
-                                  <span style={{
-                                    background: '#c8ff00', color: '#0a0c10', fontSize: 8, fontWeight: 800,
-                                    borderRadius: 6, padding: '1px 5px', minWidth: 14, textAlign: 'center', flexShrink: 0,
-                                  }}>{unseen}</span>
-                                ) : null;
-                              })()}
-                            </div>
-                            <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', marginTop: 2, display: 'flex', alignItems: 'center', gap: 4 }}>
-                              {sendingMap[disc.id] && <Loader2 size={8} style={{ animation: 'spin 1s linear infinite', color: '#c8ff00' }} />}
-                              {(disc.participants?.length ?? 0) > 1 && (
-                                <Users size={8} style={{ color: '#8b5cf6' }} />
-                              )}
-                              {disc.messages.length} msg · {disc.agent}
-                            </div>
-                          </div>
-                        </button>
-                      ))}
-                    </div>
-                  );
-                })()}
-
-                {/* Project discussions */}
-                {projects.filter(p => !isHiddenPath(p.path)).map(proj => {
-                  const projDiscs = discByProject.get(proj.id) ?? [];
-                  if (projDiscs.length === 0) return null;
-                  const isCollapsed = collapsedDiscGroups.has(proj.id);
-                  return (
-                    <div key={proj.id}>
-                      <div
-                        style={{ ...ds.projectGroup, cursor: 'pointer', userSelect: 'none' as const }}
-                        onClick={() => setCollapsedDiscGroups(prev => { const n = new Set(prev); isCollapsed ? n.delete(proj.id) : n.add(proj.id); return n; })}
-                      >
-                        <ChevronRight size={10} style={{ transform: isCollapsed ? 'none' : 'rotate(90deg)', transition: 'transform 0.15s' }} />
-                        <Folder size={10} /> {proj.name}
-                        <span style={{ fontWeight: 400, opacity: 0.5, marginLeft: 'auto' }}>{projDiscs.length}</span>
-                      </div>
-                      {!isCollapsed && projDiscs.sort((a, b) => b.updated_at.localeCompare(a.updated_at)).map(disc => (
-                        <button
-                          key={disc.id}
-                          style={ds.discItem(disc.id === activeDiscussionId)}
-                          onClick={() => { setActiveDiscussionId(disc.id); markDiscussionSeen(disc.id, disc.messages.length); }}
-                        >
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ fontSize: 12, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 4 }}>
-                              {isValidationDisc(disc.title) && <ShieldCheck size={10} style={{ color: '#c8ff00', flexShrink: 0 }} />}
-                              {disc.title}
-                              {(() => {
-                                const unseen = disc.messages.length - (lastSeenMsgCount[disc.id] ?? 0);
-                                return unseen > 0 && disc.id !== activeDiscussionId ? (
-                                  <span style={{
-                                    background: '#c8ff00', color: '#0a0c10', fontSize: 8, fontWeight: 800,
-                                    borderRadius: 6, padding: '1px 5px', minWidth: 14, textAlign: 'center', flexShrink: 0,
-                                  }}>{unseen}</span>
-                                ) : null;
-                              })()}
-                            </div>
-                            <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', marginTop: 2, display: 'flex', alignItems: 'center', gap: 4 }}>
-                              {sendingMap[disc.id] && <Loader2 size={8} style={{ animation: 'spin 1s linear infinite', color: '#c8ff00' }} />}
-                              {(disc.participants?.length ?? 0) > 1 && (
-                                <Users size={8} style={{ color: '#8b5cf6' }} />
-                              )}
-                              {disc.messages.length} msg · {disc.agent}
-                            </div>
-                          </div>
-                        </button>
-                      ))}
-                    </div>
-                  );
-                })}
-
-                {allDiscussions.length === 0 && !showNewDiscussion && (
-                  <div style={{ padding: 24, textAlign: 'center', color: 'rgba(255,255,255,0.25)', fontSize: 12, whiteSpace: 'pre-line' }}>
-                    {t('disc.empty')}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Main area */}
-            <div style={ds.chatArea}>
-              {/* New discussion form */}
-              {showNewDiscussion && (
-                <div style={ds.newDiscOverlay}>
-                  <div
-                    style={ds.newDiscCard}
-                    onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && newDiscPrompt.trim()) handleCreateDiscussion(); }}
-                  >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-                      <span style={{ fontWeight: 700, fontSize: 15, color: '#e8eaed' }}>{t('disc.newTitle')}</span>
-                      <button style={s.iconBtn} onClick={() => { setShowNewDiscussion(false); setNewDiscPrefilled(false); }}><X size={14} /></button>
-                    </div>
-
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
-                      <div>
-                        <label style={ds.label}>{t('disc.project')}</label>
-                        <select style={{ ...ds.selectStyled, ...(newDiscPrefilled ? { opacity: 0.5, pointerEvents: 'none' as const } : {}) }} value={newDiscProjectId} onChange={e => setNewDiscProjectId(e.target.value)} disabled={newDiscPrefilled}>
-                          <option value="">{t('disc.noProject')}</option>
-                          {projects.filter(p => !isHiddenPath(p.path)).map(p => (
-                            <option key={p.id} value={p.id}>{p.name}</option>
-                          ))}
-                        </select>
-                      </div>
-                      <div>
-                        <label style={ds.label}>{t('disc.agent')}</label>
-                        <select style={ds.selectStyled} value={newDiscAgent} onChange={e => setNewDiscAgent(e.target.value as AgentType)}>
-                          {installedAgents.map(a => (
-                            <option key={a.name} value={a.agent_type}>{a.name}</option>
-                          ))}
-                          {installedAgents.length === 0 && (
-                            <option value="" disabled>{t('disc.noAgent')}</option>
-                          )}
-                        </select>
-                      </div>
-                    </div>
-
-                    <label style={ds.label}>{t('disc.title')}</label>
-                    <input
-                      style={{ ...ds.inputStyled, ...(newDiscPrefilled ? { opacity: 0.5, cursor: 'not-allowed' } : {}) }}
-                      placeholder={t('disc.titlePlaceholder')}
-                      value={newDiscTitle}
-                      onChange={e => !newDiscPrefilled && setNewDiscTitle(e.target.value)}
-                      readOnly={newDiscPrefilled}
-                    />
-
-                    <label style={{ ...ds.label, marginTop: 12 }}>{t('disc.prompt')}</label>
-                    <textarea
-                      style={{ ...ds.textareaStyled, ...(newDiscPrefilled ? { opacity: 0.5, cursor: 'not-allowed' } : {}) }}
-                      placeholder={t('disc.promptPlaceholder')}
-                      value={newDiscPrompt}
-                      onChange={e => !newDiscPrefilled && setNewDiscPrompt(e.target.value)}
-                      readOnly={newDiscPrefilled}
-                      rows={4}
-                      autoFocus={!newDiscPrefilled}
-                    />
-
-                    {/* Warnings for validation discussion */}
-                    {newDiscPrefilled && (
-                      <div style={{ marginTop: 12, padding: '10px 12px', borderRadius: 8, background: 'rgba(255,200,0,0.06)', border: '1px solid rgba(255,200,0,0.12)' }}>
-                        <p style={{ fontSize: 11, color: 'rgba(255,200,0,0.7)', margin: '0 0 6px', display: 'flex', alignItems: 'center', gap: 4 }}>
-                          <AlertTriangle size={11} /> {t('disc.auditWarn')}
-                        </p>
-                        <p style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', margin: 0 }}>
-                          {t('disc.auditHint')}
-                        </p>
-                      </div>
-                    )}
-
-                    <button
-                      style={{
-                        marginTop: 16, width: '100%', padding: '11px 16px', borderRadius: 8,
-                        border: 'none', background: newDiscPrompt.trim() ? '#c8ff00' : 'rgba(255,255,255,0.06)',
-                        color: newDiscPrompt.trim() ? '#0a0c10' : 'rgba(255,255,255,0.25)',
-                        fontWeight: 700, fontSize: 13, fontFamily: 'inherit', cursor: 'pointer',
-                        display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
-                        transition: 'all 0.15s',
-                      }}
-                      onClick={handleCreateDiscussion}
-                      disabled={!newDiscPrompt.trim() || !newDiscAgent}
-                    >
-                      <MessageSquare size={14} /> {t('disc.start')}
-                      <span style={{ fontSize: 10, opacity: 0.6, marginLeft: 4 }}>Ctrl+Enter</span>
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {/* Active discussion chat */}
-              {activeDiscussion && !showNewDiscussion ? (
-                <>
-                  {/* Chat header */}
-                  <div style={ds.chatHeader}>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontWeight: 600, fontSize: 14, display: 'flex', alignItems: 'center', gap: 6 }}>
-                        {isValidationDisc(activeDiscussion.title) && <ShieldCheck size={14} style={{ color: '#c8ff00', flexShrink: 0 }} />}
-                        {activeDiscussion.title}
-                      </div>
-                      <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', marginTop: 2 }}>
-                        {activeDiscussion.project_id ? (projects.find(p => p.id === activeDiscussion.project_id)?.name ?? '?') : t('disc.general')} · {activeDiscussion.agent}
-                      </div>
-                    </div>
-                    <button
-                      style={{ ...s.iconBtn, color: '#ff4d6a' }}
-                      onClick={async () => {
-                        await discussionsApi.delete(activeDiscussion.id);
-                        setActiveDiscussionId(null);
-                        refetchDiscussions();
-                      }}
-                    >
-                      <Trash2 size={12} />
-                    </button>
-                  </div>
-
-                  {/* Messages */}
-                  <div style={ds.messages}>
-                    {activeDiscussion.messages.map((msg, idx) => {
-                      const msgs = activeDiscussion.messages;
-                      const isLastUser = msg.role === 'User' && !msgs.slice(idx + 1).some(m => m.role === 'User');
-                      const isLastAgent = msg.role === 'Agent' && idx === msgs.length - 1;
-                      const isEditing = editingMsgId === msg.id;
-
-                      return (
-                      <div key={msg.id} style={ds.msgRow(msg.role === 'User')}>
-                        <div style={{
-                          ...ds.msgBubble(msg.role === 'User'),
-                          ...(msg.role === 'System' ? { borderColor: 'rgba(255,77,106,0.3)', background: 'rgba(255,77,106,0.06)' } : {}),
-                        }}>
-                          {msg.role === 'Agent' && (
-                            <div style={{ ...ds.msgAgent, color: agentColor(msg.agent_type ?? activeDiscussion.agent) }}>
-                              <Cpu size={10} /> {msg.agent_type ?? activeDiscussion.agent}
-                            </div>
-                          )}
-                          {msg.role === 'System' && (
-                            <div style={{ ...ds.msgAgent, color: '#ff4d6a' }}>
-                              <AlertTriangle size={10} /> {t('disc.system')}
-                            </div>
-                          )}
-                          {isEditing ? (
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                              <textarea
-                                value={editingText}
-                                onChange={e => setEditingText(e.target.value)}
-                                onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); handleEditMessage(); } }}
-                                style={{
-                                  width: '100%', minHeight: 60, padding: 8, borderRadius: 6,
-                                  background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(200,255,0,0.3)',
-                                  color: '#e8eaed', fontFamily: 'inherit', fontSize: 12, resize: 'vertical',
-                                }}
-                                autoFocus
-                              />
-                              <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
-                                <button
-                                  style={{ ...s.iconBtn, fontSize: 11, padding: '4px 10px', color: 'rgba(255,255,255,0.4)' }}
-                                  onClick={() => { setEditingMsgId(null); setEditingText(''); }}
-                                >
-                                  {t('disc.cancel')}
-                                </button>
-                                <button
-                                  style={{ ...s.scanBtn, fontSize: 11, padding: '4px 10px' }}
-                                  onClick={handleEditMessage}
-                                  disabled={!editingText.trim()}
-                                >
-                                  <Send size={10} /> {t('disc.resend')}
-                                  <span style={{ fontSize: 9, opacity: 0.5, marginLeft: 4 }}>Ctrl+Enter</span>
-                                </button>
-                              </div>
-                            </div>
-                          ) : (
-                            <MarkdownContent content={msg.content} />
-                          )}
-                          {/api.?key|invalid.*key|key.*not.*config|authenticat|unauthori|login|sign.?in/i.test(msg.content) && (
-                            <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
-                              <button
-                                style={{ ...s.scanBtn, fontSize: 11, padding: '5px 12px' }}
-                                onClick={() => setPage('settings')}
-                              >
-                                <Key size={11} /> {t('disc.overrideKey')}
-                              </button>
-                              <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)', alignSelf: 'center' }}>
-                                {t('disc.orCheckAgent')}
-                              </span>
-                            </div>
-                          )}
-                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 4 }}>
-                            <div style={{ ...ds.msgTime, display: 'flex', alignItems: 'center', gap: 6 }}>
-                              {new Date(msg.timestamp).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}
-                              {msg.tokens_used > 0 && (
-                                <span style={{ color: 'rgba(255,255,255,0.2)', fontSize: 9 }}>
-                                  {msg.tokens_used.toLocaleString()} tok
-                                </span>
-                              )}
-                              {msg.auth_mode && (
-                                <span style={{ color: msg.auth_mode === 'override' ? 'rgba(200,255,0,0.3)' : 'rgba(255,255,255,0.15)', fontSize: 9 }}>
-                                  {msg.auth_mode === 'override' ? 'API key' : 'auth locale'}
-                                </span>
-                              )}
-                            </div>
-                            {!sending && !isEditing && (isLastUser || isLastAgent) && (
-                              <div style={{ display: 'flex', gap: 4 }}>
-                                {isLastUser && (
-                                  <button
-                                    style={{ ...s.iconBtn, padding: '2px 6px', fontSize: 10, color: 'rgba(255,255,255,0.3)' }}
-                                    onClick={() => { setEditingMsgId(msg.id); setEditingText(msg.content); }}
-                                    title={t('disc.editResend')}
-                                  >
-                                    <Pencil size={10} />
-                                  </button>
-                                )}
-                                {isLastAgent && (
-                                  <button
-                                    style={{ ...s.iconBtn, padding: '2px 6px', fontSize: 10, color: 'rgba(255,255,255,0.3)' }}
-                                    onClick={handleRetry}
-                                    title={t('disc.retryResponse')}
-                                  >
-                                    <RotateCcw size={10} />
-                                  </button>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                      );
-                    })}
-
-                    {/* Streaming: single agent mode */}
-                    {sending && !orchState[activeDiscussion.id]?.active && (
-                      <div style={ds.msgRow(false)}>
-                        <div style={ds.msgBubble(false)}>
-                          <div style={{ ...ds.msgAgent, color: agentColor(activeDiscussion.agent) }}>
-                            <Cpu size={10} /> {activeDiscussion.agent}
-                            <Loader2 size={10} style={{ animation: 'spin 1s linear infinite', marginLeft: 4 }} />
-                          </div>
-                          {streamingText ? (
-                            <MarkdownContent content={streamingText} />
-                          ) : (
-                            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.3)', fontStyle: 'italic' }}>
-                              {t('disc.running')}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Streaming: orchestration mode */}
-                    {orchState[activeDiscussion.id] && (() => {
-                      const orch = orchState[activeDiscussion.id];
-                      return (
-                        <>
-                          {orch.agentStreams.map((as_, i) => (
-                            <div key={i} style={ds.msgRow(false)}>
-                              <div style={{
-                                ...ds.msgBubble(false),
-                                borderLeft: `3px solid ${agentColor(as_.agentType || as_.agent)}`,
-                              }}>
-                                <div style={{
-                                  display: 'flex', alignItems: 'center', gap: 4, fontSize: 10,
-                                  fontWeight: 600, color: agentColor(as_.agentType || as_.agent), marginBottom: 4,
-                                }}>
-                                  <Cpu size={10} /> {as_.agent}
-                                  <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.2)', marginLeft: 4 }}>
-                                    {as_.round === 'synthesis' ? t('disc.synthesis') : `Round ${as_.round}`}
-                                  </span>
-                                  {!as_.done && <Loader2 size={9} style={{ animation: 'spin 1s linear infinite', marginLeft: 4 }} />}
-                                </div>
-                                {as_.text ? (
-                                  <MarkdownContent content={as_.text} />
-                                ) : !as_.done ? (
-                                  <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.3)', fontStyle: 'italic' }}>
-                                    {t('disc.thinking', as_.agent)}
-                                  </div>
-                                ) : null}
-                              </div>
-                            </div>
-                          ))}
-                        </>
-                      );
-                    })()}
-
-                    {/* Validation complete banner */}
-                    {(() => {
-                      if (activeDiscussion.title !== 'Validation audit AI' || !activeDiscussion.project_id) return null;
-                      const proj = projects.find(p => p.id === activeDiscussion.project_id);
-                      if (!proj || proj.audit_status !== 'Audited') return null;
-                      const lastAgentMsg = [...activeDiscussion.messages].reverse().find(m => m.role === 'Agent');
-                      const isComplete = lastAgentMsg && lastAgentMsg.content.includes('KRONN:VALIDATION_COMPLETE');
-                      if (!isComplete) return null;
-                      return (
-                        <div style={{ margin: '12px 16px', padding: '12px 16px', borderRadius: 10, background: 'rgba(200,255,0,0.06)', border: '1px solid rgba(200,255,0,0.15)' }}>
-                          <p style={{ fontSize: 12, color: 'rgba(200,255,0,0.8)', margin: '0 0 8px', display: 'flex', alignItems: 'center', gap: 6 }}>
-                            <ShieldCheck size={14} /> {t('audit.validationComplete')}
-                          </p>
-                          <button
-                            style={{
-                              padding: '8px 16px', borderRadius: 8, border: 'none',
-                              background: '#c8ff00', color: '#0a0c10', fontWeight: 700,
-                              fontSize: 12, fontFamily: 'inherit', cursor: 'pointer',
-                              display: 'flex', alignItems: 'center', gap: 6,
-                            }}
-                            onClick={async () => {
-                              await projectsApi.validateAudit(proj.id);
-                              refetch();
-                              refetchDiscussions();
-                            }}
-                          >
-                            <Check size={12} /> {t('audit.markValid')}
-                          </button>
-                        </div>
-                      );
-                    })()}
-
-                    <div ref={chatEndRef} />
-                  </div>
-
-                  {/* Input */}
-                  <div style={ds.inputBar}>
-                    <div style={{ flex: 1, position: 'relative' }}>
-                      <input
-                        ref={chatInputRef}
-                        style={ds.chatInput}
-                        placeholder={activeDiscussion && (activeDiscussion.participants?.length ?? 0) > 1 && AGENT_MENTIONS.length > 0
-                          ? t('disc.mentionHint', AGENT_MENTIONS.map(m => m.trigger).join(', '))
-                          : t('disc.messagePlaceholder')}
-                        value={chatInput}
-                        onChange={e => {
-                          const val = e.target.value;
-                          setChatInput(val);
-                          // Detect @mention at start
-                          const atMatch = val.match(/^@(\w*)$/);
-                          if (atMatch) {
-                            setMentionQuery(atMatch[1].toLowerCase());
-                            setMentionIndex(0);
-                          } else {
-                            setMentionQuery(null);
-                          }
-                        }}
-                        onKeyDown={e => {
-                          if (mentionQuery !== null) {
-                            const filtered = AGENT_MENTIONS.filter(m => m.trigger.slice(1).startsWith(mentionQuery ?? ''));
-                            if (e.key === 'ArrowDown') { e.preventDefault(); setMentionIndex(i => Math.min(i + 1, filtered.length - 1)); return; }
-                            if (e.key === 'ArrowUp') { e.preventDefault(); setMentionIndex(i => Math.max(i - 1, 0)); return; }
-                            if ((e.key === 'Tab' || e.key === 'Enter') && filtered.length > 0) {
-                              e.preventDefault();
-                              setChatInput(filtered[mentionIndex].trigger + ' ');
-                              setMentionQuery(null);
-                              return;
-                            }
-                            if (e.key === 'Escape') { setMentionQuery(null); return; }
-                          }
-                          if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendMessage(); }
-                        }}
-                        disabled={sending}
-                      />
-                      {/* @mention autocomplete dropdown */}
-                      {mentionQuery !== null && (() => {
-                        const filtered = AGENT_MENTIONS.filter(m => m.trigger.slice(1).startsWith(mentionQuery ?? ''));
-                        if (filtered.length === 0) return null;
-                        return (
-                          <div style={{
-                            position: 'absolute', bottom: '100%', left: 0, marginBottom: 4,
-                            background: '#1a1d26', border: '1px solid rgba(200,255,0,0.2)',
-                            borderRadius: 8, overflow: 'hidden', boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
-                            minWidth: 180,
-                          }}>
-                            {filtered.map((m, i) => (
-                              <button
-                                key={m.trigger}
-                                style={{
-                                  display: 'flex', alignItems: 'center', gap: 8,
-                                  width: '100%', padding: '8px 12px', border: 'none', cursor: 'pointer',
-                                  background: i === mentionIndex ? 'rgba(200,255,0,0.1)' : 'transparent',
-                                  color: '#e8eaed', fontFamily: 'inherit', fontSize: 12, textAlign: 'left',
-                                }}
-                                onMouseDown={e => {
-                                  e.preventDefault();
-                                  setChatInput(m.trigger + ' ');
-                                  setMentionQuery(null);
-                                  chatInputRef.current?.focus();
-                                }}
-                                onMouseEnter={() => setMentionIndex(i)}
-                              >
-                                <Cpu size={12} style={{ color: '#c8ff00' }} />
-                                <span style={{ fontWeight: 600, color: '#c8ff00' }}>{m.trigger}</span>
-                                <span style={{ color: 'rgba(255,255,255,0.4)' }}>{m.label}</span>
-                              </button>
-                            ))}
-                          </div>
-                        );
-                      })()}
-                    </div>
-                    {/* Debate button */}
-                    <div style={{ position: 'relative' }}>
-                      <button
-                        style={{
-                          ...ds.sendBtn,
-                          background: showDebatePopover ? 'rgba(139,92,246,0.2)' : 'rgba(139,92,246,0.08)',
-                          border: '1px solid rgba(139,92,246,0.3)',
-                          color: '#8b5cf6',
-                        }}
-                        onClick={() => {
-                          if (!showDebatePopover) {
-                            // Pre-select all installed agents
-                            setDebateAgents(installedAgents.map(a => a.agent_type));
-                          }
-                          setShowDebatePopover(!showDebatePopover);
-                        }}
-                        disabled={sending}
-                        title={t('debate.title')}
-                      >
-                        <Users size={16} />
-                      </button>
-                      {showDebatePopover && (
-                        <div style={{
-                          position: 'absolute', bottom: '100%', right: 0, marginBottom: 8,
-                          width: 260, padding: 14, borderRadius: 10,
-                          background: '#1a1d26', border: '1px solid rgba(139,92,246,0.2)',
-                          boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
-                        }}>
-                          <div style={{ fontSize: 12, fontWeight: 700, color: '#8b5cf6', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
-                            <Users size={12} /> {t('debate.header')}
-                          </div>
-                          <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginBottom: 10, lineHeight: 1.4 }}>
-                            {t('debate.instructions')}
-                          </p>
-                          {installedAgents.map(a => {
-                            const isPrincipal = a.agent_type === activeDiscussion?.agent;
-                            const checked = debateAgents.includes(a.agent_type);
-                            return (
-                              <label key={a.name} style={{
-                                display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0',
-                                cursor: isPrincipal ? 'default' : 'pointer', fontSize: 12,
-                                color: checked ? '#e8eaed' : 'rgba(255,255,255,0.4)',
-                              }}>
-                                <input
-                                  type="checkbox"
-                                  checked={checked}
-                                  disabled={isPrincipal}
-                                  onChange={() => {
-                                    if (isPrincipal) return;
-                                    setDebateAgents(prev =>
-                                      prev.includes(a.agent_type)
-                                        ? prev.filter(t => t !== a.agent_type)
-                                        : [...prev, a.agent_type]
-                                    );
-                                  }}
-                                  style={{ accentColor: '#8b5cf6' }}
-                                />
-                                <Cpu size={11} style={{ color: isPrincipal ? '#c8ff00' : '#8b5cf6' }} />
-                                {a.name}
-                                {isPrincipal && (
-                                  <span style={{ fontSize: 9, color: '#c8ff00', marginLeft: 'auto' }}>{t('debate.main')}</span>
-                                )}
-                              </label>
-                            );
-                          })}
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10 }}>
-                            <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>Rounds</span>
-                            {[1, 2, 3].map(n => (
-                              <button
-                                key={n}
-                                style={{
-                                  width: 28, height: 28, borderRadius: 6, border: 'none', fontFamily: 'inherit',
-                                  fontSize: 12, fontWeight: 700, cursor: 'pointer',
-                                  background: debateRounds === n ? '#8b5cf6' : 'rgba(255,255,255,0.06)',
-                                  color: debateRounds === n ? '#fff' : 'rgba(255,255,255,0.4)',
-                                }}
-                                onClick={() => setDebateRounds(n)}
-                              >
-                                {n}
-                              </button>
-                            ))}
-                          </div>
-                          <button
-                            style={{
-                              marginTop: 8, width: '100%', padding: '8px 12px', borderRadius: 6,
-                              border: 'none', fontFamily: 'inherit', fontSize: 12, fontWeight: 700, cursor: 'pointer',
-                              background: debateAgents.length >= 2 ? '#8b5cf6' : 'rgba(255,255,255,0.06)',
-                              color: debateAgents.length >= 2 ? '#fff' : 'rgba(255,255,255,0.25)',
-                            }}
-                            disabled={debateAgents.length < 2}
-                            onClick={handleOrchestrate}
-                          >
-                            {t('debate.launch', debateAgents.length)}
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                    {sending ? (
-                      <button
-                        style={{
-                          ...ds.sendBtn,
-                          background: 'rgba(255,77,106,0.15)',
-                          border: '1px solid rgba(255,77,106,0.4)',
-                          color: '#ff4d6a',
-                        }}
-                        onClick={handleStop}
-                        title={t('disc.stopThinking')}
-                      >
-                        <StopCircle size={16} />
-                      </button>
-                    ) : (
-                      <button
-                        style={ds.sendBtn}
-                        onClick={handleSendMessage}
-                        disabled={!chatInput.trim()}
-                      >
-                        <Send size={16} />
-                      </button>
-                    )}
-                  </div>
-                </>
-              ) : !showNewDiscussion && (
-                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, color: 'rgba(255,255,255,0.2)' }}>
-                  <MessageSquare size={48} style={{ marginBottom: 16, opacity: 0.3 }} />
-                  <p style={{ fontSize: 14 }}>{t('disc.selectOrCreate')}</p>
-                </div>
-              )}
-            </div>
-          </div>
-          );
-        })()}
+        {page === 'discussions' && (
+          <DiscussionsPage
+            projects={projects}
+            agents={agents}
+            allDiscussions={allDiscussions}
+            configLanguage={configLanguage ?? null}
+            agentAccess={agentAccess ?? null}
+            refetchDiscussions={refetchDiscussions}
+            refetchProjects={refetch}
+            onNavigate={(p) => setPage(p as Page)}
+            prefill={discPrefill}
+            onPrefillConsumed={handlePrefillConsumed}
+            onUnseenCountChange={setTotalUnseen}
+          />
+        )}
 
         {/* ════════ CONFIG ════════ */}
-        {page === 'settings' && (() => {
-          return (
-          <div>
-            <h1 style={s.h1}>Configuration</h1>
-            <p style={{ ...s.meta, marginBottom: 20 }}>{t('config.subtitle')}</p>
-
-            {/* UI Language */}
-            <div style={s.card(false)}>
-              <div style={{ padding: '16px 20px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                  <MessageSquare size={14} style={{ color: '#c8ff00' }} />
-                  <span style={{ fontWeight: 600, fontSize: 14 }}>{t('config.uiLanguage')}</span>
-                </div>
-                <p style={{ color: 'rgba(255,255,255,0.35)', fontSize: 12, marginBottom: 12 }}>
-                  {t('config.uiLanguageHint')}
-                </p>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  {UI_LOCALES.map(l => (
-                    <button
-                      key={l.code}
-                      style={{
-                        padding: '8px 16px', borderRadius: 6, cursor: 'pointer',
-                        fontFamily: 'inherit', fontSize: 12, fontWeight: 600,
-                        background: locale === l.code ? 'rgba(200,255,0,0.15)' : 'rgba(255,255,255,0.04)',
-                        color: locale === l.code ? '#c8ff00' : 'rgba(255,255,255,0.4)',
-                        border: locale === l.code ? '1px solid rgba(200,255,0,0.3)' : '1px solid rgba(255,255,255,0.08)',
-                      }}
-                      onClick={() => setLocale(l.code)}
-                    >
-                      {l.flag} {l.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-
-            {/* Output Language */}
-            <div style={s.card(false)}>
-              <div style={{ padding: '16px 20px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                  <MessageSquare size={14} style={{ color: '#c8ff00' }} />
-                  <span style={{ fontWeight: 600, fontSize: 14 }}>{t('config.outputLanguage')}</span>
-                </div>
-                <p style={{ color: 'rgba(255,255,255,0.35)', fontSize: 12, marginBottom: 12 }}>
-                  {t('config.outputLanguageHint')}
-                </p>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  {LANGUAGES.map(l => (
-                    <button
-                      key={l.code}
-                      style={{
-                        padding: '8px 16px', borderRadius: 6, cursor: 'pointer',
-                        fontFamily: 'inherit', fontSize: 12, fontWeight: 600,
-                        background: (configLanguage ?? 'fr') === l.code ? 'rgba(200,255,0,0.15)' : 'rgba(255,255,255,0.04)',
-                        color: (configLanguage ?? 'fr') === l.code ? '#c8ff00' : 'rgba(255,255,255,0.4)',
-                        border: (configLanguage ?? 'fr') === l.code ? '1px solid rgba(200,255,0,0.3)' : '1px solid rgba(255,255,255,0.08)',
-                      }}
-                      onClick={async () => {
-                        await configApi.saveLanguage(l.code);
-                        refetchLanguage();
-                      }}
-                    >
-                      {l.flag} {l.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-
-            {/* Agents */}
-            <div style={s.card(false)}>
-              <div style={{ padding: '16px 20px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-                  <Cpu size={14} style={{ color: '#c8ff00' }} />
-                  <span style={{ fontWeight: 600, fontSize: 14 }}>{t('config.agents')}</span>
-                  <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginLeft: 'auto' }}>
-                    {agents.filter(a => a.installed || a.runtime_available).length}/{agents.length} {agents.filter(a => a.installed || a.runtime_available).length > 1 ? t('config.installedPlural') : t('config.installed')}
-                  </span>
-                  <button style={s.iconBtn} onClick={() => refetchAgents()} title={t('config.refresh')}>
-                    <RefreshCw size={12} />
-                  </button>
-                </div>
-
-                {(() => {
-                  const isWSL = agents.some(a => a.host_label === 'WSL');
-                  const hasDockerAgent = agents.some(a => a.installed && !a.host_managed);
-                  return isWSL && hasDockerAgent ? (
-                    <div style={{ padding: '8px 12px', marginBottom: 8, borderRadius: 6, background: 'rgba(255,180,0,0.06)', border: '1px solid rgba(255,180,0,0.15)', display: 'flex', alignItems: 'flex-start', gap: 8 }}>
-                      <AlertTriangle size={12} style={{ color: '#ffb400', flexShrink: 0, marginTop: 2 }} />
-                      <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.5)', lineHeight: 1.4 }}>{t('config.wslWarning')}</span>
-                    </div>
-                  ) : null;
-                })()}
-
-                {agents.map(agent => {
-                  const permFlag: Record<string, { flag: string; descKey: string }> = {
-                    ClaudeCode: { flag: '--dangerously-skip-permissions', descKey: 'config.fullAccess' },
-                    Codex: { flag: '--full-auto', descKey: 'config.autoApply' },
-                    GeminiCli: { flag: '--yolo', descKey: 'config.fullAccess' },
-                  };
-                  const perm = permFlag[agent.agent_type];
-                  const tokenField: Record<string, { key: 'anthropic' | 'openai' | 'google'; hint: string; url: string }> = {
-                    ClaudeCode: { key: 'anthropic', hint: 'ANTHROPIC_API_KEY', url: 'https://console.anthropic.com/settings/keys' },
-                    Codex: { key: 'openai', hint: 'OPENAI_API_KEY', url: 'https://platform.openai.com/api-keys' },
-                    GeminiCli: { key: 'google', hint: 'GEMINI_API_KEY', url: 'https://aistudio.google.com/apikey' },
-                  };
-                  const tf = tokenField[agent.agent_type];
-                  const isFullAccess = agent.agent_type === 'ClaudeCode'
-                    ? agentAccess?.claude_code?.full_access ?? false
-                    : agent.agent_type === 'Codex'
-                      ? agentAccess?.codex?.full_access ?? false
-                      : agent.agent_type === 'GeminiCli'
-                        ? agentAccess?.gemini_cli?.full_access ?? false
-                        : false;
-
-                  return (
-                  <div key={agent.name} style={{ padding: '10px 0', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                      <div style={s.dot((agent.installed || agent.runtime_available) && agent.enabled)} />
-                      <div style={{ flex: 1 }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                          <span style={{ fontWeight: 600, fontSize: 12 }}>{agent.name}</span>
-                          <span style={s.originBadge}>{agent.origin}</span>
-                          {agent.version && <code style={{ ...s.code, fontSize: 10 }}>v{agent.version}</code>}
-                          {agent.latest_version && agent.latest_version !== agent.version && (
-                            <span style={s.updateBadge}>&#x2B06; {agent.latest_version}</span>
-                          )}
-                        </div>
-                        {!agent.installed && !agent.runtime_available && (
-                          <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)', marginTop: 2 }}>
-                            <code style={s.code}>{agent.install_command}</code>
-                          </div>
-                        )}
-                        {!agent.installed && agent.runtime_available && (
-                          <div style={{ fontSize: 10, color: 'rgba(52,211,153,0.5)', marginTop: 2 }}>
-                            runtime OK <span style={{ color: 'rgba(255,255,255,0.2)' }}>— via npx</span>
-                          </div>
-                        )}
-                      </div>
-                      {(agent.installed || agent.runtime_available) ? (
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                          <button
-                            style={{
-                              ...s.iconBtn,
-                              fontSize: 10,
-                              padding: '2px 8px',
-                              borderRadius: 4,
-                              background: agent.enabled ? 'rgba(200,255,0,0.1)' : 'rgba(255,100,0,0.1)',
-                              border: agent.enabled ? '1px solid rgba(200,255,0,0.2)' : '1px solid rgba(255,100,0,0.2)',
-                              color: agent.enabled ? '#c8ff00' : '#ff8c00',
-                            }}
-                            title={agent.enabled ? t('config.toggleDisable') : t('config.toggleEnable')}
-                            onClick={async () => {
-                              try {
-                                await agentsApi.toggle(agent.agent_type);
-                              } catch { /* ignore */ }
-                              refetchAgents();
-                            }}
-                            disabled={installing !== null}
-                          >
-                            {agent.enabled ? t('config.enabled') : t('config.disabled')}
-                          </button>
-                          {agent.host_managed && (
-                            <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.25)', marginLeft: 2 }} title={t('config.hostManaged')}>{agent.host_label ?? 'host'}</span>
-                          )}
-                          <button
-                            style={{ ...s.iconBtn, color: 'rgba(255,255,255,0.2)' }}
-                            title={t('config.uninstall')}
-                            onClick={async () => {
-                              if (!confirm(t('config.uninstallConfirm', agent.name))) return;
-                              setInstalling(agent.name);
-                              try {
-                                await agentsApi.uninstall(agent.agent_type);
-                              } catch {
-                                alert(t('config.uninstallFailed'));
-                                setInstalling(null);
-                                return;
-                              }
-                              // Re-detect: if agent is still installed, uninstall had no effect
-                              const updated = await agentsApi.detect();
-                              const still = updated?.find((a: AgentDetection) => a.agent_type === agent.agent_type);
-                              if (still?.installed) {
-                                alert(t('config.uninstallFailed'));
-                              }
-                              refetchAgents();
-                              setInstalling(null);
-                            }}
-                            disabled={installing !== null}
-                          >
-                            <Trash2 size={11} />
-                          </button>
-                        </div>
-                      ) : (
-                        <button
-                          style={{ ...s.installBtn, padding: '4px 10px', fontSize: 11 }}
-                          onClick={() => handleInstallAgent(agent)}
-                          disabled={installing !== null}
-                        >
-                          {installing === agent.name ? (
-                            <><Loader2 size={10} style={{ animation: 'spin 1s linear infinite' }} /> ...</>
-                          ) : (
-                            <><Download size={10} /> Installer</>
-                          )}
-                        </button>
-                      )}
-                    </div>
-                    {perm && (agent.installed || agent.runtime_available) && (
-                      <div style={{ marginLeft: 22, marginTop: 8, padding: '8px 12px', borderRadius: 6, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
-                        <div
-                          style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}
-                          onClick={async () => {
-                            await configApi.setAgentAccess({ agent: agent.agent_type, full_access: !isFullAccess });
-                            refetchAgentAccess();
-                          }}
-                        >
-                          <div style={{
-                            width: 30, height: 16, borderRadius: 8, position: 'relative' as const, transition: 'background 0.2s',
-                            background: isFullAccess ? 'rgba(200,255,0,0.3)' : 'rgba(255,255,255,0.1)',
-                            border: isFullAccess ? '1px solid rgba(200,255,0,0.4)' : '1px solid rgba(255,255,255,0.15)',
-                          }}>
-                            <div style={{
-                              width: 12, height: 12, borderRadius: '50%', position: 'absolute' as const, top: 1, transition: 'left 0.2s',
-                              left: isFullAccess ? 16 : 1,
-                              background: isFullAccess ? '#c8ff00' : 'rgba(255,255,255,0.3)',
-                            }} />
-                          </div>
-                          <code style={{ fontSize: 10, color: isFullAccess ? '#c8ff00' : 'rgba(255,255,255,0.4)' }}>{perm.flag}</code>
-                        </div>
-                        <p style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', marginTop: 4, marginLeft: 38 }}>
-                          {t(perm.descKey)}
-                        </p>
-                      </div>
-                    )}
-                    {tf && (agent.installed || agent.runtime_available) && (() => {
-                      const providerKeys = tokenConfig?.keys?.filter(k => k.provider === tf.key) ?? [];
-                      const isDisabled = tokenConfig?.disabled_overrides?.includes(tf.key);
-                      const isAdding = addingKeyFor === tf.key;
-                      const newInput = newKeyInputs[tf.key] ?? { name: '', value: '' };
-                      return (
-                      <div style={{ marginLeft: 22, marginTop: 6 }}>
-                        {/* Provider-level override toggle */}
-                        {providerKeys.length > 0 && (
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-                            <Key size={10} style={{ color: 'rgba(255,255,255,0.25)', flexShrink: 0 }} />
-                            <button
-                              style={{ ...s.iconBtn, padding: 0 }}
-                              title={isDisabled ? t('config.enableOverride') : t('config.disableOverride')}
-                              onClick={async () => {
-                                await configApi.toggleTokenOverride(tf.key);
-                                refetchTokens();
-                              }}
-                            >
-                              {isDisabled
-                                ? <Play size={10} style={{ color: 'rgba(255,255,255,0.25)' }} />
-                                : <StopCircle size={10} style={{ color: 'rgba(52,211,153,0.5)' }} />}
-                            </button>
-                            <span style={{ fontSize: 10, color: isDisabled ? 'rgba(255,255,255,0.25)' : 'rgba(52,211,153,0.6)' }}>
-                              {isDisabled ? t('config.overrideDisabled') : t('config.overrideActive')}
-                            </span>
-                            <a
-                              href={tf.url} target="_blank" rel="noopener noreferrer"
-                              style={{ display: 'flex', alignItems: 'center', color: 'rgba(255,255,255,0.25)', flexShrink: 0, marginLeft: 'auto' }}
-                              title={t('config.getKey')}
-                            >
-                              <ExternalLink size={10} />
-                            </a>
-                          </div>
-                        )}
-
-                        {/* Existing keys list */}
-                        {providerKeys.map(k => {
-                          const isVis = tokenVisible.has(k.id);
-                          return (
-                          <div key={k.id} style={{
-                            display: 'flex', alignItems: 'center', gap: 6, padding: '2px 0 2px 16px',
-                            opacity: isDisabled ? 0.4 : 1,
-                          }}>
-                            {/* Active indicator / activate button */}
-                            {k.active ? (
-                              <Check size={9} style={{ color: 'rgba(52,211,153,0.7)', flexShrink: 0 }} />
-                            ) : (
-                              <button style={{ ...s.iconBtn, padding: 0 }} title={t('config.activateKey')}
-                                onClick={async () => { await configApi.activateApiKey(k.id); refetchTokens(); }}>
-                                <div style={{ width: 9, height: 9, borderRadius: '50%', border: '1px solid rgba(255,255,255,0.2)' }} />
-                              </button>
-                            )}
-                            <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.5)', minWidth: 60, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                              {k.name}
-                            </span>
-                            <span style={{
-                              fontSize: 10, padding: '1px 6px', borderRadius: 4, fontFamily: isVis ? 'monospace' : 'inherit',
-                              background: isDisabled ? 'rgba(255,255,255,0.04)' : 'rgba(52,211,153,0.1)',
-                              color: isDisabled ? 'rgba(255,255,255,0.25)' : 'rgba(52,211,153,0.7)',
-                              textDecoration: isDisabled ? 'line-through' : 'none',
-                            }}>
-                              {isVis ? k.masked_value : k.masked_value.replace(/[^.]/g, '\u2022')}
-                            </span>
-                            <button style={{ ...s.iconBtn, padding: 0 }} title={isVis ? 'Hide' : 'Show'}
-                              onClick={() => setTokenVisible(prev => {
-                                const next = new Set(prev);
-                                if (next.has(k.id)) next.delete(k.id); else next.add(k.id);
-                                return next;
-                              })}>
-                              {isVis ? <EyeOff size={9} style={{ color: '#c8ff00' }} /> : <Eye size={9} style={{ color: 'rgba(255,255,255,0.25)' }} />}
-                            </button>
-                            <button style={{ ...s.iconBtn, padding: 0 }} title={t('config.deleteKey')}
-                              onClick={async () => {
-                                if (confirm(t('config.deleteKeyConfirm').replace('{0}', k.name))) {
-                                  await configApi.deleteApiKey(k.id);
-                                  refetchTokens();
-                                }
-                              }}>
-                              <Trash2 size={9} style={{ color: 'rgba(255,107,107,0.5)' }} />
-                            </button>
-                          </div>
-                          );
-                        })}
-
-                        {/* No keys yet */}
-                        {providerKeys.length === 0 && !isAdding && (
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, paddingLeft: 16 }}>
-                            <Key size={10} style={{ color: 'rgba(255,255,255,0.25)', flexShrink: 0 }} />
-                            <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)' }}>{t('config.localAuth')}</span>
-                            <a href={tf.url} target="_blank" rel="noopener noreferrer"
-                              style={{ display: 'flex', alignItems: 'center', color: 'rgba(255,255,255,0.25)', flexShrink: 0 }}
-                              title={t('config.getKey')}>
-                              <ExternalLink size={10} />
-                            </a>
-                          </div>
-                        )}
-
-                        {/* Add key button / form */}
-                        {isAdding ? (
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 0 2px 16px' }}>
-                            <input
-                              type="text"
-                              style={{ ...s.input, fontSize: 10, padding: '3px 6px', width: 100 }}
-                              placeholder={t('config.keyName')}
-                              value={newInput.name}
-                              onChange={e => setNewKeyInputs(prev => ({ ...prev, [tf.key]: { ...newInput, name: e.target.value } }))}
-                            />
-                            <input
-                              type="password"
-                              style={{ ...s.input, flex: 1, fontSize: 10, padding: '3px 6px', maxWidth: 180 }}
-                              placeholder={tf.hint}
-                              value={newInput.value}
-                              onChange={e => setNewKeyInputs(prev => ({ ...prev, [tf.key]: { ...newInput, value: e.target.value } }))}
-                            />
-                            {newInput.value && (
-                              <button style={{ ...s.iconBtn, fontSize: 10, color: '#c8ff00' }}
-                                onClick={async () => {
-                                  try {
-                                    await configApi.saveApiKey({
-                                      id: null,
-                                      name: newInput.name || t('config.defaultKeyName'),
-                                      provider: tf.key,
-                                      value: newInput.value,
-                                    });
-                                    setNewKeyInputs(prev => ({ ...prev, [tf.key]: { name: '', value: '' } }));
-                                    setAddingKeyFor(null);
-                                    refetchTokens();
-                                    if (confirm(t('config.syncTokensConfirm'))) {
-                                      const synced = await configApi.syncAgentTokens();
-                                      if (synced.length > 0) {
-                                        alert(t('config.syncTokensDone').replace('{0}', synced.join(', ')));
-                                      } else {
-                                        alert(t('config.syncTokensNone'));
-                                      }
-                                    }
-                                  } catch { /* done */ }
-                                }}>
-                                <Save size={10} />
-                              </button>
-                            )}
-                            <button style={{ ...s.iconBtn, padding: 0 }} onClick={() => setAddingKeyFor(null)}>
-                              <X size={10} style={{ color: 'rgba(255,255,255,0.3)' }} />
-                            </button>
-                          </div>
-                        ) : (
-                          <button
-                            style={{ ...s.iconBtn, fontSize: 10, color: 'rgba(255,255,255,0.3)', padding: '2px 0 0 16px', display: 'flex', alignItems: 'center', gap: 4 }}
-                            onClick={() => {
-                              setAddingKeyFor(tf.key);
-                              setNewKeyInputs(prev => ({
-                                ...prev,
-                                [tf.key]: { name: providerKeys.length === 0 ? t('config.defaultKeyName') : '', value: '' },
-                              }));
-                            }}
-                          >
-                            <Plus size={9} /> {t('config.addKey')}
-                          </button>
-                        )}
-                      </div>
-                      );
-                    })()}
-                  </div>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* Token Usage per Agent */}
-            {agentUsageData && agentUsageData.length > 0 && (
-            <div style={s.card(false)}>
-              <div style={{ padding: '16px 20px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-                  <Zap size={14} style={{ color: '#c8ff00' }} />
-                  <span style={{ fontWeight: 600, fontSize: 14 }}>{t('config.tokenUsage')}</span>
-                  <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginLeft: 'auto' }}>
-                    {agentUsageData.reduce((s, a) => s + a.total_tokens, 0).toLocaleString()} tokens
-                  </span>
-                  <button style={s.iconBtn} onClick={() => refetchAgentUsage()} title={t('config.refresh')}>
-                    <RefreshCw size={12} />
-                  </button>
-                </div>
-
-                {agentUsageData.map(agent => {
-                  const isExpanded = usageExpanded === agent.agent_type;
-                  const color = AGENT_COLORS[agent.agent_type] ?? '#8b5cf6';
-                  const filteredProjects = isExpanded
-                    ? agent.by_project.filter(p => !usageSearch || p.project_name.toLowerCase().includes(usageSearch.toLowerCase()))
-                    : [];
-
-                  return (
-                  <div key={agent.agent_type} style={{ marginBottom: 8 }}>
-                    <div
-                      style={{
-                        display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', cursor: 'pointer',
-                        borderRadius: 6, background: isExpanded ? 'rgba(255,255,255,0.04)' : 'transparent',
-                      }}
-                      onClick={() => setUsageExpanded(isExpanded ? null : agent.agent_type)}
-                    >
-                      <ChevronRight size={12} style={{ color: 'rgba(255,255,255,0.3)', transform: isExpanded ? 'rotate(90deg)' : 'none', transition: 'transform .15s' }} />
-                      <Cpu size={12} style={{ color }} />
-                      <span style={{ fontWeight: 600, fontSize: 12, color }}>{agent.agent_type}</span>
-                      <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginLeft: 'auto' }}>
-                        {agent.total_tokens.toLocaleString()} tok
-                      </span>
-                      <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.2)' }}>
-                        {agent.message_count} msg
-                      </span>
-                    </div>
-
-                    {isExpanded && (
-                      <div style={{ paddingLeft: 32, paddingRight: 12, paddingBottom: 8 }}>
-                        {agent.by_project.length > 5 && (
-                          <input
-                            type="text"
-                            placeholder={t('projects.search')}
-                            value={usageSearch}
-                            onChange={e => setUsageSearch(e.target.value)}
-                            style={{ ...s.input, fontSize: 10, padding: '4px 8px', marginBottom: 6, width: '100%' }}
-                          />
-                        )}
-                        {filteredProjects.map(p => (
-                          <div key={p.project_id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '3px 0', fontSize: 11 }}>
-                            <span style={{ color: 'rgba(255,255,255,0.6)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                              {p.project_name}
-                            </span>
-                            <span style={{ color: 'rgba(255,255,255,0.3)', fontSize: 10, flexShrink: 0 }}>
-                              {p.tokens_used.toLocaleString()} tok
-                            </span>
-                            <span style={{ color: 'rgba(255,255,255,0.15)', fontSize: 9, flexShrink: 0 }}>
-                              {p.message_count} msg
-                            </span>
-                          </div>
-                        ))}
-                        {filteredProjects.length === 0 && usageSearch && (
-                          <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.2)', padding: '4px 0' }}>
-                            {t('projects.noResult')}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                  );
-                })}
-              </div>
-            </div>
-            )}
-
-            {/* Database */}
-            <div style={s.card(false)}>
-              <div style={{ padding: '16px 20px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-                  <HardDrive size={14} style={{ color: '#c8ff00' }} />
-                  <span style={{ fontWeight: 600, fontSize: 14 }}>{t('config.database')}</span>
-                  {dbInfo && (
-                    <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginLeft: 'auto' }}>
-                      {dbInfo.size_bytes < 1024 * 1024
-                        ? `${(dbInfo.size_bytes / 1024).toFixed(1)} Ko`
-                        : `${(dbInfo.size_bytes / (1024 * 1024)).toFixed(1)} Mo`}
-                    </span>
-                  )}
-                </div>
-
-                {dbInfo && (
-                  <div style={{ display: 'flex', gap: 16, marginBottom: 16 }}>
-                    {[
-                      { label: t('config.dbProjects'), value: dbInfo.project_count },
-                      { label: t('config.dbDiscussions'), value: dbInfo.discussion_count },
-                      { label: t('config.dbMessages'), value: dbInfo.message_count },
-                      { label: t('config.dbMcps'), value: dbInfo.mcp_count },
-                      { label: t('config.dbTasks'), value: dbInfo.task_count },
-                    ].map(({ label, value }) => (
-                      <div key={label} style={{ textAlign: 'center' }}>
-                        <div style={{ fontSize: 18, fontWeight: 700, color: '#c8ff00' }}>{value}</div>
-                        <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', marginTop: 2 }}>{label}</div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <button
-                    style={s.scanBtn}
-                    onClick={async () => {
-                      const data = await configApi.exportData();
-                      if (!data) return;
-                      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-                      const url = URL.createObjectURL(blob);
-                      const a = document.createElement('a');
-                      a.href = url;
-                      a.download = `kronn-export-${new Date().toISOString().slice(0, 10)}.json`;
-                      a.click();
-                      URL.revokeObjectURL(url);
-                    }}
-                  >
-                    <Download size={12} /> {t('config.export')}
-                  </button>
-                  <button
-                    style={s.scanBtn}
-                    onClick={() => {
-                      const input = document.createElement('input');
-                      input.type = 'file';
-                      input.accept = '.json';
-                      input.onchange = async () => {
-                        const file = input.files?.[0];
-                        if (!file) return;
-                        try {
-                          const text = await file.text();
-                          const data = JSON.parse(text);
-                          if (!data.version || !data.projects || !data.discussions) {
-                            alert(t('config.importInvalid'));
-                            return;
-                          }
-                          if (!confirm(t('config.importConfirm'))) return;
-                          await configApi.importData(data);
-                          refetch();
-                          refetchDiscussions();
-                          refetchDbInfo();
-                        } catch {
-                          alert(t('config.importError'));
-                        }
-                      };
-                      input.click();
-                    }}
-                  >
-                    <Upload size={12} /> {t('config.import')}
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            {/* General */}
-            <div style={{ ...s.card(false), marginTop: 16 }}>
-              <div style={{ padding: '16px 20px' }}>
-                <p style={{ color: 'rgba(255,255,255,0.4)', fontSize: 13, marginBottom: 16 }}>
-                  Fichier de config : <code style={s.code}>~/.config/kronn/config.toml</code>
-                </p>
-                <div style={{ borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: 16 }}>
-                  <p style={{ color: 'rgba(255,255,255,0.35)', fontSize: 12, marginBottom: 12 }}>
-                    {t('config.resetHint')}
-                  </p>
-                  <button style={s.dangerBtn} onClick={onReset}>
-                    <Trash2 size={12} /> {t('config.reset')}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-          );
-        })()}
+        {page === 'settings' && (
+          <SettingsPage
+            agents={agents}
+            agentAccess={agentAccess ?? null}
+            configLanguage={configLanguage ?? null}
+            refetchAgents={refetchAgents}
+            refetchAgentAccess={refetchAgentAccess}
+            refetchLanguage={refetchLanguage}
+            refetchProjects={refetch}
+            refetchDiscussions={refetchDiscussions}
+            onReset={onReset}
+          />
+        )}
       </main>
     </div>
   );
 }
 
 // ─── Styles ─────────────────────────────────────────────────────────────────
+
+// Standalone styled select for audit agent chooser (was ds.selectStyled)
+const auditSelectStyle = {
+  width: '100%', padding: '9px 12px', background: '#1a1d26', border: '1px solid rgba(255,255,255,0.12)',
+  borderRadius: 8, color: '#e8eaed', fontSize: 13, fontFamily: 'inherit', outline: 'none',
+  cursor: 'pointer', appearance: 'none' as const,
+  backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E")`,
+  backgroundRepeat: 'no-repeat', backgroundPosition: 'right 10px center',
+  paddingRight: 32,
+} as const;
 
 const s = {
   app: { minHeight: '100vh', background: '#0a0c10' } as const,
@@ -2154,116 +646,4 @@ const s = {
   sourceBadge: { fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 4, background: 'rgba(200,255,0,0.08)', color: 'rgba(200,255,0,0.6)', border: '1px solid rgba(200,255,0,0.12)' } as const,
   projectChip: { display: 'flex', alignItems: 'center', gap: 3, padding: '2px 8px', borderRadius: 4, fontSize: 10, background: 'rgba(255,255,255,0.04)', color: 'rgba(255,255,255,0.4)', border: '1px solid rgba(255,255,255,0.06)' } as const,
   projectToggle: (active: boolean) => ({ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 10px', borderRadius: 5, fontSize: 11, fontFamily: 'inherit', cursor: 'pointer', border: `1px solid ${active ? 'rgba(200,255,0,0.2)' : 'rgba(255,255,255,0.08)'}`, background: active ? 'rgba(200,255,0,0.06)' : 'rgba(255,255,255,0.02)', color: active ? 'rgba(200,255,0,0.8)' : 'rgba(255,255,255,0.35)' } as const),
-};
-
-// ─── Discussion styles ──────────────────────────────────────────────────────
-
-const mdStyles: Record<string, React.CSSProperties> = {
-  p: { margin: '4px 0' },
-  h1: { fontSize: 18, fontWeight: 700, margin: '12px 0 6px', color: '#e8eaed' },
-  h2: { fontSize: 16, fontWeight: 700, margin: '10px 0 4px', color: '#e8eaed' },
-  h3: { fontSize: 14, fontWeight: 600, margin: '8px 0 4px', color: '#e8eaed' },
-  ul: { margin: '4px 0', paddingLeft: 20 },
-  ol: { margin: '4px 0', paddingLeft: 20 },
-  li: { margin: '2px 0' },
-  code: { background: 'rgba(255,255,255,0.08)', padding: '1px 5px', borderRadius: 4, fontSize: 12, fontFamily: 'monospace' },
-  pre: { background: 'rgba(0,0,0,0.3)', padding: '10px 12px', borderRadius: 8, overflowX: 'auto', margin: '6px 0', border: '1px solid rgba(255,255,255,0.06)' },
-  preCode: { background: 'none', padding: 0, fontSize: 12, fontFamily: 'monospace', color: '#c8ff00' },
-  table: { borderCollapse: 'collapse' as const, width: '100%', margin: '8px 0', fontSize: 12 },
-  th: { border: '1px solid rgba(255,255,255,0.12)', padding: '6px 10px', background: 'rgba(255,255,255,0.05)', fontWeight: 600, textAlign: 'left' as const },
-  td: { border: '1px solid rgba(255,255,255,0.08)', padding: '5px 10px' },
-  blockquote: { borderLeft: '3px solid rgba(200,255,0,0.3)', margin: '6px 0', paddingLeft: 12, color: 'rgba(255,255,255,0.6)' },
-  hr: { border: 'none', borderTop: '1px solid rgba(255,255,255,0.1)', margin: '10px 0' },
-  a: { color: '#c8ff00', textDecoration: 'underline' },
-  strong: { fontWeight: 700, color: '#f0f0f0' },
-};
-
-const MarkdownContent = ({ content }: { content: string }) => (
-  <div style={{ fontSize: 13, lineHeight: 1.55 }}>
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      components={{
-        p: ({ children }) => <p style={mdStyles.p}>{children}</p>,
-        h1: ({ children }) => <h1 style={mdStyles.h1}>{children}</h1>,
-        h2: ({ children }) => <h2 style={mdStyles.h2}>{children}</h2>,
-        h3: ({ children }) => <h3 style={mdStyles.h3}>{children}</h3>,
-        ul: ({ children }) => <ul style={mdStyles.ul}>{children}</ul>,
-        ol: ({ children }) => <ol style={mdStyles.ol}>{children}</ol>,
-        li: ({ children }) => <li style={mdStyles.li}>{children}</li>,
-        code: ({ className, children }) => {
-          const isBlock = className?.includes('language-');
-          return isBlock
-            ? <code style={mdStyles.preCode}>{children}</code>
-            : <code style={mdStyles.code}>{children}</code>;
-        },
-        pre: ({ children }) => <pre style={mdStyles.pre}>{children}</pre>,
-        table: ({ children }) => <table style={mdStyles.table}>{children}</table>,
-        th: ({ children }) => <th style={mdStyles.th}>{children}</th>,
-        td: ({ children }) => <td style={mdStyles.td}>{children}</td>,
-        blockquote: ({ children }) => <blockquote style={mdStyles.blockquote}>{children}</blockquote>,
-        hr: () => <hr style={mdStyles.hr} />,
-        a: ({ href, children }) => <a href={href} style={mdStyles.a} target="_blank" rel="noopener noreferrer">{children}</a>,
-        strong: ({ children }) => <strong style={mdStyles.strong}>{children}</strong>,
-      }}
-    >
-      {content}
-    </ReactMarkdown>
-  </div>
-);
-
-const ds = {
-  sidebar: { width: 280, borderRight: '1px solid rgba(255,255,255,0.07)', background: '#0e1117', display: 'flex', flexDirection: 'column' as const, flexShrink: 0 },
-  sidebarHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '14px 14px 10px', borderBottom: '1px solid rgba(255,255,255,0.06)' } as const,
-  sidebarList: { flex: 1, overflowY: 'auto' as const, padding: '8px 0' },
-  projectGroup: {
-    fontSize: 10, fontWeight: 700, textTransform: 'uppercase' as const, letterSpacing: '0.06em',
-    color: 'rgba(200,255,0,0.5)', padding: '14px 14px 6px',
-    marginTop: 4, borderTop: '1px solid rgba(255,255,255,0.05)',
-    display: 'flex', alignItems: 'center', gap: 6,
-  },
-  discItem: (active: boolean) => ({
-    display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '8px 14px 8px 22px', border: 'none',
-    background: active ? 'rgba(200,255,0,0.06)' : 'transparent',
-    borderLeft: active ? '2px solid #c8ff00' : '2px solid transparent',
-    color: active ? '#e8eaed' : 'rgba(255,255,255,0.5)',
-    cursor: 'pointer', textAlign: 'left' as const, fontFamily: 'inherit',
-  }),
-  chatArea: { flex: 1, display: 'flex', flexDirection: 'column' as const, minWidth: 0, background: '#0a0c10' },
-  chatHeader: { display: 'flex', alignItems: 'center', gap: 12, padding: '14px 20px', borderBottom: '1px solid rgba(255,255,255,0.07)', background: '#12151c', flexShrink: 0 } as const,
-  messages: { flex: 1, overflowY: 'auto' as const, padding: '20px 20px 10px' },
-  msgRow: (isUser: boolean) => ({ display: 'flex', justifyContent: isUser ? 'flex-end' : 'flex-start', marginBottom: 12 }),
-  msgBubble: (isUser: boolean) => ({
-    maxWidth: '70%', padding: '10px 14px', borderRadius: 12,
-    background: isUser ? 'rgba(200,255,0,0.08)' : 'rgba(255,255,255,0.04)',
-    border: `1px solid ${isUser ? 'rgba(200,255,0,0.15)' : 'rgba(255,255,255,0.07)'}`,
-    color: '#e8eaed',
-  }),
-  msgAgent: { display: 'flex', alignItems: 'center', gap: 4, fontSize: 10, fontWeight: 600, color: 'rgba(139,92,246,0.7)', marginBottom: 4 } as const,
-  msgTime: { fontSize: 10, color: 'rgba(255,255,255,0.2)', marginTop: 4, textAlign: 'right' as const },
-  inputBar: { display: 'flex', gap: 8, padding: '12px 20px', borderTop: '1px solid rgba(255,255,255,0.07)', background: '#12151c', flexShrink: 0 } as const,
-  chatInput: { width: '100%', padding: '10px 14px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, color: '#e8eaed', fontSize: 13, fontFamily: 'inherit', outline: 'none' } as const,
-  sendBtn: { padding: '10px 16px', borderRadius: 8, border: '1px solid rgba(200,255,0,0.2)', background: 'rgba(200,255,0,0.1)', color: '#c8ff00', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' } as const,
-  newDiscOverlay: { display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 1 } as const,
-  newDiscCard: { width: 420, padding: 24, borderRadius: 12, background: '#12151c', border: '1px solid rgba(255,255,255,0.1)' } as const,
-  label: { display: 'block', fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', marginBottom: 4, marginTop: 8 } as const,
-  select: { width: '100%', padding: '8px 12px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 6, color: '#e8eaed', fontSize: 12, fontFamily: 'inherit', outline: 'none' } as const,
-  selectStyled: {
-    width: '100%', padding: '9px 12px', background: '#1a1d26', border: '1px solid rgba(255,255,255,0.12)',
-    borderRadius: 8, color: '#e8eaed', fontSize: 13, fontFamily: 'inherit', outline: 'none',
-    cursor: 'pointer', appearance: 'none' as const,
-    backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E")`,
-    backgroundRepeat: 'no-repeat', backgroundPosition: 'right 10px center',
-    paddingRight: 32,
-  } as const,
-  inputStyled: {
-    width: '100%', padding: '9px 12px', background: '#1a1d26', border: '1px solid rgba(255,255,255,0.12)',
-    borderRadius: 8, color: '#e8eaed', fontSize: 13, fontFamily: 'inherit', outline: 'none',
-    boxSizing: 'border-box' as const,
-  } as const,
-  textareaStyled: {
-    width: '100%', padding: '10px 12px', background: '#1a1d26', border: '1px solid rgba(255,255,255,0.12)',
-    borderRadius: 8, color: '#e8eaed', fontSize: 13, fontFamily: 'inherit', outline: 'none',
-    resize: 'vertical' as const, boxSizing: 'border-box' as const, lineHeight: 1.5,
-  } as const,
-  textarea: { width: '100%', padding: '10px 12px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 6, color: '#e8eaed', fontSize: 12, fontFamily: 'inherit', outline: 'none', resize: 'vertical' as const } as const,
 };

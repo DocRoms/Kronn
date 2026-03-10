@@ -222,11 +222,11 @@ pub async fn trigger(
     tokio::spawn(async move {
         let cfg = config.read().await;
         let tokens = cfg.tokens.clone();
-        let full_access = cfg.agents.claude_code.full_access;
+        let agents = cfg.agents.clone();
         drop(cfg);
 
         if let Err(e) = crate::workflows::runner::execute_run(
-            db, &wf, &mut run_exec, &tokens, full_access, Some(tx),
+            db, &wf, &mut run_exec, &tokens, &agents, Some(tx),
         ).await {
             tracing::error!("Workflow run {} failed: {}", run_exec.id, e);
         }

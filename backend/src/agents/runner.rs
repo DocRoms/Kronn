@@ -40,6 +40,7 @@ enum StderrMode {
 pub struct AgentProcess {
     pub child: tokio::process::Child,
     pub output_mode: OutputMode,
+    pub work_dir: PathBuf,
     rx: mpsc::Receiver<String>,
     stderr_capture: Arc<Mutex<Vec<String>>>,
 }
@@ -53,6 +54,31 @@ impl AgentProcess {
     pub fn captured_stderr(&self) -> Vec<String> {
         self.stderr_capture.lock().unwrap().clone()
     }
+
+    /// Fix file ownership after agent execution.
+    /// Agents run as root in Docker but files on host volumes should be owned by the host user.
+    pub fn fix_ownership(&self) {
+        fix_file_ownership(&self.work_dir);
+    }
+}
+
+/// Fix file ownership after agent execution.
+/// Agents run as root in Docker but files on host volumes should be owned by the host user.
+fn fix_file_ownership(work_dir: &Path) {
+    let uid = std::env::var("KRONN_HOST_UID").unwrap_or_default();
+    let gid = std::env::var("KRONN_HOST_GID").unwrap_or_default();
+    if uid.is_empty() || gid.is_empty() {
+        return; // Not in Docker or no UID/GID configured
+    }
+
+    let ownership = format!("{}:{}", uid, gid);
+    // Only fix files in the work directory, not system files
+    let _ = std::process::Command::new("chown")
+        .args(["-R", &ownership])
+        .arg(work_dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 /// Start an agent process for the given agent type and prompt.
@@ -150,7 +176,7 @@ pub async fn start_agent(
         }
     }
 
-    Ok(AgentProcess { child, output_mode, rx, stderr_capture })
+    Ok(AgentProcess { child, output_mode, work_dir, rx, stderr_capture })
 }
 
 /// Get the command configuration for an agent type.
@@ -417,6 +443,10 @@ pub fn parse_token_usage(agent_type: &AgentType, response: &str, stderr_lines: &
         _ => (response.to_string(), 0),
     }
 }
+
+#[cfg(test)]
+#[path = "runner_test.rs"]
+mod runner_test;
 
 fn get_api_key(env_key: &str, tokens: &TokensConfig) -> Option<String> {
     let provider = match env_key {

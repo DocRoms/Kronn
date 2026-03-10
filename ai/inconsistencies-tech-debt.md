@@ -29,8 +29,8 @@
 | ~~TD-20260308-mcp-redesign~~ | ~~Old flat MCP model~~ — **DONE**: 3-tier model (servers→configs→projects), encrypted secrets, registry matching, disk sync | Backend + Frontend | Done |
 | ~~TD-20260306-mcp-noninteractive~~ | ~~Agents don't load MCP servers~~ — **DONE**: All 3 agents synced: Claude Code (`.mcp.json`), Codex (`~/.codex/config.toml`), Vibe (`.vibe/config.toml`) | Backend | Done |
 | ~~TD-20260308-codex-vibe-mcp~~ | ~~Codex and Vibe use TOML config~~ — **DONE**: Disk sync now writes all 3 formats (JSON + 2x TOML). Codex global config preserves non-MCP settings. Vibe per-project. | Backend | Done |
-| TD-20260306-monolith-dashboard | Dashboard.tsx was 2000+ lines — MCP page extracted to McpPage.tsx (~625 lines). Dashboard now ~1600 lines. Discussions page is the next candidate for extraction. | Frontend | Low |
-| TD-20260306-no-tests | No test framework or test suite configured | Backend + Frontend | Medium |
+| TD-20260306-monolith-dashboard | Dashboard.tsx ~2250 lines — MCP extracted to McpPage.tsx (~715 lines), Workflows to WorkflowsPage.tsx (~1660 lines). Discussions page next candidate. | Frontend | Low |
+| TD-20260306-no-tests | Frontend: **DONE** — Vitest 4 + testing-library (9 suites, 71 tests, coverage-v8). Backend: no unit/API tests. Shell scripts (`lib/*.sh`): no tests (bats-core recommended). | Backend + Shell | Medium |
 | TD-20260306-inline-styles | All styles are inline — no theming or consistency system | Frontend | Low |
 | ~~TD-20260307-agents-tab~~ | ~~Agents tab should be merged into Settings~~ — **DONE**: merged into Config page | Frontend | Done |
 | TD-20260307-tasks-to-workflows | Legacy scheduled tasks → Workflows engine — **DONE**: Full engine (models, DB, API, template, workspace, steps, runner, triggers, GitHub tracker, frontend UI with 5-step wizard + detail + runs + live SSE progress + run deletion). Actions wizard step removed (agents use MCP tools in steps instead). Remaining: Symphony WORKFLOW.md import. | Backend + Frontend | Done (core) |

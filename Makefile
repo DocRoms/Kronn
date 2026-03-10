@@ -1,4 +1,4 @@
-.PHONY: start stop logs clean build dev-backend dev-frontend setup check
+.PHONY: start stop logs clean build dev-backend dev-frontend setup check test-shell
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 APP_NAME    := kronn
@@ -105,6 +105,11 @@ typegen:
 	cd backend && cargo test export_types -- --nocapture
 	@echo "$(GREEN)▸ Types written to frontend/src/types/generated.ts$(RESET)"
 
+## Run shell script tests (bats)
+test-shell:
+	@echo "$(CYAN)▸ Running shell tests...$(RESET)"
+	@./tests/bats/run.sh
+
 help:
 	@echo ""
 	@echo "$(CYAN)$(APP_NAME) — Enter the grid. Command your agents.$(RESET)"
@@ -119,4 +124,5 @@ help:
 	@echo "  make dev-frontend   Vite dev server"
 	@echo "  make check          Verify prerequisites"
 	@echo "  make typegen        Sync Rust → TS types"
+	@echo "  make test-shell     Run shell tests (bats)"
 	@echo ""

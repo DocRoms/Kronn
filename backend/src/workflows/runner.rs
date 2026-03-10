@@ -25,6 +25,7 @@ pub enum RunEvent {
     /// The entire run has finished.
     RunDone { status: RunStatus },
     /// An error occurred.
+    #[allow(dead_code)]
     RunError { error: String },
 }
 
@@ -37,7 +38,7 @@ pub async fn execute_run(
     workflow: &Workflow,
     run: &mut WorkflowRun,
     tokens_config: &TokensConfig,
-    full_access: bool,
+    agents_config: &AgentsConfig,
     events_tx: Option<EventSender>,
 ) -> Result<()> {
     // Helper to send events (best-effort, ignore send errors)
@@ -126,6 +127,7 @@ pub async fn execute_run(
             total_steps,
         }).await;
 
+        let full_access = agents_config.full_access_for(&step.agent);
         let outcome: StepOutcome = execute_step(
             step,
             &work_dir,
