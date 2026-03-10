@@ -27,6 +27,7 @@ const KNOWN_AGENTS: &[AgentDef] = &[
     AgentDef { name: "Codex", agent_type: AgentType::Codex, binary: "codex", origin: "US", install_cmd: "npm install -g @openai/codex" },
     AgentDef { name: "Vibe", agent_type: AgentType::Vibe, binary: "vibe", origin: "EU", install_cmd: "uv tool install mistral-vibe" },
     AgentDef { name: "Gemini CLI", agent_type: AgentType::GeminiCli, binary: "gemini", origin: "US", install_cmd: "npm install -g @google/gemini-cli" },
+    AgentDef { name: "Kiro", agent_type: AgentType::Kiro, binary: "kiro-cli", origin: "US", install_cmd: "curl -fsSL https://cli.kiro.dev/install | bash" },
 ];
 
 /// Detect the host platform label (WSL, macOS, Linux, etc.)
@@ -112,6 +113,7 @@ async fn probe_runtime(def: &AgentDef) -> bool {
         AgentType::Codex => Some("@openai/codex"),
         AgentType::GeminiCli => Some("@google/gemini-cli"),
         AgentType::Vibe => None, // uvx, handled differently
+        AgentType::Kiro => None, // Native binary, no npx package
         AgentType::Custom => None,
     };
 
@@ -253,6 +255,7 @@ pub async fn uninstall_agent(agent_type: &AgentType) -> Result<String> {
         AgentType::Codex => "npm uninstall -g @openai/codex",
         AgentType::Vibe => "uv tool uninstall mistral-vibe 2>/dev/null || pipx uninstall mistral-vibe 2>/dev/null || pip3 uninstall -y mistral-vibe",
         AgentType::GeminiCli => "npm uninstall -g @google/gemini-cli",
+        AgentType::Kiro => "rm -f $(which kiro-cli)",
         AgentType::Custom => anyhow::bail!("Cannot uninstall custom agents"),
     };
 

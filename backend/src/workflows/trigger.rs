@@ -35,7 +35,7 @@ fn check_cron(cron_expr: &str) -> bool {
             let now = Utc::now();
             if let Some(next) = schedule.upcoming(Utc).next() {
                 let diff = (next - now).num_seconds();
-                diff <= 30 && diff >= 0
+                (0..=30).contains(&diff)
             } else {
                 false
             }

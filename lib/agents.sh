@@ -3,17 +3,17 @@
 # Compatible Bash 3.2+ (macOS default)
 
 # Parallel arrays instead of associative arrays (bash 3 compat)
-# Index: 0=claude, 1=codex, 2=vibe, 3=gemini
-_AGENT_NAMES=(claude codex vibe gemini)
-_AGENT_ORIGINS=(US US EU US)
-_AGENT_PKGS=("npm:@anthropic-ai/claude-code" "npm:@openai/codex" "pypi:mistral-vibe" "npm:@google/gemini-cli")
-_AGENT_LABELS=("Claude Code (Anthropic)" "Codex (OpenAI)" "Vibe (Mistral)" "Gemini CLI (Google)")
-_AGENT_NODE_MINS=(18 18 0 18)
+# Index: 0=claude, 1=codex, 2=vibe, 3=gemini, 4=kiro-cli
+_AGENT_NAMES=(claude codex vibe gemini kiro-cli)
+_AGENT_ORIGINS=(US US EU US US)
+_AGENT_PKGS=("npm:@anthropic-ai/claude-code" "npm:@openai/codex" "pypi:mistral-vibe" "npm:@google/gemini-cli" "curl:kiro-cli")
+_AGENT_LABELS=("Claude Code (Anthropic)" "Codex (OpenAI)" "Vibe (Mistral)" "Gemini CLI (Google)" "Kiro (Amazon)")
+_AGENT_NODE_MINS=(18 18 0 18 0)
 
 # Detection results (populated by detect_agents)
-_AGENT_PATHS=("" "" "" "")
-_AGENT_VERSIONS=("" "" "" "")
-_AGENT_LATESTS=("" "" "" "")
+_AGENT_PATHS=("" "" "" "" "")
+_AGENT_VERSIONS=("" "" "" "" "")
+_AGENT_LATESTS=("" "" "" "" "")
 
 # ─── Index lookup ─────────────────────────────────────────────────────────────
 
@@ -73,9 +73,9 @@ _get_latest_version() {
 # ─── Detection ───────────────────────────────────────────────────────────────
 
 detect_agents() {
-    _AGENT_PATHS=("" "" "" "")
-    _AGENT_VERSIONS=("" "" "" "")
-    _AGENT_LATESTS=("" "" "" "")
+    _AGENT_PATHS=("" "" "" "" "")
+    _AGENT_VERSIONS=("" "" "" "" "")
+    _AGENT_LATESTS=("" "" "" "" "")
 
     local i cmd version
     for i in "${!_AGENT_NAMES[@]}"; do
@@ -231,6 +231,15 @@ install_agent() {
             _check_node_version gemini || return 1
             _npm_install_global @google/gemini-cli
             ;;
+        kiro-cli)
+            step "Installation de Kiro (Amazon)"
+            if ! command -v curl >/dev/null 2>&1; then
+                fail "curl requis pour installer Kiro"
+                printf "  ${DIM}https://cli.kiro.dev${RESET}\n"
+                return 1
+            fi
+            curl -fsSL https://cli.kiro.dev/install | bash
+            ;;
         *)
             fail "Agent inconnu : $agent"
             return 1
@@ -264,6 +273,9 @@ uninstall_agent() {
             elif command -v pip3 >/dev/null 2>&1; then
                 pip3 uninstall -y "$name" 2>/dev/null || true
             fi
+            ;;
+        curl)
+            rm -f "$(command -v "$name" 2>/dev/null)" 2>/dev/null || true
             ;;
     esac
 

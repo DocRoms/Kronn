@@ -98,3 +98,90 @@ teardown() {
     run secret_get "github" "personal_access_token"
     assert_failure
 }
+
+# ─── init_secrets ─────────────────────────────────────────────────────────────
+
+@test "init_secrets: creates secrets.toml when missing" {
+    rm -f "$KRONN_CONFIG_DIR/secrets.toml"
+    run init_secrets
+    assert_success
+    [ -f "$KRONN_CONFIG_DIR/secrets.toml" ]
+}
+
+@test "init_secrets: sets file permissions to 600" {
+    rm -f "$KRONN_CONFIG_DIR/secrets.toml"
+    init_secrets
+    local perms
+    perms=$(stat -c '%a' "$KRONN_CONFIG_DIR/secrets.toml" 2>/dev/null || stat -f '%Lp' "$KRONN_CONFIG_DIR/secrets.toml" 2>/dev/null)
+    [ "$perms" = "600" ]
+}
+
+@test "init_secrets: is idempotent — does not overwrite existing file" {
+    # Write custom content
+    echo "custom = true" > "$KRONN_CONFIG_DIR/secrets.toml"
+    run init_secrets
+    assert_success
+    # Custom content should still be there
+    run grep "custom" "$KRONN_CONFIG_DIR/secrets.toml"
+    assert_success
+}
+
+@test "init_secrets: creates config directory if missing" {
+    rm -rf "$KRONN_CONFIG_DIR"
+    run init_secrets
+    assert_success
+    [ -d "$KRONN_CONFIG_DIR" ]
+    [ -f "$KRONN_CONFIG_DIR/secrets.toml" ]
+}
+
+@test "init_secrets: template contains expected sections" {
+    rm -f "$KRONN_CONFIG_DIR/secrets.toml"
+    init_secrets
+    run grep '\[atlassian\]' "$KRONN_CONFIG_DIR/secrets.toml"
+    assert_success
+    run grep '\[github\]' "$KRONN_CONFIG_DIR/secrets.toml"
+    assert_success
+    run grep '\[aws\]' "$KRONN_CONFIG_DIR/secrets.toml"
+    assert_success
+}
+
+# ─── secrets_configured ──────────────────────────────────────────────────────
+
+@test "secrets_configured: returns false when all secrets are empty" {
+    cat > "$KRONN_CONFIG_DIR/secrets.toml" <<'TOML'
+[atlassian]
+api_token = ""
+[github]
+personal_access_token = ""
+TOML
+    run secrets_configured
+    assert_failure
+}
+
+@test "secrets_configured: returns true when atlassian token is set" {
+    cat > "$KRONN_CONFIG_DIR/secrets.toml" <<'TOML'
+[atlassian]
+api_token = "some-token"
+[github]
+personal_access_token = ""
+TOML
+    run secrets_configured
+    assert_success
+}
+
+@test "secrets_configured: returns true when github token is set" {
+    cat > "$KRONN_CONFIG_DIR/secrets.toml" <<'TOML'
+[atlassian]
+api_token = ""
+[github]
+personal_access_token = "ghp_test"
+TOML
+    run secrets_configured
+    assert_success
+}
+
+@test "secrets_configured: returns false when secrets file is missing" {
+    rm -f "$KRONN_CONFIG_DIR/secrets.toml"
+    run secrets_configured
+    assert_failure
+}

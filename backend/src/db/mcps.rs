@@ -151,7 +151,7 @@ pub fn find_config_by_hash(conn: &Connection, hash: &str) -> Result<Option<McpCo
 pub fn insert_config(conn: &Connection, config: &McpConfig) -> Result<()> {
     let env_keys_json = serde_json::to_string(&config.env_keys)?;
     let args_json = config.args_override.as_ref()
-        .map(|a| serde_json::to_string(a))
+        .map(serde_json::to_string)
         .transpose()?;
 
     conn.execute(
@@ -177,6 +177,7 @@ pub fn insert_config(conn: &Connection, config: &McpConfig) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn update_config(conn: &Connection, id: &str, label: Option<&str>, env_encrypted: Option<&str>, env_keys: Option<&[String]>, args_override: Option<&Vec<String>>, is_global: Option<bool>, config_hash: Option<&str>) -> Result<bool> {
     // Load existing, apply changes, write back
     let existing = match get_config(conn, id)? {
@@ -193,7 +194,7 @@ pub fn update_config(conn: &Connection, id: &str, label: Option<&str>, env_encry
 
     let env_keys_json = serde_json::to_string(&new_keys)?;
     let args_json = new_args.as_ref()
-        .map(|a| serde_json::to_string(a))
+        .map(serde_json::to_string)
         .transpose()?;
 
     let affected = conn.execute(

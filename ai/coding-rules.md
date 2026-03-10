@@ -37,7 +37,7 @@
 - **Error boundaries**: wrap lazy-loaded routes with `ErrorBoundary` (see App.tsx).
 - **SSE handling**: use `_streamSSE` helper in api.ts with `AbortController` for cancellation. Cleanup AbortControllers on component unmount.
 - **Linter**: ESLint 10 (`npm run lint`) — strict config with typescript-eslint. 0 errors required.
-- **Tests**: Vitest 4 (`npm test`). Use @testing-library/react for component tests. Wrap state-triggering calls in `act()`.
+- **Tests**: Vitest 4 (`npm test`, 124+ tests, 14 suites). Use @testing-library/react for component tests. Wrap state-triggering calls in `act()`.
 - **Coverage**: `npm run test:coverage` — @vitest/coverage-v8 with text + lcov reporters.
 - **Build**: `npm run build` (tsc + vite build)
 
@@ -46,4 +46,4 @@
 - **Compat**: Bash 3.2+ (macOS + Linux + WSL). No associative arrays, no `readarray`.
 - **Portability**: detect GNU/BSD variants for `sed -i`, `cp -rn`, `timeout`.
 - **Lint**: use `shellcheck` (not enforced yet, but recommended).
-- **Tests**: none yet — planned with `bats-core`.
+- **Tests**: bats-core (8 suites, 186 tests). Run with `make test-shell` or `bash tests/bats/run.sh`. Use `_load_lib()` helper from `test_helper.bash` to source scripts. All pure functions are tested; interactive functions (menus, agent install) are not testable in bats.

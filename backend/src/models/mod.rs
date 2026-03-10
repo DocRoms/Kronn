@@ -97,7 +97,12 @@ pub struct ApiKeysResponse {
 pub struct ScanConfig {
     pub paths: Vec<String>,
     pub ignore: Vec<String>,
+    /// Max depth when scanning for git repos (2–10, default 4)
+    #[serde(default = "default_scan_depth")]
+    pub scan_depth: usize,
 }
+
+fn default_scan_depth() -> usize { 4 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../frontend/src/types/generated.ts")]
@@ -106,6 +111,10 @@ pub struct AgentsConfig {
     pub codex: AgentConfig,
     #[serde(default)]
     pub gemini_cli: AgentConfig,
+    #[serde(default)]
+    pub kiro: AgentConfig,
+    #[serde(default)]
+    pub vibe: AgentConfig,
 }
 
 impl AgentsConfig {
@@ -115,6 +124,8 @@ impl AgentsConfig {
             AgentType::ClaudeCode => self.claude_code.full_access,
             AgentType::Codex => self.codex.full_access,
             AgentType::GeminiCli => self.gemini_cli.full_access,
+            AgentType::Kiro => self.kiro.full_access,
+            AgentType::Vibe => self.vibe.full_access,
             _ => false,
         }
     }
@@ -186,6 +197,7 @@ pub enum AgentType {
     Codex,
     Vibe,
     GeminiCli,
+    Kiro,
     Custom,
 }
 
@@ -252,19 +264,14 @@ pub struct DetectedRepo {
 // AI Audit
 // ═══════════════════════════════════════════════════════════════════════════════
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../frontend/src/types/generated.ts")]
 pub enum AiAuditStatus {
+    #[default]
     NoTemplate,
     TemplateInstalled,
     Audited,
     Validated,
-}
-
-impl Default for AiAuditStatus {
-    fn default() -> Self {
-        AiAuditStatus::NoTemplate
-    }
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -598,7 +605,6 @@ pub struct ProjectUsage {
     pub project_id: String,
     pub project_name: String,
     pub tokens_used: u64,
-    pub task_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -858,7 +864,6 @@ pub struct DbInfo {
     pub discussion_count: u32,
     pub message_count: u32,
     pub mcp_count: u32,
-    pub task_count: u32,
     pub workflow_count: u32,
     pub workflow_run_count: u32,
 }

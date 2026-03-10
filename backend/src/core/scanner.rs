@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use walkdir::WalkDir;
@@ -14,14 +15,24 @@ const AI_CONFIG_PATTERNS: &[(&str, AiConfigType)] = &[
     (".mcp.json", AiConfigType::McpJson),
 ];
 
-/// Maximum depth when scanning for git repos
-const MAX_SCAN_DEPTH: usize = 4;
+/// Default depth when scanning for git repos
+const DEFAULT_SCAN_DEPTH: usize = 4;
 
 /// Scan a list of paths for git repositories
 pub async fn scan_paths(
     paths: &[String],
     ignore: &[String],
 ) -> Result<Vec<DetectedRepo>> {
+    scan_paths_with_depth(paths, ignore, DEFAULT_SCAN_DEPTH).await
+}
+
+/// Scan a list of paths for git repositories with configurable depth (2–10)
+pub async fn scan_paths_with_depth(
+    paths: &[String],
+    ignore: &[String],
+    depth: usize,
+) -> Result<Vec<DetectedRepo>> {
+    let depth = depth.clamp(2, 10);
     let mut repos = Vec::new();
 
     for base_path in paths {
@@ -32,7 +43,7 @@ pub async fn scan_paths(
             continue;
         }
 
-        let found = scan_directory(&base, ignore, MAX_SCAN_DEPTH).await?;
+        let found = scan_directory(&base, ignore, depth).await?;
         repos.extend(found);
     }
 
@@ -46,17 +57,33 @@ pub async fn scan_paths(
         exists
     });
 
-    // Deduplicate by canonical path (handles macOS symlinks like /Users -> /private/var/Users)
-    repos.sort_by(|a, b| a.path.cmp(&b.path));
-    repos.dedup_by(|a, b| {
-        if a.path == b.path {
-            return true;
-        }
-        // Compare canonical paths to catch symlink duplicates
-        let canon_a = std::fs::canonicalize(&a.path).unwrap_or_else(|_| PathBuf::from(&a.path));
-        let canon_b = std::fs::canonicalize(&b.path).unwrap_or_else(|_| PathBuf::from(&b.path));
-        canon_a == canon_b
-    });
+    // Deduplicate repos (handles macOS symlinks like /Users -> /private/var/Users).
+    // Strategy: use a composite key of (repo name, git remote URL) to detect duplicates.
+    // This works even inside Docker where host paths can't be canonicalized.
+    // Fallback: if no remote URL, use the repo name + canonicalized container path.
+    {
+        let mut seen = HashSet::new();
+        repos.retain(|r| {
+            let key = if let Some(ref url) = r.remote_url {
+                // Same name + same remote URL = same repo found via different paths
+                // (different names with same URL = intentional separate clones, keep both)
+                format!("{}:{}", r.name, url)
+            } else {
+                // No remote: try canonical path of the container-mapped path
+                let container_path = resolve_host_path(&r.path);
+                let canon = std::fs::canonicalize(&container_path)
+                    .unwrap_or(container_path);
+                format!("path:{}", canon.display())
+            };
+            if seen.contains(&key) {
+                tracing::debug!("Filtering duplicate repo: {} (key: {})", r.path, key);
+                false
+            } else {
+                seen.insert(key);
+                true
+            }
+        });
+    }
 
     tracing::info!("Scan complete: {} repositories found", repos.len());
     Ok(repos)
@@ -241,7 +268,7 @@ pub fn count_ai_todos(project_path: &str) -> u32 {
 
     let mut count = 0u32;
     for entry in WalkDir::new(&ai_dir).max_depth(3).into_iter().filter_map(|e| e.ok()) {
-        if entry.file_type().is_file() && entry.path().extension().map_or(false, |ext| ext == "md") {
+        if entry.file_type().is_file() && entry.path().extension().is_some_and(|ext| ext == "md") {
             if let Ok(content) = std::fs::read_to_string(entry.path()) {
                 count += content.matches("<!-- TODO").count() as u32;
             }

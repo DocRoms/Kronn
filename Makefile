@@ -1,4 +1,4 @@
-.PHONY: start stop logs clean build dev-backend dev-frontend setup check test-shell
+.PHONY: start stop logs clean build dev-backend dev-frontend setup check test-shell lint-backend
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 APP_NAME    := kronn
@@ -104,6 +104,11 @@ typegen:
 	@echo "$(GREEN)▸ Generating TypeScript types...$(RESET)"
 	cd backend && cargo test export_types -- --nocapture
 	@echo "$(GREEN)▸ Types written to frontend/src/types/generated.ts$(RESET)"
+
+## Run clippy lints in Docker (same toolchain as CI)
+lint-backend:
+	@echo "$(CYAN)▸ Running cargo clippy in Docker...$(RESET)"
+	@docker build --target linter -f backend/Dockerfile backend/
 
 ## Run shell script tests (bats)
 test-shell:

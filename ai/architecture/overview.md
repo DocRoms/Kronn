@@ -28,15 +28,15 @@ Three Docker services behind nginx gateway:
 - `AbortController` + `signal` for cancellation. `finished` boolean guard prevents double `onDone`.
 
 ### Agent execution
-- `agents/runner.rs` spawns CLI processes (`claude`, `codex`, `vibe`, `gemini`) with `--print` / non-interactive flags.
+- `agents/runner.rs` spawns CLI processes (`claude`, `codex`, `vibe`, `gemini`, `kiro-cli`) with `--print` / non-interactive flags.
 - **Two output modes**: `Text` (line-by-line stdout, default for Codex/Vibe/Gemini) and `StreamJson` (Claude Code with `--output-format stream-json --verbose --include-partial-messages`). In StreamJson mode, each line is a JSON event parsed by `parse_claude_stream_line()` — text deltas from `stream_event` events, token usage from `result` event.
 - Agents run in the project's directory context (or temp dir for global discussions).
 - **Runtime probe**: if no local binary is found, `probe_runtime()` tests npx availability (15s timeout, 5min cache). `AgentDetection.runtime_available` distinguishes "installed locally" from "runnable via npx". Frontend uses `isUsable(agent) = (installed || runtime_available) && enabled`.
-- MCPs work with all 3 agents: Claude Code (`.mcp.json`), Codex (`~/.codex/config.toml`), Vibe (`.vibe/config.toml`). Disk sync writes all formats simultaneously.
-- `AgentConfig` has `full_access: bool` field (persisted in config.toml). When enabled, runner adds `--dangerously-skip-permissions` (Claude) or `--full-auto` (Codex).
+- MCPs work with all 3 agents: Claude Code (`.mcp.json`), Codex (`~/.codex/config.toml`), Vibe (`.vibe/config.toml`). Disk sync writes all formats simultaneously. Kiro uses AWS Builder ID (no API key).
+- `AgentConfig` has `full_access: bool` field (persisted in config.toml). When enabled, runner adds `--dangerously-skip-permissions` (Claude), `--full-auto` (Codex), `--trust-all-tools` (Kiro).
 - API: `GET/POST /api/config/agent-access` to read/set the full_access flag. UI toggle in Config > Agents card.
 - **Agent lifecycle**: agents can be uninstalled (`POST /api/agents/uninstall`) or toggled on/off (`POST /api/agents/toggle`). Disabled agents tracked in `AppConfig.disabled_agents: Vec<AgentType>`. `AgentDetection` includes `enabled: bool`. Uninstall uses platform-specific commands (npm for Claude/Codex, uv/pipx/pip3 for Vibe).
-- **Known issue — file permissions**: agents run as `root` inside the Docker container. Files created/modified on host-mounted volumes (`:rw`) end up owned by `root:root` on the host. Fix: pass host UID/GID via `KRONN_UID`/`KRONN_GID` env vars in docker-compose, then run agent processes with `--user $KRONN_UID:$KRONN_GID` or use `tokio::process::Command` with `.uid()/.gid()`.
+- **File permissions (fixed)**: agents run as `root` inside Docker. `fix_ownership()` called after all agent executions (discussions, workflows, AI audit) to chown files back to `KRONN_HOST_UID:KRONN_HOST_GID` on host-mounted volumes.
 - **Path resolution**: `resolve_host_path` uses Docker mount priority (prefers /host-home over /home/priol).
 
 ### Discussions
@@ -44,13 +44,18 @@ Three Docker services behind nginx gateway:
 - Discussions without a project are "global" — shown under "Général" group in the sidebar.
 - Agent runs in a temp directory for global discussions (no project context).
 - `CreateDiscussionRequest.project_id` is also optional; frontend offers "Aucun projet" option.
+- **Archive/unarchive**: `Discussion.archived: bool` (default false). Swipe right on sidebar item to archive, swipe left to delete. Archived discussions shown in a collapsible "Archives" section at the bottom of the sidebar. `PATCH /api/discussions/:id` with `UpdateDiscussionRequest { title?, archived? }`.
+- **Title editing**: double-click or pencil icon in chat header for inline rename.
+- **Disabled agent detection**: if a discussion's agent is uninstalled or disabled, the text input is grayed out with a warning banner linking to agent config.
+- **Multi-line input**: `<textarea>` with auto-resize (Shift+Enter for newlines, Enter to send).
+- **Full access badge**: "Full access" indicator on agent messages when `full_access: true`.
 
 ### State management
 - Backend: `AppState` holds `db: Arc<Database>` (SQLite) and `config: Arc<RwLock<AppConfig>>`.
 - `Database` struct wraps `Mutex<Connection>` with `with_conn()` async accessor.
 - Data persisted in `kronn.db` with WAL mode and foreign keys enabled.
 - Migrations run via `backend/src/db/migrations.rs` (versioned SQL files, executed before Mutex wrap to avoid blocking_lock panic).
-- Frontend: `useApi` hook for data fetching. Dashboard.tsx is the main shell; sub-pages (McpPage.tsx, WorkflowsPage.tsx) receive data as props. UI state managed locally with `useState`.
+- Frontend: `useApi` hook for data fetching. Dashboard.tsx (~650 lines) is the main shell; sub-pages (SettingsPage.tsx, DiscussionsPage.tsx, McpPage.tsx, WorkflowsPage.tsx) receive data as props. UI state managed locally with `useState`.
 - `useMemo` for computed values (agent mentions filtering, unread counts). Conditional polling (only active tab).
 - `ErrorBoundary` class component wraps lazy-loaded routes. `React.lazy` + `Suspense` for code splitting (SetupWizard, Dashboard).
 - `AbortController` cleanup on component unmount for SSE streams.
@@ -129,13 +134,13 @@ Kronn manages MCPs with a 3-tier model:
 mcp_servers (type)  →  mcp_configs (configured instance)  →  mcp_config_projects (N:N linkage)
 ```
 
-**Servers** represent an MCP type (e.g. "GitHub"). Can come from the built-in registry (19 official servers), be detected from `.mcp.json` files, or be added manually.
+**Servers** represent an MCP type (e.g. "GitHub"). Can come from the built-in registry (26 official servers), be detected from `.mcp.json` files, or be added manually.
 
 **Configs** are configured instances of a server with encrypted env vars (AES-256-GCM), a label, and optional args override. One server can have multiple configs (e.g. two GitHub configs with different tokens). Deduplication via FNV-1a hash of (transport + args + env values).
 
 **Project linkage** — N:N relationship. A config can be linked to multiple projects. The `is_global` flag means "applies to all projects" without explicit per-project linkage.
 
-**Registry** — 19 built-in official MCP servers in `core/registry.rs`, grouped by category: Git & Code, Databases, Cloud & Infra, Search & Web, Monitoring, Communication, Project Management, Utilities. Each has `env_keys` listing required environment variables, plus optional `token_url` (link to provider's token generation page) and `token_help` (short guidance text).
+**Registry** — 26 built-in official MCP servers in `core/registry.rs`, grouped by category: Git & Code (GitHub, GitLab, Git), Databases (PostgreSQL, SQLite, Redis, Supabase), Cloud & Infra (Cloudflare, AWS CloudWatch, Docker), Search & Web (Brave Search, Fetch, Puppeteer), Analytics & Monitoring (Sentry, Grafana, Google Analytics), Communication (Slack), Project Management (Linear, Atlassian), Design (Figma), Knowledge & Docs (Notion, Context7), Payments (Stripe), SEO (Ahrefs), Files (Filesystem), Email (Resend). Each has `env_keys` listing required environment variables, plus optional `token_url` (link to provider's token generation page) and `token_help` (short guidance text).
 
 **Disk sync (3 formats)** — When linkages or config values change, Kronn writes agent-specific config files:
 
@@ -198,6 +203,7 @@ NoTemplate → TemplateInstalled → Audited → Validated
 - Codex: `#10a37f` (OpenAI green)
 - Vibe: `#FF7000` (Mistral orange)
 - Gemini CLI: `#4285f4` (Google blue)
+- Kiro: `#7B61FF` (Kiro purple)
 
 ## Separation of concerns
 
@@ -207,7 +213,6 @@ NoTemplate → TemplateInstalled → Audited → Validated
 - `db/` — SQLite persistence, migrations, CRUD operations.
 - `agents/` — External CLI process management.
 - `workflows/` — Workflow engine: triggers, steps, template rendering, workspaces, tracker adapters (GitHub).
-- `scheduler/` — Legacy cron-based task execution (to be replaced by workflows).
 
 ## Data flow
 

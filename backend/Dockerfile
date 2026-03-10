@@ -21,6 +21,13 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && cargo build --release \
     && cp target/release/kronn /usr/local/bin/kronn
 
+# ── Lint stage (optional, used by `make lint-backend`) ───────────────────────
+FROM builder AS linter
+RUN rustup component add clippy
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/build/target \
+    cargo clippy --all-targets -- -D warnings
+
 # ── Runtime stage ─────────────────────────────────────────────────────────────
 FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \

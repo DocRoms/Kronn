@@ -274,6 +274,76 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             token_url: None,
             token_help: None,
         },
+        // ── Payments ───────────────────────────────────────────────────────
+        McpDefinition {
+            id: "mcp-stripe".into(),
+            name: "Stripe".into(),
+            description: "Payments, subscriptions, customers — official Stripe server".into(),
+            transport: McpTransport::Stdio {
+                command: "npx".into(),
+                args: vec!["-y".into(), "@stripe/mcp".into(), "--tools=all".into()],
+            },
+            env_keys: vec!["STRIPE_SECRET_KEY".into()],
+            tags: vec!["payments".into(), "billing".into(), "ecommerce".into()],
+            token_url: Some("https://dashboard.stripe.com/apikeys".into()),
+            token_help: Some("Secret key (sk_live_... or sk_test_...)".into()),
+        },
+        // ── Knowledge & Docs ──────────────────────────────────────────────
+        McpDefinition {
+            id: "mcp-notion".into(),
+            name: "Notion".into(),
+            description: "Pages, databases, docs — official Notion server".into(),
+            transport: McpTransport::Stdio {
+                command: "npx".into(),
+                args: vec!["-y".into(), "@notionhq/notion-mcp-server".into()],
+            },
+            env_keys: vec!["NOTION_TOKEN".into()],
+            tags: vec!["docs".into(), "knowledge".into(), "wiki".into()],
+            token_url: Some("https://www.notion.so/profile/integrations".into()),
+            token_help: Some("Internal integration token (secret_...)".into()),
+        },
+        // ── BaaS ──────────────────────────────────────────────────────────
+        McpDefinition {
+            id: "mcp-supabase".into(),
+            name: "Supabase".into(),
+            description: "Managed Postgres, auth, storage — official Supabase server".into(),
+            transport: McpTransport::Stdio {
+                command: "npx".into(),
+                args: vec!["-y".into(), "@supabase/mcp-server-supabase@latest".into()],
+            },
+            env_keys: vec!["SUPABASE_ACCESS_TOKEN".into()],
+            tags: vec!["database".into(), "auth".into(), "cloud".into()],
+            token_url: Some("https://supabase.com/dashboard/account/tokens".into()),
+            token_help: Some("Personal access token from Supabase dashboard".into()),
+        },
+        // ── SEO ───────────────────────────────────────────────────────────
+        McpDefinition {
+            id: "mcp-ahrefs".into(),
+            name: "Ahrefs".into(),
+            description: "SEO analysis, keywords, backlinks, rank tracking — official Ahrefs server".into(),
+            transport: McpTransport::Stdio {
+                command: "npx".into(),
+                args: vec!["-y".into(), "@ahrefs/mcp".into()],
+            },
+            env_keys: vec!["API_KEY".into()],
+            tags: vec!["seo".into(), "analytics".into(), "marketing".into()],
+            token_url: Some("https://app.ahrefs.com/api".into()),
+            token_help: Some("API v3 key (requires Ahrefs subscription)".into()),
+        },
+        // ── Git (local) ──────────────────────────────────────────────────
+        McpDefinition {
+            id: "mcp-git".into(),
+            name: "Git".into(),
+            description: "Local git repository operations — official MCP server".into(),
+            transport: McpTransport::Stdio {
+                command: "uvx".into(),
+                args: vec!["mcp-server-git".into()],
+            },
+            env_keys: vec![],
+            tags: vec!["git".into(), "code".into(), "vcs".into()],
+            token_url: None,
+            token_help: None,
+        },
         // ── Email ─────────────────────────────────────────────────────────
         McpDefinition {
             id: "mcp-resend".into(),

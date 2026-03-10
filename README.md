@@ -2,7 +2,7 @@
 
 > Enter the grid. Command your agents.
 
-Self-hosted control plane for AI coding agents. Manage Claude Code, Codex, and Vibe from a single dashboard — with unified MCP management, multi-agent debates, automated workflows, and AI-powered codebase audits.
+Self-hosted control plane for AI coding agents. Manage Claude Code, Codex, Vibe, Gemini CLI, and Kiro from a single dashboard — with unified MCP management, multi-agent debates, automated workflows, and AI-powered codebase audits.
 
 > **Early development** — Kronn is functional but actively evolving. Expect breaking changes.
 
@@ -56,7 +56,7 @@ You manage all of that... manually. **Kronn fixes that.**
 
 Chat with agents in project context. Use `@claude` or `@codex` to target specific agents. **Debate mode**: agents discuss in configurable rounds (1–3, default 2) and a primary agent synthesizes — get diverse perspectives, not just one model's opinion.
 
-Stop, retry, or edit messages mid-conversation. Unread badges with browser tab notifications. Persistent conversations backed by SQLite. Full i18n support (French, English, Spanish). Claude Code responses streamed token-by-token via `--output-format stream-json` with per-message token tracking.
+Stop, retry, or edit messages mid-conversation. Unread badges with browser tab notifications. Persistent conversations backed by SQLite. Full i18n support (French, English, Spanish). Claude Code responses streamed token-by-token via `--output-format stream-json` with per-message token tracking. Archive/unarchive discussions with swipe gestures (swipe right = archive, swipe left = delete). Inline title editing (double-click or pencil icon). Disabled agent detection with grayed-out input. Multi-line input with auto-resize.
 
 ![Multi-agent discussion with debate mode](docs/screenshots/discussions.png)
 
@@ -68,18 +68,22 @@ A 3-tier architecture with encrypted secrets:
 Server (type)  →  Config (instance + secrets)  →  Project (N:N)
 ```
 
-**19 built-in servers** organized by category:
+**26 built-in servers** organized by category:
 
 | Category | Servers |
 |----------|---------|
-| Git & Code | GitHub, GitLab |
-| Databases | PostgreSQL, SQLite, Redis |
+| Git & Code | GitHub, GitLab, Git (local) |
+| Databases | PostgreSQL, SQLite, Redis, Supabase |
 | Cloud & Infra | Cloudflare, AWS CloudWatch, Docker |
 | Search & Web | Brave Search, Fetch, Puppeteer |
 | Monitoring | Sentry, Google Analytics |
 | Communication | Slack, Resend |
 | Project Management | Linear, Atlassian |
-| Utilities | Filesystem, Context7 |
+| Design | Figma |
+| Payments | Stripe |
+| Knowledge & Docs | Notion, Context7 |
+| SEO | Ahrefs |
+| Files | Filesystem |
 
 Key capabilities:
 - **Auto-detection** from existing `.mcp.json` files across projects
@@ -206,6 +210,7 @@ NoTemplate → TemplateInstalled → Audited → Validated
 | OpenAI Codex | `codex` | `#10a37f` (OpenAI green) | Supported |
 | Vibe | `vibe` | `#FF7000` (Mistral orange) | Supported |
 | Gemini CLI | `gemini` | `#4285f4` (Google blue) | Supported |
+| Kiro | `kiro-cli` | `#7B61FF` (Kiro purple) | Supported |
 | DeepSeek | `deepseek` | — | Planned |
 | OpenCode | `opencode` | — | Planned |
 
@@ -262,12 +267,13 @@ kronn/
 ├── frontend/           # React + TypeScript + Vite
 │   └── src/
 │       ├── App.tsx         # Setup wizard ↔ Dashboard routing
-│       ├── pages/          # SetupWizard, Dashboard (5 tabs)
+│       ├── pages/          # SetupWizard, Dashboard, SettingsPage, DiscussionsPage, McpPage, WorkflowsPage
 │       ├── hooks/          # useApi
 │       ├── types/          # generated.ts (from Rust — DO NOT EDIT)
 │       └── lib/            # Typed API client + SSE streaming + i18n (fr/en/es)
 ├── ai/                 # AI context documentation (for agents working on this repo)
 ├── templates/          # AI context templates (for projects managed by Kronn)
+├── tests/bats/         # Shell tests (bats-core, 186 tests)
 ├── Makefile
 ├── docker-compose.yml  # 3 services: backend, frontend, gateway
 └── LICENSE             # MIT
@@ -300,11 +306,21 @@ active = true
 [scan]
 paths = ["~/projects", "~/work"]
 ignore = ["node_modules", ".git", "target"]
+scan_depth = 4
 
 [agents.claude_code]
 path = "/usr/local/bin/claude"
 installed = true
 ```
+</details>
+
+<details>
+<summary><strong>CI pipeline</strong></summary>
+
+GitHub Actions workflow triggered by adding the `ci-test` label to a PR:
+- **test-backend**: `cargo check` + `cargo clippy` + `cargo test`
+- **test-frontend**: `tsc --noEmit` + `pnpm test` (124+ tests, 14 suites)
+- **test-shell**: `make test-shell` (186 bats tests, 8 suites)
 </details>
 
 ## Requirements

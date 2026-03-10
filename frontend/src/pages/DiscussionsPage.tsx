@@ -5,6 +5,7 @@ import { discussions as discussionsApi, projects as projectsApi } from '../lib/a
 import type { Project, AgentDetection, Discussion, AgentType, AgentsConfig } from '../types/generated';
 import { useT } from '../lib/I18nContext';
 import { AGENT_LABELS, agentColor } from '../lib/constants';
+import type { ToastFn } from '../hooks/useToast';
 import {
   Folder, ChevronRight, Cpu,
   Plus, Trash2, Loader2,
@@ -24,6 +25,7 @@ const ALL_AGENT_MENTIONS: { trigger: string; type: AgentType; label: string }[] 
   { trigger: '@codex', type: 'Codex', label: 'Codex' },
   { trigger: '@vibe', type: 'Vibe', label: 'Vibe' },
   { trigger: '@gemini', type: 'GeminiCli', label: 'Gemini CLI' },
+  { trigger: '@kiro', type: 'Kiro', label: 'Kiro' },
 ];
 
 const SWIPE_THRESHOLD = 80;
@@ -147,6 +149,7 @@ export interface DiscussionsPageProps {
   prefill?: { projectId: string; title: string; prompt: string } | null;
   onPrefillConsumed?: () => void;
   onUnseenCountChange?: (count: number) => void;
+  toast: ToastFn;
 }
 
 export function DiscussionsPage({
@@ -161,6 +164,7 @@ export function DiscussionsPage({
   prefill,
   onPrefillConsumed,
   onUnseenCountChange,
+  toast,
 }: DiscussionsPageProps) {
   const { t } = useT();
 
@@ -247,6 +251,7 @@ export function DiscussionsPage({
       ClaudeCode: agentAccess.claude_code?.full_access,
       Codex: agentAccess.codex?.full_access,
       GeminiCli: agentAccess.gemini_cli?.full_access,
+      Vibe: agentAccess.vibe?.full_access,
     };
     return map[agentType] === false;
   }, [agentAccess]);
@@ -257,6 +262,7 @@ export function DiscussionsPage({
       ClaudeCode: agentAccess.claude_code?.full_access,
       Codex: agentAccess.codex?.full_access,
       GeminiCli: agentAccess.gemini_cli?.full_access,
+      Vibe: agentAccess.vibe?.full_access,
     };
     return map[agentType] === true;
   }, [agentAccess]);
@@ -367,7 +373,7 @@ export function DiscussionsPage({
       discId,
       (text) => setStreamingMap(prev => ({ ...prev, [discId]: (prev[discId] ?? '') + text })),
       () => cleanupStream(discId),
-      (error) => { console.error('Agent error:', error); cleanupStream(discId); },
+      (error) => { console.error('Agent error:', error); toast(String(error), 'error'); cleanupStream(discId); },
       controller.signal,
     );
   };
@@ -397,7 +403,7 @@ export function DiscussionsPage({
       { content: msg, target_agent: targetAgent },
       (text) => setStreamingMap(prev => ({ ...prev, [discId]: (prev[discId] ?? '') + text })),
       () => cleanupStream(discId),
-      (error) => { console.error('Agent error:', error); cleanupStream(discId); },
+      (error) => { console.error('Agent error:', error); toast(String(error), 'error'); cleanupStream(discId); },
       controller.signal,
       () => {
         refetchDiscussions();
@@ -427,7 +433,7 @@ export function DiscussionsPage({
       discId,
       (text) => setStreamingMap(prev => ({ ...prev, [discId]: (prev[discId] ?? '') + text })),
       () => cleanupStream(discId),
-      (error) => { console.error('Agent error:', error); cleanupStream(discId); },
+      (error) => { console.error('Agent error:', error); toast(String(error), 'error'); cleanupStream(discId); },
       controller.signal,
     );
   };
@@ -448,7 +454,7 @@ export function DiscussionsPage({
       discId,
       (text) => setStreamingMap(prev => ({ ...prev, [discId]: (prev[discId] ?? '') + text })),
       () => cleanupStream(discId),
-      (error) => { console.error('Agent error:', error); cleanupStream(discId); },
+      (error) => { console.error('Agent error:', error); toast(String(error), 'error'); cleanupStream(discId); },
       controller.signal,
     );
   };
@@ -519,6 +525,7 @@ export function DiscussionsPage({
       },
       onError: (error) => {
         console.error('Orchestration error:', error);
+        toast(String(error), 'error');
         setSendingMap(prev => ({ ...prev, [discId]: false }));
         delete abortControllers.current[discId];
         setOrchState(prev => {

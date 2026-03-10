@@ -23,8 +23,7 @@ Kronn/
 │       │   ├── projects.rs     # Project CRUD + scan + AI audit pipeline (template install, SSE audit, validation)
 │       │   ├── discussions.rs  # Discussion CRUD + SSE streaming + orchestration
 │       │   ├── mcps.rs         # MCP 3-tier API: overview, configs CRUD, registry, refresh, secrets
-│       │   ├── tasks.rs        # Legacy scheduled tasks (being replaced by workflows)
-│       │   ├── workflows.rs    # [planned] Workflow CRUD + trigger + runs
+│       │   ├── workflows.rs    # Workflow CRUD + trigger + runs
 │       │   ├── agents.rs       # Agent detection + install + uninstall + toggle (enable/disable)
 │       │   └── stats.rs        # Token usage stats
 │       ├── agents/             # Agent runner (CLI execution)
@@ -34,21 +33,22 @@ Kronn/
 │       │   ├── mod.rs          # Database struct (Mutex<Connection>), with_conn() async accessor, init
 │       │   ├── migrations.rs   # Versioned migration runner (run before Mutex wrap)
 │       │   ├── projects.rs     # Project CRUD operations
-│       │   ├── discussions.rs  # Discussion + message CRUD operations
+│       │   ├── discussions.rs  # Discussion + message CRUD (+ archive/rename via update_discussion)
+│       │   ├── discussions_test.rs # 18 tests (CRUD, archive, title, messages, AgentType round-trip)
 │       │   ├── mcps.rs         # MCP servers/configs/linkages CRUD, encryption, hashing
 │       │   ├── workflows.rs    # Workflow + WorkflowRun CRUD, run deletion (individual + bulk)
 │       │   └── sql/
-│       │       ├── 001_initial.sql      # Schema: projects, tasks, discussions, messages
+│       │       ├── 001_initial.sql      # Schema: projects, discussions, messages (+ legacy tasks table)
 │       │       ├── 002_mcp_redesign.sql # 3-tier MCP: mcp_servers, mcp_configs, mcp_config_projects
-│       │       └── 004_token_tracking.sql # Token tracking tables
+│       │       ├── 004_token_tracking.sql # Token tracking tables
+│       │       └── 005_discussion_archive.sql # Add archived column to discussions
 │       ├── core/               # Business logic
 │       │   ├── mod.rs          # Re-exports
 │       │   ├── config.rs       # Config load/save (~/.config/kronn/)
 │       │   ├── scanner.rs      # Git repo scanner + AI audit detection (detect_audit_status, count_ai_todos)
-│       │   ├── registry.rs     # MCP registry (19 built-in official servers, grouped by category, with token_url/token_help)
+│       │   ├── registry.rs     # MCP registry (26 built-in official servers, grouped by category, with token_url/token_help)
 │       │   ├── mcp_scanner.rs  # Multi-agent MCP sync + MCP injection. read_all_mcp_contexts() reads .mcp.json + context files and generates prompt listing available MCP tools. Disk sync: .mcp.json (Claude), .vibe/config.toml (Vibe), ~/.codex/config.toml (Codex). .gitignore safety
 │       │   └── crypto.rs       # AES-256-GCM encryption for MCP secrets
-│       ├── scheduler/mod.rs    # Legacy cron-based task scheduler (to be replaced)
 │       └── workflows/          # Workflow engine (implemented)
 │           ├── mod.rs          # WorkflowEngine: background polling loop (30s ticks), trigger checking, concurrency
 │           ├── trigger.rs      # Cron evaluation, tracker polling frequency
@@ -69,12 +69,15 @@ Kronn/
 │       ├── main.tsx            # React DOM entry
 │       ├── App.tsx             # Router (setup wizard vs dashboard) + ErrorBoundary + React.lazy code splitting
 │       ├── pages/
-│       │   ├── Dashboard.tsx   # Main UI shell (projects, discussions, workflows, settings) — routes to sub-pages
+│       │   ├── Dashboard.tsx   # Main UI shell (~650 lines) — projects tab, nav bar, routes to sub-pages
+│       │   ├── SettingsPage.tsx # Settings (~670 lines) — language, agents config, tokens, usage stats, DB management
+│       │   ├── DiscussionsPage.tsx # Discussions (~1420 lines) — sidebar, chat, streaming, debate, archive, swipe gestures, title editing
 │       │   ├── McpPage.tsx     # MCP management (registry, configs, inline secret editing with per-field visibility, context files, project toggles)
-│       │   ├── WorkflowsPage.tsx # Workflow management (list, 5-step create wizard, detail + live run progress via SSE, run deletion, manual trigger)
+│       │   ├── WorkflowsPage.tsx # Workflow management (~1700 lines, list, wizard, detail, runs, access warnings)
 │       │   └── SetupWizard.tsx # First-run setup flow
 │       ├── hooks/
-│       │   └── useApi.ts       # Generic fetch hook with loading/error/refetch + race condition protection
+│       │   ├── useApi.ts       # Generic fetch hook with loading/error/refetch + race condition protection
+│       │   └── useToast.ts     # Toast notifications (success/error/info, auto-dismiss 4s, max 3 visible)
 │       ├── lib/
 │       │   ├── api.ts          # API client (typed wrappers + SSE streaming helpers)
 │       │   ├── i18n.ts         # Lightweight i18n system (fr/en/es). Translation dictionaries + locale persistence (localStorage)
@@ -86,7 +89,8 @@ Kronn/
 │       │   └── setup.ts        # Test setup (@testing-library/jest-dom)
 │       ├── __tests__/          # App-level tests (App.tsx, ErrorBoundary)
 │       ├── hooks/__tests__/    # Hook tests (useApi)
-│       └── lib/__tests__/      # Lib tests (i18n, api, constants, types, regression)
+│       ├── lib/__tests__/      # Lib tests (i18n, api, constants, types, regression, access-warnings)
+│       └── pages/__tests__/    # Page component tests (WorkflowsPage, DiscussionsPage, SettingsPage, McpPage)
 │
 ├── ai/                         # AI context documentation (for this repo)
 ├── templates/                  # AI context templates (for projects managed by Kronn)
@@ -95,11 +99,22 @@ Kronn/
 │
 ├── lib/                        # CLI shell libraries (Bash 3.2+ compatible — macOS, Linux, WSL)
 │   ├── ui.sh                   # Terminal UI helpers (colors, prompts, banners). Interactive menu with fallback to numbered input on Bash < 4
-│   ├── agents.sh               # Agent detection + install. Parallel arrays (no associative arrays for Bash 3.2 compat)
+│   ├── agents.sh               # Agent detection + install (5 agents incl. Kiro). Parallel arrays (no associative arrays for Bash 3.2 compat)
 │   ├── mcps.sh                 # MCP sync + secrets
 │   ├── repos.sh                # Repo scanning. Uses rsync/find+cp fallback instead of cp -rn (BSD compat)
 │   ├── tron.sh                 # Tron-themed animated progress loader
 │   └── analyze.sh              # AI config analysis. Detects GNU/BSD sed for sed -i compat
+├── tests/bats/                 # Shell tests (bats-core, 8 suites, 186 tests)
+│   ├── run.sh                  # Test runner
+│   ├── test_helper.bash        # Shared helper (_load_lib, color vars)
+│   ├── agents.bats             # agents.sh tests (37)
+│   ├── mcps.bats               # mcps.sh tests (19)
+│   ├── tron.bats               # tron.sh tests (32)
+│   ├── ui.bats                 # ui.sh tests (28)
+│   ├── repos.bats              # repos.sh tests (24)
+│   ├── analyze.bats            # analyze.sh tests (16)
+│   ├── portability.bats        # Cross-platform tests (18)
+│   └── bugfixes.bats           # Non-regression tests (12)
 ├── kronn                       # CLI entrypoint (bash script, cross-platform)
 ├── docker-compose.yml          # 3 services: backend, frontend, gateway
 ├── Makefile                    # start, stop, logs, build, dev-backend, dev-frontend, typegen
@@ -117,8 +132,10 @@ Kronn/
 ## Notes
 - `README.md` is not guaranteed to be up-to-date; prefer actual config files as source of truth.
 - `frontend/src/types/generated.ts` is auto-generated — never edit manually.
-- Dashboard.tsx (~2250 lines) is the main shell with projects, discussions, and settings pages. MCP page extracted to McpPage.tsx (~715 lines), Workflows to WorkflowsPage.tsx (~1660 lines, includes wizard + live progress + run management).
+- Dashboard.tsx (~650 lines) is the main UI shell with projects tab and nav. Extracted: SettingsPage.tsx (~670 lines), DiscussionsPage.tsx (~1420 lines), McpPage.tsx (~715 lines), WorkflowsPage.tsx (~1700 lines).
+- DiscussionsPage includes: SwipeableDiscItem (swipe-to-archive/delete), inline title editing, disabled agent detection, multi-line textarea, archive section.
 - Shared constants (AGENT_COLORS, AGENT_LABELS) extracted to `lib/constants.ts` — imported by Dashboard and WorkflowsPage.
-- Frontend tests in `__tests__/` directories alongside source (9 suites, 71 tests). See `ai/testing-quality.md`.
-- Shell scripts in `lib/` have NO tests — `bats-core` or integration tests needed.
+- Frontend tests in `__tests__/` directories alongside source (14 suites, 124+ tests). See `ai/testing-quality.md`.
+- Shell tests in `tests/bats/` (8 suites, 186 tests via bats-core). See `ai/testing-quality.md`.
+- CI pipeline: `.github/workflows/ci-test.yml` triggered by `ci-test` label on PRs (backend + frontend + shell tests).
 - `templates/` directory contains the AI context template files (ai/ skeleton, CLAUDE.md, .cursorrules, etc.) mounted at `/app/templates:ro` in Docker.

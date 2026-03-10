@@ -41,13 +41,25 @@ pub struct AgentProcess {
     pub child: tokio::process::Child,
     pub output_mode: OutputMode,
     pub work_dir: PathBuf,
+    agent_type: AgentType,
     rx: mpsc::Receiver<String>,
     stderr_capture: Arc<Mutex<Vec<String>>>,
 }
 
 impl AgentProcess {
+    /// Get next output line. For Kiro, strips ANSI codes and filters noise.
     pub async fn next_line(&mut self) -> Option<String> {
-        self.rx.recv().await
+        loop {
+            let line = self.rx.recv().await?;
+            if self.agent_type == AgentType::Kiro {
+                if let Some(cleaned) = clean_kiro_line(&line) {
+                    return Some(cleaned);
+                }
+                // Filtered noise line — try next
+                continue;
+            }
+            return Some(line);
+        }
     }
 
     /// Return captured stderr lines (only populated in StdoutOnly mode)
@@ -176,7 +188,7 @@ pub async fn start_agent(
         }
     }
 
-    Ok(AgentProcess { child, output_mode, work_dir, rx, stderr_capture })
+    Ok(AgentProcess { child, output_mode, work_dir, agent_type: agent_type.clone(), rx, stderr_capture })
 }
 
 /// Get the command configuration for an agent type.
@@ -268,6 +280,31 @@ fn agent_command(agent_type: &AgentType, prompt: &str, full_access: bool, mcp_co
                 Some("@google/gemini-cli"),
                 args,
                 "GEMINI_API_KEY",
+                StderrMode::StdoutOnly,
+                OutputMode::Text,
+            )
+        },
+        AgentType::Kiro => {
+            // --trust-all-tools is REQUIRED in --no-interactive mode,
+            // otherwise Kiro blocks waiting for tool confirmation that never comes.
+            let mut args: Vec<String> = vec![
+                "chat".into(),
+                "--no-interactive".into(),
+                "--trust-all-tools".into(),
+                "--wrap".into(), "never".into(),
+            ];
+            let _ = full_access; // Always trusted in non-interactive mode
+            let full_prompt = if mcp_context.is_empty() {
+                prompt.into()
+            } else {
+                format!("{}\n\n{}", mcp_context, prompt)
+            };
+            args.push(full_prompt);
+            (
+                "kiro-cli",
+                None, // No npx package
+                args,
+                "AWS_BUILDER_ID", // Not really used, but placeholder
                 StderrMode::StdoutOnly,
                 OutputMode::Text,
             )
@@ -405,11 +442,62 @@ pub fn parse_claude_stream_line(line: &str) -> StreamJsonEvent {
     }
 }
 
+/// Strip ANSI escape codes from a string.
+/// Handles CSI sequences (\x1b[...m), OSC, and other common escape patterns.
+pub fn strip_ansi(s: &str) -> String {
+    let re = regex_lite::Regex::new(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][0-9A-B]").unwrap();
+    re.replace_all(s, "").to_string()
+}
+
+/// Clean Kiro CLI output: strip ANSI codes, remove the "> " prefix, and filter noise lines.
+pub fn clean_kiro_line(line: &str) -> Option<String> {
+    let clean = strip_ansi(line);
+    let trimmed = clean.trim();
+    // Skip empty lines, cursor control artifacts, and the Kiro banner/spinner
+    if trimmed.is_empty()
+        || trimmed.chars().all(|c| c.is_whitespace() || c == '\u{2800}') // braille blank chars in banner
+        || trimmed.starts_with("Credits:")
+        || trimmed.starts_with("▸ Credits:")
+    {
+        return None;
+    }
+    // Strip the "> " prefix Kiro adds to responses
+    let result = if let Some(stripped) = trimmed.strip_prefix("> ") {
+        stripped.to_string()
+    } else {
+        trimmed.to_string()
+    };
+    if result.is_empty() { None } else { Some(result) }
+}
+
 /// Parse token usage from agent output.
 /// Codex outputs "tokens used\nN,NNN" on stderr (StdoutOnly mode captures it).
+/// Kiro outputs "Credits: 0.05 • Time: 3s" on stderr.
 /// Returns (cleaned_response, tokens_used) — token lines are stripped if found in response.
 pub fn parse_token_usage(agent_type: &AgentType, response: &str, stderr_lines: &[String]) -> (String, u64) {
     match agent_type {
+        AgentType::Kiro => {
+            // Kiro outputs "Credits: X.XX" or "▸ Credits: X.XX" on stderr.
+            // Format observed: "Credits: 0.05 • Time: 3s" (may vary across versions).
+            // We parse the float after "Credits:" and before the next "•" or EOL.
+            // Store as integer: credits × 10000 for precision (0.05 → 500).
+            for line in stderr_lines {
+                let clean = strip_ansi(line);
+                if let Some(credits_part) = clean.split("Credits:").nth(1) {
+                    let credits_str = credits_part.split('•').next().unwrap_or(credits_part).trim();
+                    if let Ok(credits) = credits_str.parse::<f64>() {
+                        let tokens = (credits * 10000.0) as u64;
+                        return (response.to_string(), tokens);
+                    } else {
+                        tracing::warn!("Kiro credits parse failed for: {:?}", credits_str);
+                    }
+                }
+            }
+            if !stderr_lines.is_empty() {
+                tracing::debug!("Kiro stderr ({} lines), no Credits found", stderr_lines.len());
+            }
+            (response.to_string(), 0)
+        }
         AgentType::Codex => {
             // Codex outputs "tokens used" then the count on stderr
             // Check stderr first (primary source)
@@ -417,7 +505,7 @@ pub fn parse_token_usage(agent_type: &AgentType, response: &str, stderr_lines: &
                 let last = stderr_lines[stderr_lines.len() - 1].trim();
                 let second_last = stderr_lines[stderr_lines.len() - 2].trim();
                 if second_last == "tokens used" {
-                    let count_str = last.replace(',', "").replace('.', "");
+                    let count_str: String = last.chars().filter(|c| *c != ',' && *c != '.').collect();
                     if let Ok(count) = count_str.parse::<u64>() {
                         return (response.to_string(), count);
                     }
@@ -429,7 +517,7 @@ pub fn parse_token_usage(agent_type: &AgentType, response: &str, stderr_lines: &
                 let last = lines[lines.len() - 1].trim();
                 let second_last = lines[lines.len() - 2].trim();
                 if second_last == "tokens used" {
-                    let count_str = last.replace(',', "").replace('.', "");
+                    let count_str: String = last.chars().filter(|c| *c != ',' && *c != '.').collect();
                     if let Ok(count) = count_str.parse::<u64>() {
                         let clean = lines[..lines.len() - 2].join("\n");
                         return (clean, count);

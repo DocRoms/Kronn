@@ -60,6 +60,7 @@ function checkAgentRestricted(agentAccess: AgentsConfig | undefined, agentType: 
     ClaudeCode: agentAccess.claude_code?.full_access,
     Codex: agentAccess.codex?.full_access,
     GeminiCli: agentAccess.gemini_cli?.full_access,
+    Vibe: agentAccess.vibe?.full_access,
   };
   return map[agentType] === false;
 }
@@ -70,14 +71,17 @@ function hasFullAccess(agentAccess: AgentsConfig | undefined, agentType: AgentTy
     ClaudeCode: agentAccess.claude_code?.full_access,
     Codex: agentAccess.codex?.full_access,
     GeminiCli: agentAccess.gemini_cli?.full_access,
+    Vibe: agentAccess.vibe?.full_access,
   };
   return map[agentType] === true;
 }
 
-const makeConfig = (overrides: Partial<Record<'claude' | 'codex' | 'gemini', boolean>>): AgentsConfig => ({
+const makeConfig = (overrides: Partial<Record<'claude' | 'codex' | 'gemini' | 'kiro' | 'vibe', boolean>>): AgentsConfig => ({
   claude_code: { path: null, installed: true, version: null, full_access: overrides.claude ?? false },
   codex: { path: null, installed: true, version: null, full_access: overrides.codex ?? false },
   gemini_cli: { path: null, installed: true, version: null, full_access: overrides.gemini ?? false },
+  kiro: { path: null, installed: false, version: null, full_access: overrides.kiro ?? false },
+  vibe: { path: null, installed: false, version: null, full_access: overrides.vibe ?? false },
 });
 
 describe('checkAgentRestricted', () => {
@@ -100,8 +104,13 @@ describe('checkAgentRestricted', () => {
     expect(checkAgentRestricted(config, 'GeminiCli')).toBe(false);
   });
 
-  it('returns false for Vibe (not in map)', () => {
+  it('returns true for Vibe when full_access is false', () => {
     const config = makeConfig({ claude: false });
+    expect(checkAgentRestricted(config, 'Vibe')).toBe(true);
+  });
+
+  it('returns false for Vibe when full_access is true', () => {
+    const config = makeConfig({ vibe: true });
     expect(checkAgentRestricted(config, 'Vibe')).toBe(false);
   });
 

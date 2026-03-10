@@ -36,11 +36,8 @@ jobs:
           key: cargo-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
 
-      - name: cargo check
-        run: cargo check
-
       - name: cargo clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: cargo test
         run: cargo test

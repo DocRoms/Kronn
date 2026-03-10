@@ -66,8 +66,8 @@ describe('generated types', () => {
 
   describe('union types are exhaustive', () => {
     it('AgentType includes all known agents', () => {
-      const types: AgentType[] = ['ClaudeCode', 'Codex', 'Vibe', 'GeminiCli', 'Custom'];
-      expect(types).toHaveLength(5);
+      const types: AgentType[] = ['ClaudeCode', 'Codex', 'Vibe', 'GeminiCli', 'Kiro', 'Custom'];
+      expect(types).toHaveLength(6);
     });
 
     it('SetupStep covers the full flow', () => {
