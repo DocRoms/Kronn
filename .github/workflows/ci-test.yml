@@ -5,15 +5,8 @@ on:
     types: [labeled, synchronize]
 
 jobs:
-  # Gate: only run when the PR has the 'ci-test' label
-  check-label:
-    runs-on: ubuntu-latest
-    if: contains(github.event.pull_request.labels.*.name, 'ci-test')
-    steps:
-      - run: echo "ci-test label found, running tests"
-
   test-backend:
-    needs: check-label
+    if: github.event.label.name == 'ci-test'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -26,24 +19,32 @@ jobs:
         with:
           components: clippy
 
-      - name: Cache cargo registry & build
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Cache cargo registry
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            backend/target
           key: cargo-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
 
       - name: cargo clippy
         run: cargo clippy --all-targets -- -D warnings
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: "sccache"
 
       - name: cargo test
         run: cargo test
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: "sccache"
 
   test-frontend:
-    needs: check-label
+    if: github.event.label.name == 'ci-test'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -71,7 +72,7 @@ jobs:
         run: pnpm test
 
   test-shell:
-    needs: check-label
+    if: github.event.label.name == 'ci-test'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
