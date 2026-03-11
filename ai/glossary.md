@@ -42,7 +42,7 @@ Project-specific terms. For deep dives, follow the linked `ai/architecture/` fil
 
 **McpConfigDisplay** — Read-only projection of McpConfig with masked secrets, server name, and linked project names. Used in API responses.
 
-**McpDefinition** — A template MCP from the built-in registry (name, transport, env_keys, tags, token_url, token_help). 19 official servers grouped by category (Git, Databases, Cloud, Search, Monitoring, Communication, Project Management, Utilities). `token_url` links to the provider's token generation page; `token_help` provides a short description.
+**McpDefinition** — A template MCP from the built-in registry (name, transport, env_keys, tags, token_url, token_help). 26 official servers grouped by category (Git & Code, Databases, Cloud & Infra, Search & Web, Analytics & Monitoring, Communication, Project Management, Design, Knowledge & Docs, Payments, SEO, Files, Email). `token_url` links to the provider's token generation page; `token_help` provides a short description.
 
 **McpInstance** — Legacy type kept for backward compatibility in the Project struct.
 
@@ -56,7 +56,9 @@ Project-specific terms. For deep dives, follow the linked `ai/architecture/` fil
 
 **customized_contexts** — `Vec<String>` of `"slug:projectId"` pairs in `McpOverview` where the context file has been customized (not default template). Used by frontend to color FileText icons.
 
-**AgentType** — Enum: `ClaudeCode`, `Codex`, `Vibe`, `GeminiCli`, `Custom`. Determines which CLI to spawn. `DeepSeek` and `OpenCode` planned.
+**AgentType** — Enum: `ClaudeCode`, `Codex`, `Vibe`, `GeminiCli`, `Kiro`, `Custom`. Determines which CLI to spawn. `DeepSeek` and `OpenCode` planned. Kiro uses `--trust-all-tools` (mandatory in `--no-interactive` mode) and `--wrap never` for clean output.
+
+**scan_depth** — Configurable depth for git repository scanning (2–10, default 4). Stored in `ScanConfig.scan_depth` in config.toml. Adjustable via UI slider in Config page. API: `GET/POST /api/config/scan-depth`.
 
 **disabled_agents** — `Vec<AgentType>` in `AppConfig` (persisted in config.toml). Agents in this list are installed but inactive (toggled off). Controlled via `POST /api/agents/toggle`.
 
@@ -131,6 +133,8 @@ Project-specific terms. For deep dives, follow the linked `ai/architecture/` fil
 
 **Gemini CLI** — Google's CLI coding agent (`gemini` command via `npm install -g @google/gemini-cli`). Headless mode: `gemini -p "prompt"`. Full access: `--yolo`. API key env: `GEMINI_API_KEY`. Color: `#4285f4`.
 
+**Kiro** — Amazon's CLI coding agent (`kiro-cli` command). Headless mode: `kiro-cli chat --no-interactive`. Full access: `--trust-all-tools`. Auth: AWS Builder ID (no API key needed). Color: `#7B61FF` (Kiro purple).
+
 **DeepSeek** — Planned agent support (waiting for official CLI).
 
 **OpenCode** — Planned agent support.
@@ -143,10 +147,22 @@ Project-specific terms. For deep dives, follow the linked `ai/architecture/` fil
 
 ## UI
 
-**Dashboard** — Main shell component (`Dashboard.tsx`) with tabs: Projets, Discussions, MCPs, Workflows, Config. MCP tab delegates to `McpPage.tsx`, Workflows tab delegates to `WorkflowsPage.tsx`.
+**Dashboard** — Main UI shell (~650 lines, `Dashboard.tsx`) with tabs: Projets, Discussions, MCPs, Workflows, Config. Each tab delegates to a sub-page.
+
+**SettingsPage** — Extracted settings page (~670 lines, `SettingsPage.tsx`): UI/output language, agents config, multi-key token management, usage stats, DB management.
+
+**DiscussionsPage** — Extracted discussions page (~1420 lines, `DiscussionsPage.tsx`): sidebar, chat, streaming, debate, archive/unarchive (swipe gestures), inline title editing, disabled agent detection.
+
+**SwipeableDiscItem** — Component in DiscussionsPage for swipe-to-archive (right, blue) / swipe-to-delete (left, red) gestures on sidebar discussion items. Uses pointer events with 80px threshold.
 
 **Setup Wizard** — First-run flow (`SetupWizard.tsx`) for configuring scan paths, detecting agents, and API tokens.
 
-**Config** — Unified config tab: API tokens, output language, agent detection + permissions (full_access toggle), DB management (size, counts, export/import). (Agents tab merged into Config.)
+**Config** — Unified config tab, delegates to `SettingsPage.tsx`. (Agents tab merged into Config.)
 
 **@mention** — Chat feature to target a specific agent (e.g., `@claude`) with autocomplete.
+
+**Discussion archive** — Discussions can be archived (`archived: bool`, default false). Archived discussions hidden from main sidebar, shown in collapsible "Archives" section. Backend: `PATCH /api/discussions/:id` with `UpdateDiscussionRequest`.
+
+**Discussion title editing** — Inline rename via double-click or pencil icon in chat header. Saves via `PATCH /api/discussions/:id`.
+
+**Toast notifications** — `useToast()` hook in `frontend/src/hooks/useToast.ts`. Returns `{ toast, ToastContainer }`. Types: `success` (green), `error` (red), `info` (blue). Auto-dismiss 4s, max 3 visible, slide-in animation. Replaces all `alert()` calls.

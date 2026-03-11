@@ -24,9 +24,10 @@ pub async fn detect(
                 AgentType::ClaudeCode => Some(("anthropic", "ANTHROPIC_API_KEY")),
                 AgentType::Codex => Some(("openai", "OPENAI_API_KEY")),
                 AgentType::GeminiCli => Some(("google", "GEMINI_API_KEY")),
+                AgentType::Kiro => None, // Uses AWS Builder ID, not API key
                 _ => None,
             };
-            let has_key = env_var.map_or(false, |(provider, env)| {
+            let has_key = env_var.is_some_and(|(provider, env)| {
                 // Check multi-key system first
                 config.tokens.active_key_for(provider).is_some()
                 // Then check environment variable
@@ -60,12 +61,31 @@ pub async fn install(
 
 /// POST /api/agents/uninstall
 /// Uninstall a specific agent, and auto-disable it in config so that
-/// runtime_available (npx/uvx fallback) doesn't keep it appearing as usable
+/// runtime_available (npx/uvx fallback) doesn't keep it appearing as usable.
+/// For host-managed agents (installed on host, detected via KRONN_HOST_BIN),
+/// we can't uninstall from inside Docker — just disable them instead.
 pub async fn uninstall(
     State(state): State<AppState>,
     Json(agent_type): Json<AgentType>,
 ) -> Json<ApiResponse<String>> {
-    match agents::uninstall_agent(&agent_type).await {
+    // Check if the agent is host-managed (binary found in KRONN_HOST_BIN)
+    let is_host_managed = {
+        let detected = agents::detect_all().await;
+        detected.iter()
+            .find(|a| a.agent_type == agent_type)
+            .map(|a| a.host_managed)
+            .unwrap_or(false)
+    };
+
+    let result = if is_host_managed {
+        // Can't uninstall from Docker — just disable instead
+        tracing::info!("Agent {:?} is host-managed, disabling instead of uninstalling", agent_type);
+        Ok("Agent is installed on the host system — disabled in Kronn (uninstall manually on host if needed)".to_string())
+    } else {
+        agents::uninstall_agent(&agent_type).await
+    };
+
+    match result {
         Ok(output) => {
             // Auto-disable after uninstall so runtime_available doesn't keep it "usable"
             let mut config = state.config.write().await;
@@ -75,7 +95,16 @@ pub async fn uninstall(
             }
             Json(ApiResponse::ok(output))
         }
-        Err(e) => Json(ApiResponse::err(format!("{}", e))),
+        Err(e) => {
+            // Even if uninstall command failed, disable the agent to match user intent
+            let mut config = state.config.write().await;
+            if !config.disabled_agents.contains(&agent_type) {
+                config.disabled_agents.push(agent_type);
+                let _ = crate::core::config::save(&config).await;
+            }
+            tracing::warn!("Uninstall command failed (agent disabled anyway): {}", e);
+            Json(ApiResponse::ok(format!("Uninstall failed but agent disabled: {}", e)))
+        }
     }
 }
 

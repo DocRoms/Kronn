@@ -37,7 +37,7 @@ pub async fn get_status(
         default_scan_path().into_iter().collect()
     };
 
-    let repos_detected = scanner::scan_paths(&scan_paths, &config.scan.ignore)
+    let repos_detected = scanner::scan_paths_with_depth(&scan_paths, &config.scan.ignore, config.scan.scan_depth)
         .await
         .unwrap_or_default();
 
@@ -57,6 +57,38 @@ pub async fn get_status(
         repos_detected,
         default_scan_path: default_scan_path(),
     }))
+}
+
+/// GET /api/config/scan-paths
+/// Returns the configured scan paths
+pub async fn get_scan_paths(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<Vec<String>>> {
+    let config = state.config.read().await;
+    Json(ApiResponse::ok(config.scan.paths.clone()))
+}
+
+/// GET /api/config/scan-ignore
+/// Returns the configured scan ignore patterns
+pub async fn get_scan_ignore(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<Vec<String>>> {
+    let config = state.config.read().await;
+    Json(ApiResponse::ok(config.scan.ignore.clone()))
+}
+
+/// POST /api/config/scan-ignore
+/// Set scan ignore patterns
+pub async fn set_scan_ignore(
+    State(state): State<AppState>,
+    Json(patterns): Json<Vec<String>>,
+) -> Json<ApiResponse<()>> {
+    let mut config = state.config.write().await;
+    config.scan.ignore = patterns;
+    match config::save(&config).await {
+        Ok(_) => Json(ApiResponse::ok(())),
+        Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
+    }
 }
 
 /// POST /api/setup/scan-paths
@@ -268,6 +300,28 @@ pub async fn save_language(
     }
 }
 
+/// GET /api/config/scan-depth
+pub async fn get_scan_depth(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<usize>> {
+    let config = state.config.read().await;
+    Json(ApiResponse::ok(config.scan.scan_depth))
+}
+
+/// POST /api/config/scan-depth
+pub async fn set_scan_depth(
+    State(state): State<AppState>,
+    Json(depth): Json<usize>,
+) -> Json<ApiResponse<usize>> {
+    let clamped = depth.clamp(2, 10);
+    let mut config = state.config.write().await;
+    config.scan.scan_depth = clamped;
+    match config::save(&config).await {
+        Ok(_) => Json(ApiResponse::ok(clamped)),
+        Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
+    }
+}
+
 /// GET /api/config/agent-access
 pub async fn get_agent_access(
     State(state): State<AppState>,
@@ -287,6 +341,8 @@ pub async fn set_agent_access(
         AgentType::ClaudeCode => config.agents.claude_code.full_access = req.full_access,
         AgentType::Codex => config.agents.codex.full_access = req.full_access,
         AgentType::GeminiCli => config.agents.gemini_cli.full_access = req.full_access,
+        AgentType::Kiro => config.agents.kiro.full_access = req.full_access,
+        AgentType::Vibe => config.agents.vibe.full_access = req.full_access,
         _ => return Json(ApiResponse::err("Agent does not support access flags")),
     }
     match config::save(&config).await {
@@ -371,7 +427,6 @@ pub async fn db_info(
             discussion_count: count("discussions"),
             message_count: count("messages"),
             mcp_count: count("mcp_configs"),
-            task_count: count("tasks"),
             workflow_count: count("workflows"),
             workflow_run_count: count("workflow_runs"),
         })
@@ -385,12 +440,12 @@ pub async fn db_info(
 pub async fn export_data(
     State(state): State<AppState>,
 ) -> Json<ApiResponse<DbExport>> {
-    let projects = match state.db.with_conn(|conn| crate::db::projects::list_projects(conn)).await {
+    let projects = match state.db.with_conn(crate::db::projects::list_projects).await {
         Ok(p) => p,
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
-    let discussions = match state.db.with_conn(|conn| crate::db::discussions::list_discussions(conn)).await {
+    let discussions = match state.db.with_conn(crate::db::discussions::list_discussions).await {
         Ok(d) => d,
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
@@ -411,7 +466,7 @@ pub async fn import_data(
     // Clear existing data
     if let Err(e) = state.db.with_conn(|conn| {
         conn.execute_batch(
-            "DELETE FROM messages; DELETE FROM discussions; DELETE FROM mcp_config_projects; DELETE FROM mcp_configs; DELETE FROM mcp_servers; DELETE FROM tasks; DELETE FROM projects;"
+            "DELETE FROM messages; DELETE FROM discussions; DELETE FROM mcp_config_projects; DELETE FROM mcp_configs; DELETE FROM mcp_servers; DELETE FROM projects;"
         )?;
         Ok(())
     }).await {
@@ -461,7 +516,7 @@ pub async fn reset(
     // Clear all data from DB
     let _ = state.db.with_conn(|conn| {
         conn.execute_batch(
-            "DELETE FROM messages; DELETE FROM discussions; DELETE FROM mcp_config_projects; DELETE FROM mcp_configs; DELETE FROM mcp_servers; DELETE FROM tasks; DELETE FROM projects;"
+            "DELETE FROM messages; DELETE FROM discussions; DELETE FROM mcp_config_projects; DELETE FROM mcp_configs; DELETE FROM mcp_servers; DELETE FROM projects;"
         )?;
         Ok(())
     }).await;

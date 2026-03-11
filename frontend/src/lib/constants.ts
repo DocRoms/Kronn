@@ -9,6 +9,7 @@ export const AGENT_COLORS: Record<string, string> = {
   Vibe: '#FF7000',
   GeminiCli: '#4285f4',
   'Gemini CLI': '#4285f4',
+  Kiro: '#7B61FF',
 };
 
 export const AGENT_LABELS: Record<string, string> = {
@@ -16,9 +17,10 @@ export const AGENT_LABELS: Record<string, string> = {
   Codex: 'Codex',
   Vibe: 'Vibe',
   GeminiCli: 'Gemini CLI',
+  Kiro: 'Kiro',
 };
 
-export const ALL_AGENT_TYPES: AgentType[] = ['ClaudeCode', 'Codex', 'Vibe', 'GeminiCli'];
+export const ALL_AGENT_TYPES: AgentType[] = ['ClaudeCode', 'Codex', 'Vibe', 'GeminiCli', 'Kiro'];
 
 export const agentColor = (agentType: string | null | undefined): string =>
   AGENT_COLORS[agentType ?? ''] ?? '#8b5cf6';

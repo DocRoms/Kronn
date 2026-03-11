@@ -127,6 +127,7 @@ pub fn default_config() -> AppConfig {
                 "__pycache__".into(),
                 ".venv".into(),
             ],
+            scan_depth: 4,
         },
         agents: AgentsConfig {
             claude_code: AgentConfig {
@@ -142,6 +143,8 @@ pub fn default_config() -> AppConfig {
                 full_access: false,
             },
             gemini_cli: AgentConfig::default(),
+            kiro: AgentConfig::default(),
+            vibe: AgentConfig::default(),
         },
         language: "fr".into(),
         disabled_agents: vec![],

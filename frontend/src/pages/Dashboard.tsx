@@ -1,6 +1,7 @@
 import { useState, useCallback } from 'react';
 import { projects as projectsApi, mcps as mcpsApi, agents as agentsApi, discussions as discussionsApi, config as configApi } from '../lib/api';
 import { useApi } from '../hooks/useApi';
+import { useToast } from '../hooks/useToast';
 import type { Project, AgentDetection, AgentType } from '../types/generated';
 import { useT } from '../lib/I18nContext';
 import { McpPage } from './McpPage';
@@ -47,6 +48,7 @@ const readinessScore = (p: Project) => {
 
 export function Dashboard({ onReset }: DashboardProps) {
   const { t } = useT();
+  const { toast, ToastContainer } = useToast();
   const [page, setPage] = useState<Page>('projects');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [showHidden, setShowHidden] = useState(false);
@@ -152,6 +154,7 @@ export function Dashboard({ onReset }: DashboardProps) {
 
   return (
     <div style={s.app}>
+      <ToastContainer />
       <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
       {/* Nav */}
       <nav style={s.nav}>
@@ -563,6 +566,7 @@ export function Dashboard({ onReset }: DashboardProps) {
             prefill={discPrefill}
             onPrefillConsumed={handlePrefillConsumed}
             onUnseenCountChange={setTotalUnseen}
+            toast={toast}
           />
         )}
 
@@ -578,6 +582,7 @@ export function Dashboard({ onReset }: DashboardProps) {
             refetchProjects={refetch}
             refetchDiscussions={refetchDiscussions}
             onReset={onReset}
+            toast={toast}
           />
         )}
       </main>

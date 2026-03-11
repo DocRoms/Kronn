@@ -248,6 +248,7 @@ fn parse_agent_type(s: &str) -> AgentType {
         "Codex" => AgentType::Codex,
         "Vibe" => AgentType::Vibe,
         "GeminiCli" => AgentType::GeminiCli,
+        "Kiro" => AgentType::Kiro,
         _ => AgentType::Custom,
     }
 }
@@ -258,6 +259,7 @@ fn format_agent_type(a: &AgentType) -> String {
         AgentType::Codex => "Codex".into(),
         AgentType::Vibe => "Vibe".into(),
         AgentType::GeminiCli => "GeminiCli".into(),
+        AgentType::Kiro => "Kiro".into(),
         AgentType::Custom => "Custom".into(),
     }
 }
@@ -278,3 +280,7 @@ fn format_role(r: &MessageRole) -> &'static str {
         MessageRole::System => "System",
     }
 }
+
+#[cfg(test)]
+#[path = "discussions_test.rs"]
+mod discussions_test;

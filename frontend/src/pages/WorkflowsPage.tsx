@@ -43,6 +43,7 @@ function checkAgentRestricted(agentAccess: AgentsConfig | undefined, agentType: 
     ClaudeCode: agentAccess.claude_code?.full_access,
     Codex: agentAccess.codex?.full_access,
     GeminiCli: agentAccess.gemini_cli?.full_access,
+    Vibe: agentAccess.vibe?.full_access,
   };
   return map[agentType] === false;
 }

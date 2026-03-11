@@ -21,12 +21,15 @@ services:
       - ${HOME}/.codex:/root/.codex:rw                # Codex auth + state (needs write)
       - ${HOME}/.config/codex:/root/.config/codex:ro  # Codex config (legacy path)
       - ${HOME}/.vibe:/root/.vibe:rw                  # Vibe auth + state (needs write)
+      - ${HOME}/.kiro:/root/.kiro:rw                  # Kiro auth + state (AWS Builder ID)
+      - ${HOME}/.local/share/kiro-cli:/root/.local/share/kiro-cli:rw  # Kiro SQLite data
       - ./templates:/app/templates:ro                   # AI context templates for project init
     environment:
       - KRONN_TEMPLATES_DIR=/app/templates
       - KRONN_DATA_DIR=/data
       - KRONN_HOST_HOME=${HOME}
       - KRONN_HOST_BIN=/host-bin/local:/host-bin/global
+      - PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/host-bin/local:/host-bin/global
       - KRONN_HOST_OS=${KRONN_HOST_OS:-Linux}
       - KRONN_HOST_UID=${UID:-1000}
       - KRONN_HOST_GID=${GID:-1000}

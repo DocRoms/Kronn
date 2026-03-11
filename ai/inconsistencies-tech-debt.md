@@ -29,22 +29,30 @@
 | ~~TD-20260308-mcp-redesign~~ | ~~Old flat MCP model~~ — **DONE**: 3-tier model (servers→configs→projects), encrypted secrets, registry matching, disk sync | Backend + Frontend | Done |
 | ~~TD-20260306-mcp-noninteractive~~ | ~~Agents don't load MCP servers~~ — **DONE**: All 3 agents synced: Claude Code (`.mcp.json`), Codex (`~/.codex/config.toml`), Vibe (`.vibe/config.toml`) | Backend | Done |
 | ~~TD-20260308-codex-vibe-mcp~~ | ~~Codex and Vibe use TOML config~~ — **DONE**: Disk sync now writes all 3 formats (JSON + 2x TOML). Codex global config preserves non-MCP settings. Vibe per-project. | Backend | Done |
-| TD-20260306-monolith-dashboard | Dashboard.tsx ~2250 lines — MCP extracted to McpPage.tsx (~715 lines), Workflows to WorkflowsPage.tsx (~1660 lines). Discussions page next candidate. | Frontend | Low |
-| TD-20260306-no-tests | Frontend: **DONE** — Vitest 4 + testing-library (9 suites, 71 tests, coverage-v8). Backend: no unit/API tests. Shell scripts (`lib/*.sh`): no tests (bats-core recommended). | Backend + Shell | Medium |
+| ~~TD-20260306-monolith-dashboard~~ | ~~Dashboard.tsx ~2250 lines~~ — **DONE**: Dashboard.tsx ~650 lines. Extracted: SettingsPage.tsx (~670), DiscussionsPage.tsx (~1420), McpPage.tsx (~715), WorkflowsPage.tsx (~1700). | Frontend | Done |
+| ~~TD-20260306-no-tests~~ | ~~No tests~~ — **DONE**: Frontend: Vitest + testing-library (14 suites, 124+ tests, coverage-v8). Backend: `discussions_test.rs` (18 tests), `runner_test.rs`. Shell: bats-core (8 suites, 186 tests — agents, mcps, tron, ui, repos, analyze, portability, bugfixes). CI: `.github/workflows/ci-test.yml` (label-triggered). | All | Done |
 | TD-20260306-inline-styles | All styles are inline — no theming or consistency system | Frontend | Low |
 | ~~TD-20260307-agents-tab~~ | ~~Agents tab should be merged into Settings~~ — **DONE**: merged into Config page | Frontend | Done |
 | TD-20260307-tasks-to-workflows | Legacy scheduled tasks → Workflows engine — **DONE**: Full engine (models, DB, API, template, workspace, steps, runner, triggers, GitHub tracker, frontend UI with 5-step wizard + detail + runs + live SSE progress + run deletion). Actions wizard step removed (agents use MCP tools in steps instead). Remaining: Symphony WORKFLOW.md import. | Backend + Frontend | Done (core) |
-| TD-20260307-docker-file-perms | Agents run as root in Docker — files created on host volumes owned by root:root (partially mitigated: resolve_host_path Docker mount priority fix) | Backend | Medium |
+| ~~TD-20260307-docker-file-perms~~ | ~~Agents run as root in Docker — files owned by root:root~~ — **DONE**: `fix_ownership()` (chown to KRONN_HOST_UID:GID) called after all agent executions: discussions (3 paths), workflows, and AI audit. Missing audit path fixed. | Backend | Done |
 | ~~TD-20260307-global-discussions~~ | ~~Discussions always tied to a project~~ — **DONE**: `project_id` now optional, "Général" group in sidebar | Backend + Frontend | Done |
+| ~~TD-20260310-agent-fallback-claude~~ | ~~**GH #6** — Claude answers when not selected~~ — **DONE**: `detect()` in `api/agents.rs` requires API key for runtime-only agents; frontend filters via `isUsable()`. Phantom agents no longer appear. | Backend | Done |
+| ~~TD-20260310-agent-removal~~ | ~~**GH #10** — Can't remove agent~~ — **DONE**: Host-managed agents are now disabled instead of uninstalled (can't npm uninstall from Docker). Even if uninstall command fails, agent is always disabled to match user intent. | Backend | Done |
+| ~~TD-20260310-macos-duplicate-repos~~ | ~~**GH #9** — Duplicate repos on macOS~~ — **DONE**: Replaced `dedup_by` (consecutive-only) with `HashSet` keyed on `(name, remote_url)`. Works inside Docker where host paths can't be canonicalized. | Backend | Done |
+| ~~TD-20260310-mention-uninstalled~~ | ~~**GH #2** — @mention proposes uninstalled agents~~ — **DONE**: `AGENT_MENTIONS` in DiscussionsPage filtered by `isUsable()` (already in code). `detect()` endpoint prevents phantom agents. | Frontend | Done |
+| TD-20260310-audit-conversation-display | **GH #11** — Audit validation conversation not displayed correctly when audit is in progress. | Frontend | Low |
+| ~~TD-20260310-no-error-feedback~~ | ~~No user-facing error notifications~~ — **DONE**: `useToast` hook with auto-dismiss, stacked display, slide-in animation. Integrated in SettingsPage + DiscussionsPage. Replaced all `alert()` calls. | Frontend | Done |
+| ~~TD-20260310-page-tests-missing~~ | ~~DiscussionsPage, SettingsPage, McpPage have 0% test coverage~~ — **DONE**: 3 test suites added (3 tests each). Total: 14 suites, 124 tests. | Frontend | Done |
 
 ## Implementation roadmap
 
 1. ~~**SQLite persistence**~~ — **DONE**: `kronn.db` with WAL mode, migrations framework, CRUD in `backend/src/db/`
 2. ~~**Merge Agents into Settings**~~ — **DONE**: merged into Config page as a card, with full_access toggle
 3. ~~**Global discussions**~~ — **DONE**: `project_id` optional, "Général" group, agent runs in temp dir
-4. ~~**MCP redesign**~~ — **DONE**: 3-tier model (servers→configs→projects), encrypted secrets, built-in registry (19 servers with token_url/token_help), auto-detection/matching, disk sync, editable labels, duplicate configs, categorized registry UI, inline secret editing with per-field visibility, MCP context files (ai/operations/mcp-servers/*.md) with customization detection
+4. ~~**MCP redesign**~~ — **DONE**: 3-tier model (servers→configs→projects), encrypted secrets, built-in registry (26 servers with token_url/token_help), auto-detection/matching, disk sync, editable labels, duplicate configs, categorized registry UI, inline secret editing with per-field visibility, MCP context files (ai/operations/mcp-servers/*.md) with customization detection
 5. **Docker file permissions** — Pass host UID/GID, run agents with `--user` (partially mitigated)
 6. **Workflow engine** — See detailed plan below
+7. **Agent bugs** — Fix #6 (Claude fallback), #10 (removal), #9 (macOS dupes), #2 (@mention filter)
 
 ---
 

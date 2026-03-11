@@ -15,7 +15,7 @@ use crate::AppState;
 
 /// GET /api/discussions
 pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<Vec<Discussion>>> {
-    match state.db.with_conn(|conn| crate::db::discussions::list_discussions(conn)).await {
+    match state.db.with_conn(crate::db::discussions::list_discussions).await {
         Ok(discussions) => Json(ApiResponse::ok(discussions)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
@@ -724,6 +724,7 @@ fn agent_display_name(agent_type: &AgentType) -> String {
         AgentType::Codex => "Codex".into(),
         AgentType::Vibe => "Vibe".into(),
         AgentType::GeminiCli => "Gemini CLI".into(),
+        AgentType::Kiro => "Kiro".into(),
         AgentType::Custom => "Custom".into(),
     }
 }
@@ -859,7 +860,7 @@ fn build_agent_prompt(disc: &Discussion) -> String {
             MessageRole::User => prompt.push_str(&format!("User: {}\n\n", msg.content)),
             MessageRole::Agent => {
                 let agent_label = msg.agent_type.as_ref()
-                    .map(|t| agent_display_name(t))
+                    .map(agent_display_name)
                     .unwrap_or_else(|| "Agent".into());
                 prompt.push_str(&format!("{}: {}\n\n", agent_label, msg.content));
             }

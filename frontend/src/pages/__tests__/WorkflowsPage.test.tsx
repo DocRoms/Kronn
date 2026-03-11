@@ -22,12 +22,16 @@ const restrictedConfig: AgentsConfig = {
   claude_code: { path: null, installed: true, version: null, full_access: false },
   codex: { path: null, installed: true, version: null, full_access: false },
   gemini_cli: { path: null, installed: true, version: null, full_access: false },
+  kiro: { path: null, installed: false, version: null, full_access: false },
+  vibe: { path: null, installed: false, version: null, full_access: false },
 };
 
 const fullConfig: AgentsConfig = {
   claude_code: { path: null, installed: true, version: null, full_access: true },
   codex: { path: null, installed: true, version: null, full_access: true },
   gemini_cli: { path: null, installed: true, version: null, full_access: true },
+  kiro: { path: null, installed: false, version: null, full_access: true },
+  vibe: { path: null, installed: false, version: null, full_access: true },
 };
 
 const wrap = (ui: React.ReactElement) => render(<I18nProvider>{ui}</I18nProvider>);

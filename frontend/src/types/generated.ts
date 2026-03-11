@@ -58,12 +58,15 @@ export interface SaveTokensRequest {
 export interface ScanConfig {
   paths: string[];
   ignore: string[];
+  scan_depth: number;
 }
 
 export interface AgentsConfig {
   claude_code: AgentConfig;
   codex: AgentConfig;
   gemini_cli: AgentConfig;
+  kiro: AgentConfig;
+  vibe: AgentConfig;
 }
 
 export interface SetAgentAccessRequest {
@@ -107,7 +110,7 @@ export interface AgentDetection {
   runtime_available: boolean;
 }
 
-export type AgentType = "ClaudeCode" | "Codex" | "Vibe" | "GeminiCli" | "Custom";
+export type AgentType = "ClaudeCode" | "Codex" | "Vibe" | "GeminiCli" | "Kiro" | "Custom";
 
 // ─── AI Audit ────────────────────────────────────────────────────────────────
 
@@ -396,7 +399,6 @@ export interface ProjectUsage {
   project_id: string;
   project_name: string;
   tokens_used: number;
-  task_count: number;
 }
 
 export interface DailyUsage {
@@ -513,7 +515,6 @@ export interface DbInfo {
   discussion_count: number;
   message_count: number;
   mcp_count: number;
-  task_count: number;
   workflow_count: number;
   workflow_run_count: number;
 }

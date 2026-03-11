@@ -3,7 +3,7 @@
 ## Rules
 
 - **Quality gate is non-negotiable**: code must compile and build after any change.
-- **All tests must pass**: `npm run test` (frontend), `cargo test` (backend).
+- **All tests must pass**: `npm run test` (frontend, 124+ tests), `cargo test` (backend), `make test-shell` (186 bats tests).
 - **0 ESLint errors**: `npm run lint` must report 0 errors (warnings are tolerated for existing patterns).
 
 ## Build checks
@@ -15,9 +15,10 @@
 | Rust format | `cargo fmt --check` | Formatting check |
 | TS compile | `cd frontend && npx tsc -b` | Type check |
 | Frontend lint | `cd frontend && npm run lint` | ESLint 10 strict |
-| Frontend tests | `cd frontend && npm test` | Vitest 4 (71 tests) |
+| Frontend tests | `cd frontend && npm test` | Vitest 4 (124+ tests) |
 | Frontend coverage | `cd frontend && npm run test:coverage` | Vitest + @vitest/coverage-v8 |
 | Frontend build | `cd frontend && npm run build` | Production build (Vite, code-split) |
+| Shell tests | `make test-shell` | bats-core (186 tests) |
 | Full stack | `make start` | Docker Compose build + up |
 
 ## Frontend test infrastructure
@@ -29,19 +30,24 @@
 - **Setup file**: `frontend/src/test/setup.ts`
 - **Node requirement**: >= 23.6.0 (native TS support, latest tooling)
 
-### Test files (9 suites, 71 tests)
+### Test files (14 suites, 124+ tests)
 
 | File | Tests | Covers |
 |------|-------|--------|
 | `src/lib/__tests__/i18n.test.ts` | 14 | Translations FR/EN/ES, interpolation, fallbacks, locale completeness |
-| `src/lib/__tests__/constants.test.ts` | 9 | AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES, agentColor() |
+| `src/lib/__tests__/constants.test.ts` | 9 | AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES (5 agents incl. Kiro), agentColor() |
 | `src/lib/__tests__/api.test.ts` | 11 | GET/POST/DELETE requests, error handling (API error, 502 HTML, null error), API structure |
 | `src/lib/__tests__/types.test.ts` | 10 | Generated types structure, union exhaustiveness, discriminated unions |
 | `src/lib/__tests__/I18nContext.test.tsx` | 4 | I18nProvider, locale switching, persistence |
 | `src/lib/__tests__/regression.test.ts` | 12 | Non-regression for all audit fixes (GeminiCli, constants, i18n, trigger_context, output languages) |
+| `src/lib/__tests__/access-warnings.test.ts` | 41 | i18n keys for access warnings (all locales), checkAgentRestricted, hasFullAccess, isAgentDisabled |
 | `src/hooks/__tests__/useApi.test.ts` | 5 | Fetch on mount, errors, refetch, race condition protection |
 | `src/__tests__/App.test.tsx` | 4 | Loading screen, SetupWizard vs Dashboard routing, API down fallback |
 | `src/__tests__/ErrorBoundary.test.tsx` | 2 | Error catch + display, normal render |
+| `src/pages/__tests__/WorkflowsPage.test.tsx` | 3 | Render with undefined/restricted/full agentAccess |
+| `src/pages/__tests__/DiscussionsPage.test.tsx` | 3 | Render with minimal props, agentAccess, prefill |
+| `src/pages/__tests__/SettingsPage.test.tsx` | 3 | Render with minimal props, agentAccess, agents detected |
+| `src/pages/__tests__/McpPage.test.tsx` | 3 | Render with minimal props, configs, agents |
 
 ### Coverage status
 
@@ -52,14 +58,33 @@
 | lib/i18n.ts | 100% | Fully tested |
 | lib/I18nContext.tsx | 90% | Missing edge case |
 | lib/api.ts | ~10% | SSE streams hard to unit test |
-| pages/*.tsx | 0% | Require component extraction first |
+| pages/*.tsx | ~5% | Basic render tests for 4 pages (Workflows, Discussions, Settings, MCP) |
+
+### Shell test infrastructure
+
+- **Runner**: bats-core with bats-assert + bats-support (git submodules in `tests/bats/`)
+- **Test runner**: `make test-shell` or `bash tests/bats/run.sh`
+- **Helper**: `tests/bats/test_helper.bash` — `_load_lib()` function, pre-initialized color variables
+
+### Shell test files (8 suites, 186 tests)
+
+| File | Tests | Covers |
+|------|-------|--------|
+| `tests/bats/agents.bats` | 37 | `_parse_version`, `_agent_idx` (incl. kiro-cli), `_count_detected`, `_format_agent_line`, `_check_node_version`, Kiro metadata |
+| `tests/bats/mcps.bats` | 19 | `secret_get` (TOML parsing), `init_secrets` (creation, perms, idempotence), `secrets_configured` |
+| `tests/bats/tron.bats` | 32 | `_tron_format_elapsed`, `_tron_pad`, `tron_init/cleanup`, `tron_progress`, `tron_set_step/log/agent`, `tron_signal_done`, progress file in target dir, `_tron_write_progress_file` |
+| `tests/bats/ui.bats` | 28 | `info/success/warn/fail/step/banner`, color variables, return codes, empty messages, special characters |
+| `tests/bats/repos.bats` | 24 | `scan_repos` (find/names/status/empty/nested/reset/default), `detect_ai_context` (12 cases), `ensure_gitignore` |
+| `tests/bats/analyze.bats` | 16 | `inject/has/remove_bootstrap_prompt`, roundtrip, `_ANALYSIS_STEPS` validation, marker constants |
+| `tests/bats/portability.bats` | 18 | `_safe_timeout`, `remove_bootstrap_prompt` (GNU/BSD sed), `ensure_gitignore`, `detect_ai_context`, `scan_repos`, rsync/cp fallback |
+| `tests/bats/bugfixes.bats` | 12 | Non-regression: cross-filesystem temp, sed delimiter, KRONN_DIR guard, envsubst leak, gitignore guard |
 
 ### What's NOT tested
 
-- **Shell scripts** (`lib/*.sh`): no test framework. Would need `bats-core` or `shellcheck` + integration tests.
-- **Page components**: Dashboard.tsx (2250 lines), McpPage.tsx, WorkflowsPage.tsx, SetupWizard.tsx — monolithic, need extraction into smaller components before meaningful testing.
+- **Page components**: Dashboard.tsx (~650 lines), SetupWizard.tsx — basic render tests exist for 4 sub-pages but deeper interaction/state tests still needed.
 - **SSE streaming logic** in api.ts — requires mocking ReadableStream, complex setup.
-- **Backend Rust**: `cargo test` only runs type generation. No API or unit tests yet.
+- **Backend Rust**: `discussions_test.rs` (18 tests: CRUD, archive, title editing, message management, AgentType round-trip) + `runner_test.rs` (workspace/template tests). Run with `cargo test` inside Docker.
+- **Shell interactive functions**: menu systems, agent installation/uninstall, terminal animation (require terminal I/O, tested indirectly via non-interactive helpers).
 
 ## ESLint configuration
 
@@ -76,6 +101,7 @@
 | Frontend compiles | `cd frontend && npx tsc -b` |
 | Frontend tests | `cd frontend && npm test` |
 | Frontend lint | `cd frontend && npm run lint` |
+| Shell tests | `make test-shell` |
 | Type generation | `make typegen` |
 
 ## Troubleshooting (when command output is missing)

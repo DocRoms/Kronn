@@ -91,3 +91,87 @@ setup() {
     assert_success
     assert_output --partial "v0.1.0"
 }
+
+# ─── Color variables ─────────────────────────────────────────────────────────
+
+@test "color variables: RED is set" {
+    [ -n "$RED" ]
+}
+
+@test "color variables: GREEN is set" {
+    [ -n "$GREEN" ]
+}
+
+@test "color variables: YELLOW is set" {
+    [ -n "$YELLOW" ]
+}
+
+@test "color variables: CYAN is set" {
+    [ -n "$CYAN" ]
+}
+
+@test "color variables: BOLD is set" {
+    [ -n "$BOLD" ]
+}
+
+@test "color variables: RESET is set" {
+    [ -n "$RESET" ]
+}
+
+# ─── Output function return codes ────────────────────────────────────────────
+
+@test "info: returns 0 on success" {
+    run info "test"
+    assert_success
+}
+
+@test "success: returns 0 on success" {
+    run success "test"
+    assert_success
+}
+
+@test "warn: returns 0 on success" {
+    run warn "test"
+    assert_success
+}
+
+@test "fail: returns 0 (output only, not exit)" {
+    run fail "test"
+    assert_success
+}
+
+# ─── Empty message handling ──────────────────────────────────────────────────
+
+@test "info: handles empty message" {
+    run info ""
+    assert_success
+}
+
+@test "success: handles empty message" {
+    run success ""
+    assert_success
+}
+
+@test "warn: handles empty message" {
+    run warn ""
+    assert_success
+}
+
+@test "step: handles empty title" {
+    run step ""
+    assert_success
+}
+
+# ─── Special characters ─────────────────────────────────────────────────────
+
+@test "info: handles special characters" {
+    run info 'Message with "quotes" and $vars'
+    assert_success
+    assert_output --partial "quotes"
+}
+
+@test "step: contains separator decoration" {
+    run step "Test"
+    assert_success
+    assert_output --partial "──"
+}

@@ -33,12 +33,13 @@ describe('constants', () => {
   });
 
   describe('ALL_AGENT_TYPES', () => {
-    it('contains all 4 agent types', () => {
-      expect(ALL_AGENT_TYPES).toHaveLength(4);
+    it('contains all 5 agent types', () => {
+      expect(ALL_AGENT_TYPES).toHaveLength(5);
       expect(ALL_AGENT_TYPES).toContain('ClaudeCode');
       expect(ALL_AGENT_TYPES).toContain('Codex');
       expect(ALL_AGENT_TYPES).toContain('Vibe');
       expect(ALL_AGENT_TYPES).toContain('GeminiCli');
+      expect(ALL_AGENT_TYPES).toContain('Kiro');
     });
   });
 

@@ -25,7 +25,7 @@ fn enrich_audit_status(project: &mut Project) {
 
 /// GET /api/projects
 pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<Vec<Project>>> {
-    match state.db.with_conn(|conn| crate::db::projects::list_projects(conn)).await {
+    match state.db.with_conn(crate::db::projects::list_projects).await {
         Ok(mut projects) => {
             for p in &mut projects {
                 enrich_audit_status(p);
@@ -63,6 +63,7 @@ pub async fn scan(State(state): State<AppState>) -> Json<ApiResponse<Vec<Detecte
         config.scan.paths.clone()
     };
     let ignore = config.scan.ignore.clone();
+    let depth = config.scan.scan_depth;
     drop(config);
 
     let existing_paths: Vec<String> = state.db.with_conn(|conn| {
@@ -70,10 +71,10 @@ pub async fn scan(State(state): State<AppState>) -> Json<ApiResponse<Vec<Detecte
         Ok(projects.into_iter().map(|p| p.path).collect())
     }).await.unwrap_or_default();
 
-    match scanner::scan_paths(&scan_paths, &ignore).await {
+    match scanner::scan_paths_with_depth(&scan_paths, &ignore, depth).await {
         Ok(mut repos) => {
             for repo in &mut repos {
-                repo.has_project = existing_paths.iter().any(|p| *p == repo.path);
+                repo.has_project = existing_paths.contains(&repo.path);
             }
             Json(ApiResponse::ok(repos))
         }
@@ -380,6 +381,8 @@ pub async fn run_audit(
                     }
 
                     let status = process.child.wait().await;
+                    process.fix_ownership();
+                    tracing::debug!("Audit step {}: fix_ownership applied for {}", step, file_label);
                     let success = status.map(|s| s.success()).unwrap_or(false);
 
                     let step_done = serde_json::json!({

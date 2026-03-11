@@ -3,6 +3,11 @@ use axum::{extract::State, Json};
 use crate::models::*;
 use crate::AppState;
 
+/// (project_id, project_name, agent_type, tokens)
+type TokenRow = (Option<String>, Option<String>, Option<String>, u64);
+/// (agent_type, project_id, project_name, tokens, message_count)
+type AgentRow = (String, Option<String>, Option<String>, u64, u32);
+
 /// GET /api/stats/tokens
 pub async fn token_usage(
     State(state): State<AppState>,
@@ -11,7 +16,7 @@ pub async fn token_usage(
     match state.db.with_conn(|conn| {
         // Per-project usage (join discussions -> messages)
         let mut by_project_stmt = conn.prepare(
-            "SELECT d.project_id, p.name, m.agent_type, SUM(m.tokens_used) as total_tokens, COUNT(DISTINCT d.id) as disc_count
+            "SELECT d.project_id, p.name, m.agent_type, SUM(m.tokens_used) as total_tokens
              FROM messages m
              JOIN discussions d ON m.discussion_id = d.id
              LEFT JOIN projects p ON d.project_id = p.id
@@ -20,25 +25,23 @@ pub async fn token_usage(
              ORDER BY total_tokens DESC"
         )?;
 
-        let rows: Vec<(Option<String>, Option<String>, Option<String>, u64, u32)> = by_project_stmt.query_map([], |row| {
+        let rows: Vec<TokenRow> = by_project_stmt.query_map([], |row| {
             Ok((
                 row.get(0)?,
                 row.get(1)?,
                 row.get(2)?,
                 row.get::<_, i64>(3).unwrap_or(0) as u64,
-                row.get::<_, i64>(4).unwrap_or(0) as u32,
             ))
         })?.filter_map(|r| r.ok()).collect();
 
         // Aggregate by project
         let mut project_map: std::collections::HashMap<String, ProjectUsage> = std::collections::HashMap::new();
-        for (pid, pname, _agent, tokens, disc_count) in &rows {
+        for (pid, pname, _agent, tokens) in &rows {
             let key = pid.clone().unwrap_or_else(|| "global".into());
             let entry = project_map.entry(key).or_insert_with(|| ProjectUsage {
                 project_id: pid.clone().unwrap_or_else(|| "global".into()),
                 project_name: pname.clone().unwrap_or_else(|| "Global".into()),
                 tokens_used: 0,
-                task_count: *disc_count,
             });
             entry.tokens_used += tokens;
         }
@@ -46,7 +49,7 @@ pub async fn token_usage(
 
         // Aggregate by provider (agent_type -> provider)
         let mut provider_map: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
-        for (_, _, agent_type, tokens, _) in &rows {
+        for (_, _, agent_type, tokens) in &rows {
             let provider = match agent_type.as_deref() {
                 Some("ClaudeCode") => "Anthropic",
                 Some("Codex") => "OpenAI",
@@ -96,7 +99,7 @@ pub async fn agent_usage(
              ORDER BY m.agent_type, total DESC"
         )?;
 
-        let rows: Vec<(String, Option<String>, Option<String>, u64, u32)> = stmt.query_map([], |row| {
+        let rows: Vec<AgentRow> = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get(1)?,

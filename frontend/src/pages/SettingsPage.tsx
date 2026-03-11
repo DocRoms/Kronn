@@ -5,11 +5,12 @@ import { useT } from '../lib/I18nContext';
 import { UI_LOCALES } from '../lib/i18n';
 import { AGENT_COLORS } from '../lib/constants';
 import type { AgentDetection, AgentsConfig } from '../types/generated';
+import type { ToastFn } from '../hooks/useToast';
 import {
   MessageSquare, Cpu, Zap, Key, AlertTriangle, Save,
   HardDrive, Plus, Trash2, Download, Upload, Check,
   Loader2, RefreshCw, X, Eye, EyeOff, Play, StopCircle,
-  ExternalLink, ChevronRight,
+  ExternalLink, ChevronRight, Layers, FolderSearch, Filter,
 } from 'lucide-react';
 
 /** Output languages for agents (sent to backend, not related to UI i18n) */
@@ -31,6 +32,7 @@ interface SettingsPageProps {
   refetchProjects: () => void;
   refetchDiscussions: () => void;
   onReset: () => void;
+  toast: ToastFn;
 }
 
 export function SettingsPage({
@@ -43,6 +45,7 @@ export function SettingsPage({
   refetchProjects,
   refetchDiscussions,
   onReset,
+  toast,
 }: SettingsPageProps) {
   const { t, locale, setLocale } = useT();
 
@@ -53,10 +56,18 @@ export function SettingsPage({
   const [tokenVisible, setTokenVisible] = useState<Set<string>>(new Set());
   const [usageExpanded, setUsageExpanded] = useState<string | null>(null);
   const [usageSearch, setUsageSearch] = useState('');
+  const [scanDepth, setScanDepth] = useState(4);
+  const [scanPaths, setScanPaths] = useState<string[]>([]);
+  const [scanIgnore, setScanIgnore] = useState<string[]>([]);
+  const [newScanPath, setNewScanPath] = useState('');
+  const [newIgnorePattern, setNewIgnorePattern] = useState('');
 
   // Internal API calls
   const { data: tokenConfig, refetch: refetchTokens } = useApi(() => configApi.getTokens(), []);
   const { data: dbInfo, refetch: refetchDbInfo } = useApi(() => configApi.dbInfo(), []);
+  useApi(() => configApi.getScanDepth().then(d => { if (d != null) setScanDepth(d); return d; }), []);
+  useApi(() => configApi.getScanPaths().then(p => { if (p) setScanPaths(p); return p; }), []);
+  useApi(() => configApi.getScanIgnore().then(p => { if (p) setScanIgnore(p); return p; }), []);
   const { data: agentUsageData, refetch: refetchAgentUsage } = useApi(() => statsApi.agentUsage(), []);
 
   const handleInstallAgent = async (agent: AgentDetection) => {
@@ -139,6 +150,164 @@ export function SettingsPage({
         </div>
       </div>
 
+      {/* Scan Depth */}
+      <div style={ss.card(false)}>
+        <div style={{ padding: '16px 20px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+            <Layers size={14} style={{ color: '#c8ff00' }} />
+            <span style={{ fontWeight: 600, fontSize: 14 }}>{t('config.scanDepth')}</span>
+            <span style={{ fontSize: 12, color: '#c8ff00', marginLeft: 'auto', fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
+              {scanDepth}
+            </span>
+          </div>
+          <p style={{ color: 'rgba(255,255,255,0.35)', fontSize: 12, marginBottom: 12 }}>
+            {t('config.scanDepthHint')}
+          </p>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)' }}>2</span>
+            <input
+              type="range"
+              min={2}
+              max={10}
+              value={scanDepth}
+              onChange={async (e) => {
+                const v = Number(e.target.value);
+                setScanDepth(v);
+                await configApi.setScanDepth(v);
+              }}
+              style={{ flex: 1, accentColor: '#c8ff00', cursor: 'pointer' }}
+            />
+            <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)' }}>10</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Scan Paths */}
+      <div style={ss.card(false)}>
+        <div style={{ padding: '16px 20px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+            <FolderSearch size={14} style={{ color: '#c8ff00' }} />
+            <span style={{ fontWeight: 600, fontSize: 14 }}>{t('config.scanPaths')}</span>
+            <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginLeft: 'auto' }}>
+              {scanPaths.length} {scanPaths.length > 1 ? t('config.pathsPlural') : t('config.path')}
+            </span>
+          </div>
+          <p style={{ color: 'rgba(255,255,255,0.35)', fontSize: 12, marginBottom: 12 }}>
+            {t('config.scanPathsHint')}
+          </p>
+          {scanPaths.map((p, i) => (
+            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0' }}>
+              <code style={{ ...ss.code, fontSize: 11, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p}</code>
+              <button
+                style={{ ...ss.iconBtn, padding: '2px 4px' }}
+                onClick={async () => {
+                  const updated = scanPaths.filter((_, j) => j !== i);
+                  setScanPaths(updated);
+                  await configApi.setScanPaths(updated);
+                }}
+              >
+                <Trash2 size={10} style={{ color: 'rgba(255,107,107,0.5)' }} />
+              </button>
+            </div>
+          ))}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8 }}>
+            <input
+              type="text"
+              style={{ ...ss.input, fontSize: 11, padding: '5px 8px', flex: 1 }}
+              placeholder={t('config.scanPathPlaceholder')}
+              value={newScanPath}
+              onChange={e => setNewScanPath(e.target.value)}
+              onKeyDown={async (e) => {
+                if (e.key === 'Enter' && newScanPath.trim()) {
+                  const updated = [...scanPaths, newScanPath.trim()];
+                  setScanPaths(updated);
+                  setNewScanPath('');
+                  await configApi.setScanPaths(updated);
+                }
+              }}
+            />
+            <button
+              style={{ ...ss.iconBtn, padding: '4px 8px', color: '#c8ff00' }}
+              onClick={async () => {
+                if (!newScanPath.trim()) return;
+                const updated = [...scanPaths, newScanPath.trim()];
+                setScanPaths(updated);
+                setNewScanPath('');
+                await configApi.setScanPaths(updated);
+              }}
+            >
+              <Plus size={12} />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Scan Ignore */}
+      <div style={ss.card(false)}>
+        <div style={{ padding: '16px 20px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+            <Filter size={14} style={{ color: '#c8ff00' }} />
+            <span style={{ fontWeight: 600, fontSize: 14 }}>{t('config.scanIgnore')}</span>
+            <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginLeft: 'auto' }}>
+              {scanIgnore.length} {scanIgnore.length > 1 ? t('config.patternsPlural') : t('config.pattern')}
+            </span>
+          </div>
+          <p style={{ color: 'rgba(255,255,255,0.35)', fontSize: 12, marginBottom: 12 }}>
+            {t('config.scanIgnoreHint')}
+          </p>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+            {scanIgnore.map((p, i) => (
+              <div key={i} style={{
+                display: 'flex', alignItems: 'center', gap: 4, padding: '3px 8px',
+                background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)',
+                borderRadius: 4, fontSize: 11, fontFamily: 'JetBrains Mono, monospace',
+              }}>
+                <span style={{ color: 'rgba(255,255,255,0.6)' }}>{p}</span>
+                <button
+                  style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', display: 'flex' }}
+                  onClick={async () => {
+                    const updated = scanIgnore.filter((_, j) => j !== i);
+                    setScanIgnore(updated);
+                    await configApi.setScanIgnore(updated);
+                  }}
+                >
+                  <X size={9} style={{ color: 'rgba(255,107,107,0.5)' }} />
+                </button>
+              </div>
+            ))}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input
+              type="text"
+              style={{ ...ss.input, fontSize: 11, padding: '5px 8px', flex: 1 }}
+              placeholder={t('config.scanIgnorePlaceholder')}
+              value={newIgnorePattern}
+              onChange={e => setNewIgnorePattern(e.target.value)}
+              onKeyDown={async (e) => {
+                if (e.key === 'Enter' && newIgnorePattern.trim()) {
+                  const updated = [...scanIgnore, newIgnorePattern.trim()];
+                  setScanIgnore(updated);
+                  setNewIgnorePattern('');
+                  await configApi.setScanIgnore(updated);
+                }
+              }}
+            />
+            <button
+              style={{ ...ss.iconBtn, padding: '4px 8px', color: '#c8ff00' }}
+              onClick={async () => {
+                if (!newIgnorePattern.trim()) return;
+                const updated = [...scanIgnore, newIgnorePattern.trim()];
+                setScanIgnore(updated);
+                setNewIgnorePattern('');
+                await configApi.setScanIgnore(updated);
+              }}
+            >
+              <Plus size={12} />
+            </button>
+          </div>
+        </div>
+      </div>
+
       {/* Agents */}
       <div style={ss.card(false)}>
         <div style={{ padding: '16px 20px' }}>
@@ -183,7 +352,9 @@ export function SettingsPage({
                 ? agentAccess?.codex?.full_access ?? false
                 : agent.agent_type === 'GeminiCli'
                   ? agentAccess?.gemini_cli?.full_access ?? false
-                  : false;
+                  : agent.agent_type === 'Vibe'
+                    ? agentAccess?.vibe?.full_access ?? false
+                    : false;
 
             return (
             <div key={agent.name} style={{ padding: '10px 0', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
@@ -243,19 +414,18 @@ export function SettingsPage({
                         setInstalling(agent.name);
                         try {
                           await agentsApi.uninstall(agent.agent_type);
+                          // Re-detect: if agent is still installed, uninstall had no effect
+                          const updated = await agentsApi.detect();
+                          const still = updated?.find((a: AgentDetection) => a.agent_type === agent.agent_type);
+                          if (still?.installed && still?.enabled) {
+                            toast(t('config.uninstallFailed'), 'error');
+                          }
                         } catch {
-                          alert(t('config.uninstallFailed'));
+                          toast(t('config.uninstallFailed'), 'error');
+                        } finally {
+                          refetchAgents();
                           setInstalling(null);
-                          return;
                         }
-                        // Re-detect: if agent is still installed, uninstall had no effect
-                        const updated = await agentsApi.detect();
-                        const still = updated?.find((a: AgentDetection) => a.agent_type === agent.agent_type);
-                        if (still?.installed) {
-                          alert(t('config.uninstallFailed'));
-                        }
-                        refetchAgents();
-                        setInstalling(null);
                       }}
                       disabled={installing !== null}
                     >
@@ -434,9 +604,9 @@ export function SettingsPage({
                               if (confirm(t('config.syncTokensConfirm'))) {
                                 const synced = await configApi.syncAgentTokens();
                                 if (synced.length > 0) {
-                                  alert(t('config.syncTokensDone').replace('{0}', synced.join(', ')));
+                                  toast(t('config.syncTokensDone').replace('{0}', synced.join(', ')), 'success');
                                 } else {
-                                  alert(t('config.syncTokensNone'));
+                                  toast(t('config.syncTokensNone'), 'info');
                                 }
                               }
                             } catch { /* done */ }
@@ -573,7 +743,6 @@ export function SettingsPage({
                 { label: t('config.dbDiscussions'), value: dbInfo.discussion_count },
                 { label: t('config.dbMessages'), value: dbInfo.message_count },
                 { label: t('config.dbMcps'), value: dbInfo.mcp_count },
-                { label: t('config.dbTasks'), value: dbInfo.task_count },
               ].map(({ label, value }) => (
                 <div key={label} style={{ textAlign: 'center' }}>
                   <div style={{ fontSize: 18, fontWeight: 700, color: '#c8ff00' }}>{value}</div>
@@ -613,7 +782,7 @@ export function SettingsPage({
                     const text = await file.text();
                     const data = JSON.parse(text);
                     if (!data.version || !data.projects || !data.discussions) {
-                      alert(t('config.importInvalid'));
+                      toast(t('config.importInvalid'), 'error');
                       return;
                     }
                     if (!confirm(t('config.importConfirm'))) return;
@@ -622,7 +791,7 @@ export function SettingsPage({
                     refetchDiscussions();
                     refetchDbInfo();
                   } catch {
-                    alert(t('config.importError'));
+                    toast(t('config.importError'), 'error');
                   }
                 };
                 input.click();

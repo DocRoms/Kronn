@@ -1,6 +1,6 @@
 # AI context index — Single entry point
 
-**Project:** Kronn — Self-hosted CLI + web UI for managing AI coding agents (Claude Code, Codex, Vibe, OpenCode) across git repositories. Unified workflow engine for cron, multi-step pipelines, tracker-driven automation, and manual triggers.
+**Project:** Kronn — Self-hosted CLI + web UI for managing AI coding agents (Claude Code, Codex, Vibe, Gemini CLI, Kiro) across git repositories. Unified workflow engine for cron, multi-step pipelines, tracker-driven automation, and manual triggers.
 
 > **All files under `ai/` are in English by default.** AI context documentation must be written in English.
 > **ATTENTION — This is the reference file for all AI agents.**
@@ -90,7 +90,7 @@ Never load everything "just in case".
 ## 4. Development constraints
 
 - **Docker-first**: the full app runs via `docker compose`. Backend, frontend, and gateway are separate services.
-- **Quality is mandatory**: `cargo check` and `cargo clippy` must pass. Frontend: `npm run build`, `npm run lint` (0 errors), `npm test` (71 tests must pass).
+- **Quality is mandatory**: `cargo check` and `cargo clippy` must pass. Frontend: `npm run build`, `npm run lint` (0 errors), `npm test` (124+ tests must pass). Shell: `make test-shell` (186 bats tests must pass).
 - **Type generation**: Rust models are the source of truth. TypeScript types are auto-generated via `ts-rs`.
 - If stdout/stderr is missing: ask the user to copy/paste the full output.
 
@@ -102,7 +102,7 @@ Never load everything "just in case".
 - Rust data models: `backend/src/models/mod.rs`.
 - TypeScript types: `frontend/src/types/generated.ts` (auto-generated from Rust).
 - API routes: `backend/src/main.rs` (router definition).
-- Database schema: `backend/src/db/sql/001_initial.sql`.
+- Database schema: `backend/src/db/sql/001_initial.sql` (+ 002, 004, 005 migrations).
 - Docker config: `docker-compose.yml`.
 
 ---
@@ -143,7 +143,7 @@ After completing a task: if you discovered something non-obvious (a gotcha, a mi
 | Database | SQLite (`kronn.db`, WAL mode, foreign keys) |
 | Streaming | SSE (Server-Sent Events) for agent responses and workflow run updates |
 | Container | Docker Compose (backend + frontend + nginx gateway) |
-| Agents | Claude Code CLI, OpenAI Codex CLI, Vibe (Mistral), Gemini CLI (Google), OpenCode (planned), DeepSeek (planned) |
+| Agents | Claude Code CLI, OpenAI Codex CLI, Vibe (Mistral), Gemini CLI (Google), Kiro (Amazon). Planned: OpenCode, DeepSeek |
 | MCP sync | 3 formats: `.mcp.json` (Claude, Gemini), `.vibe/config.toml` (Vibe), `~/.codex/config.toml` (Codex) |
 | API keys | Multi-key per provider (named keys, active selection), stored in `config.toml` as `[[tokens.keys]]` array. Agent auth files synced (e.g. `~/.codex/auth.json`). Override toggle per provider without deleting keys. |
 | Token tracking | Per-message `tokens_used` + `auth_mode` (override/local). Codex: parsed from stderr. Claude Code: `--output-format stream-json --verbose --include-partial-messages` (tokens from `result` event and `message_delta`). Gemini/Vibe: TODO. |
@@ -157,12 +157,19 @@ Dashboard tabs (current / planned):
 | Tab | Status | Content |
 |-----|--------|---------|
 | Projets | Done | Project list, AI audit pipeline (template → audit → validation), MCP overview |
-| Discussions | Done | Single/multi-agent chat, @mentions, orchestration, global discussions |
+| Discussions | Done | Single/multi-agent chat, @mentions, orchestration, global discussions, archive/unarchive (swipe gestures), inline title editing, disabled agent detection |
 | MCPs | Done | MCP registry and management |
 | Workflows | Done | Workflow list, creation wizard (5-step: infos → trigger → steps → config → resume), detail + runs with live SSE progress, manual trigger, run deletion (individual + bulk). MCP tools auto-injected into agent prompts. Symphony import planned. |
 | Config | Done | Multi-key API management (named keys, per-provider activation), token usage tracking, language, agent detection + permissions, DB management (export/import) |
 
 Note: the old "Agents" tab has been merged into Config. Nav order: Projets → Discussions → MCPs → Workflows → Config.
+
+### CI pipeline
+
+GitHub Actions workflow (`.github/workflows/ci-test.yml`) triggered by `ci-test` label on PRs:
+- `test-backend`: cargo check + clippy + test
+- `test-frontend`: tsc --noEmit + pnpm test
+- `test-shell`: make test-shell (bats)
 
 ### AI audit pipeline (4-state badge system)
 
