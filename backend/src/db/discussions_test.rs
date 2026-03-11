@@ -23,6 +23,8 @@ mod tests {
             language: "en".into(),
             participants: vec![AgentType::ClaudeCode],
             messages: vec![],
+            message_count: 0,
+            skill_ids: vec![],
             archived: false,
             created_at: now,
             updated_at: now,
@@ -363,5 +365,67 @@ mod tests {
             let loaded = get_discussion(&conn, &id).unwrap().unwrap();
             assert_eq!(loaded.agent, *agent);
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // skill_ids persistence
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn insert_discussion_with_skill_ids() {
+        let conn = test_conn();
+        let mut disc = make_discussion("d1");
+        disc.skill_ids = vec!["token-saver".into(), "rust-dev".into()];
+        insert_discussion(&conn, &disc).unwrap();
+
+        let loaded = get_discussion(&conn, "d1").unwrap().unwrap();
+        assert_eq!(loaded.skill_ids, vec!["token-saver", "rust-dev"]);
+    }
+
+    #[test]
+    fn insert_discussion_empty_skill_ids() {
+        let conn = test_conn();
+        let disc = make_discussion("d1");
+        insert_discussion(&conn, &disc).unwrap();
+
+        let loaded = get_discussion(&conn, "d1").unwrap().unwrap();
+        assert!(loaded.skill_ids.is_empty());
+    }
+
+    #[test]
+    fn update_skill_ids_sets_values() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d1")).unwrap();
+
+        let updated = update_discussion_skill_ids(&conn, "d1", &["security-auditor".into()]).unwrap();
+        assert!(updated);
+
+        let loaded = get_discussion(&conn, "d1").unwrap().unwrap();
+        assert_eq!(loaded.skill_ids, vec!["security-auditor"]);
+    }
+
+    #[test]
+    fn update_skill_ids_to_empty() {
+        let conn = test_conn();
+        let mut disc = make_discussion("d1");
+        disc.skill_ids = vec!["token-saver".into()];
+        insert_discussion(&conn, &disc).unwrap();
+
+        update_discussion_skill_ids(&conn, "d1", &[]).unwrap();
+
+        let loaded = get_discussion(&conn, "d1").unwrap().unwrap();
+        assert!(loaded.skill_ids.is_empty());
+    }
+
+    #[test]
+    fn list_discussions_includes_skill_ids() {
+        let conn = test_conn();
+        let mut disc = make_discussion("d1");
+        disc.skill_ids = vec!["rust-dev".into()];
+        insert_discussion(&conn, &disc).unwrap();
+
+        let all = list_discussions(&conn).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].skill_ids, vec!["rust-dev"]);
     }
 }

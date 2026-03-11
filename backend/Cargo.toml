@@ -3,7 +3,7 @@ name = "kronn"
 version = "0.1.0"
 edition = "2021"
 description = "Self-hosted AI dev workflow control plane"
-license = "MIT"
+license = "AGPL-3.0-only"
 
 [lib]
 name = "kronn"
@@ -80,3 +80,10 @@ opt-level = 1
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# Fast release build for local dev — `cargo build --profile fast`
+# Same optimizations but skips LTO and uses more codegen units (4x faster)
+[profile.fast]
+inherits = "release"
+lto = false
+codegen-units = 16

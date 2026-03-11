@@ -5,3 +5,4 @@ pub mod mcps;
 pub mod discussions;
 pub mod workflows;
 pub mod stats;
+pub mod skills;

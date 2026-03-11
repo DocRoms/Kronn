@@ -82,10 +82,23 @@ PROMPT
     # Prepend bootstrap prompt to index.md
     # Create temp in same directory to avoid cross-filesystem mv failures
     local tmp
-    tmp=$(mktemp "$repo_dir/ai/.index.md.XXXXXX")
-    echo "$prompt" > "$tmp"
-    cat "$index_file" >> "$tmp"
-    mv "$tmp" "$index_file"
+    tmp=$(mktemp "$repo_dir/ai/.index.md.XXXXXX") || {
+        echo "ERROR: Failed to create temp file in $repo_dir/ai/" >&2
+        return 1
+    }
+    {
+        echo "$prompt"
+        cat "$index_file"
+    } > "$tmp" || {
+        rm -f "$tmp"
+        echo "ERROR: Failed to write to $tmp" >&2
+        return 1
+    }
+    mv "$tmp" "$index_file" || {
+        rm -f "$tmp"
+        echo "ERROR: Failed to replace $index_file" >&2
+        return 1
+    }
 }
 
 # Check if bootstrap prompt is still present (not yet analyzed).
@@ -99,14 +112,15 @@ remove_bootstrap_prompt() {
     local repo_dir="$1"
     local index_file="$repo_dir/ai/index.md"
     [[ -f "$index_file" ]] || return 0
-    # macOS BSD sed requires -i '' (with space), GNU sed uses -i (no arg)
-    # Use | as delimiter to avoid conflicts with / in marker text
-    if sed --version >/dev/null 2>&1; then
-        # GNU sed
+    # GNU sed (Linux), BusyBox sed (Alpine), BSD sed (macOS) all differ on -i
+    # Safest cross-platform approach: use -i.bak then cleanup
+    if sed --version 2>&1 | grep -q "GNU"; then
+        # GNU sed (Ubuntu, Fedora, Arch)
         sed -i "\|$BOOTSTRAP_MARKER_START|,\|$BOOTSTRAP_MARKER_END|d" "$index_file"
     else
-        # BSD sed (macOS)
-        sed -i '' "\|$BOOTSTRAP_MARKER_START|,\|$BOOTSTRAP_MARKER_END|d" "$index_file"
+        # BSD sed (macOS) or BusyBox sed (Alpine): use backup extension
+        sed -i.kronn-bak "\|$BOOTSTRAP_MARKER_START|,\|$BOOTSTRAP_MARKER_END|d" "$index_file"
+        rm -f "$index_file.kronn-bak"
     fi
 }
 
@@ -185,7 +199,7 @@ analyze_repo() {
     tron_init "$repo_dir"
 
     local activity_file
-    activity_file=$(mktemp /tmp/kronn-activity-XXXXXX)
+    activity_file=$(mktemp "${TMPDIR:-/tmp}/kronn-activity-XXXXXX")
     tron_set_log "$activity_file"
     tron_set_agent "$agent"
 

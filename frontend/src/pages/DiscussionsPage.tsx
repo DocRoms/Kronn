@@ -1,16 +1,16 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { discussions as discussionsApi, projects as projectsApi } from '../lib/api';
-import type { Project, AgentDetection, Discussion, AgentType, AgentsConfig } from '../types/generated';
+import { discussions as discussionsApi, projects as projectsApi, skills as skillsApi } from '../lib/api';
+import type { Project, AgentDetection, Discussion, AgentType, AgentsConfig, Skill } from '../types/generated';
 import { useT } from '../lib/I18nContext';
-import { AGENT_LABELS, agentColor } from '../lib/constants';
+import { AGENT_LABELS, agentColor, isAgentRestricted as isAgentRestrictedUtil, hasAgentFullAccess } from '../lib/constants';
 import type { ToastFn } from '../hooks/useToast';
 import {
   Folder, ChevronRight, Cpu,
   Plus, Trash2, Loader2,
   MessageSquare, Send, X, Key, AlertTriangle, Users,
-  StopCircle, RotateCcw, Pencil, ShieldCheck, Check, Archive,
+  StopCircle, RotateCcw, Pencil, ShieldCheck, Check, Archive, Zap,
 } from 'lucide-react';
 
 const isHiddenPath = (path: string) => path.split('/').some(s => s.startsWith('.'));
@@ -75,7 +75,7 @@ function SwipeableDiscItem({ disc, isActive, lastSeenCount, sendingMap, onSelect
     setOffsetX(0);
   };
 
-  const unseen = disc.messages.length - lastSeenCount;
+  const unseen = (disc.message_count ?? disc.messages.length) - lastSeenCount;
   const showBadge = unseen > 0 && !isActive;
   const bgColor = offsetX > 30 ? `rgba(59,130,246,${Math.min(Math.abs(offsetX) / 120, 0.4)})`
                  : offsetX < -30 ? `rgba(239,68,68,${Math.min(Math.abs(offsetX) / 120, 0.4)})`
@@ -129,7 +129,7 @@ function SwipeableDiscItem({ disc, isActive, lastSeenCount, sendingMap, onSelect
             {(disc.participants?.length ?? 0) > 1 && (
               <Users size={8} style={{ color: '#8b5cf6' }} />
             )}
-            {disc.messages.length} msg · {disc.agent}
+            {disc.message_count ?? disc.messages.length} msg · {disc.agent}
           </div>
         </div>
       </div>
@@ -148,8 +148,18 @@ export interface DiscussionsPageProps {
   onNavigate: (page: string) => void;
   prefill?: { projectId: string; title: string; prompt: string } | null;
   onPrefillConsumed?: () => void;
-  onUnseenCountChange?: (count: number) => void;
   toast: ToastFn;
+  // Lifted streaming state (lives in Dashboard, survives page changes)
+  sendingMap: Record<string, boolean>;
+  setSendingMap: React.Dispatch<React.SetStateAction<Record<string, boolean>>>;
+  streamingMap: Record<string, string>;
+  setStreamingMap: React.Dispatch<React.SetStateAction<Record<string, string>>>;
+  abortControllers: React.MutableRefObject<Record<string, AbortController>>;
+  cleanupStream: (discId: string) => void;
+  // Lifted unseen tracking (lives in Dashboard for cross-page visibility)
+  markDiscussionSeen: (discId: string, msgCount: number) => void;
+  onActiveDiscussionChange: (id: string | null) => void;
+  lastSeenMsgCount: Record<string, number>;
 }
 
 export function DiscussionsPage({
@@ -163,8 +173,16 @@ export function DiscussionsPage({
   onNavigate,
   prefill,
   onPrefillConsumed,
-  onUnseenCountChange,
   toast,
+  sendingMap,
+  setSendingMap,
+  streamingMap,
+  setStreamingMap,
+  abortControllers,
+  cleanupStream: cleanupStreamBase,
+  markDiscussionSeen,
+  onActiveDiscussionChange,
+  lastSeenMsgCount,
 }: DiscussionsPageProps) {
   const { t } = useT();
 
@@ -177,14 +195,13 @@ export function DiscussionsPage({
   const [newDiscPrompt, setNewDiscPrompt] = useState('');
   const [newDiscPrefilled, setNewDiscPrefilled] = useState(false);
   const [chatInput, setChatInput] = useState('');
-  const [sendingMap, setSendingMap] = useState<Record<string, boolean>>({});
-  const [streamingMap, setStreamingMap] = useState<Record<string, string>>({});
   const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState('');
   const [collapsedDiscGroups, setCollapsedDiscGroups] = useState<Set<string>>(new Set());
   const [showDebatePopover, setShowDebatePopover] = useState(false);
   const [debateAgents, setDebateAgents] = useState<AgentType[]>([]);
   const [debateRounds, setDebateRounds] = useState(2);
+  const [debateSkillIds, setDebateSkillIds] = useState<string[]>(['token-saver', 'devils-advocate']);
   const [orchState, setOrchState] = useState<Record<string, {
     active: boolean;
     round: number | string;
@@ -198,13 +215,11 @@ export function DiscussionsPage({
   const [showArchives, setShowArchives] = useState(false);
   const [editingTitleId, setEditingTitleId] = useState<string | null>(null);
   const [editingTitleText, setEditingTitleText] = useState('');
-  const [lastSeenMsgCount, setLastSeenMsgCount] = useState<Record<string, number>>(() => {
-    try { return JSON.parse(localStorage.getItem('kronn:lastSeenMsgCount') ?? '{}'); } catch { return {}; }
-  });
+  const [availableSkills, setAvailableSkills] = useState<Skill[]>([]);
+  const [newDiscSkillIds, setNewDiscSkillIds] = useState<string[]>([]);
 
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
-  const abortControllers = useRef<Record<string, AbortController>>({});
 
   // ─── Derived data ────────────────────────────────────────────────────────
   const activeDiscussion = allDiscussions.find(d => d.id === activeDiscussionId) ?? null;
@@ -244,35 +259,26 @@ export function DiscussionsPage({
     return { activeDiscByProject: activeMap, archivedDiscussions: archived };
   }, [allDiscussions]);
 
-  // ─── Agent access helpers ────────────────────────────────────────────────
-  const isAgentRestricted = useCallback((agentType: AgentType): boolean => {
-    if (!agentAccess) return false;
-    const map: Record<string, boolean | undefined> = {
-      ClaudeCode: agentAccess.claude_code?.full_access,
-      Codex: agentAccess.codex?.full_access,
-      GeminiCli: agentAccess.gemini_cli?.full_access,
-      Vibe: agentAccess.vibe?.full_access,
-    };
-    return map[agentType] === false;
-  }, [agentAccess]);
+  // ─── Agent access helpers (shared from constants.ts) ─────────────────────
+  const isAgentRestricted = useCallback((agentType: AgentType): boolean =>
+    isAgentRestrictedUtil(agentAccess ?? undefined, agentType), [agentAccess]);
 
-  const hasFullAccess = useCallback((agentType: AgentType): boolean => {
-    if (!agentAccess) return false;
-    const map: Record<string, boolean | undefined> = {
-      ClaudeCode: agentAccess.claude_code?.full_access,
-      Codex: agentAccess.codex?.full_access,
-      GeminiCli: agentAccess.gemini_cli?.full_access,
-      Vibe: agentAccess.vibe?.full_access,
-    };
-    return map[agentType] === true;
-  }, [agentAccess]);
+  const hasFullAccess = useCallback((agentType: AgentType): boolean =>
+    hasAgentFullAccess(agentAccess ?? undefined, agentType), [agentAccess]);
 
   // ─── Effects ─────────────────────────────────────────────────────────────
 
-  // Abort all pending streams on unmount
+  // Abort all pending controllers on unmount
   useEffect(() => {
-    const controllers = abortControllers.current;
-    return () => { Object.values(controllers).forEach(c => c.abort()); };
+    const controllers = abortControllers;
+    return () => {
+      Object.values(controllers.current).forEach(c => c.abort());
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Fetch available skills
+  useEffect(() => {
+    skillsApi.list().then(setAvailableSkills).catch(() => {});
   }, []);
 
   // Auto-select first installed agent if current selection is invalid
@@ -282,48 +288,21 @@ export function DiscussionsPage({
     }
   }, [installedAgentsList.length, newDiscAgent]);
 
-  // Mark active discussion as seen
-  const markDiscussionSeen = useCallback((discId: string, msgCount: number) => {
-    setLastSeenMsgCount(prev => {
-      const next = { ...prev, [discId]: msgCount };
-      localStorage.setItem('kronn:lastSeenMsgCount', JSON.stringify(next));
-      return next;
-    });
-  }, []);
+  // Mark active discussion as seen + sync activeDiscussionId to parent
+  useEffect(() => {
+    onActiveDiscussionChange(activeDiscussionId);
+  }, [activeDiscussionId, onActiveDiscussionChange]);
 
   useEffect(() => {
     if (activeDiscussionId && activeDiscussion && !sendingMap[activeDiscussionId]) {
       markDiscussionSeen(activeDiscussionId, activeDiscussion.messages.length);
     }
-  }, [activeDiscussionId, activeDiscussion?.messages.length, sendingMap]);
+  }, [activeDiscussionId, activeDiscussion?.messages.length, sendingMap, markDiscussionSeen]);
 
   // Auto-scroll on new messages / streaming
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [activeDiscussion?.messages.length, streamingText]);
-
-  // Poll discussions every 10s
-  useEffect(() => {
-    const interval = setInterval(() => {
-      refetchDiscussions();
-    }, 10000);
-    return () => clearInterval(interval);
-  }, [refetchDiscussions]);
-
-  // Compute total unseen and notify parent
-  const totalUnseen = useMemo(() => allDiscussions.reduce((acc, disc) => {
-    const unseen = disc.messages.length - (lastSeenMsgCount[disc.id] ?? 0);
-    return acc + (unseen > 0 && disc.id !== activeDiscussionId ? unseen : 0);
-  }, 0), [allDiscussions, lastSeenMsgCount, activeDiscussionId]);
-
-  useEffect(() => {
-    onUnseenCountChange?.(totalUnseen);
-  }, [totalUnseen, onUnseenCountChange]);
-
-  // Update document title with unread indicator
-  useEffect(() => {
-    document.title = totalUnseen > 0 ? `(${totalUnseen}) Kronn` : 'Kronn';
-  }, [totalUnseen]);
 
   // Handle prefill from parent (e.g. "validate audit" button on Projects page)
   useEffect(() => {
@@ -340,11 +319,9 @@ export function DiscussionsPage({
   // ─── Callbacks ───────────────────────────────────────────────────────────
 
   const cleanupStream = useCallback((discId: string) => {
-    setSendingMap(prev => ({ ...prev, [discId]: false }));
-    setStreamingMap(prev => { const n = { ...prev }; delete n[discId]; return n; });
-    delete abortControllers.current[discId];
+    cleanupStreamBase(discId);
     refetchDiscussions();
-  }, [refetchDiscussions]);
+  }, [cleanupStreamBase, refetchDiscussions]);
 
   const handleCreateDiscussion = async () => {
     if (!newDiscPrompt.trim() || !newDiscAgent) return;
@@ -356,11 +333,13 @@ export function DiscussionsPage({
       agent: newDiscAgent as AgentType,
       language: configLanguage ?? 'fr',
       initial_prompt: prompt,
+      skill_ids: newDiscSkillIds.length > 0 ? newDiscSkillIds : undefined,
     });
     setShowNewDiscussion(false);
     setNewDiscTitle('');
     setNewDiscPrompt('');
     setNewDiscPrefilled(false);
+    setNewDiscSkillIds([]);
     setActiveDiscussionId(disc.id);
     refetchDiscussions();
 
@@ -408,6 +387,8 @@ export function DiscussionsPage({
       () => {
         refetchDiscussions();
         setSendingMap(prev => ({ ...prev, [discId]: true }));
+        // Mark seen so user's own message doesn't trigger unseen badge
+        markDiscussionSeen(discId, (activeDiscussion?.messages.length ?? 0) + 1);
       },
     );
   };
@@ -471,7 +452,7 @@ export function DiscussionsPage({
       [discId]: { active: true, round: 0, totalRounds: 3, currentAgent: null, agentStreams: [], systemMessages: [] },
     }));
 
-    await discussionsApi.orchestrate(discId, { agents: debateAgents, max_rounds: debateRounds }, {
+    await discussionsApi.orchestrate(discId, { agents: debateAgents, max_rounds: debateRounds, skill_ids: debateSkillIds }, {
       onSystem: (text) => {
         setOrchState(prev => {
           const s = prev[discId];
@@ -573,7 +554,7 @@ export function DiscussionsPage({
                     isActive={disc.id === activeDiscussionId}
                     lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
                     sendingMap={sendingMap}
-                    onSelect={() => { setActiveDiscussionId(disc.id); markDiscussionSeen(disc.id, disc.messages.length); }}
+                    onSelect={() => { setActiveDiscussionId(disc.id); markDiscussionSeen(disc.id, disc.message_count ?? disc.messages.length); }}
                     onArchive={async () => {
                       await discussionsApi.update(disc.id, { archived: true });
                       if (activeDiscussionId === disc.id) setActiveDiscussionId(null);
@@ -613,7 +594,7 @@ export function DiscussionsPage({
                     isActive={disc.id === activeDiscussionId}
                     lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
                     sendingMap={sendingMap}
-                    onSelect={() => { setActiveDiscussionId(disc.id); markDiscussionSeen(disc.id, disc.messages.length); }}
+                    onSelect={() => { setActiveDiscussionId(disc.id); markDiscussionSeen(disc.id, disc.message_count ?? disc.messages.length); }}
                     onArchive={async () => {
                       await discussionsApi.update(disc.id, { archived: true });
                       if (activeDiscussionId === disc.id) setActiveDiscussionId(null);
@@ -655,7 +636,7 @@ export function DiscussionsPage({
                   isActive={disc.id === activeDiscussionId}
                   lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
                   sendingMap={sendingMap}
-                  onSelect={() => { setActiveDiscussionId(disc.id); markDiscussionSeen(disc.id, disc.messages.length); }}
+                  onSelect={() => { setActiveDiscussionId(disc.id); markDiscussionSeen(disc.id, disc.message_count ?? disc.messages.length); }}
                   onArchive={async () => {
                     // Swipe right on archived = unarchive
                     await discussionsApi.update(disc.id, { archived: false });
@@ -692,7 +673,12 @@ export function DiscussionsPage({
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
                 <div>
                   <label style={ds.label}>{t('disc.project')}</label>
-                  <select style={{ ...ds.selectStyled, ...(newDiscPrefilled ? { opacity: 0.5, pointerEvents: 'none' as const } : {}) }} value={newDiscProjectId} onChange={e => setNewDiscProjectId(e.target.value)} disabled={newDiscPrefilled}>
+                  <select style={{ ...ds.selectStyled, ...(newDiscPrefilled ? { opacity: 0.5, pointerEvents: 'none' as const } : {}) }} value={newDiscProjectId} onChange={e => {
+                    const pid = e.target.value;
+                    setNewDiscProjectId(pid);
+                    const proj = projects.find(p => p.id === pid);
+                    if (proj?.default_skill_ids?.length) setNewDiscSkillIds(proj.default_skill_ids);
+                  }} disabled={newDiscPrefilled}>
                     <option value="">{t('disc.noProject')}</option>
                     {projects.filter(p => !isHiddenPath(p.path)).map(p => (
                       <option key={p.id} value={p.id}>{p.name}</option>
@@ -720,6 +706,42 @@ export function DiscussionsPage({
                     {' — '}
                     <span style={{ cursor: 'pointer', textDecoration: 'underline' }} onClick={() => { setShowNewDiscussion(false); onNavigate('settings'); }}>{t('config.restrictedAgentLink')}</span>
                   </span>
+                </div>
+              )}
+
+              {/* Skills selector */}
+              {availableSkills.length > 0 && (
+                <div style={{ marginBottom: 12 }}>
+                  <label style={ds.label}><Zap size={10} style={{ marginRight: 4 }} />{t('skills.selectSkills')}</label>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
+                    {availableSkills.map(skill => {
+                      const selected = newDiscSkillIds.includes(skill.id);
+                      return (
+                        <button
+                          key={skill.id}
+                          type="button"
+                          onClick={() => {
+                            setNewDiscSkillIds(prev =>
+                              selected ? prev.filter(id => id !== skill.id) : [...prev, skill.id]
+                            );
+                          }}
+                          style={{
+                            padding: '4px 10px', borderRadius: 12, fontSize: 11, fontFamily: 'inherit',
+                            fontWeight: selected ? 600 : 400, cursor: 'pointer',
+                            border: selected ? '1px solid rgba(200,255,0,0.4)' : '1px solid rgba(255,255,255,0.1)',
+                            background: selected ? 'rgba(200,255,0,0.1)' : 'rgba(255,255,255,0.03)',
+                            color: selected ? '#c8ff00' : 'rgba(255,255,255,0.5)',
+                            display: 'flex', alignItems: 'center', gap: 4,
+                            transition: 'all 0.15s',
+                          }}
+                          title={skill.description}
+                        >
+                          {selected && <Check size={10} />}
+                          {skill.name}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
               )}
 
@@ -835,13 +857,31 @@ export function DiscussionsPage({
                     <Pencil size={10} />
                   </button>
                 </div>
-                <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', marginTop: 2 }}>
-                  {activeDiscussion.project_id ? (projects.find(p => p.id === activeDiscussion.project_id)?.name ?? '?') : t('disc.general')} · {activeDiscussion.agent}
+                <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', marginTop: 2, display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
+                  <span>{activeDiscussion.project_id ? (projects.find(p => p.id === activeDiscussion.project_id)?.name ?? '?') : t('disc.general')} · {activeDiscussion.agent}</span>
+                  {(activeDiscussion.skill_ids ?? []).length > 0 && (
+                    <>
+                      <span style={{ color: 'rgba(255,255,255,0.15)' }}>·</span>
+                      {(activeDiscussion.skill_ids ?? []).map(sid => {
+                        const skill = availableSkills.find(s => s.id === sid);
+                        return (
+                          <span key={sid} style={{
+                            padding: '1px 7px', borderRadius: 8, fontSize: 9, fontWeight: 600,
+                            background: 'rgba(200,255,0,0.08)', border: '1px solid rgba(200,255,0,0.2)',
+                            color: 'rgba(200,255,0,0.7)',
+                          }}>
+                            {skill?.name ?? sid}
+                          </span>
+                        );
+                      })}
+                    </>
+                  )}
                 </div>
               </div>
               <button
                 style={{ ...ls.iconBtn, color: '#ff4d6a' }}
                 onClick={async () => {
+                  if (!confirm(t('disc.confirmDelete'))) return;
                   await discussionsApi.delete(activeDiscussion.id);
                   setActiveDiscussionId(null);
                   refetchDiscussions();
@@ -1247,6 +1287,49 @@ export function DiscussionsPage({
                         </button>
                       ))}
                     </div>
+                    {/* Recommended skills for debate */}
+                    {(() => {
+                      const DEBATE_SKILL_IDS = ['token-saver', 'devils-advocate'];
+                      const discSkillIds = activeDiscussion?.skill_ids ?? [];
+                      const relevantIds = [...new Set([...DEBATE_SKILL_IDS, ...discSkillIds])];
+                      const relevantSkills = relevantIds
+                        .map(id => availableSkills.find(s => s.id === id))
+                        .filter((s): s is Skill => !!s);
+                      if (relevantSkills.length === 0) return null;
+                      return (
+                        <div style={{ marginTop: 10, borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: 8 }}>
+                          <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 }}>
+                            <Zap size={10} /> Skills
+                          </div>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                            {relevantSkills.map(skill => {
+                              const active = debateSkillIds.includes(skill.id);
+                              return (
+                                <button
+                                  key={skill.id}
+                                  title={skill.description}
+                                  onClick={() => setDebateSkillIds(prev =>
+                                    prev.includes(skill.id)
+                                      ? prev.filter(id => id !== skill.id)
+                                      : [...prev, skill.id]
+                                  )}
+                                  style={{
+                                    padding: '3px 8px', borderRadius: 6, fontFamily: 'inherit',
+                                    fontSize: 10, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4,
+                                    background: active ? 'rgba(200,255,0,0.12)' : 'rgba(255,255,255,0.04)',
+                                    color: active ? '#c8ff00' : 'rgba(255,255,255,0.3)',
+                                    border: active ? '1px solid rgba(200,255,0,0.2)' : '1px solid rgba(255,255,255,0.06)',
+                                  }}
+                                >
+                                  {active && <Check size={8} />}
+                                  {skill.name}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })()}
                     {debateAgents.some(a => isAgentRestricted(a)) && (
                       <div style={{ marginTop: 8, padding: '6px 8px', borderRadius: 6, background: 'rgba(255,200,0,0.06)', border: '1px solid rgba(255,200,0,0.12)', display: 'flex', alignItems: 'center', gap: 5 }}>
                         <AlertTriangle size={10} style={{ color: '#ffb400', flexShrink: 0 }} />

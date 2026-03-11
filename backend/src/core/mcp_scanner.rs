@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::models::McpTransport;
@@ -364,8 +364,15 @@ fn sync_codex_global_config(
         });
     }
 
-    // Read existing config.toml and preserve non-MCP settings
-    let codex_dir = Path::new("/root/.codex");
+    // Read existing config.toml and preserve non-MCP settings.
+    // Inside Docker the host home is mounted at /root, but we use KRONN_HOST_HOME
+    // to support native Linux/macOS execution where /root is not the user's home.
+    let codex_dir = if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {
+        PathBuf::from(format!("{}/.codex", host_home))
+    } else {
+        std::env::var("HOME").map(|h| PathBuf::from(format!("{}/.codex", h)))
+            .unwrap_or_else(|_| PathBuf::from("/home/kronn/.codex"))
+    };
     let codex_config = codex_dir.join("config.toml");
 
     // Parse existing config as a TOML table to preserve other settings

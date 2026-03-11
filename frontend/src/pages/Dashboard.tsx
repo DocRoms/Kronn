@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { projects as projectsApi, mcps as mcpsApi, agents as agentsApi, discussions as discussionsApi, config as configApi } from '../lib/api';
 import { useApi } from '../hooks/useApi';
 import { useToast } from '../hooks/useToast';
@@ -56,8 +56,11 @@ export function Dashboard({ onReset }: DashboardProps) {
   const [projectDisplayLimit, setProjectDisplayLimit] = useState(20);
   // Cross-page prefill for discussion creation (e.g. "validate audit" from Projects)
   const [discPrefill, setDiscPrefill] = useState<{ projectId: string; title: string; prompt: string } | null>(null);
-  // Unseen count received from DiscussionsPage for nav badge
-  const [totalUnseen, setTotalUnseen] = useState(0);
+  // Unseen message tracking (persisted in localStorage, computed in Dashboard)
+  const [lastSeenMsgCount, setLastSeenMsgCount] = useState<Record<string, number>>(() => {
+    try { return JSON.parse(localStorage.getItem('kronn:lastSeenMsgCount') ?? '{}'); } catch { return {}; }
+  });
+  const [activeDiscussionId, setActiveDiscussionId] = useState<string | null>(null);
   // AI audit state
   const [installingTemplate, setInstallingTemplate] = useState<string | null>(null);
   const [auditAgentChoice, setAuditAgentChoice] = useState<Record<string, AgentType>>({});
@@ -68,6 +71,17 @@ export function Dashboard({ onReset }: DashboardProps) {
     currentFile: string;
   }>>({});
 
+  // ─── Lifted discussion streaming state (survives page changes) ──────────
+  const [sendingMap, setSendingMap] = useState<Record<string, boolean>>({});
+  const [streamingMap, setStreamingMap] = useState<Record<string, string>>({});
+  const abortControllers = useRef<Record<string, AbortController>>({});
+
+  const cleanupStream = useCallback((discId: string) => {
+    setSendingMap(prev => ({ ...prev, [discId]: false }));
+    setStreamingMap(prev => { const n = { ...prev }; delete n[discId]; return n; });
+    delete abortControllers.current[discId];
+  }, []);
+
   const { data: projectList, refetch } = useApi(() => projectsApi.list(), []);
   const { data: registry } = useApi(() => mcpsApi.registry(), []);
   const { data: mcpOverviewData, refetch: refetchMcps } = useApi(() => mcpsApi.overview(), []);
@@ -76,11 +90,40 @@ export function Dashboard({ onReset }: DashboardProps) {
   const { data: configLanguage, refetch: refetchLanguage } = useApi(() => configApi.getLanguage(), []);
   const { data: agentAccess, refetch: refetchAgentAccess } = useApi(() => configApi.getAgentAccess(), []);
 
+  // Poll discussions for notifications — faster when on discussions page, slower otherwise
+  useEffect(() => {
+    const pollInterval = page === 'discussions' ? 5000 : 30000;
+    const interval = setInterval(() => { refetchDiscussions(); }, pollInterval);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') refetchDiscussions();
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => { clearInterval(interval); document.removeEventListener('visibilitychange', onVisibilityChange); };
+  }, [refetchDiscussions, page]);
+
   const projects = projectList ?? [];
   const mcpRegistry = registry ?? [];
   const mcpOverview = mcpOverviewData ?? { servers: [], configs: [], customized_contexts: [] };
   const agents = agentList ?? [];
   const allDiscussions = discussionList ?? [];
+
+  // ─── Unseen count (computed here so it works across all pages) ─────────
+  const markDiscussionSeen = useCallback((discId: string, msgCount: number) => {
+    setLastSeenMsgCount(prev => {
+      const next = { ...prev, [discId]: msgCount };
+      localStorage.setItem('kronn:lastSeenMsgCount', JSON.stringify(next));
+      return next;
+    });
+  }, []);
+
+  const totalUnseen = useMemo(() => allDiscussions.reduce((acc, disc) => {
+    const unseen = (disc.message_count ?? disc.messages.length) - (lastSeenMsgCount[disc.id] ?? 0);
+    return acc + (unseen > 0 && disc.id !== activeDiscussionId ? unseen : 0);
+  }, 0), [allDiscussions, lastSeenMsgCount, activeDiscussionId]);
+
+  useEffect(() => {
+    document.title = totalUnseen > 0 ? `(${totalUnseen}) Kronn` : 'Kronn';
+  }, [totalUnseen]);
 
   // Stable callback for prefill consumed
   const handlePrefillConsumed = useCallback(() => setDiscPrefill(null), []);
@@ -359,7 +402,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                                 {disc.title}
                               </span>
                               <span style={{ marginLeft: 8, fontSize: 11, color: 'rgba(255,255,255,0.3)' }}>
-                                {disc.messages.length} msg · {disc.agent}
+                                {disc.message_count ?? disc.messages.length} msg · {disc.agent}
                               </span>
                             </div>
                             <button style={s.iconBtn} onClick={() => { setPage('discussions'); }}>
@@ -459,7 +502,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                             {validationInProgress ? (
                               <>
                                 <p style={{ fontSize: 11, color: 'rgba(255,200,0,0.7)', margin: '0 0 8px', display: 'flex', alignItems: 'center', gap: 4 }}>
-                                  <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> {t('audit.validationInProgress', validationDisc.messages.length)}
+                                  <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> {t('audit.validationInProgress', validationDisc.message_count ?? validationDisc.messages.length)}
                                 </p>
                                 <p style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)', margin: '0 0 8px' }}>
                                   {t('audit.validationHint')}
@@ -565,8 +608,16 @@ export function Dashboard({ onReset }: DashboardProps) {
             onNavigate={(p) => setPage(p as Page)}
             prefill={discPrefill}
             onPrefillConsumed={handlePrefillConsumed}
-            onUnseenCountChange={setTotalUnseen}
             toast={toast}
+            sendingMap={sendingMap}
+            setSendingMap={setSendingMap}
+            streamingMap={streamingMap}
+            setStreamingMap={setStreamingMap}
+            abortControllers={abortControllers}
+            cleanupStream={cleanupStream}
+            markDiscussionSeen={markDiscussionSeen}
+            onActiveDiscussionChange={setActiveDiscussionId}
+            lastSeenMsgCount={lastSeenMsgCount}
           />
         )}
 
@@ -576,6 +627,7 @@ export function Dashboard({ onReset }: DashboardProps) {
             agents={agents}
             agentAccess={agentAccess ?? null}
             configLanguage={configLanguage ?? null}
+            projects={projects}
             refetchAgents={refetchAgents}
             refetchAgentAccess={refetchAgentAccess}
             refetchLanguage={refetchLanguage}

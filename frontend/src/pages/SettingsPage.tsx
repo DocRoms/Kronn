@@ -1,10 +1,10 @@
-import { useState } from 'react';
-import { config as configApi, agents as agentsApi, stats as statsApi } from '../lib/api';
+import { useState, useEffect } from 'react';
+import { config as configApi, agents as agentsApi, stats as statsApi, skills as skillsApi, projects as projectsApi } from '../lib/api';
 import { useApi } from '../hooks/useApi';
 import { useT } from '../lib/I18nContext';
 import { UI_LOCALES } from '../lib/i18n';
 import { AGENT_COLORS } from '../lib/constants';
-import type { AgentDetection, AgentsConfig } from '../types/generated';
+import type { AgentDetection, AgentsConfig, Skill, Project } from '../types/generated';
 import type { ToastFn } from '../hooks/useToast';
 import {
   MessageSquare, Cpu, Zap, Key, AlertTriangle, Save,
@@ -26,6 +26,7 @@ interface SettingsPageProps {
   agents: AgentDetection[];
   agentAccess: AgentsConfig | null;
   configLanguage: string | null;
+  projects: Project[];
   refetchAgents: () => void;
   refetchAgentAccess: () => void;
   refetchLanguage: () => void;
@@ -39,6 +40,7 @@ export function SettingsPage({
   agents,
   agentAccess,
   configLanguage,
+  projects,
   refetchAgents,
   refetchAgentAccess,
   refetchLanguage,
@@ -61,6 +63,14 @@ export function SettingsPage({
   const [scanIgnore, setScanIgnore] = useState<string[]>([]);
   const [newScanPath, setNewScanPath] = useState('');
   const [newIgnorePattern, setNewIgnorePattern] = useState('');
+  const [availableSkills, setAvailableSkills] = useState<Skill[]>([]);
+  const [showCreateSkill, setShowCreateSkill] = useState(false);
+  const [newSkillName, setNewSkillName] = useState('');
+  const [newSkillDesc, setNewSkillDesc] = useState('');
+  const [newSkillIcon, setNewSkillIcon] = useState('Star');
+  const [newSkillCategory, setNewSkillCategory] = useState<'Technical' | 'Business' | 'Meta'>('Technical');
+  const [newSkillContent, setNewSkillContent] = useState('');
+  const [projectSkillsExpanded, setProjectSkillsExpanded] = useState<string | null>(null);
 
   // Internal API calls
   const { data: tokenConfig, refetch: refetchTokens } = useApi(() => configApi.getTokens(), []);
@@ -68,7 +78,11 @@ export function SettingsPage({
   useApi(() => configApi.getScanDepth().then(d => { if (d != null) setScanDepth(d); return d; }), []);
   useApi(() => configApi.getScanPaths().then(p => { if (p) setScanPaths(p); return p; }), []);
   useApi(() => configApi.getScanIgnore().then(p => { if (p) setScanIgnore(p); return p; }), []);
-  const { data: agentUsageData, refetch: refetchAgentUsage } = useApi(() => statsApi.agentUsage(), []);
+  const { data: agentUsageData } = useApi(() => statsApi.agentUsage(), []);
+
+  useEffect(() => {
+    skillsApi.list().then(setAvailableSkills).catch(() => {});
+  }, []);
 
   const handleInstallAgent = async (agent: AgentDetection) => {
     setInstalling(agent.name);
@@ -139,8 +153,8 @@ export function SettingsPage({
                   border: (configLanguage ?? 'fr') === l.code ? '1px solid rgba(200,255,0,0.3)' : '1px solid rgba(255,255,255,0.08)',
                 }}
                 onClick={async () => {
-                  await configApi.saveLanguage(l.code);
-                  refetchLanguage();
+                  try { await configApi.saveLanguage(l.code); refetchLanguage(); }
+                  catch { console.error('Failed to save language'); }
                 }}
               >
                 {l.flag} {l.label}
@@ -150,160 +164,167 @@ export function SettingsPage({
         </div>
       </div>
 
-      {/* Scan Depth */}
+      {/* Scan (depth + paths + ignore) */}
       <div style={ss.card(false)}>
         <div style={{ padding: '16px 20px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-            <Layers size={14} style={{ color: '#c8ff00' }} />
-            <span style={{ fontWeight: 600, fontSize: 14 }}>{t('config.scanDepth')}</span>
-            <span style={{ fontSize: 12, color: '#c8ff00', marginLeft: 'auto', fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
-              {scanDepth}
-            </span>
-          </div>
-          <p style={{ color: 'rgba(255,255,255,0.35)', fontSize: 12, marginBottom: 12 }}>
-            {t('config.scanDepthHint')}
-          </p>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)' }}>2</span>
-            <input
-              type="range"
-              min={2}
-              max={10}
-              value={scanDepth}
-              onChange={async (e) => {
-                const v = Number(e.target.value);
-                setScanDepth(v);
-                await configApi.setScanDepth(v);
-              }}
-              style={{ flex: 1, accentColor: '#c8ff00', cursor: 'pointer' }}
-            />
-            <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)' }}>10</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Scan Paths */}
-      <div style={ss.card(false)}>
-        <div style={{ padding: '16px 20px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
             <FolderSearch size={14} style={{ color: '#c8ff00' }} />
             <span style={{ fontWeight: 600, fontSize: 14 }}>{t('config.scanPaths')}</span>
             <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginLeft: 'auto' }}>
               {scanPaths.length} {scanPaths.length > 1 ? t('config.pathsPlural') : t('config.path')}
             </span>
           </div>
-          <p style={{ color: 'rgba(255,255,255,0.35)', fontSize: 12, marginBottom: 12 }}>
-            {t('config.scanPathsHint')}
-          </p>
-          {scanPaths.map((p, i) => (
-            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0' }}>
-              <code style={{ ...ss.code, fontSize: 11, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p}</code>
-              <button
-                style={{ ...ss.iconBtn, padding: '2px 4px' }}
-                onClick={async () => {
-                  const updated = scanPaths.filter((_, j) => j !== i);
-                  setScanPaths(updated);
-                  await configApi.setScanPaths(updated);
-                }}
-              >
-                <Trash2 size={10} style={{ color: 'rgba(255,107,107,0.5)' }} />
-              </button>
-            </div>
-          ))}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8 }}>
-            <input
-              type="text"
-              style={{ ...ss.input, fontSize: 11, padding: '5px 8px', flex: 1 }}
-              placeholder={t('config.scanPathPlaceholder')}
-              value={newScanPath}
-              onChange={e => setNewScanPath(e.target.value)}
-              onKeyDown={async (e) => {
-                if (e.key === 'Enter' && newScanPath.trim()) {
-                  const updated = [...scanPaths, newScanPath.trim()];
-                  setScanPaths(updated);
-                  setNewScanPath('');
-                  await configApi.setScanPaths(updated);
-                }
-              }}
-            />
-            <button
-              style={{ ...ss.iconBtn, padding: '4px 8px', color: '#c8ff00' }}
-              onClick={async () => {
-                if (!newScanPath.trim()) return;
-                const updated = [...scanPaths, newScanPath.trim()];
-                setScanPaths(updated);
-                setNewScanPath('');
-                await configApi.setScanPaths(updated);
-              }}
-            >
-              <Plus size={12} />
-            </button>
-          </div>
-        </div>
-      </div>
 
-      {/* Scan Ignore */}
-      <div style={ss.card(false)}>
-        <div style={{ padding: '16px 20px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-            <Filter size={14} style={{ color: '#c8ff00' }} />
-            <span style={{ fontWeight: 600, fontSize: 14 }}>{t('config.scanIgnore')}</span>
-            <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginLeft: 'auto' }}>
-              {scanIgnore.length} {scanIgnore.length > 1 ? t('config.patternsPlural') : t('config.pattern')}
-            </span>
+          {/* Scan Depth */}
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+              <Layers size={12} style={{ color: 'rgba(255,255,255,0.4)' }} />
+              <span style={{ fontWeight: 600, fontSize: 12, color: 'rgba(255,255,255,0.6)' }}>{t('config.scanDepth')}</span>
+              <span style={{ fontSize: 12, color: '#c8ff00', marginLeft: 'auto', fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
+                {scanDepth}
+              </span>
+            </div>
+            <p style={{ color: 'rgba(255,255,255,0.35)', fontSize: 11, marginBottom: 8 }}>
+              {t('config.scanDepthHint')}
+            </p>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)' }}>2</span>
+              <input
+                type="range"
+                min={2}
+                max={10}
+                value={scanDepth}
+                onChange={async (e) => {
+                  const v = Number(e.target.value);
+                  setScanDepth(v);
+                  try { await configApi.setScanDepth(v); }
+                  catch { console.error('Failed to save scan depth'); }
+                }}
+                style={{ flex: 1, accentColor: '#c8ff00', cursor: 'pointer' }}
+              />
+              <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)' }}>10</span>
+            </div>
           </div>
-          <p style={{ color: 'rgba(255,255,255,0.35)', fontSize: 12, marginBottom: 12 }}>
-            {t('config.scanIgnoreHint')}
-          </p>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
-            {scanIgnore.map((p, i) => (
-              <div key={i} style={{
-                display: 'flex', alignItems: 'center', gap: 4, padding: '3px 8px',
-                background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)',
-                borderRadius: 4, fontSize: 11, fontFamily: 'JetBrains Mono, monospace',
-              }}>
-                <span style={{ color: 'rgba(255,255,255,0.6)' }}>{p}</span>
+
+          {/* Scan Paths */}
+          <div style={{ marginBottom: 16, paddingTop: 12, borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+              <FolderSearch size={12} style={{ color: 'rgba(255,255,255,0.4)' }} />
+              <span style={{ fontWeight: 600, fontSize: 12, color: 'rgba(255,255,255,0.6)' }}>{t('config.scanPaths')}</span>
+            </div>
+            <p style={{ color: 'rgba(255,255,255,0.35)', fontSize: 11, marginBottom: 8 }}>
+              {t('config.scanPathsHint')}
+            </p>
+            {scanPaths.map((p, i) => (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0' }}>
+                <code style={{ ...ss.code, fontSize: 11, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p}</code>
                 <button
-                  style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', display: 'flex' }}
+                  style={{ ...ss.iconBtn, padding: '2px 4px' }}
                   onClick={async () => {
-                    const updated = scanIgnore.filter((_, j) => j !== i);
-                    setScanIgnore(updated);
-                    await configApi.setScanIgnore(updated);
+                    const updated = scanPaths.filter((_, j) => j !== i);
+                    setScanPaths(updated);
+                    try { await configApi.setScanPaths(updated); } catch (err) { console.error(err); }
                   }}
                 >
-                  <X size={9} style={{ color: 'rgba(255,107,107,0.5)' }} />
+                  <Trash2 size={10} style={{ color: 'rgba(255,107,107,0.5)' }} />
                 </button>
               </div>
             ))}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8 }}>
+              <input
+                type="text"
+                style={{ ...ss.input, fontSize: 11, padding: '5px 8px', flex: 1 }}
+                placeholder={t('config.scanPathPlaceholder')}
+                value={newScanPath}
+                onChange={e => setNewScanPath(e.target.value)}
+                onKeyDown={async (e) => {
+                  if (e.key === 'Enter' && newScanPath.trim()) {
+                    if (scanPaths.includes(newScanPath.trim())) return;
+                    const updated = [...scanPaths, newScanPath.trim()];
+                    setScanPaths(updated);
+                    setNewScanPath('');
+                    try { await configApi.setScanPaths(updated); } catch (err) { console.error(err); }
+                  }
+                }}
+              />
+              <button
+                style={{ ...ss.iconBtn, padding: '4px 8px', color: '#c8ff00' }}
+                onClick={async () => {
+                  if (!newScanPath.trim()) return;
+                  if (scanPaths.includes(newScanPath.trim())) return;
+                  const updated = [...scanPaths, newScanPath.trim()];
+                  setScanPaths(updated);
+                  setNewScanPath('');
+                  try { await configApi.setScanPaths(updated); } catch (err) { console.error(err); }
+                }}
+              >
+                <Plus size={12} />
+              </button>
+            </div>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <input
-              type="text"
-              style={{ ...ss.input, fontSize: 11, padding: '5px 8px', flex: 1 }}
-              placeholder={t('config.scanIgnorePlaceholder')}
-              value={newIgnorePattern}
-              onChange={e => setNewIgnorePattern(e.target.value)}
-              onKeyDown={async (e) => {
-                if (e.key === 'Enter' && newIgnorePattern.trim()) {
+
+          {/* Scan Ignore */}
+          <div style={{ paddingTop: 12, borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+              <Filter size={12} style={{ color: 'rgba(255,255,255,0.4)' }} />
+              <span style={{ fontWeight: 600, fontSize: 12, color: 'rgba(255,255,255,0.6)' }}>{t('config.scanIgnore')}</span>
+              <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginLeft: 'auto' }}>
+                {scanIgnore.length} {scanIgnore.length > 1 ? t('config.patternsPlural') : t('config.pattern')}
+              </span>
+            </div>
+            <p style={{ color: 'rgba(255,255,255,0.35)', fontSize: 11, marginBottom: 8 }}>
+              {t('config.scanIgnoreHint')}
+            </p>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+              {scanIgnore.map((p, i) => (
+                <div key={i} style={{
+                  display: 'flex', alignItems: 'center', gap: 4, padding: '3px 8px',
+                  background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)',
+                  borderRadius: 4, fontSize: 11, fontFamily: 'JetBrains Mono, monospace',
+                }}>
+                  <span style={{ color: 'rgba(255,255,255,0.6)' }}>{p}</span>
+                  <button
+                    style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', display: 'flex' }}
+                    onClick={async () => {
+                      const updated = scanIgnore.filter((_, j) => j !== i);
+                      setScanIgnore(updated);
+                      try { await configApi.setScanIgnore(updated); } catch (err) { console.error(err); }
+                    }}
+                  >
+                    <X size={9} style={{ color: 'rgba(255,107,107,0.5)' }} />
+                  </button>
+                </div>
+              ))}
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <input
+                type="text"
+                style={{ ...ss.input, fontSize: 11, padding: '5px 8px', flex: 1 }}
+                placeholder={t('config.scanIgnorePlaceholder')}
+                value={newIgnorePattern}
+                onChange={e => setNewIgnorePattern(e.target.value)}
+                onKeyDown={async (e) => {
+                  if (e.key === 'Enter' && newIgnorePattern.trim()) {
+                    const updated = [...scanIgnore, newIgnorePattern.trim()];
+                    setScanIgnore(updated);
+                    setNewIgnorePattern('');
+                    try { await configApi.setScanIgnore(updated); } catch (err) { console.error(err); }
+                  }
+                }}
+              />
+              <button
+                style={{ ...ss.iconBtn, padding: '4px 8px', color: '#c8ff00' }}
+                onClick={async () => {
+                  if (!newIgnorePattern.trim()) return;
                   const updated = [...scanIgnore, newIgnorePattern.trim()];
                   setScanIgnore(updated);
                   setNewIgnorePattern('');
-                  await configApi.setScanIgnore(updated);
-                }
-              }}
-            />
-            <button
-              style={{ ...ss.iconBtn, padding: '4px 8px', color: '#c8ff00' }}
-              onClick={async () => {
-                if (!newIgnorePattern.trim()) return;
-                const updated = [...scanIgnore, newIgnorePattern.trim()];
-                setScanIgnore(updated);
-                setNewIgnorePattern('');
-                await configApi.setScanIgnore(updated);
-              }}
-            >
-              <Plus size={12} />
-            </button>
+                  try { await configApi.setScanIgnore(updated); } catch (err) { console.error(err); }
+                }}
+              >
+                <Plus size={12} />
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -317,6 +338,25 @@ export function SettingsPage({
             <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginLeft: 'auto' }}>
               {agents.filter(a => a.installed || a.runtime_available).length}/{agents.length} {agents.filter(a => a.installed || a.runtime_available).length > 1 ? t('config.installedPlural') : t('config.installed')}
             </span>
+            <button
+              style={{ ...ss.iconBtn, fontSize: 10, padding: '2px 8px', borderRadius: 4, background: 'rgba(200,255,0,0.06)', border: '1px solid rgba(200,255,0,0.15)', color: '#c8ff00', display: 'flex', alignItems: 'center', gap: 4 }}
+              title={t('config.discoverKeys')}
+              onClick={async () => {
+                try {
+                  const res = await configApi.discoverKeys();
+                  if (res.imported_count > 0) {
+                    toast(t('config.discoverKeysFound').replace('{0}', String(res.discovered.length)).replace('{1}', String(res.imported_count)), 'success');
+                    refetchTokens();
+                  } else if (res.discovered.length > 0) {
+                    toast(t('config.discoverKeysFound').replace('{0}', String(res.discovered.length)).replace('{1}', '0'), 'info');
+                  } else {
+                    toast(t('config.discoverKeysNone'), 'info');
+                  }
+                } catch { toast(t('config.discoverKeysNone'), 'error'); }
+              }}
+            >
+              <FolderSearch size={10} /> {t('config.discoverKeys')}
+            </button>
             <button style={ss.iconBtn} onClick={() => refetchAgents()} title={t('config.refresh')}>
               <RefreshCw size={12} />
             </button>
@@ -451,7 +491,7 @@ export function SettingsPage({
                   <div
                     style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}
                     onClick={async () => {
-                      await configApi.setAgentAccess({ agent: agent.agent_type, full_access: !isFullAccess });
+                      try { await configApi.setAgentAccess({ agent: agent.agent_type, full_access: !isFullAccess }); } catch (err) { console.error(err); }
                       refetchAgentAccess();
                     }}
                   >
@@ -488,7 +528,7 @@ export function SettingsPage({
                         style={{ ...ss.iconBtn, padding: 0 }}
                         title={isDisabled ? t('config.enableOverride') : t('config.disableOverride')}
                         onClick={async () => {
-                          await configApi.toggleTokenOverride(tf.key);
+                          try { await configApi.toggleTokenOverride(tf.key); } catch (err) { console.error(err); }
                           refetchTokens();
                         }}
                       >
@@ -522,7 +562,7 @@ export function SettingsPage({
                         <Check size={9} style={{ color: 'rgba(52,211,153,0.7)', flexShrink: 0 }} />
                       ) : (
                         <button style={{ ...ss.iconBtn, padding: 0 }} title={t('config.activateKey')}
-                          onClick={async () => { await configApi.activateApiKey(k.id); refetchTokens(); }}>
+                          onClick={async () => { try { await configApi.activateApiKey(k.id); } catch (err) { console.error(err); } refetchTokens(); }}>
                           <div style={{ width: 9, height: 9, borderRadius: '50%', border: '1px solid rgba(255,255,255,0.2)' }} />
                         </button>
                       )}
@@ -548,7 +588,7 @@ export function SettingsPage({
                       <button style={{ ...ss.iconBtn, padding: 0 }} title={t('config.deleteKey')}
                         onClick={async () => {
                           if (confirm(t('config.deleteKeyConfirm').replace('{0}', k.name))) {
-                            await configApi.deleteApiKey(k.id);
+                            try { await configApi.deleteApiKey(k.id); } catch (err) { console.error(err); }
                             refetchTokens();
                           }
                         }}>
@@ -635,91 +675,273 @@ export function SettingsPage({
                 </div>
                 );
               })()}
-            </div>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Token Usage per Agent */}
-      {agentUsageData && agentUsageData.length > 0 && (
-      <div style={ss.card(false)}>
-        <div style={{ padding: '16px 20px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-            <Zap size={14} style={{ color: '#c8ff00' }} />
-            <span style={{ fontWeight: 600, fontSize: 14 }}>{t('config.tokenUsage')}</span>
-            <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginLeft: 'auto' }}>
-              {agentUsageData.reduce((s, a) => s + a.total_tokens, 0).toLocaleString()} tokens
-            </span>
-            <button style={ss.iconBtn} onClick={() => refetchAgentUsage()} title={t('config.refresh')}>
-              <RefreshCw size={12} />
-            </button>
-          </div>
-
-          {agentUsageData.map(agent => {
-            const isExpanded = usageExpanded === agent.agent_type;
-            const color = AGENT_COLORS[agent.agent_type] ?? '#8b5cf6';
-            const filteredProjects = isExpanded
-              ? agent.by_project.filter(p => !usageSearch || p.project_name.toLowerCase().includes(usageSearch.toLowerCase()))
-              : [];
-
-            return (
-            <div key={agent.agent_type} style={{ marginBottom: 8 }}>
-              <div
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', cursor: 'pointer',
-                  borderRadius: 6, background: isExpanded ? 'rgba(255,255,255,0.04)' : 'transparent',
-                }}
-                onClick={() => setUsageExpanded(isExpanded ? null : agent.agent_type)}
-              >
-                <ChevronRight size={12} style={{ color: 'rgba(255,255,255,0.3)', transform: isExpanded ? 'rotate(90deg)' : 'none', transition: 'transform .15s' }} />
-                <Cpu size={12} style={{ color }} />
-                <span style={{ fontWeight: 600, fontSize: 12, color }}>{agent.agent_type}</span>
-                <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginLeft: 'auto' }}>
-                  {agent.total_tokens.toLocaleString()} tok
-                </span>
-                <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.2)' }}>
-                  {agent.message_count} msg
-                </span>
-              </div>
-
-              {isExpanded && (
-                <div style={{ paddingLeft: 32, paddingRight: 12, paddingBottom: 8 }}>
-                  {agent.by_project.length > 5 && (
-                    <input
-                      type="text"
-                      placeholder={t('projects.search')}
-                      value={usageSearch}
-                      onChange={e => setUsageSearch(e.target.value)}
-                      style={{ ...ss.input, fontSize: 10, padding: '4px 8px', marginBottom: 6, width: '100%' }}
-                    />
-                  )}
-                  {filteredProjects.map(p => (
-                    <div key={p.project_id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '3px 0', fontSize: 11 }}>
-                      <span style={{ color: 'rgba(255,255,255,0.6)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {p.project_name}
-                      </span>
-                      <span style={{ color: 'rgba(255,255,255,0.3)', fontSize: 10, flexShrink: 0 }}>
-                        {p.tokens_used.toLocaleString()} tok
-                      </span>
-                      <span style={{ color: 'rgba(255,255,255,0.15)', fontSize: 9, flexShrink: 0 }}>
-                        {p.message_count} msg
-                      </span>
-                    </div>
-                  ))}
-                  {filteredProjects.length === 0 && usageSearch && (
-                    <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.2)', padding: '4px 0' }}>
-                      {t('projects.noResult')}
+              {/* Estimated token usage per agent */}
+              {(agent.installed || agent.runtime_available) && (() => {
+                const agentUsage = agentUsageData?.find(a => a.agent_type === agent.agent_type);
+                if (!agentUsage || agentUsage.total_tokens === 0) return null;
+                const color = AGENT_COLORS[agent.agent_type] ?? '#8b5cf6';
+                const isExpanded = usageExpanded === agent.agent_type;
+                const filteredProjects = isExpanded
+                  ? agentUsage.by_project.filter(p => !usageSearch || p.project_name.toLowerCase().includes(usageSearch.toLowerCase()))
+                  : [];
+                return (
+                <div style={{ marginLeft: 22, marginTop: 6 }}>
+                  <div
+                    style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', padding: '4px 0' }}
+                    onClick={() => setUsageExpanded(isExpanded ? null : agent.agent_type)}
+                  >
+                    <ChevronRight size={10} style={{ color: 'rgba(255,255,255,0.25)', transform: isExpanded ? 'rotate(90deg)' : 'none', transition: 'transform .15s' }} />
+                    <Zap size={10} style={{ color: 'rgba(255,255,255,0.25)' }} />
+                    <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)' }}>{t('config.estimateTokenUsage')}</span>
+                    <span style={{ fontSize: 10, color, marginLeft: 'auto' }}>
+                      ~{agentUsage.total_tokens.toLocaleString()} tok
+                    </span>
+                    <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.2)' }}>
+                      {agentUsage.message_count} msg
+                    </span>
+                  </div>
+                  {isExpanded && (
+                    <div style={{ paddingLeft: 22, paddingBottom: 4 }}>
+                      {agentUsage.by_project.length > 5 && (
+                        <input
+                          type="text"
+                          placeholder={t('projects.search')}
+                          value={usageSearch}
+                          onChange={e => setUsageSearch(e.target.value)}
+                          style={{ ...ss.input, fontSize: 10, padding: '3px 6px', marginBottom: 4, width: '100%' }}
+                        />
+                      )}
+                      {filteredProjects.map(p => (
+                        <div key={p.project_id} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '2px 0', fontSize: 10 }}>
+                          <span style={{ color: 'rgba(255,255,255,0.5)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {p.project_name}
+                          </span>
+                          <span style={{ color: 'rgba(255,255,255,0.25)', flexShrink: 0 }}>
+                            ~{p.tokens_used.toLocaleString()} tok
+                          </span>
+                          <span style={{ color: 'rgba(255,255,255,0.15)', fontSize: 9, flexShrink: 0 }}>
+                            {p.message_count} msg
+                          </span>
+                        </div>
+                      ))}
+                      {filteredProjects.length === 0 && usageSearch && (
+                        <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.2)', padding: '2px 0' }}>
+                          {t('projects.noResult')}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
-              )}
+                );
+              })()}
             </div>
             );
           })}
         </div>
       </div>
-      )}
+
+      {/* Skills */}
+      <div style={ss.card(false)}>
+        <div style={{ padding: '16px 20px' }}>
+          <h2 style={{ fontSize: 14, fontWeight: 700, color: '#e8eaed', marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Zap size={16} style={{ color: '#c8ff00' }} /> {t('skills.title')}
+          </h2>
+
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 16 }}>
+            {availableSkills.map(skill => (
+              <div key={skill.id} style={{
+                padding: '10px 14px', borderRadius: 8, width: 220,
+                background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)',
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                  <span style={{ fontWeight: 600, fontSize: 12, color: '#e8eaed' }}>{skill.name}</span>
+                  <div style={{ display: 'flex', gap: 4 }}>
+                    <span style={{
+                      fontSize: 9, padding: '1px 6px', borderRadius: 6, fontWeight: 600,
+                      background: skill.category === 'Technical' ? 'rgba(59,130,246,0.15)' : skill.category === 'Business' ? 'rgba(16,185,129,0.15)' : 'rgba(200,255,0,0.1)',
+                      color: skill.category === 'Technical' ? '#60a5fa' : skill.category === 'Business' ? '#34d399' : '#c8ff00',
+                      border: `1px solid ${skill.category === 'Technical' ? 'rgba(59,130,246,0.3)' : skill.category === 'Business' ? 'rgba(16,185,129,0.3)' : 'rgba(200,255,0,0.2)'}`,
+                    }}>
+                      {t(`skills.${skill.category.toLowerCase()}`)}
+                    </span>
+                    {skill.is_builtin ? (
+                      <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 6, background: 'rgba(255,255,255,0.05)', color: 'rgba(255,255,255,0.3)', border: '1px solid rgba(255,255,255,0.08)' }}>
+                        {t('skills.builtin')}
+                      </span>
+                    ) : (
+                      <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 6, background: 'rgba(139,92,246,0.1)', color: 'rgba(139,92,246,0.7)', border: '1px solid rgba(139,92,246,0.2)' }}>
+                        {t('skills.custom')}
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginBottom: 6 }}>{skill.description}</div>
+                {!skill.is_builtin && (
+                  <button
+                    style={{ ...ss.iconBtn, padding: '2px 6px', color: '#ff4d6a', borderColor: 'rgba(255,77,106,0.2)' }}
+                    onClick={async () => {
+                      if (!confirm(t('skills.deleteConfirm'))) return;
+                      try {
+                        await skillsApi.delete(skill.id);
+                        setAvailableSkills(prev => prev.filter(s => s.id !== skill.id));
+                        toast(t('skills.remove'), 'success');
+                      } catch (err) { console.error(err); }
+                    }}
+                  >
+                    <Trash2 size={10} />
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+
+          {!showCreateSkill ? (
+            <button
+              style={{ ...ss.scanBtn, gap: 6 }}
+              onClick={() => setShowCreateSkill(true)}
+            >
+              <Plus size={12} /> {t('skills.createCustom')}
+            </button>
+          ) : (
+            <div style={{ padding: 16, borderRadius: 8, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.1)' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
+                <div>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('skills.name')}</label>
+                  <input style={ss.input} value={newSkillName} onChange={e => setNewSkillName(e.target.value)} placeholder="My Skill" />
+                </div>
+                <div>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('skills.category')}</label>
+                  <select
+                    style={{ ...ss.input, cursor: 'pointer' }}
+                    value={newSkillCategory}
+                    onChange={e => setNewSkillCategory(e.target.value as any)}
+                  >
+                    <option value="Technical">{t('skills.technical')}</option>
+                    <option value="Business">{t('skills.business')}</option>
+                    <option value="Meta">{t('skills.meta')}</option>
+                  </select>
+                </div>
+              </div>
+              <div style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('skills.description')}</label>
+                <input style={ss.input} value={newSkillDesc} onChange={e => setNewSkillDesc(e.target.value)} placeholder="What this skill does..." />
+              </div>
+              <div style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('skills.icon')}</label>
+                <input style={ss.input} value={newSkillIcon} onChange={e => setNewSkillIcon(e.target.value)} placeholder="Star, Code, Shield..." />
+              </div>
+              <div style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('skills.content')}</label>
+                <textarea
+                  style={{ ...ss.input, minHeight: 120, resize: 'vertical' as const, fontFamily: 'monospace', fontSize: 12, lineHeight: 1.5 }}
+                  value={newSkillContent}
+                  onChange={e => setNewSkillContent(e.target.value)}
+                  placeholder="System prompt instructions for this skill..."
+                />
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  style={{ ...ss.scanBtn, opacity: newSkillName && newSkillContent ? 1 : 0.4 }}
+                  disabled={!newSkillName || !newSkillContent}
+                  onClick={async () => {
+                    try {
+                      const created = await skillsApi.create({
+                        name: newSkillName,
+                        description: newSkillDesc,
+                        icon: newSkillIcon,
+                        category: newSkillCategory,
+                        content: newSkillContent,
+                      });
+                      setAvailableSkills(prev => [...prev, created]);
+                      setShowCreateSkill(false);
+                      setNewSkillName(''); setNewSkillDesc(''); setNewSkillIcon('Star'); setNewSkillContent('');
+                      toast(t('skills.add'), 'success');
+                    } catch (err) { console.error(err); }
+                  }}
+                >
+                  <Check size={12} /> {t('skills.add')}
+                </button>
+                <button
+                  style={ss.iconBtn}
+                  onClick={() => { setShowCreateSkill(false); setNewSkillName(''); setNewSkillDesc(''); setNewSkillIcon('Star'); setNewSkillContent(''); }}
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Per-project default skills */}
+          {projects.length > 0 && availableSkills.length > 0 && (
+            <div style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+              <h3 style={{ fontSize: 12, fontWeight: 700, color: 'rgba(255,255,255,0.6)', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <Layers size={12} /> {t('skills.projectDefaults')}
+              </h3>
+              <p style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', marginBottom: 12 }}>
+                {t('skills.projectDefaultsHint')}
+              </p>
+              {projects.filter(p => !p.path.split('/').some(s => s.startsWith('.'))).map(project => {
+                const isExpanded = projectSkillsExpanded === project.id;
+                const currentSkills = project.default_skill_ids ?? [];
+                return (
+                  <div key={project.id} style={{ marginBottom: 4 }}>
+                    <button
+                      style={{
+                        width: '100%', display: 'flex', alignItems: 'center', gap: 8,
+                        padding: '8px 10px', borderRadius: 6, border: 'none',
+                        background: isExpanded ? 'rgba(200,255,0,0.04)' : 'transparent',
+                        color: '#e8eaed', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left' as const,
+                      }}
+                      onClick={() => setProjectSkillsExpanded(isExpanded ? null : project.id)}
+                    >
+                      <ChevronRight size={10} style={{ transform: isExpanded ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s' }} />
+                      <span style={{ fontSize: 12, fontWeight: 500, flex: 1 }}>{project.name}</span>
+                      {currentSkills.length > 0 && (
+                        <span style={{ fontSize: 9, color: 'rgba(200,255,0,0.6)', fontWeight: 600 }}>
+                          {currentSkills.length} skill{currentSkills.length > 1 ? 's' : ''}
+                        </span>
+                      )}
+                    </button>
+                    {isExpanded && (
+                      <div style={{ padding: '8px 10px 8px 28px', display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                        {availableSkills.map(skill => {
+                          const selected = currentSkills.includes(skill.id);
+                          return (
+                            <button
+                              key={skill.id}
+                              type="button"
+                              onClick={async () => {
+                                const newIds = selected
+                                  ? currentSkills.filter(id => id !== skill.id)
+                                  : [...currentSkills, skill.id];
+                                try { await projectsApi.setDefaultSkills(project.id, newIds); } catch (err) { console.error(err); }
+                                refetchProjects();
+                              }}
+                              style={{
+                                padding: '3px 9px', borderRadius: 10, fontSize: 10, fontFamily: 'inherit',
+                                fontWeight: selected ? 600 : 400, cursor: 'pointer',
+                                border: selected ? '1px solid rgba(200,255,0,0.4)' : '1px solid rgba(255,255,255,0.08)',
+                                background: selected ? 'rgba(200,255,0,0.1)' : 'rgba(255,255,255,0.03)',
+                                color: selected ? '#c8ff00' : 'rgba(255,255,255,0.4)',
+                                display: 'flex', alignItems: 'center', gap: 3,
+                                transition: 'all 0.15s',
+                              }}
+                              title={skill.description}
+                            >
+                              {selected && <Check size={8} />}
+                              {skill.name}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
 
       {/* Database */}
       <div style={ss.card(false)}>
@@ -756,15 +978,17 @@ export function SettingsPage({
             <button
               style={ss.scanBtn}
               onClick={async () => {
-                const data = await configApi.exportData();
-                if (!data) return;
-                const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = `kronn-export-${new Date().toISOString().slice(0, 10)}.json`;
-                a.click();
-                URL.revokeObjectURL(url);
+                try {
+                  const data = await configApi.exportData();
+                  if (!data) return;
+                  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement('a');
+                  a.href = url;
+                  a.download = `kronn-export-${new Date().toISOString().slice(0, 10)}.json`;
+                  a.click();
+                  URL.revokeObjectURL(url);
+                } catch (err) { console.error(err); }
               }}
             >
               <Download size={12} /> {t('config.export')}

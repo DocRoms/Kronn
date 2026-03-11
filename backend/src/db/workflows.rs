@@ -9,7 +9,10 @@ use crate::models::*;
 fn parse_dt(s: String) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(&s)
         .map(|d| d.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc::now())
+        .unwrap_or_else(|e| {
+            tracing::warn!("Failed to parse datetime '{}': {}, using now()", s, e);
+            Utc::now()
+        })
 }
 
 fn parse_run_status(s: &str) -> RunStatus {
@@ -81,7 +84,7 @@ pub fn insert_workflow(conn: &Connection, wf: &Workflow) -> Result<()> {
             serde_json::to_string(&wf.steps)?,
             serde_json::to_string(&wf.actions)?,
             serde_json::to_string(&wf.safety)?,
-            wf.workspace_config.as_ref().map(|c| serde_json::to_string(c).unwrap_or_default()),
+            wf.workspace_config.as_ref().map(|c| serde_json::to_string(c)).transpose()?,
             wf.concurrency_limit,
             wf.enabled as i32,
             wf.created_at.to_rfc3339(),
@@ -104,7 +107,7 @@ pub fn update_workflow(conn: &Connection, wf: &Workflow) -> Result<()> {
             serde_json::to_string(&wf.steps)?,
             serde_json::to_string(&wf.actions)?,
             serde_json::to_string(&wf.safety)?,
-            wf.workspace_config.as_ref().map(|c| serde_json::to_string(c).unwrap_or_default()),
+            wf.workspace_config.as_ref().map(|c| serde_json::to_string(c)).transpose()?,
             wf.concurrency_limit,
             wf.enabled as i32,
             wf.updated_at.to_rfc3339(),
@@ -159,7 +162,7 @@ pub fn insert_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
             run.id,
             run.workflow_id,
             run_status_str(&run.status),
-            run.trigger_context.as_ref().map(|c| serde_json::to_string(c).unwrap_or_default()),
+            run.trigger_context.as_ref().map(|c| serde_json::to_string(c)).transpose()?,
             serde_json::to_string(&run.step_results)?,
             run.tokens_used as i64,
             run.workspace_path,
@@ -200,6 +203,28 @@ pub fn delete_all_runs(conn: &Connection, workflow_id: &str) -> Result<()> {
 }
 
 /// Get the last run for a workflow (for summaries).
+/// Batch-load the last run for every workflow in one query (avoids N+1).
+pub fn get_last_runs_all(conn: &Connection) -> Result<std::collections::HashMap<String, WorkflowRun>> {
+    let mut stmt = conn.prepare(
+        "SELECT wr.id, wr.workflow_id, wr.status, wr.trigger_context, wr.step_results_json,
+                wr.tokens_used, wr.workspace_path, wr.started_at, wr.finished_at
+         FROM workflow_runs wr
+         INNER JOIN (
+             SELECT workflow_id, MAX(started_at) AS max_started
+             FROM workflow_runs GROUP BY workflow_id
+         ) latest ON wr.workflow_id = latest.workflow_id AND wr.started_at = latest.max_started"
+    )?;
+
+    let mut map = std::collections::HashMap::new();
+    let rows = stmt.query_map([], |row| {
+        Ok(row_to_run(row))
+    })?;
+    for row in rows.filter_map(|r| r.ok()) {
+        map.insert(row.workflow_id.clone(), row);
+    }
+    Ok(map)
+}
+
 pub fn get_last_run(conn: &Connection, workflow_id: &str) -> Result<Option<WorkflowRun>> {
     let mut stmt = conn.prepare(
         "SELECT id, workflow_id, status, trigger_context, step_results_json,

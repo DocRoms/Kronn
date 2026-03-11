@@ -154,28 +154,15 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
         McpDefinition {
             id: "mcp-grafana".into(),
             name: "Grafana".into(),
-            description: "Dashboards, datasources, alerts, incidents — official Grafana server".into(),
+            description: "Dashboards, datasources, alerts, incidents, Prometheus, Loki — official Grafana server".into(),
             transport: McpTransport::Stdio {
-                command: "npx".into(),
-                args: vec!["-y".into(), "@grafana/mcp-server-grafana".into()],
+                command: "uvx".into(),
+                args: vec!["mcp-grafana".into()],
             },
-            env_keys: vec!["GRAFANA_URL".into(), "GRAFANA_API_KEY".into()],
-            tags: vec!["monitoring".into(), "dashboards".into(), "observability".into()],
+            env_keys: vec!["GRAFANA_URL".into(), "GRAFANA_SERVICE_ACCOUNT_TOKEN".into()],
+            tags: vec!["monitoring".into(), "dashboards".into(), "observability".into(), "prometheus".into(), "loki".into()],
             token_url: Some("https://grafana.com/docs/grafana/latest/administration/service-accounts/".into()),
-            token_help: Some("Service account token with Viewer role minimum".into()),
-        },
-        McpDefinition {
-            id: "mcp-google-analytics".into(),
-            name: "Google Analytics".into(),
-            description: "GA4 data, reports, realtime — community server".into(),
-            transport: McpTransport::Stdio {
-                command: "npx".into(),
-                args: vec!["-y".into(), "mcp-server-google-analytics".into()],
-            },
-            env_keys: vec!["GA4_PROPERTY_ID".into(), "GA4_CREDENTIALS_PATH".into()],
-            tags: vec!["analytics".into(), "google".into()],
-            token_url: Some("https://console.cloud.google.com/apis/credentials".into()),
-            token_help: Some("Service account JSON with GA4 read access".into()),
+            token_help: Some("Service account token with Viewer role minimum. Optional: GRAFANA_ORG_ID for multi-org".into()),
         },
         // ── Communication ───────────────────────────────────────────────────
         McpDefinition {
@@ -260,6 +247,32 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["browser".into(), "scraping".into()],
             token_url: None,
             token_help: None,
+        },
+        McpDefinition {
+            id: "mcp-chrome-devtools".into(),
+            name: "Chrome DevTools".into(),
+            description: "Debug, inspect DOM/CSS, network, performance traces — official Google server. Requires Chrome installed on the host machine.".into(),
+            transport: McpTransport::Stdio {
+                command: "npx".into(),
+                args: vec!["-y".into(), "chrome-devtools-mcp@latest".into()],
+            },
+            env_keys: vec![],
+            tags: vec!["browser".into(), "debug".into(), "devtools".into(), "testing".into()],
+            token_url: None,
+            token_help: Some("Requires Google Chrome (stable) installed. Use --headless for servers without display.".into()),
+        },
+        McpDefinition {
+            id: "mcp-playwright".into(),
+            name: "Playwright".into(),
+            description: "Cross-browser automation and E2E testing — official Microsoft server".into(),
+            transport: McpTransport::Stdio {
+                command: "npx".into(),
+                args: vec!["-y".into(), "@playwright/mcp@latest".into()],
+            },
+            env_keys: vec![],
+            tags: vec!["browser".into(), "testing".into(), "e2e".into()],
+            token_url: None,
+            token_help: Some("Run 'npx playwright install' first to download browser binaries".into()),
         },
         McpDefinition {
             id: "mcp-context7".into(),
@@ -357,6 +370,103 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["email".into(), "mailing".into(), "communication".into()],
             token_url: Some("https://resend.com/api-keys".into()),
             token_help: Some("API key from Resend dashboard".into()),
+        },
+        // ── AI & Reasoning ───────────────────────────────────────────────
+        McpDefinition {
+            id: "mcp-memory".into(),
+            name: "Memory".into(),
+            description: "Persistent knowledge graph for agents — official Anthropic server".into(),
+            transport: McpTransport::Stdio {
+                command: "npx".into(),
+                args: vec!["-y".into(), "@modelcontextprotocol/server-memory".into()],
+            },
+            env_keys: vec![],
+            tags: vec!["core".into(), "memory".into(), "knowledge".into()],
+            token_url: None,
+            token_help: Some("Stores data in memory.jsonl. Set MEMORY_FILE_PATH to customize location.".into()),
+        },
+        McpDefinition {
+            id: "mcp-sequential-thinking".into(),
+            name: "Sequential Thinking".into(),
+            description: "Structured step-by-step reasoning for complex problems — official Anthropic server".into(),
+            transport: McpTransport::Stdio {
+                command: "npx".into(),
+                args: vec!["-y".into(), "@modelcontextprotocol/server-sequential-thinking".into()],
+            },
+            env_keys: vec![],
+            tags: vec!["core".into(), "reasoning".into(), "thinking".into()],
+            token_url: None,
+            token_help: None,
+        },
+        // ── Browser (cloud) ─────────────────────────────────────────────
+        McpDefinition {
+            id: "mcp-browserbase".into(),
+            name: "Browserbase".into(),
+            description: "Cloud browser automation — no local Chrome needed. Official Browserbase server.".into(),
+            transport: McpTransport::Stdio {
+                command: "npx".into(),
+                args: vec!["-y".into(), "@browserbasehq/mcp-server-browserbase".into()],
+            },
+            env_keys: vec!["BROWSERBASE_API_KEY".into(), "BROWSERBASE_PROJECT_ID".into()],
+            tags: vec!["browser".into(), "cloud".into(), "scraping".into(), "testing".into()],
+            token_url: Some("https://www.browserbase.com/dashboard".into()),
+            token_help: Some("API key + project ID from Browserbase dashboard (paid service)".into()),
+        },
+        // ── Cloud — Azure ───────────────────────────────────────────────
+        McpDefinition {
+            id: "mcp-azure".into(),
+            name: "Azure".into(),
+            description: "Storage, Cosmos DB, Azure CLI, Resource Manager — official Microsoft server".into(),
+            transport: McpTransport::Stdio {
+                command: "npx".into(),
+                args: vec!["-y".into(), "@azure/mcp@latest".into()],
+            },
+            env_keys: vec![],
+            tags: vec!["cloud".into(), "azure".into(), "microsoft".into(), "devops".into()],
+            token_url: Some("https://portal.azure.com".into()),
+            token_help: Some("Uses Azure CLI auth (az login). No API key needed if already authenticated.".into()),
+        },
+        // ── Search ──────────────────────────────────────────────────────
+        McpDefinition {
+            id: "mcp-exa".into(),
+            name: "Exa".into(),
+            description: "AI-native search engine — official Exa server".into(),
+            transport: McpTransport::Stdio {
+                command: "npx".into(),
+                args: vec!["-y".into(), "exa-mcp-server".into()],
+            },
+            env_keys: vec!["EXA_API_KEY".into()],
+            tags: vec!["search".into(), "web".into(), "ai".into()],
+            token_url: Some("https://dashboard.exa.ai/api-keys".into()),
+            token_help: Some("API key from Exa dashboard (free tier available)".into()),
+        },
+        // ── Scraping ────────────────────────────────────────────────────
+        McpDefinition {
+            id: "mcp-firecrawl".into(),
+            name: "Firecrawl".into(),
+            description: "Web scraping, crawling, and content extraction — official Firecrawl server".into(),
+            transport: McpTransport::Stdio {
+                command: "npx".into(),
+                args: vec!["-y".into(), "firecrawl-mcp".into()],
+            },
+            env_keys: vec!["FIRECRAWL_API_KEY".into()],
+            tags: vec!["scraping".into(), "web".into(), "crawling".into()],
+            token_url: Some("https://www.firecrawl.dev/app/api-keys".into()),
+            token_help: Some("API key from Firecrawl dashboard".into()),
+        },
+        // ── Sandbox ─────────────────────────────────────────────────────
+        McpDefinition {
+            id: "mcp-e2b".into(),
+            name: "E2B".into(),
+            description: "Execute code in secure cloud sandboxes — official E2B server".into(),
+            transport: McpTransport::Stdio {
+                command: "npx".into(),
+                args: vec!["-y".into(), "@e2b/mcp-server".into()],
+            },
+            env_keys: vec!["E2B_API_KEY".into()],
+            tags: vec!["sandbox".into(), "code-execution".into(), "cloud".into()],
+            token_url: Some("https://e2b.dev/dashboard".into()),
+            token_help: Some("API key from E2B dashboard".into()),
         },
     ]
 }

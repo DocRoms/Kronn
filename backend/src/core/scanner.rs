@@ -103,7 +103,10 @@ async fn scan_directory(
         .into_iter()
         .filter_entry(|entry| {
             let name = entry.file_name().to_string_lossy();
-            !ignore.iter().any(|i| name.as_ref() == i.as_str())
+            // Case-insensitive comparison: APFS (macOS) and NTFS (Windows) are
+            // case-insensitive by default, so "node_modules" must also match "Node_Modules".
+            let name_lower = name.to_ascii_lowercase();
+            !ignore.iter().any(|i| name_lower == i.to_ascii_lowercase())
         });
 
     for entry in walker {

@@ -7,7 +7,7 @@ pub mod workflows;
 
 use std::sync::Arc;
 use axum::{
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
     Router,
 };
 use tokio::sync::RwLock;
@@ -45,6 +45,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/config/api-keys/:id", delete(api::setup::delete_api_key))
         .route("/api/config/api-keys/:id/activate", post(api::setup::activate_api_key))
         .route("/api/config/sync-agent-tokens", post(api::setup::sync_agent_tokens))
+        .route("/api/config/discover-keys", post(api::setup::discover_keys))
         .route("/api/config/toggle-token-override", post(api::setup::toggle_token_override))
         .route("/api/config/language", get(api::setup::get_language).post(api::setup::save_language))
         .route("/api/config/scan-paths", get(api::setup::get_scan_paths).post(api::setup::set_scan_paths))
@@ -63,6 +64,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/projects/:id/install-template", post(api::projects::install_template))
         .route("/api/projects/:id/ai-audit", post(api::projects::run_audit))
         .route("/api/projects/:id/validate-audit", post(api::projects::validate_audit))
+        .route("/api/projects/:id/default-skills", put(api::projects::set_default_skills))
         // ── Agents ──
         .route("/api/agents", get(api::agents::detect))
         .route("/api/agents/install", post(api::agents::install))
@@ -93,6 +95,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/discussions/:id/messages/last", delete(api::discussions::delete_last_agent_messages).patch(api::discussions::edit_last_user_message))
         .route("/api/discussions/:id/run", post(api::discussions::run_agent))
         .route("/api/discussions/:id/orchestrate", post(api::discussions::orchestrate))
+        // ── Skills ──
+        .route("/api/skills", get(api::skills::list).post(api::skills::create))
+        .route("/api/skills/:id", put(api::skills::update).delete(api::skills::delete))
         // ── Stats ──
         .route("/api/stats/tokens", get(api::stats::token_usage))
         .route("/api/stats/agent-usage", get(api::stats::agent_usage))

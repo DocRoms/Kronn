@@ -22,6 +22,7 @@ fn sample_project(id: &str, name: &str) -> Project {
         ai_config: AiConfigStatus { detected: false, configs: vec![] },
         audit_status: AiAuditStatus::NoTemplate,
         ai_todo_count: 0,
+        default_skill_ids: vec![],
         created_at: now,
         updated_at: now,
     }
@@ -37,6 +38,8 @@ fn sample_discussion(id: &str, project_id: Option<&str>) -> Discussion {
         language: "fr".into(),
         participants: vec![AgentType::ClaudeCode],
         messages: vec![],
+        message_count: 0,
+        skill_ids: vec![],
         archived: false,
         created_at: now,
         updated_at: now,
@@ -483,6 +486,7 @@ fn sample_workflow(id: &str) -> Workflow {
             stall_timeout_secs: None,
             retry: None,
             delay_after_secs: None,
+            skill_ids: vec![],
         }],
         actions: vec![],
         safety: WorkflowSafety {
@@ -655,4 +659,195 @@ fn tracker_issue_processed() {
 
     // Marking again should not fail (INSERT OR IGNORE)
     crate::db::workflows::mark_issue_processed(&conn, "w1", "issue-1").unwrap();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Batch / Performance functions
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn projects_get_names_batch() {
+    let conn = test_db();
+    crate::db::projects::insert_project(&conn, &sample_project("p1", "Alpha")).unwrap();
+    crate::db::projects::insert_project(&conn, &sample_project("p2", "Beta")).unwrap();
+
+    let names = crate::db::projects::get_project_names(&conn).unwrap();
+    assert_eq!(names.len(), 2);
+    assert_eq!(names.get("p1").unwrap(), "Alpha");
+    assert_eq!(names.get("p2").unwrap(), "Beta");
+}
+
+#[test]
+fn projects_get_names_empty() {
+    let conn = test_db();
+    let names = crate::db::projects::get_project_names(&conn).unwrap();
+    assert!(names.is_empty());
+}
+
+#[test]
+fn discussions_list_does_not_load_messages() {
+    let conn = test_db();
+    crate::db::discussions::insert_discussion(&conn, &sample_discussion("d1", None)).unwrap();
+    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m1", MessageRole::User)).unwrap();
+    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m2", MessageRole::Agent)).unwrap();
+
+    let discussions = crate::db::discussions::list_discussions(&conn).unwrap();
+    assert_eq!(discussions.len(), 1);
+    assert_eq!(discussions[0].messages.len(), 0, "list_discussions should not load messages");
+}
+
+#[test]
+fn discussions_list_with_messages_batch_loads() {
+    let conn = test_db();
+    crate::db::discussions::insert_discussion(&conn, &sample_discussion("d1", None)).unwrap();
+    crate::db::discussions::insert_discussion(&conn, &sample_discussion("d2", None)).unwrap();
+    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m1", MessageRole::User)).unwrap();
+    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m2", MessageRole::Agent)).unwrap();
+    crate::db::discussions::insert_message(&conn, "d2", &sample_message("m3", MessageRole::User)).unwrap();
+
+    let discussions = crate::db::discussions::list_discussions_with_messages(&conn).unwrap();
+    assert_eq!(discussions.len(), 2);
+
+    let d1 = discussions.iter().find(|d| d.id == "d1").unwrap();
+    let d2 = discussions.iter().find(|d| d.id == "d2").unwrap();
+    assert_eq!(d1.messages.len(), 2);
+    assert_eq!(d2.messages.len(), 1);
+}
+
+#[test]
+fn workflow_get_last_runs_all_batch() {
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w2")).unwrap();
+    crate::db::workflows::insert_run(&conn, &sample_run("r1", "w1")).unwrap();
+    crate::db::workflows::insert_run(&conn, &sample_run("r2", "w1")).unwrap();
+    crate::db::workflows::insert_run(&conn, &sample_run("r3", "w2")).unwrap();
+
+    let last_runs = crate::db::workflows::get_last_runs_all(&conn).unwrap();
+    assert_eq!(last_runs.len(), 2);
+    assert!(last_runs.contains_key("w1"));
+    assert!(last_runs.contains_key("w2"));
+    assert_eq!(last_runs.get("w2").unwrap().id, "r3");
+}
+
+#[test]
+fn workflow_get_last_runs_all_empty() {
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    let last_runs = crate::db::workflows::get_last_runs_all(&conn).unwrap();
+    assert!(last_runs.is_empty());
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Workflow multi-step
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn workflow_multi_step_roundtrip() {
+    let conn = test_db();
+    let now = Utc::now();
+    let wf = Workflow {
+        id: "wm1".into(),
+        name: "Multi-step".into(),
+        project_id: None,
+        trigger: WorkflowTrigger::Manual,
+        steps: vec![
+            WorkflowStep {
+                name: "analyze".into(),
+                agent: AgentType::ClaudeCode,
+                prompt_template: "Analyze this".into(),
+                mode: StepMode::Normal,
+                mcp_config_ids: vec![],
+                agent_settings: None,
+                on_result: vec![],
+                stall_timeout_secs: None,
+                retry: None,
+                delay_after_secs: None,
+                skill_ids: vec![],
+            },
+            WorkflowStep {
+                name: "fix".into(),
+                agent: AgentType::Codex,
+                prompt_template: "Fix: {{previous_step.output}}".into(),
+                mode: StepMode::Normal,
+                mcp_config_ids: vec![],
+                agent_settings: None,
+                on_result: vec![StepConditionRule {
+                    contains: "NO_RESULTS".into(),
+                    action: ConditionAction::Stop,
+                }],
+                stall_timeout_secs: Some(300),
+                retry: None,
+                delay_after_secs: None,
+                skill_ids: vec!["token-saver".into()],
+            },
+            WorkflowStep {
+                name: "review".into(),
+                agent: AgentType::GeminiCli,
+                prompt_template: "Review the changes".into(),
+                mode: StepMode::Normal,
+                mcp_config_ids: vec![],
+                agent_settings: None,
+                on_result: vec![],
+                stall_timeout_secs: None,
+                retry: None,
+                delay_after_secs: Some(5),
+                skill_ids: vec![],
+            },
+        ],
+        actions: vec![],
+        safety: WorkflowSafety {
+            sandbox: false, max_files: None, max_lines: None, require_approval: false,
+        },
+        workspace_config: None,
+        concurrency_limit: None,
+        enabled: true,
+        created_at: now,
+        updated_at: now,
+    };
+
+    crate::db::workflows::insert_workflow(&conn, &wf).unwrap();
+
+    let loaded = crate::db::workflows::get_workflow(&conn, "wm1").unwrap().unwrap();
+    assert_eq!(loaded.steps.len(), 3);
+    assert_eq!(loaded.steps[0].name, "analyze");
+    assert_eq!(loaded.steps[0].agent, AgentType::ClaudeCode);
+    assert_eq!(loaded.steps[1].name, "fix");
+    assert_eq!(loaded.steps[1].agent, AgentType::Codex);
+    assert_eq!(loaded.steps[1].on_result.len(), 1);
+    assert_eq!(loaded.steps[1].on_result[0].contains, "NO_RESULTS");
+    assert_eq!(loaded.steps[1].stall_timeout_secs, Some(300));
+    assert_eq!(loaded.steps[1].skill_ids, vec!["token-saver"]);
+    assert_eq!(loaded.steps[2].name, "review");
+    assert_eq!(loaded.steps[2].agent, AgentType::GeminiCli);
+    assert_eq!(loaded.steps[2].delay_after_secs, Some(5));
+}
+
+#[test]
+fn workflow_update_steps_count() {
+    let conn = test_db();
+    let mut wf = sample_workflow("wu1");
+    assert_eq!(wf.steps.len(), 1);
+    crate::db::workflows::insert_workflow(&conn, &wf).unwrap();
+
+    // Add a second step
+    wf.steps.push(WorkflowStep {
+        name: "step2".into(),
+        agent: AgentType::ClaudeCode,
+        prompt_template: "Second step".into(),
+        mode: StepMode::Normal,
+        mcp_config_ids: vec![],
+        agent_settings: None,
+        on_result: vec![],
+        stall_timeout_secs: None,
+        retry: None,
+        delay_after_secs: None,
+        skill_ids: vec![],
+    });
+    crate::db::workflows::update_workflow(&conn, &wf).unwrap();
+
+    let loaded = crate::db::workflows::get_workflow(&conn, "wu1").unwrap().unwrap();
+    assert_eq!(loaded.steps.len(), 2);
+    assert_eq!(loaded.steps[1].name, "step2");
+    assert_eq!(loaded.steps[1].prompt_template, "Second step");
 }

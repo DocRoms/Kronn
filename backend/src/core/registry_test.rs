@@ -82,6 +82,50 @@ mod tests {
         assert!(grafana.is_some(), "Grafana MCP should be in registry");
         let g = grafana.unwrap();
         assert!(g.env_keys.contains(&"GRAFANA_URL".to_string()));
-        assert!(g.env_keys.contains(&"GRAFANA_API_KEY".to_string()));
+        assert!(g.env_keys.contains(&"GRAFANA_SERVICE_ACCOUNT_TOKEN".to_string()));
+    }
+
+    #[test]
+    fn grafana_uses_uvx_transport() {
+        let reg = builtin_registry();
+        let g = reg.iter().find(|m| m.id == "mcp-grafana").unwrap();
+        match &g.transport {
+            crate::models::McpTransport::Stdio { command, args } => {
+                assert_eq!(command, "uvx", "Grafana should use uvx, not npx");
+                assert!(args.contains(&"mcp-grafana".to_string()));
+            }
+            _ => panic!("Grafana should use Stdio transport"),
+        }
+    }
+
+    #[test]
+    fn chrome_devtools_in_registry() {
+        let reg = builtin_registry();
+        let chrome = reg.iter().find(|m| m.id == "mcp-chrome-devtools");
+        assert!(chrome.is_some(), "Chrome DevTools MCP should be in registry");
+        let c = chrome.unwrap();
+        assert!(!c.description.is_empty());
+        assert!(c.tags.iter().any(|t| t.contains("browser") || t.contains("debug")));
+    }
+
+    #[test]
+    fn registry_count_at_least_30() {
+        let reg = builtin_registry();
+        assert!(reg.len() >= 30,
+            "Expected at least 30 MCPs in registry, got {}", reg.len());
+    }
+
+    #[test]
+    fn key_mcps_present() {
+        let reg = builtin_registry();
+        let required = [
+            "mcp-github", "mcp-gitlab", "mcp-sentry", "mcp-slack",
+            "mcp-postgres", "mcp-sqlite", "mcp-grafana", "mcp-chrome-devtools",
+            "mcp-playwright", "mcp-memory", "mcp-sequential-thinking",
+        ];
+        for id in &required {
+            assert!(reg.iter().any(|m| m.id == *id),
+                "Required MCP {} not found in registry", id);
+        }
     }
 }

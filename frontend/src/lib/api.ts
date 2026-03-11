@@ -34,7 +34,10 @@ import type {
   CreateWorkflowRequest,
   UpdateWorkflowRequest,
   AgentUsageSummary,
+  Skill,
+  CreateSkillRequest,
 } from '../types/generated';
+import type { DiscoverKeysResponse } from '../types/extensions';
 
 // ─── Generic API wrapper ────────────────────────────────────────────────────
 
@@ -87,6 +90,7 @@ export const config = {
   deleteApiKey: (id: string) => api<void>('DELETE', `/config/api-keys/${id}`),
   activateApiKey: (id: string) => api<void>('POST', `/config/api-keys/${id}/activate`),
   syncAgentTokens: () => api<string[]>('POST', '/config/sync-agent-tokens'),
+  discoverKeys: () => api<DiscoverKeysResponse>('POST', '/config/discover-keys'),
   toggleTokenOverride: (provider: string) => api<boolean>('POST', '/config/toggle-token-override', provider),
   getLanguage: () => api<string>('GET', '/config/language'),
   saveLanguage: (lang: string) => api<void>('POST', '/config/language', lang),
@@ -113,6 +117,7 @@ export const projects = {
   delete: (id: string) => api<void>('DELETE', `/projects/${id}`),
   installTemplate: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/install-template`),
   validateAudit: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/validate-audit`),
+  setDefaultSkills: (id: string, skillIds: string[]) => api<boolean>('PUT', `/projects/${id}/default-skills`, skillIds),
 
   /** Stream the AI audit progress via SSE */
   auditStream: async (
@@ -466,6 +471,15 @@ export const workflows = {
   getRun: (id: string, runId: string) => api<WorkflowRun>('GET', `/workflows/${id}/runs/${runId}`),
   deleteRun: (id: string, runId: string) => api<void>('DELETE', `/workflows/${id}/runs/${runId}`),
   deleteAllRuns: (id: string) => api<void>('DELETE', `/workflows/${id}/runs`),
+};
+
+// ─── Skills ─────────────────────────────────────────────────────────────────
+
+export const skills = {
+  list: () => api<Skill[]>('GET', '/skills'),
+  create: (req: CreateSkillRequest) => api<Skill>('POST', '/skills', req),
+  update: (id: string, req: CreateSkillRequest) => api<Skill>('PUT', `/skills/${id}`, req),
+  delete: (id: string) => api<boolean>('DELETE', `/skills/${id}`),
 };
 
 // ─── Stats ──────────────────────────────────────────────────────────────────

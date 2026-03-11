@@ -92,6 +92,22 @@ pub struct ApiKeysResponse {
     pub disabled_overrides: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+pub struct DiscoveredKey {
+    pub provider: String,
+    pub source: String,
+    pub suggested_name: String,
+    pub already_exists: bool,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+pub struct DiscoverKeysResponse {
+    pub discovered: Vec<DiscoveredKey>,
+    pub imported_count: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../frontend/src/types/generated.ts")]
 pub struct ScanConfig {
@@ -218,6 +234,8 @@ pub struct Project {
     pub audit_status: AiAuditStatus,
     #[serde(default)]
     pub ai_todo_count: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub default_skill_ids: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -434,6 +452,8 @@ pub struct WorkflowStep {
     pub retry: Option<RetryConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delay_after_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skill_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -578,6 +598,42 @@ pub struct StepResult {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Skills
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+pub enum SkillCategory {
+    Technical,
+    Business,
+    Meta,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+pub struct Skill {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub icon: String,
+    pub category: SkillCategory,
+    pub content: String,
+    pub is_builtin: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+pub struct CreateSkillRequest {
+    pub name: String,
+    pub description: String,
+    pub icon: String,
+    pub category: SkillCategory,
+    pub content: String,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Stats & Analytics
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -648,6 +704,10 @@ pub struct Discussion {
     pub language: String,
     pub participants: Vec<AgentType>,
     pub messages: Vec<DiscussionMessage>,
+    #[serde(default)]
+    pub message_count: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skill_ids: Vec<String>,
     #[serde(default)]
     pub archived: bool,
     pub created_at: DateTime<Utc>,
@@ -799,6 +859,8 @@ pub struct CreateDiscussionRequest {
     #[serde(default = "default_language")]
     pub language: String,
     pub initial_prompt: String,
+    #[serde(default)]
+    pub skill_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -806,6 +868,7 @@ pub struct CreateDiscussionRequest {
 pub struct UpdateDiscussionRequest {
     pub title: Option<String>,
     pub archived: Option<bool>,
+    pub skill_ids: Option<Vec<String>>,
 }
 
 fn default_language() -> String {
@@ -825,6 +888,8 @@ pub struct SendMessageRequest {
 pub struct OrchestrationRequest {
     pub agents: Vec<AgentType>,
     pub max_rounds: Option<u32>,
+    #[serde(default)]
+    pub skill_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, TS)]

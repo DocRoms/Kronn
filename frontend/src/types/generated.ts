@@ -131,6 +131,7 @@ export interface Project {
   ai_config: AiConfigStatus;
   audit_status: AiAuditStatus;
   ai_todo_count: number;
+  default_skill_ids?: string[];
   created_at: string; // ISO 8601
   updated_at: string;
 }
@@ -259,6 +260,7 @@ export interface WorkflowStep {
   stall_timeout_secs?: number | null;
   retry?: RetryConfig | null;
   delay_after_secs?: number | null;
+  skill_ids?: string[];
 }
 
 export type StepMode =
@@ -422,6 +424,29 @@ export interface AgentProjectUsage {
   message_count: number;
 }
 
+// ─── Skills ─────────────────────────────────────────────────────────────────
+
+export type SkillCategory = "Technical" | "Business" | "Meta";
+
+export interface Skill {
+  id: string;
+  name: string;
+  description: string;
+  icon: string;
+  category: SkillCategory;
+  content: string;
+  is_builtin: boolean;
+  conflicts?: string[];
+}
+
+export interface CreateSkillRequest {
+  name: string;
+  description: string;
+  icon: string;
+  category: SkillCategory;
+  content: string;
+}
+
 // ─── Discussions ────────────────────────────────────────────────────────────
 
 export interface Discussion {
@@ -432,6 +457,7 @@ export interface Discussion {
   language: string;
   participants: AgentType[];
   messages: DiscussionMessage[];
+  skill_ids?: string[];
   archived: boolean;
   created_at: string; // ISO 8601
   updated_at: string;
@@ -497,6 +523,7 @@ export interface CreateDiscussionRequest {
   agent: AgentType;
   language?: string;
   initial_prompt: string;
+  skill_ids?: string[];
 }
 
 export interface SendMessageRequest {
@@ -507,6 +534,7 @@ export interface SendMessageRequest {
 export interface OrchestrationRequest {
   agents: AgentType[];
   max_rounds?: number;
+  skill_ids?: string[];
 }
 
 export interface DbInfo {

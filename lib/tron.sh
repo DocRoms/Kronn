@@ -39,10 +39,11 @@ _TRON_STEPS=(
 
 tron_init() {
     local target_dir="${1:-}"
-    _tron_done_file=$(mktemp /tmp/kronn-tron-done-XXXXXX)
-    _tron_progress_file=$(mktemp /tmp/kronn-tron-prog-XXXXXX)
-    _tron_step_file=$(mktemp /tmp/kronn-tron-step-XXXXXX)
-    _tron_prev_step_file=$(mktemp /tmp/kronn-tron-prev-XXXXXX)
+    local tmpbase="${TMPDIR:-/tmp}"
+    _tron_done_file=$(mktemp "$tmpbase/kronn-tron-done-XXXXXX")
+    _tron_progress_file=$(mktemp "$tmpbase/kronn-tron-prog-XXXXXX")
+    _tron_step_file=$(mktemp "$tmpbase/kronn-tron-step-XXXXXX")
+    _tron_prev_step_file=$(mktemp "$tmpbase/kronn-tron-prev-XXXXXX")
     _tron_start_time=$(date +%s)
     _tron_target_dir="$target_dir"
     echo "0" > "$_tron_progress_file"

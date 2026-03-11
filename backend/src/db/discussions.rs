@@ -8,48 +8,16 @@ use crate::models::*;
 
 pub fn list_discussions(conn: &Connection) -> Result<Vec<Discussion>> {
     let mut stmt = conn.prepare(
-        "SELECT id, project_id, title, agent, language, participants_json,
-                created_at, updated_at, archived
-         FROM discussions ORDER BY updated_at DESC"
+        "SELECT d.id, d.project_id, d.title, d.agent, d.language, d.participants_json,
+                d.created_at, d.updated_at, d.archived, d.skill_ids_json,
+                (SELECT COUNT(*) FROM messages m WHERE m.discussion_id = d.id) as msg_count
+         FROM discussions d ORDER BY d.updated_at DESC"
     )?;
 
     let discussions: Vec<Discussion> = stmt.query_map([], |row| {
-        let id: String = row.get(0)?;
         let agent_str: String = row.get(3)?;
         let participants_str: String = row.get(5)?;
-
-        Ok((id.clone(), Discussion {
-            id,
-            project_id: row.get(1)?,
-            title: row.get(2)?,
-            agent: parse_agent_type(&agent_str),
-            language: row.get(4)?,
-            participants: serde_json::from_str(&participants_str).unwrap_or_default(),
-            messages: vec![], // loaded separately
-            archived: row.get::<_, i32>(8).unwrap_or(0) != 0,
-            created_at: parse_dt(row.get::<_, String>(6)?),
-            updated_at: parse_dt(row.get::<_, String>(7)?),
-        }))
-    })?.filter_map(|r| r.ok())
-    .map(|(id, mut disc)| {
-        disc.messages = list_messages(conn, &id).unwrap_or_default();
-        disc
-    })
-    .collect();
-
-    Ok(discussions)
-}
-
-pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, project_id, title, agent, language, participants_json,
-                created_at, updated_at, archived
-         FROM discussions WHERE id = ?1"
-    )?;
-
-    let disc = stmt.query_row(params![id], |row| {
-        let agent_str: String = row.get(3)?;
-        let participants_str: String = row.get(5)?;
+        let skill_ids_str: String = row.get::<_, String>(9).unwrap_or_else(|_| "[]".into());
 
         Ok(Discussion {
             id: row.get(0)?,
@@ -59,6 +27,60 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
             language: row.get(4)?,
             participants: serde_json::from_str(&participants_str).unwrap_or_default(),
             messages: vec![],
+            message_count: row.get::<_, u32>(10).unwrap_or(0),
+            skill_ids: serde_json::from_str(&skill_ids_str).unwrap_or_default(),
+            archived: row.get::<_, i32>(8).unwrap_or(0) != 0,
+            created_at: parse_dt(row.get::<_, String>(6)?),
+            updated_at: parse_dt(row.get::<_, String>(7)?),
+        })
+    })?.filter_map(|r| r.ok())
+    .collect();
+
+    // Don't load messages for the list view — messages are only loaded
+    // for individual discussions via get_discussion(). With 200+ discussions
+    // each having 50+ messages, loading all messages here is a performance bomb.
+    // message_count is populated via SQL subquery for display purposes.
+
+    Ok(discussions)
+}
+
+/// Like list_discussions but also loads all messages (used for export).
+pub fn list_discussions_with_messages(conn: &Connection) -> Result<Vec<Discussion>> {
+    let mut discussions = list_discussions(conn)?;
+
+    let all_messages = list_all_messages(conn)?;
+    for disc in &mut discussions {
+        if let Some(msgs) = all_messages.get(&disc.id) {
+            disc.messages = msgs.clone();
+            disc.message_count = disc.messages.len() as u32;
+        }
+    }
+
+    Ok(discussions)
+}
+
+pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, project_id, title, agent, language, participants_json,
+                created_at, updated_at, archived, skill_ids_json
+         FROM discussions WHERE id = ?1"
+    )?;
+
+    let disc = stmt.query_row(params![id], |row| {
+        let agent_str: String = row.get(3)?;
+        let participants_str: String = row.get(5)?;
+        let skill_ids_str: String = row.get::<_, String>(9).unwrap_or_else(|_| "[]".into());
+
+        Ok(Discussion {
+            id: row.get(0)?,
+            project_id: row.get(1)?,
+            title: row.get(2)?,
+            agent: parse_agent_type(&agent_str),
+            language: row.get(4)?,
+            participants: serde_json::from_str(&participants_str).unwrap_or_default(),
+            messages: vec![],
+            message_count: 0,
+            skill_ids: serde_json::from_str(&skill_ids_str).unwrap_or_default(),
             archived: row.get::<_, i32>(8).unwrap_or(0) != 0,
             created_at: parse_dt(row.get::<_, String>(6)?),
             updated_at: parse_dt(row.get::<_, String>(7)?),
@@ -67,6 +89,7 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
 
     if let Some(mut d) = disc {
         d.messages = list_messages(conn, &d.id)?;
+        d.message_count = d.messages.len() as u32;
         Ok(Some(d))
     } else {
         Ok(None)
@@ -75,8 +98,8 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
 
 pub fn insert_discussion(conn: &Connection, disc: &Discussion) -> Result<()> {
     conn.execute(
-        "INSERT INTO discussions (id, project_id, title, agent, language, participants_json, created_at, updated_at, archived)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT INTO discussions (id, project_id, title, agent, language, participants_json, created_at, updated_at, archived, skill_ids_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             disc.id,
             disc.project_id,
@@ -87,6 +110,7 @@ pub fn insert_discussion(conn: &Connection, disc: &Discussion) -> Result<()> {
             disc.created_at.to_rfc3339(),
             disc.updated_at.to_rfc3339(),
             disc.archived as i32,
+            serde_json::to_string(&disc.skill_ids)?,
         ],
     )?;
     Ok(())
@@ -98,6 +122,14 @@ pub fn delete_discussion(conn: &Connection, id: &str) -> Result<bool> {
 }
 
 pub fn update_discussion(conn: &Connection, id: &str, title: Option<&str>, archived: Option<bool>) -> Result<bool> {
+    update_discussion_fields(conn, id, title, archived, None)
+}
+
+pub fn update_discussion_skill_ids(conn: &Connection, id: &str, skill_ids: &[String]) -> Result<bool> {
+    update_discussion_fields(conn, id, None, None, Some(skill_ids))
+}
+
+fn update_discussion_fields(conn: &Connection, id: &str, title: Option<&str>, archived: Option<bool>, skill_ids: Option<&[String]>) -> Result<bool> {
     let mut sets = Vec::new();
     let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
@@ -108,6 +140,10 @@ pub fn update_discussion(conn: &Connection, id: &str, title: Option<&str>, archi
     if let Some(a) = archived {
         sets.push("archived = ?");
         values.push(Box::new(a as i32));
+    }
+    if let Some(s) = skill_ids {
+        sets.push("skill_ids_json = ?");
+        values.push(Box::new(serde_json::to_string(s).unwrap_or_else(|_| "[]".into())));
     }
 
     if sets.is_empty() {
@@ -146,6 +182,37 @@ pub fn update_discussion_participants(conn: &Connection, id: &str, participants:
 }
 
 // ─── Messages ───────────────────────────────────────────────────────────────
+
+/// Load all messages grouped by discussion_id in a single query (avoids N+1).
+fn list_all_messages(conn: &Connection) -> Result<std::collections::HashMap<String, Vec<DiscussionMessage>>> {
+    let mut stmt = conn.prepare(
+        "SELECT discussion_id, id, role, content, agent_type, timestamp, tokens_used, auth_mode
+         FROM messages ORDER BY sort_order, timestamp"
+    )?;
+
+    let mut map: std::collections::HashMap<String, Vec<DiscussionMessage>> = std::collections::HashMap::new();
+    let rows = stmt.query_map([], |row| {
+        let disc_id: String = row.get(0)?;
+        let role_str: String = row.get(2)?;
+        let agent_type_str: Option<String> = row.get(4)?;
+
+        Ok((disc_id, DiscussionMessage {
+            id: row.get(1)?,
+            role: parse_role(&role_str),
+            content: row.get(3)?,
+            agent_type: agent_type_str.map(|s| parse_agent_type(&s)),
+            timestamp: parse_dt(row.get::<_, String>(5)?),
+            tokens_used: row.get::<_, i64>(6).unwrap_or(0) as u64,
+            auth_mode: row.get(7)?,
+        }))
+    })?;
+
+    for row in rows.filter_map(|r| r.ok()) {
+        map.entry(row.0).or_default().push(row.1);
+    }
+
+    Ok(map)
+}
 
 pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<DiscussionMessage>> {
     let mut stmt = conn.prepare(
@@ -239,7 +306,10 @@ pub fn update_message_tokens(conn: &Connection, message_id: &str, tokens_used: u
 fn parse_dt(s: String) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(&s)
         .map(|dt| dt.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc::now())
+        .unwrap_or_else(|e| {
+            tracing::warn!("Failed to parse datetime '{}': {}, using now()", s, e);
+            Utc::now()
+        })
 }
 
 fn parse_agent_type(s: &str) -> AgentType {
