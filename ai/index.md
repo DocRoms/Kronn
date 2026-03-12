@@ -102,7 +102,7 @@ Never load everything "just in case".
 - Rust data models: `backend/src/models/mod.rs`.
 - TypeScript types: `frontend/src/types/generated.ts` (auto-generated from Rust).
 - API routes: `backend/src/main.rs` (router definition).
-- Database schema: `backend/src/db/sql/001_initial.sql` (+ 002, 004, 005 migrations).
+- Database schema: `backend/src/db/sql/001_initial.sql` (+ 002, 004, 005, 006 migrations).
 - Docker config: `docker-compose.yml`.
 
 ---

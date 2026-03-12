@@ -136,12 +136,13 @@ async fn run_agent_with_timeout(
         .map(Duration::from_secs)
         .unwrap_or(Duration::from_secs(600)); // 10 min default
 
-    let mut agent_process = crate::agents::runner::start_agent(
+    let mut agent_process = crate::agents::runner::start_agent_with_skills(
         &step.agent,
         work_dir,
         prompt,
         tokens_config,
         full_access,
+        &step.skill_ids,
     ).await.map_err(|e| anyhow::anyhow!(e))?;
 
     let mut output = String::new();

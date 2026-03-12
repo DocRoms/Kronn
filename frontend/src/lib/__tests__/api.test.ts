@@ -158,6 +158,7 @@ describe('api module', () => {
       expect(api.mcps).toBeDefined();
       expect(api.discussions).toBeDefined();
       expect(api.workflows).toBeDefined();
+      expect(api.skills).toBeDefined();
       expect(api.stats).toBeDefined();
     });
 
@@ -181,6 +182,69 @@ describe('api module', () => {
       expect(typeof workflows.delete).toBe('function');
       expect(typeof workflows.trigger).toBe('function');
       expect(typeof workflows.listRuns).toBe('function');
+    });
+
+    it('skills has expected methods', async () => {
+      const { skills } = await getApi();
+      expect(typeof skills.list).toBe('function');
+      expect(typeof skills.create).toBe('function');
+      expect(typeof skills.update).toBe('function');
+      expect(typeof skills.delete).toBe('function');
+    });
+  });
+
+  describe('skills API calls', () => {
+    it('skills.list calls correct endpoint', async () => {
+      mockFetchResponse([{ id: 'token-saver', name: 'Token Saver' }]);
+      const { skills } = await getApi();
+
+      const result = await skills.list();
+
+      expect(globalThis.fetch).toHaveBeenCalledWith('/api/skills', {
+        method: 'GET',
+        headers: {},
+        body: undefined,
+      });
+      expect(result).toEqual([{ id: 'token-saver', name: 'Token Saver' }]);
+    });
+
+    it('skills.create sends correct payload', async () => {
+      mockFetchResponse({ id: 'custom-my-skill', name: 'My Skill' });
+      const { skills } = await getApi();
+
+      const result = await skills.create({
+        name: 'My Skill',
+        description: 'A custom skill',
+        icon: 'Star',
+        category: 'Technical',
+        content: 'Do the thing',
+      });
+
+      expect(globalThis.fetch).toHaveBeenCalledWith('/api/skills', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: 'My Skill',
+          description: 'A custom skill',
+          icon: 'Star',
+          category: 'Technical',
+          content: 'Do the thing',
+        }),
+      });
+      expect(result).toHaveProperty('id', 'custom-my-skill');
+    });
+
+    it('skills.delete calls correct endpoint', async () => {
+      mockFetchResponse(true);
+      const { skills } = await getApi();
+
+      await skills.delete('custom-my-skill');
+
+      expect(globalThis.fetch).toHaveBeenCalledWith('/api/skills/custom-my-skill', {
+        method: 'DELETE',
+        headers: {},
+        body: undefined,
+      });
     });
   });
 });

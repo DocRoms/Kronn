@@ -9,6 +9,10 @@ import type {
   McpTransport,
   WorkflowAction,
   ConditionAction,
+  Skill,
+  SkillCategory,
+  Discussion,
+  WorkflowStep,
 } from '../../types/generated';
 
 /**
@@ -120,6 +124,86 @@ describe('generated types', () => {
       expect(stop.type).toBe('Stop');
       expect(skip.type).toBe('Skip');
       expect(goto.type).toBe('Goto');
+    });
+  });
+
+  describe('Skill types', () => {
+    it('SkillCategory covers all categories', { timeout: 30_000 }, () => {
+      const categories: SkillCategory[] = ['Technical', 'Business', 'Meta'];
+      expect(categories).toHaveLength(3);
+    });
+
+    it('Skill has correct structure', () => {
+      const skill: Skill = {
+        id: 'token-saver',
+        name: 'Token Saver',
+        description: 'Minimizes token usage',
+        icon: 'Zap',
+        category: 'Meta',
+        content: 'Be concise.',
+        is_builtin: true,
+      };
+      expect(skill.id).toBe('token-saver');
+      expect(skill.is_builtin).toBe(true);
+      expect(skill.category).toBe('Meta');
+    });
+
+    it('Skill supports optional conflicts', () => {
+      const skill: Skill = {
+        id: 'custom-verbose',
+        name: 'Verbose',
+        description: 'Detailed explanations',
+        icon: 'BookOpen',
+        category: 'Meta',
+        content: 'Be verbose.',
+        is_builtin: false,
+        conflicts: ['token-saver'],
+      };
+      expect(skill.conflicts).toEqual(['token-saver']);
+    });
+
+    it('Discussion supports optional skill_ids', () => {
+      const disc: Discussion = {
+        id: 'd1',
+        project_id: null,
+        title: 'Test',
+        agent: 'ClaudeCode',
+        language: 'en',
+        participants: ['ClaudeCode'],
+        messages: [],
+        skill_ids: ['token-saver', 'rust-dev'],
+        archived: false,
+        created_at: '2024-01-01T00:00:00Z',
+        updated_at: '2024-01-01T00:00:00Z',
+      };
+      expect(disc.skill_ids).toEqual(['token-saver', 'rust-dev']);
+    });
+
+    it('Discussion works without skill_ids', () => {
+      const disc: Discussion = {
+        id: 'd2',
+        project_id: null,
+        title: 'Test',
+        agent: 'ClaudeCode',
+        language: 'en',
+        participants: [],
+        messages: [],
+        archived: false,
+        created_at: '2024-01-01T00:00:00Z',
+        updated_at: '2024-01-01T00:00:00Z',
+      };
+      expect(disc.skill_ids).toBeUndefined();
+    });
+
+    it('WorkflowStep supports optional skill_ids', () => {
+      const step: WorkflowStep = {
+        name: 'analyze',
+        agent: 'ClaudeCode',
+        prompt_template: 'Analyze this',
+        mode: { type: 'Normal' },
+        skill_ids: ['security-auditor'],
+      };
+      expect(step.skill_ids).toEqual(['security-auditor']);
     });
   });
 });

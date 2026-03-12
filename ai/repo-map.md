@@ -25,7 +25,8 @@ Kronn/
 │       │   ├── mcps.rs         # MCP 3-tier API: overview, configs CRUD, registry, refresh, secrets
 │       │   ├── workflows.rs    # Workflow CRUD + trigger + runs
 │       │   ├── agents.rs       # Agent detection + install + uninstall + toggle (enable/disable)
-│       │   └── stats.rs        # Token usage stats
+│       │   ├── stats.rs        # Token usage stats
+│       │   └── skills.rs      # Skills API: list, create, update, delete
 │       ├── agents/             # Agent runner (CLI execution)
 │       │   ├── mod.rs          # Re-exports
 │       │   └── runner.rs       # Spawns agent CLIs, streams stdout as SSE. Two output modes: Text (line-by-line) and StreamJson (Claude Code stream-json with token tracking). Runtime probe (npx fallback, 5min cache). MCP contexts injected into prompts
@@ -41,14 +42,24 @@ Kronn/
 │       │       ├── 001_initial.sql      # Schema: projects, discussions, messages (+ legacy tasks table)
 │       │       ├── 002_mcp_redesign.sql # 3-tier MCP: mcp_servers, mcp_configs, mcp_config_projects
 │       │       ├── 004_token_tracking.sql # Token tracking tables
-│       │       └── 005_discussion_archive.sql # Add archived column to discussions
+│       │       ├── 005_discussion_archive.sql # Add archived column to discussions
+│       │       └── 006_discussion_skills.sql # Add skill_ids_json column to discussions
 │       ├── core/               # Business logic
 │       │   ├── mod.rs          # Re-exports
 │       │   ├── config.rs       # Config load/save (~/.config/kronn/)
 │       │   ├── scanner.rs      # Git repo scanner + AI audit detection (detect_audit_status, count_ai_todos)
 │       │   ├── registry.rs     # MCP registry (26 built-in official servers, grouped by category, with token_url/token_help)
 │       │   ├── mcp_scanner.rs  # Multi-agent MCP sync + MCP injection. read_all_mcp_contexts() reads .mcp.json + context files and generates prompt listing available MCP tools. Disk sync: .mcp.json (Claude), .vibe/config.toml (Vibe), ~/.codex/config.toml (Codex). .gitignore safety
-│       │   └── crypto.rs       # AES-256-GCM encryption for MCP secrets
+│       │   ├── crypto.rs       # AES-256-GCM encryption for MCP secrets
+│       │   └── skills.rs      # Skills loader: builtin (embedded .md) + custom (~/.config/kronn/skills/). Frontmatter parsing, build_skills_prompt()
+│       ├── skills/             # Builtin skill Markdown files (embedded at compile time)
+│       │   ├── token-saver.md  # Meta: minimize token usage
+│       │   ├── typescript-dev.md # Technical: TypeScript expert
+│       │   ├── rust-dev.md     # Technical: Rust expert
+│       │   ├── security-auditor.md # Technical: security review
+│       │   ├── product-owner.md # Business: user perspective
+│       │   ├── devils-advocate.md # Meta: challenge assumptions
+│       │   └── qa-engineer.md  # Business: testing focus
 │       └── workflows/          # Workflow engine (implemented)
 │           ├── mod.rs          # WorkflowEngine: background polling loop (30s ticks), trigger checking, concurrency
 │           ├── trigger.rs      # Cron evaluation, tracker polling frequency

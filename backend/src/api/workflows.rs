@@ -20,24 +20,22 @@ pub async fn list(
 ) -> Json<ApiResponse<Vec<WorkflowSummary>>> {
     match state.db.with_conn(|conn| {
         let workflows = crate::db::workflows::list_workflows(conn)?;
-        let mut summaries = Vec::new();
+        // Batch-load last runs and project names (avoids N+1 queries)
+        let last_runs = crate::db::workflows::get_last_runs_all(conn)?;
+        let project_names = crate::db::projects::get_project_names(conn)?;
 
-        for wf in workflows {
-            let last_run = crate::db::workflows::get_last_run(conn, &wf.id)?
+        let summaries = workflows.into_iter().map(|wf| {
+            let last_run = last_runs.get(&wf.id)
                 .map(|r| WorkflowRunSummary {
-                    id: r.id,
-                    status: r.status,
+                    id: r.id.clone(),
+                    status: r.status.clone(),
                     started_at: r.started_at,
                     finished_at: r.finished_at,
                     tokens_used: r.tokens_used,
                 });
 
-            let project_name = if let Some(ref pid) = wf.project_id {
-                crate::db::projects::get_project(conn, pid)?
-                    .map(|p| p.name)
-            } else {
-                None
-            };
+            let project_name = wf.project_id.as_ref()
+                .and_then(|pid| project_names.get(pid).cloned());
 
             let trigger_type = match &wf.trigger {
                 WorkflowTrigger::Cron { .. } => "cron",
@@ -45,7 +43,7 @@ pub async fn list(
                 WorkflowTrigger::Manual => "manual",
             }.to_string();
 
-            summaries.push(WorkflowSummary {
+            WorkflowSummary {
                 id: wf.id,
                 name: wf.name,
                 project_id: wf.project_id,
@@ -55,8 +53,8 @@ pub async fn list(
                 enabled: wf.enabled,
                 last_run,
                 created_at: wf.created_at,
-            });
-        }
+            }
+        }).collect();
 
         Ok(summaries)
     }).await {
@@ -180,18 +178,7 @@ pub async fn trigger(
         return sse_error("Workflow is disabled");
     }
 
-    // Check concurrency limit
-    if let Some(limit) = wf.concurrency_limit {
-        let wf_id = wf.id.clone();
-        let active = match state.db.with_conn(move |conn| crate::db::workflows::count_active_runs(conn, &wf_id)).await {
-            Ok(n) => n,
-            Err(e) => return sse_error(format!("DB error: {}", e)),
-        };
-        if active >= limit {
-            return sse_error(format!("Concurrency limit reached ({}/{})", active, limit));
-        }
-    }
-
+    // Atomic concurrency check + insert in a single transaction (avoids TOCTOU race)
     let now = Utc::now();
     let run = WorkflowRun {
         id: Uuid::new_v4().to_string(),
@@ -206,8 +193,27 @@ pub async fn trigger(
     };
 
     let r = run.clone();
-    if let Err(e) = state.db.with_conn(move |conn| crate::db::workflows::insert_run(conn, &r)).await {
-        return sse_error(format!("DB error: {}", e));
+    let limit = wf.concurrency_limit;
+    let wf_id_check = wf.id.clone();
+    match state.db.with_conn(move |conn| {
+        // Single transaction: check + insert atomically
+        if let Some(max) = limit {
+            let active = crate::db::workflows::count_active_runs(conn, &wf_id_check)?;
+            if active >= max {
+                anyhow::bail!("CONCURRENCY_LIMIT:{}/{}", active, max);
+            }
+        }
+        crate::db::workflows::insert_run(conn, &r)?;
+        Ok(())
+    }).await {
+        Ok(()) => {}
+        Err(e) => {
+            let msg = e.to_string();
+            if let Some(rest) = msg.strip_prefix("CONCURRENCY_LIMIT:") {
+                return sse_error(format!("Concurrency limit reached ({})", rest));
+            }
+            return sse_error(format!("DB error: {}", msg));
+        }
     }
 
     tracing::info!("Workflow run created: {} for workflow {}", run.id, wf.name);

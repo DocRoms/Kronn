@@ -3,6 +3,8 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      args:
+        CARGO_PROFILE: ${CARGO_PROFILE:-release}
     expose:
       - "3140"
     volumes:
@@ -12,28 +14,39 @@ services:
       - ${KRONN_GLOBAL_BIN:-/usr/local/bin}:/host-bin/global:ro
       - ${HOME}/.local/bin:/host-bin/local:ro
       - ${HOME}/.local/share:/host-home/.local/share:ro  # Symlink targets (claude, vibe)
-      - npm-cache:/root/.npm  # Persistent npm cache for npx agent execution
-      - ${HOME}/.cache/uv:/root/.cache/uv:rw  # Share host uv cache for Python MCP servers
-      - uv-tools:/root/.local/share/uv  # Persistent uv tool installs (CloudWatch, Atlassian MCP servers)
+      - npm-cache:/home/kronn/.npm  # Persistent npm cache for npx agent execution
+      - ${HOME}/.cache/uv:/home/kronn/.cache/uv:rw  # Share host uv cache for Python MCP servers
+      - uv-tools:/home/kronn/.local/share/uv  # Persistent uv tool installs (CloudWatch, Atlassian MCP servers)
       # Agent auth directories (local subscriptions)
-      - ${HOME}/.claude.json:/root/.claude.json:ro    # Claude Code main config
-      - ${HOME}/.claude:/root/.claude:ro              # Claude Code auth/config
-      - ${HOME}/.codex:/root/.codex:rw                # Codex auth + state (needs write)
-      - ${HOME}/.config/codex:/root/.config/codex:ro  # Codex config (legacy path)
-      - ${HOME}/.vibe:/root/.vibe:rw                  # Vibe auth + state (needs write)
-      - ${HOME}/.kiro:/root/.kiro:rw                  # Kiro auth + state (AWS Builder ID)
-      - ${HOME}/.local/share/kiro-cli:/root/.local/share/kiro-cli:rw  # Kiro SQLite data
+      - ${HOME}/.claude.json:/home/kronn/.claude.json:ro    # Claude Code main config
+      - ${HOME}/.claude:/home/kronn/.claude:ro              # Claude Code auth/config
+      - ${HOME}/.codex:/home/kronn/.codex:rw                # Codex auth + state (needs write)
+      - ${HOME}/.config/codex:/home/kronn/.config/codex:ro  # Codex config (legacy path)
+      - ${HOME}/.vibe:/home/kronn/.vibe:rw                  # Vibe auth + state (needs write)
+      - ${HOME}/.kiro:/home/kronn/.kiro:rw                  # Kiro auth + state (AWS Builder ID)
+      - ${HOME}/.local/share/kiro-cli:/home/kronn/.local/share/kiro-cli:rw  # Kiro SQLite data
       - ./templates:/app/templates:ro                   # AI context templates for project init
     environment:
       - KRONN_TEMPLATES_DIR=/app/templates
       - KRONN_DATA_DIR=/data
       - KRONN_HOST_HOME=${HOME}
       - KRONN_HOST_BIN=/host-bin/local:/host-bin/global
-      - PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/host-bin/local:/host-bin/global
+      - PATH=/home/kronn/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/host-bin/local:/host-bin/global
       - KRONN_HOST_OS=${KRONN_HOST_OS:-Linux}
-      - KRONN_HOST_UID=${UID:-1000}
-      - KRONN_HOST_GID=${GID:-1000}
+      - KRONN_HOST_UID=${KRONN_HOST_UID:-1000}
+      - KRONN_HOST_GID=${KRONN_HOST_GID:-1000}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - MISTRAL_API_KEY=${MISTRAL_API_KEY:-}
       - RUST_LOG=kronn=debug,tower_http=debug
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3140/api/setup/status"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
 
   frontend:
     build:
@@ -41,8 +54,15 @@ services:
       dockerfile: Dockerfile
     ports:
       - "3141:80"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
 
   # Single entry point: nginx reverse proxy
   gateway:
@@ -52,8 +72,10 @@ services:
     volumes:
       - ./.docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
-      - backend
-      - frontend
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
 
 volumes:
   kronn-data:

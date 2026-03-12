@@ -345,6 +345,120 @@ async fn config_export_empty_db() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Skills endpoint tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn skills_list_returns_builtins() {
+    let app = test_app();
+    let (status, json) = get_json(app, "/api/skills").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+
+    let skills = json["data"].as_array().unwrap();
+    assert!(skills.len() >= 7, "Expected at least 7 builtin skills, got {}", skills.len());
+
+    // Verify a known builtin skill
+    let token_saver = skills.iter().find(|s| s["id"] == "token-saver");
+    assert!(token_saver.is_some(), "token-saver skill not found");
+    let ts = token_saver.unwrap();
+    assert_eq!(ts["name"], "Token Saver");
+    assert_eq!(ts["icon"], "Zap");
+    assert_eq!(ts["category"], "Meta");
+    assert_eq!(ts["is_builtin"], true);
+    assert!(!ts["content"].as_str().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn skills_list_has_all_categories() {
+    let app = test_app();
+    let (_, json) = get_json(app, "/api/skills").await;
+
+    let skills = json["data"].as_array().unwrap();
+    let categories: Vec<&str> = skills.iter()
+        .filter_map(|s| s["category"].as_str())
+        .collect();
+
+    assert!(categories.contains(&"Technical"), "Missing Technical category");
+    assert!(categories.contains(&"Business"), "Missing Business category");
+    assert!(categories.contains(&"Meta"), "Missing Meta category");
+}
+
+#[tokio::test]
+async fn skills_delete_builtin_rejected() {
+    let app = test_app();
+    let (status, json) = delete_json(app, "/api/skills/token-saver").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], false);
+    assert!(json["error"].as_str().unwrap().contains("builtin"));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Discussions with skills
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn discussions_create_with_skill_ids() {
+    let state = test_state();
+
+    let create_body = serde_json::json!({
+        "title": "Skill discussion",
+        "agent": "ClaudeCode",
+        "language": "en",
+        "initial_prompt": "Hello",
+        "skill_ids": ["token-saver", "rust-dev"]
+    });
+    let (status, json) = post_json(
+        build_router(state.clone()),
+        "/api/discussions",
+        create_body,
+    ).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+    let skill_ids = json["data"]["skill_ids"].as_array().unwrap();
+    assert_eq!(skill_ids.len(), 2);
+    assert_eq!(skill_ids[0], "token-saver");
+    assert_eq!(skill_ids[1], "rust-dev");
+
+    // Retrieve and verify skill_ids persisted
+    let disc_id = json["data"]["id"].as_str().unwrap();
+    let (_, json) = get_json(
+        build_router(state.clone()),
+        &format!("/api/discussions/{}", disc_id),
+    ).await;
+    let skill_ids = json["data"]["skill_ids"].as_array().unwrap();
+    assert_eq!(skill_ids.len(), 2);
+}
+
+#[tokio::test]
+async fn discussions_create_without_skill_ids_defaults_empty() {
+    let state = test_state();
+
+    let create_body = serde_json::json!({
+        "title": "No skills",
+        "agent": "ClaudeCode",
+        "language": "en",
+        "initial_prompt": "Hello"
+    });
+    let (status, json) = post_json(
+        build_router(state.clone()),
+        "/api/discussions",
+        create_body,
+    ).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+    // skill_ids should either be absent or empty array
+    let skill_ids = json["data"]["skill_ids"].as_array();
+    if let Some(ids) = skill_ids {
+        assert!(ids.is_empty());
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Cross-cutting: discussion creation validates project reference
 // ═══════════════════════════════════════════════════════════════════════════════
 

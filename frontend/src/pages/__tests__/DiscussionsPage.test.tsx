@@ -1,8 +1,8 @@
-import { describe, it, expect, vi } from 'vitest';
-import { render } from '@testing-library/react';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { render, act, cleanup } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
 
-// Mock API — DiscussionsPage uses discussions and projects APIs
+// Mock API — DiscussionsPage uses discussions, projects, and skills APIs
 vi.mock('../../lib/api', () => ({
   discussions: {
     list: vi.fn().mockResolvedValue([]),
@@ -22,6 +22,12 @@ vi.mock('../../lib/api', () => ({
     create: vi.fn(),
     delete: vi.fn(),
   },
+  skills: {
+    list: vi.fn().mockResolvedValue([]),
+    create: vi.fn(),
+    update: vi.fn(),
+    delete: vi.fn(),
+  },
 }));
 
 import { DiscussionsPage } from '../DiscussionsPage';
@@ -30,11 +36,32 @@ import type { AgentsConfig } from '../../types/generated';
 const noop = () => {};
 const toastFn = vi.fn() as any;
 
-const wrap = (ui: React.ReactElement) => render(<I18nProvider>{ui}</I18nProvider>);
+afterEach(cleanup);
+
+const wrap = async (ui: React.ReactElement) => {
+  let result: ReturnType<typeof render>;
+  await act(async () => {
+    result = render(<I18nProvider>{ui}</I18nProvider>);
+  });
+  return result!;
+};
+
+// Shared lifted props (mimic Dashboard)
+const liftedProps = () => ({
+  sendingMap: {},
+  setSendingMap: vi.fn(),
+  streamingMap: {},
+  setStreamingMap: vi.fn(),
+  abortControllers: { current: {} } as React.MutableRefObject<Record<string, AbortController>>,
+  cleanupStream: vi.fn(),
+  markDiscussionSeen: vi.fn(),
+  onActiveDiscussionChange: vi.fn(),
+  lastSeenMsgCount: {},
+});
 
 describe('DiscussionsPage', () => {
-  it('renders without crashing with minimal props', () => {
-    wrap(
+  it('renders without crashing with minimal props', async () => {
+    await wrap(
       <DiscussionsPage
         projects={[]}
         agents={[]}
@@ -45,12 +72,13 @@ describe('DiscussionsPage', () => {
         refetchProjects={noop}
         onNavigate={noop}
         toast={toastFn}
+        {...liftedProps()}
       />
     );
     expect(document.body.textContent).toBeDefined();
   });
 
-  it('renders with agentAccess provided', () => {
+  it('renders with agentAccess provided', async () => {
     const agentAccess: AgentsConfig = {
       claude_code: { path: null, installed: true, version: null, full_access: true },
       codex: { path: null, installed: false, version: null, full_access: false },
@@ -58,7 +86,7 @@ describe('DiscussionsPage', () => {
       kiro: { path: null, installed: false, version: null, full_access: false },
       vibe: { path: null, installed: false, version: null, full_access: false },
     };
-    wrap(
+    await wrap(
       <DiscussionsPage
         projects={[]}
         agents={[]}
@@ -69,13 +97,14 @@ describe('DiscussionsPage', () => {
         refetchProjects={noop}
         onNavigate={noop}
         toast={toastFn}
+        {...liftedProps()}
       />
     );
     expect(document.body.textContent).toBeDefined();
   });
 
-  it('renders with prefill prop', () => {
-    wrap(
+  it('renders with prefill prop', async () => {
+    await wrap(
       <DiscussionsPage
         projects={[]}
         agents={[]}
@@ -88,6 +117,7 @@ describe('DiscussionsPage', () => {
         toast={toastFn}
         prefill={{ projectId: 'p1', title: 'Test', prompt: 'Hello' }}
         onPrefillConsumed={noop}
+        {...liftedProps()}
       />
     );
     expect(document.body.textContent).toBeDefined();

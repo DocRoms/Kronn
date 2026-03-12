@@ -97,12 +97,25 @@ fn fix_file_ownership(work_dir: &Path) {
 /// Uses the local CLI agent's own authentication by default.
 /// API keys from config are passed as optional overrides only.
 /// Reads MCP context files from the project and injects them into the agent prompt.
+/// Skills are injected alongside MCP context.
 pub async fn start_agent(
     agent_type: &AgentType,
     project_path: &str,
     prompt: &str,
     tokens: &TokensConfig,
     full_access: bool,
+) -> Result<AgentProcess, String> {
+    start_agent_with_skills(agent_type, project_path, prompt, tokens, full_access, &[]).await
+}
+
+/// Start an agent process with optional skills.
+pub async fn start_agent_with_skills(
+    agent_type: &AgentType,
+    project_path: &str,
+    prompt: &str,
+    tokens: &TokensConfig,
+    full_access: bool,
+    skill_ids: &[String],
 ) -> Result<AgentProcess, String> {
     // Read MCP context files for this project (if any)
     let mcp_context = if !project_path.is_empty() {
@@ -111,8 +124,19 @@ pub async fn start_agent(
         String::new()
     };
 
+    // Build skills prompt
+    let skills_prompt = crate::core::skills::build_skills_prompt(skill_ids);
+
+    // Combine MCP context and skills into extra context
+    let extra_context = match (mcp_context.is_empty(), skills_prompt.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => mcp_context,
+        (true, false) => skills_prompt,
+        (false, false) => format!("{}\n\n{}", skills_prompt, mcp_context),
+    };
+
     let (binary, npx_pkg, args, env_key, stderr_mode, output_mode) =
-        agent_command(agent_type, prompt, full_access, &mcp_context);
+        agent_command(agent_type, prompt, full_access, &extra_context);
 
     let work_dir = if project_path.is_empty() {
         // Global discussion: use a temp working directory

@@ -272,6 +272,11 @@ pub async fn toggle_token_override(
             if is_now_enabled { config.tokens.active_key_for("openai") } else { None },
         );
     }
+    if provider == "google" {
+        crate::core::key_discovery::write_gemini_key(
+            if is_now_enabled { config.tokens.active_key_for("google") } else { None },
+        );
+    }
 
     match config::save(&config).await {
         Ok(_) => Json(ApiResponse::ok(is_now_enabled)),
@@ -396,9 +401,61 @@ pub async fn sync_agent_tokens(
         }
     }
 
-    // Future: Gemini CLI, Claude Code, etc. can be added here
+    // ── Gemini CLI: ~/.gemini/settings.json ──
+    if let Some(google_key) = config.tokens.active_key_for("google") {
+        if !config.tokens.disabled_overrides.contains(&"google".to_string()) {
+            crate::core::key_discovery::write_gemini_key(Some(google_key));
+            synced.push("Gemini CLI".into());
+        }
+    }
 
     Json(ApiResponse::ok(synced))
+}
+
+/// POST /api/config/discover-keys
+/// Scan env vars and agent config files for API keys, auto-import new ones.
+/// Keys are named after the host username by default.
+pub async fn discover_keys(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<DiscoverKeysResponse>> {
+    let discovered = crate::core::key_discovery::discover_keys().await;
+    let mut config = state.config.write().await;
+    let mut imported_count = 0u32;
+    let mut results = Vec::new();
+
+    for dk in discovered {
+        // Check duplicate: does any existing key have the same value?
+        let already_exists = config.tokens.keys.iter().any(|k| k.value == dk.value);
+
+        if !already_exists {
+            let is_first = !config.tokens.keys.iter().any(|k| k.provider == dk.provider);
+            config.tokens.keys.push(ApiKey {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: dk.suggested_name.clone(),
+                provider: dk.provider.clone(),
+                value: dk.value,
+                active: is_first,
+            });
+            imported_count += 1;
+        }
+
+        results.push(DiscoveredKey {
+            provider: dk.provider,
+            source: dk.source,
+            suggested_name: dk.suggested_name,
+            already_exists,
+        });
+    }
+
+    if imported_count > 0 {
+        let _ = config::save(&config).await;
+        tracing::info!("Auto-imported {} API key(s)", imported_count);
+    }
+
+    Json(ApiResponse::ok(DiscoverKeysResponse {
+        discovered: results,
+        imported_count,
+    }))
 }
 
 fn mask_token(token: &str) -> String {
@@ -445,7 +502,7 @@ pub async fn export_data(
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
-    let discussions = match state.db.with_conn(crate::db::discussions::list_discussions).await {
+    let discussions = match state.db.with_conn(crate::db::discussions::list_discussions_with_messages).await {
         Ok(d) => d,
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };

@@ -1,13 +1,13 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useT } from '../lib/I18nContext';
-import { workflows as workflowsApi } from '../lib/api';
+import { workflows as workflowsApi, skills as skillsApi } from '../lib/api';
 import { useApi } from '../hooks/useApi';
-import { AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES } from '../lib/constants';
+import { AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES, isAgentRestricted } from '../lib/constants';
 import type {
   Project, WorkflowSummary, Workflow, WorkflowRun, WorkflowTrigger,
   WorkflowStep, AgentType, WorkflowSafety, AgentsConfig,
   WorkspaceConfig, StepConditionRule, StepResult,
-  CreateWorkflowRequest,
+  CreateWorkflowRequest, Skill,
 } from '../types/generated';
 import {
   Plus, Trash2, Play, Loader2, Check, X, ChevronRight, ChevronDown,
@@ -36,17 +36,8 @@ const STATUS_COLORS: Record<string, string> = {
   WaitingApproval: '#c8ff00',
 };
 
-/** Check if an agent has full_access disabled (restricted mode = can't write files) */
-function checkAgentRestricted(agentAccess: AgentsConfig | undefined, agentType: AgentType): boolean {
-  if (!agentAccess) return false;
-  const map: Record<string, boolean | undefined> = {
-    ClaudeCode: agentAccess.claude_code?.full_access,
-    Codex: agentAccess.codex?.full_access,
-    GeminiCli: agentAccess.gemini_cli?.full_access,
-    Vibe: agentAccess.vibe?.full_access,
-  };
-  return map[agentType] === false;
-}
+// Agent access check imported from shared constants (isAgentRestricted)
+const checkAgentRestricted = isAgentRestricted;
 
 export function WorkflowsPage({ projects, installedAgentTypes, agentAccess }: WorkflowsPageProps) {
   const { t } = useT();
@@ -195,6 +186,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess }: Wo
       {/* Edit wizard */}
       {editingWorkflow && (
         <WorkflowWizard
+          key={editingWorkflow.id}
           projects={projects}
           installedAgentTypes={installedAgentTypes}
           agentAccess={agentAccess}
@@ -829,6 +821,11 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAge
     mode: { type: 'Normal' },
   }]);
   const [saving, setSaving] = useState(false);
+  const [availableSkills, setAvailableSkills] = useState<Skill[]>([]);
+
+  useEffect(() => {
+    skillsApi.list().then(setAvailableSkills).catch(() => {});
+  }, []);
 
   const addStep = () => {
     setSteps([...steps, {
@@ -963,7 +960,14 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAge
           />
 
           <label style={{ ...ws.label, marginTop: 12 }}>{isEdit ? t('wiz.project') : t('wiz.projectOptional')}</label>
-          <select style={ws.select} value={projectId} onChange={e => setProjectId(e.target.value)} disabled={isEdit}>
+          <select style={ws.select} value={projectId} onChange={e => {
+            const pid = e.target.value;
+            setProjectId(pid);
+            const proj = projects.find(p => p.id === pid);
+            if (proj?.default_skill_ids?.length) {
+              setSteps(prev => prev.map(s => ({ ...s, skill_ids: s.skill_ids?.length ? s.skill_ids : proj.default_skill_ids })));
+            }
+          }} disabled={isEdit}>
             <option value="">{t('wiz.noProject')}</option>
             {projects.map(p => (
               <option key={p.id} value={p.id}>{p.name}</option>
@@ -1205,6 +1209,44 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAge
                     {steps.slice(0, i).map(prev => (
                       <span key={prev.name}>{' '}<code style={{ color: 'rgba(200,255,0,0.5)' }}>{`{{steps.${prev.name}.output}}`}</code></span>
                     ))}
+                  </div>
+                )}
+
+                {/* Skills selector per step */}
+                {availableSkills.length > 0 && (
+                  <div style={{ marginTop: 8 }}>
+                    <label style={{ fontSize: 10, fontWeight: 600, color: 'rgba(255,255,255,0.4)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                      <Zap size={9} /> {t('skills.selectSkills')}
+                    </label>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 4 }}>
+                      {availableSkills.map(skill => {
+                        const ids = step.skill_ids ?? [];
+                        const selected = ids.includes(skill.id);
+                        return (
+                          <button
+                            key={skill.id}
+                            type="button"
+                            onClick={() => {
+                              const newIds = selected ? ids.filter(id => id !== skill.id) : [...ids, skill.id];
+                              updateStep(i, { skill_ids: newIds.length > 0 ? newIds : undefined });
+                            }}
+                            style={{
+                              padding: '3px 8px', borderRadius: 10, fontSize: 10, fontFamily: 'inherit',
+                              fontWeight: selected ? 600 : 400, cursor: 'pointer',
+                              border: selected ? '1px solid rgba(200,255,0,0.4)' : '1px solid rgba(255,255,255,0.08)',
+                              background: selected ? 'rgba(200,255,0,0.1)' : 'rgba(255,255,255,0.03)',
+                              color: selected ? '#c8ff00' : 'rgba(255,255,255,0.4)',
+                              display: 'flex', alignItems: 'center', gap: 3,
+                              transition: 'all 0.15s',
+                            }}
+                            title={skill.description}
+                          >
+                            {selected && <Check size={8} />}
+                            {skill.name}
+                          </button>
+                        );
+                      })}
+                    </div>
                   </div>
                 )}
 
@@ -1528,6 +1570,25 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAge
           )}
         </div>
       )}
+
+      {/* Validation errors */}
+      {wizardStep === lastStep && (() => {
+        const errors: string[] = [];
+        if (!name) errors.push(t('wiz.errorNoName'));
+        steps.forEach((s, i) => {
+          if (!s.prompt_template) errors.push(t('wiz.errorNoPrompt').replace('{0}', s.name || `step-${i + 1}`));
+          (s.on_result ?? []).forEach((r, j) => {
+            if (!r.contains) errors.push(t('wiz.errorNoCondition').replace('{0}', s.name || `step-${i + 1}`).replace('{1}', String(j + 1)));
+          });
+        });
+        return errors.length > 0 ? (
+          <div style={{ padding: '8px 12px', marginTop: 8, borderRadius: 6, background: 'rgba(255,77,106,0.06)', border: '1px solid rgba(255,77,106,0.15)' }}>
+            {errors.map((err, i) => (
+              <div key={i} style={{ fontSize: 10, color: 'rgba(255,77,106,0.8)', padding: '2px 0' }}>• {err}</div>
+            ))}
+          </div>
+        ) : null;
+      })()}
 
       {/* Navigation */}
       <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 20 }}>

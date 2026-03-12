@@ -26,3 +26,4 @@ kronn.toml
 .mcp.json
 .vibe/
 .env
+/node_modules/

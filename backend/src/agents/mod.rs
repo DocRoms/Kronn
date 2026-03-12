@@ -34,23 +34,24 @@ const KNOWN_AGENTS: &[AgentDef] = &[
 /// The backend runs inside Docker (always Linux), so we use runtime
 /// heuristics rather than compile-time cfg!() checks.
 fn detect_host_label() -> String {
-    // Docker on WSL2 shares the kernel — /proc/version contains "microsoft"
-    if let Ok(version) = std::fs::read_to_string("/proc/version") {
-        if version.contains("microsoft") || version.contains("WSL") {
-            return "WSL".into();
+    // 1. Trust the environment variable first (set by Makefile → .env → docker-compose)
+    if let Ok(host_os) = std::env::var("KRONN_HOST_OS") {
+        if !host_os.is_empty() && host_os != "host" {
+            return host_os;
         }
     }
-    // Docker Desktop on macOS uses a LinuxKit VM — check /proc/version
+    // 2. Heuristics from /proc/version (single read, case-insensitive)
     if let Ok(version) = std::fs::read_to_string("/proc/version") {
-        if version.contains("linuxkit") || version.contains("Docker Desktop") {
+        let lower = version.to_lowercase();
+        if lower.contains("microsoft") || lower.contains("wsl") {
+            return "WSL".into();
+        }
+        if lower.contains("linuxkit") || lower.contains("docker desktop") {
             return "macOS".into();
         }
     }
-    // Env var fallback: docker-compose can pass KRONN_HOST_OS=macOS
-    if let Ok(host_os) = std::env::var("KRONN_HOST_OS") {
-        return host_os;
-    }
-    "host".into()
+    // 3. Default to Linux (safest assumption inside Docker)
+    "Linux".into()
 }
 
 /// Detect all known agents on the system

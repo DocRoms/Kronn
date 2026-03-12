@@ -101,6 +101,7 @@ pub async fn create(
         },
         audit_status: AiAuditStatus::NoTemplate,
         ai_todo_count: 0,
+        default_skill_ids: vec![],
         created_at: now,
         updated_at: now,
     };
@@ -452,6 +453,21 @@ pub async fn validate_audit(
 
     let status = scanner::detect_audit_status(&project.path);
     Json(ApiResponse::ok(status))
+}
+
+/// PUT /api/projects/:id/default-skills
+pub async fn set_default_skills(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(skill_ids): Json<Vec<String>>,
+) -> Json<ApiResponse<bool>> {
+    match state.db.with_conn(move |conn| {
+        crate::db::projects::update_project_default_skills(conn, &id, &skill_ids)
+    }).await {
+        Ok(true) => Json(ApiResponse::ok(true)),
+        Ok(false) => Json(ApiResponse::err("Project not found")),
+        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
 }
 
 /// Remove the KRONN:BOOTSTRAP block from ai/index.md

@@ -46,8 +46,17 @@ impl Database {
         let conn = Connection::open(path)
             .with_context(|| format!("Failed to open database at {}", path.display()))?;
 
-        // Enable WAL mode for better concurrent read performance
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        // WAL mode for better concurrent read performance.
+        // Disable with KRONN_DB_WAL=0 if database is on a network mount (NFS, SMB, iCloud).
+        let use_wal = std::env::var("KRONN_DB_WAL")
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(true);
+        if use_wal {
+            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        } else {
+            tracing::warn!("WAL mode disabled (KRONN_DB_WAL=0); using DELETE journal mode");
+            conn.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA foreign_keys=ON;")?;
+        }
 
         // Run migrations before wrapping in Mutex (avoids blocking_lock inside async runtime)
         migrations::run(&conn)?;
