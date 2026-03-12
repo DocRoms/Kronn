@@ -33,6 +33,8 @@ pub struct AppState {
 /// Extracted for reuse in integration tests.
 pub fn build_router(state: AppState) -> Router {
     Router::new()
+        // ── Health (lightweight, used by Docker healthcheck) ──
+        .route("/api/health", get(|| async { axum::Json(serde_json::json!({"ok": true})) }))
         // ── Setup wizard ──
         .route("/api/setup/status", get(api::setup::get_status))
         .route("/api/setup/scan-paths", post(api::setup::set_scan_paths))
@@ -65,6 +67,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/projects/:id/ai-audit", post(api::projects::run_audit))
         .route("/api/projects/:id/validate-audit", post(api::projects::validate_audit))
         .route("/api/projects/:id/default-skills", put(api::projects::set_default_skills))
+        .route("/api/projects/:id/default-profile", put(api::projects::set_default_profile))
         // ── Agents ──
         .route("/api/agents", get(api::agents::detect))
         .route("/api/agents/install", post(api::agents::install))
@@ -98,6 +101,13 @@ pub fn build_router(state: AppState) -> Router {
         // ── Skills ──
         .route("/api/skills", get(api::skills::list).post(api::skills::create))
         .route("/api/skills/:id", put(api::skills::update).delete(api::skills::delete))
+        // ── Profiles ──
+        .route("/api/profiles", get(api::profiles::list).post(api::profiles::create))
+        .route("/api/profiles/:id", get(api::profiles::get).put(api::profiles::update).delete(api::profiles::delete))
+        .route("/api/profiles/:id/persona-name", put(api::profiles::update_persona_name))
+        // ── Directives ──
+        .route("/api/directives", get(api::directives::list).post(api::directives::create))
+        .route("/api/directives/:id", put(api::directives::update).delete(api::directives::delete))
         // ── Stats ──
         .route("/api/stats/tokens", get(api::stats::token_usage))
         .route("/api/stats/agent-usage", get(api::stats::agent_usage))

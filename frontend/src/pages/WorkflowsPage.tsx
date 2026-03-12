@@ -1,18 +1,18 @@
 import { useState, useRef, useEffect } from 'react';
 import { useT } from '../lib/I18nContext';
-import { workflows as workflowsApi, skills as skillsApi } from '../lib/api';
+import { workflows as workflowsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi } from '../lib/api';
 import { useApi } from '../hooks/useApi';
 import { AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES, isAgentRestricted } from '../lib/constants';
 import type {
   Project, WorkflowSummary, Workflow, WorkflowRun, WorkflowTrigger,
   WorkflowStep, AgentType, WorkflowSafety, AgentsConfig,
   WorkspaceConfig, StepConditionRule, StepResult,
-  CreateWorkflowRequest, Skill,
+  CreateWorkflowRequest, Skill, AgentProfile, Directive,
 } from '../types/generated';
 import {
   Plus, Trash2, Play, Loader2, Check, X, ChevronRight, ChevronDown,
   Clock, GitBranch, Zap, Eye, HelpCircle, Settings, Shield,
-  ToggleLeft, ToggleRight, RefreshCw, AlertTriangle,
+  ToggleLeft, ToggleRight, RefreshCw, AlertTriangle, UserCircle, FileText,
 } from 'lucide-react';
 
 interface WorkflowsPageProps {
@@ -822,9 +822,32 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAge
   }]);
   const [saving, setSaving] = useState(false);
   const [availableSkills, setAvailableSkills] = useState<Skill[]>([]);
+  const [availableProfiles, setAvailableProfiles] = useState<AgentProfile[]>([]);
+  const [availableDirectives, setAvailableDirectives] = useState<Directive[]>([]);
+  const promptTextareaRefs = useRef<Record<number, HTMLTextAreaElement | null>>({});
+
+  /** Insert text at cursor position in the prompt textarea of step `stepIndex` */
+  const insertVarAtCursor = (stepIndex: number, text: string) => {
+    const el = promptTextareaRefs.current[stepIndex];
+    if (!el) return;
+    const start = el.selectionStart ?? el.value.length;
+    const end = el.selectionEnd ?? start;
+    const before = el.value.slice(0, start);
+    const after = el.value.slice(end);
+    const newValue = before + text + after;
+    updateStep(stepIndex, { prompt_template: newValue });
+    // Restore cursor position after React re-render
+    requestAnimationFrame(() => {
+      el.focus();
+      const pos = start + text.length;
+      el.setSelectionRange(pos, pos);
+    });
+  };
 
   useEffect(() => {
     skillsApi.list().then(setAvailableSkills).catch(() => {});
+    profilesApi.list().then(setAvailableProfiles).catch(() => {});
+    directivesApi.list().then(setAvailableDirectives).catch(console.error);
   }, []);
 
   const addStep = () => {
@@ -1100,7 +1123,13 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAge
                     ['{{issue.labels}}', t('wiz.issueLabels')],
                   ].map(([v, d]) => (
                     <div key={v} style={ws.helpRow}>
-                      <code style={ws.helpCode}>{v}</code>
+                      <code
+                        style={{ ...ws.helpCode, cursor: 'pointer', transition: 'background 0.15s' }}
+                        onClick={() => navigator.clipboard.writeText(v!)}
+                        title={t('wiz.clickToInsert')}
+                        onMouseEnter={e => { (e.target as HTMLElement).style.background = 'rgba(200,255,0,0.12)'; }}
+                        onMouseLeave={e => { (e.target as HTMLElement).style.background = ''; }}
+                      >{v}</code>
                       <span style={ws.helpDesc}>{d}</span>
                     </div>
                   ))}
@@ -1115,11 +1144,35 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAge
                     ['{{steps.<nom>.output}}', t('wiz.namedOutput')],
                   ].map(([v, d]) => (
                     <div key={v} style={ws.helpRow}>
-                      <code style={ws.helpCode}>{v}</code>
+                      <code
+                        style={{ ...ws.helpCode, cursor: 'pointer', transition: 'background 0.15s' }}
+                        onClick={() => navigator.clipboard.writeText(v!)}
+                        title={t('wiz.clickToInsert')}
+                        onMouseEnter={e => { (e.target as HTMLElement).style.background = 'rgba(200,255,0,0.12)'; }}
+                        onMouseLeave={e => { (e.target as HTMLElement).style.background = ''; }}
+                      >{v}</code>
                       <span style={ws.helpDesc}>{d}</span>
                     </div>
                   ))}
                 </div>
+              </div>
+
+              <div style={ws.helpSection}>
+                <div style={ws.helpTitle}>{t('wiz.availableSignals')}</div>
+                <div style={ws.helpGrid}>
+                  {[
+                    ['[SIGNAL: NO_RESULTS]', t('wiz.signalNoResults')],
+                    ['[SIGNAL: CONTINUE]', t('wiz.signalContinue')],
+                  ].map(([v, d]) => (
+                    <div key={v} style={ws.helpRow}>
+                      <code style={{ ...ws.helpCode, color: 'rgba(255,150,0,0.7)' }}>{v}</code>
+                      <span style={ws.helpDesc}>{d}</span>
+                    </div>
+                  ))}
+                </div>
+                <p style={{ fontSize: 9, color: 'rgba(255,255,255,0.2)', margin: '4px 0 0' }}>
+                  {`Auto-injecte quand des conditions (on_result) sont definies sur un step.`}
+                </p>
               </div>
 
               <div style={ws.helpSection}>
@@ -1193,6 +1246,7 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAge
                   </div>
                 )}
                 <textarea
+                  ref={el => { promptTextareaRefs.current[i] = el; }}
                   style={ws.textarea}
                   rows={3}
                   value={step.prompt_template}
@@ -1202,12 +1256,26 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAge
                     : `Prompt template... ex: Voici l'analyse : {{previous_step.output}}. Ecris le correctif.`
                   }
                 />
-                {/* Hint: available variables for this step */}
+                {/* Hint: available variables for this step (clickable) */}
                 {i > 0 && (
-                  <div style={{ marginTop: 4, fontSize: 10, color: 'rgba(255,255,255,0.2)' }}>
-                    Dispo : <code style={{ color: 'rgba(200,255,0,0.5)' }}>{'{{previous_step.output}}'}</code>
+                  <div style={{ marginTop: 4, fontSize: 10, color: 'rgba(255,255,255,0.2)', display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 3 }}>
+                    <span>{t('wiz.clickToInsert')} :</span>
+                    <code
+                      style={{ color: 'rgba(200,255,0,0.5)', cursor: 'pointer', padding: '1px 4px', borderRadius: 3, background: 'rgba(200,255,0,0.04)', transition: 'background 0.15s' }}
+                      onClick={() => insertVarAtCursor(i, '{{previous_step.output}}')}
+                      title={t('wiz.prevOutput')}
+                      onMouseEnter={e => { (e.target as HTMLElement).style.background = 'rgba(200,255,0,0.12)'; }}
+                      onMouseLeave={e => { (e.target as HTMLElement).style.background = 'rgba(200,255,0,0.04)'; }}
+                    >{'{{previous_step.output}}'}</code>
                     {steps.slice(0, i).map(prev => (
-                      <span key={prev.name}>{' '}<code style={{ color: 'rgba(200,255,0,0.5)' }}>{`{{steps.${prev.name}.output}}`}</code></span>
+                      <code
+                        key={prev.name}
+                        style={{ color: 'rgba(200,255,0,0.5)', cursor: 'pointer', padding: '1px 4px', borderRadius: 3, background: 'rgba(200,255,0,0.04)', transition: 'background 0.15s' }}
+                        onClick={() => insertVarAtCursor(i, `{{steps.${prev.name}.output}}`)}
+                        title={`${t('wiz.namedOutput')}: ${prev.name}`}
+                        onMouseEnter={e => { (e.target as HTMLElement).style.background = 'rgba(200,255,0,0.12)'; }}
+                        onMouseLeave={e => { (e.target as HTMLElement).style.background = 'rgba(200,255,0,0.04)'; }}
+                      >{`{{steps.${prev.name}.output}}`}</code>
                     ))}
                   </div>
                 )}
@@ -1239,10 +1307,98 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAge
                               display: 'flex', alignItems: 'center', gap: 3,
                               transition: 'all 0.15s',
                             }}
-                            title={skill.description}
+                            title={skill.name}
                           >
                             {selected && <Check size={8} />}
                             {skill.name}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Profile selector per step (single-select) */}
+                {availableProfiles.length > 0 && (
+                  <div style={{ marginTop: 8 }}>
+                    <label style={{ fontSize: 10, fontWeight: 600, color: 'rgba(255,255,255,0.4)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                      <UserCircle size={9} /> {t('profiles.select')}
+                    </label>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 4 }}>
+                      <button
+                        type="button"
+                        onClick={() => updateStep(i, { profile_ids: [] })}
+                        style={{
+                          padding: '3px 8px', borderRadius: 10, fontSize: 10, fontFamily: 'inherit',
+                          fontWeight: !step.profile_ids?.length ? 600 : 400, cursor: 'pointer',
+                          border: !step.profile_ids?.length ? '1px solid rgba(139,92,246,0.4)' : '1px solid rgba(255,255,255,0.08)',
+                          background: !step.profile_ids?.length ? 'rgba(139,92,246,0.1)' : 'rgba(255,255,255,0.03)',
+                          color: !step.profile_ids?.length ? '#a78bfa' : 'rgba(255,255,255,0.4)',
+                          transition: 'all 0.15s',
+                        }}
+                      >
+                        {t('profiles.none')}
+                      </button>
+                      {availableProfiles.map(profile => {
+                        const selected = step.profile_ids?.includes(profile.id) ?? false;
+                        return (
+                          <button
+                            key={profile.id}
+                            type="button"
+                            onClick={() => updateStep(i, { profile_ids: selected ? (step.profile_ids ?? []).filter(id => id !== profile.id) : [...(step.profile_ids ?? []), profile.id] })}
+                            style={{
+                              padding: '3px 8px', borderRadius: 10, fontSize: 10, fontFamily: 'inherit',
+                              fontWeight: selected ? 600 : 400, cursor: 'pointer',
+                              border: selected ? `1px solid ${profile.color || 'rgba(139,92,246,0.4)'}` : '1px solid rgba(255,255,255,0.08)',
+                              background: selected ? `${profile.color}15` : 'rgba(255,255,255,0.03)',
+                              color: selected ? (profile.color || '#a78bfa') : 'rgba(255,255,255,0.4)',
+                              display: 'flex', alignItems: 'center', gap: 3,
+                              transition: 'all 0.15s',
+                            }}
+                            title={profile.role}
+                          >
+                            {selected && <Check size={8} />}
+                            {profile.avatar} {profile.persona_name || profile.name}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Directive selector per step (multi-select) */}
+                {availableDirectives.length > 0 && (
+                  <div style={{ marginTop: 8 }}>
+                    <label style={{ fontSize: 10, fontWeight: 600, color: 'rgba(255,255,255,0.4)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                      <FileText size={9} /> {t('directives.title')}
+                    </label>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 4 }}>
+                      {availableDirectives.map(directive => {
+                        const ids = step.directive_ids ?? [];
+                        const selected = ids.includes(directive.id);
+                        return (
+                          <button
+                            key={directive.id}
+                            type="button"
+                            onClick={() => {
+                              const newIds = selected
+                                ? ids.filter(id => id !== directive.id)
+                                : [...ids, directive.id];
+                              updateStep(i, { directive_ids: newIds });
+                            }}
+                            style={{
+                              padding: '3px 8px', borderRadius: 10, fontSize: 10, fontFamily: 'inherit',
+                              fontWeight: selected ? 600 : 400, cursor: 'pointer',
+                              border: selected ? '1px solid rgba(245,158,11,0.4)' : '1px solid rgba(255,255,255,0.08)',
+                              background: selected ? 'rgba(245,158,11,0.1)' : 'rgba(255,255,255,0.03)',
+                              color: selected ? '#fbbf24' : 'rgba(255,255,255,0.4)',
+                              display: 'flex', alignItems: 'center', gap: 3,
+                              transition: 'all 0.15s',
+                            }}
+                            title={directive.name}
+                          >
+                            {selected && <Check size={8} />}
+                            {directive.icon} {directive.name}
                           </button>
                         );
                       })}

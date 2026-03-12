@@ -84,4 +84,85 @@ mod tests {
         assert_eq!(count_ai_todos(&tmp.to_string_lossy()), 2);
         let _ = std::fs::remove_dir_all(&tmp);
     }
+
+    // ─── scan_paths_with_depth: ignore list ────────────────────────────────────
+
+    #[tokio::test]
+    async fn scan_skips_ignored_directories() {
+        let tmp = std::env::temp_dir().join("kronn-test-scan-ignore");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("Library/some-app/.git")).unwrap();
+        std::fs::create_dir_all(tmp.join("real-project/.git")).unwrap();
+
+        let ignore = vec!["Library".into()];
+        let repos = scan_paths_with_depth(
+            &[tmp.to_string_lossy().to_string()],
+            &ignore,
+            3,
+        ).await.unwrap();
+
+        // "Library" should be ignored, only "real-project" found
+        let names: Vec<&str> = repos.iter().map(|r| r.name.as_str()).collect();
+        assert!(names.contains(&"real-project"), "Expected real-project, got: {:?}", names);
+        assert!(!names.iter().any(|n| n.contains("Library")), "Library should be ignored");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn scan_ignore_is_case_insensitive() {
+        let tmp = std::env::temp_dir().join("kronn-test-scan-case");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("NODE_MODULES/foo/.git")).unwrap();
+        std::fs::create_dir_all(tmp.join("my-repo/.git")).unwrap();
+
+        let ignore = vec!["node_modules".into()];
+        let repos = scan_paths_with_depth(
+            &[tmp.to_string_lossy().to_string()],
+            &ignore,
+            3,
+        ).await.unwrap();
+
+        let names: Vec<&str> = repos.iter().map(|r| r.name.as_str()).collect();
+        assert!(!names.iter().any(|n| n.contains("NODE_MODULES")),
+            "NODE_MODULES should be ignored (case-insensitive)");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn scan_nonexistent_path_returns_empty() {
+        let repos = scan_paths_with_depth(
+            &["/nonexistent/path/that/does/not/exist".into()],
+            &[],
+            3,
+        ).await.unwrap();
+        assert!(repos.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scan_empty_paths_returns_empty() {
+        let repos = scan_paths_with_depth(&[], &[], 3).await.unwrap();
+        assert!(repos.is_empty());
+    }
+
+    // ─── default_config ignore list ────────────────────────────────────────────
+
+    #[test]
+    fn default_config_ignores_macos_dirs() {
+        let config = crate::core::config::default_config();
+        let ignore = &config.scan.ignore;
+        assert!(ignore.contains(&"Library".to_string()), "Should ignore macOS Library");
+        assert!(ignore.contains(&".Trash".to_string()), "Should ignore macOS .Trash");
+        assert!(ignore.contains(&"node_modules".to_string()), "Should ignore node_modules");
+    }
+
+    #[test]
+    fn default_config_ignores_cache_dirs() {
+        let config = crate::core::config::default_config();
+        let ignore = &config.scan.ignore;
+        assert!(ignore.contains(&".cache".to_string()), "Should ignore .cache");
+        assert!(ignore.contains(&".npm".to_string()), "Should ignore .npm");
+        assert!(ignore.contains(&".cargo".to_string()), "Should ignore .cargo");
+    }
 }

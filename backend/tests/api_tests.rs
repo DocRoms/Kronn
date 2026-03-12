@@ -89,6 +89,39 @@ async fn delete_json(app: Router, uri: &str) -> (StatusCode, Value) {
     (status, json)
 }
 
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Health endpoint tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn health_returns_ok() {
+    let app = test_app();
+    let (status, json) = get_json(app, "/api/health").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["ok"], true);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Setup status endpoint tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn setup_status_returns_ok() {
+    let app = test_app();
+    let (status, json) = get_json(app, "/api/setup/status").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+    // Should have all required fields
+    assert!(json["data"]["is_first_run"].is_boolean());
+    assert!(json["data"]["current_step"].is_string());
+    assert!(json["data"]["agents_detected"].is_array());
+    assert!(json["data"]["repos_detected"].is_array());
+    assert!(json["data"]["scan_paths_set"].is_boolean());
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Stats endpoint tests
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -357,17 +390,17 @@ async fn skills_list_returns_builtins() {
     assert_eq!(json["success"], true);
 
     let skills = json["data"].as_array().unwrap();
-    assert!(skills.len() >= 7, "Expected at least 7 builtin skills, got {}", skills.len());
+    assert!(skills.len() >= 14, "Expected at least 14 builtin skills, got {}", skills.len());
 
     // Verify a known builtin skill
-    let token_saver = skills.iter().find(|s| s["id"] == "token-saver");
-    assert!(token_saver.is_some(), "token-saver skill not found");
-    let ts = token_saver.unwrap();
-    assert_eq!(ts["name"], "Token Saver");
-    assert_eq!(ts["icon"], "Zap");
-    assert_eq!(ts["category"], "Meta");
-    assert_eq!(ts["is_builtin"], true);
-    assert!(!ts["content"].as_str().unwrap().is_empty());
+    let rust = skills.iter().find(|s| s["id"] == "rust");
+    assert!(rust.is_some(), "rust skill not found");
+    let rs = rust.unwrap();
+    assert_eq!(rs["name"], "Rust");
+    assert_eq!(rs["icon"], "🦀");
+    assert_eq!(rs["category"], "Language");
+    assert_eq!(rs["is_builtin"], true);
+    assert!(!rs["content"].as_str().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -376,19 +409,19 @@ async fn skills_list_has_all_categories() {
     let (_, json) = get_json(app, "/api/skills").await;
 
     let skills = json["data"].as_array().unwrap();
-    let categories: Vec<&str> = skills.iter()
+    let categories: std::collections::HashSet<&str> = skills.iter()
         .filter_map(|s| s["category"].as_str())
         .collect();
 
-    assert!(categories.contains(&"Technical"), "Missing Technical category");
-    assert!(categories.contains(&"Business"), "Missing Business category");
-    assert!(categories.contains(&"Meta"), "Missing Meta category");
+    assert!(categories.contains("Language"), "No Language skills found");
+    assert!(categories.contains("Domain"), "No Domain skills found");
+    assert!(categories.contains("Business"), "No Business skills found");
 }
 
 #[tokio::test]
 async fn skills_delete_builtin_rejected() {
     let app = test_app();
-    let (status, json) = delete_json(app, "/api/skills/token-saver").await;
+    let (status, json) = delete_json(app, "/api/skills/rust").await;
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["success"], false);
@@ -408,7 +441,7 @@ async fn discussions_create_with_skill_ids() {
         "agent": "ClaudeCode",
         "language": "en",
         "initial_prompt": "Hello",
-        "skill_ids": ["token-saver", "rust-dev"]
+        "skill_ids": ["rust", "typescript"]
     });
     let (status, json) = post_json(
         build_router(state.clone()),
@@ -420,8 +453,8 @@ async fn discussions_create_with_skill_ids() {
     assert_eq!(json["success"], true);
     let skill_ids = json["data"]["skill_ids"].as_array().unwrap();
     assert_eq!(skill_ids.len(), 2);
-    assert_eq!(skill_ids[0], "token-saver");
-    assert_eq!(skill_ids[1], "rust-dev");
+    assert_eq!(skill_ids[0], "rust");
+    assert_eq!(skill_ids[1], "typescript");
 
     // Retrieve and verify skill_ids persisted
     let disc_id = json["data"]["id"].as_str().unwrap();
@@ -477,4 +510,177 @@ async fn discussions_create_with_invalid_project() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["success"], false);
     assert!(json["error"].as_str().unwrap().contains("Project not found"));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Profiles endpoint tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn profiles_list_returns_builtins() {
+    let app = test_app();
+    let (status, json) = get_json(app, "/api/profiles").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+
+    let profiles = json["data"].as_array().unwrap();
+    assert!(!profiles.is_empty(), "Expected at least 1 profile");
+
+    // At least one builtin profile should be present
+    let builtins: Vec<_> = profiles.iter().filter(|p| p["is_builtin"] == true).collect();
+    assert!(!builtins.is_empty(), "Expected at least 1 builtin profile");
+
+    // All profiles should have required fields
+    for p in profiles {
+        assert!(!p["name"].as_str().unwrap().is_empty());
+        assert!(!p["persona_prompt"].as_str().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn profiles_create_and_get() {
+    let state = test_state();
+
+    let create_body = serde_json::json!({
+        "name": "Test Profile",
+        "role": "Test Assistant",
+        "avatar": "🤖",
+        "color": "#ff0000",
+        "category": "Technical",
+        "persona_prompt": "You are a test assistant."
+    });
+    let (status, json) = post_json(
+        build_router(state.clone()),
+        "/api/profiles",
+        create_body,
+    ).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+    assert_eq!(json["data"]["name"], "Test Profile");
+    assert_eq!(json["data"]["category"], "Technical");
+    assert_eq!(json["data"]["is_builtin"], false);
+    assert_eq!(json["data"]["persona_prompt"], "You are a test assistant.");
+
+    let profile_id = json["data"]["id"].as_str().unwrap().to_string();
+
+    // Get by id
+    let (status, json) = get_json(
+        build_router(state.clone()),
+        &format!("/api/profiles/{}", profile_id),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["data"]["id"], profile_id);
+    assert_eq!(json["data"]["name"], "Test Profile");
+}
+
+#[tokio::test]
+async fn profiles_delete_builtin_rejected() {
+    let app = test_app();
+    // Get a builtin profile id first
+    let (_, json) = get_json(build_router(test_state()), "/api/profiles").await;
+    let profiles = json["data"].as_array().unwrap();
+    if profiles.is_empty() {
+        return; // No builtins to test
+    }
+    let builtin_id = profiles[0]["id"].as_str().unwrap();
+
+    let (status, json) = delete_json(app, &format!("/api/profiles/{}", builtin_id)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], false);
+    assert!(json["error"].as_str().unwrap().contains("builtin"));
+}
+
+#[tokio::test]
+async fn profiles_delete_custom() {
+    let state = test_state();
+
+    // Create a custom profile
+    let create_body = serde_json::json!({
+        "name": "To Delete",
+        "role": "Temporary",
+        "avatar": "🗑️",
+        "color": "#999999",
+        "category": "Meta",
+        "persona_prompt": "Temporary."
+    });
+    let (_, json) = post_json(
+        build_router(state.clone()),
+        "/api/profiles",
+        create_body,
+    ).await;
+    let profile_id = json["data"]["id"].as_str().unwrap().to_string();
+
+    // Delete it
+    let (status, json) = delete_json(
+        build_router(state.clone()),
+        &format!("/api/profiles/{}", profile_id),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+
+    // Verify it's gone from the list (only builtins remain)
+    let (_, json) = get_json(build_router(state.clone()), "/api/profiles").await;
+    let ids: Vec<&str> = json["data"].as_array().unwrap()
+        .iter()
+        .filter_map(|p| p["id"].as_str())
+        .collect();
+    assert!(!ids.contains(&profile_id.as_str()), "Deleted profile should not appear in list");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Discussions with profile_ids
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn discussions_create_with_profile_id() {
+    let state = test_state();
+
+    let create_body = serde_json::json!({
+        "title": "Profile discussion",
+        "agent": "ClaudeCode",
+        "language": "en",
+        "initial_prompt": "Hello",
+        "profile_ids": ["some-profile-id"]
+    });
+    let (status, json) = post_json(
+        build_router(state.clone()),
+        "/api/discussions",
+        create_body,
+    ).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+    assert_eq!(json["data"]["profile_ids"], serde_json::json!(["some-profile-id"]));
+
+    // Retrieve and verify profile_ids persisted
+    let disc_id = json["data"]["id"].as_str().unwrap();
+    let (_, json) = get_json(
+        build_router(state.clone()),
+        &format!("/api/discussions/{}", disc_id),
+    ).await;
+    assert_eq!(json["data"]["profile_ids"], serde_json::json!(["some-profile-id"]));
+}
+
+#[tokio::test]
+async fn discussions_create_without_profile_id_defaults_null() {
+    let state = test_state();
+
+    let create_body = serde_json::json!({
+        "title": "No profile",
+        "agent": "ClaudeCode",
+        "language": "en",
+        "initial_prompt": "Hello"
+    });
+    let (status, json) = post_json(
+        build_router(state.clone()),
+        "/api/discussions",
+        create_body,
+    ).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+    // profile_ids should be absent (skip_serializing_if = "Vec::is_empty")
+    assert!(json["data"]["profile_ids"].is_null() || json["data"]["profile_ids"] == serde_json::json!([]));
 }

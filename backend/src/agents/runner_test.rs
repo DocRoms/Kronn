@@ -149,4 +149,98 @@ mod tests {
         std::env::remove_var("KRONN_HOST_UID");
         std::env::remove_var("KRONN_HOST_GID");
     }
+
+    // ─── agent_command: full_access flags ──────────────────────────────────────
+
+    #[test]
+    fn claude_code_full_access_adds_skip_permissions() {
+        let (_, _, args, _, _, _) = super::super::agent_command(
+            &AgentType::ClaudeCode, "test prompt", true, "",
+        );
+        assert!(args.contains(&"--dangerously-skip-permissions".to_string()),
+            "Claude Code with full_access should include --dangerously-skip-permissions");
+    }
+
+    #[test]
+    fn claude_code_no_full_access_omits_skip_permissions() {
+        let (_, _, args, _, _, _) = super::super::agent_command(
+            &AgentType::ClaudeCode, "test prompt", false, "",
+        );
+        assert!(!args.contains(&"--dangerously-skip-permissions".to_string()),
+            "Claude Code without full_access should NOT include --dangerously-skip-permissions");
+    }
+
+    #[test]
+    fn codex_full_access_adds_full_auto() {
+        let (_, _, args, _, _, _) = super::super::agent_command(
+            &AgentType::Codex, "test prompt", true, "",
+        );
+        assert!(args.contains(&"--full-auto".to_string()),
+            "Codex with full_access should include --full-auto");
+    }
+
+    #[test]
+    fn codex_no_full_access_omits_full_auto() {
+        let (_, _, args, _, _, _) = super::super::agent_command(
+            &AgentType::Codex, "test prompt", false, "",
+        );
+        assert!(!args.contains(&"--full-auto".to_string()),
+            "Codex without full_access should NOT include --full-auto");
+    }
+
+    #[test]
+    fn gemini_full_access_adds_yolo() {
+        let (_, _, args, _, _, _) = super::super::agent_command(
+            &AgentType::GeminiCli, "test prompt", true, "",
+        );
+        assert!(args.contains(&"--yolo".to_string()),
+            "Gemini CLI with full_access should include --yolo");
+    }
+
+    // ─── agent_command: MCP/skills context injection ───────────────────────────
+
+    #[test]
+    fn claude_code_injects_context_via_append_system_prompt() {
+        let (_, _, args, _, _, _) = super::super::agent_command(
+            &AgentType::ClaudeCode, "prompt", false, "MCP context here",
+        );
+        let idx = args.iter().position(|a| a == "--append-system-prompt");
+        assert!(idx.is_some(), "Should have --append-system-prompt flag");
+        assert_eq!(args[idx.unwrap() + 1], "MCP context here");
+    }
+
+    #[test]
+    fn codex_prepends_context_to_prompt() {
+        let (_, _, args, _, _, _) = super::super::agent_command(
+            &AgentType::Codex, "user prompt", false, "MCP context",
+        );
+        let last = args.last().unwrap();
+        assert!(last.starts_with("MCP context"), "Context should be prepended to prompt");
+        assert!(last.contains("user prompt"), "Original prompt should be in the combined prompt");
+    }
+
+    #[test]
+    fn agent_command_no_context_when_empty() {
+        let (_, _, args, _, _, _) = super::super::agent_command(
+            &AgentType::ClaudeCode, "prompt", false, "",
+        );
+        assert!(!args.contains(&"--append-system-prompt".to_string()),
+            "Should not add --append-system-prompt when context is empty");
+    }
+
+    // ─── Kiro output cleaning ──────────────────────────────────────────────────
+
+    #[test]
+    fn kiro_credits_parsing() {
+        let stderr = vec!["▸ Credits: 0.05 • Time: 3s".into()];
+        let (_, tokens) = parse_token_usage(&AgentType::Kiro, "response", &stderr);
+        assert_eq!(tokens, 500); // 0.05 × 10000
+    }
+
+    #[test]
+    fn kiro_credits_parsing_no_bullet() {
+        let stderr = vec!["Credits: 1.23 • Time: 10s".into()];
+        let (_, tokens) = parse_token_usage(&AgentType::Kiro, "response", &stderr);
+        assert_eq!(tokens, 12300); // 1.23 × 10000
+    }
 }

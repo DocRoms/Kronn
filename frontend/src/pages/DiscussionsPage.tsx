@@ -1,8 +1,8 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { discussions as discussionsApi, projects as projectsApi, skills as skillsApi } from '../lib/api';
-import type { Project, AgentDetection, Discussion, AgentType, AgentsConfig, Skill } from '../types/generated';
+import { discussions as discussionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi } from '../lib/api';
+import type { Project, AgentDetection, Discussion, AgentType, AgentsConfig, Skill, AgentProfile, Directive } from '../types/generated';
 import { useT } from '../lib/I18nContext';
 import { AGENT_LABELS, agentColor, isAgentRestricted as isAgentRestrictedUtil, hasAgentFullAccess } from '../lib/constants';
 import type { ToastFn } from '../hooks/useToast';
@@ -10,7 +10,7 @@ import {
   Folder, ChevronRight, Cpu,
   Plus, Trash2, Loader2,
   MessageSquare, Send, X, Key, AlertTriangle, Users,
-  StopCircle, RotateCcw, Pencil, ShieldCheck, Check, Archive, Zap,
+  StopCircle, RotateCcw, Pencil, ShieldCheck, Check, Archive, Zap, UserCircle, FileText,
 } from 'lucide-react';
 
 const isHiddenPath = (path: string) => path.split('/').some(s => s.startsWith('.'));
@@ -202,6 +202,7 @@ export function DiscussionsPage({
   const [debateAgents, setDebateAgents] = useState<AgentType[]>([]);
   const [debateRounds, setDebateRounds] = useState(2);
   const [debateSkillIds, setDebateSkillIds] = useState<string[]>(['token-saver', 'devils-advocate']);
+  const [debateDirectiveIds, setDebateDirectiveIds] = useState<string[]>([]);
   const [orchState, setOrchState] = useState<Record<string, {
     active: boolean;
     round: number | string;
@@ -217,12 +218,33 @@ export function DiscussionsPage({
   const [editingTitleText, setEditingTitleText] = useState('');
   const [availableSkills, setAvailableSkills] = useState<Skill[]>([]);
   const [newDiscSkillIds, setNewDiscSkillIds] = useState<string[]>([]);
+  const [availableProfiles, setAvailableProfiles] = useState<AgentProfile[]>([]);
+  const [newDiscProfileIds, setNewDiscProfileIds] = useState<string[]>([]);
+  const [newDiscDirectiveIds, setNewDiscDirectiveIds] = useState<string[]>([]);
+  const [availableDirectives, setAvailableDirectives] = useState<Directive[]>([]);
 
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
+  // Cache of fully-loaded discussions (with messages)
+  const [loadedDiscussions, setLoadedDiscussions] = useState<Record<string, Discussion>>({});
+
+  // Fetch full discussion (with messages) when active discussion changes
+  useEffect(() => {
+    if (!activeDiscussionId) return;
+    let cancelled = false;
+    discussionsApi.get(activeDiscussionId).then(disc => {
+      if (!cancelled && disc) {
+        setLoadedDiscussions(prev => ({ ...prev, [disc.id]: disc }));
+      }
+    }).catch(() => { /* ignore fetch errors */ });
+    return () => { cancelled = true; };
+  }, [activeDiscussionId]);
+
   // ─── Derived data ────────────────────────────────────────────────────────
-  const activeDiscussion = allDiscussions.find(d => d.id === activeDiscussionId) ?? null;
+  const activeDiscussion = (activeDiscussionId && loadedDiscussions[activeDiscussionId])
+    ? loadedDiscussions[activeDiscussionId]
+    : allDiscussions.find(d => d.id === activeDiscussionId) ?? null;
 
   const activeAgentDisabled = useMemo(() => {
     if (!activeDiscussion || agents.length === 0) return false;
@@ -276,9 +298,11 @@ export function DiscussionsPage({
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Fetch available skills
+  // Fetch available skills & profiles
   useEffect(() => {
     skillsApi.list().then(setAvailableSkills).catch(() => {});
+    profilesApi.list().then(setAvailableProfiles).catch(() => {});
+    directivesApi.list().then(setAvailableDirectives).catch(console.error);
   }, []);
 
   // Auto-select first installed agent if current selection is invalid
@@ -318,10 +342,17 @@ export function DiscussionsPage({
 
   // ─── Callbacks ───────────────────────────────────────────────────────────
 
+  const reloadDiscussion = useCallback((discId: string) => {
+    discussionsApi.get(discId).then(disc => {
+      if (disc) setLoadedDiscussions(prev => ({ ...prev, [disc.id]: disc }));
+    }).catch(() => {});
+  }, []);
+
   const cleanupStream = useCallback((discId: string) => {
     cleanupStreamBase(discId);
     refetchDiscussions();
-  }, [cleanupStreamBase, refetchDiscussions]);
+    reloadDiscussion(discId);
+  }, [cleanupStreamBase, refetchDiscussions, reloadDiscussion]);
 
   const handleCreateDiscussion = async () => {
     if (!newDiscPrompt.trim() || !newDiscAgent) return;
@@ -334,12 +365,16 @@ export function DiscussionsPage({
       language: configLanguage ?? 'fr',
       initial_prompt: prompt,
       skill_ids: newDiscSkillIds.length > 0 ? newDiscSkillIds : undefined,
+      profile_ids: newDiscProfileIds.length > 0 ? newDiscProfileIds : undefined,
+      ...(newDiscDirectiveIds.length > 0 ? { directive_ids: newDiscDirectiveIds } : {}),
     });
     setShowNewDiscussion(false);
     setNewDiscTitle('');
     setNewDiscPrompt('');
     setNewDiscPrefilled(false);
     setNewDiscSkillIds([]);
+    setNewDiscDirectiveIds([]);
+    setNewDiscProfileIds([]);
     setActiveDiscussionId(disc.id);
     refetchDiscussions();
 
@@ -406,6 +441,7 @@ export function DiscussionsPage({
     const discId = activeDiscussionId;
     await discussionsApi.deleteLastAgentMessages(discId);
     await refetchDiscussions();
+    reloadDiscussion(discId);
     const controller = new AbortController();
     abortControllers.current[discId] = controller;
     setSendingMap(prev => ({ ...prev, [discId]: true }));
@@ -427,6 +463,7 @@ export function DiscussionsPage({
     setEditingMsgId(null);
     setEditingText('');
     await refetchDiscussions();
+    reloadDiscussion(discId);
     const controller = new AbortController();
     abortControllers.current[discId] = controller;
     setSendingMap(prev => ({ ...prev, [discId]: true }));
@@ -452,7 +489,7 @@ export function DiscussionsPage({
       [discId]: { active: true, round: 0, totalRounds: 3, currentAgent: null, agentStreams: [], systemMessages: [] },
     }));
 
-    await discussionsApi.orchestrate(discId, { agents: debateAgents, max_rounds: debateRounds, skill_ids: debateSkillIds }, {
+    await discussionsApi.orchestrate(discId, { agents: debateAgents, max_rounds: debateRounds, skill_ids: debateSkillIds, ...(debateDirectiveIds.length > 0 ? { directive_ids: debateDirectiveIds } : {}) }, {
       onSystem: (text) => {
         setOrchState(prev => {
           const s = prev[discId];
@@ -678,6 +715,7 @@ export function DiscussionsPage({
                     setNewDiscProjectId(pid);
                     const proj = projects.find(p => p.id === pid);
                     if (proj?.default_skill_ids?.length) setNewDiscSkillIds(proj.default_skill_ids);
+                    if ((proj as any)?.default_profile_id) setNewDiscProfileIds([(proj as any).default_profile_id]);
                   }} disabled={newDiscPrefilled}>
                     <option value="">{t('disc.noProject')}</option>
                     {projects.filter(p => !isHiddenPath(p.path)).map(p => (
@@ -734,10 +772,92 @@ export function DiscussionsPage({
                             display: 'flex', alignItems: 'center', gap: 4,
                             transition: 'all 0.15s',
                           }}
-                          title={skill.description}
+                          title={skill.name}
                         >
                           {selected && <Check size={10} />}
                           {skill.name}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Profile selector (multi-select) */}
+              {availableProfiles.length > 0 && (
+                <div style={{ marginBottom: 12 }}>
+                  <label style={ds.label}><UserCircle size={10} style={{ marginRight: 4 }} />{t('profiles.select')}</label>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
+                    <button
+                      type="button"
+                      onClick={() => setNewDiscProfileIds([])}
+                      style={{
+                        padding: '4px 10px', borderRadius: 12, fontSize: 11, fontFamily: 'inherit',
+                        fontWeight: newDiscProfileIds.length === 0 ? 600 : 400, cursor: 'pointer',
+                        border: newDiscProfileIds.length === 0 ? '1px solid rgba(139,92,246,0.4)' : '1px solid rgba(255,255,255,0.1)',
+                        background: newDiscProfileIds.length === 0 ? 'rgba(139,92,246,0.1)' : 'rgba(255,255,255,0.03)',
+                        color: newDiscProfileIds.length === 0 ? '#a78bfa' : 'rgba(255,255,255,0.5)',
+                        transition: 'all 0.15s',
+                      }}
+                    >
+                      {t('profiles.none')}
+                    </button>
+                    {availableProfiles.map(profile => {
+                      const selected = newDiscProfileIds.includes(profile.id);
+                      return (
+                        <button
+                          key={profile.id}
+                          type="button"
+                          onClick={() => setNewDiscProfileIds(prev => selected ? prev.filter(id => id !== profile.id) : [...prev, profile.id])}
+                          style={{
+                            padding: '4px 10px', borderRadius: 12, fontSize: 11, fontFamily: 'inherit',
+                            fontWeight: selected ? 600 : 400, cursor: 'pointer',
+                            border: selected ? `1px solid ${profile.color || 'rgba(139,92,246,0.4)'}` : '1px solid rgba(255,255,255,0.1)',
+                            background: selected ? `${profile.color}15` : 'rgba(255,255,255,0.03)',
+                            color: selected ? (profile.color || '#a78bfa') : 'rgba(255,255,255,0.5)',
+                            display: 'flex', alignItems: 'center', gap: 4,
+                            transition: 'all 0.15s',
+                          }}
+                          title={profile.role}
+                        >
+                          {selected && <Check size={10} />}
+                          {profile.avatar} {profile.persona_name || profile.name}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Directive selector (multi-select) */}
+              {availableDirectives.length > 0 && (
+                <div style={{ marginBottom: 12 }}>
+                  <label style={ds.label}><FileText size={10} style={{ marginRight: 4 }} />{t('directives.title')}</label>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
+                    {availableDirectives.map(directive => {
+                      const selected = newDiscDirectiveIds.includes(directive.id);
+                      return (
+                        <button
+                          key={directive.id}
+                          type="button"
+                          onClick={() => {
+                            setNewDiscDirectiveIds(prev =>
+                              selected ? prev.filter(id => id !== directive.id) : [...prev, directive.id]
+                            );
+                          }}
+                          style={{
+                            padding: '4px 10px', borderRadius: 12, fontSize: 11, fontFamily: 'inherit',
+                            fontWeight: selected ? 600 : 400, cursor: 'pointer',
+                            border: selected ? '1px solid rgba(245,158,11,0.4)' : '1px solid rgba(255,255,255,0.1)',
+                            background: selected ? 'rgba(245,158,11,0.1)' : 'rgba(255,255,255,0.03)',
+                            color: selected ? '#fbbf24' : 'rgba(255,255,255,0.5)',
+                            display: 'flex', alignItems: 'center', gap: 4,
+                            transition: 'all 0.15s',
+                          }}
+                          title={directive.name}
+                        >
+                          {selected && <Check size={10} />}
+                          {directive.icon} {directive.name}
                         </button>
                       );
                     })}
@@ -859,6 +979,19 @@ export function DiscussionsPage({
                 </div>
                 <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', marginTop: 2, display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
                   <span>{activeDiscussion.project_id ? (projects.find(p => p.id === activeDiscussion.project_id)?.name ?? '?') : t('disc.general')} · {activeDiscussion.agent}</span>
+                  {(activeDiscussion.profile_ids?.length ?? 0) > 0 && (
+                    <>
+                      <span style={{ color: 'rgba(255,255,255,0.15)' }}>·</span>
+                      {activeDiscussion.profile_ids?.map((pid: string) => {
+                        const p = availableProfiles.find(p => p.id === pid);
+                        return p ? (
+                          <span key={pid} style={{ fontSize: 10, padding: '1px 6px', borderRadius: 8, background: `${p.color}15`, color: p.color, border: `1px solid ${p.color}30` }}>
+                            {p.avatar} {p.persona_name || p.name}
+                          </span>
+                        ) : null;
+                      })}
+                    </>
+                  )}
                   {(activeDiscussion.skill_ids ?? []).length > 0 && (
                     <>
                       <span style={{ color: 'rgba(255,255,255,0.15)' }}>·</span>
@@ -871,6 +1004,25 @@ export function DiscussionsPage({
                             color: 'rgba(200,255,0,0.7)',
                           }}>
                             {skill?.name ?? sid}
+                          </span>
+                        );
+                      })}
+                    </>
+                  )}
+                  {(activeDiscussion.directive_ids ?? []).length > 0 && (
+                    <>
+                      <span style={{ color: 'rgba(255,255,255,0.15)' }}>·</span>
+                      {(activeDiscussion.directive_ids ?? []).map(id => {
+                        const d = availableDirectives.find(dd => dd.id === id);
+                        return (
+                          <span key={id} style={{
+                            fontSize: 9, padding: '1px 6px', borderRadius: 6,
+                            background: 'rgba(245,158,11,0.08)', color: 'rgba(245,158,11,0.6)',
+                            border: '1px solid rgba(245,158,11,0.15)',
+                            display: 'inline-flex', alignItems: 'center', gap: 2,
+                          }}>
+                            <FileText size={7} style={{ marginRight: 2 }} />
+                            {d ? `${d.icon} ${d.name}` : id}
                           </span>
                         );
                       })}
@@ -1307,7 +1459,7 @@ export function DiscussionsPage({
                               return (
                                 <button
                                   key={skill.id}
-                                  title={skill.description}
+                                  title={skill.name}
                                   onClick={() => setDebateSkillIds(prev =>
                                     prev.includes(skill.id)
                                       ? prev.filter(id => id !== skill.id)
@@ -1330,6 +1482,40 @@ export function DiscussionsPage({
                         </div>
                       );
                     })()}
+                    {/* Directives for debate */}
+                    {availableDirectives.length > 0 && (
+                      <div style={{ marginTop: 10, borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: 8 }}>
+                        <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 }}>
+                          <FileText size={10} /> {t('directives.title')}
+                        </div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                          {availableDirectives.map(directive => {
+                            const active = debateDirectiveIds.includes(directive.id);
+                            return (
+                              <button
+                                key={directive.id}
+                                title={directive.name}
+                                onClick={() => setDebateDirectiveIds(prev =>
+                                  prev.includes(directive.id)
+                                    ? prev.filter(id => id !== directive.id)
+                                    : [...prev, directive.id]
+                                )}
+                                style={{
+                                  padding: '3px 8px', borderRadius: 6, fontFamily: 'inherit',
+                                  fontSize: 10, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4,
+                                  background: active ? 'rgba(245,158,11,0.12)' : 'rgba(255,255,255,0.04)',
+                                  color: active ? '#fbbf24' : 'rgba(255,255,255,0.3)',
+                                  border: active ? '1px solid rgba(245,158,11,0.2)' : '1px solid rgba(255,255,255,0.06)',
+                                }}
+                              >
+                                {active && <Check size={8} />}
+                                {directive.icon} {directive.name}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
                     {debateAgents.some(a => isAgentRestricted(a)) && (
                       <div style={{ marginTop: 8, padding: '6px 8px', borderRadius: 6, background: 'rgba(255,200,0,0.06)', border: '1px solid rgba(255,200,0,0.12)', display: 'flex', alignItems: 'center', gap: 5 }}>
                         <AlertTriangle size={10} style={{ color: '#ffb400', flexShrink: 0 }} />

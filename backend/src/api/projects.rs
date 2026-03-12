@@ -102,6 +102,7 @@ pub async fn create(
         audit_status: AiAuditStatus::NoTemplate,
         ai_todo_count: 0,
         default_skill_ids: vec![],
+        default_profile_id: None,
         created_at: now,
         updated_at: now,
     };
@@ -373,8 +374,17 @@ pub async fn run_audit(
 
             let full_prompt = format!("{} {}", PROMPT_PREAMBLE, step_prompt);
 
+            // Default audit profiles: Architect (structure), Tech Lead (quality), Mentor (clarity)
+            let audit_profiles: Vec<String> = vec![
+                "architect".into(), "tech-lead".into(), "mentor".into(),
+            ];
+
             // Always use full_access for audit (agent needs to write files)
-            match runner::start_agent(&agent_type, &project_path_str, &full_prompt, &tokens, true).await {
+            match runner::start_agent_with_config(runner::AgentStartConfig {
+                agent_type: &agent_type, project_path: &project_path_str, work_dir: None,
+                prompt: &full_prompt, tokens: &tokens, full_access: true,
+                skill_ids: &[], directive_ids: &[], profile_ids: &audit_profiles,
+            }).await {
                 Ok(mut process) => {
                     while let Some(line) = process.next_line().await {
                         let chunk = serde_json::json!({ "text": line, "step": step });
@@ -463,6 +473,22 @@ pub async fn set_default_skills(
 ) -> Json<ApiResponse<bool>> {
     match state.db.with_conn(move |conn| {
         crate::db::projects::update_project_default_skills(conn, &id, &skill_ids)
+    }).await {
+        Ok(true) => Json(ApiResponse::ok(true)),
+        Ok(false) => Json(ApiResponse::err("Project not found")),
+        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
+/// PUT /api/projects/:id/default-profile
+pub async fn set_default_profile(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<ApiResponse<bool>> {
+    let profile_id = body.get("profile_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+    match state.db.with_conn(move |conn| {
+        crate::db::projects::update_project_default_profile(conn, &id, profile_id.as_deref())
     }).await {
         Ok(true) => Json(ApiResponse::ok(true)),
         Ok(false) => Json(ApiResponse::err("Project not found")),

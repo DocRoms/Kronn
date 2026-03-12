@@ -36,6 +36,10 @@ import type {
   AgentUsageSummary,
   Skill,
   CreateSkillRequest,
+  AgentProfile,
+  CreateProfileRequest,
+  Directive,
+  CreateDirectiveRequest,
 } from '../types/generated';
 import type { DiscoverKeysResponse } from '../types/extensions';
 
@@ -118,6 +122,7 @@ export const projects = {
   installTemplate: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/install-template`),
   validateAudit: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/validate-audit`),
   setDefaultSkills: (id: string, skillIds: string[]) => api<boolean>('PUT', `/projects/${id}/default-skills`, skillIds),
+  setDefaultProfile: (id: string, profileId: string | null) => api<boolean>('PUT', `/projects/${id}/default-profile`, { profile_id: profileId }),
 
   /** Stream the AI audit progress via SSE */
   auditStream: async (
@@ -480,6 +485,26 @@ export const skills = {
   create: (req: CreateSkillRequest) => api<Skill>('POST', '/skills', req),
   update: (id: string, req: CreateSkillRequest) => api<Skill>('PUT', `/skills/${id}`, req),
   delete: (id: string) => api<boolean>('DELETE', `/skills/${id}`),
+};
+
+// ─── Profiles ────────────────────────────────────────────────────────────────
+
+export const profiles = {
+  list: () => api<AgentProfile[]>('GET', '/profiles'),
+  get: (id: string) => api<AgentProfile>('GET', `/profiles/${id}`),
+  create: (req: CreateProfileRequest) => api<AgentProfile>('POST', '/profiles', req),
+  update: (id: string, req: CreateProfileRequest) => api<AgentProfile>('PUT', `/profiles/${id}`, req),
+  delete: (id: string) => api<boolean>('DELETE', `/profiles/${id}`),
+  updatePersonaName: (id: string, personaName: string) => api<AgentProfile>('PUT', `/profiles/${id}/persona-name`, { persona_name: personaName }),
+};
+
+// ─── Directives ─────────────────────────────────────────────────────────────
+
+export const directives = {
+  list: () => api<Directive[]>('GET', '/directives'),
+  create: (req: CreateDirectiveRequest) => api<Directive>('POST', '/directives', req),
+  update: (id: string, req: CreateDirectiveRequest) => api<Directive>('PUT', `/directives/${id}`, req),
+  delete: (id: string) => api<boolean>('DELETE', `/directives/${id}`),
 };
 
 // ─── Stats ──────────────────────────────────────────────────────────────────

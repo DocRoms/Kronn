@@ -214,9 +214,8 @@ describe('api module', () => {
 
       const result = await skills.create({
         name: 'My Skill',
-        description: 'A custom skill',
         icon: 'Star',
-        category: 'Technical',
+        category: 'Language',
         content: 'Do the thing',
       });
 
@@ -225,9 +224,8 @@ describe('api module', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: 'My Skill',
-          description: 'A custom skill',
           icon: 'Star',
-          category: 'Technical',
+          category: 'Language',
           content: 'Do the thing',
         }),
       });

@@ -113,7 +113,7 @@ async fn scan_directory(
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {
-                tracing::warn!("Walkdir error: {}", e);
+                tracing::debug!("Walkdir error (skipping): {}", e);
                 continue;
             }
         };

@@ -33,6 +33,7 @@ Three Docker services behind nginx gateway:
 - Agents run in the project's directory context (or temp dir for global discussions).
 - **Runtime probe**: if no local binary is found, `probe_runtime()` tests npx availability (15s timeout, 5min cache). `AgentDetection.runtime_available` distinguishes "installed locally" from "runnable via npx". Frontend uses `isUsable(agent) = (installed || runtime_available) && enabled`.
 - MCPs work with all 3 agents: Claude Code (`.mcp.json`), Codex (`~/.codex/config.toml`), Vibe (`.vibe/config.toml`). Disk sync writes all formats simultaneously. Kiro uses AWS Builder ID (no API key).
+- **Prompt injection order**: profiles → skills → directives → MCP context. All injected via `extra_context` parameter to `agent_command()`.
 - `AgentConfig` has `full_access: bool` field (persisted in config.toml). When enabled, runner adds `--dangerously-skip-permissions` (Claude), `--full-auto` (Codex), `--trust-all-tools` (Kiro).
 - API: `GET/POST /api/config/agent-access` to read/set the full_access flag. UI toggle in Config > Agents card.
 - **Agent lifecycle**: agents can be uninstalled (`POST /api/agents/uninstall`) or toggled on/off (`POST /api/agents/toggle`). Disabled agents tracked in `AppConfig.disabled_agents: Vec<AgentType>`. `AgentDetection` includes `enabled: bool`. Uninstall uses platform-specific commands (npm for Claude/Codex, uv/pipx/pip3 for Vibe).
@@ -82,6 +83,27 @@ Three Docker services behind nginx gateway:
 - Primary agent (discussion owner) speaks last each round and produces final synthesis.
 - Anti-repetition prompts keep rounds concise.
 - Language configurable globally (fr/en/zh/br), injected into all agent prompts.
+
+### 3-axis agent configuration (Profiles / Skills / Directives)
+
+Agents are configured along three independent axes, each multi-selectable:
+
+| Axis | Purpose | Selection | Storage |
+|------|---------|-----------|---------|
+| **Profiles** (WHO) | Agent persona — identity, expertise, personality | Multi-select | Builtin `.md` in `backend/src/profiles/`, custom in `~/.config/kronn/profiles/` |
+| **Skills** (WHAT) | Domain expertise — technical knowledge injected into prompts | Multi-select | Builtin `.md` in `backend/src/skills/`, custom in `~/.config/kronn/skills/` |
+| **Directives** (HOW) | Output behavior — formatting, language, verbosity constraints | Multi-select | Builtin `.md` in `backend/src/directives/`, custom in `~/.config/kronn/directives/` |
+
+**Profiles** define WHO the agent is: persona name (editable, even on builtins via override file), avatar, color, role, and a detailed persona prompt. 8 builtin profiles (Kai/Architect, Mia/Tech Lead, Sam/QA Engineer, Noa/Product Owner, Kim/Scrum Master, Eve/Technical Writer, Max/Devil's Advocate, Zia/Mentor). Persona names are short (3-4 chars) for token efficiency.
+
+When multiple profiles are selected, the prompt builder generates a **multi-agent collaboration** instruction: each profile's perspective must be considered, trade-offs identified, and assumptions challenged.
+
+**Persona name overrides**: stored in `~/.config/kronn/persona_overrides.json`. Applies to both builtin and custom profiles. API: `PUT /api/profiles/:id/persona-name`.
+
+All three axes are available in:
+- Discussions (profile/skill/directive selectors in new discussion form)
+- Workflow steps (per-step selectors)
+- AI audit pipeline (default profiles: Architect + Tech Lead + Mentor)
 
 ### Workflows (implemented — replaces scheduled tasks)
 
@@ -134,13 +156,13 @@ Kronn manages MCPs with a 3-tier model:
 mcp_servers (type)  →  mcp_configs (configured instance)  →  mcp_config_projects (N:N linkage)
 ```
 
-**Servers** represent an MCP type (e.g. "GitHub"). Can come from the built-in registry (26 official servers), be detected from `.mcp.json` files, or be added manually.
+**Servers** represent an MCP type (e.g. "GitHub"). Can come from the built-in registry (34 official servers), be detected from `.mcp.json` files, or be added manually.
 
 **Configs** are configured instances of a server with encrypted env vars (AES-256-GCM), a label, and optional args override. One server can have multiple configs (e.g. two GitHub configs with different tokens). Deduplication via FNV-1a hash of (transport + args + env values).
 
 **Project linkage** — N:N relationship. A config can be linked to multiple projects. The `is_global` flag means "applies to all projects" without explicit per-project linkage.
 
-**Registry** — 26 built-in official MCP servers in `core/registry.rs`, grouped by category: Git & Code (GitHub, GitLab, Git), Databases (PostgreSQL, SQLite, Redis, Supabase), Cloud & Infra (Cloudflare, AWS CloudWatch, Docker), Search & Web (Brave Search, Fetch, Puppeteer), Analytics & Monitoring (Sentry, Grafana, Google Analytics), Communication (Slack), Project Management (Linear, Atlassian), Design (Figma), Knowledge & Docs (Notion, Context7), Payments (Stripe), SEO (Ahrefs), Files (Filesystem), Email (Resend). Each has `env_keys` listing required environment variables, plus optional `token_url` (link to provider's token generation page) and `token_help` (short guidance text).
+**Registry** — 34 built-in official MCP servers in `core/registry.rs`, grouped by category: Git & Code (GitHub, GitLab, Git), Databases (PostgreSQL, SQLite, Redis), BaaS (Supabase), Cloud & Infra (Cloudflare, AWS CloudWatch, Docker, Azure), Search & Web (Brave Search, Fetch, Exa), Browser (Puppeteer, Chrome DevTools, Playwright, Browserbase), Scraping (Firecrawl), Monitoring (Sentry, Grafana), Communication (Slack), Email (Resend), Project Management (Linear, Atlassian), Design (Figma), Knowledge & Docs (Notion, Context7), Payments (Stripe), AI & Reasoning (Memory, Sequential Thinking), SEO (Ahrefs), Files (Filesystem), Sandbox (E2B). Each has `env_keys` listing required environment variables, plus optional `token_url` (link to provider's token generation page) and `token_help` (short guidance text).
 
 **Disk sync (3 formats)** — When linkages or config values change, Kronn writes agent-specific config files:
 
@@ -182,7 +204,7 @@ NoTemplate → TemplateInstalled → Audited → Validated
 - **Detection**: `scanner::detect_audit_status()` checks `ai/index.md` existence, `KRONN:BOOTSTRAP`/`{{` markers, and `KRONN:VALIDATED` marker.
 - **TODO counting**: `scanner::count_ai_todos()` walks `ai/*.md` files and counts `<!-- TODO` occurrences. Exposed as `Project.ai_todo_count` (computed on-the-fly by `enrich_audit_status()`).
 - **Template install** (`POST /api/projects/:id/install-template`): copies `ai/` skeleton + redirectors (CLAUDE.md, .cursorrules, etc.) non-destructively, injects bootstrap prompt block (`KRONN:BOOTSTRAP:START` to `KRONN:BOOTSTRAP:END`).
-- **AI audit** (`POST /api/projects/:id/ai-audit`): SSE-streamed 10-step analysis. Each step runs an agent call with `full_access: true`. Bootstrap block removed before audit starts. Steps defined in `ANALYSIS_STEPS` constant.
+- **AI audit** (`POST /api/projects/:id/ai-audit`): SSE-streamed 10-step analysis. Each step runs an agent call with `full_access: true` and default profiles (Architect + Tech Lead + Mentor) for multi-perspective analysis. Bootstrap block removed before audit starts. Steps defined in `ANALYSIS_STEPS` constant.
 - **Validation**: creates a Discussion with title "Validation audit AI" and a locked prompt. The AI asks questions about ambiguities/TODOs, updates `ai/` files after each answer. Frontend detects validation-in-progress by matching discussion title + project_id. Project page only shows "validation en cours" + link (no validate button).
 - **Completion detection**: the prompt instructs the AI to include `KRONN:VALIDATION_COMPLETE` in its final message. Frontend detects this in the last agent message and shows a green banner with "Marquer l'audit comme valide" button — only in the discussion view.
 - **Mark validated** (`POST /api/projects/:id/validate-audit`): injects `<!-- KRONN:VALIDATED:YYYY-MM-DD -->` at end of `ai/index.md`.

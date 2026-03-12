@@ -1,5 +1,6 @@
 # Rust
 backend/target/
+backend/bindings/
 
 # Node
 frontend/node_modules/
@@ -22,6 +23,7 @@ kronn.toml
 
 # Docker
 .env
+docker-compose.override.yml
 .docker/data/
 .mcp.json
 .vibe/

@@ -25,6 +25,8 @@ mod tests {
             messages: vec![],
             message_count: 0,
             skill_ids: vec![],
+            profile_ids: vec![],
+            directive_ids: vec![],
             archived: false,
             created_at: now,
             updated_at: now,

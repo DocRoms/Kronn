@@ -37,9 +37,17 @@ pub async fn get_status(
         default_scan_path().into_iter().collect()
     };
 
-    let repos_detected = scanner::scan_paths_with_depth(&scan_paths, &config.scan.ignore, config.scan.scan_depth)
-        .await
-        .unwrap_or_default();
+    // Scan with a timeout to avoid blocking on slow filesystems (e.g. macOS Library via Docker)
+    let repos_detected = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        scanner::scan_paths_with_depth(&scan_paths, &config.scan.ignore, config.scan.scan_depth),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        tracing::warn!("Repo scan timed out after 10s — returning empty list");
+        Ok(vec![])
+    })
+    .unwrap_or_default();
 
     let current_step = if agents_detected.iter().all(|a| !a.installed) {
         SetupStep::Agents

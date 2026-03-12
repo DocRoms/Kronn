@@ -13,6 +13,20 @@ use crate::agents::runner;
 use crate::models::*;
 use crate::AppState;
 
+#[derive(Clone, Debug)]
+enum AgentStreamEvent {
+    Start,
+    Meta { auth_mode: String },
+    Chunk { data: serde_json::Value },
+    Done { data: serde_json::Value },
+    Error { data: serde_json::Value },
+    // Orchestration-specific:
+    System { data: serde_json::Value },
+    Round { data: serde_json::Value },
+    AgentStart { data: serde_json::Value },
+    AgentDone { data: serde_json::Value },
+}
+
 /// GET /api/discussions
 pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<Vec<Discussion>>> {
     match state.db.with_conn(crate::db::discussions::list_discussions).await {
@@ -81,6 +95,8 @@ pub async fn create(
         messages: vec![initial_message.clone()],
         message_count: 1,
         skill_ids: req.skill_ids,
+        profile_ids: req.profile_ids,
+        directive_ids: req.directive_ids,
         archived: false,
         created_at: now,
         updated_at: now,
@@ -107,10 +123,18 @@ pub async fn update(
     let title = req.title;
     let archived = req.archived;
     let skill_ids = req.skill_ids;
+    let profile_ids = req.profile_ids;
+    let directive_ids = req.directive_ids;
     match state.db.with_conn(move |conn| {
         let mut updated = crate::db::discussions::update_discussion(conn, &id, title.as_deref(), archived)?;
         if let Some(ref ids) = skill_ids {
             updated = crate::db::discussions::update_discussion_skill_ids(conn, &id, ids)? || updated;
+        }
+        if let Some(ref ids) = profile_ids {
+            updated = crate::db::discussions::update_discussion_profile_ids(conn, &id, ids)? || updated;
+        }
+        if let Some(ref ids) = directive_ids {
+            updated = crate::db::discussions::update_discussion_directive_ids(conn, &id, ids)? || updated;
         }
         Ok(updated)
     }).await {
@@ -231,6 +255,8 @@ async fn make_agent_stream(
     let agent_type = agent_override.unwrap_or_else(|| disc.agent.clone());
     let prompt = build_agent_prompt(&disc);
     let skill_ids = disc.skill_ids.clone();
+    let directive_ids = disc.directive_ids.clone();
+    let profile_ids = disc.profile_ids.clone();
 
     let project_path = if let Some(ref pid) = disc.project_id {
         let pid = pid.clone();
@@ -250,17 +276,20 @@ async fn make_agent_stream(
 
     let auth_mode_str = auth_mode_for(&agent_type, &tokens);
 
-    let state_clone = state.clone();
     let disc_id = discussion_id.clone();
 
-    let stream: SseStream = Box::pin(async_stream::try_stream! {
-        yield Event::default().event("start").data("{}");
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentStreamEvent>(64);
 
-        yield Event::default().event("meta").data(
-            serde_json::json!({ "auth_mode": auth_mode_str }).to_string()
-        );
+    // Spawn background task — always saves to DB even if client disconnects
+    tokio::spawn(async move {
+        let _ = tx.send(AgentStreamEvent::Start).await;
+        let _ = tx.send(AgentStreamEvent::Meta { auth_mode: auth_mode_str.clone() }).await;
 
-        match runner::start_agent_with_skills(&agent_type, &project_path, &prompt, &tokens, full_access, &skill_ids).await {
+        match runner::start_agent_with_config(runner::AgentStartConfig {
+            agent_type: &agent_type, project_path: &project_path, work_dir: None,
+            prompt: &prompt, tokens: &tokens, full_access,
+            skill_ids: &skill_ids, directive_ids: &directive_ids, profile_ids: &profile_ids,
+        }).await {
             Ok(mut process) => {
                 let mut full_response = String::new();
                 let mut stream_json_tokens: u64 = 0;
@@ -268,12 +297,13 @@ async fn make_agent_stream(
 
                 while let Some(line) = process.next_line().await {
                     if is_stream_json {
-                        // Parse Claude Code stream-json events
                         match runner::parse_claude_stream_line(&line) {
                             runner::StreamJsonEvent::Text(text) => {
                                 full_response.push_str(&text);
-                                let chunk = serde_json::json!({ "text": text });
-                                yield Event::default().event("chunk").data(chunk.to_string());
+                                if !tx.is_closed() {
+                                    let chunk = serde_json::json!({ "text": text });
+                                    let _ = tx.send(AgentStreamEvent::Chunk { data: chunk }).await;
+                                }
                             }
                             runner::StreamJsonEvent::Usage { input_tokens, output_tokens } => {
                                 stream_json_tokens = stream_json_tokens.max(input_tokens + output_tokens);
@@ -281,20 +311,20 @@ async fn make_agent_stream(
                             runner::StreamJsonEvent::Skip => {}
                         }
                     } else {
-                        // Plain text mode — each line from stdout is a complete line.
-                        // Append newline so the frontend can concatenate chunks directly.
                         if !full_response.is_empty() {
                             full_response.push('\n');
                         }
                         full_response.push_str(&line);
 
-                        let text_with_nl = if full_response.len() > line.len() {
-                            format!("\n{}", line)
-                        } else {
-                            line.clone()
-                        };
-                        let chunk = serde_json::json!({ "text": text_with_nl });
-                        yield Event::default().event("chunk").data(chunk.to_string());
+                        if !tx.is_closed() {
+                            let text_with_nl = if full_response.len() > line.len() {
+                                format!("\n{}", line)
+                            } else {
+                                line.clone()
+                            };
+                            let chunk = serde_json::json!({ "text": text_with_nl });
+                            let _ = tx.send(AgentStreamEvent::Chunk { data: chunk }).await;
+                        }
                     }
                 }
 
@@ -316,7 +346,6 @@ async fn make_agent_stream(
                 let stderr_lines = process.captured_stderr();
 
                 if full_response.is_empty() && !success {
-                    // Show captured stderr when agent fails silently
                     if stderr_lines.is_empty() {
                         full_response = "[Agent exited with error]".to_string();
                     } else {
@@ -324,7 +353,6 @@ async fn make_agent_stream(
                     }
                 }
 
-                // Token usage: stream-json parsed inline, others use parse_token_usage
                 let tokens_used = if stream_json_tokens > 0 {
                     stream_json_tokens
                 } else {
@@ -335,7 +363,7 @@ async fn make_agent_stream(
                     count
                 };
 
-                // Save agent response to DB
+                // Save agent response to DB — always runs even if client is gone
                 let agent_msg = DiscussionMessage {
                     id: Uuid::new_v4().to_string(),
                     role: MessageRole::Agent,
@@ -348,12 +376,12 @@ async fn make_agent_stream(
 
                 let did = disc_id.clone();
                 let msg = agent_msg.clone();
-                let _ = state_clone.db.with_conn(move |conn| {
+                let _ = state.db.with_conn(move |conn| {
                     crate::db::discussions::insert_message(conn, &did, &msg)
                 }).await;
 
                 let done = serde_json::json!({ "message_id": agent_msg.id, "success": success, "tokens_used": tokens_used });
-                yield Event::default().event("done").data(done.to_string());
+                let _ = tx.send(AgentStreamEvent::Done { data: done }).await;
             }
             Err(e) => {
                 tracing::error!("Agent start failed: {}", e);
@@ -369,12 +397,38 @@ async fn make_agent_stream(
                 };
 
                 let did = disc_id.clone();
-                let _ = state_clone.db.with_conn(move |conn| {
+                let _ = state.db.with_conn(move |conn| {
                     crate::db::discussions::insert_message(conn, &did, &err_msg)
                 }).await;
 
                 let err = serde_json::json!({ "error": e });
-                yield Event::default().event("error").data(err.to_string());
+                let _ = tx.send(AgentStreamEvent::Error { data: err }).await;
+            }
+        }
+    });
+
+    // Thin SSE reader — just maps channel events to SSE
+    let stream: SseStream = Box::pin(async_stream::try_stream! {
+        while let Some(evt) = rx.recv().await {
+            match evt {
+                AgentStreamEvent::Start => {
+                    yield Event::default().event("start").data("{}");
+                }
+                AgentStreamEvent::Meta { auth_mode } => {
+                    yield Event::default().event("meta").data(
+                        serde_json::json!({ "auth_mode": auth_mode }).to_string()
+                    );
+                }
+                AgentStreamEvent::Chunk { data } => {
+                    yield Event::default().event("chunk").data(data.to_string());
+                }
+                AgentStreamEvent::Done { data } => {
+                    yield Event::default().event("done").data(data.to_string());
+                }
+                AgentStreamEvent::Error { data } => {
+                    yield Event::default().event("error").data(data.to_string());
+                }
+                _ => {}
             }
         }
     });
@@ -391,6 +445,8 @@ pub async fn orchestrate(
     let agents = req.agents;
     let max_rounds = req.max_rounds.unwrap_or(3).min(3);
     let req_skill_ids = req.skill_ids;
+    let req_directive_ids = req.directive_ids;
+    let req_profile_ids = req.profile_ids;
 
     if agents.len() < 2 {
         let stream: SseStream = Box::pin(futures::stream::once(async {
@@ -449,6 +505,8 @@ pub async fn orchestrate(
     let primary_agent_type = disc.agent.clone();
     // Use skills from the orchestration request if provided, otherwise fall back to discussion skills
     let orch_skill_ids = if req_skill_ids.is_empty() { disc.skill_ids.clone() } else { req_skill_ids };
+    let orch_directive_ids = if req_directive_ids.is_empty() { disc.directive_ids.clone() } else { req_directive_ids };
+    let orch_profile_ids = if req_profile_ids.is_empty() { disc.profile_ids.clone() } else { req_profile_ids };
 
     // Reorder agents: non-primary first, primary last
     let agents = {
@@ -490,18 +548,27 @@ pub async fn orchestrate(
         }).await;
     }
 
-    let state_clone = state.clone();
     let disc_id = id.clone();
 
-    let stream: SseStream = Box::pin(async_stream::try_stream! {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentStreamEvent>(128);
+
+    // Spawn background task — always saves to DB even if client disconnects
+    tokio::spawn(async move {
+        // Helper macro to send events — silently drops if client disconnected
+        macro_rules! emit {
+            ($evt:expr) => {
+                if !tx.is_closed() {
+                    let _ = tx.send($evt).await;
+                }
+            };
+        }
+
         let agent_names: Vec<String> = agents.iter().map(agent_display_name).collect();
         let sys_text = format!(
             "Mode orchestration active avec {}. Les agents vont debattre sur {} rounds maximum.",
             agent_names.join(", "), max_rounds
         );
-        yield Event::default().event("system").data(
-            serde_json::json!({ "text": sys_text, "agents": agent_names }).to_string()
-        );
+        emit!(AgentStreamEvent::System { data: serde_json::json!({ "text": sys_text, "agents": agent_names }) });
 
         // Save system message
         {
@@ -515,7 +582,7 @@ pub async fn orchestrate(
                 auth_mode: None,
             };
             let did = disc_id.clone();
-            let _ = state_clone.db.with_conn(move |conn| {
+            let _ = state.db.with_conn(move |conn| {
                 crate::db::discussions::insert_message(conn, &did, &msg)
             }).await;
         }
@@ -551,16 +618,18 @@ pub async fn orchestrate(
                 ),
             };
 
-            yield Event::default().event("system").data(
-                serde_json::json!({ "text": match disc_language.as_str() {
-                    "fr" => "Resume de la conversation en cours...",
-                    "es" => "Resumiendo la conversacion...",
-                    _ => "Summarizing conversation...",
-                }}).to_string()
-            );
+            emit!(AgentStreamEvent::System { data: serde_json::json!({ "text": match disc_language.as_str() {
+                "fr" => "Resume de la conversation en cours...",
+                "es" => "Resumiendo la conversacion...",
+                _ => "Summarizing conversation...",
+            }})});
 
             let fa = *agent_access.get(&format!("{:?}", primary_agent_type)).unwrap_or(&false);
-            match runner::start_agent_with_skills(&primary_agent_type, &project_path, &summary_prompt, &tokens, fa, &[]).await {
+            match runner::start_agent_with_config(runner::AgentStartConfig {
+                agent_type: &primary_agent_type, project_path: &project_path, work_dir: None,
+                prompt: &summary_prompt, tokens: &tokens, full_access: fa,
+                skill_ids: &[], directive_ids: &[], profile_ids: &[],
+            }).await {
                 Ok(mut process) => {
                     let mut summary = String::new();
                     let is_json = process.output_mode == runner::OutputMode::StreamJson;
@@ -580,8 +649,6 @@ pub async fn orchestrate(
                 }
                 Err(e) => {
                     tracing::warn!("Failed to summarize conversation: {}. Using last messages as fallback.", e);
-                    // Fallback: keep the last messages that fit within ~800 chars
-                    // (most relevant since they're closest to the debated question)
                     let lines: Vec<&str> = raw_conv_context.split("\n\n").filter(|s| !s.is_empty()).collect();
                     let mut fallback = String::new();
                     for line in lines.iter().rev() {
@@ -600,25 +667,27 @@ pub async fn orchestrate(
         let mut round_responses: Vec<Vec<(String, String)>> = Vec::new();
 
         for round in 1..=max_rounds {
-            yield Event::default().event("round").data(
-                serde_json::json!({ "round": round, "total": max_rounds }).to_string()
-            );
+            emit!(AgentStreamEvent::Round { data: serde_json::json!({ "round": round, "total": max_rounds }) });
 
             let mut this_round: Vec<(String, String)> = Vec::new();
 
             for agent_type in &agents {
                 let agent_name = agent_display_name(agent_type);
 
-                yield Event::default().event("agent_start").data(
-                    serde_json::json!({ "agent": agent_name, "agent_type": agent_type, "round": round }).to_string()
-                );
+                emit!(AgentStreamEvent::AgentStart { data: serde_json::json!({ "agent": agent_name, "agent_type": agent_type, "round": round }) });
 
-                let prompt = build_orchestration_prompt(
-                    &original_question, agent_type, &agent_names, &round_responses, round, max_rounds, &disc_language, &conv_context,
-                );
+                let prompt = build_orchestration_prompt(&OrchestrationContext {
+                    question: &original_question, current_agent: agent_type, all_agents: &agent_names,
+                    previous_rounds: &round_responses, round, max_rounds, lang: &disc_language,
+                    conversation_context: &conv_context,
+                });
 
                 let fa = *agent_access.get(&format!("{:?}", agent_type)).unwrap_or(&false);
-                match runner::start_agent_with_skills(agent_type, &project_path, &prompt, &tokens, fa, &orch_skill_ids).await {
+                match runner::start_agent_with_config(runner::AgentStartConfig {
+                    agent_type, project_path: &project_path, work_dir: None,
+                    prompt: &prompt, tokens: &tokens, full_access: fa,
+                    skill_ids: &orch_skill_ids, directive_ids: &orch_directive_ids, profile_ids: &orch_profile_ids,
+                }).await {
                     Ok(mut process) => {
                         let mut full_response = String::new();
                         let mut orch_stream_tokens: u64 = 0;
@@ -629,11 +698,13 @@ pub async fn orchestrate(
                                 match runner::parse_claude_stream_line(&line) {
                                     runner::StreamJsonEvent::Text(text) => {
                                         full_response.push_str(&text);
-                                        let chunk = serde_json::json!({
-                                            "text": text, "agent": agent_name,
-                                            "agent_type": agent_type, "round": round,
-                                        });
-                                        yield Event::default().event("chunk").data(chunk.to_string());
+                                        if !tx.is_closed() {
+                                            let chunk = serde_json::json!({
+                                                "text": text, "agent": agent_name,
+                                                "agent_type": agent_type, "round": round,
+                                            });
+                                            emit!(AgentStreamEvent::Chunk { data: chunk });
+                                        }
                                     }
                                     runner::StreamJsonEvent::Usage { input_tokens, output_tokens } => {
                                         orch_stream_tokens = orch_stream_tokens.max(input_tokens + output_tokens);
@@ -643,11 +714,13 @@ pub async fn orchestrate(
                             } else {
                                 let nl = if full_response.is_empty() { "" } else { "\n" };
                                 full_response.push_str(&format!("{}{}", nl, line));
-                                let chunk = serde_json::json!({
-                                    "text": format!("{}{}", nl, line), "agent": agent_name,
-                                    "agent_type": agent_type, "round": round,
-                                });
-                                yield Event::default().event("chunk").data(chunk.to_string());
+                                if !tx.is_closed() {
+                                    let chunk = serde_json::json!({
+                                        "text": format!("{}{}", nl, line), "agent": agent_name,
+                                        "agent_type": agent_type, "round": round,
+                                    });
+                                    emit!(AgentStreamEvent::Chunk { data: chunk });
+                                }
                             }
                         }
 
@@ -667,7 +740,6 @@ pub async fn orchestrate(
                             full_response = "[No response]".to_string();
                         }
 
-                        // Token usage: stream-json parsed inline, others use parse_token_usage
                         let tokens_used = if orch_stream_tokens > 0 {
                             orch_stream_tokens
                         } else {
@@ -676,7 +748,7 @@ pub async fn orchestrate(
                             count
                         };
 
-                        // Save to DB
+                        // Save to DB — always runs even if client is gone
                         {
                             let msg = DiscussionMessage {
                                 id: Uuid::new_v4().to_string(),
@@ -688,16 +760,14 @@ pub async fn orchestrate(
                                 auth_mode: Some(auth_mode_for(agent_type, &tokens)),
                             };
                             let did = disc_id.clone();
-                            let _ = state_clone.db.with_conn(move |conn| {
+                            let _ = state.db.with_conn(move |conn| {
                                 crate::db::discussions::insert_message(conn, &did, &msg)
                             }).await;
                         }
 
-                        yield Event::default().event("agent_done").data(
-                            serde_json::json!({
-                                "agent": agent_name, "agent_type": agent_type, "round": round,
-                            }).to_string()
-                        );
+                        emit!(AgentStreamEvent::AgentDone { data: serde_json::json!({
+                            "agent": agent_name, "agent_type": agent_type, "round": round,
+                        })});
 
                         this_round.push((agent_name.clone(), full_response));
                     }
@@ -706,12 +776,10 @@ pub async fn orchestrate(
                         let err_text = format!("[Erreur: {}]", e);
                         this_round.push((agent_name.clone(), err_text));
 
-                        yield Event::default().event("agent_done").data(
-                            serde_json::json!({
-                                "agent": agent_name, "agent_type": agent_type,
-                                "round": round, "error": e,
-                            }).to_string()
-                        );
+                        emit!(AgentStreamEvent::AgentDone { data: serde_json::json!({
+                            "agent": agent_name, "agent_type": agent_type,
+                            "round": round, "error": e,
+                        })});
                     }
                 }
             }
@@ -719,9 +787,7 @@ pub async fn orchestrate(
             round_responses.push(this_round);
 
             if round >= 2 {
-                yield Event::default().event("system").data(
-                    serde_json::json!({ "text": format!("Round {} termine. Analyse de la convergence...", round) }).to_string()
-                );
+                emit!(AgentStreamEvent::System { data: serde_json::json!({ "text": format!("Round {} termine. Analyse de la convergence...", round) }) });
             }
         }
 
@@ -729,17 +795,17 @@ pub async fn orchestrate(
         {
             let primary_name = agent_display_name(&primary_agent_type);
 
-            yield Event::default().event("system").data(
-                serde_json::json!({ "text": format!("{} synthetise le debat...", primary_name) }).to_string()
-            );
+            emit!(AgentStreamEvent::System { data: serde_json::json!({ "text": format!("{} synthetise le debat...", primary_name) }) });
 
-            yield Event::default().event("agent_start").data(
-                serde_json::json!({ "agent": primary_name, "agent_type": primary_agent_type, "round": "synthesis" }).to_string()
-            );
+            emit!(AgentStreamEvent::AgentStart { data: serde_json::json!({ "agent": primary_name, "agent_type": primary_agent_type, "round": "synthesis" }) });
 
             let synth_prompt = build_synthesis_prompt(&original_question, &round_responses, &disc_language);
             let synth_fa = *agent_access.get(&format!("{:?}", primary_agent_type)).unwrap_or(&false);
-            match runner::start_agent_with_skills(&primary_agent_type, &project_path, &synth_prompt, &tokens, synth_fa, &orch_skill_ids).await {
+            match runner::start_agent_with_config(runner::AgentStartConfig {
+                agent_type: &primary_agent_type, project_path: &project_path, work_dir: None,
+                prompt: &synth_prompt, tokens: &tokens, full_access: synth_fa,
+                skill_ids: &orch_skill_ids, directive_ids: &orch_directive_ids, profile_ids: &orch_profile_ids,
+            }).await {
                 Ok(mut process) => {
                     let mut full_response = String::new();
                     let mut synth_stream_tokens: u64 = 0;
@@ -750,11 +816,13 @@ pub async fn orchestrate(
                             match runner::parse_claude_stream_line(&line) {
                                 runner::StreamJsonEvent::Text(text) => {
                                     full_response.push_str(&text);
-                                    let chunk = serde_json::json!({
-                                        "text": text, "agent": primary_name,
-                                        "agent_type": primary_agent_type, "round": "synthesis",
-                                    });
-                                    yield Event::default().event("chunk").data(chunk.to_string());
+                                    if !tx.is_closed() {
+                                        let chunk = serde_json::json!({
+                                            "text": text, "agent": primary_name,
+                                            "agent_type": primary_agent_type, "round": "synthesis",
+                                        });
+                                        emit!(AgentStreamEvent::Chunk { data: chunk });
+                                    }
                                 }
                                 runner::StreamJsonEvent::Usage { input_tokens, output_tokens } => {
                                     synth_stream_tokens = synth_stream_tokens.max(input_tokens + output_tokens);
@@ -764,18 +832,19 @@ pub async fn orchestrate(
                         } else {
                             let nl = if full_response.is_empty() { "" } else { "\n" };
                             full_response.push_str(&format!("{}{}", nl, line));
-                            let chunk = serde_json::json!({
-                                "text": format!("{}{}", nl, line), "agent": primary_name,
-                                "agent_type": primary_agent_type, "round": "synthesis",
-                            });
-                            yield Event::default().event("chunk").data(chunk.to_string());
+                            if !tx.is_closed() {
+                                let chunk = serde_json::json!({
+                                    "text": format!("{}{}", nl, line), "agent": primary_name,
+                                    "agent_type": primary_agent_type, "round": "synthesis",
+                                });
+                                emit!(AgentStreamEvent::Chunk { data: chunk });
+                            }
                         }
                     }
                     let _ = process.child.wait().await;
                     process.fix_ownership();
                     let synth_stderr = process.captured_stderr();
 
-                    // Token usage: stream-json parsed inline, others use parse_token_usage
                     let tokens_used = if synth_stream_tokens > 0 {
                         synth_stream_tokens
                     } else {
@@ -784,7 +853,7 @@ pub async fn orchestrate(
                         count
                     };
 
-                    // Save synthesis to DB
+                    // Save synthesis to DB — always runs even if client is gone
                     {
                         let msg = DiscussionMessage {
                             id: Uuid::new_v4().to_string(),
@@ -796,27 +865,58 @@ pub async fn orchestrate(
                             auth_mode: Some(auth_mode_for(&primary_agent_type, &tokens)),
                         };
                         let did = disc_id.clone();
-                        let _ = state_clone.db.with_conn(move |conn| {
+                        let _ = state.db.with_conn(move |conn| {
                             crate::db::discussions::insert_message(conn, &did, &msg)
                         }).await;
                     }
 
-                    yield Event::default().event("agent_done").data(
-                        serde_json::json!({ "agent": primary_name, "round": "synthesis" }).to_string()
-                    );
+                    emit!(AgentStreamEvent::AgentDone { data: serde_json::json!({ "agent": primary_name, "round": "synthesis" }) });
                 }
                 Err(e) => {
                     tracing::error!("Synthesis failed: {}", e);
-                    yield Event::default().event("error").data(
-                        serde_json::json!({ "error": format!("Synthesis failed: {}", e) }).to_string()
-                    );
+                    emit!(AgentStreamEvent::Error { data: serde_json::json!({ "error": format!("Synthesis failed: {}", e) }) });
                 }
             }
         }
 
-        yield Event::default().event("done").data(
-            serde_json::json!({ "status": "complete" }).to_string()
-        );
+        emit!(AgentStreamEvent::Done { data: serde_json::json!({ "status": "complete" }) });
+    });
+
+    // Thin SSE reader — just maps channel events to SSE
+    let stream: SseStream = Box::pin(async_stream::try_stream! {
+        while let Some(evt) = rx.recv().await {
+            match evt {
+                AgentStreamEvent::Start => {
+                    yield Event::default().event("start").data("{}");
+                }
+                AgentStreamEvent::Meta { auth_mode } => {
+                    yield Event::default().event("meta").data(
+                        serde_json::json!({ "auth_mode": auth_mode }).to_string()
+                    );
+                }
+                AgentStreamEvent::Chunk { data } => {
+                    yield Event::default().event("chunk").data(data.to_string());
+                }
+                AgentStreamEvent::Done { data } => {
+                    yield Event::default().event("done").data(data.to_string());
+                }
+                AgentStreamEvent::Error { data } => {
+                    yield Event::default().event("error").data(data.to_string());
+                }
+                AgentStreamEvent::System { data } => {
+                    yield Event::default().event("system").data(data.to_string());
+                }
+                AgentStreamEvent::Round { data } => {
+                    yield Event::default().event("round").data(data.to_string());
+                }
+                AgentStreamEvent::AgentStart { data } => {
+                    yield Event::default().event("agent_start").data(data.to_string());
+                }
+                AgentStreamEvent::AgentDone { data } => {
+                    yield Event::default().event("agent_done").data(data.to_string());
+                }
+            }
+        }
     });
 
     Sse::new(stream)
@@ -852,8 +952,8 @@ fn smart_truncate(text: &str, max_len: usize) -> String {
     }
     let slice = &text[..max_len];
     // Try to cut at last sentence end
-    if let Some(pos) = slice.rfind(|c| c == '.' || c == '!' || c == '?') {
-        return format!("{}", &text[..=pos]);
+    if let Some(pos) = slice.rfind(['.', '!', '?']) {
+        return text[..=pos].to_string();
     }
     // Fall back to last word boundary
     if let Some(pos) = slice.rfind(' ') {
@@ -862,31 +962,33 @@ fn smart_truncate(text: &str, max_len: usize) -> String {
     format!("{}…", slice)
 }
 
-fn build_orchestration_prompt(
-    question: &str,
-    current_agent: &AgentType,
-    all_agents: &[String],
-    previous_rounds: &[Vec<(String, String)>],
+struct OrchestrationContext<'a> {
+    question: &'a str,
+    current_agent: &'a AgentType,
+    all_agents: &'a [String],
+    previous_rounds: &'a [Vec<(String, String)>],
     round: u32,
     max_rounds: u32,
-    lang: &str,
-    conversation_context: &str,
-) -> String {
-    let agent_name = agent_display_name(current_agent);
+    lang: &'a str,
+    conversation_context: &'a str,
+}
+
+fn build_orchestration_prompt(ctx: &OrchestrationContext) -> String {
+    let agent_name = agent_display_name(ctx.current_agent);
 
     // Conversation context section (prior exchanges before the debated question)
-    let conv_section = if conversation_context.is_empty() {
+    let conv_section = if ctx.conversation_context.is_empty() {
         String::new()
     } else {
-        match lang {
-            "fr" => format!("Contexte de la conversation precedente (ne pas repeter) :\n\n{}\n\n", conversation_context),
-            "es" => format!("Contexto de la conversacion anterior (no repetir) :\n\n{}\n\n", conversation_context),
-            _ => format!("Previous conversation context (do not repeat) :\n\n{}\n\n", conversation_context),
+        match ctx.lang {
+            "fr" => format!("Contexte de la conversation precedente (ne pas repeter) :\n\n{}\n\n", ctx.conversation_context),
+            "es" => format!("Contexto de la conversacion anterior (no repetir) :\n\n{}\n\n", ctx.conversation_context),
+            _ => format!("Previous conversation context (do not repeat) :\n\n{}\n\n", ctx.conversation_context),
         }
     };
 
-    if round == 1 {
-        match lang {
+    if ctx.round == 1 {
+        match ctx.lang {
             "fr" => format!(
                 "Tu es {} dans un debat technique entre agents IA ({}).\n\
                 {}\
@@ -895,7 +997,7 @@ fn build_orchestration_prompt(
                 Concentre-toi sur ton expertise specifique.\n\
                 Reponds en francais.\n\n\
                 Question : {}",
-                agent_name, all_agents.join(", "), conv_section, question
+                agent_name, ctx.all_agents.join(", "), conv_section, ctx.question
             ),
             "es" => format!(
                 "Eres {} en un debate tecnico entre agentes IA ({}).\n\
@@ -904,7 +1006,7 @@ fn build_orchestration_prompt(
                 Se conciso y preciso (max 200 palabras). NO repitas la pregunta.\n\
                 Responde en espanol.\n\n\
                 Pregunta: {}",
-                agent_name, all_agents.join(", "), conv_section, question
+                agent_name, ctx.all_agents.join(", "), conv_section, ctx.question
             ),
             _ => format!(
                 "You are {} in a technical debate between AI agents ({}).\n\
@@ -914,42 +1016,42 @@ fn build_orchestration_prompt(
                 Focus on your specific expertise and what you uniquely bring.\n\
                 Respond in English.\n\n\
                 Question: {}",
-                agent_name, all_agents.join(", "), conv_section, question
+                agent_name, ctx.all_agents.join(", "), conv_section, ctx.question
             ),
         }
     } else {
-        let mut ctx = match lang {
+        let mut prompt = match ctx.lang {
             "fr" => format!(
                 "Tu es {} au round {}/{} d'un debat technique ({}).\n\
                 Voici les echanges precedents :\n\n",
-                agent_name, round, max_rounds, all_agents.join(", ")
+                agent_name, ctx.round, ctx.max_rounds, ctx.all_agents.join(", ")
             ),
             "es" => format!(
                 "Eres {} en la ronda {}/{} de un debate tecnico ({}).\n\
                 Intercambios anteriores:\n\n",
-                agent_name, round, max_rounds, all_agents.join(", ")
+                agent_name, ctx.round, ctx.max_rounds, ctx.all_agents.join(", ")
             ),
             _ => format!(
                 "You are {} in round {}/{} of a technical debate ({}).\n\
                 Here are the previous exchanges:\n\n",
-                agent_name, round, max_rounds, all_agents.join(", ")
+                agent_name, ctx.round, ctx.max_rounds, ctx.all_agents.join(", ")
             ),
         };
 
-        if !conversation_context.is_empty() {
-            ctx.push_str(&conv_section);
+        if !ctx.conversation_context.is_empty() {
+            prompt.push_str(&conv_section);
         }
 
-        for (r_idx, round_data) in previous_rounds.iter().enumerate() {
-            ctx.push_str(&format!("--- Round {} ---\n", r_idx + 1));
+        for (r_idx, round_data) in ctx.previous_rounds.iter().enumerate() {
+            prompt.push_str(&format!("--- Round {} ---\n", r_idx + 1));
             for (name, response) in round_data {
                 let truncated = smart_truncate(response, 500);
-                ctx.push_str(&format!("{}: {}\n\n", name, truncated));
+                prompt.push_str(&format!("{}: {}\n\n", name, truncated));
             }
         }
 
-        match lang {
-            "fr" => ctx.push_str(&format!(
+        match ctx.lang {
+            "fr" => prompt.push_str(&format!(
                 "Question originale : {}\n\n\
                 REGLES IMPORTANTES :\n\
                 - Ne repete PAS ce que les autres ont dit. Ne resume PAS les rounds precedents.\n\
@@ -958,9 +1060,9 @@ fn build_orchestration_prompt(
                 - Si c'est le round {}/{}, donne ta position FINALE en 1-2 phrases.\n\
                 - Max 150 mots.\n\
                 Reponds en francais.",
-                question, round, max_rounds
+                ctx.question, ctx.round, ctx.max_rounds
             )),
-            "es" => ctx.push_str(&format!(
+            "es" => prompt.push_str(&format!(
                 "Pregunta original: {}\n\n\
                 REGLAS IMPORTANTES:\n\
                 - NO repitas lo que otros dijeron. NO resumas rondas anteriores.\n\
@@ -969,9 +1071,9 @@ fn build_orchestration_prompt(
                 - Si es la ronda {}/{}, da tu posicion FINAL en 1-2 frases.\n\
                 - Max 150 palabras.\n\
                 Responde en espanol.",
-                question, round, max_rounds
+                ctx.question, ctx.round, ctx.max_rounds
             )),
-            _ => ctx.push_str(&format!(
+            _ => prompt.push_str(&format!(
                 "Original question: {}\n\n\
                 IMPORTANT RULES:\n\
                 - Do NOT repeat what others said. Do NOT summarize previous rounds.\n\
@@ -980,10 +1082,10 @@ fn build_orchestration_prompt(
                 - If this is round {}/{}, give your FINAL position in 1-2 sentences.\n\
                 - Max 150 words.\n\
                 Respond in English.",
-                question, round, max_rounds
+                ctx.question, ctx.round, ctx.max_rounds
             )),
         }
-        ctx
+        prompt
     }
 }
 

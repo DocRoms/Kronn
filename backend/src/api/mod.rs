@@ -6,3 +6,5 @@ pub mod discussions;
 pub mod workflows;
 pub mod stats;
 pub mod skills;
+pub mod profiles;
+pub mod directives;

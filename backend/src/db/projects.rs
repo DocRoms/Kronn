@@ -9,7 +9,7 @@ use crate::models::*;
 pub fn list_projects(conn: &Connection) -> Result<Vec<Project>> {
     let mut stmt = conn.prepare(
         "SELECT id, name, path, repo_url, token_override_json, ai_config_json,
-                created_at, updated_at, default_skill_ids_json
+                created_at, updated_at, default_skill_ids_json, default_profile_id
          FROM projects ORDER BY name"
     )?;
 
@@ -31,6 +31,7 @@ pub fn list_projects(conn: &Connection) -> Result<Vec<Project>> {
             audit_status: AiAuditStatus::default(), // enriched by API layer
             ai_todo_count: 0,  // enriched by API layer
             default_skill_ids: serde_json::from_str(&skill_ids_str).unwrap_or_default(),
+            default_profile_id: row.get(9)?,
             created_at: parse_dt(row.get::<_, String>(6)?),
             updated_at: parse_dt(row.get::<_, String>(7)?),
         }))
@@ -44,7 +45,7 @@ pub fn list_projects(conn: &Connection) -> Result<Vec<Project>> {
 pub fn get_project(conn: &Connection, id: &str) -> Result<Option<Project>> {
     let mut stmt = conn.prepare(
         "SELECT id, name, path, repo_url, token_override_json, ai_config_json,
-                created_at, updated_at, default_skill_ids_json
+                created_at, updated_at, default_skill_ids_json, default_profile_id
          FROM projects WHERE id = ?1"
     )?;
 
@@ -65,6 +66,7 @@ pub fn get_project(conn: &Connection, id: &str) -> Result<Option<Project>> {
             audit_status: AiAuditStatus::default(),
             ai_todo_count: 0,
             default_skill_ids: serde_json::from_str(&skill_ids_str).unwrap_or_default(),
+            default_profile_id: row.get(9)?,
             created_at: parse_dt(row.get::<_, String>(6)?),
             updated_at: parse_dt(row.get::<_, String>(7)?),
         })
@@ -95,7 +97,7 @@ pub fn insert_project(conn: &Connection, project: &Project) -> Result<()> {
             project.name,
             project.path,
             project.repo_url,
-            project.token_override.as_ref().map(|t| serde_json::to_string(t)).transpose()?,
+            project.token_override.as_ref().map(serde_json::to_string).transpose()?,
             serde_json::to_string(&project.ai_config)?,
             project.created_at.to_rfc3339(),
             project.updated_at.to_rfc3339(),
@@ -132,6 +134,14 @@ pub fn update_project_default_skills(conn: &Connection, id: &str, skill_ids: &[S
     let affected = conn.execute(
         "UPDATE projects SET default_skill_ids_json = ?1, updated_at = ?2 WHERE id = ?3",
         params![serde_json::to_string(skill_ids)?, Utc::now().to_rfc3339(), id],
+    )?;
+    Ok(affected > 0)
+}
+
+pub fn update_project_default_profile(conn: &Connection, id: &str, profile_id: Option<&str>) -> Result<bool> {
+    let affected = conn.execute(
+        "UPDATE projects SET default_profile_id = ?1, updated_at = ?2 WHERE id = ?3",
+        params![profile_id, Utc::now().to_rfc3339(), id],
     )?;
     Ok(affected > 0)
 }

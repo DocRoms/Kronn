@@ -38,16 +38,42 @@ RESET  := \033[0m
 	@echo "KRONN_HOST_GID=$$(id -g)" >> .env
 	@echo "UID=$$(id -u)" >> .env
 	@echo "GID=$$(id -g)" >> .env
+	@# Auto-detect repos dir = parent of Kronn install dir
+	@repos_dir=$$(cd "$(CURDIR)/.." && pwd); \
+	repos_rel=$${repos_dir#$$HOME/}; \
+	echo "KRONN_REPOS_DIR=$$repos_dir" >> .env; \
+	echo "KRONN_REPOS_REL=$$repos_rel" >> .env; \
+	echo "$(CYAN)  Repos dir: $$repos_dir (rw mount)$(RESET)"
+	@echo "# Add extra repo dirs (colon-separated) for rw access:" >> .env
+	@echo "# KRONN_EXTRA_REPOS=$$HOME/Desktop/projects:$$HOME/Work" >> .env
+
+## Generate docker-compose.override.yml for extra repo dirs (KRONN_EXTRA_REPOS)
+.PHONY: _gen-override
+_gen-override:
+	@. ./.env 2>/dev/null; \
+	if [ -n "$$KRONN_EXTRA_REPOS" ]; then \
+		echo "# Auto-generated — extra rw mounts from KRONN_EXTRA_REPOS" > docker-compose.override.yml; \
+		echo "services:" >> docker-compose.override.yml; \
+		echo "  backend:" >> docker-compose.override.yml; \
+		echo "    volumes:" >> docker-compose.override.yml; \
+		IFS=':'; for dir in $$KRONN_EXTRA_REPOS; do \
+			rel=$${dir#$$HOME/}; \
+			echo "      - $$dir:/host-home/$$rel:rw" >> docker-compose.override.yml; \
+			echo "$(CYAN)  Extra rw mount: $$dir$(RESET)"; \
+		done; \
+	elif [ -f docker-compose.override.yml ]; then \
+		rm -f docker-compose.override.yml; \
+	fi
 
 ## Start everything (Docker, release build — slow first time, fast after)
-start: .env
+start: .env _gen-override
 	@echo "$(GREEN)▸ Building $(APP_NAME)...$(RESET)"
 	@$(DOCKER_COMP) build
 	@echo "$(GREEN)▸ Starting services...$(RESET)"
 	@$(DOCKER_COMP) up -d
 
 ## Start with fast build (no LTO — ~4x faster rebuild, slightly larger binary)
-start-fast: .env
+start-fast: .env _gen-override
 	@echo "$(GREEN)▸ Building $(APP_NAME) (fast profile)...$(RESET)"
 	@CARGO_PROFILE=fast $(DOCKER_COMP) build
 	@echo "$(GREEN)▸ Starting services...$(RESET)"
@@ -83,6 +109,7 @@ clean:
 	@echo "$(YELLOW)▸ Cleaning up...$(RESET)"
 	@$(DOCKER_COMP) down -v --remove-orphans
 	@rm -rf backend/target frontend/node_modules frontend/dist
+	@rm -f docker-compose.override.yml
 
 ## Production build (no Docker)
 build:

@@ -10,7 +10,7 @@ services:
     volumes:
       - kronn-data:/data
       - ${HOME}:/host-home:ro
-      - ${KRONN_REPOS_DIR:-${HOME}/Repositories}:/host-home/Repositories:rw  # rw for .mcp.json writes
+      - ${KRONN_REPOS_DIR:-${HOME}/Repositories}:/host-home/${KRONN_REPOS_REL:-Repositories}:rw  # rw for agent writes
       - ${KRONN_GLOBAL_BIN:-/usr/local/bin}:/host-bin/global:ro
       - ${HOME}/.local/bin:/host-bin/local:ro
       - ${HOME}/.local/share:/host-home/.local/share:ro  # Symlink targets (claude, vibe)
@@ -40,9 +40,11 @@ services:
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
       - MISTRAL_API_KEY=${MISTRAL_API_KEY:-}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GH_TOKEN=${GH_TOKEN:-${GITHUB_TOKEN:-}}
       - RUST_LOG=kronn=debug,tower_http=debug
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3140/api/setup/status"]
+      test: ["CMD", "curl", "-f", "http://localhost:3140/api/health"]
       interval: 10s
       timeout: 3s
       retries: 3

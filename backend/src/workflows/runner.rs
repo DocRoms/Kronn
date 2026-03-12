@@ -130,6 +130,7 @@ pub async fn execute_run(
         let full_access = agents_config.full_access_for(&step.agent);
         let outcome: StepOutcome = execute_step(
             step,
+            &project_path,
             &work_dir,
             tokens_config,
             full_access,

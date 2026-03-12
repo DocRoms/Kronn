@@ -45,6 +45,21 @@ vi.mock('../../lib/api', () => ({
   },
   projects: {
     setDefaultSkills: vi.fn().mockResolvedValue(true),
+    setDefaultProfile: vi.fn().mockResolvedValue(true),
+  },
+  profiles: {
+    list: vi.fn().mockResolvedValue([]),
+    get: vi.fn(),
+    create: vi.fn(),
+    update: vi.fn(),
+    delete: vi.fn(),
+    updatePersonaName: vi.fn(),
+  },
+  directives: {
+    list: vi.fn().mockResolvedValue([]),
+    create: vi.fn(),
+    update: vi.fn(),
+    delete: vi.fn(),
   },
 }));
 
