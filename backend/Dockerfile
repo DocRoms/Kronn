@@ -41,6 +41,7 @@ RUN groupadd -g ${APP_GID} kronn && useradd -u ${APP_UID} -g kronn -m kronn
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates git curl nodejs npm python3 python3-pip \
+    make gh \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv as root, then make available to kronn user

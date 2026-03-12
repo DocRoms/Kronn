@@ -39,6 +39,12 @@ vi.mock('../../lib/api', () => ({
   skills: {
     list: vi.fn().mockResolvedValue([]),
   },
+  profiles: {
+    list: vi.fn().mockResolvedValue([]),
+  },
+  workflows: {
+    list: vi.fn().mockResolvedValue([]),
+  },
 }));
 
 import { discussions as discussionsApi } from '../../lib/api';
@@ -64,6 +70,11 @@ const wrap = async (ui: React.ReactElement) => {
   return result!;
 };
 
+/**
+ * Simulates a discussion as returned by the list endpoint:
+ * messages is empty, message_count has the real count.
+ * This matches the real backend behavior (list doesn't load messages).
+ */
 const makeDiscussion = (id: string, msgCount: number): Discussion => ({
   id,
   project_id: null,
@@ -71,15 +82,8 @@ const makeDiscussion = (id: string, msgCount: number): Discussion => ({
   agent: 'ClaudeCode',
   language: 'fr',
   participants: ['ClaudeCode'],
-  messages: Array.from({ length: msgCount }, (_, i) => ({
-    id: `msg-${id}-${i}`,
-    role: i % 2 === 0 ? 'User' as const : 'Agent' as const,
-    content: `Message ${i}`,
-    agent_type: i % 2 === 0 ? null : 'ClaudeCode' as const,
-    timestamp: '2026-01-01T00:00:00Z',
-    tokens_used: 0,
-    auth_mode: null,
-  })),
+  messages: [],
+  message_count: msgCount,
   archived: false,
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',

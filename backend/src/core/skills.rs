@@ -1,5 +1,8 @@
 //! Skills loader — reads builtin (embedded) and custom skills from disk.
 //!
+//! Skills represent WHAT domain expertise the agent has (multi-select).
+//! Categories: Language, Domain, Business.
+//!
 //! Builtin skills are embedded at compile time from `src/skills/*.md`.
 //! Custom skills live in `~/.config/kronn/skills/` as Markdown files with YAML frontmatter.
 
@@ -15,24 +18,28 @@ struct BuiltinSkill {
 }
 
 const BUILTIN_SKILLS: &[BuiltinSkill] = &[
-    BuiltinSkill { id: "token-saver", content: include_str!("../skills/token-saver.md") },
-    BuiltinSkill { id: "typescript-dev", content: include_str!("../skills/typescript-dev.md") },
-    BuiltinSkill { id: "rust-dev", content: include_str!("../skills/rust-dev.md") },
-    BuiltinSkill { id: "security-auditor", content: include_str!("../skills/security-auditor.md") },
-    BuiltinSkill { id: "product-owner", content: include_str!("../skills/product-owner.md") },
-    BuiltinSkill { id: "devils-advocate", content: include_str!("../skills/devils-advocate.md") },
-    BuiltinSkill { id: "qa-engineer", content: include_str!("../skills/qa-engineer.md") },
-    BuiltinSkill { id: "devops-expert", content: include_str!("../skills/devops-expert.md") },
-    BuiltinSkill { id: "seo-expert", content: include_str!("../skills/seo-expert.md") },
-    BuiltinSkill { id: "green-it-expert", content: include_str!("../skills/green-it-expert.md") },
-    BuiltinSkill { id: "data-engineer", content: include_str!("../skills/data-engineer.md") },
-    BuiltinSkill { id: "tech-lead", content: include_str!("../skills/tech-lead.md") },
+    // Language
+    BuiltinSkill { id: "rust", content: include_str!("../skills/rust.md") },
+    BuiltinSkill { id: "typescript", content: include_str!("../skills/typescript.md") },
+    BuiltinSkill { id: "python", content: include_str!("../skills/python.md") },
+    BuiltinSkill { id: "go", content: include_str!("../skills/go.md") },
+    BuiltinSkill { id: "php", content: include_str!("../skills/php.md") },
+    // Domain
+    BuiltinSkill { id: "security", content: include_str!("../skills/security.md") },
+    BuiltinSkill { id: "devops", content: include_str!("../skills/devops.md") },
+    BuiltinSkill { id: "data-engineering", content: include_str!("../skills/data-engineering.md") },
+    BuiltinSkill { id: "database", content: include_str!("../skills/database.md") },
+    // Business
+    BuiltinSkill { id: "seo", content: include_str!("../skills/seo.md") },
+    BuiltinSkill { id: "web-performance", content: include_str!("../skills/web-performance.md") },
+    BuiltinSkill { id: "green-it", content: include_str!("../skills/green-it.md") },
+    BuiltinSkill { id: "accessibility", content: include_str!("../skills/accessibility.md") },
+    BuiltinSkill { id: "gdpr", content: include_str!("../skills/gdpr.md") },
 ];
 
 // ─── Frontmatter parsing ────────────────────────────────────────────────────
 
 fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Skill> {
-    // Split frontmatter from content
     let trimmed = raw.trim_start();
     if !trimmed.starts_with("---") {
         tracing::warn!("Skill '{}' missing YAML frontmatter", id);
@@ -44,34 +51,23 @@ fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Skill> 
     let yaml_str = &after_first[..end_pos];
     let body = after_first[end_pos + 4..].trim().to_string();
 
-    // Parse YAML frontmatter manually (avoid adding a full YAML dep)
     let mut name = String::new();
-    let mut description = String::new();
     let mut icon = String::new();
-    let mut category = SkillCategory::Meta;
-    let mut conflicts = Vec::new();
+    let mut category = SkillCategory::Domain;
 
     for line in yaml_str.lines() {
         let line = line.trim();
         if let Some(val) = line.strip_prefix("name:") {
             name = val.trim().to_string();
-        } else if let Some(val) = line.strip_prefix("description:") {
-            description = val.trim().to_string();
         } else if let Some(val) = line.strip_prefix("icon:") {
             icon = val.trim().to_string();
         } else if let Some(val) = line.strip_prefix("category:") {
             category = match val.trim() {
-                "Technical" => SkillCategory::Technical,
-                "Business" => SkillCategory::Business,
-                _ => SkillCategory::Meta,
+                "language" => SkillCategory::Language,
+                "domain" => SkillCategory::Domain,
+                "business" => SkillCategory::Business,
+                _ => SkillCategory::Domain,
             };
-        } else if let Some(val) = line.strip_prefix("conflicts:") {
-            let val = val.trim();
-            if val != "[]" && !val.is_empty() {
-                // Simple inline array: [a, b, c]
-                let inner = val.trim_start_matches('[').trim_end_matches(']');
-                conflicts = inner.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
-            }
         }
     }
 
@@ -83,12 +79,10 @@ fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Skill> 
     Some(Skill {
         id: id.to_string(),
         name,
-        description,
         icon,
         category,
         content: body,
         is_builtin,
-        conflicts,
     })
 }
 
@@ -104,14 +98,12 @@ fn custom_skills_dir() -> Option<PathBuf> {
 pub fn list_all_skills() -> Vec<Skill> {
     let mut skills = Vec::new();
 
-    // Load builtins
     for builtin in BUILTIN_SKILLS {
         if let Some(skill) = parse_skill_markdown(builtin.id, builtin.content, true) {
             skills.push(skill);
         }
     }
 
-    // Load custom skills
     if let Some(dir) = custom_skills_dir() {
         if dir.is_dir() {
             if let Ok(entries) = std::fs::read_dir(&dir) {
@@ -162,7 +154,7 @@ pub fn build_skills_prompt(skill_ids: &[String]) -> String {
 }
 
 /// Save a custom skill to disk. Returns the generated ID.
-pub fn save_custom_skill(name: &str, description: &str, icon: &str, category: &SkillCategory, content: &str) -> Result<String, String> {
+pub fn save_custom_skill(name: &str, icon: &str, category: &SkillCategory, content: &str) -> Result<String, String> {
     let dir = custom_skills_dir().ok_or("Cannot determine config directory")?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot create skills dir: {}", e))?;
 
@@ -175,14 +167,14 @@ pub fn save_custom_skill(name: &str, description: &str, icon: &str, category: &S
 
     let id = format!("custom-{}", slug);
     let cat_str = match category {
-        SkillCategory::Technical => "Technical",
-        SkillCategory::Business => "Business",
-        SkillCategory::Meta => "Meta",
+        SkillCategory::Language => "language",
+        SkillCategory::Domain => "domain",
+        SkillCategory::Business => "business",
     };
 
     let file_content = format!(
-        "---\nname: {}\ndescription: {}\nicon: {}\ncategory: {}\nconflicts: []\n---\n{}",
-        name, description, icon, cat_str, content
+        "---\nname: {}\ncategory: {}\nicon: {}\nbuiltin: false\n---\n{}",
+        name, cat_str, icon, content
     );
 
     let path = dir.join(format!("{}.md", slug));
@@ -212,19 +204,17 @@ pub fn delete_custom_skill(id: &str) -> Result<bool, String> {
 mod tests {
     use super::*;
 
-    // ── Builtin skills loading ──────────────────────────────────────────────
-
     #[test]
     fn parse_builtin_skills() {
         let skills = list_all_skills();
-        assert!(skills.len() >= 12, "Expected at least 12 builtin skills, got {}", skills.len());
+        assert!(skills.len() >= 14, "Expected at least 14 builtin skills, got {}", skills.len());
 
-        let token_saver = skills.iter().find(|s| s.id == "token-saver").unwrap();
-        assert_eq!(token_saver.name, "Token Saver");
-        assert_eq!(token_saver.icon, "Zap");
-        assert_eq!(token_saver.category, SkillCategory::Meta);
-        assert!(token_saver.is_builtin);
-        assert!(!token_saver.content.is_empty());
+        let rust = skills.iter().find(|s| s.id == "rust").unwrap();
+        assert_eq!(rust.name, "Rust");
+        assert_eq!(rust.icon, "🦀");
+        assert_eq!(rust.category, SkillCategory::Language);
+        assert!(rust.is_builtin);
+        assert!(!rust.content.is_empty());
     }
 
     #[test]
@@ -242,7 +232,6 @@ mod tests {
         let skills = list_all_skills();
         for skill in &skills {
             assert!(!skill.name.is_empty(), "Skill '{}' has empty name", skill.id);
-            assert!(!skill.description.is_empty(), "Skill '{}' has empty description", skill.id);
             assert!(!skill.icon.is_empty(), "Skill '{}' has empty icon", skill.id);
             assert!(!skill.content.is_empty(), "Skill '{}' has empty content", skill.id);
         }
@@ -261,18 +250,16 @@ mod tests {
     #[test]
     fn all_three_categories_represented() {
         let skills = list_all_skills();
-        assert!(skills.iter().any(|s| s.category == SkillCategory::Technical));
-        assert!(skills.iter().any(|s| s.category == SkillCategory::Business));
-        assert!(skills.iter().any(|s| s.category == SkillCategory::Meta));
+        assert!(skills.iter().any(|s| s.category == SkillCategory::Language), "No language skills");
+        assert!(skills.iter().any(|s| s.category == SkillCategory::Domain), "No domain skills");
+        assert!(skills.iter().any(|s| s.category == SkillCategory::Business), "No business skills");
     }
-
-    // ── get_skill / get_skills_by_ids ───────────────────────────────────────
 
     #[test]
     fn get_skill_found() {
-        let skill = get_skill("rust-dev");
+        let skill = get_skill("typescript");
         assert!(skill.is_some());
-        assert_eq!(skill.unwrap().name, "Rust Dev");
+        assert_eq!(skill.unwrap().name, "TypeScript");
     }
 
     #[test]
@@ -283,18 +270,18 @@ mod tests {
 
     #[test]
     fn get_skills_by_ids_preserves_order() {
-        let skills = get_skills_by_ids(&["rust-dev".into(), "token-saver".into()]);
+        let skills = get_skills_by_ids(&["python".into(), "rust".into()]);
         assert_eq!(skills.len(), 2);
-        assert_eq!(skills[0].id, "rust-dev");
-        assert_eq!(skills[1].id, "token-saver");
+        assert_eq!(skills[0].id, "python");
+        assert_eq!(skills[1].id, "rust");
     }
 
     #[test]
     fn get_skills_by_ids_skips_unknown() {
-        let skills = get_skills_by_ids(&["token-saver".into(), "nonexistent".into(), "rust-dev".into()]);
+        let skills = get_skills_by_ids(&["rust".into(), "nonexistent".into(), "typescript".into()]);
         assert_eq!(skills.len(), 2);
-        assert_eq!(skills[0].id, "token-saver");
-        assert_eq!(skills[1].id, "rust-dev");
+        assert_eq!(skills[0].id, "rust");
+        assert_eq!(skills[1].id, "typescript");
     }
 
     #[test]
@@ -302,8 +289,6 @@ mod tests {
         let skills = get_skills_by_ids(&[]);
         assert!(skills.is_empty());
     }
-
-    // ── build_skills_prompt ─────────────────────────────────────────────────
 
     #[test]
     fn build_skills_prompt_empty() {
@@ -313,9 +298,9 @@ mod tests {
 
     #[test]
     fn build_skills_prompt_with_ids() {
-        let prompt = build_skills_prompt(&["token-saver".into(), "rust-dev".into()]);
-        assert!(prompt.contains("Token Saver"));
-        assert!(prompt.contains("Rust Dev"));
+        let prompt = build_skills_prompt(&["rust".into(), "typescript".into()]);
+        assert!(prompt.contains("Rust"));
+        assert!(prompt.contains("TypeScript"));
         assert!(prompt.contains("=== Active Skills ==="));
     }
 
@@ -327,46 +312,42 @@ mod tests {
 
     #[test]
     fn build_skills_prompt_single_skill() {
-        let prompt = build_skills_prompt(&["security-auditor".into()]);
-        assert!(prompt.contains("Security Auditor"));
+        let prompt = build_skills_prompt(&["rust".into()]);
+        assert!(prompt.contains("Rust"));
         assert!(prompt.contains("=== Active Skills ==="));
     }
 
-    // ── Frontmatter parsing ─────────────────────────────────────────────────
-
     #[test]
     fn parse_frontmatter_valid() {
-        let raw = "---\nname: Test Skill\ndescription: A test\nicon: Star\ncategory: Technical\nconflicts: []\n---\nDo the thing.";
+        let raw = "---\nname: Test Skill\nicon: ⭐\ncategory: domain\nbuiltin: false\n---\nDo the thing.";
         let skill = parse_skill_markdown("test", raw, false).unwrap();
         assert_eq!(skill.name, "Test Skill");
-        assert_eq!(skill.description, "A test");
-        assert_eq!(skill.icon, "Star");
-        assert_eq!(skill.category, SkillCategory::Technical);
+        assert_eq!(skill.icon, "⭐");
+        assert_eq!(skill.category, SkillCategory::Domain);
         assert_eq!(skill.content, "Do the thing.");
         assert!(!skill.is_builtin);
-        assert!(skill.conflicts.is_empty());
     }
 
     #[test]
-    fn parse_frontmatter_business_category() {
-        let raw = "---\nname: PO\ndescription: d\nicon: I\ncategory: Business\nconflicts: []\n---\ncontent";
-        let skill = parse_skill_markdown("po", raw, true).unwrap();
-        assert_eq!(skill.category, SkillCategory::Business);
+    fn parse_frontmatter_language_category() {
+        let raw = "---\nname: Go\nicon: 🐹\ncategory: language\nbuiltin: true\n---\ncontent";
+        let skill = parse_skill_markdown("go", raw, true).unwrap();
+        assert_eq!(skill.category, SkillCategory::Language);
         assert!(skill.is_builtin);
     }
 
     #[test]
-    fn parse_frontmatter_unknown_category_defaults_meta() {
-        let raw = "---\nname: X\ndescription: d\nicon: I\ncategory: Unknown\nconflicts: []\n---\ncontent";
-        let skill = parse_skill_markdown("x", raw, false).unwrap();
-        assert_eq!(skill.category, SkillCategory::Meta);
+    fn parse_frontmatter_business_category() {
+        let raw = "---\nname: SEO\nicon: 🔎\ncategory: business\nbuiltin: true\n---\ncontent";
+        let skill = parse_skill_markdown("seo", raw, true).unwrap();
+        assert_eq!(skill.category, SkillCategory::Business);
     }
 
     #[test]
-    fn parse_frontmatter_with_conflicts() {
-        let raw = "---\nname: X\ndescription: d\nicon: I\ncategory: Meta\nconflicts: [token-saver, verbose]\n---\ncontent";
+    fn parse_frontmatter_unknown_category_defaults_domain() {
+        let raw = "---\nname: X\nicon: I\ncategory: Unknown\nbuiltin: false\n---\ncontent";
         let skill = parse_skill_markdown("x", raw, false).unwrap();
-        assert_eq!(skill.conflicts, vec!["token-saver", "verbose"]);
+        assert_eq!(skill.category, SkillCategory::Domain);
     }
 
     #[test]
@@ -377,29 +358,19 @@ mod tests {
 
     #[test]
     fn parse_frontmatter_no_name_yields_none() {
-        let raw = "---\ndescription: d\nicon: I\ncategory: Meta\nconflicts: []\n---\ncontent";
+        let raw = "---\nicon: I\ncategory: domain\nbuiltin: false\n---\ncontent";
         assert!(parse_skill_markdown("bad", raw, false).is_none());
     }
 
     #[test]
     fn parse_frontmatter_unclosed_yields_none() {
-        let raw = "---\nname: X\ndescription: d\nicon: I\ncategory: Meta\nconflicts: []\ncontent without closing frontmatter";
+        let raw = "---\nname: X\nicon: I\ncategory: domain\ncontent without closing frontmatter";
         assert!(parse_skill_markdown("bad", raw, false).is_none());
     }
 
     #[test]
-    fn parse_frontmatter_multiline_content() {
-        let raw = "---\nname: Multi\ndescription: d\nicon: I\ncategory: Technical\nconflicts: []\n---\nLine 1\nLine 2\nLine 3";
-        let skill = parse_skill_markdown("multi", raw, false).unwrap();
-        assert!(skill.content.contains("Line 1"));
-        assert!(skill.content.contains("Line 3"));
-    }
-
-    // ── delete_custom_skill validation ──────────────────────────────────────
-
-    #[test]
     fn delete_builtin_skill_rejected() {
-        let result = delete_custom_skill("token-saver");
+        let result = delete_custom_skill("rust");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("builtin"));
     }

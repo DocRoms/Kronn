@@ -7,6 +7,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use tokio::time::{timeout, Duration};
 
+use crate::agents::runner::{self, OutputMode, StreamJsonEvent};
 use crate::models::*;
 
 use super::template::TemplateContext;
@@ -18,9 +19,19 @@ pub struct StepOutcome {
     pub condition_action: Option<ConditionAction>,
 }
 
+/// Output from a single agent run, including token usage.
+struct AgentOutput {
+    text: String,
+    tokens_used: u64,
+}
+
 /// Execute a single workflow step.
+///
+/// - `project_path`: original project path for MCP context resolution
+/// - `work_dir`: agent's working directory (may be a worktree)
 pub async fn execute_step(
     step: &WorkflowStep,
+    project_path: &str,
     work_dir: &str,
     tokens_config: &TokensConfig,
     full_access: bool,
@@ -78,12 +89,12 @@ pub async fn execute_step(
             tokio::time::sleep(delay).await;
         }
 
-        match run_agent_with_timeout(step, work_dir, &prompt, tokens_config, full_access).await {
-            Ok(output) => {
+        match run_agent_with_timeout(step, project_path, work_dir, &prompt, tokens_config, full_access).await {
+            Ok(agent_output) => {
                 let duration_ms = start.elapsed().as_millis() as u64;
 
                 // Evaluate on_result conditions
-                let condition_action = evaluate_conditions(&step.on_result, &output);
+                let condition_action = evaluate_conditions(&step.on_result, &agent_output.text);
 
                 let condition_result = condition_action.as_ref().map(|a| match a {
                     ConditionAction::Stop => "Stop".to_string(),
@@ -95,8 +106,8 @@ pub async fn execute_step(
                     result: StepResult {
                         step_name: step.name.clone(),
                         status: RunStatus::Success,
-                        output,
-                        tokens_used: 0, // TODO: extract from agent output when available
+                        output: agent_output.text,
+                        tokens_used: agent_output.tokens_used,
                         duration_ms,
                         condition_result,
                     },
@@ -125,35 +136,50 @@ pub async fn execute_step(
 }
 
 /// Run an agent with optional stall timeout.
+/// Returns the agent output text and token usage.
+///
+/// - `project_path`: original project path for MCP context resolution
+/// - `work_dir`: agent's working directory (may be a worktree)
 async fn run_agent_with_timeout(
     step: &WorkflowStep,
+    project_path: &str,
     work_dir: &str,
     prompt: &str,
     tokens_config: &TokensConfig,
     full_access: bool,
-) -> Result<String> {
+) -> Result<AgentOutput> {
     let stall_timeout = step.stall_timeout_secs
         .map(Duration::from_secs)
         .unwrap_or(Duration::from_secs(600)); // 10 min default
 
-    let mut agent_process = crate::agents::runner::start_agent_with_skills(
-        &step.agent,
-        work_dir,
+    let mut agent_process = runner::start_agent_with_config(runner::AgentStartConfig {
+        agent_type: &step.agent,
+        project_path,
+        work_dir: Some(work_dir),
         prompt,
-        tokens_config,
+        tokens: tokens_config,
         full_access,
-        &step.skill_ids,
-    ).await.map_err(|e| anyhow::anyhow!(e))?;
+        skill_ids: &step.skill_ids,
+        directive_ids: &step.directive_ids,
+        profile_ids: &step.profile_ids,
+    }).await.map_err(|e| anyhow::anyhow!(e))?;
 
     let mut output = String::new();
-    let is_stream_json = agent_process.output_mode == crate::agents::runner::OutputMode::StreamJson;
+    let is_stream_json = agent_process.output_mode == OutputMode::StreamJson;
+    let mut stream_json_tokens: u64 = 0;
 
     loop {
         match timeout(stall_timeout, agent_process.next_line()).await {
             Ok(Some(line)) => {
                 if is_stream_json {
-                    if let crate::agents::runner::StreamJsonEvent::Text(text) = crate::agents::runner::parse_claude_stream_line(&line) {
-                        output.push_str(&text);
+                    match runner::parse_claude_stream_line(&line) {
+                        StreamJsonEvent::Text(text) => {
+                            output.push_str(&text);
+                        }
+                        StreamJsonEvent::Usage { input_tokens, output_tokens } => {
+                            stream_json_tokens = input_tokens + output_tokens;
+                        }
+                        StreamJsonEvent::Skip => {}
                     }
                 } else {
                     if !output.is_empty() {
@@ -190,7 +216,26 @@ async fn run_agent_with_timeout(
         }
     }
 
-    Ok(output)
+    // Extract token usage — same logic as discussions:
+    // 1. Claude Code: tokens from stream-json events (input + output)
+    // 2. Codex/Kiro/etc: tokens parsed from stderr/stdout after execution
+    let stderr_lines = agent_process.captured_stderr();
+    let tokens_used = if stream_json_tokens > 0 {
+        stream_json_tokens
+    } else {
+        let (cleaned, count) = runner::parse_token_usage(&step.agent, &output, &stderr_lines);
+        if count > 0 {
+            output = cleaned;
+        }
+        count
+    };
+
+    tracing::info!("Step '{}' finished — {} tokens used", step.name, tokens_used);
+
+    Ok(AgentOutput {
+        text: output,
+        tokens_used,
+    })
 }
 
 /// Evaluate on_result conditions against the step output.

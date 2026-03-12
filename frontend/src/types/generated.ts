@@ -261,6 +261,8 @@ export interface WorkflowStep {
   retry?: RetryConfig | null;
   delay_after_secs?: number | null;
   skill_ids?: string[];
+  profile_ids?: string[];
+  directive_ids?: string[];
 }
 
 export type StepMode =
@@ -424,27 +426,74 @@ export interface AgentProjectUsage {
   message_count: number;
 }
 
-// ─── Skills ─────────────────────────────────────────────────────────────────
+// ─── Skills (WHAT — domain expertise, multi-select) ────────────────────────
 
-export type SkillCategory = "Technical" | "Business" | "Meta";
+export type SkillCategory = "Language" | "Domain" | "Business";
 
 export interface Skill {
   id: string;
   name: string;
-  description: string;
   icon: string;
   category: SkillCategory;
+  content: string;
+  is_builtin: boolean;
+}
+
+export interface CreateSkillRequest {
+  name: string;
+  icon: string;
+  category: SkillCategory;
+  content: string;
+}
+
+// ─── Profiles (WHO — persona, multi-select) ────────────────────────────────
+
+export type ProfileCategory = "Technical" | "Business" | "Meta";
+
+export interface AgentProfile {
+  id: string;
+  name: string;
+  persona_name: string;
+  role: string;
+  avatar: string;
+  color: string;
+  category: ProfileCategory;
+  persona_prompt: string;
+  default_engine?: string;
+  is_builtin: boolean;
+}
+
+export interface CreateProfileRequest {
+  name: string;
+  persona_name: string;
+  role: string;
+  avatar: string;
+  color: string;
+  category: ProfileCategory;
+  persona_prompt: string;
+  default_engine?: string;
+}
+
+// ─── Directives (HOW — output behavior, multi-select) ──────────────────────
+
+export type DirectiveCategory = "Output" | "Language";
+
+export interface Directive {
+  id: string;
+  name: string;
+  icon: string;
+  category: DirectiveCategory;
   content: string;
   is_builtin: boolean;
   conflicts?: string[];
 }
 
-export interface CreateSkillRequest {
+export interface CreateDirectiveRequest {
   name: string;
-  description: string;
   icon: string;
-  category: SkillCategory;
+  category: DirectiveCategory;
   content: string;
+  conflicts?: string[];
 }
 
 // ─── Discussions ────────────────────────────────────────────────────────────
@@ -457,7 +506,10 @@ export interface Discussion {
   language: string;
   participants: AgentType[];
   messages: DiscussionMessage[];
+  message_count: number;
   skill_ids?: string[];
+  profile_ids?: string[];
+  directive_ids?: string[];
   archived: boolean;
   created_at: string; // ISO 8601
   updated_at: string;
@@ -524,6 +576,8 @@ export interface CreateDiscussionRequest {
   language?: string;
   initial_prompt: string;
   skill_ids?: string[];
+  profile_ids?: string[];
+  directive_ids?: string[];
 }
 
 export interface SendMessageRequest {
@@ -535,6 +589,8 @@ export interface OrchestrationRequest {
   agents: AgentType[];
   max_rounds?: number;
   skill_ids?: string[];
+  profile_ids?: string[];
+  directive_ids?: string[];
 }
 
 export interface DbInfo {

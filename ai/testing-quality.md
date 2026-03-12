@@ -3,7 +3,7 @@
 ## Rules
 
 - **Quality gate is non-negotiable**: code must compile and build after any change.
-- **All tests must pass**: `npm run test` (frontend, 124+ tests), `cargo test` (backend), `make test-shell` (186 bats tests).
+- **All tests must pass**: `npm run test` (frontend, 146+ tests), `cargo test` (backend), `make test-shell` (186 bats tests).
 - **0 ESLint errors**: `npm run lint` must report 0 errors (warnings are tolerated for existing patterns).
 
 ## Build checks
@@ -15,7 +15,7 @@
 | Rust format | `cargo fmt --check` | Formatting check |
 | TS compile | `cd frontend && npx tsc -b` | Type check |
 | Frontend lint | `cd frontend && npm run lint` | ESLint 10 strict |
-| Frontend tests | `cd frontend && npm test` | Vitest 4 (124+ tests) |
+| Frontend tests | `cd frontend && npm test` | Vitest 4 (146+ tests) |
 | Frontend coverage | `cd frontend && npm run test:coverage` | Vitest + @vitest/coverage-v8 |
 | Frontend build | `cd frontend && npm run build` | Production build (Vite, code-split) |
 | Shell tests | `make test-shell` | bats-core (186 tests) |
@@ -30,7 +30,7 @@
 - **Setup file**: `frontend/src/test/setup.ts`
 - **Node requirement**: >= 23.6.0 (native TS support, latest tooling)
 
-### Test files (14 suites, 124+ tests)
+### Test files (15 suites, 146+ tests)
 
 | File | Tests | Covers |
 |------|-------|--------|

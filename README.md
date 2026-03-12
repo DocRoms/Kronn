@@ -68,22 +68,28 @@ A 3-tier architecture with encrypted secrets:
 Server (type)  →  Config (instance + secrets)  →  Project (N:N)
 ```
 
-**26 built-in servers** organized by category:
+**34 built-in servers** organized by category:
 
 | Category | Servers |
 |----------|---------|
 | Git & Code | GitHub, GitLab, Git (local) |
-| Databases | PostgreSQL, SQLite, Redis, Supabase |
-| Cloud & Infra | Cloudflare, AWS CloudWatch, Docker |
-| Search & Web | Brave Search, Fetch, Puppeteer |
-| Monitoring | Sentry, Google Analytics |
-| Communication | Slack, Resend |
+| Databases | PostgreSQL, SQLite, Redis |
+| BaaS | Supabase |
+| Cloud & Infra | Cloudflare, AWS CloudWatch, Docker, Azure |
+| Search & Web | Brave Search, Fetch, Exa |
+| Browser | Puppeteer, Chrome DevTools, Playwright, Browserbase |
+| Scraping | Firecrawl |
+| Monitoring | Sentry, Grafana |
+| Communication | Slack |
+| Email | Resend |
 | Project Management | Linear, Atlassian |
 | Design | Figma |
 | Payments | Stripe |
 | Knowledge & Docs | Notion, Context7 |
+| AI & Reasoning | Memory, Sequential Thinking |
 | SEO | Ahrefs |
 | Files | Filesystem |
+| Sandbox | E2B |
 
 Key capabilities:
 - **Auto-detection** from existing `.mcp.json` files across projects
@@ -183,6 +189,33 @@ Kronn reads Symphony's `WORKFLOW.md` natively. Existing users can migrate withou
 | Token tracking | No | Per-run, per-step, per-agent |
 </details>
 
+### 🎭 Agent Configuration (3-axis model)
+
+Three independent axes shape how agents behave — all multi-selectable, all available in discussions and workflow steps:
+
+#### Profiles (WHO — persona)
+8 built-in agent profiles with distinct personalities, expertise, and avatars. Each profile has an editable persona name (Kai, Mia, Sam, Noa, Kim, Eve, Max, Zia) — customize even the builtins. When multiple profiles are selected, agents adopt a **collaborative mode**: consider each perspective, identify trade-offs, challenge assumptions.
+
+| Category | Profiles |
+|----------|----------|
+| Technical | Architect (Kai), Tech Lead (Mia), QA Engineer (Sam) |
+| Business | Product Owner (Noa), Scrum Master (Kim), Technical Writer (Eve) |
+| Meta | Devil's Advocate (Max), Mentor (Zia) |
+
+#### Skills (WHAT — domain expertise)
+13 built-in skills + custom skills. Injected into agent prompts as domain knowledge.
+
+| Category | Skills |
+|----------|--------|
+| Language | TypeScript Dev, Rust Dev |
+| Domain | Security Auditor, DevOps Expert, SEO Expert, Green IT Expert, Data Engineer |
+| Business | Product Owner, QA Engineer, Tech Lead |
+
+#### Directives (HOW — output behavior)
+Control output format, language, and verbosity. Conflict detection prevents contradictory directives.
+
+Custom profiles, skills, and directives are stored as Markdown files with YAML frontmatter in `~/.config/kronn/`. Create, edit, and delete from the dashboard.
+
 ### 🔍 AI Audit Pipeline
 
 Generate, review, and validate AI context documentation for any project in 4 steps:
@@ -192,7 +225,7 @@ NoTemplate → TemplateInstalled → Audited → Validated
 ```
 
 1. **Install template** — one-click `ai/` skeleton with redirectors (`CLAUDE.md`, `.cursorrules`, `.windsurfrules`)
-2. **AI audit** — 10-step automated analysis (~20 min, SSE progress bar): project analysis, repo map, coding rules, testing, architecture, glossary, operations, MCP servers, tech debt, final review
+2. **AI audit** — 10-step automated analysis (~20 min, SSE progress bar) with **3 default expert profiles** (Architect + Tech Lead + Mentor) for multi-perspective analysis: project analysis, repo map, coding rules, testing, architecture, glossary, operations, MCP servers, tech debt, final review
 3. **Validation** — dedicated discussion where the AI asks about ambiguities and updates docs after each answer in real-time
 4. **Mark as validated** — injects `<!-- KRONN:VALIDATED:date -->`, project is AI-ready
 
@@ -260,9 +293,12 @@ kronn/
 │   └── src/
 │       ├── main.rs         # Entrypoint, router, AppState
 │       ├── api/            # setup, projects, agents, mcps, workflows, discussions, stats
-│       ├── core/           # config, scanner, registry, mcp_scanner, crypto
+│       ├── core/           # config, scanner, registry, mcp_scanner, crypto, profiles, directives
 │       ├── agents/         # Agent runner (spawns CLIs, streams stdout)
 │       ├── workflows/      # Workflow engine, triggers, steps, tracker adapters
+│       ├── skills/         # 13 built-in skill profiles (Markdown + YAML frontmatter)
+│       ├── profiles/      # 8 built-in agent profiles (persona + YAML frontmatter)
+│       ├── directives/    # Built-in output directives (Markdown + YAML frontmatter)
 │       └── models/         # Shared types → auto-exported to TS via ts-rs
 ├── frontend/           # React + TypeScript + Vite
 │   └── src/
@@ -276,10 +312,10 @@ kronn/
 ├── tests/bats/         # Shell tests (bats-core, 186 tests)
 ├── Makefile
 ├── docker-compose.yml  # 3 services: backend, frontend, gateway
-└── LICENSE             # MIT
+└── LICENSE             # AGPL-3.0
 ```
 
-**Stack**: Rust (Axum 0.7) + TypeScript (React 19 / Vite) — full type safety end-to-end via `ts-rs`.
+**Stack**: Rust (Axum 0.7) + TypeScript (React 18 / Vite) — full type safety end-to-end via `ts-rs`.
 
 <details>
 <summary><strong>Configuration</strong></summary>
@@ -319,7 +355,7 @@ installed = true
 
 GitHub Actions workflow triggered by adding the `ci-test` label to a PR:
 - **test-backend**: `cargo check` + `cargo clippy` + `cargo test`
-- **test-frontend**: `tsc --noEmit` + `pnpm test` (124+ tests, 14 suites)
+- **test-frontend**: `tsc --noEmit` + `pnpm test` (150+ tests, 15 suites)
 - **test-shell**: `make test-shell` (186 bats tests, 8 suites)
 </details>
 
@@ -334,4 +370,4 @@ Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-MIT
+AGPL-3.0 — See [LICENSE](LICENSE).

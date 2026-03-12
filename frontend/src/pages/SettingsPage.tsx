@@ -1,16 +1,16 @@
 import { useState, useEffect } from 'react';
-import { config as configApi, agents as agentsApi, stats as statsApi, skills as skillsApi, projects as projectsApi } from '../lib/api';
+import { config as configApi, agents as agentsApi, stats as statsApi, skills as skillsApi, profiles as profilesApi, projects as projectsApi, directives as directivesApi } from '../lib/api';
 import { useApi } from '../hooks/useApi';
 import { useT } from '../lib/I18nContext';
 import { UI_LOCALES } from '../lib/i18n';
 import { AGENT_COLORS } from '../lib/constants';
-import type { AgentDetection, AgentsConfig, Skill, Project } from '../types/generated';
+import type { AgentDetection, AgentsConfig, Skill, AgentProfile, Project, Directive } from '../types/generated';
 import type { ToastFn } from '../hooks/useToast';
 import {
   MessageSquare, Cpu, Zap, Key, AlertTriangle, Save,
   HardDrive, Plus, Trash2, Download, Upload, Check,
   Loader2, RefreshCw, X, Eye, EyeOff, Play, StopCircle,
-  ExternalLink, ChevronRight, Layers, FolderSearch, Filter,
+  ExternalLink, ChevronRight, Layers, FolderSearch, Filter, UserCircle, FileText,
 } from 'lucide-react';
 
 /** Output languages for agents (sent to backend, not related to UI i18n) */
@@ -66,11 +66,30 @@ export function SettingsPage({
   const [availableSkills, setAvailableSkills] = useState<Skill[]>([]);
   const [showCreateSkill, setShowCreateSkill] = useState(false);
   const [newSkillName, setNewSkillName] = useState('');
-  const [newSkillDesc, setNewSkillDesc] = useState('');
   const [newSkillIcon, setNewSkillIcon] = useState('Star');
-  const [newSkillCategory, setNewSkillCategory] = useState<'Technical' | 'Business' | 'Meta'>('Technical');
+  const [newSkillCategory, setNewSkillCategory] = useState<'Language' | 'Domain' | 'Business'>('Language');
   const [newSkillContent, setNewSkillContent] = useState('');
   const [projectSkillsExpanded, setProjectSkillsExpanded] = useState<string | null>(null);
+  const [availableProfiles, setAvailableProfiles] = useState<AgentProfile[]>([]);
+  const [showCreateProfile, setShowCreateProfile] = useState(false);
+  const [newProfileName, setNewProfileName] = useState('');
+  const [newProfilePersonaName, setNewProfilePersonaName] = useState('');
+  const [newProfileRole, setNewProfileRole] = useState('');
+  const [newProfileAvatar, setNewProfileAvatar] = useState('🤖');
+  const [newProfileColor, setNewProfileColor] = useState('#a78bfa');
+  const [newProfileCategory, setNewProfileCategory] = useState<'Technical' | 'Business' | 'Meta'>('Technical');
+  const [newProfilePersona, setNewProfilePersona] = useState('');
+  const [projectProfileExpanded, setProjectProfileExpanded] = useState<string | null>(null);
+  const [expandedProfileDesc, setExpandedProfileDesc] = useState<string | null>(null);
+  const [editingPersonaId, setEditingPersonaId] = useState<string | null>(null);
+  const [editingPersonaValue, setEditingPersonaValue] = useState('');
+  const [availableDirectives, setAvailableDirectives] = useState<Directive[]>([]);
+  const [showCreateDirective, setShowCreateDirective] = useState(false);
+  const [newDirectiveName, setNewDirectiveName] = useState('');
+  const [newDirectiveIcon, setNewDirectiveIcon] = useState('📋');
+  const [newDirectiveCategory, setNewDirectiveCategory] = useState<'Output' | 'Language'>('Output');
+  const [newDirectiveContent, setNewDirectiveContent] = useState('');
+  const [newDirectiveConflicts, setNewDirectiveConflicts] = useState('');
 
   // Internal API calls
   const { data: tokenConfig, refetch: refetchTokens } = useApi(() => configApi.getTokens(), []);
@@ -82,6 +101,8 @@ export function SettingsPage({
 
   useEffect(() => {
     skillsApi.list().then(setAvailableSkills).catch(() => {});
+    profilesApi.list().then(setAvailableProfiles).catch(() => {});
+    directivesApi.list().then(setAvailableDirectives).catch(console.error);
   }, []);
 
   const handleInstallAgent = async (agent: AgentDetection) => {
@@ -758,9 +779,9 @@ export function SettingsPage({
                   <div style={{ display: 'flex', gap: 4 }}>
                     <span style={{
                       fontSize: 9, padding: '1px 6px', borderRadius: 6, fontWeight: 600,
-                      background: skill.category === 'Technical' ? 'rgba(59,130,246,0.15)' : skill.category === 'Business' ? 'rgba(16,185,129,0.15)' : 'rgba(200,255,0,0.1)',
-                      color: skill.category === 'Technical' ? '#60a5fa' : skill.category === 'Business' ? '#34d399' : '#c8ff00',
-                      border: `1px solid ${skill.category === 'Technical' ? 'rgba(59,130,246,0.3)' : skill.category === 'Business' ? 'rgba(16,185,129,0.3)' : 'rgba(200,255,0,0.2)'}`,
+                      background: skill.category === 'Language' ? 'rgba(59,130,246,0.15)' : skill.category === 'Business' ? 'rgba(16,185,129,0.15)' : 'rgba(200,255,0,0.1)',
+                      color: skill.category === 'Language' ? '#60a5fa' : skill.category === 'Business' ? '#34d399' : '#c8ff00',
+                      border: `1px solid ${skill.category === 'Language' ? 'rgba(59,130,246,0.3)' : skill.category === 'Business' ? 'rgba(16,185,129,0.3)' : 'rgba(200,255,0,0.2)'}`,
                     }}>
                       {t(`skills.${skill.category.toLowerCase()}`)}
                     </span>
@@ -775,7 +796,7 @@ export function SettingsPage({
                     )}
                   </div>
                 </div>
-                <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginBottom: 6 }}>{skill.description}</div>
+                <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginBottom: 6 }}>{skill.name}</div>
                 {!skill.is_builtin && (
                   <button
                     style={{ ...ss.iconBtn, padding: '2px 6px', color: '#ff4d6a', borderColor: 'rgba(255,77,106,0.2)' }}
@@ -816,15 +837,11 @@ export function SettingsPage({
                     value={newSkillCategory}
                     onChange={e => setNewSkillCategory(e.target.value as any)}
                   >
-                    <option value="Technical">{t('skills.technical')}</option>
+                    <option value="Language">{t('skills.language')}</option>
                     <option value="Business">{t('skills.business')}</option>
-                    <option value="Meta">{t('skills.meta')}</option>
+                    <option value="Domain">{t('skills.domain')}</option>
                   </select>
                 </div>
-              </div>
-              <div style={{ marginBottom: 10 }}>
-                <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('skills.description')}</label>
-                <input style={ss.input} value={newSkillDesc} onChange={e => setNewSkillDesc(e.target.value)} placeholder="What this skill does..." />
               </div>
               <div style={{ marginBottom: 10 }}>
                 <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('skills.icon')}</label>
@@ -847,14 +864,13 @@ export function SettingsPage({
                     try {
                       const created = await skillsApi.create({
                         name: newSkillName,
-                        description: newSkillDesc,
                         icon: newSkillIcon,
                         category: newSkillCategory,
                         content: newSkillContent,
                       });
                       setAvailableSkills(prev => [...prev, created]);
                       setShowCreateSkill(false);
-                      setNewSkillName(''); setNewSkillDesc(''); setNewSkillIcon('Star'); setNewSkillContent('');
+                      setNewSkillName(''); setNewSkillIcon('Star'); setNewSkillContent('');
                       toast(t('skills.add'), 'success');
                     } catch (err) { console.error(err); }
                   }}
@@ -863,7 +879,7 @@ export function SettingsPage({
                 </button>
                 <button
                   style={ss.iconBtn}
-                  onClick={() => { setShowCreateSkill(false); setNewSkillName(''); setNewSkillDesc(''); setNewSkillIcon('Star'); setNewSkillContent(''); }}
+                  onClick={() => { setShowCreateSkill(false); setNewSkillName(''); setNewSkillIcon('Star'); setNewSkillContent(''); }}
                 >
                   <X size={12} />
                 </button>
@@ -926,7 +942,7 @@ export function SettingsPage({
                                 display: 'flex', alignItems: 'center', gap: 3,
                                 transition: 'all 0.15s',
                               }}
-                              title={skill.description}
+                              title={skill.name}
                             >
                               {selected && <Check size={8} />}
                               {skill.name}
@@ -938,6 +954,457 @@ export function SettingsPage({
                   </div>
                 );
               })}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Agent Profiles */}
+      <div style={ss.card(false)}>
+        <div style={{ padding: '16px 20px' }}>
+          <h2 style={{ fontSize: 14, fontWeight: 700, color: '#e8eaed', marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <UserCircle size={16} style={{ color: '#a78bfa' }} /> {t('profiles.title')}
+          </h2>
+
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginBottom: 16 }}>
+            {availableProfiles.map(profile => (
+              <div key={profile.id} style={{
+                padding: '14px 16px', borderRadius: 10, width: 280,
+                background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)',
+                borderLeft: `3px solid ${profile.color}`,
+                position: 'relative' as const,
+              }}>
+                {/* Header: avatar + identity */}
+                <div style={{ display: 'flex', gap: 12, marginBottom: 10 }}>
+                  <div style={{
+                    width: 44, height: 44, borderRadius: 10, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    fontSize: 24, background: `${profile.color}18`, border: `1px solid ${profile.color}30`,
+                    flexShrink: 0,
+                  }}>
+                    {profile.avatar}
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 700, fontSize: 13, color: '#e8eaed', lineHeight: 1.2, display: 'flex', alignItems: 'center', gap: 4 }}>
+                      {editingPersonaId === profile.id ? (
+                        <input
+                          autoFocus
+                          style={{
+                            background: 'rgba(255,255,255,0.08)', border: `1px solid ${profile.color}60`, borderRadius: 4,
+                            color: profile.color, fontWeight: 700, fontSize: 13, fontFamily: 'inherit',
+                            padding: '1px 6px', width: 70, outline: 'none',
+                          }}
+                          value={editingPersonaValue}
+                          onChange={e => setEditingPersonaValue(e.target.value)}
+                          onBlur={async () => {
+                            if (editingPersonaValue !== profile.persona_name) {
+                              try {
+                                const updated = await profilesApi.updatePersonaName(profile.id, editingPersonaValue);
+                                setAvailableProfiles(prev => prev.map(p => p.id === profile.id ? updated : p));
+                              } catch (err) { console.error(err); }
+                            }
+                            setEditingPersonaId(null);
+                          }}
+                          onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); if (e.key === 'Escape') setEditingPersonaId(null); }}
+                        />
+                      ) : (
+                        <span
+                          style={{ color: profile.color, cursor: 'pointer' }}
+                          title={t('profiles.clickToEditName')}
+                          onClick={() => { setEditingPersonaId(profile.id); setEditingPersonaValue(profile.persona_name); }}
+                        >
+                          {profile.persona_name || '—'}
+                        </span>
+                      )}
+                      <span style={{ color: 'rgba(255,255,255,0.25)' }}>·</span>
+                      {profile.name}
+                    </div>
+                    <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', marginTop: 2 }}>{profile.role}</div>
+                  </div>
+                </div>
+                {/* Description: expandable persona_prompt */}
+                {profile.persona_prompt && (
+                  <div style={{ marginBottom: 10 }}>
+                    <div style={{
+                      fontSize: 10, color: 'rgba(255,255,255,0.3)', lineHeight: 1.4,
+                      ...(expandedProfileDesc !== profile.id ? {
+                        overflow: 'hidden', display: '-webkit-box',
+                        WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' as const,
+                      } : {}),
+                    }}>
+                      {expandedProfileDesc === profile.id ? profile.persona_prompt : profile.persona_prompt.slice(0, 150)}
+                    </div>
+                    {profile.persona_prompt.length > 100 && (
+                      <button
+                        style={{
+                          fontSize: 9, color: profile.color, background: 'none', border: 'none',
+                          cursor: 'pointer', padding: '2px 0', fontFamily: 'inherit', opacity: 0.8,
+                        }}
+                        onClick={() => setExpandedProfileDesc(expandedProfileDesc === profile.id ? null : profile.id)}
+                      >
+                        {expandedProfileDesc === profile.id ? t('common.seeLess') : t('common.seeMore')}
+                      </button>
+                    )}
+                  </div>
+                )}
+                {/* Badges + actions */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
+                  <span style={{
+                    fontSize: 9, padding: '1px 6px', borderRadius: 6, fontWeight: 600,
+                    background: profile.category === 'Technical' ? 'rgba(59,130,246,0.15)' : profile.category === 'Business' ? 'rgba(16,185,129,0.15)' : 'rgba(139,92,246,0.1)',
+                    color: profile.category === 'Technical' ? '#60a5fa' : profile.category === 'Business' ? '#34d399' : '#a78bfa',
+                    border: `1px solid ${profile.category === 'Technical' ? 'rgba(59,130,246,0.3)' : profile.category === 'Business' ? 'rgba(16,185,129,0.3)' : 'rgba(139,92,246,0.2)'}`,
+                  }}>
+                    {t(`profiles.${profile.category.toLowerCase()}`)}
+                  </span>
+                  {profile.is_builtin ? (
+                    <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 6, background: 'rgba(255,255,255,0.05)', color: 'rgba(255,255,255,0.3)', border: '1px solid rgba(255,255,255,0.08)' }}>
+                      {t('profiles.builtin')}
+                    </span>
+                  ) : (
+                    <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 6, background: 'rgba(139,92,246,0.1)', color: 'rgba(139,92,246,0.7)', border: '1px solid rgba(139,92,246,0.2)' }}>
+                      {t('profiles.custom')}
+                    </span>
+                  )}
+                  {profile.default_engine && (
+                    <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 6, background: 'rgba(255,255,255,0.04)', color: 'rgba(255,255,255,0.25)', border: '1px solid rgba(255,255,255,0.06)' }}>
+                      {profile.default_engine}
+                    </span>
+                  )}
+                  <div style={{ flex: 1 }} />
+                  {!profile.is_builtin && (
+                    <button
+                      style={{ ...ss.iconBtn, padding: '2px 6px', color: '#ff4d6a', borderColor: 'rgba(255,77,106,0.2)' }}
+                      onClick={async () => {
+                        if (!confirm(t('profiles.deleteConfirm'))) return;
+                        try {
+                          await profilesApi.delete(profile.id);
+                          setAvailableProfiles(prev => prev.filter(p => p.id !== profile.id));
+                          toast(t('common.delete'), 'success');
+                        } catch (err) { console.error(err); }
+                      }}
+                    >
+                      <Trash2 size={10} />
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {!showCreateProfile ? (
+            <button
+              style={{ ...ss.scanBtn, gap: 6 }}
+              onClick={() => setShowCreateProfile(true)}
+            >
+              <Plus size={12} /> {t('profiles.createCustom')}
+            </button>
+          ) : (
+            <div style={{ padding: 16, borderRadius: 8, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.1)' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
+                <div>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('profiles.name')}</label>
+                  <input style={ss.input} value={newProfileName} onChange={e => setNewProfileName(e.target.value)} placeholder="Architect, QA Lead..." />
+                </div>
+                <div>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('profiles.personaName')}</label>
+                  <input style={ss.input} value={newProfilePersonaName} onChange={e => setNewProfilePersonaName(e.target.value)} placeholder="Leo, Mia, Sam..." />
+                </div>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
+                <div>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('profiles.role')}</label>
+                  <input style={ss.input} value={newProfileRole} onChange={e => setNewProfileRole(e.target.value)} placeholder="Software Architect, QA Engineer..." />
+                </div>
+                <div>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('profiles.category')}</label>
+                  <select
+                    style={{ ...ss.input, cursor: 'pointer' }}
+                    value={newProfileCategory}
+                    onChange={e => setNewProfileCategory(e.target.value as any)}
+                  >
+                    <option value="Technical">{t('profiles.technical')}</option>
+                    <option value="Business">{t('profiles.business')}</option>
+                    <option value="Meta">{t('profiles.meta')}</option>
+                  </select>
+                </div>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '60px 1fr 80px', gap: 10, marginBottom: 10 }}>
+                <div>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('profiles.avatar')}</label>
+                  <input style={{ ...ss.input, textAlign: 'center' as const, fontSize: 20, padding: '4px' }} value={newProfileAvatar} onChange={e => setNewProfileAvatar(e.target.value)} placeholder="🤖" />
+                </div>
+                <div />
+                <div>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('profiles.color')}</label>
+                  <input style={{ ...ss.input, width: '100%', height: 34, padding: 2, cursor: 'pointer' }} type="color" value={newProfileColor} onChange={e => setNewProfileColor(e.target.value)} />
+                </div>
+              </div>
+              <div style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('profiles.persona')}</label>
+                <textarea
+                  style={{ ...ss.input, minHeight: 120, resize: 'vertical' as const, fontFamily: 'monospace', fontSize: 12, lineHeight: 1.5 }}
+                  value={newProfilePersona}
+                  onChange={e => setNewProfilePersona(e.target.value)}
+                  placeholder="You are an expert in... Always prioritize..."
+                />
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  style={{ ...ss.scanBtn, opacity: newProfileName && newProfilePersona ? 1 : 0.4 }}
+                  disabled={!newProfileName || !newProfilePersona}
+                  onClick={async () => {
+                    try {
+                      const created = await profilesApi.create({
+                        name: newProfileName,
+                        persona_name: newProfilePersonaName,
+                        role: newProfileRole,
+                        avatar: newProfileAvatar,
+                        color: newProfileColor,
+                        category: newProfileCategory,
+                        persona_prompt: newProfilePersona,
+                      });
+                      setAvailableProfiles(prev => [...prev, created]);
+                      setShowCreateProfile(false);
+                      setNewProfileName(''); setNewProfilePersonaName(''); setNewProfileRole(''); setNewProfileAvatar('🤖'); setNewProfileColor('#a78bfa'); setNewProfilePersona('');
+                      toast(t('profiles.createCustom'), 'success');
+                    } catch (err) { console.error(err); }
+                  }}
+                >
+                  <Check size={12} /> {t('profiles.createCustom')}
+                </button>
+                <button
+                  style={ss.iconBtn}
+                  onClick={() => { setShowCreateProfile(false); setNewProfileName(''); setNewProfilePersonaName(''); setNewProfileRole(''); setNewProfileAvatar('🤖'); setNewProfileColor('#a78bfa'); setNewProfilePersona(''); }}
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Per-project default profile */}
+          {projects.length > 0 && availableProfiles.length > 0 && (
+            <div style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+              <h3 style={{ fontSize: 12, fontWeight: 700, color: 'rgba(255,255,255,0.6)', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <Layers size={12} /> {t('profiles.projectDefault')}
+              </h3>
+              <p style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', marginBottom: 12 }}>
+                {t('profiles.projectDefaultHint')}
+              </p>
+              {projects.filter(p => !p.path.split('/').some(s => s.startsWith('.'))).map(project => {
+                const isExpanded = projectProfileExpanded === project.id;
+                const currentProfileId = (project as any).default_profile_id ?? null;
+                return (
+                  <div key={project.id} style={{ marginBottom: 4 }}>
+                    <button
+                      style={{
+                        width: '100%', display: 'flex', alignItems: 'center', gap: 8,
+                        padding: '8px 10px', borderRadius: 6, border: 'none',
+                        background: isExpanded ? 'rgba(139,92,246,0.04)' : 'transparent',
+                        color: '#e8eaed', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left' as const,
+                      }}
+                      onClick={() => setProjectProfileExpanded(isExpanded ? null : project.id)}
+                    >
+                      <ChevronRight size={10} style={{ transform: isExpanded ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s' }} />
+                      <span style={{ fontSize: 12, fontWeight: 500, flex: 1 }}>{project.name}</span>
+                      {currentProfileId && (
+                        <span style={{ fontSize: 9, color: 'rgba(139,92,246,0.6)', fontWeight: 600 }}>
+                          {availableProfiles.find(p => p.id === currentProfileId)?.name ?? currentProfileId}
+                        </span>
+                      )}
+                    </button>
+                    {isExpanded && (
+                      <div style={{ padding: '8px 10px 8px 28px', display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            try { await projectsApi.setDefaultProfile(project.id, null); } catch (err) { console.error(err); }
+                            refetchProjects();
+                          }}
+                          style={{
+                            padding: '3px 9px', borderRadius: 10, fontSize: 10, fontFamily: 'inherit',
+                            fontWeight: !currentProfileId ? 600 : 400, cursor: 'pointer',
+                            border: !currentProfileId ? '1px solid rgba(139,92,246,0.4)' : '1px solid rgba(255,255,255,0.08)',
+                            background: !currentProfileId ? 'rgba(139,92,246,0.1)' : 'rgba(255,255,255,0.03)',
+                            color: !currentProfileId ? '#a78bfa' : 'rgba(255,255,255,0.4)',
+                            transition: 'all 0.15s',
+                          }}
+                        >
+                          {t('profiles.none')}
+                        </button>
+                        {availableProfiles.map(profile => {
+                          const selected = currentProfileId === profile.id;
+                          return (
+                            <button
+                              key={profile.id}
+                              type="button"
+                              onClick={async () => {
+                                const newId = selected ? null : profile.id;
+                                try { await projectsApi.setDefaultProfile(project.id, newId); } catch (err) { console.error(err); }
+                                refetchProjects();
+                              }}
+                              style={{
+                                padding: '3px 9px', borderRadius: 10, fontSize: 10, fontFamily: 'inherit',
+                                fontWeight: selected ? 600 : 400, cursor: 'pointer',
+                                border: selected ? '1px solid rgba(139,92,246,0.4)' : '1px solid rgba(255,255,255,0.08)',
+                                background: selected ? 'rgba(139,92,246,0.1)' : 'rgba(255,255,255,0.03)',
+                                color: selected ? '#a78bfa' : 'rgba(255,255,255,0.4)',
+                                display: 'flex', alignItems: 'center', gap: 3,
+                                transition: 'all 0.15s',
+                              }}
+                              title={profile.role}
+                            >
+                              {selected && <Check size={8} />}
+                              {profile.avatar} {profile.persona_name || profile.name}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── Directives (HOW) ── */}
+      <div style={ss.card(false)}>
+        <div style={{ padding: '16px 20px' }}>
+          <h2 style={{ fontSize: 14, fontWeight: 700, color: '#e8eaed', marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <FileText size={16} style={{ color: '#f59e0b' }} /> {t('directives.title')}
+          </h2>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 16 }}>
+            {availableDirectives.map(directive => (
+              <div key={directive.id} style={{
+                padding: '10px 14px', borderRadius: 8, width: 220,
+                background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)',
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                  <span style={{ fontWeight: 600, fontSize: 12, color: '#e8eaed' }}>
+                    {directive.icon} {directive.name}
+                  </span>
+                  <div style={{ display: 'flex', gap: 4 }}>
+                    <span style={{
+                      fontSize: 9, padding: '1px 6px', borderRadius: 6, fontWeight: 600,
+                      background: directive.category === 'Output' ? 'rgba(245,158,11,0.15)' : 'rgba(59,130,246,0.15)',
+                      color: directive.category === 'Output' ? '#fbbf24' : '#60a5fa',
+                      border: `1px solid ${directive.category === 'Output' ? 'rgba(245,158,11,0.3)' : 'rgba(59,130,246,0.3)'}`,
+                    }}>
+                      {t(`directives.${directive.category.toLowerCase()}`)}
+                    </span>
+                    {directive.is_builtin ? (
+                      <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 6, background: 'rgba(255,255,255,0.05)', color: 'rgba(255,255,255,0.3)', border: '1px solid rgba(255,255,255,0.08)' }}>
+                        {t('directives.builtin')}
+                      </span>
+                    ) : (
+                      <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 6, background: 'rgba(245,158,11,0.1)', color: 'rgba(245,158,11,0.7)', border: '1px solid rgba(245,158,11,0.2)' }}>
+                        {t('directives.custom')}
+                      </span>
+                    )}
+                  </div>
+                </div>
+                {(directive.conflicts ?? []).length > 0 && (
+                  <div style={{ fontSize: 9, color: 'rgba(255,77,106,0.6)', marginBottom: 4 }}>
+                    ⚠ {t('directives.conflicts')}: {(directive.conflicts ?? []).join(', ')}
+                  </div>
+                )}
+                {!directive.is_builtin && (
+                  <button
+                    style={{ ...ss.iconBtn, padding: '2px 6px', color: '#ff4d6a', borderColor: 'rgba(255,77,106,0.2)' }}
+                    onClick={async () => {
+                      if (!confirm(t('directives.deleteConfirm'))) return;
+                      try {
+                        await directivesApi.delete(directive.id);
+                        setAvailableDirectives(prev => prev.filter(d => d.id !== directive.id));
+                        toast(t('directives.remove'), 'success');
+                      } catch (err) { console.error(err); }
+                    }}
+                  >
+                    <Trash2 size={10} />
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+
+          {/* Create custom directive form */}
+          {!showCreateDirective ? (
+            <button
+              style={{ ...ss.scanBtn, gap: 6 }}
+              onClick={() => setShowCreateDirective(true)}
+            >
+              <Plus size={12} /> {t('directives.createCustom')}
+            </button>
+          ) : (
+            <div style={{ padding: 16, borderRadius: 8, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.1)' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
+                <div>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('directives.name')}</label>
+                  <input style={ss.input} value={newDirectiveName} onChange={e => setNewDirectiveName(e.target.value)} placeholder="My Directive" />
+                </div>
+                <div>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('directives.category')}</label>
+                  <select
+                    style={{ ...ss.input, cursor: 'pointer' }}
+                    value={newDirectiveCategory}
+                    onChange={e => setNewDirectiveCategory(e.target.value as any)}
+                  >
+                    <option value="Output">{t('directives.output')}</option>
+                    <option value="Language">{t('directives.language')}</option>
+                  </select>
+                </div>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
+                <div>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('directives.icon')}</label>
+                  <input style={ss.input} value={newDirectiveIcon} onChange={e => setNewDirectiveIcon(e.target.value)} placeholder="📋, 🔇, 📊..." />
+                </div>
+                <div>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('directives.conflicts')}</label>
+                  <input style={ss.input} value={newDirectiveConflicts} onChange={e => setNewDirectiveConflicts(e.target.value)} placeholder="token-saver, verbose..." />
+                </div>
+              </div>
+              <div style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('directives.content')}</label>
+                <textarea
+                  style={{ ...ss.input, minHeight: 120, resize: 'vertical' as const, fontFamily: 'monospace', fontSize: 12, lineHeight: 1.5 }}
+                  value={newDirectiveContent}
+                  onChange={e => setNewDirectiveContent(e.target.value)}
+                  placeholder="Instructions for agent output behavior..."
+                />
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  style={{ ...ss.scanBtn, opacity: newDirectiveName && newDirectiveContent ? 1 : 0.4 }}
+                  disabled={!newDirectiveName || !newDirectiveContent}
+                  onClick={async () => {
+                    try {
+                      const conflicts = newDirectiveConflicts.split(',').map(s => s.trim()).filter(Boolean);
+                      const created = await directivesApi.create({
+                        name: newDirectiveName,
+                        icon: newDirectiveIcon,
+                        category: newDirectiveCategory,
+                        content: newDirectiveContent,
+                        conflicts: conflicts.length > 0 ? conflicts : undefined,
+                      });
+                      setAvailableDirectives(prev => [...prev, created]);
+                      setShowCreateDirective(false);
+                      setNewDirectiveName(''); setNewDirectiveIcon('📋'); setNewDirectiveContent(''); setNewDirectiveConflicts('');
+                      toast(t('directives.add'), 'success');
+                    } catch (err) { console.error(err); }
+                  }}
+                >
+                  <Check size={12} /> {t('directives.createCustom')}
+                </button>
+                <button
+                  style={ss.iconBtn}
+                  onClick={() => { setShowCreateDirective(false); setNewDirectiveName(''); setNewDirectiveIcon('📋'); setNewDirectiveContent(''); setNewDirectiveConflicts(''); }}
+                >
+                  <X size={12} />
+                </button>
+              </div>
             </div>
           )}
         </div>

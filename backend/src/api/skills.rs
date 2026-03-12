@@ -20,7 +20,7 @@ pub async fn create(
     _state: State<AppState>,
     Json(req): Json<CreateSkillRequest>,
 ) -> Json<ApiResponse<Skill>> {
-    match skills::save_custom_skill(&req.name, &req.description, &req.icon, &req.category, &req.content) {
+    match skills::save_custom_skill(&req.name, &req.icon, &req.category, &req.content) {
         Ok(id) => {
             match skills::get_skill(&id) {
                 Some(skill) => Json(ApiResponse::ok(skill)),
@@ -41,10 +41,9 @@ pub async fn update(
         return Json(ApiResponse::err("Cannot modify builtin skills"));
     }
 
-    // Delete old and re-create (slug might change if name changes)
     let _ = skills::delete_custom_skill(&id);
 
-    match skills::save_custom_skill(&req.name, &req.description, &req.icon, &req.category, &req.content) {
+    match skills::save_custom_skill(&req.name, &req.icon, &req.category, &req.content) {
         Ok(new_id) => {
             match skills::get_skill(&new_id) {
                 Some(skill) => Json(ApiResponse::ok(skill)),

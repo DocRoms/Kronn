@@ -93,11 +93,22 @@ fn fix_file_ownership(work_dir: &Path) {
         .status();
 }
 
-/// Start an agent process for the given agent type and prompt.
-/// Uses the local CLI agent's own authentication by default.
-/// API keys from config are passed as optional overrides only.
-/// Reads MCP context files from the project and injects them into the agent prompt.
-/// Skills are injected alongside MCP context.
+/// Configuration for starting an agent process.
+pub struct AgentStartConfig<'a> {
+    pub agent_type: &'a AgentType,
+    /// Used to read .mcp.json and resolve MCP context.
+    pub project_path: &'a str,
+    /// Working directory for the agent. If `None`, defaults to `project_path`.
+    pub work_dir: Option<&'a str>,
+    pub prompt: &'a str,
+    pub tokens: &'a TokensConfig,
+    pub full_access: bool,
+    pub skill_ids: &'a [String],
+    pub directive_ids: &'a [String],
+    pub profile_ids: &'a [String],
+}
+
+/// Start an agent process with minimal config (no skills/directives/profiles).
 pub async fn start_agent(
     agent_type: &AgentType,
     project_path: &str,
@@ -105,48 +116,52 @@ pub async fn start_agent(
     tokens: &TokensConfig,
     full_access: bool,
 ) -> Result<AgentProcess, String> {
-    start_agent_with_skills(agent_type, project_path, prompt, tokens, full_access, &[]).await
+    start_agent_with_config(AgentStartConfig {
+        agent_type, project_path, work_dir: None, prompt, tokens, full_access,
+        skill_ids: &[], directive_ids: &[], profile_ids: &[],
+    }).await
 }
 
-/// Start an agent process with optional skills.
-pub async fn start_agent_with_skills(
-    agent_type: &AgentType,
-    project_path: &str,
-    prompt: &str,
-    tokens: &TokensConfig,
-    full_access: bool,
-    skill_ids: &[String],
-) -> Result<AgentProcess, String> {
-    // Read MCP context files for this project (if any)
-    let mcp_context = if !project_path.is_empty() {
-        crate::core::mcp_scanner::read_all_mcp_contexts(project_path)
+/// Start an agent process with full configuration.
+pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<AgentProcess, String> {
+    // Read MCP context files from the original project path (not the worktree)
+    let mcp_context = if !config.project_path.is_empty() {
+        crate::core::mcp_scanner::read_all_mcp_contexts(config.project_path)
     } else {
         String::new()
     };
 
     // Build skills prompt
-    let skills_prompt = crate::core::skills::build_skills_prompt(skill_ids);
+    let skills_prompt = crate::core::skills::build_skills_prompt(config.skill_ids);
 
-    // Combine MCP context and skills into extra context
-    let extra_context = match (mcp_context.is_empty(), skills_prompt.is_empty()) {
-        (true, true) => String::new(),
-        (false, true) => mcp_context,
-        (true, false) => skills_prompt,
-        (false, false) => format!("{}\n\n{}", skills_prompt, mcp_context),
-    };
+    // Build directives prompt
+    let directives_prompt = crate::core::directives::build_directives_prompt(config.directive_ids);
+
+    // Build profiles prompt
+    let profiles_prompt = crate::core::profiles::build_profiles_prompt(config.profile_ids);
+
+    // Combine all context parts
+    let mut parts = Vec::new();
+    if !profiles_prompt.is_empty() { parts.push(profiles_prompt); }
+    if !skills_prompt.is_empty() { parts.push(skills_prompt); }
+    if !directives_prompt.is_empty() { parts.push(directives_prompt); }
+    if !mcp_context.is_empty() { parts.push(mcp_context); }
+    let extra_context = parts.join("\n\n");
 
     let (binary, npx_pkg, args, env_key, stderr_mode, output_mode) =
-        agent_command(agent_type, prompt, full_access, &extra_context);
+        agent_command(config.agent_type, config.prompt, config.full_access, &extra_context);
 
-    let work_dir = if project_path.is_empty() {
+    // Use work_dir (or project_path) for the agent's CWD
+    let effective_work_dir = config.work_dir.unwrap_or(config.project_path);
+    let work_dir = if effective_work_dir.is_empty() {
         // Global discussion: use a temp working directory
         std::env::temp_dir()
     } else {
-        let container_path = crate::core::scanner::resolve_host_path(project_path);
+        let container_path = crate::core::scanner::resolve_host_path(effective_work_dir);
         if container_path.exists() {
             container_path
         } else {
-            let p = PathBuf::from(project_path);
+            let p = PathBuf::from(effective_work_dir);
             if !p.exists() {
                 return Err(format!("Project path not found: {}", p.display()));
             }
@@ -155,7 +170,7 @@ pub async fn start_agent_with_skills(
     };
 
     // API key is optional — agents use their own local auth by default
-    let api_key = get_api_key(env_key, tokens);
+    let api_key = get_api_key(env_key, config.tokens);
 
     // Try direct binary first, then npx fallback
     let mut child = match try_spawn(binary, None, &args, &work_dir, env_key, api_key.as_deref()) {
@@ -212,7 +227,7 @@ pub async fn start_agent_with_skills(
         }
     }
 
-    Ok(AgentProcess { child, output_mode, work_dir, agent_type: agent_type.clone(), rx, stderr_capture })
+    Ok(AgentProcess { child, output_mode, work_dir, agent_type: config.agent_type.clone(), rx, stderr_capture })
 }
 
 /// Get the command configuration for an agent type.
@@ -385,6 +400,13 @@ fn try_spawn(
     // Otherwise let the agent use its own local auth
     if let Some(key) = api_key {
         cmd.env(env_key, key);
+    }
+
+    // Forward GitHub token so agents can create branches, PRs, etc.
+    // Checks GH_TOKEN first (gh CLI convention), then GITHUB_TOKEN.
+    if let Ok(gh_token) = std::env::var("GH_TOKEN").or_else(|_| std::env::var("GITHUB_TOKEN")) {
+        cmd.env("GH_TOKEN", &gh_token);
+        cmd.env("GITHUB_TOKEN", &gh_token);
     }
 
     cmd.spawn()

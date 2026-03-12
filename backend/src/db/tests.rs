@@ -23,6 +23,7 @@ fn sample_project(id: &str, name: &str) -> Project {
         audit_status: AiAuditStatus::NoTemplate,
         ai_todo_count: 0,
         default_skill_ids: vec![],
+        default_profile_id: None,
         created_at: now,
         updated_at: now,
     }
@@ -40,6 +41,8 @@ fn sample_discussion(id: &str, project_id: Option<&str>) -> Discussion {
         messages: vec![],
         message_count: 0,
         skill_ids: vec![],
+        profile_ids: vec![],
+        directive_ids: vec![],
         archived: false,
         created_at: now,
         updated_at: now,
@@ -487,6 +490,8 @@ fn sample_workflow(id: &str) -> Workflow {
             retry: None,
             delay_after_secs: None,
             skill_ids: vec![],
+            profile_ids: vec![],
+            directive_ids: vec![],
         }],
         actions: vec![],
         safety: WorkflowSafety {
@@ -764,6 +769,8 @@ fn workflow_multi_step_roundtrip() {
                 retry: None,
                 delay_after_secs: None,
                 skill_ids: vec![],
+                profile_ids: vec![],
+                directive_ids: vec![],
             },
             WorkflowStep {
                 name: "fix".into(),
@@ -780,6 +787,8 @@ fn workflow_multi_step_roundtrip() {
                 retry: None,
                 delay_after_secs: None,
                 skill_ids: vec!["token-saver".into()],
+                profile_ids: vec![],
+                directive_ids: vec![],
             },
             WorkflowStep {
                 name: "review".into(),
@@ -793,6 +802,8 @@ fn workflow_multi_step_roundtrip() {
                 retry: None,
                 delay_after_secs: Some(5),
                 skill_ids: vec![],
+                profile_ids: vec![],
+                directive_ids: vec![],
             },
         ],
         actions: vec![],
@@ -843,6 +854,8 @@ fn workflow_update_steps_count() {
         retry: None,
         delay_after_secs: None,
         skill_ids: vec![],
+        profile_ids: vec![],
+        directive_ids: vec![],
     });
     crate::db::workflows::update_workflow(&conn, &wf).unwrap();
 

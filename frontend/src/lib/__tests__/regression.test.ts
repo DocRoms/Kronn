@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES, agentColor } from '../constants';
 import { t, UI_LOCALES } from '../i18n';
-import type { WorkflowRun } from '../../types/generated';
+import type { WorkflowRun, Discussion } from '../../types/generated';
 
 /**
  * Regression tests for bugs fixed during the frontend audit.
@@ -117,6 +117,54 @@ describe('regression tests', () => {
           expect(val).not.toBe(key); // Should not fallback to the raw key
         }
       }
+    });
+  });
+
+  describe('Discussion message_count vs messages array (list optimization fix)', () => {
+    it('Discussion type requires message_count field', () => {
+      // The list endpoint returns messages:[] with message_count:N for performance.
+      // This test ensures message_count stays a required field on Discussion,
+      // preventing the bug where notifications showed wrong counts and
+      // conversations appeared empty when selected.
+      const listDisc: Discussion = {
+        id: 'd1',
+        project_id: null,
+        title: 'Test',
+        agent: 'ClaudeCode',
+        language: 'fr',
+        participants: ['ClaudeCode'],
+        messages: [],
+        message_count: 5,
+        archived: false,
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+      };
+      // message_count must be used for display, not messages.length
+      expect(listDisc.message_count).toBe(5);
+      expect(listDisc.messages).toHaveLength(0);
+    });
+
+    it('unseen count uses message_count, not messages.length', () => {
+      // Simulates the real calculation from Dashboard/DiscussionsPage
+      const disc: Discussion = {
+        id: 'd1',
+        project_id: null,
+        title: 'Test',
+        agent: 'ClaudeCode',
+        language: 'fr',
+        participants: [],
+        messages: [],       // empty from list endpoint
+        message_count: 10,  // real count from backend
+        archived: false,
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+      };
+      const lastSeenCount = 7;
+      // Correct: use message_count (not messages.length which would be 0)
+      const unseen = (disc.message_count ?? disc.messages.length) - lastSeenCount;
+      expect(unseen).toBe(3);
+      // Wrong: using messages.length would give -7
+      expect(disc.messages.length - lastSeenCount).toBe(-7);
     });
   });
 });

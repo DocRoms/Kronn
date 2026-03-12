@@ -7,7 +7,7 @@ use ts_rs::TS;
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct AppConfig {
     pub server: ServerConfig,
     pub tokens: TokensConfig,
@@ -23,14 +23,14 @@ pub struct AppConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct TokensConfig {
     /// Legacy fields — kept for backward compat when reading old config.toml
     #[serde(default, skip_serializing)]
@@ -56,7 +56,7 @@ impl TokensConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct ApiKey {
     pub id: String,
     pub name: String,
@@ -67,7 +67,7 @@ pub struct ApiKey {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct ApiKeyDisplay {
     pub id: String,
     pub name: String,
@@ -77,7 +77,7 @@ pub struct ApiKeyDisplay {
 }
 
 #[derive(Debug, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct SaveApiKeyRequest {
     pub id: Option<String>,
     pub name: String,
@@ -86,14 +86,14 @@ pub struct SaveApiKeyRequest {
 }
 
 #[derive(Debug, Serialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct ApiKeysResponse {
     pub keys: Vec<ApiKeyDisplay>,
     pub disabled_overrides: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct DiscoveredKey {
     pub provider: String,
     pub source: String,
@@ -102,14 +102,14 @@ pub struct DiscoveredKey {
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct DiscoverKeysResponse {
     pub discovered: Vec<DiscoveredKey>,
     pub imported_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct ScanConfig {
     pub paths: Vec<String>,
     pub ignore: Vec<String>,
@@ -121,7 +121,7 @@ pub struct ScanConfig {
 fn default_scan_depth() -> usize { 4 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct AgentsConfig {
     pub claude_code: AgentConfig,
     pub codex: AgentConfig,
@@ -148,7 +148,7 @@ impl AgentsConfig {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct AgentConfig {
     pub path: Option<String>,
     #[serde(default)]
@@ -163,7 +163,7 @@ pub struct AgentConfig {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct SetupStatus {
     pub is_first_run: bool,
     pub current_step: SetupStep,
@@ -174,7 +174,7 @@ pub struct SetupStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub enum SetupStep {
     Agents,
     ScanPaths,
@@ -183,7 +183,7 @@ pub enum SetupStep {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct AgentDetection {
     pub name: String,
     pub agent_type: AgentType,
@@ -207,7 +207,7 @@ pub struct AgentDetection {
 fn default_true() -> bool { true }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub enum AgentType {
     ClaudeCode,
     Codex,
@@ -222,7 +222,7 @@ pub enum AgentType {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct Project {
     pub id: String,
     pub name: String,
@@ -236,26 +236,28 @@ pub struct Project {
     pub ai_todo_count: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub default_skill_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_profile_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct TokenOverride {
     pub provider: String,
     pub token: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct AiConfigStatus {
     pub detected: bool,
     pub configs: Vec<AiConfigType>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub enum AiConfigType {
     ClaudeMd,       // CLAUDE.md
     ClauseDir,      // .claude/
@@ -267,7 +269,7 @@ pub enum AiConfigType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct DetectedRepo {
     pub path: String,
     pub name: String,
@@ -283,7 +285,7 @@ pub struct DetectedRepo {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub enum AiAuditStatus {
     #[default]
     NoTemplate,
@@ -293,7 +295,7 @@ pub enum AiAuditStatus {
 }
 
 #[derive(Debug, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct LaunchAuditRequest {
     pub agent: AgentType,
 }
@@ -305,7 +307,7 @@ pub struct LaunchAuditRequest {
 /// An MCP server type (e.g. "GitHub", "Atlassian", "Context7")
 /// Represents the abstract definition — command + args template.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct McpServer {
     pub id: String,
     pub name: String,
@@ -315,7 +317,7 @@ pub struct McpServer {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub enum McpTransport {
     Stdio { command: String, args: Vec<String> },
     Sse { url: String },
@@ -323,7 +325,7 @@ pub enum McpTransport {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub enum McpSource {
     Registry,
     Detected,
@@ -333,7 +335,7 @@ pub enum McpSource {
 /// A configured instance of an MCP server — with label, env secrets, etc.
 /// Multiple projects can share the same config (deduplication by config_hash).
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct McpConfig {
     pub id: String,
     pub server_id: String,
@@ -348,7 +350,7 @@ pub struct McpConfig {
 
 /// Display-safe version of McpConfig (secrets masked)
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct McpConfigDisplay {
     pub id: String,
     pub server_id: String,
@@ -364,7 +366,7 @@ pub struct McpConfigDisplay {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct McpEnvEntry {
     pub key: String,
     pub masked_value: String,
@@ -372,7 +374,7 @@ pub struct McpEnvEntry {
 
 /// Registry entry — an MCP available for installation
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct McpDefinition {
     pub id: String,
     pub name: String,
@@ -391,7 +393,7 @@ pub struct McpDefinition {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct Workflow {
     pub id: String,
     pub name: String,
@@ -408,7 +410,7 @@ pub struct Workflow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 #[serde(tag = "type")]
 pub enum WorkflowTrigger {
     Cron {
@@ -424,7 +426,7 @@ pub enum WorkflowTrigger {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 #[serde(tag = "type")]
 pub enum TrackerSourceConfig {
     GitHub {
@@ -434,7 +436,7 @@ pub enum TrackerSourceConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct WorkflowStep {
     pub name: String,
     pub agent: AgentType,
@@ -454,17 +456,21 @@ pub struct WorkflowStep {
     pub delay_after_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skill_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profile_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub directive_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 #[serde(tag = "type")]
 pub enum StepMode {
     Normal,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct AgentSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -475,14 +481,14 @@ pub struct AgentSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct StepConditionRule {
     pub contains: String,
     pub action: ConditionAction,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 #[serde(tag = "type")]
 pub enum ConditionAction {
     Stop,
@@ -491,7 +497,7 @@ pub enum ConditionAction {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct RetryConfig {
     pub max_retries: u32,
     #[serde(default = "default_backoff")]
@@ -503,7 +509,7 @@ fn default_backoff() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 #[serde(tag = "type")]
 pub enum WorkflowAction {
     CreatePr {
@@ -524,7 +530,7 @@ pub enum WorkflowAction {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct WorkflowSafety {
     #[serde(default)]
     pub sandbox: bool,
@@ -537,14 +543,14 @@ pub struct WorkflowSafety {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct WorkspaceConfig {
     #[serde(default)]
     pub hooks: WorkspaceHooks,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct WorkspaceHooks {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_create: Option<String>,
@@ -559,7 +565,7 @@ pub struct WorkspaceHooks {
 // ─── Workflow Runs ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct WorkflowRun {
     pub id: String,
     pub workflow_id: String,
@@ -574,7 +580,7 @@ pub struct WorkflowRun {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub enum RunStatus {
     Pending,
     Running,
@@ -585,7 +591,7 @@ pub enum RunStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct StepResult {
     pub step_name: String,
     pub status: RunStatus,
@@ -598,25 +604,99 @@ pub struct StepResult {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Skills
+// Skills (WHAT — domain expertise, multi-select)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub enum SkillCategory {
+    Language,
+    Domain,
+    Business,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Skill {
+    pub id: String,
+    pub name: String,
+    pub icon: String,
+    pub category: SkillCategory,
+    pub content: String,
+    pub is_builtin: bool,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct CreateSkillRequest {
+    pub name: String,
+    pub icon: String,
+    pub category: SkillCategory,
+    pub content: String,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Agent Profiles (WHO — persona, single-select)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub enum ProfileCategory {
     Technical,
     Business,
     Meta,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
-pub struct Skill {
+#[ts(export)]
+pub struct AgentProfile {
     pub id: String,
     pub name: String,
-    pub description: String,
+    #[serde(default)]
+    pub persona_name: String,
+    pub role: String,
+    pub avatar: String,
+    pub color: String,
+    pub category: ProfileCategory,
+    pub persona_prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_engine: Option<String>,
+    pub is_builtin: bool,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct CreateProfileRequest {
+    pub name: String,
+    #[serde(default)]
+    pub persona_name: String,
+    pub role: String,
+    pub avatar: String,
+    pub color: String,
+    pub category: ProfileCategory,
+    pub persona_prompt: String,
+    #[serde(default)]
+    pub default_engine: Option<String>,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Directives (HOW — output behavior, multi-select)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub enum DirectiveCategory {
+    Output,
+    Language,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Directive {
+    pub id: String,
+    pub name: String,
     pub icon: String,
-    pub category: SkillCategory,
+    pub category: DirectiveCategory,
     pub content: String,
     pub is_builtin: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -624,13 +704,14 @@ pub struct Skill {
 }
 
 #[derive(Debug, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
-pub struct CreateSkillRequest {
+#[ts(export)]
+pub struct CreateDirectiveRequest {
     pub name: String,
-    pub description: String,
     pub icon: String,
-    pub category: SkillCategory,
+    pub category: DirectiveCategory,
     pub content: String,
+    #[serde(default)]
+    pub conflicts: Vec<String>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -638,7 +719,7 @@ pub struct CreateSkillRequest {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct TokenUsageSummary {
     pub total_tokens: u64,
     pub by_provider: Vec<ProviderUsage>,
@@ -647,7 +728,7 @@ pub struct TokenUsageSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct ProviderUsage {
     pub provider: String,
     pub tokens_used: u64,
@@ -656,7 +737,7 @@ pub struct ProviderUsage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct ProjectUsage {
     pub project_id: String,
     pub project_name: String,
@@ -664,7 +745,7 @@ pub struct ProjectUsage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct AgentUsageSummary {
     pub agent_type: String,
     pub total_tokens: u64,
@@ -673,7 +754,7 @@ pub struct AgentUsageSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct AgentProjectUsage {
     pub project_id: String,
     pub project_name: String,
@@ -682,7 +763,7 @@ pub struct AgentProjectUsage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct DailyUsage {
     pub date: String,
     pub anthropic: u64,
@@ -695,7 +776,7 @@ pub struct DailyUsage {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct Discussion {
     pub id: String,
     pub project_id: Option<String>,
@@ -708,6 +789,10 @@ pub struct Discussion {
     pub message_count: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skill_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profile_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub directive_ids: Vec<String>,
     #[serde(default)]
     pub archived: bool,
     pub created_at: DateTime<Utc>,
@@ -715,7 +800,7 @@ pub struct Discussion {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct DiscussionMessage {
     pub id: String,
     pub role: MessageRole,
@@ -729,7 +814,7 @@ pub struct DiscussionMessage {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub enum MessageRole {
     User,
     Agent,
@@ -741,7 +826,7 @@ pub enum MessageRole {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct SetScanPathsRequest {
     pub paths: Vec<String>,
 }
@@ -749,7 +834,7 @@ pub struct SetScanPathsRequest {
 // ─── Workflow API requests ────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct CreateWorkflowRequest {
     pub name: String,
     pub project_id: Option<String>,
@@ -766,7 +851,7 @@ pub struct CreateWorkflowRequest {
 }
 
 #[derive(Debug, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct UpdateWorkflowRequest {
     pub name: Option<String>,
     pub trigger: Option<WorkflowTrigger>,
@@ -779,7 +864,7 @@ pub struct UpdateWorkflowRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct WorkflowSummary {
     pub id: String,
     pub name: String,
@@ -793,7 +878,7 @@ pub struct WorkflowSummary {
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct WorkflowRunSummary {
     pub id: String,
     pub status: RunStatus,
@@ -804,7 +889,7 @@ pub struct WorkflowRunSummary {
 
 #[allow(dead_code)]
 #[derive(Debug, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct ImportWorkflowRequest {
     pub content: String,
     pub project_id: Option<String>,
@@ -813,7 +898,7 @@ pub struct ImportWorkflowRequest {
 // ─── MCP API requests ────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct CreateMcpConfigRequest {
     pub server_id: String,
     pub label: String,
@@ -825,7 +910,7 @@ pub struct CreateMcpConfigRequest {
 }
 
 #[derive(Debug, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct UpdateMcpConfigRequest {
     pub label: Option<String>,
     #[ts(type = "Record<string, string> | null")]
@@ -835,13 +920,13 @@ pub struct UpdateMcpConfigRequest {
 }
 
 #[derive(Debug, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct LinkMcpConfigRequest {
     pub project_ids: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct McpOverview {
     pub servers: Vec<McpServer>,
     pub configs: Vec<McpConfigDisplay>,
@@ -851,7 +936,7 @@ pub struct McpOverview {
 }
 
 #[derive(Debug, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct CreateDiscussionRequest {
     pub project_id: Option<String>,
     pub title: String,
@@ -861,14 +946,20 @@ pub struct CreateDiscussionRequest {
     pub initial_prompt: String,
     #[serde(default)]
     pub skill_ids: Vec<String>,
+    #[serde(default)]
+    pub profile_ids: Vec<String>,
+    #[serde(default)]
+    pub directive_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct UpdateDiscussionRequest {
     pub title: Option<String>,
     pub archived: Option<bool>,
     pub skill_ids: Option<Vec<String>>,
+    pub profile_ids: Option<Vec<String>>,
+    pub directive_ids: Option<Vec<String>>,
 }
 
 fn default_language() -> String {
@@ -876,7 +967,7 @@ fn default_language() -> String {
 }
 
 #[derive(Debug, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct SendMessageRequest {
     pub content: String,
     #[serde(default)]
@@ -884,16 +975,20 @@ pub struct SendMessageRequest {
 }
 
 #[derive(Debug, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct OrchestrationRequest {
     pub agents: Vec<AgentType>,
     pub max_rounds: Option<u32>,
     #[serde(default)]
     pub skill_ids: Vec<String>,
+    #[serde(default)]
+    pub profile_ids: Vec<String>,
+    #[serde(default)]
+    pub directive_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct SetAgentAccessRequest {
     pub agent: AgentType,
     pub full_access: bool,
@@ -904,7 +999,7 @@ pub struct SetAgentAccessRequest {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct McpContextEntry {
     pub slug: String,
     pub label: String,
@@ -912,7 +1007,7 @@ pub struct McpContextEntry {
 }
 
 #[derive(Debug, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct UpdateMcpContextRequest {
     pub content: String,
 }
@@ -922,7 +1017,7 @@ pub struct UpdateMcpContextRequest {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Serialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct DbInfo {
     pub size_bytes: u64,
     pub project_count: u32,
@@ -934,7 +1029,7 @@ pub struct DbInfo {
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../frontend/src/types/generated.ts")]
+#[ts(export)]
 pub struct DbExport {
     pub version: u32,
     pub exported_at: DateTime<Utc>,

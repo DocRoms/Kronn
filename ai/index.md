@@ -90,7 +90,7 @@ Never load everything "just in case".
 ## 4. Development constraints
 
 - **Docker-first**: the full app runs via `docker compose`. Backend, frontend, and gateway are separate services.
-- **Quality is mandatory**: `cargo check` and `cargo clippy` must pass. Frontend: `npm run build`, `npm run lint` (0 errors), `npm test` (124+ tests must pass). Shell: `make test-shell` (186 bats tests must pass).
+- **Quality is mandatory**: `cargo check` and `cargo clippy` must pass. Frontend: `npm run build`, `npm run lint` (0 errors), `npm test` (146+ tests must pass). Shell: `make test-shell` (186 bats tests must pass).
 - **Type generation**: Rust models are the source of truth. TypeScript types are auto-generated via `ts-rs`.
 - If stdout/stderr is missing: ask the user to copy/paste the full output.
 
@@ -102,7 +102,7 @@ Never load everything "just in case".
 - Rust data models: `backend/src/models/mod.rs`.
 - TypeScript types: `frontend/src/types/generated.ts` (auto-generated from Rust).
 - API routes: `backend/src/main.rs` (router definition).
-- Database schema: `backend/src/db/sql/001_initial.sql` (+ 002, 004, 005, 006 migrations).
+- Database schema: `backend/src/db/sql/001_initial.sql` (+ migrations 002-011).
 - Docker config: `docker-compose.yml`.
 
 ---
@@ -160,7 +160,7 @@ Dashboard tabs (current / planned):
 | Discussions | Done | Single/multi-agent chat, @mentions, orchestration, global discussions, archive/unarchive (swipe gestures), inline title editing, disabled agent detection |
 | MCPs | Done | MCP registry and management |
 | Workflows | Done | Workflow list, creation wizard (5-step: infos → trigger → steps → config → resume), detail + runs with live SSE progress, manual trigger, run deletion (individual + bulk). MCP tools auto-injected into agent prompts. Symphony import planned. |
-| Config | Done | Multi-key API management (named keys, per-provider activation), token usage tracking, language, agent detection + permissions, DB management (export/import) |
+| Config | Done | Multi-key API management, token usage tracking, language, agent detection + permissions, Skills/Profiles/Directives CRUD with live cards, DB management (export/import) |
 
 Note: the old "Agents" tab has been merged into Config. Nav order: Projets → Discussions → MCPs → Workflows → Config.
 
@@ -209,4 +209,4 @@ Redirectors to this file: `CLAUDE.md`.
 
 ## 12. Last updated
 
-AI context last reviewed: **2026-03-10**.
+AI context last reviewed: **2026-03-12**.

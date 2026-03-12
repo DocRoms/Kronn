@@ -10,7 +10,8 @@ pub fn list_discussions(conn: &Connection) -> Result<Vec<Discussion>> {
     let mut stmt = conn.prepare(
         "SELECT d.id, d.project_id, d.title, d.agent, d.language, d.participants_json,
                 d.created_at, d.updated_at, d.archived, d.skill_ids_json,
-                (SELECT COUNT(*) FROM messages m WHERE m.discussion_id = d.id) as msg_count
+                (SELECT COUNT(*) FROM messages m WHERE m.discussion_id = d.id) as msg_count,
+                d.profile_ids_json, d.directive_ids_json
          FROM discussions d ORDER BY d.updated_at DESC"
     )?;
 
@@ -18,6 +19,8 @@ pub fn list_discussions(conn: &Connection) -> Result<Vec<Discussion>> {
         let agent_str: String = row.get(3)?;
         let participants_str: String = row.get(5)?;
         let skill_ids_str: String = row.get::<_, String>(9).unwrap_or_else(|_| "[]".into());
+        let profile_ids_str: String = row.get::<_, String>(11).unwrap_or_else(|_| "[]".into());
+        let directive_ids_str: String = row.get::<_, String>(12).unwrap_or_else(|_| "[]".into());
 
         Ok(Discussion {
             id: row.get(0)?,
@@ -29,6 +32,8 @@ pub fn list_discussions(conn: &Connection) -> Result<Vec<Discussion>> {
             messages: vec![],
             message_count: row.get::<_, u32>(10).unwrap_or(0),
             skill_ids: serde_json::from_str(&skill_ids_str).unwrap_or_default(),
+            profile_ids: serde_json::from_str(&profile_ids_str).unwrap_or_default(),
+            directive_ids: serde_json::from_str(&directive_ids_str).unwrap_or_default(),
             archived: row.get::<_, i32>(8).unwrap_or(0) != 0,
             created_at: parse_dt(row.get::<_, String>(6)?),
             updated_at: parse_dt(row.get::<_, String>(7)?),
@@ -62,7 +67,7 @@ pub fn list_discussions_with_messages(conn: &Connection) -> Result<Vec<Discussio
 pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>> {
     let mut stmt = conn.prepare(
         "SELECT id, project_id, title, agent, language, participants_json,
-                created_at, updated_at, archived, skill_ids_json
+                created_at, updated_at, archived, skill_ids_json, profile_ids_json, directive_ids_json
          FROM discussions WHERE id = ?1"
     )?;
 
@@ -70,6 +75,8 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
         let agent_str: String = row.get(3)?;
         let participants_str: String = row.get(5)?;
         let skill_ids_str: String = row.get::<_, String>(9).unwrap_or_else(|_| "[]".into());
+        let profile_ids_str: String = row.get::<_, String>(10).unwrap_or_else(|_| "[]".into());
+        let directive_ids_str: String = row.get::<_, String>(11).unwrap_or_else(|_| "[]".into());
 
         Ok(Discussion {
             id: row.get(0)?,
@@ -81,6 +88,8 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
             messages: vec![],
             message_count: 0,
             skill_ids: serde_json::from_str(&skill_ids_str).unwrap_or_default(),
+            profile_ids: serde_json::from_str(&profile_ids_str).unwrap_or_default(),
+            directive_ids: serde_json::from_str(&directive_ids_str).unwrap_or_default(),
             archived: row.get::<_, i32>(8).unwrap_or(0) != 0,
             created_at: parse_dt(row.get::<_, String>(6)?),
             updated_at: parse_dt(row.get::<_, String>(7)?),
@@ -98,8 +107,8 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
 
 pub fn insert_discussion(conn: &Connection, disc: &Discussion) -> Result<()> {
     conn.execute(
-        "INSERT INTO discussions (id, project_id, title, agent, language, participants_json, created_at, updated_at, archived, skill_ids_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "INSERT INTO discussions (id, project_id, title, agent, language, participants_json, created_at, updated_at, archived, skill_ids_json, profile_ids_json, directive_ids_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             disc.id,
             disc.project_id,
@@ -111,6 +120,8 @@ pub fn insert_discussion(conn: &Connection, disc: &Discussion) -> Result<()> {
             disc.updated_at.to_rfc3339(),
             disc.archived as i32,
             serde_json::to_string(&disc.skill_ids)?,
+            serde_json::to_string(&disc.profile_ids)?,
+            serde_json::to_string(&disc.directive_ids)?,
         ],
     )?;
     Ok(())
@@ -122,14 +133,22 @@ pub fn delete_discussion(conn: &Connection, id: &str) -> Result<bool> {
 }
 
 pub fn update_discussion(conn: &Connection, id: &str, title: Option<&str>, archived: Option<bool>) -> Result<bool> {
-    update_discussion_fields(conn, id, title, archived, None)
+    update_discussion_fields(conn, id, title, archived, None, None, None)
 }
 
 pub fn update_discussion_skill_ids(conn: &Connection, id: &str, skill_ids: &[String]) -> Result<bool> {
-    update_discussion_fields(conn, id, None, None, Some(skill_ids))
+    update_discussion_fields(conn, id, None, None, Some(skill_ids), None, None)
 }
 
-fn update_discussion_fields(conn: &Connection, id: &str, title: Option<&str>, archived: Option<bool>, skill_ids: Option<&[String]>) -> Result<bool> {
+pub fn update_discussion_profile_ids(conn: &Connection, id: &str, profile_ids: &[String]) -> Result<bool> {
+    update_discussion_fields(conn, id, None, None, None, Some(profile_ids), None)
+}
+
+pub fn update_discussion_directive_ids(conn: &Connection, id: &str, directive_ids: &[String]) -> Result<bool> {
+    update_discussion_fields(conn, id, None, None, None, None, Some(directive_ids))
+}
+
+fn update_discussion_fields(conn: &Connection, id: &str, title: Option<&str>, archived: Option<bool>, skill_ids: Option<&[String]>, profile_ids: Option<&[String]>, directive_ids: Option<&[String]>) -> Result<bool> {
     let mut sets = Vec::new();
     let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
@@ -144,6 +163,14 @@ fn update_discussion_fields(conn: &Connection, id: &str, title: Option<&str>, ar
     if let Some(s) = skill_ids {
         sets.push("skill_ids_json = ?");
         values.push(Box::new(serde_json::to_string(s).unwrap_or_else(|_| "[]".into())));
+    }
+    if let Some(p) = profile_ids {
+        sets.push("profile_ids_json = ?");
+        values.push(Box::new(serde_json::to_string(p).unwrap_or_else(|_| "[]".into())));
+    }
+    if let Some(d) = directive_ids {
+        sets.push("directive_ids_json = ?");
+        values.push(Box::new(serde_json::to_string(d).unwrap_or_else(|_| "[]".into())));
     }
 
     if sets.is_empty() {

@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
-import { projects as projectsApi, mcps as mcpsApi, agents as agentsApi, discussions as discussionsApi, config as configApi } from '../lib/api';
+import { projects as projectsApi, mcps as mcpsApi, agents as agentsApi, discussions as discussionsApi, workflows as workflowsApi, config as configApi } from '../lib/api';
 import { useApi } from '../hooks/useApi';
 import { useToast } from '../hooks/useToast';
 import type { Project, AgentDetection, AgentType } from '../types/generated';
@@ -89,6 +89,7 @@ export function Dashboard({ onReset }: DashboardProps) {
   const { data: discussionList, refetch: refetchDiscussions } = useApi(() => discussionsApi.list(), []);
   const { data: configLanguage, refetch: refetchLanguage } = useApi(() => configApi.getLanguage(), []);
   const { data: agentAccess, refetch: refetchAgentAccess } = useApi(() => configApi.getAgentAccess(), []);
+  const { data: workflowList, refetch: refetchWorkflows } = useApi(() => workflowsApi.list(), []);
 
   // Poll discussions for notifications — faster when on discussions page, slower otherwise
   useEffect(() => {
@@ -100,6 +101,22 @@ export function Dashboard({ onReset }: DashboardProps) {
     document.addEventListener('visibilitychange', onVisibilityChange);
     return () => { clearInterval(interval); document.removeEventListener('visibilitychange', onVisibilityChange); };
   }, [refetchDiscussions, page]);
+
+  // Poll workflows — fast when running, slow otherwise
+  const runningWorkflows = useMemo(() =>
+    (workflowList ?? []).filter(w => w.last_run?.status === 'Running' || w.last_run?.status === 'Pending').length,
+    [workflowList],
+  );
+
+  useEffect(() => {
+    const pollInterval = runningWorkflows > 0 ? 3000 : page === 'workflows' ? 10000 : 60000;
+    const interval = setInterval(() => { refetchWorkflows(); }, pollInterval);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') refetchWorkflows();
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => { clearInterval(interval); document.removeEventListener('visibilitychange', onVisibilityChange); };
+  }, [refetchWorkflows, page, runningWorkflows]);
 
   const projects = projectList ?? [];
   const mcpRegistry = registry ?? [];
@@ -213,7 +230,11 @@ export function Dashboard({ onReset }: DashboardProps) {
           ['settings', Settings, t('nav.config')],
         ] as [string, typeof Folder, string][]).map(([id, Icon, label]) => (
           <button key={id} style={{ ...s.navBtn(page === id), position: 'relative' }} onClick={() => setPage(id as Page)}>
-            <Icon size={14} /> {label}
+            {id === 'workflows' && runningWorkflows > 0
+              ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite', color: '#c8ff00' }} />
+              : <Icon size={14} />
+            }
+            {' '}{label}
             {id === 'discussions' && totalUnseen > 0 && (
               <span style={{
                 position: 'absolute', top: 2, right: 2,
@@ -221,6 +242,14 @@ export function Dashboard({ onReset }: DashboardProps) {
                 borderRadius: 6, padding: '1px 5px', minWidth: 14, textAlign: 'center',
                 lineHeight: '12px',
               }}>{totalUnseen}</span>
+            )}
+            {id === 'workflows' && runningWorkflows > 0 && (
+              <span style={{
+                position: 'absolute', top: 2, right: 2,
+                background: '#c8ff00', color: '#0a0c10', fontSize: 8, fontWeight: 800,
+                borderRadius: 6, padding: '1px 5px', minWidth: 14, textAlign: 'center',
+                lineHeight: '12px',
+              }}>{runningWorkflows}</span>
             )}
           </button>
         ))}

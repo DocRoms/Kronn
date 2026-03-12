@@ -129,37 +129,22 @@ describe('generated types', () => {
 
   describe('Skill types', () => {
     it('SkillCategory covers all categories', { timeout: 30_000 }, () => {
-      const categories: SkillCategory[] = ['Technical', 'Business', 'Meta'];
+      const categories: SkillCategory[] = ['Language', 'Domain', 'Business'];
       expect(categories).toHaveLength(3);
     });
 
     it('Skill has correct structure', () => {
       const skill: Skill = {
-        id: 'token-saver',
-        name: 'Token Saver',
-        description: 'Minimizes token usage',
+        id: 'rust',
+        name: 'Rust',
         icon: 'Zap',
-        category: 'Meta',
+        category: 'Language',
         content: 'Be concise.',
         is_builtin: true,
       };
-      expect(skill.id).toBe('token-saver');
+      expect(skill.id).toBe('rust');
       expect(skill.is_builtin).toBe(true);
-      expect(skill.category).toBe('Meta');
-    });
-
-    it('Skill supports optional conflicts', () => {
-      const skill: Skill = {
-        id: 'custom-verbose',
-        name: 'Verbose',
-        description: 'Detailed explanations',
-        icon: 'BookOpen',
-        category: 'Meta',
-        content: 'Be verbose.',
-        is_builtin: false,
-        conflicts: ['token-saver'],
-      };
-      expect(skill.conflicts).toEqual(['token-saver']);
+      expect(skill.category).toBe('Language');
     });
 
     it('Discussion supports optional skill_ids', () => {
@@ -171,6 +156,7 @@ describe('generated types', () => {
         language: 'en',
         participants: ['ClaudeCode'],
         messages: [],
+        message_count: 0,
         skill_ids: ['token-saver', 'rust-dev'],
         archived: false,
         created_at: '2024-01-01T00:00:00Z',
@@ -188,6 +174,7 @@ describe('generated types', () => {
         language: 'en',
         participants: [],
         messages: [],
+        message_count: 0,
         archived: false,
         created_at: '2024-01-01T00:00:00Z',
         updated_at: '2024-01-01T00:00:00Z',

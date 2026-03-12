@@ -43,6 +43,17 @@ impl Workspace {
         std::fs::create_dir_all(&worktree_base)?;
         let worktree_path = worktree_base.join(format!("{}-{}", sanitized_name, &run_id[..8.min(run_id.len())]));
 
+        // Mark the repo and worktree as safe directories (needed in Docker where
+        // the mounted volume owner differs from the container user)
+        let _ = Command::new("git")
+            .args(["config", "--global", "--add", "safe.directory", &repo_path.to_string_lossy()])
+            .output()
+            .await;
+        let _ = Command::new("git")
+            .args(["config", "--global", "--add", "safe.directory", &worktree_path.to_string_lossy()])
+            .output()
+            .await;
+
         // Create the worktree with a new branch
         let output = Command::new("git")
             .args(["worktree", "add", "-b", &branch])

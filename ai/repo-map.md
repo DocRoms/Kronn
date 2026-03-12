@@ -26,7 +26,9 @@ Kronn/
 │       │   ├── workflows.rs    # Workflow CRUD + trigger + runs
 │       │   ├── agents.rs       # Agent detection + install + uninstall + toggle (enable/disable)
 │       │   ├── stats.rs        # Token usage stats
-│       │   └── skills.rs      # Skills API: list, create, update, delete
+│       │   ├── skills.rs      # Skills API: list, create, update, delete
+│       │   ├── profiles.rs    # Profiles API: list, create, update, delete, persona-name override
+│       │   └── directives.rs  # Directives API: list, create, update, delete
 │       ├── agents/             # Agent runner (CLI execution)
 │       │   ├── mod.rs          # Re-exports
 │       │   └── runner.rs       # Spawns agent CLIs, streams stdout as SSE. Two output modes: Text (line-by-line) and StreamJson (Claude Code stream-json with token tracking). Runtime probe (npx fallback, 5min cache). MCP contexts injected into prompts
@@ -43,15 +45,24 @@ Kronn/
 │       │       ├── 002_mcp_redesign.sql # 3-tier MCP: mcp_servers, mcp_configs, mcp_config_projects
 │       │       ├── 004_token_tracking.sql # Token tracking tables
 │       │       ├── 005_discussion_archive.sql # Add archived column to discussions
-│       │       └── 006_discussion_skills.sql # Add skill_ids_json column to discussions
+│       │       ├── 006_discussion_skills.sql # Add skill_ids_json column to discussions
+│       │       ├── 007_project_skills.sql   # Default skills per project
+│       │       ├── 008_discussions_index.sql # Performance index
+│       │       ├── 009_profiles.sql          # Profile support (profile_id on discussions/projects)
+│       │       ├── 010_directives.sql        # Directives support
+│       │       └── 011_multi_profiles.sql    # Multi-profile support (profile_id → profile_ids_json)
 │       ├── core/               # Business logic
 │       │   ├── mod.rs          # Re-exports
 │       │   ├── config.rs       # Config load/save (~/.config/kronn/)
 │       │   ├── scanner.rs      # Git repo scanner + AI audit detection (detect_audit_status, count_ai_todos)
-│       │   ├── registry.rs     # MCP registry (26 built-in official servers, grouped by category, with token_url/token_help)
+│       │   ├── registry.rs     # MCP registry (34 built-in official servers, grouped by category, with token_url/token_help)
 │       │   ├── mcp_scanner.rs  # Multi-agent MCP sync + MCP injection. read_all_mcp_contexts() reads .mcp.json + context files and generates prompt listing available MCP tools. Disk sync: .mcp.json (Claude), .vibe/config.toml (Vibe), ~/.codex/config.toml (Codex). .gitignore safety
 │       │   ├── crypto.rs       # AES-256-GCM encryption for MCP secrets
-│       │   └── skills.rs      # Skills loader: builtin (embedded .md) + custom (~/.config/kronn/skills/). Frontmatter parsing, build_skills_prompt()
+│       │   ├── skills.rs      # Skills loader: builtin (embedded .md) + custom (~/.config/kronn/skills/). Frontmatter parsing, build_skills_prompt()
+│       │   ├── profiles.rs   # Profiles loader: builtin (embedded .md) + custom (~/.config/kronn/profiles/). Persona override system, build_profiles_prompt()
+│       │   └── directives.rs # Directives loader: builtin (embedded .md) + custom (~/.config/kronn/directives/). build_directives_prompt()
+│       ├── profiles/          # Builtin profile Markdown files (8 profiles: architect, tech-lead, qa-engineer, product-owner, scrum-master, technical-writer, devils-advocate, mentor)
+│       ├── directives/        # Builtin directive Markdown files
 │       ├── skills/             # Builtin skill Markdown files (embedded at compile time)
 │       │   ├── token-saver.md  # Meta: minimize token usage
 │       │   ├── typescript-dev.md # Technical: TypeScript expert
@@ -59,7 +70,13 @@ Kronn/
 │       │   ├── security-auditor.md # Technical: security review
 │       │   ├── product-owner.md # Business: user perspective
 │       │   ├── devils-advocate.md # Meta: challenge assumptions
-│       │   └── qa-engineer.md  # Business: testing focus
+│       │   ├── qa-engineer.md  # Business: testing focus
+│       │   ├── devops-expert.md # Technical: infrastructure & ops
+│       │   ├── seo-expert.md   # Technical: SEO optimization
+│       │   ├── green-it-expert.md # Technical: environmental efficiency
+│       │   ├── data-engineer.md # Technical: data pipelines
+│       │   ├── tech-lead.md    # Technical: architecture & leadership
+│       │   └── json-output.md  # Meta: force JSON-only output
 │       └── workflows/          # Workflow engine (implemented)
 │           ├── mod.rs          # WorkflowEngine: background polling loop (30s ticks), trigger checking, concurrency
 │           ├── trigger.rs      # Cron evaluation, tracker polling frequency
@@ -146,7 +163,7 @@ Kronn/
 - Dashboard.tsx (~650 lines) is the main UI shell with projects tab and nav. Extracted: SettingsPage.tsx (~670 lines), DiscussionsPage.tsx (~1420 lines), McpPage.tsx (~715 lines), WorkflowsPage.tsx (~1700 lines).
 - DiscussionsPage includes: SwipeableDiscItem (swipe-to-archive/delete), inline title editing, disabled agent detection, multi-line textarea, archive section.
 - Shared constants (AGENT_COLORS, AGENT_LABELS) extracted to `lib/constants.ts` — imported by Dashboard and WorkflowsPage.
-- Frontend tests in `__tests__/` directories alongside source (14 suites, 124+ tests). See `ai/testing-quality.md`.
+- Frontend tests in `__tests__/` directories alongside source (15 suites, 146+ tests). See `ai/testing-quality.md`.
 - Shell tests in `tests/bats/` (8 suites, 186 tests via bats-core). See `ai/testing-quality.md`.
 - CI pipeline: `.github/workflows/ci-test.yml` triggered by `ci-test` label on PRs (backend + frontend + shell tests).
 - `templates/` directory contains the AI context template files (ai/ skeleton, CLAUDE.md, .cursorrules, etc.) mounted at `/app/templates:ro` in Docker.
