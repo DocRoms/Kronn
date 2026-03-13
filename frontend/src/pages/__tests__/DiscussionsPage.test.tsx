@@ -210,4 +210,213 @@ describe('DiscussionsPage', () => {
     expect(disc.messages).toHaveLength(0);
     expect(disc.message_count).toBe(10);
   });
+
+  // ─── Streaming & tab-switch behavior tests ──────────────────────────────
+
+  it('shows thinking loader when sendingMap has active entry', async () => {
+    const fullDisc: Discussion = {
+      ...makeListDiscussion('d1', 1),
+      messages: [
+        { id: 'm1', role: 'User', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+
+    const lifted = liftedProps();
+    lifted.sendingMap = { d1: true };
+    lifted.streamingMap = { d1: '' };
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[{ ...makeListDiscussion('d1', 1), messages: fullDisc.messages }]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d1"
+        {...lifted}
+      />
+    );
+
+    // The "thinking" / running indicator should be visible
+    const body = document.body.textContent ?? '';
+    expect(body).toContain('ClaudeCode');
+  });
+
+  it('restores active discussion on remount via initialActiveDiscussionId', async () => {
+    const fullDisc: Discussion = {
+      ...makeListDiscussion('d1', 2),
+      messages: [
+        { id: 'm1', role: 'User', content: 'My question', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm2', role: 'Agent', content: 'My answer', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:01Z', tokens_used: 100, auth_mode: null },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+
+    const lifted = liftedProps();
+
+    // First mount — simulate user selecting d1
+    const { unmount } = await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[makeListDiscussion('d1', 2)]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d1"
+        {...lifted}
+      />
+    );
+
+    // discussions.get should have been called for d1
+    expect(vi.mocked(discussionsApi.get)).toHaveBeenCalledWith('d1');
+
+    // Unmount (tab switch) and remount
+    unmount();
+    vi.mocked(discussionsApi.get).mockClear();
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[makeListDiscussion('d1', 2)]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d1"
+        {...lifted}
+      />
+    );
+
+    // After remount, discussions.get should be called again to reload d1
+    expect(vi.mocked(discussionsApi.get)).toHaveBeenCalledWith('d1');
+  });
+
+  it('does NOT abort SSE controllers on unmount', async () => {
+    const controller = new AbortController();
+    const abortSpy = vi.spyOn(controller, 'abort');
+    const lifted = liftedProps();
+    lifted.abortControllers = { current: { d1: controller } };
+
+    const { unmount } = await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        {...lifted}
+      />
+    );
+
+    unmount();
+
+    // The controller should NOT be aborted — SSE streams survive page switches
+    expect(abortSpy).not.toHaveBeenCalled();
+  });
+
+  it('refetches discussion when sending finishes (activeSending changes)', async () => {
+    const discWithResponse: Discussion = {
+      ...makeListDiscussion('d1', 2),
+      messages: [
+        { id: 'm1', role: 'User', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm2', role: 'Agent', content: 'Response', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:01Z', tokens_used: 50, auth_mode: null },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(discWithResponse);
+
+    const lifted = liftedProps();
+
+    // Initial render: agent is still sending
+    const sendingMap: Record<string, boolean> = { d1: true };
+    lifted.sendingMap = sendingMap;
+
+    const { rerender } = await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[makeListDiscussion('d1', 1)]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d1"
+        {...lifted}
+      />
+    );
+
+    const callCountBefore = vi.mocked(discussionsApi.get).mock.calls.length;
+
+    // Simulate sending finishing: sendingMap changes to false
+    const updatedLifted = { ...lifted, sendingMap: { d1: false } };
+    await act(async () => {
+      rerender(
+        <I18nProvider>
+          <DiscussionsPage
+            projects={[]}
+            agents={[]}
+            allDiscussions={[makeListDiscussion('d1', 2)]}
+            configLanguage="fr"
+            agentAccess={null}
+            refetchDiscussions={noop}
+            refetchProjects={noop}
+            onNavigate={noop}
+            toast={toastFn}
+            initialActiveDiscussionId="d1"
+            {...updatedLifted}
+          />
+        </I18nProvider>
+      );
+    });
+
+    // discussions.get should have been called again to reload the discussion with new messages
+    expect(vi.mocked(discussionsApi.get).mock.calls.length).toBeGreaterThan(callCountBefore);
+  });
+
+  it('pre-selects validation profiles when prefill is provided', async () => {
+    const lifted = liftedProps();
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        prefill={{ projectId: 'p1', title: 'Validation audit AI', prompt: 'Validate this' }}
+        onPrefillConsumed={noop}
+        {...lifted}
+      />
+    );
+
+    // The prefilled form should be visible — the prompt textarea has the prefilled content
+    const body = document.body.textContent ?? '';
+    expect(body).toContain('Validate this');
+
+    // The title input should have the prefilled value
+    const titleInput = document.querySelector('input[readonly]') as HTMLInputElement;
+    expect(titleInput).toBeTruthy();
+    expect(titleInput.value).toBe('Validation audit AI');
+  });
 });

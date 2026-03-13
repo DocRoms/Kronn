@@ -33,6 +33,9 @@ export function useApi<T>(
     } catch (e) {
       if (thisRequest === requestId.current) {
         setError(e instanceof Error ? e.message : 'Unknown error');
+        // Keep previous data on error — don't setData(null).
+        // This prevents the UI from flashing empty when a transient error occurs
+        // (e.g. SQLITE_BUSY during concurrent writes).
       }
     } finally {
       if (thisRequest === requestId.current) {
