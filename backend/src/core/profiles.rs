@@ -206,17 +206,29 @@ pub fn build_profiles_prompt(profile_ids: &[String]) -> String {
         return format!("=== Agent Profile: {} ({}) ===\n{}\n\n", p.name, p.role, p.persona_prompt);
     }
 
-    // Multi-profile: collaborative mode
-    let mut prompt = String::from("=== Multi-Agent Collaboration ===\n");
-    prompt.push_str("Multiple expert profiles are active in this discussion. ");
-    prompt.push_str("Each profile brings unique expertise. You must:\n");
-    prompt.push_str("1. Consider each profile's perspective when answering\n");
-    prompt.push_str("2. Identify trade-offs between different viewpoints\n");
-    prompt.push_str("3. Challenge assumptions from each role's standpoint\n");
-    prompt.push_str("4. Synthesize a balanced recommendation\n\n");
+    // Multi-profile: structured discussion mode
+    let mut prompt = String::from("=== Multi-Profile Discussion Mode ===\n\n");
+    prompt.push_str("You have multiple expert profiles active. You MUST respond as a structured discussion.\n");
+    prompt.push_str("Each profile speaks individually with their own voice, perspective, and expertise.\n\n");
+    prompt.push_str("FORMAT — follow this EXACTLY:\n\n");
+    prompt.push_str("1. For EACH profile below, write a response block using this format:\n");
+    prompt.push_str("   > **[Avatar] [FirstName] ([Role])** : [their response in their own voice]\n\n");
+    prompt.push_str("   Each profile MUST:\n");
+    prompt.push_str("   - Speak from their specific expertise and role\n");
+    prompt.push_str("   - Have a distinct opinion (agree, disagree, nuance — not all the same)\n");
+    prompt.push_str("   - Use a natural, conversational tone (not bullet points)\n");
+    prompt.push_str("   - Be concise (3-6 sentences per profile)\n\n");
+    prompt.push_str("2. After ALL profiles have spoken, add a synthesis:\n");
+    prompt.push_str("   **🔗 Synthèse** : [balanced summary of agreements, disagreements, and final recommendation]\n\n");
+    prompt.push_str("IMPORTANT:\n");
+    prompt.push_str("- Each profile is a DISTINCT voice. Do NOT merge perspectives.\n");
+    prompt.push_str("- Use the blockquote format (>) for each profile response.\n");
+    prompt.push_str("- The synthesis is NOT in a blockquote.\n\n");
 
+    prompt.push_str("--- Active Profiles ---\n\n");
     for p in &profiles {
-        prompt.push_str(&format!("--- {} ({}) ---\n{}\n\n", p.persona_name, p.role, p.persona_prompt));
+        prompt.push_str(&format!("FirstName: {}\nAvatar: {}\nRole: {}\n{}\n\n",
+            p.persona_name, p.avatar, p.role, p.persona_prompt));
     }
 
     prompt

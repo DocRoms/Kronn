@@ -147,6 +147,7 @@ export interface DiscussionsPageProps {
   refetchProjects: () => void;
   onNavigate: (page: string) => void;
   prefill?: { projectId: string; title: string; prompt: string } | null;
+  initialActiveDiscussionId?: string | null;
   onPrefillConsumed?: () => void;
   toast: ToastFn;
   // Lifted streaming state (lives in Dashboard, survives page changes)
@@ -183,11 +184,12 @@ export function DiscussionsPage({
   markDiscussionSeen,
   onActiveDiscussionChange,
   lastSeenMsgCount,
+  initialActiveDiscussionId,
 }: DiscussionsPageProps) {
   const { t } = useT();
 
   // ─── Internal state ──────────────────────────────────────────────────────
-  const [activeDiscussionId, setActiveDiscussionId] = useState<string | null>(null);
+  const [activeDiscussionId, setActiveDiscussionId] = useState<string | null>(initialActiveDiscussionId ?? null);
   const [showNewDiscussion, setShowNewDiscussion] = useState(false);
   const [newDiscTitle, setNewDiscTitle] = useState('');
   const [newDiscAgent, setNewDiscAgent] = useState<AgentType | ''>('');
@@ -230,6 +232,8 @@ export function DiscussionsPage({
   const [loadedDiscussions, setLoadedDiscussions] = useState<Record<string, Discussion>>({});
 
   // Fetch full discussion (with messages) when active discussion changes
+  // or when sending finishes (to pick up the agent's response)
+  const activeSending = activeDiscussionId ? !!sendingMap[activeDiscussionId] : false;
   useEffect(() => {
     if (!activeDiscussionId) return;
     let cancelled = false;
@@ -239,7 +243,7 @@ export function DiscussionsPage({
       }
     }).catch(() => { /* ignore fetch errors */ });
     return () => { cancelled = true; };
-  }, [activeDiscussionId]);
+  }, [activeDiscussionId, activeSending]);
 
   // ─── Derived data ────────────────────────────────────────────────────────
   const activeDiscussion = (activeDiscussionId && loadedDiscussions[activeDiscussionId])
@@ -290,13 +294,12 @@ export function DiscussionsPage({
 
   // ─── Effects ─────────────────────────────────────────────────────────────
 
-  // Abort all pending controllers on unmount
-  useEffect(() => {
-    const controllers = abortControllers;
-    return () => {
-      Object.values(controllers.current).forEach(c => c.abort());
-    };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  // NOTE: Do NOT abort SSE controllers on unmount.
+  // The SSE callbacks use Dashboard state setters (sendingMap, streamingMap)
+  // which survive page switches. Aborting here would kill in-flight agent
+  // streams when the user simply switches tabs, causing the "thinking" loader
+  // to disappear. Controllers are cleaned up by cleanupStream (on SSE done)
+  // or by the explicit Stop button (handleStop).
 
   // Fetch available skills & profiles
   useEffect(() => {
@@ -336,6 +339,9 @@ export function DiscussionsPage({
       setNewDiscProjectId(prefill.projectId);
       setNewDiscTitle(prefill.title);
       setNewDiscPrompt(prefill.prompt);
+      // Auto-select mandatory profiles for audit validation
+      const validationProfileIds = ['architect', 'tech-lead', 'qa-engineer'];
+      setNewDiscProfileIds(validationProfileIds);
       onPrefillConsumed?.();
     }
   }, [prefill, onPrefillConsumed]);
@@ -408,6 +414,28 @@ export function DiscussionsPage({
     const { targetAgent } = parseMention(msg);
     setChatInput('');
     setMentionQuery(null);
+
+    // Optimistically add user message to loadedDiscussions so it appears immediately
+    setLoadedDiscussions(prev => {
+      const disc = prev[discId];
+      if (!disc) return prev;
+      return {
+        ...prev,
+        [discId]: {
+          ...disc,
+          messages: [...disc.messages, {
+            id: `optimistic-${Date.now()}`,
+            role: 'User' as const,
+            content: msg,
+            agent_type: null,
+            timestamp: new Date().toISOString(),
+            tokens_used: 0,
+            auth_mode: null,
+          }],
+        },
+      };
+    });
+
     const controller = new AbortController();
     abortControllers.current[discId] = controller;
     setStreamingMap(prev => ({ ...prev, [discId]: '' }));
@@ -751,7 +779,7 @@ export function DiscussionsPage({
               {availableSkills.length > 0 && (
                 <div style={{ marginBottom: 12 }}>
                   <label style={ds.label}><Zap size={10} style={{ marginRight: 4 }} />{t('skills.selectSkills')}</label>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4, maxHeight: 72, overflowY: 'auto' }}>
                     {availableSkills.map(skill => {
                       const selected = newDiscSkillIds.includes(skill.id);
                       return (
@@ -787,7 +815,7 @@ export function DiscussionsPage({
               {availableProfiles.length > 0 && (
                 <div style={{ marginBottom: 12 }}>
                   <label style={ds.label}><UserCircle size={10} style={{ marginRight: 4 }} />{t('profiles.select')}</label>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4, maxHeight: 72, overflowY: 'auto' }}>
                     <button
                       type="button"
                       onClick={() => setNewDiscProfileIds([])}
@@ -833,7 +861,7 @@ export function DiscussionsPage({
               {availableDirectives.length > 0 && (
                 <div style={{ marginBottom: 12 }}>
                   <label style={ds.label}><FileText size={10} style={{ marginRight: 4 }} />{t('directives.title')}</label>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4, maxHeight: 72, overflowY: 'auto' }}>
                     {availableDirectives.map(directive => {
                       const selected = newDiscDirectiveIds.includes(directive.id);
                       return (
@@ -1671,7 +1699,7 @@ const ds = {
   chatInput: { width: '100%', padding: '10px 14px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, color: '#e8eaed', fontSize: 13, fontFamily: 'inherit', outline: 'none' } as const,
   sendBtn: { padding: '10px 16px', borderRadius: 8, border: '1px solid rgba(200,255,0,0.2)', background: 'rgba(200,255,0,0.1)', color: '#c8ff00', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' } as const,
   newDiscOverlay: { display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 1 } as const,
-  newDiscCard: { width: 420, padding: 24, borderRadius: 12, background: '#12151c', border: '1px solid rgba(255,255,255,0.1)' } as const,
+  newDiscCard: { width: 420, padding: 24, borderRadius: 12, background: '#12151c', border: '1px solid rgba(255,255,255,0.1)', maxHeight: 'calc(100vh - 120px)', overflowY: 'auto' } as const,
   label: { display: 'block', fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', marginBottom: 4, marginTop: 8 } as const,
   selectStyled: {
     width: '100%', padding: '9px 12px', background: '#1a1d26', border: '1px solid rgba(255,255,255,0.12)',

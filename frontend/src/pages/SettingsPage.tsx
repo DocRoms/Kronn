@@ -768,7 +768,7 @@ export function SettingsPage({
             <Zap size={16} style={{ color: '#c8ff00' }} /> {t('skills.title')}
           </h2>
 
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 16 }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 16, maxHeight: 400, overflowY: 'auto', overflowX: 'hidden' }}>
             {availableSkills.map(skill => (
               <div key={skill.id} style={{
                 padding: '10px 14px', borderRadius: 8, width: 220,
@@ -966,7 +966,7 @@ export function SettingsPage({
             <UserCircle size={16} style={{ color: '#a78bfa' }} /> {t('profiles.title')}
           </h2>
 
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginBottom: 16 }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginBottom: 16, maxHeight: 400, overflowY: 'auto', overflowX: 'hidden' }}>
             {availableProfiles.map(profile => (
               <div key={profile.id} style={{
                 padding: '14px 16px', borderRadius: 10, width: 280,
@@ -1275,7 +1275,7 @@ export function SettingsPage({
           <h2 style={{ fontSize: 14, fontWeight: 700, color: '#e8eaed', marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
             <FileText size={16} style={{ color: '#f59e0b' }} /> {t('directives.title')}
           </h2>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 16 }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 16, maxHeight: 400, overflowY: 'auto', overflowX: 'hidden' }}>
             {availableDirectives.map(directive => (
               <div key={directive.id} style={{
                 padding: '10px 14px', borderRadius: 8, width: 220,

@@ -646,6 +646,7 @@ export function Dashboard({ onReset }: DashboardProps) {
             cleanupStream={cleanupStream}
             markDiscussionSeen={markDiscussionSeen}
             onActiveDiscussionChange={setActiveDiscussionId}
+            initialActiveDiscussionId={activeDiscussionId}
             lastSeenMsgCount={lastSeenMsgCount}
           />
         )}

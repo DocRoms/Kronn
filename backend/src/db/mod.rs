@@ -52,10 +52,10 @@ impl Database {
             .map(|v| v != "0" && v.to_lowercase() != "false")
             .unwrap_or(true);
         if use_wal {
-            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")?;
         } else {
             tracing::warn!("WAL mode disabled (KRONN_DB_WAL=0); using DELETE journal mode");
-            conn.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA foreign_keys=ON;")?;
+            conn.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")?;
         }
 
         // Run migrations before wrapping in Mutex (avoids blocking_lock inside async runtime)
