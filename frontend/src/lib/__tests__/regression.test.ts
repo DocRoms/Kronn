@@ -286,6 +286,72 @@ describe('regression tests', () => {
     });
   });
 
+  describe('git panel i18n keys', () => {
+    const gitKeys = [
+      'git.title',
+      'git.refresh',
+      'git.noChanges',
+      'git.filesChanged',
+      'git.onDefaultBranch',
+      'git.createBranch',
+      'git.branchName',
+      'git.commit',
+      'git.commitMessage',
+      'git.commitSelected',
+      'git.push',
+      'git.pushSuccess',
+      'git.selectAll',
+      'git.deselectAll',
+      'git.filesBtn',
+    ];
+
+    it('all git keys exist in FR', () => {
+      for (const key of gitKeys) {
+        const val = t('fr', key);
+        expect(val).not.toBe(key);
+      }
+    });
+
+    it('all git keys exist in EN', () => {
+      for (const key of gitKeys) {
+        const val = t('en', key);
+        expect(val).not.toBe(key);
+      }
+    });
+
+    it('all git keys exist in ES', () => {
+      for (const key of gitKeys) {
+        const val = t('es', key);
+        expect(val).not.toBe(key);
+      }
+    });
+  });
+
+  describe('git terminal i18n keys', () => {
+    const terminalKeys = ['git.terminal', 'git.terminalPlaceholder'];
+
+    it('all terminal keys exist in FR', () => {
+      for (const key of terminalKeys) {
+        const val = t('fr', key);
+        expect(val).not.toBe(key);
+      }
+    });
+
+    it('all terminal keys exist in EN', () => {
+      for (const key of terminalKeys) {
+        const val = t('en', key);
+        expect(val).not.toBe(key);
+      }
+    });
+
+    it('all terminal keys exist in ES', () => {
+      for (const key of terminalKeys) {
+        const val = t('es', key);
+        expect(val).not.toBe(key);
+      }
+    });
+  });
+
   describe('smart default section logic (collapsible project sections)', () => {
     // Replicate the defaultSection() logic from Dashboard.tsx
     const defaultSection = (auditStatus: string) => {

@@ -246,11 +246,29 @@ pub async fn bootstrap(
     enrich_audit_status(&mut project);
 
     let p = project.clone();
+    let mcp_ids = req.mcp_config_ids.clone();
     if let Err(e) = state.db.with_conn(move |conn| {
         crate::db::projects::insert_project(conn, &p)?;
+        // Link selected MCP configs to the new project
+        for mcp_id in &mcp_ids {
+            crate::db::mcps::link_config_project(conn, mcp_id, &p.id)?;
+        }
         Ok(())
     }).await {
         return Json(ApiResponse::err(format!("DB error: {}", e)));
+    }
+
+    // Sync .mcp.json for the new project if MCPs were linked
+    if !req.mcp_config_ids.is_empty() {
+        let config = state.config.read().await;
+        if let Some(ref secret) = config.encryption_secret {
+            let secret = secret.clone();
+            let pid = project_id.clone();
+            let _ = state.db.with_conn(move |conn| {
+                crate::core::mcp_scanner::sync_affected_projects(conn, &[pid], &secret);
+                Ok::<_, anyhow::Error>(())
+            }).await;
+        }
     }
 
     // 4. Get language
@@ -715,7 +733,7 @@ fn inject_bootstrap_prompt(index_file: &std::path::Path) {
 > 7. **`ai/operations/debug-operations.md`** — Common commands, Docker services, troubleshooting.
 >
 > 8. **`ai/operations/mcp-servers.md`** — MCP servers if .mcp.json exists.
->    Also create `ai/operations/mcp-servers/<slug>.md` for each MCP with purpose, rules, examples.
+>    Only create `ai/operations/mcp-servers/<slug>.md` if there are project-specific rules to document.
 >
 > 9. **`ai/inconsistencies-tech-debt.md`** — Real issues found during analysis.
 >    Create `ai/tech-debt/TD-*.md` detail files for each entry.
@@ -839,11 +857,10 @@ Read ai/index.md for context. Check if .mcp.json or .mcp.json.example or .env.mc
 If MCP config exists:\n\
 - Document each configured MCP server in ai/operations/mcp-servers.md\n\
 - For each server: name, transport type, what it's used for, required env vars\n\
-- Create a context file for EACH MCP server at ai/operations/mcp-servers/<slug>.md with:\n\
-  # <MCP Name> — Usage context\n\
-  ## Purpose: what this MCP does in this project\n\
-  ## Rules: project-specific constraints (rate limits, naming conventions, allowed operations)\n\
-  ## Examples: 1-2 common usage patterns\n\n\
+- ONLY create a context file at ai/operations/mcp-servers/<slug>.md if you have \
+project-specific rules, constraints, or usage patterns to document for that MCP.\n\
+  Do NOT create empty or boilerplate context files — they add no value.\n\
+  A context file should contain: purpose in this project, specific rules, and usage examples.\n\n\
 If no MCP config exists: replace ai/operations/mcp-servers.md content with:\n\
 '# MCP Servers\\n\\nNo MCP servers configured for this project.'"),
 
@@ -948,6 +965,7 @@ pub async fn run_audit(
                 agent_type: &agent_type, project_path: &project_path_str, work_dir: None,
                 prompt: &full_prompt, tokens: &tokens, full_access: true,
                 skill_ids: &[], directive_ids: &[], profile_ids: &[],
+                mcp_context_override: None,
             }).await {
                 Ok(mut process) => {
                     while let Some(line) = process.next_line().await {
@@ -1478,6 +1496,7 @@ pub async fn full_audit(
                 agent_type: &agent_type, project_path: &project_path_str, work_dir: None,
                 prompt: &full_prompt, tokens: &tokens, full_access: true,
                 skill_ids: &[], directive_ids: &[], profile_ids: &[],
+                mcp_context_override: None,
             }).await {
                 Ok(mut process) => {
                     // Register the child PID for cancellation
@@ -2512,6 +2531,484 @@ pub async fn read_ai_file(
 
     match result {
         Ok(content) => Json(ApiResponse::ok(content)),
+        Err(e) => Json(ApiResponse::err(e)),
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Git Operations
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Helper: resolve a project's filesystem path from its DB id.
+async fn resolve_project_path(state: &AppState, id: &str) -> Result<std::path::PathBuf, String> {
+    let pid = id.to_string();
+    let project = state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &pid))
+        .await
+        .map_err(|e| format!("DB error: {}", e))?;
+    let project = project.ok_or_else(|| "Project not found".to_string())?;
+    let resolved = scanner::resolve_host_path(&project.path);
+    if !resolved.exists() {
+        return Err(format!("Project path not found: {}", resolved.display()));
+    }
+    Ok(resolved)
+}
+
+/// GET /api/projects/:id/git-status
+pub async fn git_status(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<GitStatusResponse>> {
+    let repo_path = match resolve_project_path(&state, &id).await {
+        Ok(p) => p,
+        Err(e) => return Json(ApiResponse::err(e)),
+    };
+
+    let result = tokio::task::spawn_blocking(move || -> Result<GitStatusResponse, String> {
+        let run = |args: &[&str]| -> Result<String, String> {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo_path)
+                .output()
+                .map_err(|e| format!("Failed to run git: {}", e))?;
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        };
+
+        let run_with_status = |args: &[&str]| -> (String, bool) {
+            match std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo_path)
+                .output()
+            {
+                Ok(o) => (String::from_utf8_lossy(&o.stdout).trim().to_string(), o.status.success()),
+                Err(_) => (String::new(), false),
+            }
+        };
+
+        // Current branch
+        let branch = run(&["branch", "--show-current"])?;
+
+        // Default branch detection: try main, then master
+        let default_branch = {
+            let (_, ok_main) = run_with_status(&["rev-parse", "--verify", "main"]);
+            if ok_main {
+                "main".to_string()
+            } else {
+                let (_, ok_master) = run_with_status(&["rev-parse", "--verify", "master"]);
+                if ok_master {
+                    "master".to_string()
+                } else {
+                    String::new()
+                }
+            }
+        };
+
+        let is_default_branch = !default_branch.is_empty() && branch == default_branch;
+
+        // Parse porcelain v1 status
+        // -u shows individual files in untracked directories (not just the directory name)
+        let status_output = run(&["status", "--porcelain=v1", "-u"])?;
+        let files: Vec<GitFileStatus> = status_output
+            .lines()
+            .filter(|l| l.len() >= 3)
+            .map(|line| {
+                let bytes = line.as_bytes();
+                let staged_char = bytes[0] as char;
+                let unstaged_char = bytes[1] as char;
+                let raw_path = line[3..].to_string();
+                // Handle renamed files ("old -> new") — show the new path
+                let path = if raw_path.contains(" -> ") {
+                    raw_path.split(" -> ").last().unwrap_or(&raw_path).to_string()
+                } else {
+                    raw_path
+                };
+                // Strip quotes that git adds for special characters
+                let path = path.trim_matches('"').to_string();
+
+                // Determine status label
+                let status = match (staged_char, unstaged_char) {
+                    ('?', '?') => "untracked",
+                    ('A', _) => "added",
+                    ('D', _) | (_, 'D') => "deleted",
+                    ('R', _) => "renamed",
+                    ('M', _) | (_, 'M') => "modified",
+                    ('C', _) => "copied",
+                    _ => "modified",
+                }.to_string();
+
+                let staged = staged_char != ' ' && staged_char != '?';
+
+                GitFileStatus { path, status, staged }
+            })
+            .collect();
+
+        // Ahead/behind upstream
+        let (ahead, behind) = {
+            let (ab_output, ab_ok) = run_with_status(&["rev-list", "--count", "--left-right", "@{upstream}...HEAD"]);
+            if ab_ok {
+                let parts: Vec<&str> = ab_output.split_whitespace().collect();
+                if parts.len() == 2 {
+                    let b = parts[0].parse::<u32>().unwrap_or(0);
+                    let a = parts[1].parse::<u32>().unwrap_or(0);
+                    (a, b)
+                } else {
+                    (0, 0)
+                }
+            } else {
+                (0, 0)
+            }
+        };
+
+        Ok(GitStatusResponse {
+            branch,
+            default_branch,
+            is_default_branch,
+            files,
+            ahead,
+            behind,
+        })
+    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+
+    match result {
+        Ok(status) => Json(ApiResponse::ok(status)),
+        Err(e) => Json(ApiResponse::err(e)),
+    }
+}
+
+/// GET /api/projects/:id/git-diff?path=src/foo.rs
+pub async fn git_diff(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<GitDiffQuery>,
+) -> Json<ApiResponse<GitDiffResponse>> {
+    // Path traversal protection
+    if query.path.contains("..") {
+        return Json(ApiResponse::err("Invalid path"));
+    }
+
+    let repo_path = match resolve_project_path(&state, &id).await {
+        Ok(p) => p,
+        Err(e) => return Json(ApiResponse::err(e)),
+    };
+
+    let file_path = query.path.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<GitDiffResponse, String> {
+        let run_diff = |args: &[&str]| -> String {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo_path)
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                .unwrap_or_default()
+        };
+
+        // Unstaged diff
+        let unstaged = run_diff(&["diff", "--", &file_path]);
+        // Staged diff
+        let staged = run_diff(&["diff", "--cached", "--", &file_path]);
+
+        // For untracked or newly added files, git diff returns nothing.
+        // Show the file content as a full-add diff instead.
+        let untracked_diff = if unstaged.is_empty() && staged.is_empty() {
+            let full_path = repo_path.join(&file_path);
+            if full_path.exists() {
+                // Show file as new content (similar to git diff --no-index)
+                match std::fs::read_to_string(&full_path) {
+                    Ok(content) => {
+                        let lines: Vec<String> = content.lines()
+                            .map(|l| format!("+{}", l))
+                            .collect();
+                        if lines.is_empty() {
+                            String::new()
+                        } else {
+                            format!("--- /dev/null\n+++ b/{}\n@@ -0,0 +1,{} @@\n{}",
+                                file_path, lines.len(), lines.join("\n"))
+                        }
+                    }
+                    Err(_) => String::new(), // Binary or unreadable
+                }
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+
+        // Combine all diffs
+        let diff = if !staged.is_empty() && !unstaged.is_empty() {
+            format!("--- Staged ---\n{}\n--- Unstaged ---\n{}", staged, unstaged)
+        } else if !staged.is_empty() {
+            staged
+        } else if !unstaged.is_empty() {
+            unstaged
+        } else {
+            untracked_diff
+        };
+
+        Ok(GitDiffResponse { path: file_path, diff })
+    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+
+    match result {
+        Ok(diff) => Json(ApiResponse::ok(diff)),
+        Err(e) => Json(ApiResponse::err(e)),
+    }
+}
+
+/// POST /api/projects/:id/git-branch
+pub async fn git_branch(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<GitBranchRequest>,
+) -> Json<ApiResponse<GitBranchResponse>> {
+    // Validate branch name (no spaces, no special chars)
+    if req.name.is_empty() || req.name.contains(' ') || req.name.contains("..") {
+        return Json(ApiResponse::err("Invalid branch name"));
+    }
+
+    let repo_path = match resolve_project_path(&state, &id).await {
+        Ok(p) => p,
+        Err(e) => return Json(ApiResponse::err(e)),
+    };
+
+    let branch_name = req.name.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<GitBranchResponse, String> {
+        let output = std::process::Command::new("git")
+            .args(["checkout", "-b", &branch_name])
+            .current_dir(&repo_path)
+            .output()
+            .map_err(|e| format!("Failed to run git: {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("git checkout -b failed: {}", stderr.trim()));
+        }
+
+        Ok(GitBranchResponse { branch: branch_name })
+    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+
+    match result {
+        Ok(resp) => Json(ApiResponse::ok(resp)),
+        Err(e) => Json(ApiResponse::err(e)),
+    }
+}
+
+/// POST /api/projects/:id/git-commit
+pub async fn git_commit(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<GitCommitRequest>,
+) -> Json<ApiResponse<GitCommitResponse>> {
+    if req.files.is_empty() {
+        return Json(ApiResponse::err("No files specified"));
+    }
+    if req.message.is_empty() {
+        return Json(ApiResponse::err("Commit message is required"));
+    }
+    // Validate file paths (no path traversal)
+    for f in &req.files {
+        if f.contains("..") {
+            return Json(ApiResponse::err(format!("Invalid file path: {}", f)));
+        }
+    }
+
+    let repo_path = match resolve_project_path(&state, &id).await {
+        Ok(p) => p,
+        Err(e) => return Json(ApiResponse::err(e)),
+    };
+
+    let files = req.files.clone();
+    let message = req.message.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<GitCommitResponse, String> {
+        // git add each file individually, skip missing files gracefully
+        let mut added = 0;
+        for file in &files {
+            // Strip quotes that may come from the frontend
+            let clean_file = file.trim_matches('"');
+            let file_abs = repo_path.join(clean_file);
+
+            if file_abs.exists() {
+                // Existing file: git add
+                let add_output = std::process::Command::new("git")
+                    .args(["add", "--", clean_file])
+                    .current_dir(&repo_path)
+                    .output()
+                    .map_err(|e| format!("Failed to run git add: {}", e))?;
+                if add_output.status.success() {
+                    added += 1;
+                } else {
+                    tracing::warn!("git add skipped '{}': {}", clean_file,
+                        String::from_utf8_lossy(&add_output.stderr).trim());
+                }
+            } else {
+                // Deleted file: stage the deletion
+                let rm_output = std::process::Command::new("git")
+                    .args(["rm", "--cached", "--ignore-unmatch", "--", clean_file])
+                    .current_dir(&repo_path)
+                    .output();
+                if rm_output.map(|o| o.status.success()).unwrap_or(false) {
+                    added += 1;
+                }
+            }
+        }
+        if added == 0 {
+            return Err("No files could be staged".to_string());
+        }
+
+        // Ensure git identity is set (Docker container may not have one)
+        let has_user = std::process::Command::new("git")
+            .args(["config", "user.name"])
+            .current_dir(&repo_path)
+            .output()
+            .map(|o| o.status.success() && !o.stdout.is_empty())
+            .unwrap_or(false);
+        if !has_user {
+            let _ = std::process::Command::new("git")
+                .args(["config", "user.name", "Kronn"])
+                .current_dir(&repo_path).status();
+            let _ = std::process::Command::new("git")
+                .args(["config", "user.email", "kronn@localhost"])
+                .current_dir(&repo_path).status();
+        }
+
+        // git commit -m <message>
+        let commit_output = std::process::Command::new("git")
+            .args(["commit", "-m", &message])
+            .current_dir(&repo_path)
+            .output()
+            .map_err(|e| format!("Failed to run git commit: {}", e))?;
+
+        if !commit_output.status.success() {
+            let stderr = String::from_utf8_lossy(&commit_output.stderr);
+            return Err(format!("git commit failed: {}", stderr.trim()));
+        }
+
+        // Get the commit hash
+        let hash_output = std::process::Command::new("git")
+            .args(["rev-parse", "--short", "HEAD"])
+            .current_dir(&repo_path)
+            .output()
+            .map_err(|e| format!("Failed to get commit hash: {}", e))?;
+
+        let hash = String::from_utf8_lossy(&hash_output.stdout).trim().to_string();
+
+        Ok(GitCommitResponse { hash, message })
+    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+
+    match result {
+        Ok(resp) => Json(ApiResponse::ok(resp)),
+        Err(e) => Json(ApiResponse::err(e)),
+    }
+}
+
+/// POST /api/projects/:id/git-push
+pub async fn git_push(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<GitPushResponse>> {
+    let repo_path = match resolve_project_path(&state, &id).await {
+        Ok(p) => p,
+        Err(e) => return Json(ApiResponse::err(e)),
+    };
+
+    let result = tokio::task::spawn_blocking(move || -> Result<GitPushResponse, String> {
+        // Get current branch
+        let branch_output = std::process::Command::new("git")
+            .args(["branch", "--show-current"])
+            .current_dir(&repo_path)
+            .output()
+            .map_err(|e| format!("Failed to get branch: {}", e))?;
+
+        let branch = String::from_utf8_lossy(&branch_output.stdout).trim().to_string();
+        if branch.is_empty() {
+            return Err("Cannot determine current branch (detached HEAD?)".to_string());
+        }
+
+        // git push -u origin <branch>
+        let push_output = std::process::Command::new("git")
+            .args(["push", "-u", "origin", &branch])
+            .current_dir(&repo_path)
+            .output()
+            .map_err(|e| format!("Failed to run git push: {}", e))?;
+
+        if push_output.status.success() {
+            let stdout = String::from_utf8_lossy(&push_output.stdout);
+            let stderr = String::from_utf8_lossy(&push_output.stderr);
+            // git push often writes progress to stderr even on success
+            let msg = if !stdout.trim().is_empty() {
+                stdout.trim().to_string()
+            } else {
+                stderr.trim().to_string()
+            };
+            Ok(GitPushResponse {
+                success: true,
+                message: msg,
+            })
+        } else {
+            let stderr = String::from_utf8_lossy(&push_output.stderr);
+            Ok(GitPushResponse {
+                success: false,
+                message: stderr.trim().to_string(),
+            })
+        }
+    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+
+    match result {
+        Ok(resp) => Json(ApiResponse::ok(resp)),
+        Err(e) => Json(ApiResponse::err(e)),
+    }
+}
+
+/// POST /api/projects/:id/exec
+/// Execute a shell command in the project directory for verification.
+pub async fn project_exec(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<ExecRequest>,
+) -> Json<ApiResponse<ExecResponse>> {
+    let cmd = req.command.trim().to_string();
+    if cmd.is_empty() {
+        return Json(ApiResponse::err("Empty command"));
+    }
+
+    // Block dangerous commands
+    let first_word = cmd.split_whitespace().next().unwrap_or("");
+    const BLOCKED: &[&str] = &["rm", "sudo", "chmod", "chown", "kill", "reboot", "shutdown", "mkfs", "dd"];
+    if BLOCKED.contains(&first_word) {
+        return Json(ApiResponse::err(format!("Command '{}' is not allowed", first_word)));
+    }
+
+    let repo_path = match resolve_project_path(&state, &id).await {
+        Ok(p) => p,
+        Err(e) => return Json(ApiResponse::err(e)),
+    };
+
+    let result = tokio::task::spawn_blocking(move || -> Result<ExecResponse, String> {
+        let output = std::process::Command::new("sh")
+            .args(["-c", &cmd])
+            .current_dir(&repo_path)
+            .output()
+            .map_err(|e| format!("Failed to execute: {}", e))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        // Add helpful hint when a command is not found
+        if !output.status.success() && (stderr.contains("not found") || stderr.contains("No such file")) {
+            stderr.push_str(
+                "\n\n💡 Commande introuvable. Le terminal s'exécute dans le container Docker \
+                avec accès aux binaires du host (/usr/bin). Si l'outil est installé ailleurs, \
+                vérifiez votre PATH ou installez-le dans le container."
+            );
+        }
+
+        Ok(ExecResponse {
+            stdout,
+            stderr,
+            exit_code: output.status.code().unwrap_or(-1),
+        })
+    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+
+    match result {
+        Ok(resp) => Json(ApiResponse::ok(resp)),
         Err(e) => Json(ApiResponse::err(e)),
     }
 }

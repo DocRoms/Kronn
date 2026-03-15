@@ -1,5 +1,6 @@
 ---
 name: Rust
+description: Systems programming with ownership, lifetimes, and zero-cost abstractions
 category: language
 icon: 🦀
 builtin: true

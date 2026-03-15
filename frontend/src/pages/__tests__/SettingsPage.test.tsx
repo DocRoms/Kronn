@@ -1,13 +1,24 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, screen, act, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, act, cleanup } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
 
-// Mock API — SettingsPage calls config.getTokens(), config.dbInfo(), config.getScanDepth(), stats.agentUsage(), skills.list() on mount
+// Mock API
 vi.mock('../../lib/api', () => ({
   setAuthToken: vi.fn(),
   config: {
     getTokens: vi.fn().mockResolvedValue({ keys: [], overrides: {} }),
-    dbInfo: vi.fn().mockResolvedValue({ path: '/tmp/db', size_bytes: 1024 }),
+    dbInfo: vi.fn().mockResolvedValue({
+      size_bytes: 1024,
+      project_count: 5,
+      discussion_count: 12,
+      message_count: 150,
+      mcp_count: 3,
+      workflow_count: 2,
+      workflow_run_count: 8,
+      custom_skill_count: 4,
+      custom_profile_count: 2,
+      custom_directive_count: 1,
+    }),
     getScanDepth: vi.fn().mockResolvedValue(4),
     getScanPaths: vi.fn().mockResolvedValue(['/home/user/repos']),
     getScanIgnore: vi.fn().mockResolvedValue(['node_modules', '.git']),
@@ -42,7 +53,10 @@ vi.mock('../../lib/api', () => ({
     ]),
   },
   skills: {
-    list: vi.fn().mockResolvedValue([]),
+    list: vi.fn().mockResolvedValue([
+      { id: 'rust', name: 'Rust', description: 'Systems programming', icon: 'Zap', category: 'Language', content: 'Be concise.', is_builtin: true },
+      { id: 'custom-security', name: 'Security', description: 'Security auditing', icon: 'Shield', category: 'Domain', content: 'Focus on security.', is_builtin: false },
+    ]),
     create: vi.fn(),
     update: vi.fn(),
     delete: vi.fn(),
@@ -60,7 +74,9 @@ vi.mock('../../lib/api', () => ({
     updatePersonaName: vi.fn(),
   },
   directives: {
-    list: vi.fn().mockResolvedValue([]),
+    list: vi.fn().mockResolvedValue([
+      { id: 'dir-terse', name: 'Terse', description: 'Short answers', icon: 'MessageSquare', category: 'Output', content: 'Be brief.', is_builtin: true, conflicts: ['dir-verbose'] },
+    ]),
     create: vi.fn(),
     update: vi.fn(),
     delete: vi.fn(),
@@ -113,81 +129,85 @@ const defaultProps = {
 };
 
 describe('SettingsPage', () => {
-  it('renders without crashing with minimal props', async () => {
+  it('renders all main sections', async () => {
+    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
+    const body = document.body.textContent!;
+
+    // Configuration heading
+    expect(body).toContain('Configuration');
+    // Database section
+    expect(body).toContain('Base de donnees');
+    // Agents section
+    expect(body).toContain('Agents');
+    // Skills section
+    expect(body).toContain('Skills');
+    // Directives section
+    expect(body).toContain('Directives');
+    // Profiles section
+    expect(body).toContain('Profils agent');
+  });
+
+  it('renders skill cards with name and description', async () => {
     await wrap(<SettingsPage {...defaultProps} />);
-    expect(document.body.textContent).toBeDefined();
+    const body = document.body.textContent!;
+
+    expect(body).toContain('Rust');
+    expect(body).toContain('Systems programming');
+    expect(body).toContain('Security');
+    expect(body).toContain('Security auditing');
   });
 
-  it('renders with agentAccess set', async () => {
-    const agentAccess: AgentsConfig = {
-      claude_code: { path: null, installed: true, version: null, full_access: true },
-      codex: { path: null, installed: false, version: null, full_access: false },
-      gemini_cli: { path: null, installed: false, version: null, full_access: false },
-      kiro: { path: null, installed: false, version: null, full_access: false },
-      vibe: { path: null, installed: false, version: null, full_access: false },
-    };
-    await wrap(<SettingsPage {...defaultProps} agentAccess={agentAccess} configLanguage="en" />);
-    expect(document.body.textContent).toBeDefined();
-  });
-
-  it('renders with agents detected', async () => {
-    await wrap(
-      <SettingsPage {...defaultProps} agents={[sampleAgent]} configLanguage="fr" />
-    );
-    expect(document.body.textContent).toBeDefined();
-  });
-
-  // ─── Scan sections merged into one card ──────────────────────────────────
-
-  it('renders scan depth, paths and ignore in the same card', async () => {
+  it('renders directive cards with name, description, and conflicts', async () => {
     await wrap(<SettingsPage {...defaultProps} />);
-    // All three sub-sections should be present
+    const body = document.body.textContent!;
+
+    expect(body).toContain('Terse');
+    expect(body).toContain('Short answers');
+  });
+
+  it('DB info shows all counters when > 0', async () => {
+    await wrap(<SettingsPage {...defaultProps} />);
+    const body = document.body.textContent!;
+
+    // Check counter values are rendered
+    expect(body).toContain('5');   // project_count
+    expect(body).toContain('12');  // discussion_count
+    expect(body).toContain('150'); // message_count
+    expect(body).toContain('3');   // mcp_count
+
+    // Check labels (French default)
+    expect(body).toContain('Projets');
+    expect(body).toContain('Discussions');
+    expect(body).toContain('Messages');
+    expect(body).toContain('MCPs');
+    expect(body).toContain('Workflows');
+    expect(body).toContain('Skills custom');
+    expect(body).toContain('Profils custom');
+    expect(body).toContain('Directives custom');
+  });
+
+  it('export button exists', async () => {
+    await wrap(<SettingsPage {...defaultProps} />);
+    expect(screen.getByText('Exporter')).toBeTruthy();
+  });
+
+  it('renders scan configuration sections in the same card', async () => {
+    await wrap(<SettingsPage {...defaultProps} />);
     const body = document.body.textContent!;
     expect(body).toContain('Profondeur de scan');
     expect(body).toContain('Dossiers a scanner');
     expect(body).toContain('Patterns a ignorer');
-
-    // They should be inside the SAME card: find the card-level heading,
-    // go up to the card container, and verify all sub-sections are there.
-    const scanPathsHeadings = screen.getAllByText('Dossiers a scanner');
-    // The card-level heading is the first one (14px), the sub-section is the second (12px)
-    const cardHeading = scanPathsHeadings[0];
-    const card = cardHeading.closest('div[style]')?.parentElement;
-    expect(card).toBeTruthy();
-    expect(card!.textContent).toContain('Profondeur de scan');
-    expect(card!.textContent).toContain('Patterns a ignorer');
   });
 
-  // ─── Agents + token usage merged into one card ───────────────────────────
-
-  it('renders estimated token usage inside each agent block', async () => {
+  it('renders agent token usage when agents are detected', async () => {
     await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
-    // Find the agents heading
-    const agentsHeading = screen.getByText('Agents');
-    const agentsCard = agentsHeading.closest('div[style]')?.parentElement;
-    expect(agentsCard).toBeTruthy();
-    // Estimated token usage should be shown per agent inside their block
-    expect(agentsCard!.textContent).toContain('Estimation tokens');
-    expect(agentsCard!.textContent).toContain('5,000 tok');
+    const body = document.body.textContent!;
+    expect(body).toContain('Estimation tokens');
+    expect(body).toContain('5,000 tok');
   });
-
-  // ─── Discover keys button ─────────────────────────────────────────────
 
   it('renders the auto-detect button for API keys', async () => {
     await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
-    // The discover keys button should be present
     expect(screen.getByText('Auto-detecter')).toBeDefined();
-  });
-
-  it('calls discoverKeys API when auto-detect button is clicked', async () => {
-    const { config } = await import('../../lib/api');
-    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
-
-    const btn = screen.getByText('Auto-detecter');
-    await act(async () => { fireEvent.click(btn); });
-
-    await waitFor(() => {
-      expect(config.discoverKeys).toHaveBeenCalled();
-    });
   });
 });

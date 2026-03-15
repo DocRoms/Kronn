@@ -5,6 +5,10 @@ services:
       dockerfile: Dockerfile
       args:
         CARGO_PROFILE: ${CARGO_PROFILE:-release}
+        APP_UID: ${KRONN_HOST_UID:-1000}
+        APP_GID: ${KRONN_HOST_GID:-1000}
+    group_add:
+      - "${KRONN_DOCKER_GID:-989}"  # Docker socket GID for docker compose access
     expose:
       - "3140"
     volumes:
@@ -13,13 +17,17 @@ services:
       - ${KRONN_REPOS_DIR:-${HOME}/Repositories}:/host-home/${KRONN_REPOS_REL:-Repositories}:rw  # rw for agent writes
       - ${KRONN_GLOBAL_BIN:-/usr/local/bin}:/host-bin/global:ro
       - ${HOME}/.local/bin:/host-bin/local:ro
+      - /usr/bin:/host-bin/sysbin:ro              # Host system binaries (make, php, etc.)
+      - /usr/sbin:/host-bin/syssbin:ro            # Host system admin binaries
+      - /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro  # Docker compose plugin
+      - /var/run/docker.sock:/var/run/docker.sock  # Docker socket for docker compose
       - ${HOME}/.local/share:/host-home/.local/share:ro  # Symlink targets (claude, vibe)
       - npm-cache:/home/kronn/.npm  # Persistent npm cache for npx agent execution
       - ${HOME}/.cache/uv:/home/kronn/.cache/uv:rw  # Share host uv cache for Python MCP servers
       - uv-tools:/home/kronn/.local/share/uv  # Persistent uv tool installs (CloudWatch, Atlassian MCP servers)
       # Agent auth directories (local subscriptions)
       - ${HOME}/.claude.json:/home/kronn/.claude.json:ro    # Claude Code main config
-      - ${HOME}/.claude:/home/kronn/.claude:ro              # Claude Code auth/config
+      - ${HOME}/.claude:/home/kronn/.claude:rw              # Claude Code auth/config + session state (needs write)
       - ${HOME}/.codex:/home/kronn/.codex:rw                # Codex auth + state (needs write)
       - ${HOME}/.config/codex:/home/kronn/.config/codex:ro  # Codex config (legacy path)
       - ${HOME}/.vibe:/home/kronn/.vibe:rw                  # Vibe auth + state (needs write)
@@ -31,7 +39,7 @@ services:
       - KRONN_DATA_DIR=/data
       - KRONN_HOST_HOME=${HOME}
       - KRONN_HOST_BIN=/host-bin/local:/host-bin/global
-      - PATH=/home/kronn/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/host-bin/local:/host-bin/global
+      - PATH=/home/kronn/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/host-bin/local:/host-bin/global:/host-bin/sysbin:/host-bin/syssbin
       - KRONN_HOST_OS=${KRONN_HOST_OS:-Linux}
       - KRONN_HOST_UID=${KRONN_HOST_UID:-1000}
       - KRONN_HOST_GID=${KRONN_HOST_GID:-1000}

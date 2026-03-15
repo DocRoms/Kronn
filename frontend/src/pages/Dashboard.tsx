@@ -15,7 +15,7 @@ import {
   Plus, Trash2, Search, Zap, Settings, Eye,
   Loader2,
   MessageSquare, X, AlertTriangle,
-  Play, FileCode, ShieldCheck, StopCircle, BookOpen, Rocket,
+  Play, FileCode, ShieldCheck, StopCircle, BookOpen, Rocket, Check,
 } from 'lucide-react';
 
 type Page = 'projects' | 'mcps' | 'workflows' | 'discussions' | 'settings';
@@ -49,10 +49,6 @@ const AI_CONFIG_LABELS: Record<string, string> = {
 };
 
 // Sort score for project readiness
-const readinessScore = (p: Project) => {
-  return p.ai_config.detected ? 0 : 1;
-};
-
 export function Dashboard({ onReset }: DashboardProps) {
   const { t } = useT();
   const { toast, ToastContainer } = useToast();
@@ -61,6 +57,7 @@ export function Dashboard({ onReset }: DashboardProps) {
   const [showHidden, setShowHidden] = useState(false);
   const [projectSearch, setProjectSearch] = useState('');
   const [projectDisplayLimit, setProjectDisplayLimit] = useState(20);
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set());
   // Cross-page prefill for discussion creation (e.g. "validate audit" from Projects)
   const [discPrefill, setDiscPrefill] = useState<{ projectId: string; title: string; prompt: string; locked?: boolean } | null>(null);
   // Unseen message tracking (persisted in localStorage, computed in Dashboard)
@@ -261,6 +258,7 @@ export function Dashboard({ onReset }: DashboardProps) {
   const [bootstrapName, setBootstrapName] = useState('');
   const [bootstrapDesc, setBootstrapDesc] = useState('');
   const [bootstrapLoading, setBootstrapLoading] = useState(false);
+  const [bootstrapMcpIds, setBootstrapMcpIds] = useState<string[]>([]);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [deleteConfirmInput, setDeleteConfirmInput] = useState('');
   const [newProjectMode, setNewProjectMode] = useState<'bootstrap' | 'clone'>('bootstrap');
@@ -281,10 +279,11 @@ export function Dashboard({ onReset }: DashboardProps) {
     if (!agent) { toast('No usable agent found', 'error'); return; }
     setBootstrapLoading(true);
     try {
-      const res = await projectsApi.bootstrap({ name: bootstrapName.trim(), description: bootstrapDesc.trim(), agent });
+      const res = await projectsApi.bootstrap({ name: bootstrapName.trim(), description: bootstrapDesc.trim(), agent, mcp_config_ids: bootstrapMcpIds });
       setShowBootstrap(false);
       setBootstrapName('');
       setBootstrapDesc('');
+      setBootstrapMcpIds([]);
       await refetch();
       // Navigate to discussions with auto-run on the bootstrap discussion
       setAutoRunDiscussionId(res.discussion_id);
@@ -464,7 +463,7 @@ export function Dashboard({ onReset }: DashboardProps) {
               </button>
             </div>
             {newProjectMode === 'bootstrap' && (
-              <>
+              <div onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && bootstrapName.trim() && bootstrapDesc.trim() && !bootstrapLoading) handleBootstrap(); }}>
                 <label style={{ display: 'block', marginBottom: 12 }}>
                   <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)', display: 'block', marginBottom: 4 }}>{t('projects.bootstrap.name')}</span>
                   <input
@@ -490,6 +489,46 @@ export function Dashboard({ onReset }: DashboardProps) {
                     placeholder={t('projects.bootstrap.descPlaceholder')}
                   />
                 </label>
+
+                {/* MCP selector (collapsible) */}
+                {mcpOverview.configs.length > 0 && (
+                  <div style={{ marginBottom: 16 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                      <Server size={12} style={{ color: 'rgba(255,255,255,0.4)' }} />
+                      <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)' }}>{t('projects.bootstrap.mcps')}</span>
+                      {bootstrapMcpIds.length > 0 && (
+                        <span style={{ fontSize: 10, color: '#c8ff00' }}>({bootstrapMcpIds.length})</span>
+                      )}
+                    </div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                      {mcpOverview.configs.map(cfg => {
+                        const selected = bootstrapMcpIds.includes(cfg.id);
+                        return (
+                          <button
+                            key={cfg.id}
+                            type="button"
+                            onClick={() => setBootstrapMcpIds(prev =>
+                              selected ? prev.filter(id => id !== cfg.id) : [...prev, cfg.id]
+                            )}
+                            style={{
+                              padding: '3px 8px', borderRadius: 10, fontSize: 10, fontFamily: 'inherit',
+                              fontWeight: selected ? 600 : 400, cursor: 'pointer',
+                              border: selected ? '1px solid rgba(0,212,255,0.4)' : '1px solid rgba(255,255,255,0.1)',
+                              background: selected ? 'rgba(0,212,255,0.1)' : 'rgba(255,255,255,0.03)',
+                              color: selected ? '#00d4ff' : 'rgba(255,255,255,0.5)',
+                              display: 'flex', alignItems: 'center', gap: 3,
+                              transition: 'all 0.15s',
+                            }}
+                          >
+                            {selected && <Check size={9} />}
+                            {cfg.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
                 <button
                   onClick={handleBootstrap}
                   disabled={bootstrapLoading || !bootstrapName.trim() || !bootstrapDesc.trim()}
@@ -504,10 +543,10 @@ export function Dashboard({ onReset }: DashboardProps) {
                   {bootstrapLoading ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <Zap size={16} />}
                   {bootstrapLoading ? t('projects.bootstrap.creating') : t('projects.bootstrap.start')}
                 </button>
-              </>
+              </div>
             )}
             {newProjectMode === 'clone' && (
-              <>
+              <div onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && cloneUrl.trim() && !cloneLoading) handleClone(); }}>
                 <label style={{ display: 'block', marginBottom: 12 }}>
                   <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)', display: 'block', marginBottom: 4 }}>{t('projects.clone.url')}</span>
                   <input
@@ -672,7 +711,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                   </div>
                   </div>
                 )}
-              </>
+              </div>
             )}
           </div>
         </div>
@@ -691,11 +730,35 @@ export function Dashboard({ onReset }: DashboardProps) {
           const filteredProjects = projectSearch
             ? baseProjects.filter(p => p.name.toLowerCase().includes(searchLower) || p.path.toLowerCase().includes(searchLower))
             : baseProjects;
-          // Sort: AI+MCP > AI only > MCP only > nothing, then by name
+
+          // Extract org/owner from repo_url for grouping
+          const getProjectGroup = (p: Project): string => {
+            if (!p.repo_url) return t('projects.group.local');
+            try {
+              const url = p.repo_url.replace('git@github.com:', 'https://github.com/')
+                .replace('git@gitlab.com:', 'https://gitlab.com/');
+              const parts = new URL(url).pathname.split('/').filter(Boolean);
+              return parts[0] || t('projects.group.other');
+            } catch { return t('projects.group.other'); }
+          };
+
+          // Sort alphabetically within each group
           const sortedProjects = [...filteredProjects].sort((a, b) => {
-            const diff = readinessScore(a) - readinessScore(b);
-            return diff !== 0 ? diff : a.name.localeCompare(b.name);
+            const groupA = getProjectGroup(a);
+            const groupB = getProjectGroup(b);
+            if (groupA !== groupB) return groupA.localeCompare(groupB);
+            return a.name.localeCompare(b.name);
           });
+
+          // Group projects
+          const groupedProjects: { group: string; projects: Project[] }[] = [];
+          for (const p of sortedProjects) {
+            const group = getProjectGroup(p);
+            const last = groupedProjects[groupedProjects.length - 1];
+            if (last && last.group === group) { last.projects.push(p); }
+            else { groupedProjects.push({ group, projects: [p] }); }
+          }
+
           const displayProjects = projectSearch ? sortedProjects : sortedProjects.slice(0, projectDisplayLimit);
           const remainingCount = sortedProjects.length - displayProjects.length;
           const aiCount = visibleProjects.filter(isAiReady).length;
@@ -741,15 +804,49 @@ export function Dashboard({ onReset }: DashboardProps) {
               </div>
             )}
 
-            {displayProjects.map((proj: Project) => {
+            {displayProjects.map((proj: Project, idx: number) => {
               const isOpen = expandedId === proj.id;
               const projHidden = isHiddenPath(proj.path);
+              // Group header: show when first item or group changes
+              const currentGroup = getProjectGroup(proj);
+              const prevGroup = idx > 0 ? getProjectGroup(displayProjects[idx - 1]) : null;
+              const showGroupHeader = !projectSearch && groupedProjects.length > 1 && currentGroup !== prevGroup;
+              const groupColor = currentGroup === t('projects.group.local') ? 'rgba(255,255,255,0.3)' : `hsl(${Math.abs([...currentGroup].reduce((h, c) => h * 31 + c.charCodeAt(0), 0)) % 360}, 60%, 65%)`;
               const validationDisc = allDiscussions.find(d => d.project_id === proj.id && d.title === 'Validation audit AI');
               const validationInProgress = !!validationDisc && proj.audit_status === 'Audited';
               const bootstrapDisc = allDiscussions.find(d => d.project_id === proj.id && d.title.startsWith('Bootstrap: '));
               const bootstrapInProgress = !!bootstrapDisc && proj.audit_status === 'TemplateInstalled';
+              const groupProjectCount = groupedProjects.find(g => g.group === currentGroup)?.projects.length ?? 0;
               return (
-                <div key={proj.id} style={{ ...s.card(isOpen), opacity: projHidden ? 0.5 : 1 }}>
+                <div key={proj.id}>
+                {showGroupHeader && (() => {
+                  const isCollapsed = collapsedGroups.has(currentGroup);
+                  return (
+                  <div
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 8, margin: idx === 0 ? '0 0 6px' : '16px 0 6px',
+                      padding: '4px 0', cursor: 'pointer', userSelect: 'none',
+                    }}
+                    onClick={() => setCollapsedGroups(prev => {
+                      const next = new Set(prev);
+                      if (next.has(currentGroup)) next.delete(currentGroup); else next.add(currentGroup);
+                      return next;
+                    })}
+                  >
+                    <ChevronDown size={12} style={{ color: groupColor, transform: isCollapsed ? 'rotate(-90deg)' : 'none', transition: 'transform 0.15s', flexShrink: 0 }} />
+                    <div style={{ width: 3, height: 14, borderRadius: 2, background: groupColor }} />
+                    <span style={{ fontSize: 11, fontWeight: 700, color: groupColor, letterSpacing: '0.03em' }}>
+                      {currentGroup}
+                    </span>
+                    <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)' }}>
+                      ({groupProjectCount})
+                    </span>
+                    <div style={{ flex: 1, height: 1, background: `${groupColor}20` }} />
+                  </div>
+                  );
+                })()}
+                {collapsedGroups.has(currentGroup) ? null : (
+                <div style={{ ...s.card(isOpen), opacity: projHidden ? 0.5 : 1 }}>
                   <div style={s.cardHeader} onClick={() => setExpandedId(isOpen ? null : proj.id)}>
                     <ChevronRight size={14} style={{ color: '#c8ff00', transform: isOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s' }} />
                     <div style={{ flex: 1 }}>
@@ -1183,6 +1280,8 @@ export function Dashboard({ onReset }: DashboardProps) {
                     </div>
                   )}
                 </div>
+                )}
+                </div>
               );
             })}
 
@@ -1254,6 +1353,7 @@ export function Dashboard({ onReset }: DashboardProps) {
             onActiveDiscussionChange={setActiveDiscussionId}
             initialActiveDiscussionId={activeDiscussionId}
             lastSeenMsgCount={lastSeenMsgCount}
+            mcpConfigs={mcpOverview.configs}
           />
         )}
 

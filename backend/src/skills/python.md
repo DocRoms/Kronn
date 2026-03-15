@@ -1,5 +1,6 @@
 ---
 name: Python
+description: Modern Python with type hints, async patterns, and clean architecture
 category: language
 icon: 🐍
 builtin: true

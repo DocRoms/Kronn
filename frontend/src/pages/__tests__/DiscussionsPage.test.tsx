@@ -419,4 +419,66 @@ describe('DiscussionsPage', () => {
     expect(titleInput).toBeTruthy();
     expect(titleInput.value).toBe('Validation audit AI');
   });
+
+  // ─── Sidebar content tests ────────────────────────────────────────────
+
+  it('sidebar shows discussion titles in the list', async () => {
+    const discs = [
+      makeListDiscussion('d1', 2),
+      makeListDiscussion('d2', 0),
+    ];
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={discs}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        {...liftedProps()}
+      />
+    );
+
+    const body = document.body.textContent!;
+    expect(body).toContain('Discussion d1');
+    expect(body).toContain('Discussion d2');
+  });
+
+  it('archived discussions show count in Archives section header', async () => {
+    const activeDisc: Discussion = {
+      ...makeListDiscussion('d1', 3),
+      archived: false,
+    };
+    const archivedDisc: Discussion = {
+      ...makeListDiscussion('d2', 5),
+      title: 'Old discussion',
+      archived: true,
+    };
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[activeDisc, archivedDisc]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        {...liftedProps()}
+      />
+    );
+
+    const body = document.body.textContent!;
+    // Active discussion is visible
+    expect(body).toContain('Discussion d1');
+    // Archives section header shows count of archived discussions
+    expect(body).toContain('Archives');
+    expect(body).toContain('1');
+  });
 });

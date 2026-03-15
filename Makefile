@@ -1,4 +1,4 @@
-.PHONY: start start-fast stop logs clean build dev-backend dev-frontend setup check test-shell lint-backend
+.PHONY: start start-fast stop logs clean build dev-backend dev-frontend setup check test-shell lint-backend .env
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 APP_NAME    := kronn
@@ -44,8 +44,34 @@ RESET  := \033[0m
 	echo "KRONN_REPOS_DIR=$$repos_dir" >> .env; \
 	echo "KRONN_REPOS_REL=$$repos_rel" >> .env; \
 	echo "$(CYAN)  Repos dir: $$repos_dir (rw mount)$(RESET)"
+	@# Docker socket GID (for docker compose access from container)
+	@if [ -S /var/run/docker.sock ]; then \
+		docker_gid=$$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo ""); \
+		if [ -n "$$docker_gid" ]; then \
+			echo "KRONN_DOCKER_GID=$$docker_gid" >> .env; \
+			echo "$(CYAN)  Docker socket GID: $$docker_gid$(RESET)"; \
+		fi; \
+	fi
+	@# Auto-detect host system binary paths for terminal access
+	@sysbin=""; \
+	for dir in /usr/bin /usr/sbin /snap/bin; do \
+		[ -d "$$dir" ] && sysbin="$${sysbin:+$$sysbin:}$$dir"; \
+	done; \
+	if [ -n "$$sysbin" ]; then \
+		echo "KRONN_HOST_SYSBIN=$$sysbin" >> .env; \
+		echo "$(CYAN)  Host system binaries: $$sysbin$(RESET)"; \
+	fi
 	@echo "# Add extra repo dirs (colon-separated) for rw access:" >> .env
 	@echo "# KRONN_EXTRA_REPOS=$$HOME/Desktop/projects:$$HOME/Work" >> .env
+	@# Ensure .claude.json exists as a file (Docker creates a directory if missing)
+	@if [ ! -e "$$HOME/.claude.json" ]; then \
+		echo '{}' > "$$HOME/.claude.json"; \
+		echo "$(CYAN)  Created ~/.claude.json (empty file)$(RESET)"; \
+	elif [ -d "$$HOME/.claude.json" ]; then \
+		echo "$(YELLOW)  WARNING: ~/.claude.json is a directory — fixing$(RESET)"; \
+		rmdir "$$HOME/.claude.json" 2>/dev/null && echo '{}' > "$$HOME/.claude.json" || \
+		echo "$(RED)  ERROR: Cannot fix ~/.claude.json — remove it manually$(RESET)"; \
+	fi
 
 ## Generate docker-compose.override.yml for extra repo dirs (KRONN_EXTRA_REPOS)
 .PHONY: _gen-override
@@ -68,16 +94,12 @@ _gen-override:
 ## Start everything (Docker, release build — slow first time, fast after)
 start: .env _gen-override
 	@echo "$(GREEN)▸ Building $(APP_NAME)...$(RESET)"
-	@$(DOCKER_COMP) build
-	@echo "$(GREEN)▸ Starting services...$(RESET)"
-	@$(DOCKER_COMP) up -d
+	@$(DOCKER_COMP) up -d --build
 
 ## Start with fast build (no LTO — ~4x faster rebuild, slightly larger binary)
 start-fast: .env _gen-override
 	@echo "$(GREEN)▸ Building $(APP_NAME) (fast profile)...$(RESET)"
-	@CARGO_PROFILE=fast $(DOCKER_COMP) build
-	@echo "$(GREEN)▸ Starting services...$(RESET)"
-	@CARGO_PROFILE=fast $(DOCKER_COMP) up -d
+	@CARGO_PROFILE=fast $(DOCKER_COMP) up -d --build
 	@echo ""
 	@echo "  $(CYAN)╭──╮$(RESET)"
 	@echo "  $(CYAN)│$(GREEN)⚡$(CYAN)│$(RESET) $(GREEN)Kronn v0.1.0$(RESET)"

@@ -1,5 +1,6 @@
 ---
 name: SEO
+description: Technical SEO, Core Web Vitals, structured data, and crawlability
 category: business
 icon: 🔎
 builtin: true

@@ -1,5 +1,6 @@
 ---
 name: Responder en Español
+description: Forzar todas las respuestas en español profesional y técnico
 category: language
 icon: 🇪🇸
 builtin: true

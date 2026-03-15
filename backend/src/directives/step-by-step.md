@@ -1,5 +1,6 @@
 ---
 name: Step by Step
+description: Explain reasoning step by step with numbered thought process
 category: output
 icon: 📊
 builtin: true

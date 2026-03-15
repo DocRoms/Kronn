@@ -47,6 +47,7 @@ fn parse_directive_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Dir
     let body = after_first[end_pos + 4..].trim().to_string();
 
     let mut name = String::new();
+    let mut description = String::new();
     let mut icon = String::new();
     let mut category = DirectiveCategory::Output;
     let mut conflicts = Vec::new();
@@ -55,6 +56,8 @@ fn parse_directive_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Dir
         let line = line.trim();
         if let Some(val) = line.strip_prefix("name:") {
             name = val.trim().to_string();
+        } else if let Some(val) = line.strip_prefix("description:") {
+            description = val.trim().to_string();
         } else if let Some(val) = line.strip_prefix("icon:") {
             icon = val.trim().to_string();
         } else if let Some(val) = line.strip_prefix("category:") {
@@ -80,6 +83,7 @@ fn parse_directive_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Dir
     Some(Directive {
         id: id.to_string(),
         name,
+        description,
         icon,
         category,
         content: body,
@@ -182,6 +186,7 @@ pub fn validate_no_conflicts(directive_ids: &[String]) -> Vec<(String, String)> 
 /// Save a custom directive to disk. Returns the generated ID.
 pub fn save_custom_directive(
     name: &str,
+    description: &str,
     icon: &str,
     category: &DirectiveCategory,
     content: &str,
@@ -209,9 +214,10 @@ pub fn save_custom_directive(
         format!("[{}]", conflicts.join(", "))
     };
 
+    let desc_line = if description.is_empty() { String::new() } else { format!("description: {}\n", description) };
     let file_content = format!(
-        "---\nname: {}\ncategory: {}\nicon: {}\nbuiltin: false\nconflicts: {}\n---\n{}",
-        name, cat_str, icon, conflicts_str, content
+        "---\nname: {}\n{}category: {}\nicon: {}\nbuiltin: false\nconflicts: {}\n---\n{}",
+        name, desc_line, cat_str, icon, conflicts_str, content
     );
 
     let path = dir.join(format!("{}.md", slug));

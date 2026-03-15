@@ -1,5 +1,6 @@
 ---
 name: Go
+description: Idiomatic Go with concurrency, interfaces, and minimal dependencies
 category: language
 icon: 🔵
 builtin: true

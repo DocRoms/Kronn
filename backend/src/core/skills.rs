@@ -52,6 +52,7 @@ fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Skill> 
     let body = after_first[end_pos + 4..].trim().to_string();
 
     let mut name = String::new();
+    let mut description = String::new();
     let mut icon = String::new();
     let mut category = SkillCategory::Domain;
 
@@ -59,6 +60,8 @@ fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Skill> 
         let line = line.trim();
         if let Some(val) = line.strip_prefix("name:") {
             name = val.trim().to_string();
+        } else if let Some(val) = line.strip_prefix("description:") {
+            description = val.trim().to_string();
         } else if let Some(val) = line.strip_prefix("icon:") {
             icon = val.trim().to_string();
         } else if let Some(val) = line.strip_prefix("category:") {
@@ -79,6 +82,7 @@ fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Skill> 
     Some(Skill {
         id: id.to_string(),
         name,
+        description,
         icon,
         category,
         content: body,
@@ -154,7 +158,7 @@ pub fn build_skills_prompt(skill_ids: &[String]) -> String {
 }
 
 /// Save a custom skill to disk. Returns the generated ID.
-pub fn save_custom_skill(name: &str, icon: &str, category: &SkillCategory, content: &str) -> Result<String, String> {
+pub fn save_custom_skill(name: &str, description: &str, icon: &str, category: &SkillCategory, content: &str) -> Result<String, String> {
     let dir = custom_skills_dir().ok_or("Cannot determine config directory")?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot create skills dir: {}", e))?;
 
@@ -172,9 +176,10 @@ pub fn save_custom_skill(name: &str, icon: &str, category: &SkillCategory, conte
         SkillCategory::Business => "business",
     };
 
+    let desc_line = if description.is_empty() { String::new() } else { format!("description: {}\n", description) };
     let file_content = format!(
-        "---\nname: {}\ncategory: {}\nicon: {}\nbuiltin: false\n---\n{}",
-        name, cat_str, icon, content
+        "---\nname: {}\n{}category: {}\nicon: {}\nbuiltin: false\n---\n{}",
+        name, desc_line, cat_str, icon, content
     );
 
     let path = dir.join(format!("{}.md", slug));

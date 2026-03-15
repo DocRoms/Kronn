@@ -376,9 +376,12 @@ async fn config_export_empty_db() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["success"], true);
-    assert_eq!(json["data"]["version"], 1);
+    assert_eq!(json["data"]["version"], 2);
     assert!(json["data"]["projects"].as_array().unwrap().is_empty());
     assert!(json["data"]["discussions"].as_array().unwrap().is_empty());
+    assert!(json["data"]["workflows"].as_array().unwrap().is_empty());
+    assert!(json["data"]["mcp_servers"].as_array().unwrap().is_empty());
+    assert!(json["data"]["mcp_configs"].as_array().unwrap().is_empty());
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1225,4 +1228,280 @@ async fn discover_repos_no_token_returns_error() {
     assert_eq!(json["success"], false);
     // Should mention no token found
     assert!(json["error"].as_str().unwrap().contains("token") || json["error"].as_str().unwrap().contains("Token"));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Git Panel endpoint tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn git_status_route_exists() {
+    let app = test_app();
+    let (status, _json) = get_json(app, "/api/projects/some-id/git-status").await;
+
+    // Route registered — not 404 or 405
+    assert_ne!(status, StatusCode::NOT_FOUND, "git-status route should be registered");
+    assert_ne!(status, StatusCode::METHOD_NOT_ALLOWED, "git-status should accept GET");
+}
+
+#[tokio::test]
+async fn git_status_project_not_found() {
+    let app = test_app();
+    let (status, json) = get_json(app, "/api/projects/nonexistent-id/git-status").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], false);
+    assert!(json["error"].as_str().unwrap().contains("not found") || json["error"].as_str().unwrap().contains("Not found"));
+}
+
+#[tokio::test]
+async fn git_diff_route_exists() {
+    let app = test_app();
+    let (status, _json) = get_json(app, "/api/projects/some-id/git-diff?path=test.rs").await;
+
+    assert_ne!(status, StatusCode::NOT_FOUND, "git-diff route should be registered");
+    assert_ne!(status, StatusCode::METHOD_NOT_ALLOWED, "git-diff should accept GET");
+}
+
+#[tokio::test]
+async fn git_diff_project_not_found() {
+    let app = test_app();
+    let (status, json) = get_json(app, "/api/projects/nonexistent-id/git-diff?path=file.rs").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], false);
+    assert!(json["error"].as_str().unwrap().contains("not found") || json["error"].as_str().unwrap().contains("Not found"));
+}
+
+#[tokio::test]
+async fn git_branch_route_exists() {
+    let app = test_app();
+    let body = serde_json::json!({ "name": "test-branch" });
+    let (status, _json) = post_json(app, "/api/projects/some-id/git-branch", body).await;
+
+    assert_ne!(status, StatusCode::NOT_FOUND, "git-branch route should be registered");
+    assert_ne!(status, StatusCode::METHOD_NOT_ALLOWED, "git-branch should accept POST");
+}
+
+#[tokio::test]
+async fn git_branch_project_not_found() {
+    let app = test_app();
+    let body = serde_json::json!({ "name": "feature-x" });
+    let (status, json) = post_json(app, "/api/projects/nonexistent-id/git-branch", body).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], false);
+    assert!(json["error"].as_str().unwrap().contains("not found") || json["error"].as_str().unwrap().contains("Not found"));
+}
+
+#[tokio::test]
+async fn git_branch_empty_name_rejected() {
+    let app = test_app();
+    let body = serde_json::json!({ "name": "" });
+    let (status, json) = post_json(app, "/api/projects/some-id/git-branch", body).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], false);
+    assert!(json["error"].as_str().unwrap().contains("Invalid") || json["error"].as_str().unwrap().contains("name"));
+}
+
+#[tokio::test]
+async fn git_branch_name_with_spaces_rejected() {
+    let app = test_app();
+    let body = serde_json::json!({ "name": "my bad branch" });
+    let (status, json) = post_json(app, "/api/projects/some-id/git-branch", body).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], false);
+    assert!(json["error"].as_str().unwrap().contains("Invalid"));
+}
+
+#[tokio::test]
+async fn git_branch_name_with_dotdot_rejected() {
+    let app = test_app();
+    let body = serde_json::json!({ "name": "branch..bad" });
+    let (status, json) = post_json(app, "/api/projects/some-id/git-branch", body).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], false);
+    assert!(json["error"].as_str().unwrap().contains("Invalid"));
+}
+
+#[tokio::test]
+async fn git_commit_route_exists() {
+    let app = test_app();
+    let body = serde_json::json!({ "files": ["test.rs"], "message": "test commit" });
+    let (status, _json) = post_json(app, "/api/projects/some-id/git-commit", body).await;
+
+    assert_ne!(status, StatusCode::NOT_FOUND, "git-commit route should be registered");
+    assert_ne!(status, StatusCode::METHOD_NOT_ALLOWED, "git-commit should accept POST");
+}
+
+#[tokio::test]
+async fn git_commit_empty_message_rejected() {
+    let app = test_app();
+    let body = serde_json::json!({ "files": ["test.rs"], "message": "" });
+    let (status, json) = post_json(app, "/api/projects/some-id/git-commit", body).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], false);
+    assert!(json["error"].as_str().unwrap().contains("message") || json["error"].as_str().unwrap().contains("required"));
+}
+
+#[tokio::test]
+async fn git_commit_no_files_rejected() {
+    let app = test_app();
+    let body = serde_json::json!({ "files": [], "message": "my commit" });
+    let (status, json) = post_json(app, "/api/projects/some-id/git-commit", body).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], false);
+    assert!(json["error"].as_str().unwrap().contains("No files") || json["error"].as_str().unwrap().contains("files"));
+}
+
+#[tokio::test]
+async fn git_commit_path_traversal_rejected() {
+    let app = test_app();
+    let body = serde_json::json!({ "files": ["../../../etc/passwd"], "message": "pwn" });
+    let (status, json) = post_json(app, "/api/projects/some-id/git-commit", body).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], false);
+    assert!(json["error"].as_str().unwrap().contains("Invalid"));
+}
+
+#[tokio::test]
+async fn git_push_route_exists() {
+    let app = test_app();
+    let (status, _json) = post_json(app, "/api/projects/some-id/git-push", serde_json::json!({})).await;
+
+    assert_ne!(status, StatusCode::NOT_FOUND, "git-push route should be registered");
+    assert_ne!(status, StatusCode::METHOD_NOT_ALLOWED, "git-push should accept POST");
+}
+
+#[tokio::test]
+async fn git_push_project_not_found() {
+    let app = test_app();
+    let (status, json) = post_json(app, "/api/projects/nonexistent-id/git-push", serde_json::json!({})).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], false);
+    assert!(json["error"].as_str().unwrap().contains("not found") || json["error"].as_str().unwrap().contains("Not found"));
+}
+
+#[tokio::test]
+async fn git_diff_path_traversal_rejected() {
+    let app = test_app();
+    let (status, json) = get_json(app, "/api/projects/some-id/git-diff?path=../../../etc/passwd").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], false);
+    assert!(json["error"].as_str().unwrap().contains("Invalid"));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Exec endpoint tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn exec_route_exists() {
+    let app = test_app();
+    let body = serde_json::json!({ "command": "echo hello" });
+    let (status, _json) = post_json(app, "/api/projects/some-id/exec", body).await;
+
+    // Route exists — not 404/405
+    assert_ne!(status, StatusCode::NOT_FOUND, "exec route should be registered");
+    assert_ne!(status, StatusCode::METHOD_NOT_ALLOWED, "exec should accept POST");
+}
+
+#[tokio::test]
+async fn exec_project_not_found() {
+    let app = test_app();
+    let body = serde_json::json!({ "command": "echo hello" });
+    let (status, json) = post_json(app, "/api/projects/nonexistent-id/exec", body).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], false);
+    assert!(
+        json["error"].as_str().unwrap().contains("not found") || json["error"].as_str().unwrap().contains("Not found"),
+        "Error should mention project not found, got: {}",
+        json["error"]
+    );
+}
+
+#[tokio::test]
+async fn exec_empty_command_rejected() {
+    let app = test_app();
+    let body = serde_json::json!({ "command": "   " });
+    let (status, json) = post_json(app, "/api/projects/some-id/exec", body).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], false);
+    assert!(
+        json["error"].as_str().unwrap().contains("Empty command"),
+        "Error should mention empty command, got: {}",
+        json["error"]
+    );
+}
+
+#[tokio::test]
+async fn exec_dangerous_command_blocked() {
+    let app = test_app();
+    let blocked_commands = ["rm -rf /", "sudo apt install", "chmod 777 .", "chown root .", "kill -9 1", "reboot", "shutdown now", "mkfs /dev/sda", "dd if=/dev/zero"];
+
+    for cmd in &blocked_commands {
+        let body = serde_json::json!({ "command": cmd });
+        let (_status, json) = post_json(test_app(), "/api/projects/some-id/exec", body).await;
+
+        assert_eq!(json["success"], false, "Command '{}' should be blocked", cmd);
+        assert!(
+            json["error"].as_str().unwrap().contains("not allowed"),
+            "Blocked command '{}' should say 'not allowed', got: {}",
+            cmd, json["error"]
+        );
+    }
+}
+
+#[tokio::test]
+async fn exec_returns_expected_fields() {
+    // Create a project with a real path so the command can execute
+    let state = test_state();
+    let now = chrono::Utc::now();
+    let project = kronn::models::Project {
+        id: "exec-test-proj".to_string(),
+        name: "Exec Test".to_string(),
+        path: "/tmp".to_string(),
+        repo_url: None,
+        token_override: None,
+        ai_config: kronn::models::AiConfigStatus {
+            detected: false,
+            configs: vec![],
+        },
+        audit_status: kronn::models::AiAuditStatus::NoTemplate,
+        ai_todo_count: 0,
+        default_skill_ids: vec![],
+        default_profile_id: None,
+        created_at: now,
+        updated_at: now,
+    };
+    let p = project.clone();
+    state.db.with_conn(move |conn| {
+        kronn::db::projects::insert_project(conn, &p)
+    }).await.unwrap();
+
+    let body = serde_json::json!({ "command": "echo hello" });
+    let (status, json) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/projects/exec-test-proj/exec",
+        body,
+    ).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true, "exec should succeed, got: {:?}", json);
+    let data = &json["data"];
+    assert!(data["stdout"].is_string(), "Response should have stdout field");
+    assert!(data["stderr"].is_string(), "Response should have stderr field");
+    assert!(data["exit_code"].is_number(), "Response should have exit_code field");
+    assert_eq!(data["stdout"].as_str().unwrap().trim(), "hello");
+    assert_eq!(data["exit_code"].as_i64().unwrap(), 0);
 }

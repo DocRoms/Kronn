@@ -1,5 +1,6 @@
 ---
 name: Database Design
+description: Schema design, indexing strategies, query optimization, and migrations
 category: domain
 icon: 🗄️
 builtin: true

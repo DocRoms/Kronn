@@ -557,6 +557,13 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                           >
                             Global
                           </span>
+                          <span
+                            style={s.generalLabel(cfg.include_general)}
+                            onClick={async () => { await mcpsApi.updateConfig(cfg.id, { include_general: !cfg.include_general }); refetchMcps(); }}
+                            title={cfg.include_general ? t('mcp.disableGeneral') : t('mcp.enableGeneral')}
+                          >
+                            {t('mcp.general')}
+                          </span>
                           <span style={{ color: 'rgba(255,255,255,0.12)', fontSize: 11 }}>|</span>
                           {(() => {
                             const sorted = projects.filter(p => !isHiddenPath(p.path)).sort((a, b) => {
@@ -707,6 +714,7 @@ const s = {
   mcpCard: { display: 'flex', alignItems: 'flex-start', gap: 12, padding: '14px 16px', borderRadius: 8, background: 'rgba(255,255,255,0.03)', marginBottom: 8, border: '1px solid rgba(255,255,255,0.06)' } as const,
   sourceBadge: { fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 4, background: 'rgba(200,255,0,0.08)', color: 'rgba(200,255,0,0.6)', border: '1px solid rgba(200,255,0,0.12)' } as const,
   globalLabel: (active: boolean) => ({ fontSize: 11, fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase' as const, cursor: 'pointer', userSelect: 'none' as const, padding: '4px 10px', borderRadius: 5, border: `1px solid ${active ? 'rgba(200,255,0,0.3)' : 'rgba(255,255,255,0.08)'}`, background: active ? 'rgba(200,255,0,0.12)' : 'transparent', color: active ? '#c8ff00' : 'rgba(255,255,255,0.25)', transition: 'all 0.15s' }),
+  generalLabel: (active: boolean) => ({ fontSize: 11, fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase' as const, cursor: 'pointer', userSelect: 'none' as const, padding: '4px 10px', borderRadius: 5, border: `1px solid ${active ? 'rgba(96,165,250,0.3)' : 'rgba(255,255,255,0.08)'}`, background: active ? 'rgba(96,165,250,0.12)' : 'transparent', color: active ? '#60a5fa' : 'rgba(255,255,255,0.25)', transition: 'all 0.15s' }),
   projectToggle: (active: boolean) => ({ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 10px', borderRadius: 5, fontSize: 11, fontFamily: 'inherit', cursor: 'pointer', border: `1px solid ${active ? 'rgba(200,255,0,0.2)' : 'rgba(255,255,255,0.08)'}`, background: active ? 'rgba(200,255,0,0.06)' : 'rgba(255,255,255,0.02)', color: active ? 'rgba(200,255,0,0.8)' : 'rgba(255,255,255,0.35)' } as const),
   fieldLabel: { fontSize: 11, color: 'rgba(255,255,255,0.4)', display: 'block', marginBottom: 4 } as const,
   categoryHeader: { fontSize: 10, fontWeight: 700, color: 'rgba(255,255,255,0.25)', textTransform: 'uppercase' as const, letterSpacing: 1, padding: '8px 4px 4px', borderBottom: '1px solid rgba(255,255,255,0.05)', marginBottom: 2 },

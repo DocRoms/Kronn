@@ -1,5 +1,6 @@
 ---
 name: Security
+description: Secure code practices, OWASP Top 10, auth, and vulnerability prevention
 category: domain
 icon: 🔒
 builtin: true

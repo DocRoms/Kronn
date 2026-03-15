@@ -1,5 +1,6 @@
 ---
 name: PHP
+description: Modern PHP 8.1+ with strict types, PSR standards, and Laravel patterns
 category: language
 icon: 🐘
 builtin: true

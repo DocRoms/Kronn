@@ -323,6 +323,8 @@ pub struct BootstrapProjectRequest {
     pub name: String,
     pub description: String,
     pub agent: AgentType,
+    #[serde(default)]
+    pub mcp_config_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -463,6 +465,7 @@ pub struct McpConfig {
     pub env_encrypted: String,
     pub args_override: Option<Vec<String>>,
     pub is_global: bool,
+    pub include_general: bool,
     pub config_hash: String,
     pub project_ids: Vec<String>,
 }
@@ -479,6 +482,7 @@ pub struct McpConfigDisplay {
     pub env_masked: Vec<McpEnvEntry>,
     pub args_override: Option<Vec<String>>,
     pub is_global: bool,
+    pub include_general: bool,
     pub config_hash: String,
     pub project_ids: Vec<String>,
     pub project_names: Vec<String>,
@@ -739,6 +743,7 @@ pub enum SkillCategory {
 pub struct Skill {
     pub id: String,
     pub name: String,
+    pub description: String,
     pub icon: String,
     pub category: SkillCategory,
     pub content: String,
@@ -749,6 +754,7 @@ pub struct Skill {
 #[ts(export)]
 pub struct CreateSkillRequest {
     pub name: String,
+    pub description: String,
     pub icon: String,
     pub category: SkillCategory,
     pub content: String,
@@ -814,6 +820,7 @@ pub enum DirectiveCategory {
 pub struct Directive {
     pub id: String,
     pub name: String,
+    pub description: String,
     pub icon: String,
     pub category: DirectiveCategory,
     pub content: String,
@@ -826,6 +833,7 @@ pub struct Directive {
 #[ts(export)]
 pub struct CreateDirectiveRequest {
     pub name: String,
+    pub description: String,
     pub icon: String,
     pub category: DirectiveCategory,
     pub content: String,
@@ -1064,6 +1072,7 @@ pub struct UpdateMcpConfigRequest {
     pub env: Option<std::collections::HashMap<String, String>>,
     pub args_override: Option<Vec<String>>,
     pub is_global: Option<bool>,
+    pub include_general: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -1107,6 +1116,9 @@ pub struct UpdateDiscussionRequest {
     pub skill_ids: Option<Vec<String>>,
     pub profile_ids: Option<Vec<String>>,
     pub directive_ids: Option<Vec<String>>,
+    /// Change project: Some(Some("id")) = set, Some(None) = unset, absent = no change
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<Option<String>>,
 }
 
 fn default_language() -> String {
@@ -1189,6 +1201,9 @@ pub struct DbInfo {
     pub mcp_count: u32,
     pub workflow_count: u32,
     pub workflow_run_count: u32,
+    pub custom_skill_count: u32,
+    pub custom_profile_count: u32,
+    pub custom_directive_count: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]
@@ -1198,6 +1213,100 @@ pub struct DbExport {
     pub exported_at: DateTime<Utc>,
     pub projects: Vec<Project>,
     pub discussions: Vec<Discussion>,
+    #[serde(default)]
+    pub workflows: Vec<Workflow>,
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServer>,
+    #[serde(default)]
+    pub mcp_configs: Vec<McpConfig>,
+    #[serde(default)]
+    pub custom_skills: Vec<Skill>,
+    #[serde(default)]
+    pub custom_directives: Vec<Directive>,
+    #[serde(default)]
+    pub custom_profiles: Vec<AgentProfile>,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Git Operations
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct GitStatusResponse {
+    pub branch: String,
+    pub default_branch: String,
+    pub is_default_branch: bool,
+    pub files: Vec<GitFileStatus>,
+    pub ahead: u32,
+    pub behind: u32,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct GitFileStatus {
+    pub path: String,
+    pub status: String,
+    pub staged: bool,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct GitDiffResponse {
+    pub path: String,
+    pub diff: String,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct GitDiffQuery {
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct GitBranchRequest {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct GitBranchResponse {
+    pub branch: String,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct GitCommitRequest {
+    pub files: Vec<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct GitCommitResponse {
+    pub hash: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct GitPushResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExecRequest {
+    pub command: String,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct ExecResponse {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
 }
 
 #[derive(Debug, Serialize)]

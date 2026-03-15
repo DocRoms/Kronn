@@ -1,5 +1,6 @@
 ---
 name: Verbose
+description: Provide detailed explanations with context, trade-offs, and alternatives
 category: output
 icon: 📖
 builtin: true

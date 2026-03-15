@@ -1,5 +1,6 @@
 ---
 name: DevOps
+description: CI/CD, containers, IaC, monitoring, and cloud infrastructure practices
 category: domain
 icon: 🚀
 builtin: true

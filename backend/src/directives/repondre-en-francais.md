@@ -1,5 +1,6 @@
 ---
 name: Répondre en Français
+description: Forcer toutes les réponses en français professionnel et technique
 category: language
 icon: 🇫🇷
 builtin: true

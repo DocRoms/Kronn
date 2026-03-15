@@ -124,6 +124,7 @@ export interface BootstrapProjectRequest {
   name: string;
   description: string;
   agent: AgentType;
+  mcp_config_ids?: string[];
 }
 
 export interface BootstrapProjectResponse {
@@ -226,6 +227,7 @@ export interface McpConfig {
   env_encrypted: string;
   args_override: string[] | null;
   is_global: boolean;
+  include_general: boolean;
   config_hash: string;
   project_ids: string[];
 }
@@ -239,6 +241,7 @@ export interface McpConfigDisplay {
   env_masked: McpEnvEntry[];
   args_override: string[] | null;
   is_global: boolean;
+  include_general: boolean;
   config_hash: string;
   project_ids: string[];
   project_names: string[];
@@ -495,6 +498,7 @@ export type SkillCategory = "Language" | "Domain" | "Business";
 export interface Skill {
   id: string;
   name: string;
+  description: string;
   icon: string;
   category: SkillCategory;
   content: string;
@@ -503,6 +507,7 @@ export interface Skill {
 
 export interface CreateSkillRequest {
   name: string;
+  description: string;
   icon: string;
   category: SkillCategory;
   content: string;
@@ -543,6 +548,7 @@ export type DirectiveCategory = "Output" | "Language";
 export interface Directive {
   id: string;
   name: string;
+  description: string;
   icon: string;
   category: DirectiveCategory;
   content: string;
@@ -552,6 +558,7 @@ export interface Directive {
 
 export interface CreateDirectiveRequest {
   name: string;
+  description: string;
   icon: string;
   category: DirectiveCategory;
   content: string;
@@ -621,6 +628,7 @@ export interface UpdateMcpConfigRequest {
   env?: Record<string, string>;
   args_override?: string[];
   is_global?: boolean;
+  include_general?: boolean;
 }
 
 export interface LinkMcpConfigRequest {
@@ -671,6 +679,9 @@ export interface DbInfo {
   mcp_count: number;
   workflow_count: number;
   workflow_run_count: number;
+  custom_skill_count: number;
+  custom_profile_count: number;
+  custom_directive_count: number;
 }
 
 export interface DbExport {
@@ -678,4 +689,10 @@ export interface DbExport {
   exported_at: string;
   projects: Project[];
   discussions: Discussion[];
+  workflows?: any[];
+  mcp_servers?: any[];
+  mcp_configs?: any[];
+  custom_skills?: Skill[];
+  custom_directives?: Directive[];
+  custom_profiles?: AgentProfile[];
 }

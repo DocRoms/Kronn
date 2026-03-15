@@ -1,5 +1,6 @@
 ---
 name: Green IT
+description: Eco-design, digital sobriety, and sustainable development practices
 category: business
 icon: 🌱
 builtin: true
