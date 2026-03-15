@@ -4,12 +4,16 @@ import { I18nProvider } from '../../lib/I18nContext';
 
 // Mock API — SettingsPage calls config.getTokens(), config.dbInfo(), config.getScanDepth(), stats.agentUsage(), skills.list() on mount
 vi.mock('../../lib/api', () => ({
+  setAuthToken: vi.fn(),
   config: {
     getTokens: vi.fn().mockResolvedValue({ keys: [], overrides: {} }),
     dbInfo: vi.fn().mockResolvedValue({ path: '/tmp/db', size_bytes: 1024 }),
     getScanDepth: vi.fn().mockResolvedValue(4),
     getScanPaths: vi.fn().mockResolvedValue(['/home/user/repos']),
     getScanIgnore: vi.fn().mockResolvedValue(['node_modules', '.git']),
+    getServerConfig: vi.fn().mockResolvedValue({ host: '127.0.0.1', port: 3140, domain: null, max_concurrent_agents: 5, auth_enabled: true }),
+    setServerConfig: vi.fn().mockResolvedValue(undefined),
+    regenerateAuthToken: vi.fn().mockResolvedValue('new-token-456'),
     saveApiKey: vi.fn(),
     deleteApiKey: vi.fn(),
     activateApiKey: vi.fn(),

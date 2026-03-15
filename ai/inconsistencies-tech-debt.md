@@ -25,38 +25,43 @@
 
 | ID | Problem | Area | Priority |
 |----|---------|------|----------|
-| ~~TD-20260306-in-memory-storage~~ | ~~All data lost on restart~~ — **DONE**: SQLite persistence (`kronn.db`) | Backend | Done |
-| ~~TD-20260308-mcp-redesign~~ | ~~Old flat MCP model~~ — **DONE**: 3-tier model (servers→configs→projects), encrypted secrets, registry matching, disk sync | Backend + Frontend | Done |
-| ~~TD-20260306-mcp-noninteractive~~ | ~~Agents don't load MCP servers~~ — **DONE**: All 3 agents synced: Claude Code (`.mcp.json`), Codex (`~/.codex/config.toml`), Vibe (`.vibe/config.toml`) | Backend | Done |
-| ~~TD-20260308-codex-vibe-mcp~~ | ~~Codex and Vibe use TOML config~~ — **DONE**: Disk sync now writes all 3 formats (JSON + 2x TOML). Codex global config preserves non-MCP settings. Vibe per-project. | Backend | Done |
-| ~~TD-20260306-monolith-dashboard~~ | ~~Dashboard.tsx ~2250 lines~~ — **DONE**: Dashboard.tsx ~650 lines. Extracted: SettingsPage.tsx (~670), DiscussionsPage.tsx (~1420), McpPage.tsx (~715), WorkflowsPage.tsx (~1700). | Frontend | Done |
-| ~~TD-20260306-no-tests~~ | ~~No tests~~ — **DONE**: Frontend: Vitest + testing-library (14 suites, 124+ tests, coverage-v8). Backend: `discussions_test.rs` (18 tests), `runner_test.rs`. Shell: bats-core (8 suites, 186 tests — agents, mcps, tron, ui, repos, analyze, portability, bugfixes). CI: `.github/workflows/ci-test.yml` (label-triggered). | All | Done |
 | TD-20260306-inline-styles | All styles are inline — no theming or consistency system | Frontend | Low |
-| ~~TD-20260307-agents-tab~~ | ~~Agents tab should be merged into Settings~~ — **DONE**: merged into Config page | Frontend | Done |
-| TD-20260307-tasks-to-workflows | Legacy scheduled tasks → Workflows engine — **DONE**: Full engine (models, DB, API, template, workspace, steps, runner, triggers, GitHub tracker, frontend UI with 5-step wizard + detail + runs + live SSE progress + run deletion). Actions wizard step removed (agents use MCP tools in steps instead). Remaining: Symphony WORKFLOW.md import. | Backend + Frontend | Done (core) |
-| ~~TD-20260307-docker-file-perms~~ | ~~Agents run as root in Docker — files owned by root:root~~ — **DONE**: `fix_ownership()` (chown to KRONN_HOST_UID:GID) called after all agent executions: discussions (3 paths), workflows, and AI audit. Missing audit path fixed. | Backend | Done |
-| ~~TD-20260307-global-discussions~~ | ~~Discussions always tied to a project~~ — **DONE**: `project_id` now optional, "Général" group in sidebar | Backend + Frontend | Done |
-| ~~TD-20260310-agent-fallback-claude~~ | ~~**GH #6** — Claude answers when not selected~~ — **DONE**: `detect()` in `api/agents.rs` requires API key for runtime-only agents; frontend filters via `isUsable()`. Phantom agents no longer appear. | Backend | Done |
-| ~~TD-20260310-agent-removal~~ | ~~**GH #10** — Can't remove agent~~ — **DONE**: Host-managed agents are now disabled instead of uninstalled (can't npm uninstall from Docker). Even if uninstall command fails, agent is always disabled to match user intent. | Backend | Done |
-| ~~TD-20260310-macos-duplicate-repos~~ | ~~**GH #9** — Duplicate repos on macOS~~ — **DONE**: Replaced `dedup_by` (consecutive-only) with `HashSet` keyed on `(name, remote_url)`. Works inside Docker where host paths can't be canonicalized. | Backend | Done |
-| ~~TD-20260310-mention-uninstalled~~ | ~~**GH #2** — @mention proposes uninstalled agents~~ — **DONE**: `AGENT_MENTIONS` in DiscussionsPage filtered by `isUsable()` (already in code). `detect()` endpoint prevents phantom agents. | Frontend | Done |
 | TD-20260310-audit-conversation-display | **GH #11** — Audit validation conversation not displayed correctly when audit is in progress. | Frontend | Low |
-| ~~TD-20260310-no-error-feedback~~ | ~~No user-facing error notifications~~ — **DONE**: `useToast` hook with auto-dismiss, stacked display, slide-in animation. Integrated in SettingsPage + DiscussionsPage. Replaced all `alert()` calls. | Frontend | Done |
-| ~~TD-20260310-page-tests-missing~~ | ~~DiscussionsPage, SettingsPage, McpPage have 0% test coverage~~ — **DONE**: 3 test suites added (3 tests each). Total: 14 suites, 124 tests. | Frontend | Done |
+| TD-20260314-db-mutex-single | Single Mutex on SQLite connection — acceptable for SQLite single-writer model with busy_timeout | Backend | Wontfix |
+| TD-20260314-no-tls | No TLS/HTTPS — secrets in cleartext on network. Domain config added, nginx TLS setup pending. | Infra | High |
+| TD-20260314-no-docker-limits | No CPU/RAM limits on Docker containers. `max_concurrent_agents` now configurable via UI. | Infra | High |
+| TD-20260314-polling-heavy | Frontend polls all discussions every 5s — replace with WebSocket/SSE | Frontend + Backend | Medium |
+| TD-20260314-no-pagination | No pagination on list_discussions / list_runs | Backend | Medium |
+| TD-20260314-audit-status-io | `enrich_audit_status` does filesystem I/O for every project on every list call | Backend | Medium |
+| TD-20260314-error-boundary-single | Single ErrorBoundary — one component crash takes down entire UI | Frontend | Medium |
+| TD-20260314-google-fonts-external | Google Fonts loaded externally — GDPR + air-gapped issues | Frontend | Medium |
+| TD-20260314-backup-sqlite | No automatic SQLite backup before migrations | Backend | Medium |
+| TD-20260314-no-changelog | No CHANGELOG, version stuck at 0.1.0 | Docs | Medium |
+| TD-20260314-no-api-docs | No OpenAPI/Swagger API documentation | Docs | Medium |
+| TD-20260314-let-underscore-errors | `let _ =` silently ignores DB insert errors | Backend | Medium |
+| TD-20260314-react-memo-missing | Large components not memoized (SwipeableDiscItem, etc.) — excessive re-renders | Frontend | Medium |
+| TD-20260314-regex-recompile | Regex recompiled on every call in `strip_ansi()` | Backend | Low |
+| TD-20260314-workflow-clones | Excessive `run.clone()` in workflow runner — O(n²) memory | Backend | Low |
+| TD-20260314-uid-gid-mismatch | Dockerfile creates user UID=1000 at build time but compose passes vars at runtime only | Infra | Low |
+| TD-20260314-home-mount | `$HOME` mounted read-only in container — security + portability risk | Infra | Low |
+| TD-20260314-uv-not-pinned | `uv` installed via `curl \| sh` without pinned version | Infra | Low |
+| TD-20260314-no-multi-arch | No multi-architecture Docker support (ARM64) | Infra | Low |
+| TD-20260314-pnpm-not-pinned | `corepack prepare pnpm@latest` — not pinned | Frontend | Low |
+| TD-20260314-error-hints-french | `detect_agent_error_hint` messages hardcoded in French | Backend | Low |
+| TD-20260314-agpl-notice-missing | No AGPL notice in web UI (required by AGPL sections 0 and 13) | Frontend | Low |
 
 ## Implementation roadmap
 
-1. ~~**SQLite persistence**~~ — **DONE**: `kronn.db` with WAL mode, migrations framework, CRUD in `backend/src/db/`
-2. ~~**Merge Agents into Settings**~~ — **DONE**: merged into Config page as a card, with full_access toggle
-3. ~~**Global discussions**~~ — **DONE**: `project_id` optional, "Général" group, agent runs in temp dir
-4. ~~**MCP redesign**~~ — **DONE**: 3-tier model (servers→configs→projects), encrypted secrets, built-in registry (26 servers with token_url/token_help), auto-detection/matching, disk sync, editable labels, duplicate configs, categorized registry UI, inline secret editing with per-field visibility, MCP context files (ai/operations/mcp-servers/*.md) with customization detection
-5. **Docker file permissions** — Pass host UID/GID, run agents with `--user` (partially mitigated)
-6. **Workflow engine** — See detailed plan below
-7. **Agent bugs** — Fix #6 (Claude fallback), #10 (removal), #9 (macOS dupes), #2 (@mention filter)
+Items 1–7 are all completed. Remaining work tracked in the table above.
 
 ---
 
-## Workflow engine plan (TD-20260307-tasks-to-workflows)
+## Completed: Workflow engine (TD-20260307-tasks-to-workflows)
+
+Fully implemented. See `ai/architecture/overview.md` § Workflows for current architecture. Remaining: Symphony WORKFLOW.md import (planned).
+
+<!--
+Original detailed plan removed — all phases completed. Reference commit history for implementation details.
 
 ### Phase 1 — Backend engine
 
@@ -206,3 +211,4 @@ steps:
      prompt: "Create a draft PR with title 'fix: {{issue.title}}' on branch 'fix/{{issue.number}}'. Comment on the issue with the PR URL."
 safety: { sandbox: true, max_files: 10, require_approval: false }
 ```
+-->

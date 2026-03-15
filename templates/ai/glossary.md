@@ -2,20 +2,36 @@
 
 Project-specific terms. For deep dives, follow the linked `ai/architecture/` files.
 
+> Terms marked with `<!-- TODO: ask user -->` were identified during audit but need human confirmation.
+
 ---
 
-<!--
-Organize by category. Example:
+## Architecture / Stack
 
-## Architecture / stack
-**Term** — Definition. See `ai/architecture/relevant-file.md`.
+| Term | Definition | Reference |
+|------|-----------|-----------|
+| {{TERM}} | {{DEFINITION}} | `ai/architecture/overview.md` |
+
+## Domain / Business concepts
+
+| Term | Definition | Reference |
+|------|-----------|-----------|
+| {{TERM}} | {{DEFINITION}} | |
 
 ## Environments
-**QAT** — Quality Assurance environment.
 
-## Business / domain
-**Term** — Business domain definition.
+| Term | Definition | Reference |
+|------|-----------|-----------|
+| {{TERM}} | {{DEFINITION}} | |
 
-## Third parties
-**Term** — External service description.
--->
+## Third parties / External services
+
+| Term | Definition | Reference |
+|------|-----------|-----------|
+| {{TERM}} | {{DEFINITION}} | |
+
+## Abbreviations & acronyms
+
+| Abbreviation | Full form | Context |
+|-------------|-----------|---------|
+| {{ABBR}} | {{FULL_FORM}} | {{CONTEXT}} |

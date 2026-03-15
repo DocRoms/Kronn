@@ -11,7 +11,9 @@ import {
   HardDrive, Plus, Trash2, Download, Upload, Check,
   Loader2, RefreshCw, X, Eye, EyeOff, Play, StopCircle,
   ExternalLink, ChevronRight, Layers, FolderSearch, Filter, UserCircle, FileText,
+  Shield, Globe, Copy, Server,
 } from 'lucide-react';
+import { setAuthToken } from '../lib/api';
 
 /** Output languages for agents (sent to backend, not related to UI i18n) */
 const LANGUAGES: { code: string; label: string; flag: string }[] = [
@@ -91,9 +93,25 @@ export function SettingsPage({
   const [newDirectiveContent, setNewDirectiveContent] = useState('');
   const [newDirectiveConflicts, setNewDirectiveConflicts] = useState('');
 
+  const [serverDomain, setServerDomain] = useState('');
+  const [serverMaxAgents, setServerMaxAgents] = useState(5);
+  const [authToken, setAuthTokenState] = useState<string | null>(null);
+  const [authVisible, setAuthVisible] = useState(false);
+
   // Internal API calls
   const { data: tokenConfig, refetch: refetchTokens } = useApi(() => configApi.getTokens(), []);
   const { data: dbInfo, refetch: refetchDbInfo } = useApi(() => configApi.dbInfo(), []);
+  useApi(() => configApi.getServerConfig().then(cfg => {
+    if (cfg) { setServerDomain(cfg.domain ?? ''); setServerMaxAgents(cfg.max_concurrent_agents); }
+    return cfg;
+  }), []);
+
+  // Auth token is loaded from localStorage (set when user activates auth).
+  // No need to fetch from backend — it's only returned once at activation.
+  useEffect(() => {
+    const stored = localStorage.getItem('kronn_auth_token');
+    if (stored) setAuthTokenState(stored);
+  }, []);
   useApi(() => configApi.getScanDepth().then(d => { if (d != null) setScanDepth(d); return d; }), []);
   useApi(() => configApi.getScanPaths().then(p => { if (p) setScanPaths(p); return p; }), []);
   useApi(() => configApi.getScanIgnore().then(p => { if (p) setScanIgnore(p); return p; }), []);
@@ -1407,6 +1425,128 @@ export function SettingsPage({
               </div>
             </div>
           )}
+        </div>
+      </div>
+
+      {/* Server & Security */}
+      <div style={ss.card(false)}>
+        <div style={{ padding: '16px 20px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
+            <Server size={14} style={{ color: '#c8ff00' }} />
+            <span style={{ fontWeight: 600, fontSize: 14 }}>{t('config.server')}</span>
+          </div>
+
+          {/* Auth Token */}
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+              <Shield size={12} style={{ color: 'rgba(255,255,255,0.5)' }} />
+              <span style={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.6)' }}>{t('config.authToken')}</span>
+              <span style={{ fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 4, marginLeft: 4,
+                background: authToken ? 'rgba(52,211,153,0.1)' : 'rgba(255,100,100,0.1)',
+                color: authToken ? '#34d399' : '#ff6464',
+                border: `1px solid ${authToken ? 'rgba(52,211,153,0.2)' : 'rgba(255,100,100,0.2)'}`,
+              }}>
+                {authToken ? t('config.authEnabled') : t('config.authDisabled')}
+              </span>
+            </div>
+            {authToken ? (
+              <>
+                <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                  <code style={{ ...ss.code, flex: 1, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {authVisible ? authToken : '••••••••••••••••••••'}
+                  </code>
+                  <button style={ss.iconBtn} onClick={() => setAuthVisible(!authVisible)}>
+                    {authVisible ? <EyeOff size={11} /> : <Eye size={11} />}
+                  </button>
+                  <button style={ss.iconBtn} onClick={() => { navigator.clipboard.writeText(authToken); toast(t('config.authCopied'), 'success'); }}>
+                    <Copy size={11} />
+                  </button>
+                  <button style={ss.iconBtn} onClick={async () => {
+                    if (!confirm(t('config.authRegenConfirm'))) return;
+                    try {
+                      const newToken = await configApi.regenerateAuthToken();
+                      setAuthTokenState(newToken);
+                      setAuthToken(newToken);
+                      toast(t('config.authRegenerated'), 'success');
+                    } catch { toast(t('config.authRegenError'), 'error'); }
+                  }}>
+                    <RefreshCw size={11} />
+                  </button>
+                </div>
+                <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', marginTop: 4 }}>
+                  {t('config.authHint')}
+                </div>
+              </>
+            ) : (
+              <div>
+                <button style={ss.installBtn} onClick={async () => {
+                  try {
+                    const newToken = await configApi.regenerateAuthToken();
+                    setAuthTokenState(newToken);
+                    setAuthToken(newToken);
+                    setAuthVisible(true);
+                    toast(t('config.authActivated'), 'success');
+                  } catch { toast(t('config.authRegenError'), 'error'); }
+                }}>
+                  <Shield size={12} /> {t('config.authActivate')}
+                </button>
+                <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', marginTop: 4 }}>
+                  {t('config.authDisabledHint')}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Domain */}
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+              <Globe size={12} style={{ color: 'rgba(255,255,255,0.5)' }} />
+              <span style={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.6)' }}>{t('config.domain')}</span>
+            </div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <input
+                style={{ ...ss.code, flex: 1, background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 4, padding: '4px 8px', color: '#fff', fontSize: 12, fontFamily: 'inherit' }}
+                value={serverDomain}
+                onChange={e => setServerDomain(e.target.value)}
+                placeholder="kronn.local"
+              />
+              <button style={ss.iconBtn} onClick={async () => {
+                try {
+                  await configApi.setServerConfig({ domain: serverDomain });
+                  toast(t('config.domainSaved'), 'success');
+                } catch { toast(t('config.domainError'), 'error'); }
+              }}>
+                <Save size={11} />
+              </button>
+            </div>
+            <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', marginTop: 4 }}>
+              {t('config.domainHint')}
+            </div>
+          </div>
+
+          {/* Max concurrent agents */}
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+              <Cpu size={12} style={{ color: 'rgba(255,255,255,0.5)' }} />
+              <span style={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.6)' }}>{t('config.maxAgents')}</span>
+              <span style={{ fontSize: 11, fontWeight: 700, color: '#c8ff00', marginLeft: 4 }}>{serverMaxAgents}</span>
+            </div>
+            <input
+              type="range"
+              min={1}
+              max={20}
+              value={serverMaxAgents}
+              onChange={async e => {
+                const v = Number(e.target.value);
+                setServerMaxAgents(v);
+                try { await configApi.setServerConfig({ max_concurrent_agents: v }); } catch {}
+              }}
+              style={{ width: '100%', accentColor: '#c8ff00' }}
+            />
+            <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', marginTop: 4 }}>
+              {t('config.maxAgentsHint')}
+            </div>
+          </div>
         </div>
       </div>
 

@@ -10,7 +10,7 @@ import {
   Folder, ChevronRight, Cpu,
   Plus, Trash2, Loader2,
   MessageSquare, Send, X, Key, AlertTriangle, Users,
-  StopCircle, RotateCcw, Pencil, ShieldCheck, Check, Archive, Zap, UserCircle, FileText,
+  StopCircle, RotateCcw, Pencil, ShieldCheck, Check, Archive, Zap, UserCircle, FileText, Settings, Rocket,
 } from 'lucide-react';
 
 const isHiddenPath = (path: string) => path.split('/').some(s => s.startsWith('.'));
@@ -19,6 +19,7 @@ const isHiddenPath = (path: string) => path.split('/').some(s => s.startsWith('.
 const isUsable = (a: AgentDetection) => (a.installed || a.runtime_available) && a.enabled;
 
 const isValidationDisc = (title: string) => title === 'Validation audit AI';
+const isBootstrapDisc = (title: string) => title.startsWith('Bootstrap: ');
 
 const ALL_AGENT_MENTIONS: { trigger: string; type: AgentType; label: string }[] = [
   { trigger: '@claude', type: 'ClaudeCode', label: 'Claude Code' },
@@ -116,6 +117,7 @@ function SwipeableDiscItem({ disc, isActive, lastSeenCount, sendingMap, onSelect
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 12, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 4 }}>
             {isValidationDisc(disc.title) && <ShieldCheck size={10} style={{ color: '#c8ff00', flexShrink: 0 }} />}
+            {isBootstrapDisc(disc.title) && <Rocket size={10} style={{ color: '#c8ff00', flexShrink: 0 }} />}
             {disc.title}
             {showBadge && (
               <span style={{
@@ -146,9 +148,15 @@ export interface DiscussionsPageProps {
   refetchDiscussions: () => void;
   refetchProjects: () => void;
   onNavigate: (page: string) => void;
-  prefill?: { projectId: string; title: string; prompt: string } | null;
+  prefill?: { projectId: string; title: string; prompt: string; locked?: boolean } | null;
   initialActiveDiscussionId?: string | null;
   onPrefillConsumed?: () => void;
+  /** Auto-open an existing discussion and trigger agent run (used after full audit) */
+  autoRunDiscussionId?: string | null;
+  onAutoRunConsumed?: () => void;
+  /** Open a specific discussion without triggering agent (e.g. Resume Validation) */
+  openDiscussionId?: string | null;
+  onOpenDiscConsumed?: () => void;
   toast: ToastFn;
   // Lifted streaming state (lives in Dashboard, survives page changes)
   sendingMap: Record<string, boolean>;
@@ -174,6 +182,10 @@ export function DiscussionsPage({
   onNavigate,
   prefill,
   onPrefillConsumed,
+  autoRunDiscussionId,
+  onAutoRunConsumed,
+  openDiscussionId,
+  onOpenDiscConsumed,
   toast,
   sendingMap,
   setSendingMap,
@@ -196,6 +208,7 @@ export function DiscussionsPage({
   const [newDiscProjectId, setNewDiscProjectId] = useState<string>('');
   const [newDiscPrompt, setNewDiscPrompt] = useState('');
   const [newDiscPrefilled, setNewDiscPrefilled] = useState(false);
+  const [showAdvancedOptions, setShowAdvancedOptions] = useState(false);
   const [chatInput, setChatInput] = useState('');
   const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState('');
@@ -335,7 +348,8 @@ export function DiscussionsPage({
   useEffect(() => {
     if (prefill) {
       setShowNewDiscussion(true);
-      setNewDiscPrefilled(true);
+      // Lock fields only when explicitly requested (validation audit)
+      setNewDiscPrefilled(!!prefill.locked);
       setNewDiscProjectId(prefill.projectId);
       setNewDiscTitle(prefill.title);
       setNewDiscPrompt(prefill.prompt);
@@ -359,6 +373,47 @@ export function DiscussionsPage({
     refetchDiscussions();
     reloadDiscussion(discId);
   }, [cleanupStreamBase, refetchDiscussions, reloadDiscussion]);
+
+  // Handle auto-run: open existing discussion and trigger agent (e.g. after full audit)
+  // Uses a ref to track the pending run so that re-renders (from onAutoRunConsumed/refetch)
+  // don't cancel the timeout via effect cleanup.
+  const pendingAutoRun = useRef<string | null>(null);
+  useEffect(() => {
+    if (!autoRunDiscussionId || pendingAutoRun.current === autoRunDiscussionId) return;
+    const discId = autoRunDiscussionId;
+    pendingAutoRun.current = discId;
+    onAutoRunConsumed?.();
+
+    // Select the discussion and show loader immediately
+    setActiveDiscussionId(discId);
+    setSendingMap(prev => ({ ...prev, [discId]: true }));
+    setStreamingMap(prev => ({ ...prev, [discId]: '' }));
+    refetchDiscussions();
+
+    // Trigger agent run after a short delay to let discussion load in sidebar
+    const controller = new AbortController();
+    abortControllers.current[discId] = controller;
+    setTimeout(async () => {
+      pendingAutoRun.current = null;
+      if (controller.signal.aborted) return;
+      await discussionsApi.runAgent(
+        discId,
+        (text) => setStreamingMap(prev => ({ ...prev, [discId]: (prev[discId] ?? '') + text })),
+        () => cleanupStream(discId),
+        (error) => { console.error('Agent error:', error); toast(String(error), 'error'); cleanupStream(discId); },
+        controller.signal,
+      );
+    }, 500);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoRunDiscussionId]);
+
+  // Handle open-discussion: just select it without triggering agent (e.g. Resume Validation)
+  useEffect(() => {
+    if (!openDiscussionId) return;
+    setActiveDiscussionId(openDiscussionId);
+    onOpenDiscConsumed?.();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openDiscussionId]);
 
   const handleCreateDiscussion = async () => {
     if (!newDiscPrompt.trim() || !newDiscAgent) return;
@@ -439,6 +494,28 @@ export function DiscussionsPage({
     const controller = new AbortController();
     abortControllers.current[discId] = controller;
     setStreamingMap(prev => ({ ...prev, [discId]: '' }));
+
+    // Optimistic update: show user message immediately before agent starts
+    setLoadedDiscussions(prev => {
+      const disc = prev[discId];
+      if (!disc) return prev;
+      return {
+        ...prev,
+        [discId]: {
+          ...disc,
+          messages: [...disc.messages, {
+            id: `optimistic-${Date.now()}`,
+            role: 'User' as const,
+            content: msg,
+            agent_type: null,
+            timestamp: new Date().toISOString(),
+            tokens_used: 0,
+            auth_mode: null,
+          }],
+          message_count: disc.message_count + 1,
+        },
+      };
+    });
 
     await discussionsApi.sendMessageStream(
       discId,
@@ -590,7 +667,7 @@ export function DiscussionsPage({
       <div style={ds.sidebar}>
         <div style={ds.sidebarHeader}>
           <span style={{ fontWeight: 600, fontSize: 13 }}>Discussions</span>
-          <button style={ls.scanBtn} onClick={() => { setShowNewDiscussion(true); }}>
+          <button style={ls.scanBtn} onClick={() => { setShowNewDiscussion(true); setNewDiscPrefilled(false); }}>
             <Plus size={12} /> {t('disc.new')}
           </button>
         </div>
@@ -775,121 +852,149 @@ export function DiscussionsPage({
                 </div>
               )}
 
-              {/* Skills selector */}
-              {availableSkills.length > 0 && (
+              {/* Advanced options (collapsible) */}
+              {(availableSkills.length > 0 || availableProfiles.length > 0 || availableDirectives.length > 0) && (
                 <div style={{ marginBottom: 12 }}>
-                  <label style={ds.label}><Zap size={10} style={{ marginRight: 4 }} />{t('skills.selectSkills')}</label>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4, maxHeight: 72, overflowY: 'auto' }}>
-                    {availableSkills.map(skill => {
-                      const selected = newDiscSkillIds.includes(skill.id);
-                      return (
-                        <button
-                          key={skill.id}
-                          type="button"
-                          onClick={() => {
-                            setNewDiscSkillIds(prev =>
-                              selected ? prev.filter(id => id !== skill.id) : [...prev, skill.id]
-                            );
-                          }}
-                          style={{
-                            padding: '4px 10px', borderRadius: 12, fontSize: 11, fontFamily: 'inherit',
-                            fontWeight: selected ? 600 : 400, cursor: 'pointer',
-                            border: selected ? '1px solid rgba(200,255,0,0.4)' : '1px solid rgba(255,255,255,0.1)',
-                            background: selected ? 'rgba(200,255,0,0.1)' : 'rgba(255,255,255,0.03)',
-                            color: selected ? '#c8ff00' : 'rgba(255,255,255,0.5)',
-                            display: 'flex', alignItems: 'center', gap: 4,
-                            transition: 'all 0.15s',
-                          }}
-                          title={skill.name}
-                        >
-                          {selected && <Check size={10} />}
-                          {skill.name}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
+                  <button
+                    type="button"
+                    onClick={() => setShowAdvancedOptions(prev => !prev)}
+                    style={{
+                      background: 'none', border: 'none', cursor: 'pointer', padding: '4px 0',
+                      color: 'rgba(255,255,255,0.4)', fontSize: 11, fontFamily: 'inherit',
+                      display: 'flex', alignItems: 'center', gap: 4,
+                    }}
+                  >
+                    <ChevronRight size={11} style={{ transform: showAdvancedOptions ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s' }} />
+                    <Settings size={10} />
+                    {t('disc.advancedOptions')}
+                    {(newDiscSkillIds.length > 0 || newDiscProfileIds.length > 0 || newDiscDirectiveIds.length > 0) && (
+                      <span style={{ fontSize: 9, color: '#c8ff00', marginLeft: 2 }}>
+                        ({newDiscSkillIds.length + newDiscProfileIds.length + newDiscDirectiveIds.length})
+                      </span>
+                    )}
+                  </button>
 
-              {/* Profile selector (multi-select) */}
-              {availableProfiles.length > 0 && (
-                <div style={{ marginBottom: 12 }}>
-                  <label style={ds.label}><UserCircle size={10} style={{ marginRight: 4 }} />{t('profiles.select')}</label>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4, maxHeight: 72, overflowY: 'auto' }}>
-                    <button
-                      type="button"
-                      onClick={() => setNewDiscProfileIds([])}
-                      style={{
-                        padding: '4px 10px', borderRadius: 12, fontSize: 11, fontFamily: 'inherit',
-                        fontWeight: newDiscProfileIds.length === 0 ? 600 : 400, cursor: 'pointer',
-                        border: newDiscProfileIds.length === 0 ? '1px solid rgba(139,92,246,0.4)' : '1px solid rgba(255,255,255,0.1)',
-                        background: newDiscProfileIds.length === 0 ? 'rgba(139,92,246,0.1)' : 'rgba(255,255,255,0.03)',
-                        color: newDiscProfileIds.length === 0 ? '#a78bfa' : 'rgba(255,255,255,0.5)',
-                        transition: 'all 0.15s',
-                      }}
-                    >
-                      {t('profiles.none')}
-                    </button>
-                    {availableProfiles.map(profile => {
-                      const selected = newDiscProfileIds.includes(profile.id);
-                      return (
-                        <button
-                          key={profile.id}
-                          type="button"
-                          onClick={() => setNewDiscProfileIds(prev => selected ? prev.filter(id => id !== profile.id) : [...prev, profile.id])}
-                          style={{
-                            padding: '4px 10px', borderRadius: 12, fontSize: 11, fontFamily: 'inherit',
-                            fontWeight: selected ? 600 : 400, cursor: 'pointer',
-                            border: selected ? `1px solid ${profile.color || 'rgba(139,92,246,0.4)'}` : '1px solid rgba(255,255,255,0.1)',
-                            background: selected ? `${profile.color}15` : 'rgba(255,255,255,0.03)',
-                            color: selected ? (profile.color || '#a78bfa') : 'rgba(255,255,255,0.5)',
-                            display: 'flex', alignItems: 'center', gap: 4,
-                            transition: 'all 0.15s',
-                          }}
-                          title={profile.role}
-                        >
-                          {selected && <Check size={10} />}
-                          {profile.avatar} {profile.persona_name || profile.name}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
+                  {showAdvancedOptions && (
+                    <div style={{ marginTop: 8, padding: '10px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)' }}>
+                      {/* Skills selector */}
+                      {availableSkills.length > 0 && (
+                        <div style={{ marginBottom: 10 }}>
+                          <label style={{ ...ds.label, marginBottom: 4 }}><Zap size={10} style={{ marginRight: 4 }} />{t('skills.selectSkills')}</label>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                            {availableSkills.map(skill => {
+                              const selected = newDiscSkillIds.includes(skill.id);
+                              return (
+                                <button
+                                  key={skill.id}
+                                  type="button"
+                                  onClick={() => {
+                                    setNewDiscSkillIds(prev =>
+                                      selected ? prev.filter(id => id !== skill.id) : [...prev, skill.id]
+                                    );
+                                  }}
+                                  style={{
+                                    padding: '3px 8px', borderRadius: 10, fontSize: 10, fontFamily: 'inherit',
+                                    fontWeight: selected ? 600 : 400, cursor: 'pointer',
+                                    border: selected ? '1px solid rgba(200,255,0,0.4)' : '1px solid rgba(255,255,255,0.1)',
+                                    background: selected ? 'rgba(200,255,0,0.1)' : 'rgba(255,255,255,0.03)',
+                                    color: selected ? '#c8ff00' : 'rgba(255,255,255,0.5)',
+                                    display: 'flex', alignItems: 'center', gap: 3,
+                                    transition: 'all 0.15s',
+                                  }}
+                                  title={skill.name}
+                                >
+                                  {selected && <Check size={9} />}
+                                  {skill.name}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
 
-              {/* Directive selector (multi-select) */}
-              {availableDirectives.length > 0 && (
-                <div style={{ marginBottom: 12 }}>
-                  <label style={ds.label}><FileText size={10} style={{ marginRight: 4 }} />{t('directives.title')}</label>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4, maxHeight: 72, overflowY: 'auto' }}>
-                    {availableDirectives.map(directive => {
-                      const selected = newDiscDirectiveIds.includes(directive.id);
-                      return (
-                        <button
-                          key={directive.id}
-                          type="button"
-                          onClick={() => {
-                            setNewDiscDirectiveIds(prev =>
-                              selected ? prev.filter(id => id !== directive.id) : [...prev, directive.id]
-                            );
-                          }}
-                          style={{
-                            padding: '4px 10px', borderRadius: 12, fontSize: 11, fontFamily: 'inherit',
-                            fontWeight: selected ? 600 : 400, cursor: 'pointer',
-                            border: selected ? '1px solid rgba(245,158,11,0.4)' : '1px solid rgba(255,255,255,0.1)',
-                            background: selected ? 'rgba(245,158,11,0.1)' : 'rgba(255,255,255,0.03)',
-                            color: selected ? '#fbbf24' : 'rgba(255,255,255,0.5)',
-                            display: 'flex', alignItems: 'center', gap: 4,
-                            transition: 'all 0.15s',
-                          }}
-                          title={directive.name}
-                        >
-                          {selected && <Check size={10} />}
-                          {directive.icon} {directive.name}
-                        </button>
-                      );
-                    })}
-                  </div>
+                      {/* Profile selector */}
+                      {availableProfiles.length > 0 && (
+                        <div style={{ marginBottom: 10 }}>
+                          <label style={{ ...ds.label, marginBottom: 4 }}><UserCircle size={10} style={{ marginRight: 4 }} />{t('profiles.select')}</label>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                            <button
+                              type="button"
+                              onClick={() => setNewDiscProfileIds([])}
+                              style={{
+                                padding: '3px 8px', borderRadius: 10, fontSize: 10, fontFamily: 'inherit',
+                                fontWeight: newDiscProfileIds.length === 0 ? 600 : 400, cursor: 'pointer',
+                                border: newDiscProfileIds.length === 0 ? '1px solid rgba(139,92,246,0.4)' : '1px solid rgba(255,255,255,0.1)',
+                                background: newDiscProfileIds.length === 0 ? 'rgba(139,92,246,0.1)' : 'rgba(255,255,255,0.03)',
+                                color: newDiscProfileIds.length === 0 ? '#a78bfa' : 'rgba(255,255,255,0.5)',
+                                transition: 'all 0.15s',
+                              }}
+                            >
+                              {t('profiles.none')}
+                            </button>
+                            {availableProfiles.map(profile => {
+                              const selected = newDiscProfileIds.includes(profile.id);
+                              return (
+                                <button
+                                  key={profile.id}
+                                  type="button"
+                                  onClick={() => setNewDiscProfileIds(prev => selected ? prev.filter(id => id !== profile.id) : [...prev, profile.id])}
+                                  style={{
+                                    padding: '3px 8px', borderRadius: 10, fontSize: 10, fontFamily: 'inherit',
+                                    fontWeight: selected ? 600 : 400, cursor: 'pointer',
+                                    border: selected ? `1px solid ${profile.color || 'rgba(139,92,246,0.4)'}` : '1px solid rgba(255,255,255,0.1)',
+                                    background: selected ? `${profile.color}15` : 'rgba(255,255,255,0.03)',
+                                    color: selected ? (profile.color || '#a78bfa') : 'rgba(255,255,255,0.5)',
+                                    display: 'flex', alignItems: 'center', gap: 3,
+                                    transition: 'all 0.15s',
+                                  }}
+                                  title={profile.role}
+                                >
+                                  {selected && <Check size={9} />}
+                                  {profile.avatar} {profile.persona_name || profile.name}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Directive selector */}
+                      {availableDirectives.length > 0 && (
+                        <div>
+                          <label style={{ ...ds.label, marginBottom: 4 }}><FileText size={10} style={{ marginRight: 4 }} />{t('directives.title')}</label>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                            {availableDirectives.map(directive => {
+                              const selected = newDiscDirectiveIds.includes(directive.id);
+                              return (
+                                <button
+                                  key={directive.id}
+                                  type="button"
+                                  onClick={() => {
+                                    setNewDiscDirectiveIds(prev =>
+                                      selected ? prev.filter(id => id !== directive.id) : [...prev, directive.id]
+                                    );
+                                  }}
+                                  style={{
+                                    padding: '3px 8px', borderRadius: 10, fontSize: 10, fontFamily: 'inherit',
+                                    fontWeight: selected ? 600 : 400, cursor: 'pointer',
+                                    border: selected ? '1px solid rgba(245,158,11,0.4)' : '1px solid rgba(255,255,255,0.1)',
+                                    background: selected ? 'rgba(245,158,11,0.1)' : 'rgba(255,255,255,0.03)',
+                                    color: selected ? '#fbbf24' : 'rgba(255,255,255,0.5)',
+                                    display: 'flex', alignItems: 'center', gap: 3,
+                                    transition: 'all 0.15s',
+                                  }}
+                                  title={directive.name}
+                                >
+                                  {selected && <Check size={9} />}
+                                  {directive.icon} {directive.name}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -952,7 +1057,8 @@ export function DiscussionsPage({
               <div style={{ flex: 1 }}>
                 <div style={{ fontWeight: 600, fontSize: 14, display: 'flex', alignItems: 'center', gap: 6 }}>
                   {isValidationDisc(activeDiscussion.title) && <ShieldCheck size={14} style={{ color: '#c8ff00', flexShrink: 0 }} />}
-                  {editingTitleId === activeDiscussion.id ? (
+                  {isBootstrapDisc(activeDiscussion.title) && <Rocket size={14} style={{ color: '#c8ff00', flexShrink: 0 }} />}
+                  {editingTitleId === activeDiscussion.id && !isValidationDisc(activeDiscussion.title) && !isBootstrapDisc(activeDiscussion.title) ? (
                     <input
                       autoFocus
                       style={{
@@ -980,16 +1086,18 @@ export function DiscussionsPage({
                     />
                   ) : (
                     <span
-                      style={{ cursor: 'pointer' }}
+                      style={{ cursor: (isValidationDisc(activeDiscussion.title) || isBootstrapDisc(activeDiscussion.title)) ? 'default' : 'pointer' }}
                       onDoubleClick={() => {
+                        if (isValidationDisc(activeDiscussion.title) || isBootstrapDisc(activeDiscussion.title)) return;
                         setEditingTitleId(activeDiscussion.id);
                         setEditingTitleText(activeDiscussion.title);
                       }}
-                      title={t('disc.editTitle')}
+                      title={(isValidationDisc(activeDiscussion.title) || isBootstrapDisc(activeDiscussion.title)) ? undefined : t('disc.editTitle')}
                     >
                       {activeDiscussion.title}
                     </span>
                   )}
+                  {!isValidationDisc(activeDiscussion.title) && !isBootstrapDisc(activeDiscussion.title) && (
                   <button
                     style={{ ...ls.iconBtn, padding: '2px 4px', border: 'none', background: 'none', color: 'rgba(255,255,255,0.2)' }}
                     onClick={() => {
@@ -1004,6 +1112,7 @@ export function DiscussionsPage({
                   >
                     <Pencil size={10} />
                   </button>
+                  )}
                 </div>
                 <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', marginTop: 2, display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
                   <span>{activeDiscussion.project_id ? (projects.find(p => p.id === activeDiscussion.project_id)?.name ?? '?') : t('disc.general')} · {activeDiscussion.agent}</span>
@@ -1256,7 +1365,7 @@ export function DiscussionsPage({
                 const proj = projects.find(p => p.id === activeDiscussion.project_id);
                 if (!proj || proj.audit_status !== 'Audited') return null;
                 const lastAgentMsg = [...activeDiscussion.messages].reverse().find(m => m.role === 'Agent');
-                const isComplete = lastAgentMsg && lastAgentMsg.content.includes('KRONN:VALIDATION_COMPLETE');
+                const isComplete = lastAgentMsg && lastAgentMsg.content.toUpperCase().includes('KRONN:VALIDATION_COMPLETE');
                 if (!isComplete) return null;
                 return (
                   <div style={{ margin: '12px 16px', padding: '12px 16px', borderRadius: 10, background: 'rgba(200,255,0,0.06)', border: '1px solid rgba(200,255,0,0.15)' }}>
@@ -1277,6 +1386,38 @@ export function DiscussionsPage({
                       }}
                     >
                       <Check size={12} /> {t('audit.markValid')}
+                    </button>
+                  </div>
+                );
+              })()}
+
+              {/* Bootstrap complete banner */}
+              {(() => {
+                if (!isBootstrapDisc(activeDiscussion.title) || !activeDiscussion.project_id) return null;
+                const proj = projects.find(p => p.id === activeDiscussion.project_id);
+                if (!proj || proj.audit_status !== 'TemplateInstalled') return null;
+                const lastAgentMsg = [...activeDiscussion.messages].reverse().find(m => m.role === 'Agent');
+                const isComplete = lastAgentMsg && lastAgentMsg.content.toUpperCase().includes('KRONN:BOOTSTRAP_COMPLETE');
+                if (!isComplete) return null;
+                return (
+                  <div style={{ margin: '12px 16px', padding: '12px 16px', borderRadius: 10, background: 'rgba(200,255,0,0.06)', border: '1px solid rgba(200,255,0,0.15)' }}>
+                    <p style={{ fontSize: 12, color: 'rgba(200,255,0,0.8)', margin: '0 0 8px', display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <Rocket size={14} /> {t('audit.bootstrapComplete')}
+                    </p>
+                    <button
+                      style={{
+                        padding: '8px 16px', borderRadius: 8, border: 'none',
+                        background: '#c8ff00', color: '#0a0c10', fontWeight: 700,
+                        fontSize: 12, fontFamily: 'inherit', cursor: 'pointer',
+                        display: 'flex', alignItems: 'center', gap: 6,
+                      }}
+                      onClick={async () => {
+                        await projectsApi.markBootstrapped(proj.id);
+                        refetchProjects();
+                        refetchDiscussions();
+                      }}
+                    >
+                      <Check size={12} /> {t('audit.markBootstrapped')}
                     </button>
                   </div>
                 );
@@ -1699,7 +1840,7 @@ const ds = {
   chatInput: { width: '100%', padding: '10px 14px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, color: '#e8eaed', fontSize: 13, fontFamily: 'inherit', outline: 'none' } as const,
   sendBtn: { padding: '10px 16px', borderRadius: 8, border: '1px solid rgba(200,255,0,0.2)', background: 'rgba(200,255,0,0.1)', color: '#c8ff00', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' } as const,
   newDiscOverlay: { display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 1 } as const,
-  newDiscCard: { width: 420, padding: 24, borderRadius: 12, background: '#12151c', border: '1px solid rgba(255,255,255,0.1)', maxHeight: 'calc(100vh - 120px)', overflowY: 'auto' } as const,
+  newDiscCard: { width: 420, maxHeight: 'calc(100vh - 120px)', overflowY: 'auto', padding: 24, borderRadius: 12, background: '#12151c', border: '1px solid rgba(255,255,255,0.1)' } as const,
   label: { display: 'block', fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', marginBottom: 4, marginTop: 8 } as const,
   selectStyled: {
     width: '100%', padding: '9px 12px', background: '#1a1d26', border: '1px solid rgba(255,255,255,0.12)',

@@ -239,19 +239,37 @@ pub fn detect_audit_status(project_path: &str) -> crate::models::AiAuditStatus {
     use crate::models::AiAuditStatus;
 
     let path = resolve_host_path(project_path);
+    let ai_dir = path.join("ai");
     let index_file = path.join("ai/index.md");
 
-    if !index_file.exists() {
+    if !ai_dir.exists() {
         return AiAuditStatus::NoTemplate;
+    }
+
+    // ai/ directory exists but index.md doesn't — treat as template installed (partial state)
+    if !index_file.exists() {
+        return AiAuditStatus::TemplateInstalled;
     }
 
     let content = match std::fs::read_to_string(&index_file) {
         Ok(c) => c,
-        Err(_) => return AiAuditStatus::NoTemplate,
+        Err(e) => {
+            // File exists but can't be read (permission issue) — don't confuse with "no template"
+            tracing::warn!("Cannot read ai/index.md at {}: {} — treating as TemplateInstalled", index_file.display(), e);
+            return AiAuditStatus::TemplateInstalled;
+        }
     };
 
-    if content.contains("KRONN:BOOTSTRAP") || content.contains("{{") {
+    if content.contains("KRONN:BOOTSTRAP:START") || content.contains("KRONN:BOOTSTRAP:END") || content.contains("{{") {
         return AiAuditStatus::TemplateInstalled;
+    }
+
+    if content.contains("KRONN:BOOTSTRAPPED") {
+        // Validated takes priority over Bootstrapped
+        if content.contains("KRONN:VALIDATED") {
+            return AiAuditStatus::Validated;
+        }
+        return AiAuditStatus::Bootstrapped;
     }
 
     if content.contains("KRONN:VALIDATED") {

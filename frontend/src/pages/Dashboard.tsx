@@ -1,19 +1,21 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
-import { projects as projectsApi, mcps as mcpsApi, agents as agentsApi, discussions as discussionsApi, workflows as workflowsApi, config as configApi } from '../lib/api';
+import { projects as projectsApi, mcps as mcpsApi, agents as agentsApi, discussions as discussionsApi, workflows as workflowsApi, config as configApi, skills as skillsApi } from '../lib/api';
 import { useApi } from '../hooks/useApi';
 import { useToast } from '../hooks/useToast';
-import type { Project, AgentDetection, AgentType } from '../types/generated';
+import type { Project, AgentDetection, AgentType, RemoteRepo, RepoSource } from '../types/generated';
 import { useT } from '../lib/I18nContext';
 import { McpPage } from './McpPage';
 import { WorkflowsPage } from './WorkflowsPage';
 import { SettingsPage } from './SettingsPage';
 import { DiscussionsPage } from './DiscussionsPage';
+import { AiDocViewer } from '../components/AiDocViewer';
+import { ProjectSkills } from '../components/ProjectSkills';
 import {
-  Folder, Server, ChevronRight, Cpu, Workflow,
+  Folder, Server, ChevronRight, ChevronDown, Cpu, Workflow,
   Plus, Trash2, Search, Zap, Settings, Eye,
-  Download, Loader2,
+  Loader2,
   MessageSquare, X, AlertTriangle,
-  Play, FileCode, ShieldCheck,
+  Play, FileCode, ShieldCheck, StopCircle, BookOpen, Rocket,
 } from 'lucide-react';
 
 type Page = 'projects' | 'mcps' | 'workflows' | 'discussions' | 'settings';
@@ -25,6 +27,11 @@ interface DashboardProps {
 const isHiddenPath = (path: string) => path.split('/').some(s => s.startsWith('.'));
 
 const isAiReady = (p: Project) => p.audit_status !== 'NoTemplate';
+
+const STATUS_COLORS: Record<string, string> = {
+  Pending: '#ffc800', Running: '#00d4ff', Success: '#34d399',
+  Failed: '#ff4d6a', Cancelled: 'rgba(255,255,255,0.3)', WaitingApproval: '#c8ff00',
+};
 
 /** Agent is usable: locally installed OR available via npx/uvx runtime fallback */
 const isUsable = (a: AgentDetection) => (a.installed || a.runtime_available) && a.enabled;
@@ -55,21 +62,42 @@ export function Dashboard({ onReset }: DashboardProps) {
   const [projectSearch, setProjectSearch] = useState('');
   const [projectDisplayLimit, setProjectDisplayLimit] = useState(20);
   // Cross-page prefill for discussion creation (e.g. "validate audit" from Projects)
-  const [discPrefill, setDiscPrefill] = useState<{ projectId: string; title: string; prompt: string } | null>(null);
+  const [discPrefill, setDiscPrefill] = useState<{ projectId: string; title: string; prompt: string; locked?: boolean } | null>(null);
   // Unseen message tracking (persisted in localStorage, computed in Dashboard)
   const [lastSeenMsgCount, setLastSeenMsgCount] = useState<Record<string, number>>(() => {
     try { return JSON.parse(localStorage.getItem('kronn:lastSeenMsgCount') ?? '{}'); } catch { return {}; }
   });
   const [activeDiscussionId, setActiveDiscussionId] = useState<string | null>(null);
+  // Auto-run agent on a discussion (after full audit creates validation discussion)
+  const [autoRunDiscussionId, setAutoRunDiscussionId] = useState<string | null>(null);
+  // Open a specific discussion without triggering agent (e.g. Resume Validation button)
+  const [openDiscussionId, setOpenDiscussionId] = useState<string | null>(null);
   // AI audit state
-  const [installingTemplate, setInstallingTemplate] = useState<string | null>(null);
   const [auditAgentChoice, setAuditAgentChoice] = useState<Record<string, AgentType>>({});
+  // Collapsible sections per project: tracks which section is open (only one at a time)
+  const [openSections, setOpenSections] = useState<Record<string, string>>({});
+  const toggleSection = useCallback((projectId: string, section: string) => {
+    setOpenSections(prev => ({
+      ...prev,
+      [projectId]: prev[projectId] === section ? '' : section,
+    }));
+  }, []);
+  const defaultSection = useCallback((auditStatus: string) => {
+    // Before audit completes: show AI Context to encourage launching audit
+    // After audit (Audited/Validated): show Discussions (auto-created post-audit)
+    return (auditStatus === 'Bootstrapped' || auditStatus === 'Audited' || auditStatus === 'Validated') ? 'discussions' : 'aiContext';
+  }, []);
+  const isSectionOpen = useCallback((projectId: string, section: string, auditStatus: string) => {
+    if (openSections[projectId] === undefined) return section === defaultSection(auditStatus);
+    return openSections[projectId] === section;
+  }, [openSections, defaultSection]);
   const [auditState, setAuditState] = useState<Record<string, {
     active: boolean;
     step: number;
     totalSteps: number;
     currentFile: string;
   }>>({});
+  const auditAbortControllers = useRef<Record<string, AbortController>>({});
 
   // ─── Lifted discussion streaming state (survives page changes) ──────────
   const [sendingMap, setSendingMap] = useState<Record<string, boolean>>({});
@@ -90,6 +118,7 @@ export function Dashboard({ onReset }: DashboardProps) {
   const { data: configLanguage, refetch: refetchLanguage } = useApi(() => configApi.getLanguage(), []);
   const { data: agentAccess, refetch: refetchAgentAccess } = useApi(() => configApi.getAgentAccess(), []);
   const { data: workflowList, refetch: refetchWorkflows } = useApi(() => workflowsApi.list(), []);
+  const { data: skillList, refetch: refetchSkills } = useApi(() => skillsApi.list(), []);
 
   // Poll discussions for notifications — faster when on discussions page, slower otherwise
   useEffect(() => {
@@ -123,6 +152,7 @@ export function Dashboard({ onReset }: DashboardProps) {
   const mcpOverview = mcpOverviewData ?? { servers: [], configs: [], customized_contexts: [] };
   const agents = agentList ?? [];
   const allDiscussions = discussionList ?? [];
+  const allSkills = skillList ?? [];
 
   // ─── Unseen count (computed here so it works across all pages) ─────────
   const markDiscussionSeen = useCallback((discId: string, msgCount: number) => {
@@ -144,61 +174,191 @@ export function Dashboard({ onReset }: DashboardProps) {
 
   // Stable callback for prefill consumed
   const handlePrefillConsumed = useCallback(() => setDiscPrefill(null), []);
+  const handleAutoRunConsumed = useCallback(() => setAutoRunDiscussionId(null), []);
+  const handleOpenDiscConsumed = useCallback(() => setOpenDiscussionId(null), []);
 
-  const handleDeleteProject = async (id: string) => {
-    await projectsApi.delete(id);
+  const handleDeleteProject = async (id: string, hard: boolean) => {
+    await projectsApi.delete(id, hard);
+    setDeleteConfirmId(null);
+    setDeleteConfirmInput('');
     refetch();
   };
 
-  const handleInstallTemplate = async (projectId: string) => {
-    setInstallingTemplate(projectId);
-    try {
-      await projectsApi.installTemplate(projectId);
-      refetch();
-    } catch (e) {
-      console.error('Failed to install template:', e);
-    } finally {
-      setInstallingTemplate(null);
-    }
-  };
+  const handleCancelAudit = async (projectId: string) => {
+    // Abort the SSE stream
+    auditAbortControllers.current[projectId]?.abort();
+    delete auditAbortControllers.current[projectId];
 
-  const handleLaunchAudit = async (projectId: string) => {
+    // Call backend to kill process + clean files
+    try {
+      await projectsApi.cancelAudit(projectId);
+      toast(t('audit.cancelled'), 'success');
+    } catch (e) {
+      console.error('Cancel audit failed:', e);
+    }
+
     setAuditState(prev => ({
       ...prev,
-      [projectId]: { active: true, step: 0, totalSteps: 10, currentFile: 'Demarrage...' }
+      [projectId]: { ...prev[projectId], active: false }
+    }));
+    refetch();
+    refetchDiscussions();
+  };
+
+  const handleFullAudit = async (projectId: string) => {
+    const controller = new AbortController();
+    auditAbortControllers.current[projectId] = controller;
+
+    setAuditState(prev => ({
+      ...prev,
+      [projectId]: { active: true, step: 0, totalSteps: 10, currentFile: t('audit.templateStep') }
     }));
     try {
       const auditAgent = auditAgentChoice[projectId] ?? agents.filter(isUsable)[0]?.agent_type ?? 'ClaudeCode';
-      await projectsApi.auditStream(projectId, { agent: auditAgent }, {
+      await projectsApi.fullAuditStream(projectId, { agent: auditAgent }, {
+        onTemplateInstalled: () => { /* template phase done */ },
         onStepStart: (step, total, file) => {
           setAuditState(prev => ({
             ...prev,
             [projectId]: { active: true, step, totalSteps: total, currentFile: file }
           }));
         },
-        onChunk: () => { /* progress tracked via step_start */ },
-        onStepDone: () => { /* step progress */ },
-        onDone: () => {
+        onChunk: () => {},
+        onStepDone: () => {},
+        onValidationCreated: () => {},
+        onDone: (discussionId) => {
           setAuditState(prev => ({
             ...prev,
             [projectId]: { ...prev[projectId], active: false }
           }));
           refetch();
+          refetchDiscussions();
+          if (discussionId) {
+            toast(t('audit.fullAuditDone'), 'success');
+            // Navigate to discussions and auto-trigger agent response
+            setAutoRunDiscussionId(discussionId);
+            setPage('discussions');
+          }
         },
         onError: (error) => {
-          console.error('Audit error:', error);
-          setAuditState(prev => ({
-            ...prev,
-            [projectId]: { ...prev[projectId], active: false }
-          }));
+          console.error('Full audit error:', error);
         },
-      });
+      }, controller.signal);
     } catch (e) {
-      console.error('Audit failed:', e);
+      if (e instanceof DOMException && e.name === 'AbortError') return; // cancelled by user
+      console.error('Full audit failed:', e);
       setAuditState(prev => ({
         ...prev,
         [projectId]: { ...prev[projectId], active: false }
       }));
+    } finally {
+      delete auditAbortControllers.current[projectId];
+    }
+  };
+
+  // Bootstrap new project state
+  const [showBootstrap, setShowBootstrap] = useState(false);
+  const [bootstrapName, setBootstrapName] = useState('');
+  const [bootstrapDesc, setBootstrapDesc] = useState('');
+  const [bootstrapLoading, setBootstrapLoading] = useState(false);
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const [deleteConfirmInput, setDeleteConfirmInput] = useState('');
+  const [newProjectMode, setNewProjectMode] = useState<'bootstrap' | 'clone'>('bootstrap');
+  const [cloneUrl, setCloneUrl] = useState('');
+  const [cloneName, setCloneName] = useState('');
+  const [cloneLoading, setCloneLoading] = useState(false);
+  const [discoveredRepos, setDiscoveredRepos] = useState<RemoteRepo[]>([]);
+  const [discoverLoading, setDiscoverLoading] = useState(false);
+  const [discoverSources, setDiscoverSources] = useState<string[]>([]);
+  const [discoverError, setDiscoverError] = useState('');
+  const [availableSources, setAvailableSources] = useState<RepoSource[]>([]);
+  const [selectedSourceIds, setSelectedSourceIds] = useState<string[]>([]);
+  const [repoSearch, setRepoSearch] = useState('');
+
+  const handleBootstrap = async () => {
+    if (!bootstrapName.trim() || !bootstrapDesc.trim()) return;
+    const agent = agents.find(a => isUsable(a))?.agent_type;
+    if (!agent) { toast('No usable agent found', 'error'); return; }
+    setBootstrapLoading(true);
+    try {
+      const res = await projectsApi.bootstrap({ name: bootstrapName.trim(), description: bootstrapDesc.trim(), agent });
+      setShowBootstrap(false);
+      setBootstrapName('');
+      setBootstrapDesc('');
+      await refetch();
+      // Navigate to discussions with auto-run on the bootstrap discussion
+      setAutoRunDiscussionId(res.discussion_id);
+      setPage('discussions');
+      toast(`Projet "${bootstrapName}" cree`, 'success');
+    } catch (e) {
+      toast(`Erreur: ${e}`, 'error');
+    } finally {
+      setBootstrapLoading(false);
+    }
+  };
+
+  const handleClone = async () => {
+    if (!cloneUrl.trim()) return;
+    const agent = agents.find(a => isUsable(a))?.agent_type;
+    if (!agent) { toast('No usable agent found', 'error'); return; }
+    setCloneLoading(true);
+    try {
+      await projectsApi.clone({ url: cloneUrl.trim(), name: cloneName.trim() || null, agent });
+      setShowBootstrap(false);
+      setCloneUrl('');
+      setCloneName('');
+      await refetch();
+      toast(t('projects.clone.success'), 'success');
+    } catch (e) {
+      toast(`Error: ${e}`, 'error');
+    } finally {
+      setCloneLoading(false);
+    }
+  };
+
+  const handleDiscoverRepos = async (sourceIds?: string[]) => {
+    setDiscoverLoading(true);
+    setDiscoverError('');
+    try {
+      const res = await projectsApi.discoverRepos({ source_ids: sourceIds ?? selectedSourceIds });
+      setDiscoveredRepos(res.repos);
+      setDiscoverSources(res.sources);
+      setAvailableSources(res.available_sources);
+      // On first call, auto-select all sources
+      if (selectedSourceIds.length === 0 && res.available_sources.length > 0) {
+        setSelectedSourceIds(res.available_sources.map(s => s.id));
+      }
+    } catch (e) {
+      setDiscoverError(String(e));
+    } finally {
+      setDiscoverLoading(false);
+    }
+  };
+
+  const toggleSource = (id: string) => {
+    const next = selectedSourceIds.includes(id)
+      ? selectedSourceIds.filter(x => x !== id)
+      : [...selectedSourceIds, id];
+    setSelectedSourceIds(next);
+    if (next.length > 0) {
+      handleDiscoverRepos(next);
+    }
+  };
+
+  const handleCloneDiscovered = async (repo: RemoteRepo) => {
+    const agent = agents.find(a => isUsable(a))?.agent_type;
+    if (!agent) { toast('No usable agent found', 'error'); return; }
+    setCloneLoading(true);
+    try {
+      await projectsApi.clone({ url: repo.clone_url, name: repo.name, agent });
+      // Mark as cloned in local state
+      setDiscoveredRepos(prev => prev.map(r => r.full_name === repo.full_name ? { ...r, already_cloned: true } : r));
+      await refetch();
+      toast(t('projects.clone.success'), 'success');
+    } catch (e) {
+      toast(`Error: ${e}`, 'error');
+    } finally {
+      setCloneLoading(false);
     }
   };
 
@@ -254,10 +414,269 @@ export function Dashboard({ onReset }: DashboardProps) {
           </button>
         ))}
         <div style={{ flex: 1 }} />
+        <button style={s.scanBtn} onClick={() => setShowBootstrap(true)}>
+          <Plus size={14} /> {t('projects.bootstrap')}
+        </button>
         <button style={s.scanBtn} onClick={handleScan}>
           <Search size={14} /> {t('nav.scan')}
         </button>
       </nav>
+
+      {/* Bootstrap modal */}
+      {showBootstrap && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', zIndex: 1000,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }} onClick={() => !bootstrapLoading && !cloneLoading && setShowBootstrap(false)}>
+          <div style={{
+            background: '#161b22', border: '1px solid rgba(200,255,0,0.15)', borderRadius: 12,
+            padding: 24, width: 480, maxWidth: '90vw',
+          }} onClick={e => e.stopPropagation()}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+              <h3 style={{ margin: 0, color: '#c8ff00', fontSize: 16 }}>{t('projects.bootstrap')}</h3>
+              <button onClick={() => setShowBootstrap(false)} style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.5)', cursor: 'pointer' }}>
+                <X size={16} />
+              </button>
+            </div>
+            <div style={{ display: 'flex', marginBottom: 16, borderRadius: 8, overflow: 'hidden', border: '1px solid rgba(255,255,255,0.1)' }}>
+              <button
+                onClick={() => setNewProjectMode('bootstrap')}
+                style={{
+                  flex: 1, padding: '8px 12px', border: 'none', fontSize: 13, fontFamily: 'inherit', cursor: 'pointer',
+                  background: newProjectMode === 'bootstrap' ? 'rgba(200,255,0,0.15)' : 'transparent',
+                  color: newProjectMode === 'bootstrap' ? '#c8ff00' : 'rgba(255,255,255,0.5)',
+                }}
+              >
+                <Rocket size={14} style={{ verticalAlign: 'middle', marginRight: 6 }} />
+                Bootstrap
+              </button>
+              <button
+                onClick={() => setNewProjectMode('clone')}
+                style={{
+                  flex: 1, padding: '8px 12px', border: 'none', fontSize: 13, fontFamily: 'inherit', cursor: 'pointer',
+                  borderLeft: '1px solid rgba(255,255,255,0.1)',
+                  background: newProjectMode === 'clone' ? 'rgba(200,255,0,0.15)' : 'transparent',
+                  color: newProjectMode === 'clone' ? '#c8ff00' : 'rgba(255,255,255,0.5)',
+                }}
+              >
+                <Folder size={14} style={{ verticalAlign: 'middle', marginRight: 6 }} />
+                {t('projects.clone')}
+              </button>
+            </div>
+            {newProjectMode === 'bootstrap' && (
+              <>
+                <label style={{ display: 'block', marginBottom: 12 }}>
+                  <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)', display: 'block', marginBottom: 4 }}>{t('projects.bootstrap.name')}</span>
+                  <input
+                    value={bootstrapName} onChange={e => setBootstrapName(e.target.value)}
+                    style={{
+                      width: '100%', padding: '8px 12px', borderRadius: 6, border: '1px solid rgba(255,255,255,0.1)',
+                      background: '#0d1117', color: '#e6edf3', fontSize: 14, fontFamily: 'inherit', boxSizing: 'border-box',
+                    }}
+                    placeholder="my-awesome-project"
+                    autoFocus
+                  />
+                </label>
+                <label style={{ display: 'block', marginBottom: 16 }}>
+                  <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)', display: 'block', marginBottom: 4 }}>{t('projects.bootstrap.desc')}</span>
+                  <textarea
+                    value={bootstrapDesc} onChange={e => setBootstrapDesc(e.target.value)}
+                    rows={5}
+                    style={{
+                      width: '100%', padding: '8px 12px', borderRadius: 6, border: '1px solid rgba(255,255,255,0.1)',
+                      background: '#0d1117', color: '#e6edf3', fontSize: 13, fontFamily: 'inherit', resize: 'vertical',
+                      boxSizing: 'border-box',
+                    }}
+                    placeholder={t('projects.bootstrap.descPlaceholder')}
+                  />
+                </label>
+                <button
+                  onClick={handleBootstrap}
+                  disabled={bootstrapLoading || !bootstrapName.trim() || !bootstrapDesc.trim()}
+                  style={{
+                    width: '100%', padding: '10px 16px', borderRadius: 8, border: 'none',
+                    background: bootstrapLoading || !bootstrapName.trim() || !bootstrapDesc.trim() ? 'rgba(200,255,0,0.15)' : '#c8ff00',
+                    color: bootstrapLoading || !bootstrapName.trim() || !bootstrapDesc.trim() ? 'rgba(200,255,0,0.4)' : '#0a0c10',
+                    fontSize: 14, fontWeight: 600, fontFamily: 'inherit', cursor: bootstrapLoading ? 'wait' : 'pointer',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                  }}
+                >
+                  {bootstrapLoading ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <Zap size={16} />}
+                  {bootstrapLoading ? t('projects.bootstrap.creating') : t('projects.bootstrap.start')}
+                </button>
+              </>
+            )}
+            {newProjectMode === 'clone' && (
+              <>
+                <label style={{ display: 'block', marginBottom: 12 }}>
+                  <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)', display: 'block', marginBottom: 4 }}>{t('projects.clone.url')}</span>
+                  <input
+                    value={cloneUrl} onChange={e => setCloneUrl(e.target.value)}
+                    style={{
+                      width: '100%', padding: '8px 12px', borderRadius: 6, border: '1px solid rgba(255,255,255,0.1)',
+                      background: '#0d1117', color: '#e6edf3', fontSize: 14, fontFamily: 'inherit', boxSizing: 'border-box',
+                    }}
+                    placeholder={t('projects.clone.urlPlaceholder')}
+                    autoFocus
+                  />
+                </label>
+                <label style={{ display: 'block', marginBottom: 16 }}>
+                  <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)', display: 'block', marginBottom: 4 }}>{t('projects.clone.name')}</span>
+                  <input
+                    value={cloneName} onChange={e => setCloneName(e.target.value)}
+                    style={{
+                      width: '100%', padding: '8px 12px', borderRadius: 6, border: '1px solid rgba(255,255,255,0.1)',
+                      background: '#0d1117', color: '#e6edf3', fontSize: 14, fontFamily: 'inherit', boxSizing: 'border-box',
+                    }}
+                    placeholder="my-project"
+                  />
+                </label>
+                <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+                  <button
+                    onClick={handleClone}
+                    disabled={cloneLoading || !cloneUrl.trim()}
+                    style={{
+                      flex: 1, padding: '10px 16px', borderRadius: 8, border: 'none',
+                      background: cloneLoading || !cloneUrl.trim() ? 'rgba(200,255,0,0.15)' : '#c8ff00',
+                      color: cloneLoading || !cloneUrl.trim() ? 'rgba(200,255,0,0.4)' : '#0a0c10',
+                      fontSize: 14, fontWeight: 600, fontFamily: 'inherit', cursor: cloneLoading ? 'wait' : 'pointer',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                    }}
+                  >
+                    {cloneLoading ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <Folder size={16} />}
+                    {cloneLoading ? t('projects.clone.cloning') : t('projects.clone.start')}
+                  </button>
+                  <button
+                    onClick={() => handleDiscoverRepos()}
+                    disabled={discoverLoading}
+                    style={{
+                      padding: '10px 16px', borderRadius: 8, border: '1px solid rgba(200,255,0,0.3)',
+                      background: 'transparent', color: '#c8ff00',
+                      fontSize: 13, fontWeight: 500, fontFamily: 'inherit', cursor: discoverLoading ? 'wait' : 'pointer',
+                      display: 'flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {discoverLoading ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <Search size={14} />}
+                    {discoverLoading ? t('projects.clone.discovering') : t('projects.clone.discover')}
+                  </button>
+                </div>
+
+                {availableSources.length > 1 && (
+                  <div style={{ marginBottom: 12 }}>
+                    <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginBottom: 6 }}>{t('projects.clone.selectSources')}</div>
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                      {availableSources.map(src => (
+                        <button
+                          key={src.id}
+                          onClick={() => toggleSource(src.id)}
+                          style={{
+                            padding: '4px 10px', borderRadius: 12, fontSize: 11, fontFamily: 'inherit',
+                            border: '1px solid',
+                            borderColor: selectedSourceIds.includes(src.id) ? 'rgba(200,255,0,0.4)' : 'rgba(255,255,255,0.1)',
+                            background: selectedSourceIds.includes(src.id) ? 'rgba(200,255,0,0.1)' : 'transparent',
+                            color: selectedSourceIds.includes(src.id) ? '#c8ff00' : 'rgba(255,255,255,0.4)',
+                            cursor: 'pointer',
+                            display: 'flex', alignItems: 'center', gap: 4,
+                          }}
+                        >
+                          {src.provider === 'github' ? '🐙' : '🦊'} {src.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {discoverError && (
+                  <div style={{ padding: 10, borderRadius: 8, background: 'rgba(255,77,106,0.08)', border: '1px solid rgba(255,77,106,0.2)', fontSize: 12, color: '#ff8a9e', marginBottom: 12 }}>
+                    {discoverError}
+                  </div>
+                )}
+
+                {discoverSources.length > 0 && (
+                  <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginBottom: 8 }}>
+                    {t('projects.clone.discovered').replace('{0}', String(discoveredRepos.length)).replace('{1}', discoverSources.join(', '))}
+                  </div>
+                )}
+
+                {discoveredRepos.length > 0 && (
+                  <div>
+                    {discoveredRepos.length > 10 && (
+                      <div style={{ marginBottom: 8 }}>
+                        <input
+                          type="text"
+                          value={repoSearch}
+                          onChange={e => setRepoSearch(e.target.value)}
+                          placeholder={t('projects.clone.searchRepos')}
+                          style={{
+                            width: '100%', padding: '6px 10px', borderRadius: 6,
+                            border: '1px solid rgba(255,255,255,0.1)', background: 'rgba(255,255,255,0.04)',
+                            color: '#e6edf3', fontSize: 12, fontFamily: 'inherit',
+                            outline: 'none', boxSizing: 'border-box',
+                          }}
+                        />
+                      </div>
+                    )}
+                  <div style={{ maxHeight: 300, overflowY: 'auto', borderRadius: 8, border: '1px solid rgba(255,255,255,0.06)' }}>
+                    {discoveredRepos
+                      .filter(repo => {
+                        if (!repoSearch.trim()) return true;
+                        const q = repoSearch.toLowerCase();
+                        return repo.full_name.toLowerCase().includes(q)
+                          || (repo.description ?? '').toLowerCase().includes(q)
+                          || (repo.language ?? '').toLowerCase().includes(q);
+                      })
+                      .map(repo => (
+                      <div
+                        key={repo.full_name}
+                        style={{
+                          padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.04)',
+                          display: 'flex', alignItems: 'center', gap: 10,
+                          opacity: repo.already_cloned ? 0.5 : 1,
+                        }}
+                      >
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 13, color: '#e6edf3', fontWeight: 500 }}>
+                            {repo.full_name}
+                            {repo.language && (
+                              <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginLeft: 8 }}>{repo.language}</span>
+                            )}
+                            {repo.stargazers_count > 0 && (
+                              <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginLeft: 6 }}>&#9733; {repo.stargazers_count}</span>
+                            )}
+                          </div>
+                          {repo.description && (
+                            <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {repo.description}
+                            </div>
+                          )}
+                        </div>
+                        {repo.already_cloned ? (
+                          <span style={{ fontSize: 11, color: 'rgba(200,255,0,0.5)', whiteSpace: 'nowrap' }}>
+                            {t('projects.clone.alreadyCloned')}
+                          </span>
+                        ) : (
+                          <button
+                            onClick={() => handleCloneDiscovered(repo)}
+                            disabled={cloneLoading}
+                            style={{
+                              padding: '4px 12px', borderRadius: 6, border: '1px solid rgba(200,255,0,0.3)',
+                              background: 'transparent', color: '#c8ff00', fontSize: 12, fontFamily: 'inherit',
+                              cursor: cloneLoading ? 'wait' : 'pointer', whiteSpace: 'nowrap',
+                            }}
+                          >
+                            {t('projects.clone.start')}
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Content */}
       <main style={s.main}>
@@ -327,6 +746,8 @@ export function Dashboard({ onReset }: DashboardProps) {
               const projHidden = isHiddenPath(proj.path);
               const validationDisc = allDiscussions.find(d => d.project_id === proj.id && d.title === 'Validation audit AI');
               const validationInProgress = !!validationDisc && proj.audit_status === 'Audited';
+              const bootstrapDisc = allDiscussions.find(d => d.project_id === proj.id && d.title.startsWith('Bootstrap: '));
+              const bootstrapInProgress = !!bootstrapDisc && proj.audit_status === 'TemplateInstalled';
               return (
                 <div key={proj.id} style={{ ...s.card(isOpen), opacity: projHidden ? 0.5 : 1 }}>
                   <div style={s.cardHeader} onClick={() => setExpandedId(isOpen ? null : proj.id)}>
@@ -345,7 +766,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                           <span style={s.badgeOrange}>
                             <Loader2 size={9} style={{ animation: 'spin 1s linear infinite' }} /> AI audit {auditState[proj.id].step}/{auditState[proj.id].totalSteps}
                           </span>
-                        ) : (proj.audit_status === 'Audited' || proj.audit_status === 'Validated') ? (
+                        ) : (proj.audit_status === 'Bootstrapped' || proj.audit_status === 'Audited' || proj.audit_status === 'Validated') ? (
                           <span style={s.badgeGreen}><Cpu size={9} /> AI audit</span>
                         ) : proj.audit_status === 'TemplateInstalled' ? (
                           <span style={s.badgeOrange}><Cpu size={9} /> AI audit</span>
@@ -381,202 +802,383 @@ export function Dashboard({ onReset }: DashboardProps) {
 
                   {isOpen && (
                     <div style={s.cardBody} onClick={(e) => e.stopPropagation()}>
-                      {/* MCPs */}
-                      {(() => {
-                        const projMcps = mcpOverview.configs.filter(c => c.is_global || c.project_ids.includes(proj.id));
-                        return (
-                          <div style={s.section}>
-                            <div style={s.sectionHeader}>
-                              <Server size={14} /> <span style={s.sectionTitle}>MCP</span>
-                              <span style={s.count}>{projMcps.length}</span>
-                            </div>
-                            {projMcps.map(cfg => (
-                              <div key={cfg.id} style={s.row}>
+                      {/* ── 1. Discussions (open after audit, closed before) ── */}
+                      <div style={s.section}>
+                        <div style={s.collapsibleHeader} onClick={() => toggleSection(proj.id, 'discussions')}>
+                          {isSectionOpen(proj.id, 'discussions', proj.audit_status) ? <ChevronDown size={12} style={{ flexShrink: 0 }} /> : <ChevronRight size={12} style={{ flexShrink: 0 }} />}
+                          <MessageSquare size={14} /> <span style={s.sectionTitle}>Discussions</span>
+                          <span style={s.count}>{allDiscussions.filter(d => d.project_id === proj.id).length}</span>
+                        </div>
+                        {isSectionOpen(proj.id, 'discussions', proj.audit_status) && (
+                          <>
+                            {allDiscussions.filter(d => d.project_id === proj.id).slice(0, 3).map(disc => (
+                              <div key={disc.id} style={s.row}>
                                 <div style={s.dot(true)} />
                                 <div style={{ flex: 1 }}>
-                                  <span style={{ fontWeight: 600, fontSize: 12 }}>{cfg.server_name}</span>
-                                  <span style={{ marginLeft: 6, fontSize: 11, color: 'rgba(255,255,255,0.3)' }}>{cfg.label}</span>
-                                  {cfg.is_global && <span style={{ marginLeft: 4, fontSize: 9, color: '#c8ff00' }}>GLOBAL</span>}
+                                  <span style={{ fontWeight: 600, fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                                    {isValidationDisc(disc.title) && <ShieldCheck size={10} style={{ color: '#c8ff00' }} />}
+                                    {disc.title}
+                                  </span>
+                                  <span style={{ marginLeft: 8, fontSize: 11, color: 'rgba(255,255,255,0.3)' }}>
+                                    {disc.message_count ?? disc.messages.length} msg · {disc.agent}
+                                  </span>
                                 </div>
-                                <button
-                                  style={s.iconBtn}
-                                  onClick={() => setPage('mcps')}
-                                  title={t('projects.manageMcps')}
-                                >
+                                <button style={s.iconBtn} onClick={() => { setPage('discussions'); }}>
                                   <ChevronRight size={12} />
                                 </button>
                               </div>
                             ))}
-                            {projMcps.length === 0 && (
-                              <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.25)', padding: '4px 0' }}>
-                                {t('projects.noMcp').split(' — ')[0]} — <button style={{ ...s.iconBtn, fontSize: 11, color: '#c8ff00' }} onClick={() => setPage('mcps')}>{t('projects.noMcp').split(' — ')[1]}</button>
-                              </div>
+                            <button
+                              style={{ ...s.iconBtn, marginTop: 8, fontSize: 11, gap: 4 }}
+                              onClick={() => { setDiscPrefill({ projectId: proj.id, title: '', prompt: '' }); setPage('discussions'); }}
+                            >
+                              <Plus size={12} /> {t('disc.newTitle')}
+                            </button>
+                          </>
+                        )}
+                      </div>
+
+                      {/* ── 2. Documentation AI (closed, only when validated) ── */}
+                      {proj.audit_status === 'Validated' && (
+                        <div style={s.section}>
+                          <div style={s.collapsibleHeader} onClick={() => toggleSection(proj.id, 'docAi')}>
+                            {isSectionOpen(proj.id, 'docAi', proj.audit_status) ? <ChevronDown size={12} style={{ flexShrink: 0 }} /> : <ChevronRight size={12} style={{ flexShrink: 0 }} />}
+                            <BookOpen size={14} /> <span style={s.sectionTitle}>{t('projects.docAi')}</span>
+                          </div>
+                          {isSectionOpen(proj.id, 'docAi', proj.audit_status) && (
+                            <AiDocViewer
+                              projectId={proj.id}
+                              onDiscussFile={(filePath) => {
+                                setDiscPrefill({
+                                  projectId: proj.id,
+                                  title: `Doc: ${filePath.replace('ai/', '')}`,
+                                  prompt: t('projects.docAi.discussPrompt', filePath),
+                                });
+                                setPage('discussions');
+                              }}
+                            />
+                          )}
+                        </div>
+                      )}
+
+                      {/* ── 3. MCPs (closed) ── */}
+                      {(() => {
+                        const projMcps = mcpOverview.configs.filter(c => c.is_global || c.project_ids.includes(proj.id));
+                        return (
+                          <div style={s.section}>
+                            <div style={s.collapsibleHeader} onClick={() => toggleSection(proj.id, 'mcps')}>
+                              {isSectionOpen(proj.id, 'mcps', proj.audit_status) ? <ChevronDown size={12} style={{ flexShrink: 0 }} /> : <ChevronRight size={12} style={{ flexShrink: 0 }} />}
+                              <Server size={14} /> <span style={s.sectionTitle}>MCP</span>
+                              <span style={s.count}>{projMcps.length}</span>
+                            </div>
+                            {isSectionOpen(proj.id, 'mcps', proj.audit_status) && (
+                              <>
+                                {projMcps.map(cfg => (
+                                  <div key={cfg.id} style={s.row}>
+                                    <div style={s.dot(true)} />
+                                    <div style={{ flex: 1 }}>
+                                      <span style={{ fontWeight: 600, fontSize: 12 }}>{cfg.server_name}</span>
+                                      <span style={{ marginLeft: 6, fontSize: 11, color: 'rgba(255,255,255,0.3)' }}>{cfg.label}</span>
+                                      {cfg.is_global && <span style={{ marginLeft: 4, fontSize: 9, color: '#c8ff00' }}>GLOBAL</span>}
+                                    </div>
+                                    <button
+                                      style={s.iconBtn}
+                                      onClick={() => setPage('mcps')}
+                                      title={t('projects.manageMcps')}
+                                    >
+                                      <ChevronRight size={12} />
+                                    </button>
+                                  </div>
+                                ))}
+                                {projMcps.length === 0 && (
+                                  <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.25)', padding: '4px 0' }}>
+                                    {t('projects.noMcp').split(' — ')[0]} — <button style={{ ...s.iconBtn, fontSize: 11, color: '#c8ff00' }} onClick={() => setPage('mcps')}>{t('projects.noMcp').split(' — ')[1]}</button>
+                                  </div>
+                                )}
+                              </>
                             )}
                           </div>
                         );
                       })()}
 
-                      {/* Discussions */}
-                      <div style={s.section}>
-                        <div style={s.sectionHeader}>
-                          <MessageSquare size={14} /> <span style={s.sectionTitle}>Discussions</span>
-                          <span style={s.count}>{allDiscussions.filter(d => d.project_id === proj.id).length}</span>
-                        </div>
-                        {allDiscussions.filter(d => d.project_id === proj.id).slice(0, 3).map(disc => (
-                          <div key={disc.id} style={s.row}>
-                            <div style={s.dot(true)} />
-                            <div style={{ flex: 1 }}>
-                              <span style={{ fontWeight: 600, fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                                {isValidationDisc(disc.title) && <ShieldCheck size={10} style={{ color: '#c8ff00' }} />}
-                                {disc.title}
-                              </span>
-                              <span style={{ marginLeft: 8, fontSize: 11, color: 'rgba(255,255,255,0.3)' }}>
-                                {disc.message_count ?? disc.messages.length} msg · {disc.agent}
-                              </span>
+                      {/* ── 4. Workflows (closed) ── */}
+                      {(() => {
+                        const projWorkflows = (workflowList ?? []).filter(w => w.project_id === proj.id);
+                        return (
+                          <div style={s.section}>
+                            <div style={s.collapsibleHeader} onClick={() => toggleSection(proj.id, 'workflows')}>
+                              {isSectionOpen(proj.id, 'workflows', proj.audit_status) ? <ChevronDown size={12} style={{ flexShrink: 0 }} /> : <ChevronRight size={12} style={{ flexShrink: 0 }} />}
+                              <Workflow size={14} /> <span style={s.sectionTitle}>{t('projects.workflows')}</span>
+                              <span style={s.count}>{projWorkflows.length}</span>
                             </div>
-                            <button style={s.iconBtn} onClick={() => { setPage('discussions'); }}>
-                              <ChevronRight size={12} />
-                            </button>
-                          </div>
-                        ))}
-                        <button
-                          style={{ ...s.iconBtn, marginTop: 8, fontSize: 11, gap: 4 }}
-                          onClick={() => { setDiscPrefill({ projectId: proj.id, title: '', prompt: '' }); setPage('discussions'); }}
-                        >
-                          <Plus size={12} /> {t('disc.newTitle')}
-                        </button>
-                      </div>
-
-                      {/* AI Audit */}
-                      <div style={s.section}>
-                        <div style={s.sectionHeader}>
-                          <FileCode size={14} /> <span style={s.sectionTitle}>AI Context</span>
-                          <span style={s.count}>
-                            {proj.audit_status === 'Validated' ? t('projects.status.valid') : validationInProgress ? t('projects.status.validating') : proj.audit_status === 'Audited' ? t('projects.status.auditOk') : proj.audit_status === 'TemplateInstalled' ? t('projects.status.template') : t('projects.status.none')}
-                          </span>
-                        </div>
-
-                        {proj.audit_status === 'NoTemplate' && (
-                          <div style={{ padding: '8px 0' }}>
-                            <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', margin: '0 0 8px' }}>
-                              {t('audit.noTemplate')}
-                            </p>
-                            <button
-                              style={{ ...s.iconBtn, fontSize: 11, gap: 4, color: '#c8ff00', borderColor: 'rgba(200,255,0,0.2)' }}
-                              onClick={() => handleInstallTemplate(proj.id)}
-                              disabled={installingTemplate === proj.id}
-                            >
-                              {installingTemplate === proj.id
-                                ? <><Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> Installation...</>
-                                : <><Download size={12} /> {t('audit.installTemplate')}</>
-                              }
-                            </button>
-                          </div>
-                        )}
-
-                        {proj.audit_status === 'TemplateInstalled' && !auditState[proj.id]?.active && (
-                          <div style={{ padding: '8px 0' }}>
-                            <p style={{ fontSize: 11, color: 'rgba(255,200,0,0.7)', margin: '0 0 8px', display: 'flex', alignItems: 'center', gap: 4 }}>
-                              <AlertTriangle size={11} /> {t('audit.description')}
-                            </p>
-                            <p style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)', margin: '0 0 8px' }}>
-                              {t('audit.warning')}
-                            </p>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                              <select
-                                style={{ ...auditSelectStyle, width: 'auto', minWidth: 140, fontSize: 12, padding: '6px 32px 6px 10px' }}
-                                value={auditAgentChoice[proj.id] ?? agents.filter(isUsable)[0]?.agent_type ?? 'ClaudeCode'}
-                                onChange={e => setAuditAgentChoice(prev => ({ ...prev, [proj.id]: e.target.value as AgentType }))}
-                              >
-                                {agents.filter(isUsable).map(a => (
-                                  <option key={a.agent_type} value={a.agent_type}>{a.name}</option>
+                            {isSectionOpen(proj.id, 'workflows', proj.audit_status) && (
+                              <>
+                                {projWorkflows.map(wf => (
+                                  <div key={wf.id} style={s.row}>
+                                    <div style={s.dot(wf.enabled)} />
+                                    <div style={{ flex: 1 }}>
+                                      <span style={{ fontWeight: 600, fontSize: 12 }}>{wf.name}</span>
+                                      <span style={{ marginLeft: 6, fontSize: 10, color: 'rgba(255,255,255,0.3)' }}>
+                                        {wf.trigger_type} · {wf.step_count} step{wf.step_count > 1 ? 's' : ''}
+                                      </span>
+                                      {wf.last_run && (
+                                        <span style={{ marginLeft: 6, fontSize: 10, color: STATUS_COLORS[wf.last_run.status] ?? '#888' }}>
+                                          {wf.last_run.status}
+                                        </span>
+                                      )}
+                                    </div>
+                                    <button
+                                      style={s.iconBtn}
+                                      onClick={() => setPage('workflows')}
+                                      title={t('projects.workflows')}
+                                    >
+                                      <ChevronRight size={12} />
+                                    </button>
+                                  </div>
                                 ))}
-                                {agents.filter(isUsable).length === 0 && (
-                                  <option value="" disabled>{t('disc.noAgent')}</option>
+                                {projWorkflows.length === 0 && (
+                                  <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.25)', padding: '4px 0' }}>
+                                    {t('projects.noWorkflows').split(' — ')[0]} — <button style={{ ...s.iconBtn, fontSize: 11, color: '#c8ff00' }} onClick={() => setPage('workflows')}>{t('projects.noWorkflows').split(' — ')[1]}</button>
+                                  </div>
                                 )}
-                              </select>
-                              <button
-                                style={{ ...s.iconBtn, fontSize: 11, gap: 4, color: '#c8ff00', borderColor: 'rgba(200,255,0,0.2)' }}
-                                onClick={() => handleLaunchAudit(proj.id)}
-                                disabled={agents.filter(isUsable).length === 0}
-                              >
-                                <Play size={12} /> {t('audit.launch')}
-                              </button>
-                            </div>
-                          </div>
-                        )}
-
-                        {auditState[proj.id]?.active && (
-                          <div style={{ padding: '8px 0' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                              <Loader2 size={14} style={{ animation: 'spin 1s linear infinite', color: '#c8ff00' }} />
-                              <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)' }}>
-                                {t('audit.step', auditState[proj.id].step, auditState[proj.id].totalSteps, auditState[proj.id].currentFile)}
-                              </span>
-                            </div>
-                            <div style={{ height: 3, background: 'rgba(255,255,255,0.06)', borderRadius: 2, overflow: 'hidden' }}>
-                              <div style={{
-                                height: '100%',
-                                width: `${(auditState[proj.id].step / auditState[proj.id].totalSteps) * 100}%`,
-                                background: '#c8ff00',
-                                borderRadius: 2,
-                                transition: 'width 0.5s ease',
-                              }} />
-                            </div>
-                          </div>
-                        )}
-
-                        {proj.audit_status === 'Audited' && !auditState[proj.id]?.active && (
-                          <div style={{ padding: '8px 0' }}>
-                            {validationInProgress ? (
-                              <>
-                                <p style={{ fontSize: 11, color: 'rgba(255,200,0,0.7)', margin: '0 0 8px', display: 'flex', alignItems: 'center', gap: 4 }}>
-                                  <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> {t('audit.validationInProgress', validationDisc.message_count ?? validationDisc.messages.length)}
-                                </p>
-                                <p style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)', margin: '0 0 8px' }}>
-                                  {t('audit.validationHint')}
-                                </p>
-                                <button
-                                  style={{ ...s.iconBtn, fontSize: 11, gap: 4, color: '#c8ff00', borderColor: 'rgba(200,255,0,0.2)' }}
-                                  onClick={() => { setPage('discussions'); }}
-                                >
-                                  <MessageSquare size={12} /> {t('audit.resumeValidation')}
-                                </button>
-                              </>
-                            ) : (
-                              <>
-                                <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', margin: '0 0 8px' }}>
-                                  {t('audit.readyToValidate')}
-                                </p>
-                                <button
-                                  style={{ ...s.iconBtn, fontSize: 11, gap: 4, color: '#c8ff00', borderColor: 'rgba(200,255,0,0.2)' }}
-                                  onClick={() => {
-                                    setDiscPrefill({
-                                      projectId: proj.id,
-                                      title: 'Validation audit AI',
-                                      prompt: `Voici le contexte AI du projet (dossier ai/). Analyse l'ensemble des fichiers ai/, identifie les zones d'ambiguite, les questions non resolues, les marqueurs <!-- TODO --> et les incoherences. Pose-moi tes questions une par une. Important : a chaque reponse de ma part, mets immediatement a jour les fichiers ai/ concernes avant de poser la question suivante — cela evite de repeter les memes questions et garde la documentation a jour en continu. Quand toutes mes reponses seront comprises, n'hesite pas a poser des questions de suivi. Une fois tout clarifie, termine ton message par la phrase exacte : "KRONN:VALIDATION_COMPLETE".`,
-                                    });
-                                    setPage('discussions');
-                                  }}
-                                >
-                                  <ShieldCheck size={12} /> {t('audit.validate')}
-                                </button>
                               </>
                             )}
                           </div>
-                        )}
+                        );
+                      })()}
 
-                        {proj.audit_status === 'Validated' && !auditState[proj.id]?.active && (
-                          <div style={{ padding: '4px 0', fontSize: 11, color: 'rgba(200,255,0,0.5)', display: 'flex', alignItems: 'center', gap: 4 }}>
-                            <ShieldCheck size={11} /> {t('audit.done')}
+                      {/* ── 5. Skills (closed) ── */}
+                      <div style={s.section}>
+                        <div style={s.collapsibleHeader} onClick={() => toggleSection(proj.id, 'skills')}>
+                          {isSectionOpen(proj.id, 'skills', proj.audit_status) ? <ChevronDown size={12} style={{ flexShrink: 0 }} /> : <ChevronRight size={12} style={{ flexShrink: 0 }} />}
+                          <Zap size={14} /> <span style={s.sectionTitle}>{t('projects.skills')}</span>
+                          <span style={s.count}>{(proj.default_skill_ids ?? []).length}</span>
+                        </div>
+                        {isSectionOpen(proj.id, 'skills', proj.audit_status) && (
+                          <div style={{ paddingTop: 6 }}>
+                            <ProjectSkills
+                              projectId={proj.id}
+                              currentSkillIds={proj.default_skill_ids ?? []}
+                              allSkills={allSkills}
+                              onUpdate={() => { refetch(); refetchSkills(); }}
+                            />
                           </div>
                         )}
                       </div>
 
-                      <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 12, paddingTop: 12, borderTop: '1px solid rgba(255,255,255,0.05)' }}>
-                        <button style={s.dangerBtn} onClick={() => handleDeleteProject(proj.id)}>
-                          <Trash2 size={12} /> {t('projects.delete')}
-                        </button>
+                      {/* ── 6. AI Context / Audit (closed) ── */}
+                      <div style={s.section}>
+                        <div style={s.collapsibleHeader} onClick={() => toggleSection(proj.id, 'aiContext')}>
+                          {isSectionOpen(proj.id, 'aiContext', proj.audit_status) ? <ChevronDown size={12} style={{ flexShrink: 0 }} /> : <ChevronRight size={12} style={{ flexShrink: 0 }} />}
+                          <FileCode size={14} /> <span style={s.sectionTitle}>AI Context</span>
+                          <span style={s.count}>
+                            {proj.audit_status === 'Validated' ? t('projects.status.valid') : validationInProgress ? t('projects.status.validating') : proj.audit_status === 'Audited' ? t('projects.status.auditOk') : proj.audit_status === 'Bootstrapped' ? t('projects.status.bootstrapped') : bootstrapInProgress ? t('projects.status.bootstrapping') : proj.audit_status === 'TemplateInstalled' ? t('projects.status.template') : t('projects.status.none')}
+                          </span>
+                        </div>
+                        {isSectionOpen(proj.id, 'aiContext', proj.audit_status) && (
+                          <>
+                            {(proj.audit_status === 'NoTemplate' || (proj.audit_status === 'TemplateInstalled' && !bootstrapInProgress)) && !auditState[proj.id]?.active && (
+                              <div style={{ padding: '8px 0' }}>
+                                <p style={{ fontSize: 11, color: 'rgba(255,200,0,0.7)', margin: '0 0 8px', display: 'flex', alignItems: 'center', gap: 4 }}>
+                                  <AlertTriangle size={11} /> {proj.audit_status === 'NoTemplate' ? t('audit.noTemplate') : t('audit.description')}
+                                </p>
+                                <p style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)', margin: '0 0 8px' }}>
+                                  {t('audit.fullAuditDesc')}
+                                </p>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                  <select
+                                    style={{ ...auditSelectStyle, width: 'auto', minWidth: 140, fontSize: 12, padding: '6px 32px 6px 10px' }}
+                                    value={auditAgentChoice[proj.id] ?? agents.filter(isUsable)[0]?.agent_type ?? 'ClaudeCode'}
+                                    onChange={e => setAuditAgentChoice(prev => ({ ...prev, [proj.id]: e.target.value as AgentType }))}
+                                  >
+                                    {agents.filter(isUsable).map(a => (
+                                      <option key={a.agent_type} value={a.agent_type}>{a.name}</option>
+                                    ))}
+                                    {agents.filter(isUsable).length === 0 && (
+                                      <option value="" disabled>{t('disc.noAgent')}</option>
+                                    )}
+                                  </select>
+                                  <button
+                                    style={{ ...s.iconBtn, fontSize: 11, gap: 4, color: '#c8ff00', borderColor: 'rgba(200,255,0,0.2)' }}
+                                    onClick={() => handleFullAudit(proj.id)}
+                                    disabled={agents.filter(isUsable).length === 0}
+                                  >
+                                    <Play size={12} /> {t('audit.startFullAudit')}
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+
+                            {auditState[proj.id]?.active && (
+                              <div style={{ padding: '8px 0' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                                  <Loader2 size={14} style={{ animation: 'spin 1s linear infinite', color: '#c8ff00' }} />
+                                  <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)', flex: 1 }}>
+                                    {t('audit.step', auditState[proj.id].step, auditState[proj.id].totalSteps, auditState[proj.id].currentFile)}
+                                  </span>
+                                  <button
+                                    style={{ ...s.iconBtn, fontSize: 11, gap: 4, color: '#ff4444', borderColor: 'rgba(255,68,68,0.3)', padding: '4px 10px' }}
+                                    onClick={() => handleCancelAudit(proj.id)}
+                                    title={t('audit.cancelAudit')}
+                                  >
+                                    <StopCircle size={12} /> {t('audit.cancelAudit')}
+                                  </button>
+                                </div>
+                                <div style={{ height: 3, background: 'rgba(255,255,255,0.06)', borderRadius: 2, overflow: 'hidden' }}>
+                                  <div style={{
+                                    height: '100%',
+                                    width: `${(auditState[proj.id].step / auditState[proj.id].totalSteps) * 100}%`,
+                                    background: '#c8ff00',
+                                    borderRadius: 2,
+                                    transition: 'width 0.5s ease',
+                                  }} />
+                                </div>
+                              </div>
+                            )}
+
+                            {bootstrapInProgress && !auditState[proj.id]?.active && (
+                              <div style={{ padding: '8px 0' }}>
+                                <p style={{ fontSize: 11, color: 'rgba(255,200,0,0.7)', margin: '0 0 8px', display: 'flex', alignItems: 'center', gap: 4 }}>
+                                  <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> {t('audit.bootstrapInProgress')}
+                                </p>
+                                <button
+                                  style={{ ...s.iconBtn, fontSize: 11, gap: 4, color: '#c8ff00', borderColor: 'rgba(200,255,0,0.2)' }}
+                                  onClick={() => { setOpenDiscussionId(bootstrapDisc!.id); setPage('discussions'); }}
+                                >
+                                  <MessageSquare size={12} /> {t('audit.resumeBootstrap')}
+                                </button>
+                              </div>
+                            )}
+
+                            {proj.audit_status === 'Bootstrapped' && !auditState[proj.id]?.active && (
+                              <div style={{ padding: '8px 0' }}>
+                                <p style={{ fontSize: 11, color: 'rgba(200,255,0,0.5)', margin: '0 0 8px', display: 'flex', alignItems: 'center', gap: 4 }}>
+                                  <Rocket size={11} /> {t('audit.bootstrapDone')}
+                                </p>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                  <select
+                                    style={{ ...auditSelectStyle, width: 'auto', minWidth: 140, fontSize: 12, padding: '6px 32px 6px 10px' }}
+                                    value={auditAgentChoice[proj.id] ?? agents.filter(isUsable)[0]?.agent_type ?? 'ClaudeCode'}
+                                    onChange={e => setAuditAgentChoice(prev => ({ ...prev, [proj.id]: e.target.value as AgentType }))}
+                                  >
+                                    {agents.filter(isUsable).map(a => (
+                                      <option key={a.agent_type} value={a.agent_type}>{a.name}</option>
+                                    ))}
+                                    {agents.filter(isUsable).length === 0 && (
+                                      <option value="" disabled>{t('disc.noAgent')}</option>
+                                    )}
+                                  </select>
+                                  <button
+                                    style={{ ...s.iconBtn, fontSize: 11, gap: 4, color: '#c8ff00', borderColor: 'rgba(200,255,0,0.2)' }}
+                                    onClick={() => handleFullAudit(proj.id)}
+                                    disabled={agents.filter(isUsable).length === 0}
+                                  >
+                                    <Play size={12} /> {t('audit.startFullAudit')}
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+
+                            {proj.audit_status === 'Audited' && !auditState[proj.id]?.active && (
+                              <div style={{ padding: '8px 0' }}>
+                                {validationInProgress ? (
+                                  <>
+                                    <p style={{ fontSize: 11, color: 'rgba(255,200,0,0.7)', margin: '0 0 8px', display: 'flex', alignItems: 'center', gap: 4 }}>
+                                      <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> {t('audit.validationInProgress', validationDisc.message_count ?? validationDisc.messages.length)}
+                                    </p>
+                                    <p style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)', margin: '0 0 8px' }}>
+                                      {t('audit.validationHint')}
+                                    </p>
+                                    <button
+                                      style={{ ...s.iconBtn, fontSize: 11, gap: 4, color: '#c8ff00', borderColor: 'rgba(200,255,0,0.2)' }}
+                                      onClick={() => { setOpenDiscussionId(validationDisc!.id); setPage('discussions'); }}
+                                    >
+                                      <MessageSquare size={12} /> {t('audit.resumeValidation')}
+                                    </button>
+                                  </>
+                                ) : (
+                                  <>
+                                    <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', margin: '0 0 8px' }}>
+                                      {t('audit.readyToValidate')}
+                                    </p>
+                                    <button
+                                      style={{ ...s.iconBtn, fontSize: 11, gap: 4, color: '#c8ff00', borderColor: 'rgba(200,255,0,0.2)' }}
+                                      onClick={() => {
+                                        setDiscPrefill({
+                                          projectId: proj.id,
+                                          title: 'Validation audit AI',
+                                          prompt: t('audit.validationPrompt'),
+                                          locked: true,
+                                        });
+                                        setPage('discussions');
+                                      }}
+                                    >
+                                      <ShieldCheck size={12} /> {t('audit.validate')}
+                                    </button>
+                                  </>
+                                )}
+                              </div>
+                            )}
+
+                            {proj.audit_status === 'Validated' && !auditState[proj.id]?.active && (
+                              <div style={{ padding: '4px 0', fontSize: 11, color: 'rgba(200,255,0,0.5)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                                <ShieldCheck size={11} /> {t('audit.done')}
+                              </div>
+                            )}
+                          </>
+                        )}
+                      </div>
+
+                      <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+                        {deleteConfirmId === proj.id ? (
+                          <div>
+                            <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+                              <button
+                                style={{ ...s.scanBtn, fontSize: 12, padding: '6px 12px', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', color: 'rgba(255,255,255,0.7)' }}
+                                onClick={() => handleDeleteProject(proj.id, false)}
+                              >
+                                {t('projects.deleteSoft')}
+                              </button>
+                            </div>
+                            <div style={{ background: 'rgba(255,77,106,0.08)', border: '1px solid rgba(255,77,106,0.2)', borderRadius: 8, padding: 10 }}>
+                              <div style={{ fontSize: 11, color: '#ff4d6a', marginBottom: 8 }}>
+                                <AlertTriangle size={12} style={{ verticalAlign: 'middle', marginRight: 4 }} />
+                                {t('projects.deleteHardWarn')}
+                              </div>
+                              <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.5)', marginBottom: 6 }}>{t('projects.deleteHardConfirmLabel')}</div>
+                              <input
+                                value={deleteConfirmInput}
+                                onChange={e => setDeleteConfirmInput(e.target.value)}
+                                placeholder={proj.name}
+                                style={{
+                                  width: '100%', padding: '6px 10px', borderRadius: 6, border: '1px solid rgba(255,77,106,0.3)',
+                                  background: '#0d1117', color: '#e6edf3', fontSize: 12, fontFamily: 'inherit', boxSizing: 'border-box', marginBottom: 8,
+                                }}
+                              />
+                              <div style={{ display: 'flex', gap: 8 }}>
+                                <button
+                                  style={{ ...s.dangerBtn, opacity: deleteConfirmInput === proj.name ? 1 : 0.4, pointerEvents: deleteConfirmInput === proj.name ? 'auto' : 'none' }}
+                                  onClick={() => handleDeleteProject(proj.id, true)}
+                                  disabled={deleteConfirmInput !== proj.name}
+                                >
+                                  <Trash2 size={12} /> {t('projects.deleteHard')}
+                                </button>
+                                <button
+                                  style={{ ...s.scanBtn, fontSize: 12, padding: '6px 12px', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', color: 'rgba(255,255,255,0.7)' }}
+                                  onClick={() => { setDeleteConfirmId(null); setDeleteConfirmInput(''); }}
+                                >
+                                  {t('audit.cancelAudit')}
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        ) : (
+                          <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                            <button style={s.dangerBtn} onClick={() => setDeleteConfirmId(proj.id)}>
+                              <Trash2 size={12} /> {t('projects.delete')}
+                            </button>
+                          </div>
+                        )}
                       </div>
                     </div>
                   )}
@@ -637,6 +1239,10 @@ export function Dashboard({ onReset }: DashboardProps) {
             onNavigate={(p) => setPage(p as Page)}
             prefill={discPrefill}
             onPrefillConsumed={handlePrefillConsumed}
+            autoRunDiscussionId={autoRunDiscussionId}
+            onAutoRunConsumed={handleAutoRunConsumed}
+            openDiscussionId={openDiscussionId}
+            onOpenDiscConsumed={handleOpenDiscConsumed}
             toast={toast}
             sendingMap={sendingMap}
             setSendingMap={setSendingMap}
@@ -705,6 +1311,7 @@ const s = {
   metaItem: { display: 'flex', alignItems: 'center', gap: 4 } as const,
   section: { marginTop: 16 } as const,
   sectionHeader: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, color: 'rgba(255,255,255,0.6)', fontSize: 12 } as const,
+  collapsibleHeader: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, color: 'rgba(255,255,255,0.6)', fontSize: 12, cursor: 'pointer', userSelect: 'none' as const, padding: '4px 0', borderRadius: 4 } as const,
   sectionTitle: { fontWeight: 600 } as const,
   sectionLabel: { fontSize: 11, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 10 },
   count: { fontSize: 10, padding: '1px 6px', borderRadius: 10, background: 'rgba(255,255,255,0.06)', color: 'rgba(255,255,255,0.4)' } as const,

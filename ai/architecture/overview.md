@@ -8,15 +8,15 @@ Three Docker services behind nginx gateway:
 
 | Service | Port | Role |
 |---------|------|------|
-| `backend` | 3001 | Rust/axum API server |
-| `frontend` | 5173 | Vite dev server (React) |
+| `backend` | 3140 | Rust/axum API server |
+| `frontend` | 80 | Vite dev server (React) |
 | `gateway` | 3456 | nginx reverse proxy (routes `/api/*` to backend, rest to frontend) |
 
 ## Key patterns (facts)
 
 ### API pattern
 - All endpoints return `ApiResponse<T>` wrapper: `{ success: bool, data: T|null, error: string|null }`.
-- Routes registered in `backend/src/main.rs`, handlers in `backend/src/api/<domain>.rs`.
+- Routes registered in `backend/src/lib.rs` (`build_router()`), handlers in `backend/src/api/<domain>.rs`.
 - Axum 0.7 method chaining: same path, multiple methods → `.route("/path", get(h1).post(h2))`.
 
 ### SSE streaming
@@ -51,12 +51,37 @@ Three Docker services behind nginx gateway:
 - **Multi-line input**: `<textarea>` with auto-resize (Shift+Enter for newlines, Enter to send).
 - **Full access badge**: "Full access" indicator on agent messages when `full_access: true`.
 
+### Security & auth
+
+**Bearer token authentication** (opt-in):
+- Middleware in `lib.rs` checks `Authorization: Bearer <token>` on all routes except `/api/health`.
+- Token is **opt-in**: `ServerConfig.auth_token: Option<String>` + `auth_enabled: bool`. If no token configured or `auth_enabled=false`, all requests pass through.
+- User activates auth from Settings UI → `POST /api/config/auth-token/regenerate` generates a UUID token, sets `auth_enabled=true`, returns the token **once**. Frontend stores it in `localStorage`.
+- Migration safety: if `auth_token` exists but `auth_enabled=false` (legacy auto-generated artifact), the token is cleared on startup.
+
+**CORS**: restricted to configured `ServerConfig.domain` or `localhost:3140`/`localhost:3141`. Built via `build_cors()` in `lib.rs`.
+
+**Docker host binding**: `main.rs` detects `KRONN_DATA_DIR` env var → binds to `0.0.0.0` (needed for nginx container). Otherwise uses `config.server.host` (default `127.0.0.1`).
+
+**Agent concurrency**: `Semaphore` in `AppState.agent_semaphore` limits concurrent agent processes. Configurable via `ServerConfig.max_concurrent_agents` (1–20, default 5). UI slider in Settings.
+
+**Agent timeouts**: `AGENT_GLOBAL_TIMEOUT` (30 min) + `AGENT_STALL_TIMEOUT` (5 min no output). Agent process killed on timeout or client disconnect. Partial responses saved with `⚠️ [Réponse partielle — agent interrompu]` marker.
+
+**Input validation**: title ≤ 500 chars, content ≤ 100KB, workflow ≤ 20 steps, workflow name ≤ 200 chars.
+
+**Graceful shutdown**: `axum::serve().with_graceful_shutdown()` handles SIGTERM (Unix) + Ctrl+C. In-flight requests finish before exit.
+
+**Server config API**:
+- `GET /api/config/server` → `ServerConfigPublic { host, port, domain, max_concurrent_agents, auth_enabled }`
+- `POST /api/config/server` → update domain, max_concurrent_agents
+- `POST /api/config/auth-token/regenerate` → generate new token (sets `auth_enabled=true`)
+
 ### State management
-- Backend: `AppState` holds `db: Arc<Database>` (SQLite) and `config: Arc<RwLock<AppConfig>>`.
+- Backend: `AppState` holds `db: Arc<Database>` (SQLite), `config: Arc<RwLock<AppConfig>>`, `agent_semaphore: Arc<Semaphore>`, and `workflow_engine: Arc<WorkflowEngine>`.
 - `Database` struct wraps `Mutex<Connection>` with `with_conn()` async accessor.
 - Data persisted in `kronn.db` with WAL mode and foreign keys enabled.
 - Migrations run via `backend/src/db/migrations.rs` (versioned SQL files, executed before Mutex wrap to avoid blocking_lock panic).
-- Frontend: `useApi` hook for data fetching. Dashboard.tsx (~650 lines) is the main shell; sub-pages (SettingsPage.tsx, DiscussionsPage.tsx, McpPage.tsx, WorkflowsPage.tsx) receive data as props. UI state managed locally with `useState`.
+- Frontend: `useApi` hook for data fetching. Dashboard.tsx (~750 lines) is the main shell with accordion sections per project, bootstrap modal, and smart section defaults based on audit status; sub-pages (SettingsPage.tsx, DiscussionsPage.tsx, McpPage.tsx, WorkflowsPage.tsx) receive data as props. UI state managed locally with `useState`.
 - `useMemo` for computed values (agent mentions filtering, unread counts). Conditional polling (only active tab).
 - `ErrorBoundary` class component wraps lazy-loaded routes. `React.lazy` + `Suspense` for code splitting (SetupWizard, Dashboard).
 - `AbortController` cleanup on component unmount for SSE streams.
@@ -209,7 +234,10 @@ NoTemplate → TemplateInstalled → Audited → Validated
 - **Completion detection**: the prompt instructs the AI to include `KRONN:VALIDATION_COMPLETE` in its final message. Frontend detects this in the last agent message and shows a green banner with "Marquer l'audit comme valide" button — only in the discussion view.
 - **Mark validated** (`POST /api/projects/:id/validate-audit`): injects `<!-- KRONN:VALIDATED:YYYY-MM-DD -->` at end of `ai/index.md`.
 
+**Skill auto-detection**: between audit Phase 2 and Phase 3, `detect_project_skills()` scans project filesystem for config files (Cargo.toml, tsconfig.json, go.mod, etc.) and maps them to skill IDs. Detected skills are saved to DB and used for the validation discussion.
+
 **API endpoints:**
+- `POST /api/projects/bootstrap` — create project from scratch (dir + git init + template + discussion)
 - `POST /api/projects/:id/install-template` — copy template, inject bootstrap
 - `POST /api/projects/:id/ai-audit` — SSE streaming 10-step audit
 - `POST /api/projects/:id/validate-audit` — mark audit as validated
@@ -240,10 +268,10 @@ NoTemplate → TemplateInstalled → Audited → Validated
 
 ```
 User → nginx (gateway:3456)
-  → /api/* → backend (axum:3001)
-    → handlers → state (SQLite via Database struct) / agent runner → SSE response
-  → /* → frontend (vite:5173)
-    → React SPA → fetch /api/* via api.ts
+  → /api/* → backend (axum:3140)
+    → [auth middleware] → handlers → state (SQLite via Database struct) / agent runner → SSE response
+  → /* → frontend (nginx:80)
+    → React SPA → fetch /api/* via api.ts (with Bearer token if auth enabled)
 ```
 
 ### Workflow execution flow (implemented)

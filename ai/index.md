@@ -90,7 +90,7 @@ Never load everything "just in case".
 ## 4. Development constraints
 
 - **Docker-first**: the full app runs via `docker compose`. Backend, frontend, and gateway are separate services.
-- **Quality is mandatory**: `cargo check` and `cargo clippy` must pass. Frontend: `npm run build`, `npm run lint` (0 errors), `npm test` (146+ tests must pass). Shell: `make test-shell` (186 bats tests must pass).
+- **Quality is mandatory**: `cargo clippy -- -D warnings` must pass. Frontend: `npx tsc --noEmit` + `pnpm test` (155+ tests must pass). Shell: `make test-shell` (186 bats tests must pass).
 - **Type generation**: Rust models are the source of truth. TypeScript types are auto-generated via `ts-rs`.
 - If stdout/stderr is missing: ask the user to copy/paste the full output.
 
@@ -101,7 +101,7 @@ Never load everything "just in case".
 - AI context: `ai/`.
 - Rust data models: `backend/src/models/mod.rs`.
 - TypeScript types: `frontend/src/types/generated.ts` (auto-generated from Rust).
-- API routes: `backend/src/main.rs` (router definition).
+- API routes: `backend/src/lib.rs` (router definition in `build_router()`).
 - Database schema: `backend/src/db/sql/001_initial.sql` (+ migrations 002-011).
 - Docker config: `docker-compose.yml`.
 
@@ -110,7 +110,7 @@ Never load everything "just in case".
 ## 6. Code placement
 
 Use `ai/repo-map.md` to decide.
-- New API endpoints: add handler in `backend/src/api/<domain>.rs`, register route in `backend/src/main.rs`.
+- New API endpoints: add handler in `backend/src/api/<domain>.rs`, register route in `backend/src/lib.rs` (`build_router()`).
 - Workflow engine code: `backend/src/workflows/`.
 - New frontend pages: `frontend/src/pages/`.
 - New hooks: `frontend/src/hooks/`.
@@ -136,7 +136,7 @@ After completing a task: if you discovered something non-obvious (a gotcha, a mi
 | Layer | Technology |
 |-------|------------|
 | Backend | Rust (axum 0.7, tokio, serde, anyhow) |
-| Frontend | React 18 + TypeScript (Vite 5, Lucide icons, Node >= 23.6.0) |
+| Frontend | React 18 + TypeScript (Vite 5, Lucide icons, Node >= 24 LTS) |
 | Styling | Inline styles (no CSS framework) |
 | i18n | Custom lightweight system (fr/en/es), localStorage, no external lib |
 | Type bridge | ts-rs (Rust → TypeScript) |
@@ -156,20 +156,25 @@ Dashboard tabs (current / planned):
 
 | Tab | Status | Content |
 |-----|--------|---------|
-| Projets | Done | Project list, AI audit pipeline (template → audit → validation), MCP overview |
+| Projets | Done | Project list, AI audit pipeline (template → audit → validation), project bootstrap (create from scratch), MCP overview, per-project workflows/skills/doc viewer |
 | Discussions | Done | Single/multi-agent chat, @mentions, orchestration, global discussions, archive/unarchive (swipe gestures), inline title editing, disabled agent detection |
 | MCPs | Done | MCP registry and management |
-| Workflows | Done | Workflow list, creation wizard (5-step: infos → trigger → steps → config → resume), detail + runs with live SSE progress, manual trigger, run deletion (individual + bulk). MCP tools auto-injected into agent prompts. Symphony import planned. |
+| Workflows | Done | Workflow list (grouped by project), creation wizard (5-step: infos → trigger → steps → config → resume), detail + runs with live SSE progress, manual trigger, run deletion (individual + bulk). MCP tools auto-injected into agent prompts. Symphony import planned. |
 | Config | Done | Multi-key API management, token usage tracking, language, agent detection + permissions, Skills/Profiles/Directives CRUD with live cards, DB management (export/import) |
 
 Note: the old "Agents" tab has been merged into Config. Nav order: Projets → Discussions → MCPs → Workflows → Config.
 
+### Project Bootstrap (create from scratch)
+
+`POST /api/projects/bootstrap` — creates a new project directory, initializes git, installs AI template, creates a bootstrap discussion with architect + product-owner profiles. The discussion prompt guides the AI through: Vision → Architecture → Structure → MVP → Action Plan. Frontend modal accessible via "New project" button in nav bar. Parent directory determined from existing projects' common parent or `KRONN_REPOS_DIR` env var.
+
 ### CI pipeline
 
-GitHub Actions workflow (`.github/workflows/ci-test.yml`) triggered by `ci-test` label on PRs:
-- `test-backend`: cargo check + clippy + test
-- `test-frontend`: tsc --noEmit + pnpm test
+GitHub Actions workflow (`.github/workflows/ci-test.yml`) triggered on push to `main` + all PRs:
+- `test-backend`: cargo clippy + cargo test (with sccache)
+- `test-frontend`: tsc --noEmit + pnpm test (Node 24 LTS)
 - `test-shell`: make test-shell (bats)
+- `security-scan`: cargo audit + pnpm audit
 
 ### AI audit pipeline (4-state badge system)
 
@@ -209,4 +214,4 @@ Redirectors to this file: `CLAUDE.md`.
 
 ## 12. Last updated
 
-AI context last reviewed: **2026-03-12**.
+AI context last reviewed: **2026-03-14**.

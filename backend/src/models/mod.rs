@@ -27,7 +27,23 @@ pub struct AppConfig {
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
+    /// Custom domain for CORS and TLS (e.g. "kronn.local")
+    #[serde(default)]
+    pub domain: Option<String>,
+    /// Bearer token for API authentication (opt-in from Settings UI)
+    #[serde(default)]
+    #[ts(skip)]
+    pub auth_token: Option<String>,
+    /// Whether auth was explicitly enabled by the user (distinguishes from migration artifacts)
+    #[serde(default)]
+    #[ts(skip)]
+    pub auth_enabled: bool,
+    /// Maximum concurrent agent processes (default: 5)
+    #[serde(default = "default_max_agents")]
+    pub max_concurrent_agents: usize,
 }
+
+fn default_max_agents() -> usize { 5 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -290,6 +306,7 @@ pub enum AiAuditStatus {
     #[default]
     NoTemplate,
     TemplateInstalled,
+    Bootstrapped,
     Audited,
     Validated,
 }
@@ -298,6 +315,108 @@ pub enum AiAuditStatus {
 #[ts(export)]
 pub struct LaunchAuditRequest {
     pub agent: AgentType,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct BootstrapProjectRequest {
+    pub name: String,
+    pub description: String,
+    pub agent: AgentType,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct BootstrapProjectResponse {
+    pub project_id: String,
+    pub discussion_id: String,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct CloneProjectRequest {
+    pub url: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    pub agent: AgentType,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct CloneProjectResponse {
+    pub project_id: String,
+    pub discussion_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct RemoteRepo {
+    pub name: String,
+    pub full_name: String,
+    pub clone_url: String,
+    pub ssh_url: String,
+    pub description: Option<String>,
+    pub language: Option<String>,
+    pub stargazers_count: u32,
+    pub updated_at: String,
+    pub source: String,  // "github" or "gitlab"
+    pub already_cloned: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RepoSource {
+    pub id: String,           // MCP config id, or "env:github" / "env:gitlab"
+    pub label: String,        // MCP config label, or "GitHub (env)" / "GitLab (env)"
+    pub provider: String,     // "github" or "gitlab"
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct DiscoverReposRequest {
+    #[serde(default)]
+    pub source_ids: Vec<String>,  // empty = use all available sources
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct DiscoverReposResponse {
+    pub repos: Vec<RemoteRepo>,
+    pub sources: Vec<String>,
+    pub available_sources: Vec<RepoSource>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AuditInfo {
+    pub files: Vec<AuditFileInfo>,
+    pub todos: Vec<AuditTodo>,
+    #[serde(default)]
+    pub tech_debt_items: Vec<TechDebtItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TechDebtItem {
+    pub id: String,
+    pub problem: String,
+    pub area: String,
+    pub severity: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AuditFileInfo {
+    pub path: String,
+    pub filled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AuditTodo {
+    pub file: String,
+    pub line: u32,
+    pub text: String,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -715,6 +834,34 @@ pub struct CreateDirectiveRequest {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// AI Documentation Files (read-only viewer)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct AiFileNode {
+    pub path: String,
+    pub name: String,
+    pub is_dir: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<AiFileNode>,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct AiFileContent {
+    pub path: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct AiSearchResult {
+    pub path: String,
+    pub match_count: u32,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Stats & Analytics
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -992,6 +1139,22 @@ pub struct OrchestrationRequest {
 pub struct SetAgentAccessRequest {
     pub agent: AgentType,
     pub full_access: bool,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct ServerConfigPublic {
+    pub host: String,
+    pub port: u16,
+    pub domain: Option<String>,
+    pub max_concurrent_agents: usize,
+    pub auth_enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateServerConfigRequest {
+    pub domain: Option<String>,
+    pub max_concurrent_agents: Option<usize>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

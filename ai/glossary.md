@@ -6,7 +6,7 @@ Project-specific terms. For deep dives, follow the linked `ai/architecture/` fil
 
 ## Architecture / stack
 
-**AppState** — Axum shared state holding `db: Arc<Database>` (SQLite) and `config: Arc<RwLock<AppConfig>>`. See `backend/src/main.rs`.
+**AppState** — Axum shared state holding `db: Arc<Database>`, `config: Arc<RwLock<AppConfig>>`, `agent_semaphore: Arc<Semaphore>`, and `workflow_engine: Arc<WorkflowEngine>`. See `backend/src/lib.rs`.
 
 **Gateway** — nginx reverse proxy (Docker service) routing `/api/*` to backend and `/*` to frontend. Port 3456.
 
@@ -23,6 +23,14 @@ Project-specific terms. For deep dives, follow the linked `ai/architecture/` fil
 **DbInfo** — Response from `GET /api/config/db-info`: database file size and record counts per table.
 
 **DbExport** — Full JSON dump of all database tables, retrieved via `GET /api/config/export` and restored via `POST /api/config/import`.
+
+**ServerConfig** — Backend server configuration: `host`, `port`, `domain` (for CORS), `auth_token` (opt-in Bearer auth), `auth_enabled` (distinguishes user-set from auto-generated token), `max_concurrent_agents` (1–20, default 5).
+
+**ServerConfigPublic** — Public view of ServerConfig returned by `GET /api/config/server`: `host`, `port`, `domain`, `max_concurrent_agents`, `auth_enabled`. Excludes `auth_token` for security.
+
+**auth_enabled** — Boolean flag on `ServerConfig`. When `true`, the auth token was explicitly enabled by the user from the Settings UI. Prevents legacy auto-generated tokens from blocking access after upgrade.
+
+**Agent semaphore** — `tokio::sync::Semaphore` in `AppState` limiting concurrent agent processes. Acquired with `acquire_owned()` in `make_agent_stream` and `orchestrate`. Size configurable via `max_concurrent_agents`.
 
 **full_access** — Boolean field on `AgentConfig` (persisted in config.toml). When true, agent runner adds `--dangerously-skip-permissions` (Claude) or `--full-auto` (Codex) to CLI invocations. Controlled via `GET/POST /api/config/agent-access`.
 
@@ -75,6 +83,16 @@ Project-specific terms. For deep dives, follow the linked `ai/architecture/` fil
 **ai_todo_count** — Number of `<!-- TODO -->` markers remaining in `ai/*.md` files. Computed on-the-fly by `scanner::count_ai_todos()`, exposed on `Project` struct.
 
 **Bootstrap prompt** — Block injected into `ai/index.md` between `KRONN:BOOTSTRAP:START` and `KRONN:BOOTSTRAP:END` markers. Instructs AI agents to analyze the repo and fill the `ai/` skeleton. Removed before running the automated audit.
+
+**Project Bootstrap** — Feature to create a new project from scratch via `POST /api/projects/bootstrap`. Creates directory, runs `git init`, installs AI template, and creates a bootstrap discussion with architect + product-owner profiles. The bootstrap prompt guides through Vision → Architecture → Structure → MVP → Action Plan. Parent directory resolved from existing projects' common parent path or `KRONN_REPOS_DIR` env var.
+
+**BootstrapProjectRequest** — `{ name: string, description: string, agent: AgentType }`. Name is sanitized to kebab-case for the directory name.
+
+**BootstrapProjectResponse** — `{ project_id: string, discussion_id: string }`. Frontend uses `discussion_id` to auto-navigate and trigger the agent.
+
+**find_common_parent** — Internal function in `projects.rs` that computes the common parent directory of all existing projects in DB. Used by bootstrap to determine where to create new project directories. E.g., `/home/user/Repos/A` + `/home/user/Repos/B` → `/home/user/Repos`.
+
+**Skill auto-detection** — During AI audit (between Phase 2 and Phase 3), `detect_project_skills()` scans project filesystem for config files (Cargo.toml → rust, tsconfig.json → typescript, go.mod → go, etc.) and saves detected skills to DB. Covers languages (rust, typescript, python, go, php), domain (devops, database, security), and business (web-performance, seo).
 
 **Validation discussion** — Discussion with title "Validation audit AI" created from the project page. Uses a locked (read-only) prompt. The AI asks questions about ambiguities, updates `ai/` files after each answer. Detected by matching `title === 'Validation audit AI'` + `project_id`.
 
@@ -147,7 +165,7 @@ Project-specific terms. For deep dives, follow the linked `ai/architecture/` fil
 
 ## UI
 
-**Dashboard** — Main UI shell (~650 lines, `Dashboard.tsx`) with tabs: Projets, Discussions, MCPs, Workflows, Config. Each tab delegates to a sub-page.
+**Dashboard** — Main UI shell (~750 lines, `Dashboard.tsx`) with tabs: Projets, Discussions, MCPs, Workflows, Config. Each tab delegates to a sub-page. Project cards have collapsible accordion sections (Discussions, Doc AI, MCPs, Workflows, Skills, AI Context) with smart defaults based on audit status. Bootstrap modal for creating new projects from scratch.
 
 **SettingsPage** — Extracted settings page (~670 lines, `SettingsPage.tsx`): UI/output language, agents config, multi-key token management, usage stats, DB management.
 

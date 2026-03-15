@@ -25,9 +25,31 @@ mod tests {
         let tmp = std::env::temp_dir().join("kronn-test-audit-bootstrap");
         let ai_dir = tmp.join("ai");
         let _ = std::fs::create_dir_all(&ai_dir);
-        std::fs::write(ai_dir.join("index.md"), "# Project\nKRONN:BOOTSTRAP\n").unwrap();
+        std::fs::write(ai_dir.join("index.md"), "# Project\nKRONN:BOOTSTRAP:START\n").unwrap();
         let status = detect_audit_status(&tmp.to_string_lossy());
         assert!(matches!(status, crate::models::AiAuditStatus::TemplateInstalled));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn detect_audit_status_bootstrapped() {
+        let tmp = std::env::temp_dir().join("kronn-test-audit-bootstrapped");
+        let ai_dir = tmp.join("ai");
+        let _ = std::fs::create_dir_all(&ai_dir);
+        std::fs::write(ai_dir.join("index.md"), "# Project\n<!-- KRONN:BOOTSTRAPPED:2026-03-14 -->\n").unwrap();
+        let status = detect_audit_status(&tmp.to_string_lossy());
+        assert!(matches!(status, crate::models::AiAuditStatus::Bootstrapped));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn detect_audit_status_bootstrapped_and_validated() {
+        let tmp = std::env::temp_dir().join("kronn-test-audit-bootstrapped-validated");
+        let ai_dir = tmp.join("ai");
+        let _ = std::fs::create_dir_all(&ai_dir);
+        std::fs::write(ai_dir.join("index.md"), "# Project\n<!-- KRONN:BOOTSTRAPPED:2026-03-14 -->\n<!-- KRONN:VALIDATED:2026-03-14 -->\n").unwrap();
+        let status = detect_audit_status(&tmp.to_string_lossy());
+        assert!(matches!(status, crate::models::AiAuditStatus::Validated));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -164,5 +186,50 @@ mod tests {
         assert!(ignore.contains(&".cache".to_string()), "Should ignore .cache");
         assert!(ignore.contains(&".npm".to_string()), "Should ignore .npm");
         assert!(ignore.contains(&".cargo".to_string()), "Should ignore .cargo");
+    }
+
+    // ─── count_ai_todos: Phase 2 markers ─────────────────────────────────────
+
+    #[test]
+    fn count_ai_todos_with_ask_user_markers() {
+        let tmp = std::env::temp_dir().join("kronn-test-todos-ask-user");
+        let ai_dir = tmp.join("ai");
+        let _ = std::fs::create_dir_all(&ai_dir);
+        std::fs::write(
+            ai_dir.join("glossary.md"),
+            "# Glossary\n| Widget | some entity <!-- TODO: ask user --> | |\n| Known | definition | |\n",
+        ).unwrap();
+        assert_eq!(count_ai_todos(&tmp.to_string_lossy()), 1);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn count_ai_todos_in_tech_debt_subdir() {
+        let tmp = std::env::temp_dir().join("kronn-test-todos-techdebt");
+        let td_dir = tmp.join("ai/tech-debt");
+        let _ = std::fs::create_dir_all(&td_dir);
+        std::fs::write(
+            td_dir.join("TD-20260313-old-php.md"),
+            "# TD\n<!-- TODO: verify -->\nSome content\n",
+        ).unwrap();
+        std::fs::write(
+            tmp.join("ai").join("index.md"),
+            "# Project\nClean content\n",
+        ).unwrap();
+        assert_eq!(count_ai_todos(&tmp.to_string_lossy()), 1);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ─── detect_audit_status: ai/ dir exists but no index.md ─────────────────
+
+    #[test]
+    fn detect_audit_status_ai_dir_no_index() {
+        let tmp = std::env::temp_dir().join("kronn-test-audit-no-index");
+        let ai_dir = tmp.join("ai");
+        let _ = std::fs::create_dir_all(&ai_dir);
+        // ai/ dir exists but no index.md → TemplateInstalled
+        let status = detect_audit_status(&tmp.to_string_lossy());
+        assert!(matches!(status, crate::models::AiAuditStatus::TemplateInstalled));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

@@ -74,9 +74,9 @@ impl AgentProcess {
     }
 }
 
-/// Fix file ownership after agent execution.
-/// Agents run as root in Docker but files on host volumes should be owned by the host user.
-fn fix_file_ownership(work_dir: &Path) {
+/// Fix file ownership after agent execution or file operations.
+/// Files created in Docker may have wrong ownership; this restores them to the host user.
+pub fn fix_file_ownership(work_dir: &Path) {
     let uid = std::env::var("KRONN_HOST_UID").unwrap_or_default();
     let gid = std::env::var("KRONN_HOST_GID").unwrap_or_default();
     if uid.is_empty() || gid.is_empty() {

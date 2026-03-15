@@ -116,8 +116,24 @@ pub async fn execute_run(
     let mut all_success = true;
     let mut step_idx = 0;
     let total_steps = workflow.steps.len();
+    let max_total_iterations = total_steps * 10 + 50; // safeguard against infinite Goto loops
+    let mut iteration_count = 0;
 
     while step_idx < workflow.steps.len() {
+        iteration_count += 1;
+        if iteration_count > max_total_iterations {
+            tracing::error!("Workflow run exceeded {} iterations — aborting to prevent infinite loop", max_total_iterations);
+            all_success = false;
+            run.step_results.push(StepResult {
+                step_name: "__safeguard_abort__".to_string(),
+                status: RunStatus::Failed,
+                output: format!("Workflow aborted: exceeded {} total step iterations (possible infinite Goto loop)", max_total_iterations),
+                tokens_used: 0,
+                duration_ms: 0,
+                condition_result: None,
+            });
+            break;
+        }
         let step = &workflow.steps[step_idx];
         tracing::info!("Executing step {}/{}: '{}'", step_idx + 1, total_steps, step.name);
 

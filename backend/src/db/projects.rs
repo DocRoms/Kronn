@@ -146,6 +146,14 @@ pub fn update_project_default_profile(conn: &Connection, id: &str, profile_id: O
     Ok(affected > 0)
 }
 
+pub fn delete_project_discussions(conn: &Connection, project_id: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM discussions WHERE project_id = ?1",
+        params![project_id],
+    )?;
+    Ok(())
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 fn parse_dt(s: String) -> DateTime<Utc> {

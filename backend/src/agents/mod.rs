@@ -50,7 +50,12 @@ fn detect_host_label() -> String {
             return "macOS".into();
         }
     }
-    // 3. Default to Linux (safest assumption inside Docker)
+    // 3. Native macOS (no /proc/version, not in Docker)
+    #[cfg(target_os = "macos")]
+    return "macOS".into();
+
+    // 4. Default to Linux (safest assumption inside Docker)
+    #[allow(unreachable_code)]
     "Linux".into()
 }
 
@@ -175,10 +180,10 @@ pub fn find_binary(name: &str) -> Option<BinaryLocation> {
         });
     }
 
-    // Host-mounted bin directories (KRONN_HOST_BIN=dir1:dir2:...)
+    // Host-mounted bin directories (KRONN_HOST_BIN=dir1:dir2:... or dir1;dir2;... on Windows)
     if let Ok(host_bin) = std::env::var("KRONN_HOST_BIN") {
-        for dir in host_bin.split(':') {
-            let dir_path = std::path::Path::new(dir);
+        for dir in std::env::split_paths(&host_bin) {
+            let dir_path = dir.as_path();
             if let Ok(entries) = std::fs::read_dir(dir_path) {
                 for entry in entries.flatten() {
                     if entry.file_name() == name {

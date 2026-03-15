@@ -370,8 +370,12 @@ fn sync_codex_global_config(
     let codex_dir = if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {
         PathBuf::from(format!("{}/.codex", host_home))
     } else {
-        std::env::var("HOME").map(|h| PathBuf::from(format!("{}/.codex", h)))
-            .unwrap_or_else(|_| PathBuf::from("/home/kronn/.codex"))
+        std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .map(|h| PathBuf::from(format!("{}/.codex", h)))
+            .unwrap_or_else(|_| directories::BaseDirs::new()
+                .map(|d| d.home_dir().join(".codex"))
+                .unwrap_or_else(|| PathBuf::from("/home/kronn/.codex")))
     };
     let codex_config = codex_dir.join("config.toml");
 

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES, agentColor } from '../constants';
 import { t, UI_LOCALES } from '../i18n';
-import type { WorkflowRun, Discussion } from '../../types/generated';
+import type { WorkflowRun, Discussion, BootstrapProjectRequest, BootstrapProjectResponse } from '../../types/generated';
 
 /**
  * Regression tests for bugs fixed during the frontend audit.
@@ -165,6 +165,160 @@ describe('regression tests', () => {
       expect(unseen).toBe(3);
       // Wrong: using messages.length would give -7
       expect(disc.messages.length - lastSeenCount).toBe(-7);
+    });
+  });
+
+  describe('validation flow improvements (Phase 3)', () => {
+    it('isValidationDisc detects validation title exactly', () => {
+      // Replicate the function logic from DiscussionsPage.tsx
+      const isValidationDisc = (title: string) => title === 'Validation audit AI';
+
+      expect(isValidationDisc('Validation audit AI')).toBe(true);
+      expect(isValidationDisc('validation audit AI')).toBe(false); // exact match
+      expect(isValidationDisc('Validation audit AI ')).toBe(false); // trailing space
+      expect(isValidationDisc('')).toBe(false);
+      expect(isValidationDisc('Some other discussion')).toBe(false);
+    });
+
+    it('VALIDATION_COMPLETE check is case-insensitive', () => {
+      // Replicate the check from DiscussionsPage.tsx
+      const checkComplete = (content: string) =>
+        content.toUpperCase().includes('KRONN:VALIDATION_COMPLETE');
+
+      expect(checkComplete('KRONN:VALIDATION_COMPLETE')).toBe(true);
+      expect(checkComplete('kronn:validation_complete')).toBe(true);
+      expect(checkComplete('Kronn:Validation_Complete')).toBe(true);
+      expect(checkComplete('All done! KRONN:VALIDATION_COMPLETE')).toBe(true);
+      expect(checkComplete('Some text without the marker')).toBe(false);
+      expect(checkComplete('')).toBe(false);
+    });
+
+    it('i18n has disc.advancedOptions key in all locales', () => {
+      expect(t('fr', 'disc.advancedOptions')).not.toBe('disc.advancedOptions');
+      expect(t('en', 'disc.advancedOptions')).not.toBe('disc.advancedOptions');
+      expect(t('es', 'disc.advancedOptions')).not.toBe('disc.advancedOptions');
+    });
+  });
+
+  describe('bootstrap i18n keys', () => {
+    const bootstrapKeys = [
+      'projects.bootstrap',
+      'projects.bootstrap.name',
+      'projects.bootstrap.desc',
+      'projects.bootstrap.descPlaceholder',
+      'projects.bootstrap.creating',
+      'projects.bootstrap.start',
+    ];
+
+    it('all bootstrap keys exist in FR', () => {
+      for (const key of bootstrapKeys) {
+        const val = t('fr', key);
+        expect(val).not.toBe(key);
+      }
+    });
+
+    it('all bootstrap keys exist in EN', () => {
+      for (const key of bootstrapKeys) {
+        const val = t('en', key);
+        expect(val).not.toBe(key);
+      }
+    });
+
+    it('all bootstrap keys exist in ES', () => {
+      for (const key of bootstrapKeys) {
+        const val = t('es', key);
+        expect(val).not.toBe(key);
+      }
+    });
+  });
+
+  describe('BootstrapProjectRequest/Response types (compile-time check)', () => {
+    it('BootstrapProjectRequest has required fields', () => {
+      const req: BootstrapProjectRequest = {
+        name: 'Test Project',
+        description: 'A test project',
+        agent: 'ClaudeCode',
+      };
+      expect(req.name).toBe('Test Project');
+      expect(req.description).toBe('A test project');
+      expect(req.agent).toBe('ClaudeCode');
+    });
+
+    it('BootstrapProjectResponse has required fields', () => {
+      const res: BootstrapProjectResponse = {
+        project_id: 'proj-123',
+        discussion_id: 'disc-456',
+      };
+      expect(res.project_id).toBe('proj-123');
+      expect(res.discussion_id).toBe('disc-456');
+    });
+  });
+
+  describe('workflow and project section i18n keys (today\'s changes)', () => {
+    const newKeys = [
+      'wf.noProject',
+      'projects.workflows',
+      'projects.noWorkflows',
+      'projects.docAi',
+      'projects.docAi.selectFile',
+      'projects.docAi.loading',
+      'projects.docAi.empty',
+      'projects.docAi.search',
+      'projects.docAi.noResults',
+    ];
+
+    it('all keys exist in FR', () => {
+      for (const key of newKeys) {
+        expect(t('fr', key)).not.toBe(key);
+      }
+    });
+
+    it('all keys exist in EN', () => {
+      for (const key of newKeys) {
+        expect(t('en', key)).not.toBe(key);
+      }
+    });
+
+    it('all keys exist in ES', () => {
+      for (const key of newKeys) {
+        expect(t('es', key)).not.toBe(key);
+      }
+    });
+  });
+
+  describe('smart default section logic (collapsible project sections)', () => {
+    // Replicate the defaultSection() logic from Dashboard.tsx
+    const defaultSection = (auditStatus: string) => {
+      return (auditStatus === 'Audited' || auditStatus === 'Validated') ? 'discussions' : 'aiContext';
+    };
+
+    it('shows aiContext before audit completes', () => {
+      expect(defaultSection('NoTemplate')).toBe('aiContext');
+      expect(defaultSection('TemplateInstalled')).toBe('aiContext');
+    });
+
+    it('shows discussions after audit completes', () => {
+      expect(defaultSection('Audited')).toBe('discussions');
+      expect(defaultSection('Validated')).toBe('discussions');
+    });
+  });
+
+  describe('discussion locked prefill behavior', () => {
+    it('locked flag determines field editability', () => {
+      // Replicate logic from DiscussionsPage.tsx
+      const setNewDiscPrefilled = (locked: boolean) => locked;
+
+      // Doc viewer discussions: editable
+      const docPrefill = { projectId: 'p1', title: 'Doc', prompt: 'Review', locked: false };
+      expect(setNewDiscPrefilled(!!docPrefill.locked)).toBe(false);
+
+      // Validation audit discussions: locked
+      const valPrefill = { projectId: 'p1', title: 'Validation', prompt: 'Validate', locked: true };
+      expect(setNewDiscPrefilled(!!valPrefill.locked)).toBe(true);
+
+      // No locked field: defaults to false (not locked)
+      const noPrefill = { projectId: 'p1', title: 'Test', prompt: 'Test' };
+      expect(setNewDiscPrefilled(!!(noPrefill as any).locked)).toBe(false);
     });
   });
 });

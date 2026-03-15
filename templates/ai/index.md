@@ -38,7 +38,11 @@ This folder (`ai/`) contains AI-optimized project context (not human docs). Use 
 
 | Task | Files to load |
 |------|---------------|
-<!-- Fill with project-specific task→file mappings -->
+| {{TASK_EXAMPLE_1}} | `ai/repo-map.md`, `ai/coding-rules.md` |
+| {{TASK_EXAMPLE_2}} | `ai/testing-quality.md` |
+| {{TASK_EXAMPLE_3}} | `ai/architecture/overview.md`, `ai/repo-map.md` |
+| {{TASK_EXAMPLE_4}} | `ai/operations/debug-operations.md` |
+| {{TASK_EXAMPLE_5}} | `ai/glossary.md`, `ai/architecture/overview.md` |
 
 #### Tier 2 — For needs not covered above (max 3 files)
 
@@ -50,49 +54,63 @@ This folder (`ai/`) contains AI-optimized project context (not human docs). Use 
 | known issues / tech debt | `ai/inconsistencies-tech-debt.md` |
 | MCP servers / agent tools setup | `ai/operations/mcp-servers.md` |
 | term definitions / project jargon | `ai/glossary.md` |
-<!-- Add project-specific entries -->
 
 #### Tier 3 — Escalation
 Only if Tier 1 + 2 are insufficient: state which file you need and why, read it, or ask the user.
 Never load everything "just in case".
 - Architecture overview → `ai/architecture/overview.md`
+- Tech debt details → `ai/tech-debt/TD-*.md` (only the specific issue)
 
 ---
 
 ## 2. Prerequisites before running commands
 
-<!-- Project-specific prerequisites: Docker, env vars, build commands, etc. -->
+| Prerequisite | Command / Version | Notes |
+|-------------|-------------------|-------|
+| {{PREREQ_1}} | {{COMMAND_OR_VERSION}} | {{NOTES}} |
+| {{PREREQ_2}} | {{COMMAND_OR_VERSION}} | {{NOTES}} |
 
 ---
 
 ## 3. DO NOT (common mistakes)
 
-<!-- Project-specific "do not" rules. Common ones: -->
 - Do **not** guess when information is missing — ask the user.
 - Do **not** load all Tier 2 files at once — pick up to 3 max.
 - Do **not** modify business code when the task is only about AI context — edit `ai/` only.
+- {{DO_NOT_1}}
+- {{DO_NOT_2}}
+- {{DO_NOT_3}}
 
 ---
 
 ## 4. Workflow constraints
 
-<!-- Project-specific workflow rules: Docker-first, quality gates, etc. -->
 - **Quality is mandatory**: follow existing code style; add/update tests when changing behavior.
 - If stdout/stderr is missing: ask the user to copy/paste the full output.
+- {{WORKFLOW_CONSTRAINT_1}}
+- {{WORKFLOW_CONSTRAINT_2}}
 
 ---
 
 ## 5. Source of truth
 
-- AI context: `ai/`.
-<!-- Add project-specific config files as source of truth -->
+| What | File(s) |
+|------|---------|
+| AI context | `ai/` |
+| {{SOURCE_1}} | {{FILE_PATH}} |
+| {{SOURCE_2}} | {{FILE_PATH}} |
 
 ---
 
 ## 6. Code placement
 
 Use `ai/repo-map.md` to decide.
-<!-- Add default code placement rules -->
+
+| Type of code | Where to put it |
+|-------------|----------------|
+| {{CODE_TYPE_1}} | {{LOCATION_1}} |
+| {{CODE_TYPE_2}} | {{LOCATION_2}} |
+| {{CODE_TYPE_3}} | {{LOCATION_3}} |
 
 ---
 
@@ -111,7 +129,11 @@ After completing a task: if you discovered something non-obvious (a gotcha, a mi
 
 ## 8. Stack (facts)
 
-<!-- Fill with project stack details -->
+| Technology | Version | Role |
+|-----------|---------|------|
+| {{TECH_1}} | {{VERSION}} | {{ROLE}} |
+| {{TECH_2}} | {{VERSION}} | {{ROLE}} |
+| {{TECH_3}} | {{VERSION}} | {{ROLE}} |
 
 ---
 

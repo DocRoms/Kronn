@@ -364,6 +364,60 @@ pub async fn set_agent_access(
     }
 }
 
+/// GET /api/config/server
+pub async fn get_server_config(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<ServerConfigPublic>> {
+    let config = state.config.read().await;
+    Json(ApiResponse::ok(ServerConfigPublic {
+        host: config.server.host.clone(),
+        port: config.server.port,
+        domain: config.server.domain.clone(),
+        max_concurrent_agents: config.server.max_concurrent_agents,
+        auth_enabled: config.server.auth_enabled && config.server.auth_token.is_some(),
+    }))
+}
+
+/// POST /api/config/server
+pub async fn set_server_config(
+    State(state): State<AppState>,
+    Json(req): Json<UpdateServerConfigRequest>,
+) -> Json<ApiResponse<()>> {
+    let mut config = state.config.write().await;
+    if let Some(domain) = req.domain {
+        config.server.domain = if domain.is_empty() { None } else { Some(domain) };
+    }
+    if let Some(max) = req.max_concurrent_agents {
+        config.server.max_concurrent_agents = max.clamp(1, 20);
+    }
+    match config::save(&config).await {
+        Ok(_) => Json(ApiResponse::ok(())),
+        Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
+    }
+}
+
+/// POST /api/config/auth-token/regenerate
+pub async fn regenerate_auth_token(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<String>> {
+    let mut config = state.config.write().await;
+    let new_token = uuid::Uuid::new_v4().to_string();
+    config.server.auth_token = Some(new_token.clone());
+    config.server.auth_enabled = true;
+    match config::save(&config).await {
+        Ok(_) => Json(ApiResponse::ok(new_token)),
+        Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
+    }
+}
+
+/// GET /api/config/auth-token
+pub async fn get_auth_token(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<Option<String>>> {
+    let config = state.config.read().await;
+    Json(ApiResponse::ok(config.server.auth_token.clone()))
+}
+
 /// Write or remove the OpenAI key from ~/.codex/auth.json
 fn sync_codex_auth(key: Option<&str>) {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
