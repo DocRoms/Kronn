@@ -27,6 +27,12 @@ import type {
   McpContextEntry,
   AiAuditStatus,
   LaunchAuditRequest,
+  BootstrapProjectRequest,
+  BootstrapProjectResponse,
+  CloneProjectRequest,
+  CloneProjectResponse,
+  DiscoverReposRequest,
+  DiscoverReposResponse,
   Workflow,
   WorkflowSummary,
   WorkflowRun,
@@ -40,8 +46,36 @@ import type {
   CreateProfileRequest,
   Directive,
   CreateDirectiveRequest,
+  ServerConfigPublic,
+  AiFileNode,
+  AiFileContent,
+  AiSearchResult,
 } from '../types/generated';
 import type { DiscoverKeysResponse } from '../types/extensions';
+
+// ─── Auth token ──────────────────────────────────────────────────────────────
+
+let _authToken: string | null = localStorage.getItem('kronn_auth_token');
+
+export function setAuthToken(token: string | null) {
+  _authToken = token;
+  if (token) {
+    localStorage.setItem('kronn_auth_token', token);
+  } else {
+    localStorage.removeItem('kronn_auth_token');
+  }
+}
+
+export function getAuthToken(): string | null {
+  return _authToken;
+}
+
+/** Build auth headers for fetch/EventSource */
+export function authHeaders(): Record<string, string> {
+  const h: Record<string, string> = {};
+  if (_authToken) h['Authorization'] = `Bearer ${_authToken}`;
+  return h;
+}
 
 // ─── Generic API wrapper ────────────────────────────────────────────────────
 
@@ -56,9 +90,12 @@ async function api<T>(
   path: string,
   body?: unknown,
 ): Promise<T> {
+  const headers: Record<string, string> = { ...authHeaders() };
+  if (body) headers['Content-Type'] = 'application/json';
+
   const res = await fetch(`/api${path}`, {
     method,
-    headers: body ? { 'Content-Type': 'application/json' } : {},
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   });
 
@@ -109,6 +146,9 @@ export const config = {
   dbInfo: () => api<DbInfo>('GET', '/config/db-info'),
   exportData: () => api<DbExport>('GET', '/config/export'),
   importData: (data: DbExport) => api<void>('POST', '/config/import', data),
+  getServerConfig: () => api<ServerConfigPublic>('GET', '/config/server'),
+  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number }) => api<void>('POST', '/config/server', req),
+  regenerateAuthToken: () => api<string>('POST', '/config/auth-token/regenerate'),
 };
 
 // ─── Projects ───────────────────────────────────────────────────────────────
@@ -118,11 +158,20 @@ export const projects = {
   get: (id: string) => api<Project>('GET', `/projects/${id}`),
   scan: () => api<DetectedRepo[]>('POST', '/projects/scan'),
   create: (repo: DetectedRepo) => api<Project>('POST', '/projects', repo),
-  delete: (id: string) => api<void>('DELETE', `/projects/${id}`),
+  bootstrap: (req: BootstrapProjectRequest) => api<BootstrapProjectResponse>('POST', '/projects/bootstrap', req),
+  delete: (id: string, hard?: boolean) => api<void>('DELETE', `/projects/${id}${hard ? '?hard=true' : ''}`),
+  clone: (req: CloneProjectRequest) => api<CloneProjectResponse>('POST', '/projects/clone', req),
+  discoverRepos: (req?: DiscoverReposRequest) => api<DiscoverReposResponse>('POST', '/projects/discover-repos', req ?? { source_ids: [] }),
   installTemplate: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/install-template`),
+  auditInfo: (id: string) => api<{ files: { path: string; filled: boolean }[]; todos: { file: string; line: number; text: string }[] }>('GET', `/projects/${id}/audit-info`),
   validateAudit: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/validate-audit`),
+  markBootstrapped: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/mark-bootstrapped`),
+  cancelAudit: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/cancel-audit`),
   setDefaultSkills: (id: string, skillIds: string[]) => api<boolean>('PUT', `/projects/${id}/default-skills`, skillIds),
   setDefaultProfile: (id: string, profileId: string | null) => api<boolean>('PUT', `/projects/${id}/default-profile`, { profile_id: profileId }),
+  listAiFiles: (id: string) => api<AiFileNode[]>('GET', `/projects/${id}/ai-files`),
+  readAiFile: (id: string, path: string) => api<AiFileContent>('GET', `/projects/${id}/ai-file?path=${encodeURIComponent(path)}`),
+  searchAiFiles: (id: string, q: string) => api<AiSearchResult[]>('GET', `/projects/${id}/ai-search?q=${encodeURIComponent(q)}`),
 
   /** Stream the AI audit progress via SSE */
   auditStream: async (
@@ -142,7 +191,7 @@ export const projects = {
 
     const res = await fetch(`/api/projects/${id}/ai-audit`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify(req),
       signal,
     }).catch(e => {
@@ -196,6 +245,91 @@ export const projects = {
 
     done();
   },
+  /** Stream the full audit (template + audit + validation discussion) via SSE */
+  fullAuditStream: async (
+    id: string,
+    req: LaunchAuditRequest,
+    handlers: {
+      onTemplateInstalled: (installed: boolean) => void;
+      onStepStart: (step: number, total: number, file: string) => void;
+      onChunk: (text: string, step: number) => void;
+      onStepDone: (step: number, success: boolean) => void;
+      onValidationCreated: (discussionId: string) => void;
+      onDone: (discussionId: string | null, templateWasInstalled: boolean) => void;
+      onError: (error: string) => void;
+    },
+    signal?: AbortSignal,
+  ) => {
+    let finished = false;
+    const done = (discId: string | null, tmpl: boolean) => {
+      if (!finished) { finished = true; handlers.onDone(discId, tmpl); }
+    };
+
+    const res = await fetch(`/api/projects/${id}/full-audit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify(req),
+      signal,
+    }).catch(e => {
+      if (e.name === 'AbortError') { done(null, false); return null; }
+      throw e;
+    });
+    if (!res) return;
+
+    if (!res.ok || !res.body) {
+      handlers.onError(`HTTP ${res.status}`);
+      return;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    const processLines = (lines: string[], eventType: { current: string }) => {
+      for (const line of lines) {
+        if (line.startsWith('event:')) {
+          eventType.current = line.slice(6).trim();
+        } else if (line.startsWith('data:')) {
+          const data = line.slice(5).trim();
+          try {
+            const p = JSON.parse(data);
+            switch (eventType.current) {
+              case 'template_installed': handlers.onTemplateInstalled(p.installed); break;
+              case 'step_start': handlers.onStepStart(p.step, p.total, p.file); break;
+              case 'chunk': handlers.onChunk(p.text, p.step); break;
+              case 'step_done': handlers.onStepDone(p.step, p.success); break;
+              case 'step_error': handlers.onError(p.error ?? 'Step error'); break;
+              case 'validation_created': handlers.onValidationCreated(p.discussion_id); break;
+              case 'done': done(p.discussion_id ?? null, p.template_was_installed ?? false); break;
+              case 'error': handlers.onError(p.error ?? 'Unknown error'); break;
+            }
+          } catch { /* ignore non-JSON */ }
+        }
+      }
+    };
+
+    const eventType = { current: '' };
+    try {
+      while (true) {
+        const { done: streamDone, value } = await reader.read();
+        if (streamDone) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+        processLines(lines, eventType);
+      }
+      // Process any remaining data in buffer (last chunk may lack trailing newline)
+      if (buffer.trim()) {
+        processLines(buffer.split('\n'), eventType);
+      }
+    } catch (e: unknown) {
+      if (e instanceof DOMException && e.name === 'AbortError') { done(null, false); return; }
+      throw e;
+    }
+
+    done(null, false);
+  },
 };
 
 // ─── Agents ─────────────────────────────────────────────────────────────────
@@ -246,9 +380,12 @@ export const discussions = {
     let finished = false;
     const done = () => { if (!finished) { finished = true; onDone(); } };
 
+    const hdrs: Record<string, string> = { ...authHeaders() };
+    if (body) hdrs['Content-Type'] = 'application/json';
+
     const res = await fetch(url, {
       method: 'POST',
-      headers: body ? { 'Content-Type': 'application/json' } : {},
+      headers: hdrs,
       body: body ? JSON.stringify(body) : undefined,
       signal,
     }).catch(e => {
@@ -352,7 +489,7 @@ export const discussions = {
 
     const res = await fetch(`/api/discussions/${id}/orchestrate`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify(req),
       signal,
     }).catch(e => {
@@ -430,6 +567,7 @@ export const workflows = {
   ) => {
     const res = await fetch(`/api/workflows/${id}/trigger`, {
       method: 'POST',
+      headers: authHeaders(),
       signal,
     }).catch(e => {
       if (e.name !== 'AbortError') onError(String(e));

@@ -404,7 +404,7 @@ describe('DiscussionsPage', () => {
         refetchProjects={noop}
         onNavigate={noop}
         toast={toastFn}
-        prefill={{ projectId: 'p1', title: 'Validation audit AI', prompt: 'Validate this' }}
+        prefill={{ projectId: 'p1', title: 'Validation audit AI', prompt: 'Validate this', locked: true }}
         onPrefillConsumed={noop}
         {...lifted}
       />

@@ -7,12 +7,17 @@ pub mod workflows;
 
 use std::sync::Arc;
 use axum::{
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    middleware::{self, Next},
     routing::{delete, get, patch, post, put},
     Router,
 };
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
+use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
 use tower_http::{
-    cors::CorsLayer,
+    cors::{CorsLayer, AllowOrigin},
     trace::TraceLayer,
 };
 
@@ -22,18 +27,113 @@ pub use crate::workflows::WorkflowEngine;
 
 // ─── Application State ──────────────────────────────────────────────────────
 
+/// Default maximum concurrent agent processes.
+pub const DEFAULT_MAX_CONCURRENT_AGENTS: usize = 5;
+
+/// Tracks running audit processes so they can be cancelled.
+#[derive(Default)]
+pub struct AuditTracker {
+    /// Currently running child PID per project (if any)
+    pub running_pids: HashMap<String, u32>,
+    /// Projects whose audit should be cancelled
+    pub cancelled: HashSet<String>,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<RwLock<AppConfig>>,
     pub db: Arc<Database>,
     pub workflow_engine: Arc<WorkflowEngine>,
+    pub agent_semaphore: Arc<Semaphore>,
+    pub audit_tracker: Arc<Mutex<AuditTracker>>,
+}
+
+// ─── Auth Middleware ─────────────────────────────────────────────────────────
+
+/// Bearer token authentication middleware.
+/// Skips auth for /api/health (Docker healthcheck) and when no token is configured.
+async fn auth_middleware(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+    next: Next,
+) -> Result<axum::response::Response, StatusCode> {
+    // Skip auth for health endpoint
+    if request.uri().path() == "/api/health" {
+        return Ok(next.run(request).await);
+    }
+
+    let config = state.config.read().await;
+    let expected_token = config.server.auth_token.clone();
+    drop(config);
+
+    // If no token is configured, skip auth (backward compat / first run)
+    let Some(expected) = expected_token else {
+        return Ok(next.run(request).await);
+    };
+
+    // Check Authorization: Bearer <token>
+    let authorized = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|token| token == expected)
+        .unwrap_or(false);
+
+    if authorized {
+        Ok(next.run(request).await)
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
+    }
+}
+
+// ─── CORS ────────────────────────────────────────────────────────────────────
+
+/// Build CORS layer based on config domain.
+fn build_cors(domain: &Option<String>, port: u16) -> CorsLayer {
+    let origins: Vec<String> = match domain {
+        Some(d) => vec![
+            format!("https://{}", d),
+            format!("http://{}", d),
+            format!("https://{}:{}", d, port),
+            format!("http://{}:{}", d, port),
+        ],
+        None => vec![
+            format!("http://localhost:{}", port),
+            format!("http://127.0.0.1:{}", port),
+            // Default gateway port
+            "http://localhost:3140".into(),
+            "http://localhost:3141".into(),
+        ],
+    };
+
+    let parsed: Vec<_> = origins
+        .iter()
+        .filter_map(|o| o.parse().ok())
+        .collect();
+
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(parsed))
+        .allow_methods(tower_http::cors::Any)
+        .allow_headers(tower_http::cors::Any)
 }
 
 /// Build the Axum router with all routes and middleware.
 /// Extracted for reuse in integration tests.
 pub fn build_router(state: AppState) -> Router {
-    Router::new()
-        // ── Health (lightweight, used by Docker healthcheck) ──
+    build_router_with_auth(state, true)
+}
+
+/// Build router with optional auth (disabled for tests).
+pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
+    let (domain, port) = {
+        // We need config synchronously here; use blocking_lock since this runs once at startup
+        let config = state.config.try_read().expect("Config lock poisoned at startup");
+        (config.server.domain.clone(), config.server.port)
+    };
+
+    let mut router = Router::new()
+        // ── Health (lightweight, used by Docker healthcheck — no auth) ──
         .route("/api/health", get(|| async { axum::Json(serde_json::json!({"ok": true})) }))
         // ── Setup wizard ──
         .route("/api/setup/status", get(api::setup::get_status))
@@ -54,6 +154,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/config/scan-ignore", get(api::setup::get_scan_ignore).post(api::setup::set_scan_ignore))
         .route("/api/config/scan-depth", get(api::setup::get_scan_depth).post(api::setup::set_scan_depth))
         .route("/api/config/agent-access", get(api::setup::get_agent_access).post(api::setup::set_agent_access))
+        .route("/api/config/server", get(api::setup::get_server_config).post(api::setup::set_server_config))
+        .route("/api/config/auth-token/regenerate", post(api::setup::regenerate_auth_token))
         .route("/api/config/db-info", get(api::setup::db_info))
         .route("/api/config/export", get(api::setup::export_data))
         .route("/api/config/import", post(api::setup::import_data))
@@ -61,13 +163,23 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/projects", get(api::projects::list))
         .route("/api/projects", post(api::projects::create))
         .route("/api/projects/scan", post(api::projects::scan))
+        .route("/api/projects/bootstrap", post(api::projects::bootstrap))
+        .route("/api/projects/clone", post(api::projects::clone_project))
+        .route("/api/projects/discover-repos", post(api::projects::discover_repos))
         .route("/api/projects/:id", get(api::projects::get))
         .route("/api/projects/:id", delete(api::projects::delete))
         .route("/api/projects/:id/install-template", post(api::projects::install_template))
         .route("/api/projects/:id/ai-audit", post(api::projects::run_audit))
+        .route("/api/projects/:id/audit-info", get(api::projects::audit_info))
         .route("/api/projects/:id/validate-audit", post(api::projects::validate_audit))
+        .route("/api/projects/:id/mark-bootstrapped", post(api::projects::mark_bootstrapped))
+        .route("/api/projects/:id/full-audit", post(api::projects::full_audit))
+        .route("/api/projects/:id/cancel-audit", post(api::projects::cancel_audit))
         .route("/api/projects/:id/default-skills", put(api::projects::set_default_skills))
         .route("/api/projects/:id/default-profile", put(api::projects::set_default_profile))
+        .route("/api/projects/:id/ai-files", get(api::projects::list_ai_files))
+        .route("/api/projects/:id/ai-file", get(api::projects::read_ai_file))
+        .route("/api/projects/:id/ai-search", get(api::projects::search_ai_files))
         // ── Agents ──
         .route("/api/agents", get(api::agents::detect))
         .route("/api/agents/install", post(api::agents::install))
@@ -112,7 +224,12 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/stats/tokens", get(api::stats::token_usage))
         .route("/api/stats/agent-usage", get(api::stats::agent_usage))
         // ── Middleware ──
-        .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http())
-        .with_state(state)
+        .layer(build_cors(&domain, port))
+        .layer(TraceLayer::new_for_http());
+
+    if enable_auth {
+        router = router.route_layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
+    }
+
+    router.with_state(state)
 }

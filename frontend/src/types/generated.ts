@@ -114,10 +114,53 @@ export type AgentType = "ClaudeCode" | "Codex" | "Vibe" | "GeminiCli" | "Kiro" |
 
 // ─── AI Audit ────────────────────────────────────────────────────────────────
 
-export type AiAuditStatus = "NoTemplate" | "TemplateInstalled" | "Audited" | "Validated";
+export type AiAuditStatus = "NoTemplate" | "TemplateInstalled" | "Bootstrapped" | "Audited" | "Validated";
 
 export interface LaunchAuditRequest {
   agent: AgentType;
+}
+
+export interface BootstrapProjectRequest {
+  name: string;
+  description: string;
+  agent: AgentType;
+}
+
+export interface BootstrapProjectResponse {
+  project_id: string;
+  discussion_id: string;
+}
+
+export interface CloneProjectRequest { url: string; name: string | null; agent: AgentType; }
+export interface CloneProjectResponse { project_id: string; discussion_id: string | null; }
+
+export interface RemoteRepo {
+  name: string;
+  full_name: string;
+  clone_url: string;
+  ssh_url: string;
+  description: string | null;
+  language: string | null;
+  stargazers_count: number;
+  updated_at: string;
+  source: string;
+  already_cloned: boolean;
+}
+
+export interface RepoSource {
+  id: string;
+  label: string;
+  provider: string;
+}
+
+export interface DiscoverReposRequest {
+  source_ids: string[];
+}
+
+export interface DiscoverReposResponse {
+  repos: RemoteRepo[];
+  sources: string[];
+  available_sources: RepoSource[];
 }
 
 // ─── Projects ───────────────────────────────────────────────────────────────
@@ -383,6 +426,25 @@ export interface ImportWorkflowRequest {
   project_id?: string | null;
 }
 
+// ─── AI Documentation Files ─────────────────────────────────────────────────
+
+export interface AiFileNode {
+  path: string;
+  name: string;
+  is_dir: boolean;
+  children?: AiFileNode[];
+}
+
+export interface AiFileContent {
+  path: string;
+  content: string;
+}
+
+export interface AiSearchResult {
+  path: string;
+  match_count: number;
+}
+
 // ─── Stats ──────────────────────────────────────────────────────────────────
 
 export interface TokenUsageSummary {
@@ -591,6 +653,14 @@ export interface OrchestrationRequest {
   skill_ids?: string[];
   profile_ids?: string[];
   directive_ids?: string[];
+}
+
+export interface ServerConfigPublic {
+  host: string;
+  port: number;
+  domain: string | null;
+  max_concurrent_agents: number;
+  auth_enabled: boolean;
 }
 
 export interface DbInfo {

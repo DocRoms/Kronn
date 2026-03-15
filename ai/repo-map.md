@@ -15,12 +15,13 @@ Kronn/
 ├── backend/                    # Rust backend (axum web server)
 │   ├── Cargo.toml              # Dependencies: axum 0.7, tokio, serde, ts-rs, anyhow
 │   └── src/
-│       ├── main.rs             # Entrypoint, router definition, AppState
+│       ├── main.rs             # Entrypoint, server startup, graceful shutdown (SIGTERM/SIGINT)
+│       ├── lib.rs              # Router definition (build_router), auth middleware, CORS, AppState
 │       ├── models/mod.rs       # All data models (Project, Discussion, MCP, Workflow, Config...)
 │       ├── api/                # HTTP handlers (one file per domain)
 │       │   ├── mod.rs          # Re-exports
-│       │   ├── setup.rs        # Setup wizard + config endpoints (tokens, language, agents)
-│       │   ├── projects.rs     # Project CRUD + scan + AI audit pipeline (template install, SSE audit, validation)
+│       │   ├── setup.rs        # Setup wizard + config endpoints (tokens, language, agents, server config, auth token)
+│       │   ├── projects.rs     # Project CRUD + scan + bootstrap + AI audit pipeline (template install, SSE audit, validation, skill auto-detection)
 │       │   ├── discussions.rs  # Discussion CRUD + SSE streaming + orchestration
 │       │   ├── mcps.rs         # MCP 3-tier API: overview, configs CRUD, registry, refresh, secrets
 │       │   ├── workflows.rs    # Workflow CRUD + trigger + runs
@@ -89,7 +90,7 @@ Kronn/
 │               └── github.rs   # GitHub API v3 implementation (reqwest + rustls)
 │
 ├── frontend/                   # React + TypeScript (Vite)
-│   ├── package.json            # engines: node>=23.6.0
+│   ├── package.json            # engines: node>=24 (LTS)
 │   ├── tsconfig.json           # ES2020, strict, react-jsx
 │   ├── vite.config.ts          # Build config + test config (vitest) + code splitting
 │   ├── eslint.config.js        # ESLint 10 flat config (typescript-eslint strict)
@@ -97,7 +98,7 @@ Kronn/
 │       ├── main.tsx            # React DOM entry
 │       ├── App.tsx             # Router (setup wizard vs dashboard) + ErrorBoundary + React.lazy code splitting
 │       ├── pages/
-│       │   ├── Dashboard.tsx   # Main UI shell (~650 lines) — projects tab, nav bar, routes to sub-pages
+│       │   ├── Dashboard.tsx   # Main UI shell (~750 lines) — projects tab (collapsible sections, bootstrap modal), nav bar, routes to sub-pages
 │       │   ├── SettingsPage.tsx # Settings (~670 lines) — language, agents config, tokens, usage stats, DB management
 │       │   ├── DiscussionsPage.tsx # Discussions (~1420 lines) — sidebar, chat, streaming, debate, archive, swipe gestures, title editing
 │       │   ├── McpPage.tsx     # MCP management (registry, configs, inline secret editing with per-field visibility, context files, project toggles)
@@ -151,7 +152,7 @@ Kronn/
 
 ## Primary entrypoints for conventions
 
-- **Route registration**: `backend/src/main.rs` — all API routes defined here.
+- **Route registration**: `backend/src/lib.rs` (`build_router()`) — all API routes defined here.
 - **Data models**: `backend/src/models/mod.rs` — single file, source of truth for all types.
 - **API client**: `frontend/src/lib/api.ts` — all fetch calls, SSE streaming logic.
 - **Type generation**: `make typegen` reads `#[derive(TS)]` attributes in Rust models.
@@ -160,10 +161,10 @@ Kronn/
 ## Notes
 - `README.md` is not guaranteed to be up-to-date; prefer actual config files as source of truth.
 - `frontend/src/types/generated.ts` is auto-generated — never edit manually.
-- Dashboard.tsx (~650 lines) is the main UI shell with projects tab and nav. Extracted: SettingsPage.tsx (~670 lines), DiscussionsPage.tsx (~1420 lines), McpPage.tsx (~715 lines), WorkflowsPage.tsx (~1700 lines).
+- Dashboard.tsx (~750 lines) is the main UI shell with projects tab (collapsible accordion sections, bootstrap modal), nav bar. Extracted: SettingsPage.tsx (~670 lines), DiscussionsPage.tsx (~1420 lines), McpPage.tsx (~715 lines), WorkflowsPage.tsx (~1700 lines).
 - DiscussionsPage includes: SwipeableDiscItem (swipe-to-archive/delete), inline title editing, disabled agent detection, multi-line textarea, archive section.
 - Shared constants (AGENT_COLORS, AGENT_LABELS) extracted to `lib/constants.ts` — imported by Dashboard and WorkflowsPage.
-- Frontend tests in `__tests__/` directories alongside source (15 suites, 146+ tests). See `ai/testing-quality.md`.
+- Frontend tests in `__tests__/` directories alongside source (15 suites, 155+ tests). See `ai/testing-quality.md`.
 - Shell tests in `tests/bats/` (8 suites, 186 tests via bats-core). See `ai/testing-quality.md`.
-- CI pipeline: `.github/workflows/ci-test.yml` triggered by `ci-test` label on PRs (backend + frontend + shell tests).
+- CI pipeline: `.github/workflows/ci-test.yml` triggered on push to main + all PRs (backend clippy/test + frontend tsc/test + shell bats + security scan).
 - `templates/` directory contains the AI context template files (ai/ skeleton, CLAUDE.md, .cursorrules, etc.) mounted at `/app/templates:ro` in Docker.

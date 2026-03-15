@@ -51,6 +51,9 @@ impl Database {
         let use_wal = std::env::var("KRONN_DB_WAL")
             .map(|v| v != "0" && v.to_lowercase() != "false")
             .unwrap_or(true);
+        // busy_timeout: wait up to 5s if the DB is locked by another writer
+        conn.execute_batch("PRAGMA busy_timeout=5000;")?;
+
         if use_wal {
             conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")?;
         } else {

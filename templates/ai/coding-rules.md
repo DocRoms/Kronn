@@ -7,15 +7,50 @@
 - Prefer smallest diffs. Avoid drive-by refactors.
 - Follow existing naming in adjacent code. Avoid generic names (`Helper`, `Utils`).
 
-<!-- Add language-specific sections. Example:
+## {{LANGUAGE_1}}
 
-## Language X
+### Tools
 
-- **Linter**: config file, run command
-- **Formatter**: config file, run command
-- **Type checker**: config file, run command
+| Tool | Config file | Run command |
+|------|------------|-------------|
+| Linter | {{CONFIG}} | {{COMMAND}} |
+| Formatter | {{CONFIG}} | {{COMMAND}} |
+| Type checker | {{CONFIG}} | {{COMMAND}} |
 
-## Language Y
+### Conventions
 
-...
--->
+- {{CONVENTION_1}}
+- {{CONVENTION_2}}
+- {{CONVENTION_3}}
+- {{CONVENTION_4}}
+- {{CONVENTION_5}}
+
+### Common mistakes to avoid
+
+- {{MISTAKE_1}}
+- {{MISTAKE_2}}
+- {{MISTAKE_3}}
+
+## {{LANGUAGE_2}}
+
+### Tools
+
+| Tool | Config file | Run command |
+|------|------------|-------------|
+| Linter | {{CONFIG}} | {{COMMAND}} |
+| Formatter | {{CONFIG}} | {{COMMAND}} |
+| Type checker | {{CONFIG}} | {{COMMAND}} |
+
+### Conventions
+
+- {{CONVENTION_1}}
+- {{CONVENTION_2}}
+- {{CONVENTION_3}}
+- {{CONVENTION_4}}
+- {{CONVENTION_5}}
+
+### Common mistakes to avoid
+
+- {{MISTAKE_1}}
+- {{MISTAKE_2}}
+- {{MISTAKE_3}}

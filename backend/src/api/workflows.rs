@@ -83,6 +83,12 @@ pub async fn create(
     if req.steps.is_empty() {
         return Json(ApiResponse::err("Workflow must have at least one step"));
     }
+    if req.steps.len() > 20 {
+        return Json(ApiResponse::err(format!("Too many steps ({}, max 20)", req.steps.len())));
+    }
+    if req.name.len() > 200 {
+        return Json(ApiResponse::err("Workflow name too long (max 200 chars)"));
+    }
 
     let now = Utc::now();
     let wf = Workflow {
@@ -124,6 +130,17 @@ pub async fn update(
         Ok(None) => return Json(ApiResponse::err("Workflow not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
+
+    if let Some(ref steps) = req.steps {
+        if steps.len() > 20 {
+            return Json(ApiResponse::err(format!("Too many steps ({}, max 20)", steps.len())));
+        }
+    }
+    if let Some(ref name) = req.name {
+        if name.len() > 200 {
+            return Json(ApiResponse::err("Workflow name too long (max 200 chars)"));
+        }
+    }
 
     let updated = Workflow {
         id: existing.id,

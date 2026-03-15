@@ -13,7 +13,8 @@
 
 ## Entry template (for detail files)
 - **ID**: TD-YYYYMMDD-short-slug
-- **Area**: (e.g. Backend | Frontend | CI | Config | Docs | Other)
+- **Area**: (e.g. Backend | Frontend | CI | Config | Docs | Dependencies | Infrastructure)
+- **Severity**: Critical | High | Medium | Low
 - **Problem (fact)**: ...
 - **Why we can't fix now (constraint)**: ...
 - **Impact**: dev friction | test fragility | perf | security | correctness | docs
@@ -21,8 +22,14 @@
 - **Suggested direction (non-binding)**: ...
 - **Next step**: ticket link or 'create ticket'
 
+## Outdated prerequisites & deprecated dependencies
+
+| Component | Current version | Status | Risk |
+|-----------|----------------|--------|------|
+| {{COMPONENT}} | {{VERSION}} | {{STATUS}} | {{RISK}} |
+
 ## Current list
 
-| ID | Problem | Area |
-|----|---------|------|
-<!-- Add entries as discovered -->
+| ID | Problem | Area | Severity |
+|----|---------|------|----------|
+| {{ID}} | {{PROBLEM}} | {{AREA}} | {{SEVERITY}} |

@@ -168,9 +168,16 @@ describe('api module', () => {
       expect(typeof projects.get).toBe('function');
       expect(typeof projects.scan).toBe('function');
       expect(typeof projects.create).toBe('function');
+      expect(typeof projects.bootstrap).toBe('function');
       expect(typeof projects.delete).toBe('function');
       expect(typeof projects.installTemplate).toBe('function');
       expect(typeof projects.auditStream).toBe('function');
+      expect(typeof projects.auditInfo).toBe('function');
+      expect(typeof projects.validateAudit).toBe('function');
+      expect(typeof projects.cancelAudit).toBe('function');
+      expect(typeof projects.listAiFiles).toBe('function');
+      expect(typeof projects.readAiFile).toBe('function');
+      expect(typeof projects.searchAiFiles).toBe('function');
     });
 
     it('workflows has expected methods', async () => {
@@ -190,6 +197,35 @@ describe('api module', () => {
       expect(typeof skills.create).toBe('function');
       expect(typeof skills.update).toBe('function');
       expect(typeof skills.delete).toBe('function');
+    });
+  });
+
+  describe('audit API calls', () => {
+    it('projects.auditInfo calls correct endpoint', async () => {
+      mockFetchResponse({ files: [], todos: [] });
+      const { projects } = await getApi();
+
+      const result = await projects.auditInfo('proj-1');
+
+      expect(globalThis.fetch).toHaveBeenCalledWith('/api/projects/proj-1/audit-info', {
+        method: 'GET',
+        headers: {},
+        body: undefined,
+      });
+      expect(result).toEqual({ files: [], todos: [] });
+    });
+
+    it('projects.validateAudit calls correct endpoint', async () => {
+      mockFetchResponse('Validated');
+      const { projects } = await getApi();
+
+      await projects.validateAudit('proj-1');
+
+      expect(globalThis.fetch).toHaveBeenCalledWith('/api/projects/proj-1/validate-audit', {
+        method: 'POST',
+        headers: {},
+        body: undefined,
+      });
     });
   });
 
@@ -243,6 +279,60 @@ describe('api module', () => {
         headers: {},
         body: undefined,
       });
+    });
+  });
+
+  describe('AI files API calls', () => {
+    it('projects.listAiFiles calls correct endpoint', async () => {
+      mockFetchResponse([{ path: 'ai/index.md', name: 'index.md', is_dir: false }]);
+      const { projects } = await getApi();
+      await projects.listAiFiles('proj-1');
+      expect(globalThis.fetch).toHaveBeenCalledWith('/api/projects/proj-1/ai-files', expect.objectContaining({ method: 'GET' }));
+    });
+
+    it('projects.readAiFile calls correct endpoint with encoded path', async () => {
+      mockFetchResponse({ path: 'ai/index.md', content: '# Index' });
+      const { projects } = await getApi();
+      await projects.readAiFile('proj-1', 'ai/index.md');
+      expect(globalThis.fetch).toHaveBeenCalledWith('/api/projects/proj-1/ai-file?path=ai%2Findex.md', expect.objectContaining({ method: 'GET' }));
+    });
+
+    it('projects.searchAiFiles calls correct endpoint', async () => {
+      mockFetchResponse([]);
+      const { projects } = await getApi();
+      await projects.searchAiFiles('proj-1', 'test query');
+      expect(globalThis.fetch).toHaveBeenCalledWith('/api/projects/proj-1/ai-search?q=test%20query', expect.objectContaining({ method: 'GET' }));
+    });
+
+    it('projects.cancelAudit calls correct endpoint', async () => {
+      mockFetchResponse('NoTemplate');
+      const { projects } = await getApi();
+      await projects.cancelAudit('proj-1');
+      expect(globalThis.fetch).toHaveBeenCalledWith('/api/projects/proj-1/cancel-audit', expect.objectContaining({ method: 'POST' }));
+    });
+  });
+
+  describe('bootstrap API calls', () => {
+    it('projects.bootstrap calls correct endpoint with correct payload', async () => {
+      mockFetchResponse({ project_id: 'proj-new', discussion_id: 'disc-1' });
+      const { projects } = await getApi();
+
+      const result = await projects.bootstrap({
+        name: 'My New App',
+        description: 'A cool app',
+        agent: 'ClaudeCode',
+      });
+
+      expect(globalThis.fetch).toHaveBeenCalledWith('/api/projects/bootstrap', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: 'My New App',
+          description: 'A cool app',
+          agent: 'ClaudeCode',
+        }),
+      });
+      expect(result).toEqual({ project_id: 'proj-new', discussion_id: 'disc-1' });
     });
   });
 });

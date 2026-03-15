@@ -216,6 +216,10 @@ Control output format, language, and verbosity. Conflict detection prevents cont
 
 Custom profiles, skills, and directives are stored as Markdown files with YAML frontmatter in `~/.config/kronn/`. Create, edit, and delete from the dashboard.
 
+### 🚀 Project Bootstrap
+
+Create a new project from scratch: name it, describe it, and Kronn creates the directory, initializes git, installs the AI template, and opens a guided discussion with an AI architect + product owner. The bootstrap conversation walks you through Vision → Architecture → Stack → MVP → Action Plan.
+
 ### 🔍 AI Audit Pipeline
 
 Generate, review, and validate AI context documentation for any project in 4 steps:
@@ -225,7 +229,7 @@ NoTemplate → TemplateInstalled → Audited → Validated
 ```
 
 1. **Install template** — one-click `ai/` skeleton with redirectors (`CLAUDE.md`, `.cursorrules`, `.windsurfrules`)
-2. **AI audit** — 10-step automated analysis (~20 min, SSE progress bar) with **3 default expert profiles** (Architect + Tech Lead + Mentor) for multi-perspective analysis: project analysis, repo map, coding rules, testing, architecture, glossary, operations, MCP servers, tech debt, final review
+2. **AI audit** — 10-step automated analysis (~20 min, SSE progress bar) with **3 default expert profiles** (Architect + Tech Lead + Mentor) for multi-perspective analysis: project analysis, repo map, coding rules, testing, architecture, glossary, operations, MCP servers, tech debt, final review. **Auto-detects project skills** (languages, frameworks, tools) from config files.
 3. **Validation** — dedicated discussion where the AI asks about ambiguities and updates docs after each answer in real-time
 4. **Mark as validated** — injects `<!-- KRONN:VALIDATED:date -->`, project is AI-ready
 
@@ -292,7 +296,7 @@ kronn/
 ├── backend/            # Rust (Axum) — API, workflows, agents, SQLite
 │   └── src/
 │       ├── main.rs         # Entrypoint, router, AppState
-│       ├── api/            # setup, projects, agents, mcps, workflows, discussions, stats
+│       ├── api/            # setup, projects (+ bootstrap), agents, mcps, workflows, discussions, stats
 │       ├── core/           # config, scanner, registry, mcp_scanner, crypto, profiles, directives
 │       ├── agents/         # Agent runner (spawns CLIs, streams stdout)
 │       ├── workflows/      # Workflow engine, triggers, steps, tracker adapters
@@ -355,7 +359,7 @@ installed = true
 
 GitHub Actions workflow triggered by adding the `ci-test` label to a PR:
 - **test-backend**: `cargo check` + `cargo clippy` + `cargo test`
-- **test-frontend**: `tsc --noEmit` + `pnpm test` (150+ tests, 15 suites)
+- **test-frontend**: `tsc --noEmit` + `pnpm test` (155+ tests, 15 suites)
 - **test-shell**: `make test-shell` (186 bats tests, 8 suites)
 </details>
 

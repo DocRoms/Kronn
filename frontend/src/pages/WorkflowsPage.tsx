@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import { useT } from '../lib/I18nContext';
 import { workflows as workflowsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi } from '../lib/api';
 import { useApi } from '../hooks/useApi';
@@ -63,6 +63,35 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess }: Wo
   const abortRef = useRef<AbortController | null>(null);
 
   const workflows = workflowList ?? [];
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
+
+  const groupedWorkflows = useMemo(() => {
+    const groups: { key: string; label: string; workflows: WorkflowSummary[] }[] = [];
+    const byProject = new Map<string, WorkflowSummary[]>();
+    const noProject: WorkflowSummary[] = [];
+    for (const wf of workflows) {
+      if (wf.project_id) {
+        const arr = byProject.get(wf.project_id) ?? [];
+        arr.push(wf);
+        byProject.set(wf.project_id, arr);
+      } else {
+        noProject.push(wf);
+      }
+    }
+    // Projects in order they appear
+    for (const [pid, wfs] of byProject) {
+      const label = wfs[0].project_name ?? pid;
+      groups.push({ key: pid, label, workflows: wfs });
+    }
+    if (noProject.length > 0) {
+      groups.push({ key: '__none__', label: t('wf.noProject'), workflows: noProject });
+    }
+    return groups;
+  }, [workflows, t]);
+
+  const toggleGroup = (key: string) => {
+    setCollapsedGroups(prev => ({ ...prev, [key]: !prev[key] }));
+  };
 
   const openDetail = async (id: string) => {
     setSelectedId(id);
@@ -209,72 +238,93 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess }: Wo
 
       {!showCreate && !editingWorkflow && workflows.length > 0 && (
         <div style={{ display: 'flex', gap: 16 }}>
-          {/* List */}
+          {/* List — grouped by project */}
           <div style={{ flex: '0 0 380px' }}>
-            {workflows.map(wf => (
-              <div
-                key={wf.id}
-                style={{
-                  ...ws.card(selectedId === wf.id),
-                  cursor: 'pointer',
-                  marginBottom: 8,
-                }}
-                onClick={() => openDetail(wf.id)}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                  <span style={{ fontWeight: 600, fontSize: 13, flex: 1 }}>{wf.name}</span>
-                  <button
-                    style={{ ...ws.iconBtn, color: wf.enabled ? '#34d399' : 'rgba(255,255,255,0.3)' }}
-                    onClick={(e) => { e.stopPropagation(); handleToggle(wf); }}
-                    title={wf.enabled ? t('wf.active') : t('wf.inactive')}
+            {groupedWorkflows.map(group => (
+              <div key={group.key} style={{ marginBottom: 12 }}>
+                {/* Group header */}
+                <div
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px',
+                    cursor: 'pointer', borderRadius: 6, fontSize: 12, fontWeight: 600,
+                    color: 'rgba(255,255,255,0.6)', background: 'rgba(255,255,255,0.03)',
+                    userSelect: 'none',
+                  }}
+                  onClick={() => toggleGroup(group.key)}
+                >
+                  {collapsedGroups[group.key] ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+                  <span style={{ flex: 1 }}>{group.label}</span>
+                  <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)' }}>{group.workflows.length}</span>
+                </div>
+
+                {/* Workflow cards */}
+                {!collapsedGroups[group.key] && group.workflows.map(wf => (
+                  <div
+                    key={wf.id}
+                    style={{
+                      ...ws.card(selectedId === wf.id),
+                      cursor: 'pointer',
+                      marginBottom: 8,
+                      marginTop: 6,
+                      marginLeft: 8,
+                    }}
+                    onClick={() => openDetail(wf.id)}
                   >
-                    {wf.enabled ? <ToggleRight size={16} /> : <ToggleLeft size={16} />}
-                  </button>
-                </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                      <span style={{ fontWeight: 600, fontSize: 13, flex: 1 }}>{wf.name}</span>
+                      <button
+                        style={{ ...ws.iconBtn, color: wf.enabled ? '#34d399' : 'rgba(255,255,255,0.3)' }}
+                        onClick={(e) => { e.stopPropagation(); handleToggle(wf); }}
+                        title={wf.enabled ? t('wf.active') : t('wf.inactive')}
+                      >
+                        {wf.enabled ? <ToggleRight size={16} /> : <ToggleLeft size={16} />}
+                      </button>
+                    </div>
 
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>
-                  <span style={ws.triggerBadge(wf.trigger_type)}>
-                    {wf.trigger_type === 'cron' && <Clock size={10} />}
-                    {wf.trigger_type === 'tracker' && <GitBranch size={10} />}
-                    {wf.trigger_type === 'manual' && <Zap size={10} />}
-                    {TRIGGER_LABELS[wf.trigger_type] ?? wf.trigger_type}
-                  </span>
-                  <span>{wf.step_count} step{wf.step_count > 1 ? 's' : ''}</span>
-                  {wf.project_name && <span>· {wf.project_name}</span>}
-                </div>
-
-                {wf.last_run && (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6, fontSize: 10 }}>
-                    <span style={{ color: STATUS_COLORS[wf.last_run.status] ?? '#888' }}>
-                      {wf.last_run.status}
-                    </span>
-                    <span style={{ color: 'rgba(255,255,255,0.2)' }}>
-                      {new Date(wf.last_run.started_at).toLocaleString()}
-                    </span>
-                    {wf.last_run.tokens_used > 0 && (
-                      <span style={{ color: 'rgba(255,255,255,0.2)' }}>
-                        · {wf.last_run.tokens_used} tokens
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>
+                      <span style={ws.triggerBadge(wf.trigger_type)}>
+                        {wf.trigger_type === 'cron' && <Clock size={10} />}
+                        {wf.trigger_type === 'tracker' && <GitBranch size={10} />}
+                        {wf.trigger_type === 'manual' && <Zap size={10} />}
+                        {TRIGGER_LABELS[wf.trigger_type] ?? wf.trigger_type}
                       </span>
-                    )}
-                  </div>
-                )}
+                      <span>{wf.step_count} step{wf.step_count > 1 ? 's' : ''}</span>
+                    </div>
 
-                <div style={{ display: 'flex', gap: 4, marginTop: 8 }}>
-                  <button
-                    style={ws.smallBtn}
-                    onClick={(e) => { e.stopPropagation(); handleTrigger(wf.id); }}
-                    disabled={!wf.enabled || triggering === wf.id}
-                  >
-                    {triggering === wf.id ? <Loader2 size={10} className="spin" /> : <Play size={10} />}
-                    {t('wf.trigger')}
-                  </button>
-                  <button
-                    style={{ ...ws.smallBtn, color: '#ff4d6a', borderColor: 'rgba(255,77,106,0.2)' }}
-                    onClick={(e) => { e.stopPropagation(); handleDelete(wf.id); }}
-                  >
-                    <Trash2 size={10} /> {t('wf.delete')}
-                  </button>
-                </div>
+                    {wf.last_run && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6, fontSize: 10 }}>
+                        <span style={{ color: STATUS_COLORS[wf.last_run.status] ?? '#888' }}>
+                          {wf.last_run.status}
+                        </span>
+                        <span style={{ color: 'rgba(255,255,255,0.2)' }}>
+                          {new Date(wf.last_run.started_at).toLocaleString()}
+                        </span>
+                        {wf.last_run.tokens_used > 0 && (
+                          <span style={{ color: 'rgba(255,255,255,0.2)' }}>
+                            · {wf.last_run.tokens_used} tokens
+                          </span>
+                        )}
+                      </div>
+                    )}
+
+                    <div style={{ display: 'flex', gap: 4, marginTop: 8 }}>
+                      <button
+                        style={ws.smallBtn}
+                        onClick={(e) => { e.stopPropagation(); handleTrigger(wf.id); }}
+                        disabled={!wf.enabled || triggering === wf.id}
+                      >
+                        {triggering === wf.id ? <Loader2 size={10} className="spin" /> : <Play size={10} />}
+                        {t('wf.trigger')}
+                      </button>
+                      <button
+                        style={{ ...ws.smallBtn, color: '#ff4d6a', borderColor: 'rgba(255,77,106,0.2)' }}
+                        onClick={(e) => { e.stopPropagation(); handleDelete(wf.id); }}
+                      >
+                        <Trash2 size={10} /> {t('wf.delete')}
+                      </button>
+                    </div>
+                  </div>
+                ))}
               </div>
             ))}
           </div>

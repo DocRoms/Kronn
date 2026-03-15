@@ -51,6 +51,14 @@ pub async fn load() -> Result<Option<AppConfig>> {
         tracing::info!("Generated encryption secret for existing config");
     }
 
+    // Auth token is opt-in — user enables it from the Settings UI.
+    // Remove tokens from old auto-generation (before auth_enabled flag existed).
+    if config.server.auth_token.is_some() && !config.server.auth_enabled {
+        config.server.auth_token = None;
+        needs_save = true;
+        tracing::info!("Removed legacy auto-generated auth token — re-enable from Settings UI");
+    }
+
     // Migrate legacy single-key fields to multi-key system
     if config.tokens.keys.is_empty() {
         let legacy_keys: Vec<(&str, &Option<String>)> = vec![
@@ -109,6 +117,10 @@ pub fn default_config() -> AppConfig {
         server: ServerConfig {
             host: "127.0.0.1".into(),
             port: DEFAULT_PORT,
+            domain: None,
+            auth_token: None,
+            auth_enabled: false,
+            max_concurrent_agents: 5,
         },
         tokens: TokensConfig {
             anthropic: None,

@@ -1,5 +1,6 @@
 use std::convert::Infallible;
 use std::pin::Pin;
+use std::time::Duration;
 use axum::{
     extract::{Path, State},
     response::sse::{Event, Sse},
@@ -12,6 +13,15 @@ use uuid::Uuid;
 use crate::agents::runner;
 use crate::models::*;
 use crate::AppState;
+
+/// Maximum title length for discussions (characters).
+const MAX_TITLE_LEN: usize = 500;
+/// Maximum content/prompt length (bytes, ~100 KB).
+const MAX_CONTENT_LEN: usize = 100_000;
+/// Global timeout for a single agent stream (30 minutes).
+const AGENT_GLOBAL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// Stall timeout — abort if no output line received for this long (5 minutes).
+const AGENT_STALL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone, Debug)]
 enum AgentStreamEvent {
@@ -52,6 +62,14 @@ pub async fn create(
     State(state): State<AppState>,
     Json(req): Json<CreateDiscussionRequest>,
 ) -> Json<ApiResponse<Discussion>> {
+    // Input validation
+    if req.title.len() > MAX_TITLE_LEN {
+        return Json(ApiResponse::err(format!("Title too long ({} chars, max {})", req.title.len(), MAX_TITLE_LEN)));
+    }
+    if req.initial_prompt.len() > MAX_CONTENT_LEN {
+        return Json(ApiResponse::err(format!("Prompt too long ({} bytes, max {})", req.initial_prompt.len(), MAX_CONTENT_LEN)));
+    }
+
     // Validate project exists (if specified)
     if let Some(ref pid) = req.project_id {
         let pid = pid.clone();
@@ -188,6 +206,16 @@ pub async fn send_message(
     Path(id): Path<String>,
     Json(req): Json<SendMessageRequest>,
 ) -> Sse<SseStream> {
+    // Input validation
+    if req.content.len() > MAX_CONTENT_LEN {
+        let stream: SseStream = Box::pin(futures::stream::once(async {
+            Ok::<_, Infallible>(Event::default().event("error").data(
+                serde_json::json!({ "error": "Message too long" }).to_string()
+            ))
+        }));
+        return Sse::new(stream);
+    }
+
     let target = req.target_agent.clone();
 
     // Add user message to DB
@@ -281,7 +309,19 @@ async fn make_agent_stream(
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentStreamEvent>(64);
 
     // Spawn background task — always saves to DB even if client disconnects
+    let semaphore = state.agent_semaphore.clone();
     tokio::spawn(async move {
+        // Acquire semaphore permit — limits concurrent agent processes
+        let _permit = match semaphore.acquire_owned().await {
+            Ok(p) => p,
+            Err(_) => {
+                let _ = tx.send(AgentStreamEvent::Error {
+                    data: serde_json::json!({ "error": "Server shutting down" }),
+                }).await;
+                return;
+            }
+        };
+
         let _ = tx.send(AgentStreamEvent::Start).await;
         let _ = tx.send(AgentStreamEvent::Meta { auth_mode: auth_mode_str.clone() }).await;
 
@@ -294,13 +334,32 @@ async fn make_agent_stream(
                 let mut full_response = String::new();
                 let mut stream_json_tokens: u64 = 0;
                 let is_stream_json = process.output_mode == runner::OutputMode::StreamJson;
+                let global_deadline = tokio::time::Instant::now() + AGENT_GLOBAL_TIMEOUT;
+                let mut was_interrupted = false;
 
-                while let Some(line) = process.next_line().await {
+                while let Some(line) = tokio::select! {
+                    line = process.next_line() => line,
+                    _ = tokio::time::sleep_until(global_deadline) => {
+                        tracing::warn!("Agent stream global timeout ({:?}) exceeded", AGENT_GLOBAL_TIMEOUT);
+                        was_interrupted = true;
+                        None
+                    }
+                    _ = async {
+                        tokio::time::sleep(AGENT_STALL_TIMEOUT).await
+                    } => {
+                        tracing::warn!("Agent stream stall timeout ({:?}) — no output", AGENT_STALL_TIMEOUT);
+                        was_interrupted = true;
+                        None
+                    }
+                } {
+                    // Client disconnected — keep running to save result in DB
+                    let client_gone = tx.is_closed();
+
                     if is_stream_json {
                         match runner::parse_claude_stream_line(&line) {
                             runner::StreamJsonEvent::Text(text) => {
                                 full_response.push_str(&text);
-                                if !tx.is_closed() {
+                                if !client_gone {
                                     let chunk = serde_json::json!({ "text": text });
                                     let _ = tx.send(AgentStreamEvent::Chunk { data: chunk }).await;
                                 }
@@ -316,7 +375,7 @@ async fn make_agent_stream(
                         }
                         full_response.push_str(&line);
 
-                        if !tx.is_closed() {
+                        if !client_gone {
                             let text_with_nl = if full_response.len() > line.len() {
                                 format!("\n{}", line)
                             } else {
@@ -328,28 +387,46 @@ async fn make_agent_stream(
                     }
                 }
 
+                // Kill agent on timeout/stall (process may still be running)
+                if was_interrupted {
+                    let _ = process.child.kill().await;
+                }
+
                 let status = process.child.wait().await;
                 process.fix_ownership();
-                let success = status.map(|s| s.success()).unwrap_or(false);
+                let exit_info = match &status {
+                    Ok(s) => format!("exit code: {:?}", s.code()),
+                    Err(e) => format!("wait error: {}", e),
+                };
+                let success = !was_interrupted && status.map(|s| s.success()).unwrap_or(false);
 
-                // Detect authentication errors and add helpful guidance
-                if !success || full_response.contains("authentication_error") || full_response.contains("Invalid authentication") {
-                    let is_auth_error = full_response.contains("authentication_error")
-                        || full_response.contains("Invalid authentication")
-                        || full_response.contains("API Error: 401");
+                let stderr_lines = process.captured_stderr();
+                let stderr_text = stderr_lines.join("\n");
 
-                    if is_auth_error {
-                        full_response.push_str("\n\n⚠️ Session expirée. Reconnectez-vous en lançant `/login` dans le CLI de l'agent concerné.");
+                // Mark partial responses
+                if was_interrupted && !full_response.is_empty() {
+                    full_response.push_str("\n\n---\n⚠️ [Réponse partielle — agent interrompu]");
+                }
+
+                if full_response.is_empty() && !success {
+                    tracing::error!(
+                        "Agent {:?} exited with error ({}). stderr ({} lines): {}",
+                        agent_type, exit_info, stderr_lines.len(),
+                        if stderr_text.len() > 500 { &stderr_text[..500] } else { &stderr_text }
+                    );
+                    if stderr_text.is_empty() {
+                        full_response = format!("[Agent exited with error] ({})", exit_info);
+                    } else {
+                        full_response = format!("[Agent exited with error] ({})\n\n{}", exit_info, stderr_text);
                     }
                 }
 
-                let stderr_lines = process.captured_stderr();
-
-                if full_response.is_empty() && !success {
-                    if stderr_lines.is_empty() {
-                        full_response = "[Agent exited with error]".to_string();
-                    } else {
-                        full_response = format!("[Agent exited with error]\n\n{}", stderr_lines.join("\n"));
+                // Detect error patterns in both stdout and stderr and add helpful guidance
+                if !success && !was_interrupted {
+                    let all_output = format!("{}\n{}", full_response, stderr_text);
+                    let error_hint = detect_agent_error_hint(&all_output);
+                    if let Some(hint) = error_hint {
+                        full_response.push_str(&format!("\n\n{}", hint));
                     }
                 }
 
@@ -553,7 +630,19 @@ pub async fn orchestrate(
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentStreamEvent>(128);
 
     // Spawn background task — always saves to DB even if client disconnects
+    let semaphore = state.agent_semaphore.clone();
     tokio::spawn(async move {
+        // Acquire semaphore permit — limits concurrent agent processes
+        let _permit = match semaphore.acquire_owned().await {
+            Ok(p) => p,
+            Err(_) => {
+                let _ = tx.send(AgentStreamEvent::Error {
+                    data: serde_json::json!({ "error": "Server shutting down" }),
+                }).await;
+                return;
+            }
+        };
+
         // Helper macro to send events — silently drops if client disconnected
         macro_rules! emit {
             ($evt:expr) => {
@@ -726,18 +815,35 @@ pub async fn orchestrate(
 
                         let status = process.child.wait().await;
                         process.fix_ownership();
+                        let exit_info = match &status {
+                            Ok(s) => format!("exit code: {:?}", s.code()),
+                            Err(e) => format!("wait error: {}", e),
+                        };
                         let orch_success = status.map(|s| s.success()).unwrap_or(false);
 
                         let orch_stderr = process.captured_stderr();
+                        let orch_stderr_text = orch_stderr.join("\n");
 
                         if full_response.is_empty() && !orch_success {
-                            if orch_stderr.is_empty() {
-                                full_response = "[Agent exited with error]".to_string();
+                            tracing::error!(
+                                "Orchestration agent {:?} exited with error ({}). stderr: {}",
+                                agent_type, exit_info,
+                                if orch_stderr_text.len() > 500 { &orch_stderr_text[..500] } else { &orch_stderr_text }
+                            );
+                            if orch_stderr_text.is_empty() {
+                                full_response = format!("[Agent exited with error] ({})", exit_info);
                             } else {
-                                full_response = format!("[Agent exited with error]\n\n{}", orch_stderr.join("\n"));
+                                full_response = format!("[Agent exited with error] ({})\n\n{}", exit_info, orch_stderr_text);
                             }
                         } else if full_response.is_empty() {
                             full_response = "[No response]".to_string();
+                        }
+
+                        if !orch_success {
+                            let all_output = format!("{}\n{}", full_response, orch_stderr_text);
+                            if let Some(hint) = detect_agent_error_hint(&all_output) {
+                                full_response.push_str(&format!("\n\n{}", hint));
+                            }
                         }
 
                         let tokens_used = if orch_stream_tokens > 0 {
@@ -1201,4 +1307,182 @@ fn build_agent_prompt(disc: &Discussion) -> String {
     }
     prompt.push_str("Please respond to the latest user message above.");
     prompt
+}
+
+/// Detect common agent error patterns and return a user-friendly hint.
+pub(crate) fn detect_agent_error_hint(output: &str) -> Option<String> {
+    let lower = output.to_lowercase();
+
+    // Authentication / session errors
+    if lower.contains("authentication_error")
+        || lower.contains("invalid authentication")
+        || lower.contains("api error: 401")
+        || lower.contains("unauthorized")
+        || lower.contains("invalid x-api-key")
+        || lower.contains("not authenticated")
+    {
+        return Some(
+            "⚠️ **Session expirée ou clé API invalide.**\n\
+             Reconnectez-vous en lançant `/login` dans le CLI de l'agent concerné.\n\
+             Vérifiez aussi vos clés API dans Config > Tokens.".to_string()
+        );
+    }
+
+    // Rate limiting / overloaded
+    if lower.contains("rate_limit") || lower.contains("rate limit")
+        || lower.contains("429") || lower.contains("too many requests")
+    {
+        return Some(
+            "⚠️ **Limite de requêtes atteinte (rate limit).**\n\
+             Attendez quelques minutes avant de réessayer.\n\
+             Status Anthropic : https://status.anthropic.com".to_string()
+        );
+    }
+
+    // Server overloaded
+    if lower.contains("overloaded") || lower.contains("529")
+        || lower.contains("capacity") || lower.contains("server_busy")
+    {
+        return Some(
+            "⚠️ **Serveurs surchargés.**\n\
+             Les serveurs de l'API sont temporairement saturés. Réessayez dans quelques minutes.\n\
+             Status Anthropic : https://status.anthropic.com".to_string()
+        );
+    }
+
+    // Server errors (500, 502, 503)
+    if lower.contains("internal server error") || lower.contains("502 bad gateway")
+        || lower.contains("503 service unavailable") || lower.contains("api error: 500")
+    {
+        return Some(
+            "⚠️ **Erreur serveur API.**\n\
+             Le service est temporairement indisponible. Réessayez dans quelques minutes.\n\
+             Status Anthropic : https://status.anthropic.com".to_string()
+        );
+    }
+
+    // Credit / billing
+    if lower.contains("insufficient_quota") || lower.contains("billing")
+        || lower.contains("payment required") || lower.contains("402")
+    {
+        return Some(
+            "⚠️ **Quota épuisé ou problème de facturation.**\n\
+             Vérifiez votre abonnement et vos crédits API.".to_string()
+        );
+    }
+
+    // Network errors
+    if lower.contains("econnrefused") || lower.contains("enotfound")
+        || lower.contains("network error") || lower.contains("dns resolution")
+        || lower.contains("timeout") || lower.contains("timed out")
+    {
+        return Some(
+            "⚠️ **Erreur réseau.**\n\
+             Impossible de joindre l'API. Vérifiez votre connexion internet.".to_string()
+        );
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_hint_auth_401() {
+        let hint = detect_agent_error_hint("Error: api error: 401 Unauthorized");
+        assert!(hint.is_some());
+        assert!(hint.unwrap().contains("Session expirée"));
+    }
+
+    #[test]
+    fn error_hint_auth_invalid_key() {
+        let hint = detect_agent_error_hint("invalid x-api-key provided");
+        assert!(hint.is_some());
+        assert!(hint.unwrap().contains("/login"));
+    }
+
+    #[test]
+    fn error_hint_auth_authentication_error() {
+        let hint = detect_agent_error_hint("authentication_error: invalid credentials");
+        assert!(hint.is_some());
+    }
+
+    #[test]
+    fn error_hint_rate_limit_429() {
+        let hint = detect_agent_error_hint("Error 429: too many requests");
+        assert!(hint.is_some());
+        assert!(hint.unwrap().contains("rate limit"));
+    }
+
+    #[test]
+    fn error_hint_overloaded_529() {
+        let hint = detect_agent_error_hint("Server overloaded (529)");
+        assert!(hint.is_some());
+        assert!(hint.unwrap().contains("surchargés"));
+    }
+
+    #[test]
+    fn error_hint_server_error_502() {
+        let hint = detect_agent_error_hint("502 Bad Gateway");
+        assert!(hint.is_some());
+        assert!(hint.unwrap().contains("indisponible"));
+    }
+
+    #[test]
+    fn error_hint_server_error_500() {
+        let hint = detect_agent_error_hint("API error: 500 Internal Server Error");
+        assert!(hint.is_some());
+    }
+
+    #[test]
+    fn error_hint_billing_402() {
+        let hint = detect_agent_error_hint("Error 402 payment required");
+        assert!(hint.is_some());
+        assert!(hint.unwrap().contains("Quota"));
+    }
+
+    #[test]
+    fn error_hint_billing_insufficient_quota() {
+        let hint = detect_agent_error_hint("insufficient_quota: no credits remaining");
+        assert!(hint.is_some());
+    }
+
+    #[test]
+    fn error_hint_network_econnrefused() {
+        let hint = detect_agent_error_hint("ECONNREFUSED: connection refused");
+        assert!(hint.is_some());
+        assert!(hint.unwrap().contains("réseau"));
+    }
+
+    #[test]
+    fn error_hint_network_timeout() {
+        let hint = detect_agent_error_hint("request timed out after 30s");
+        assert!(hint.is_some());
+    }
+
+    #[test]
+    fn error_hint_network_dns() {
+        let hint = detect_agent_error_hint("ENOTFOUND api.anthropic.com");
+        assert!(hint.is_some());
+    }
+
+    #[test]
+    fn error_hint_none_for_normal_output() {
+        let hint = detect_agent_error_hint("Here is your code:\n```rust\nfn main() {}\n```");
+        assert!(hint.is_none());
+    }
+
+    #[test]
+    fn error_hint_none_for_empty() {
+        assert!(detect_agent_error_hint("").is_none());
+    }
+
+    #[test]
+    fn error_hint_case_insensitive() {
+        // Checks that "UNAUTHORIZED" is detected (lowercased)
+        let hint = detect_agent_error_hint("UNAUTHORIZED ACCESS DENIED");
+        assert!(hint.is_some());
+    }
 }
