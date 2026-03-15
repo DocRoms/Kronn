@@ -143,8 +143,11 @@ pub async fn update(
     let skill_ids = req.skill_ids;
     let profile_ids = req.profile_ids;
     let directive_ids = req.directive_ids;
+    let project_id = req.project_id;
     match state.db.with_conn(move |conn| {
-        let mut updated = crate::db::discussions::update_discussion(conn, &id, title.as_deref(), archived)?;
+        // project_id: None = don't change, Some(None) = unset, Some(Some("id")) = set
+        let pid_update = project_id.as_ref().map(|p| p.as_deref());
+        let mut updated = crate::db::discussions::update_discussion(conn, &id, title.as_deref(), archived, pid_update)?;
         if let Some(ref ids) = skill_ids {
             updated = crate::db::discussions::update_discussion_skill_ids(conn, &id, ids)? || updated;
         }
@@ -296,6 +299,13 @@ async fn make_agent_stream(
         String::new()
     };
 
+    // For general discussions (no project), build MCP context from global configs
+    let global_mcp_context = if project_path.is_empty() {
+        build_global_mcp_context(&state).await
+    } else {
+        None
+    };
+
     let (tokens, full_access) = {
         let config = state.config.read().await;
         let fa = config.agents.full_access_for(&agent_type);
@@ -329,6 +339,7 @@ async fn make_agent_stream(
             agent_type: &agent_type, project_path: &project_path, work_dir: None,
             prompt: &prompt, tokens: &tokens, full_access,
             skill_ids: &skill_ids, directive_ids: &directive_ids, profile_ids: &profile_ids,
+            mcp_context_override: global_mcp_context.as_deref(),
         }).await {
             Ok(mut process) => {
                 let mut full_response = String::new();
@@ -415,7 +426,15 @@ async fn make_agent_stream(
                         if stderr_text.len() > 500 { &stderr_text[..500] } else { &stderr_text }
                     );
                     if stderr_text.is_empty() {
-                        full_response = format!("[Agent exited with error] ({})", exit_info);
+                        // No output at all — likely auth/session issue
+                        full_response = format!(
+                            "[Agent exited with error] ({})\n\n\
+                            ⚠️ **Aucune sortie capturée.** Causes possibles :\n\
+                            - Session expirée → lancez `/login` dans le terminal\n\
+                            - Clé API invalide → vérifiez Config > Tokens\n\
+                            - Agent non installé ou non trouvé",
+                            exit_info
+                        );
                     } else {
                         full_response = format!("[Agent exited with error] ({})\n\n{}", exit_info, stderr_text);
                     }
@@ -602,6 +621,13 @@ pub async fn orchestrate(
         String::new()
     };
 
+    // For general discussions (no project), build MCP context from global configs
+    let global_mcp_context = if project_path.is_empty() {
+        build_global_mcp_context(&state).await
+    } else {
+        None
+    };
+
     let (tokens, agent_access) = {
         let config = state.config.read().await;
         let access_map: std::collections::HashMap<String, bool> = agents.iter()
@@ -718,6 +744,7 @@ pub async fn orchestrate(
                 agent_type: &primary_agent_type, project_path: &project_path, work_dir: None,
                 prompt: &summary_prompt, tokens: &tokens, full_access: fa,
                 skill_ids: &[], directive_ids: &[], profile_ids: &[],
+                mcp_context_override: global_mcp_context.as_deref(),
             }).await {
                 Ok(mut process) => {
                     let mut summary = String::new();
@@ -776,6 +803,7 @@ pub async fn orchestrate(
                     agent_type, project_path: &project_path, work_dir: None,
                     prompt: &prompt, tokens: &tokens, full_access: fa,
                     skill_ids: &orch_skill_ids, directive_ids: &orch_directive_ids, profile_ids: &orch_profile_ids,
+                    mcp_context_override: global_mcp_context.as_deref(),
                 }).await {
                     Ok(mut process) => {
                         let mut full_response = String::new();
@@ -911,6 +939,7 @@ pub async fn orchestrate(
                 agent_type: &primary_agent_type, project_path: &project_path, work_dir: None,
                 prompt: &synth_prompt, tokens: &tokens, full_access: synth_fa,
                 skill_ids: &orch_skill_ids, directive_ids: &orch_directive_ids, profile_ids: &orch_profile_ids,
+                mcp_context_override: global_mcp_context.as_deref(),
             }).await {
                 Ok(mut process) => {
                     let mut full_response = String::new();
@@ -1283,16 +1312,27 @@ fn language_instruction(lang: &str) -> &'static str {
 fn build_agent_prompt(disc: &Discussion) -> String {
     let lang_instr = language_instruction(&disc.language);
 
+    // Include discussion title as context if it's meaningful (not auto-generated placeholder)
+    let title_ctx = if !disc.title.is_empty()
+        && disc.title != "New discussion"
+        && disc.title != "Nouvelle discussion"
+        && !disc.title.starts_with("Bootstrap: ")
+    {
+        format!("Discussion topic: \"{}\"\n\n", disc.title)
+    } else {
+        String::new()
+    };
+
     let user_msgs: Vec<_> = disc.messages.iter()
         .filter(|m| matches!(m.role, MessageRole::User))
         .collect();
 
     if user_msgs.len() <= 1 {
         let content = user_msgs.last().map(|m| m.content.clone()).unwrap_or_default();
-        return format!("{}\n\n{}", lang_instr, content);
+        return format!("{}\n\n{}{}", lang_instr, title_ctx, content);
     }
 
-    let mut prompt = format!("{}\n\nPrevious conversation:\n\n", lang_instr);
+    let mut prompt = format!("{}\n\n{}Previous conversation:\n\n", lang_instr, title_ctx);
     for msg in &disc.messages {
         match msg.role {
             MessageRole::User => prompt.push_str(&format!("User: {}\n\n", msg.content)),
@@ -1305,6 +1345,23 @@ fn build_agent_prompt(disc: &Discussion) -> String {
             MessageRole::System => {}
         }
     }
+
+    // Remind the agent about active profiles/skills if they were changed mid-conversation.
+    // The profiles are also in the system prompt, but this explicit note in the conversation
+    // ensures the agent notices the change even when continuing a long conversation.
+    if !disc.profile_ids.is_empty() {
+        let profile_names: Vec<String> = disc.profile_ids.iter()
+            .map(|id| crate::core::profiles::get_profile(id)
+                .map(|p| format!("{} {} ({})", p.avatar, p.persona_name, p.role))
+                .unwrap_or_else(|| id.clone()))
+            .collect();
+        prompt.push_str(&format!(
+            "[System note: The user has configured the following agent profiles for this conversation: {}. \
+            You MUST respond as these profiles — follow their personas as defined in your system instructions.]\n\n",
+            profile_names.join(", ")
+        ));
+    }
+
     prompt.push_str("Please respond to the latest user message above.");
     prompt
 }
@@ -1379,6 +1436,17 @@ pub(crate) fn detect_agent_error_hint(output: &str) -> Option<String> {
         return Some(
             "⚠️ **Erreur réseau.**\n\
              Impossible de joindre l'API. Vérifiez votre connexion internet.".to_string()
+        );
+    }
+
+    // Permission denied (sandbox / file access)
+    if lower.contains("permission denied") || lower.contains("sandbox permission") {
+        return Some(
+            "⚠️ **Permission refusée sur le répertoire du projet.**\n\
+             Causes possibles :\n\
+             - Le projet n'est pas dans le répertoire rw (`KRONN_REPOS_DIR`)\n\
+             - Le container a un UID différent du propriétaire des fichiers → `make stop && make start` pour rebuild\n\
+             - Sur macOS : vérifiez que Docker Desktop a accès au répertoire dans Settings > Resources > File sharing".to_string()
         );
     }
 
@@ -1485,4 +1553,39 @@ mod tests {
         let hint = detect_agent_error_hint("UNAUTHORIZED ACCESS DENIED");
         assert!(hint.is_some());
     }
+}
+
+/// Build MCP context from global MCP configs for general discussions (no project).
+/// Lists the server names so the agent knows which MCP tools are available.
+async fn build_global_mcp_context(state: &AppState) -> Option<String> {
+    let configs = state.db.with_conn(|conn| {
+        crate::db::mcps::list_configs(conn)
+    }).await.ok()?;
+
+    let global_configs: Vec<_> = configs.into_iter().filter(|c| c.include_general).collect();
+    if global_configs.is_empty() {
+        return None;
+    }
+
+    // Get server names for the global configs
+    let servers = state.db.with_conn(|conn| {
+        crate::db::mcps::list_servers(conn)
+    }).await.unwrap_or_default();
+    let server_map: std::collections::HashMap<String, String> = servers.into_iter()
+        .map(|s| (s.id.clone(), s.name.clone()))
+        .collect();
+
+    let mut result = String::from("## MCP Servers available\n\n");
+    result.push_str("You have access to the following MCP servers (global). ");
+    result.push_str("Use their tools (prefixed `mcp__<server>__<tool>`) instead of Bash workarounds.\n\n");
+    result.push_str("Available servers:\n");
+    for cfg in &global_configs {
+        let name = server_map.get(&cfg.server_id)
+            .cloned()
+            .unwrap_or_else(|| cfg.label.clone());
+        result.push_str(&format!("- **{}** ({})\n", cfg.label, name));
+    }
+    result.push('\n');
+
+    Some(result)
 }

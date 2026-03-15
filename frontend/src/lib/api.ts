@@ -172,6 +172,12 @@ export const projects = {
   listAiFiles: (id: string) => api<AiFileNode[]>('GET', `/projects/${id}/ai-files`),
   readAiFile: (id: string, path: string) => api<AiFileContent>('GET', `/projects/${id}/ai-file?path=${encodeURIComponent(path)}`),
   searchAiFiles: (id: string, q: string) => api<AiSearchResult[]>('GET', `/projects/${id}/ai-search?q=${encodeURIComponent(q)}`),
+  gitStatus: (id: string) => api<{ branch: string; default_branch: string; is_default_branch: boolean; files: { path: string; status: string; staged: boolean }[]; ahead: number; behind: number }>('GET', `/projects/${id}/git-status`),
+  gitDiff: (id: string, path: string) => api<{ path: string; diff: string }>('GET', `/projects/${id}/git-diff?path=${encodeURIComponent(path)}`),
+  gitCreateBranch: (id: string, req: { name: string }) => api<{ branch: string }>('POST', `/projects/${id}/git-branch`, req),
+  gitCommit: (id: string, req: { files: string[]; message: string }) => api<{ hash: string; message: string }>('POST', `/projects/${id}/git-commit`, req),
+  gitPush: (id: string) => api<{ success: boolean; message: string }>('POST', `/projects/${id}/git-push`, {}),
+  exec: (id: string, command: string) => api<{ stdout: string; stderr: string; exit_code: number }>('POST', `/projects/${id}/exec`, { command }),
 
   /** Stream the AI audit progress via SSE */
   auditStream: async (
@@ -365,7 +371,7 @@ export const discussions = {
   get: (id: string) => api<Discussion>('GET', `/discussions/${id}`),
   create: (req: CreateDiscussionRequest) => api<Discussion>('POST', '/discussions', req),
   delete: (id: string) => api<void>('DELETE', `/discussions/${id}`),
-  update: (id: string, body: { title?: string; archived?: boolean }) => api<void>('PATCH', `/discussions/${id}`, body),
+  update: (id: string, body: { title?: string; archived?: boolean; skill_ids?: string[]; profile_ids?: string[]; directive_ids?: string[]; project_id?: string | null }) => api<void>('PATCH', `/discussions/${id}`, body),
 
   /** Stream SSE helper shared by sendMessage and run. */
   _streamSSE: async (

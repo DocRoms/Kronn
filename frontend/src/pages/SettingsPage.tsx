@@ -68,6 +68,7 @@ export function SettingsPage({
   const [availableSkills, setAvailableSkills] = useState<Skill[]>([]);
   const [showCreateSkill, setShowCreateSkill] = useState(false);
   const [newSkillName, setNewSkillName] = useState('');
+  const [newSkillDesc, setNewSkillDesc] = useState('');
   const [newSkillIcon, setNewSkillIcon] = useState('Star');
   const [newSkillCategory, setNewSkillCategory] = useState<'Language' | 'Domain' | 'Business'>('Language');
   const [newSkillContent, setNewSkillContent] = useState('');
@@ -88,6 +89,7 @@ export function SettingsPage({
   const [availableDirectives, setAvailableDirectives] = useState<Directive[]>([]);
   const [showCreateDirective, setShowCreateDirective] = useState(false);
   const [newDirectiveName, setNewDirectiveName] = useState('');
+  const [newDirectiveDesc, setNewDirectiveDesc] = useState('');
   const [newDirectiveIcon, setNewDirectiveIcon] = useState('📋');
   const [newDirectiveCategory, setNewDirectiveCategory] = useState<'Output' | 'Language'>('Output');
   const [newDirectiveContent, setNewDirectiveContent] = useState('');
@@ -814,7 +816,9 @@ export function SettingsPage({
                     )}
                   </div>
                 </div>
-                <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginBottom: 6 }}>{skill.name}</div>
+                {skill.description && (
+                  <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginBottom: 6 }}>{skill.description}</div>
+                )}
                 {!skill.is_builtin && (
                   <button
                     style={{ ...ss.iconBtn, padding: '2px 6px', color: '#ff4d6a', borderColor: 'rgba(255,77,106,0.2)' }}
@@ -862,6 +866,10 @@ export function SettingsPage({
                 </div>
               </div>
               <div style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('skills.description')}</label>
+                <input style={ss.input} value={newSkillDesc} onChange={e => setNewSkillDesc(e.target.value)} placeholder={t('skills.descriptionPlaceholder')} />
+              </div>
+              <div style={{ marginBottom: 10 }}>
                 <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('skills.icon')}</label>
                 <input style={ss.input} value={newSkillIcon} onChange={e => setNewSkillIcon(e.target.value)} placeholder="Star, Code, Shield..." />
               </div>
@@ -882,6 +890,7 @@ export function SettingsPage({
                     try {
                       const created = await skillsApi.create({
                         name: newSkillName,
+                        description: newSkillDesc,
                         icon: newSkillIcon,
                         category: newSkillCategory,
                         content: newSkillContent,
@@ -1323,6 +1332,9 @@ export function SettingsPage({
                     )}
                   </div>
                 </div>
+                {directive.description && (
+                  <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginBottom: 4 }}>{directive.description}</div>
+                )}
                 {(directive.conflicts ?? []).length > 0 && (
                   <div style={{ fontSize: 9, color: 'rgba(255,77,106,0.6)', marginBottom: 4 }}>
                     ⚠ {t('directives.conflicts')}: {(directive.conflicts ?? []).join(', ')}
@@ -1374,6 +1386,10 @@ export function SettingsPage({
                   </select>
                 </div>
               </div>
+              <div style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('directives.description')}</label>
+                <input style={ss.input} value={newDirectiveDesc} onChange={e => setNewDirectiveDesc(e.target.value)} placeholder={t('directives.descriptionPlaceholder')} />
+              </div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
                 <div>
                   <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('directives.icon')}</label>
@@ -1402,6 +1418,7 @@ export function SettingsPage({
                       const conflicts = newDirectiveConflicts.split(',').map(s => s.trim()).filter(Boolean);
                       const created = await directivesApi.create({
                         name: newDirectiveName,
+                        description: newDirectiveDesc,
                         icon: newDirectiveIcon,
                         category: newDirectiveCategory,
                         content: newDirectiveContent,
@@ -1572,7 +1589,11 @@ export function SettingsPage({
                 { label: t('config.dbDiscussions'), value: dbInfo.discussion_count },
                 { label: t('config.dbMessages'), value: dbInfo.message_count },
                 { label: t('config.dbMcps'), value: dbInfo.mcp_count },
-              ].map(({ label, value }) => (
+                { label: t('config.dbWorkflows'), value: dbInfo.workflow_count },
+                { label: t('config.dbSkills'), value: dbInfo.custom_skill_count },
+                { label: t('config.dbProfiles'), value: dbInfo.custom_profile_count },
+                { label: t('config.dbDirectives'), value: dbInfo.custom_directive_count },
+              ].filter(({ value }) => value > 0).map(({ label, value }) => (
                 <div key={label} style={{ textAlign: 'center' }}>
                   <div style={{ fontSize: 18, fontWeight: 700, color: '#c8ff00' }}>{value}</div>
                   <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', marginTop: 2 }}>{label}</div>

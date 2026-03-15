@@ -1,5 +1,6 @@
 ---
 name: Markdown Report
+description: Structure responses as well-formatted Markdown reports with sections
 category: output
 icon: 📝
 builtin: true

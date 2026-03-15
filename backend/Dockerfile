@@ -35,9 +35,16 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM debian:trixie-slim
 
 # Create non-root user for runtime (UID/GID overridable via KRONN_HOST_UID/GID)
+# On macOS the default GID is 20 which conflicts with 'dialout' in Debian — handle gracefully.
 ARG APP_UID=1000
 ARG APP_GID=1000
-RUN groupadd -g ${APP_GID} kronn && useradd -u ${APP_UID} -g kronn -m kronn
+RUN if getent group ${APP_GID} >/dev/null 2>&1; then \
+      existing=$(getent group ${APP_GID} | cut -d: -f1); \
+      groupmod -n kronn "$existing"; \
+    else \
+      groupadd -g ${APP_GID} kronn; \
+    fi \
+    && useradd -u ${APP_UID} -g kronn -m kronn
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates git curl nodejs npm python3 python3-pip \

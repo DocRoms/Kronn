@@ -366,7 +366,7 @@ fn mcp_config_insert_with_projects() {
     let config = McpConfig {
         id: "cfg1".into(), server_id: "srv1".into(), label: "My Config".into(),
         env_keys: vec!["KEY1".into()], env_encrypted: "enc".into(),
-        args_override: None, is_global: false, config_hash: "hash1".into(),
+        args_override: None, is_global: false, include_general: true, config_hash: "hash1".into(),
         project_ids: vec!["p1".into()],
     };
     crate::db::mcps::insert_config(&conn, &config).unwrap();
@@ -391,7 +391,7 @@ fn mcp_configs_for_project_includes_global() {
     let global = McpConfig {
         id: "cfg-global".into(), server_id: "srv1".into(), label: "Global".into(),
         env_keys: vec![], env_encrypted: "".into(),
-        args_override: None, is_global: true, config_hash: "h1".into(),
+        args_override: None, is_global: true, include_general: true, config_hash: "h1".into(),
         project_ids: vec![],
     };
     crate::db::mcps::insert_config(&conn, &global).unwrap();
@@ -400,7 +400,7 @@ fn mcp_configs_for_project_includes_global() {
     let specific = McpConfig {
         id: "cfg-proj".into(), server_id: "srv1".into(), label: "Proj".into(),
         env_keys: vec![], env_encrypted: "".into(),
-        args_override: None, is_global: false, config_hash: "h2".into(),
+        args_override: None, is_global: false, include_general: true, config_hash: "h2".into(),
         project_ids: vec!["p1".into()],
     };
     crate::db::mcps::insert_config(&conn, &specific).unwrap();

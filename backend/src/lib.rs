@@ -180,6 +180,12 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/projects/:id/ai-files", get(api::projects::list_ai_files))
         .route("/api/projects/:id/ai-file", get(api::projects::read_ai_file))
         .route("/api/projects/:id/ai-search", get(api::projects::search_ai_files))
+        .route("/api/projects/:id/git-status", get(api::projects::git_status))
+        .route("/api/projects/:id/git-diff", get(api::projects::git_diff))
+        .route("/api/projects/:id/git-branch", post(api::projects::git_branch))
+        .route("/api/projects/:id/git-commit", post(api::projects::git_commit))
+        .route("/api/projects/:id/git-push", post(api::projects::git_push))
+        .route("/api/projects/:id/exec", post(api::projects::project_exec))
         // ── Agents ──
         .route("/api/agents", get(api::agents::detect))
         .route("/api/agents/install", post(api::agents::install))

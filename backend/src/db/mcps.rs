@@ -108,7 +108,7 @@ pub fn delete_server(conn: &Connection, id: &str) -> Result<bool> {
 
 pub fn list_configs(conn: &Connection) -> Result<Vec<McpConfig>> {
     let mut stmt = conn.prepare(
-        "SELECT id, server_id, label, env_encrypted, env_keys_json, args_override, is_global, config_hash
+        "SELECT id, server_id, label, env_encrypted, env_keys_json, args_override, is_global, config_hash, include_general
          FROM mcp_configs ORDER BY label"
     )?;
 
@@ -126,6 +126,7 @@ pub fn list_configs(conn: &Connection) -> Result<Vec<McpConfig>> {
             args_override: args_str.and_then(|s| serde_json::from_str(&s).ok()),
             is_global: row.get::<_, i32>(6)? != 0,
             config_hash: row.get(7)?,
+            include_general: row.get::<_, i32>(8).unwrap_or(1) != 0,
             project_ids: vec![], // loaded below
         }))
     })?.filter_map(|r| r.ok())
@@ -155,8 +156,8 @@ pub fn insert_config(conn: &Connection, config: &McpConfig) -> Result<()> {
         .transpose()?;
 
     conn.execute(
-        "INSERT INTO mcp_configs (id, server_id, label, env_encrypted, env_keys_json, args_override, is_global, config_hash)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO mcp_configs (id, server_id, label, env_encrypted, env_keys_json, args_override, is_global, config_hash, include_general)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             config.id,
             config.server_id,
@@ -166,6 +167,7 @@ pub fn insert_config(conn: &Connection, config: &McpConfig) -> Result<()> {
             args_json,
             config.is_global as i32,
             config.config_hash,
+            config.include_general as i32,
         ],
     )?;
 
@@ -178,7 +180,7 @@ pub fn insert_config(conn: &Connection, config: &McpConfig) -> Result<()> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn update_config(conn: &Connection, id: &str, label: Option<&str>, env_encrypted: Option<&str>, env_keys: Option<&[String]>, args_override: Option<&Vec<String>>, is_global: Option<bool>, config_hash: Option<&str>) -> Result<bool> {
+pub fn update_config(conn: &Connection, id: &str, label: Option<&str>, env_encrypted: Option<&str>, env_keys: Option<&[String]>, args_override: Option<&Vec<String>>, is_global: Option<bool>, config_hash: Option<&str>, include_general: Option<bool>) -> Result<bool> {
     // Load existing, apply changes, write back
     let existing = match get_config(conn, id)? {
         Some(c) => c,
@@ -190,6 +192,7 @@ pub fn update_config(conn: &Connection, id: &str, label: Option<&str>, env_encry
     let new_keys = env_keys.map(|k| k.to_vec()).unwrap_or(existing.env_keys.clone());
     let new_args = args_override.cloned().or(existing.args_override.clone());
     let new_global = is_global.unwrap_or(existing.is_global);
+    let new_include_general = include_general.unwrap_or(existing.include_general);
     let new_hash = config_hash.unwrap_or(&existing.config_hash);
 
     let env_keys_json = serde_json::to_string(&new_keys)?;
@@ -198,8 +201,8 @@ pub fn update_config(conn: &Connection, id: &str, label: Option<&str>, env_encry
         .transpose()?;
 
     let affected = conn.execute(
-        "UPDATE mcp_configs SET label = ?1, env_encrypted = ?2, env_keys_json = ?3, args_override = ?4, is_global = ?5, config_hash = ?6 WHERE id = ?7",
-        params![new_label, new_enc, env_keys_json, args_json, new_global as i32, new_hash, id],
+        "UPDATE mcp_configs SET label = ?1, env_encrypted = ?2, env_keys_json = ?3, args_override = ?4, is_global = ?5, config_hash = ?6, include_general = ?7 WHERE id = ?8",
+        params![new_label, new_enc, env_keys_json, args_json, new_global as i32, new_hash, new_include_general as i32, id],
     )?;
     Ok(affected > 0)
 }
@@ -294,6 +297,7 @@ pub fn list_configs_display(conn: &Connection) -> Result<Vec<McpConfigDisplay>> 
             env_masked,
             args_override: c.args_override,
             is_global: c.is_global,
+            include_general: c.include_general,
             config_hash: c.config_hash,
             project_ids: c.project_ids,
             project_names,

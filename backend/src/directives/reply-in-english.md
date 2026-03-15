@@ -1,5 +1,6 @@
 ---
 name: Reply in English
+description: Force all responses in clear, professional English
 category: language
 icon: 🇬🇧
 builtin: true

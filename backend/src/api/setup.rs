@@ -535,6 +535,14 @@ pub async fn db_info(
         .map(|m| m.len())
         .unwrap_or(0);
 
+    // Count custom skills/directives/profiles (file-based, not in DB)
+    let custom_skill_count = crate::core::skills::list_all_skills()
+        .iter().filter(|s| !s.is_builtin).count() as u32;
+    let custom_profile_count = crate::core::profiles::list_all_profiles()
+        .iter().filter(|p| !p.is_builtin).count() as u32;
+    let custom_directive_count = crate::core::directives::list_all_directives()
+        .iter().filter(|d| !d.is_builtin).count() as u32;
+
     match state.db.with_conn(move |conn| {
         let count = |table: &str| -> u32 {
             conn.query_row(&format!("SELECT COUNT(*) FROM {}", table), [], |r| r.get(0))
@@ -548,6 +556,9 @@ pub async fn db_info(
             mcp_count: count("mcp_configs"),
             workflow_count: count("workflows"),
             workflow_run_count: count("workflow_runs"),
+            custom_skill_count,
+            custom_profile_count,
+            custom_directive_count,
         })
     }).await {
         Ok(info) => Json(ApiResponse::ok(info)),
@@ -569,11 +580,35 @@ pub async fn export_data(
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
+    let (workflows, mcp_servers, mcp_configs) = match state.db.with_conn(|conn| {
+        let wf = crate::db::workflows::list_workflows(conn)?;
+        let servers = crate::db::mcps::list_servers(conn)?;
+        let configs = crate::db::mcps::list_configs(conn)?;
+        Ok((wf, servers, configs))
+    }).await {
+        Ok(data) => data,
+        Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
+    };
+
+    // Custom skills/directives/profiles (file-based)
+    let custom_skills: Vec<_> = crate::core::skills::list_all_skills()
+        .into_iter().filter(|s| !s.is_builtin).collect();
+    let custom_directives: Vec<_> = crate::core::directives::list_all_directives()
+        .into_iter().filter(|d| !d.is_builtin).collect();
+    let custom_profiles: Vec<_> = crate::core::profiles::list_all_profiles()
+        .into_iter().filter(|p| !p.is_builtin).collect();
+
     Json(ApiResponse::ok(DbExport {
-        version: 1,
+        version: 2,
         exported_at: Utc::now(),
         projects,
         discussions,
+        workflows,
+        mcp_servers,
+        mcp_configs,
+        custom_skills,
+        custom_directives,
+        custom_profiles,
     }))
 }
 
@@ -585,7 +620,10 @@ pub async fn import_data(
     // Clear existing data
     if let Err(e) = state.db.with_conn(|conn| {
         conn.execute_batch(
-            "DELETE FROM messages; DELETE FROM discussions; DELETE FROM mcp_config_projects; DELETE FROM mcp_configs; DELETE FROM mcp_servers; DELETE FROM projects;"
+            "DELETE FROM messages; DELETE FROM discussions; \
+             DELETE FROM mcp_config_projects; DELETE FROM mcp_configs; DELETE FROM mcp_servers; \
+             DELETE FROM workflow_runs; DELETE FROM workflows; \
+             DELETE FROM projects;"
         )?;
         Ok(())
     }).await {
@@ -596,7 +634,7 @@ pub async fn import_data(
     for project in &data.projects {
         let p = project.clone();
         if let Err(e) = state.db.with_conn(move |conn| crate::db::projects::insert_project(conn, &p)).await {
-            return Json(ApiResponse::err(format!("Import project error: {}", e)));
+            tracing::warn!("Import project error: {}", e);
         }
     }
 
@@ -604,7 +642,7 @@ pub async fn import_data(
     for disc in &data.discussions {
         let d = disc.clone();
         if let Err(e) = state.db.with_conn(move |conn| crate::db::discussions::insert_discussion(conn, &d)).await {
-            return Json(ApiResponse::err(format!("Import discussion error: {}", e)));
+            tracing::warn!("Import discussion error: {}", e);
         }
         let did = disc.id.clone();
         for msg in &disc.messages {
@@ -612,6 +650,49 @@ pub async fn import_data(
             let id = did.clone();
             let _ = state.db.with_conn(move |conn| crate::db::discussions::insert_message(conn, &id, &m)).await;
         }
+    }
+
+    // Import MCP servers & configs
+    for server in &data.mcp_servers {
+        let s = server.clone();
+        let _ = state.db.with_conn(move |conn| crate::db::mcps::upsert_server(conn, &s)).await;
+    }
+    for config in &data.mcp_configs {
+        let c = config.clone();
+        let _ = state.db.with_conn(move |conn| crate::db::mcps::insert_config(conn, &c)).await;
+    }
+
+    // Import workflows
+    for wf in &data.workflows {
+        let w = wf.clone();
+        let _ = state.db.with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &w)).await;
+    }
+
+    // Import custom skills/directives/profiles (file-based)
+    for skill in &data.custom_skills {
+        let _ = crate::core::skills::save_custom_skill(
+            &skill.name, &skill.description, &skill.icon, &skill.category, &skill.content,
+        );
+    }
+    for directive in &data.custom_directives {
+        let _ = crate::core::directives::save_custom_directive(
+            &directive.name, &directive.description, &directive.icon, &directive.category,
+            &directive.content, &directive.conflicts,
+        );
+    }
+    for profile in &data.custom_profiles {
+        let _ = crate::core::profiles::save_custom_profile(
+            &crate::core::profiles::CustomProfileData {
+                name: &profile.name,
+                persona_name: &profile.persona_name,
+                role: &profile.role,
+                avatar: &profile.avatar,
+                color: &profile.color,
+                category: &profile.category,
+                persona_prompt: &profile.persona_prompt,
+                default_engine: profile.default_engine.as_deref(),
+            }
+        );
     }
 
     Json(ApiResponse::ok(()))

@@ -1,5 +1,6 @@
 ---
 name: Accessibility
+description: WCAG 2.1 AA compliance, semantic HTML, keyboard nav, and screen readers
 category: business
 icon: ♿
 builtin: true

@@ -20,7 +20,7 @@ pub async fn create(
     _state: State<AppState>,
     Json(req): Json<CreateDirectiveRequest>,
 ) -> Json<ApiResponse<Directive>> {
-    match directives::save_custom_directive(&req.name, &req.icon, &req.category, &req.content, &req.conflicts) {
+    match directives::save_custom_directive(&req.name, &req.description, &req.icon, &req.category, &req.content, &req.conflicts) {
         Ok(id) => {
             match directives::get_directive(&id) {
                 Some(directive) => Json(ApiResponse::ok(directive)),
@@ -43,7 +43,7 @@ pub async fn update(
 
     let _ = directives::delete_custom_directive(&id);
 
-    match directives::save_custom_directive(&req.name, &req.icon, &req.category, &req.content, &req.conflicts) {
+    match directives::save_custom_directive(&req.name, &req.description, &req.icon, &req.category, &req.content, &req.conflicts) {
         Ok(new_id) => {
             match directives::get_directive(&new_id) {
                 Some(directive) => Json(ApiResponse::ok(directive)),

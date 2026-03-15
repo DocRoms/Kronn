@@ -1,5 +1,6 @@
 ---
 name: Code Only
+description: Output raw code only, no explanations or surrounding text
 category: output
 icon: 💻
 builtin: true

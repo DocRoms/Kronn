@@ -185,15 +185,9 @@ pub fn sync_project_mcps_to_disk(
         // ── Vibe: .vibe/config.toml ──
         sync_vibe_project_config(&project.path, &configs, &server_map, secret);
 
-        // Auto-create MCP context files for new MCPs
-        let mcp_labels: Vec<(String, String)> = configs.iter()
-            .filter_map(|c| {
-                server_map.get(&c.server_id).map(|s| {
-                    (c.label.clone(), s.description.clone())
-                })
-            })
-            .collect();
-        sync_mcp_context_files(&project.path, &mcp_labels);
+        // MCP context files are only created when the user explicitly writes
+        // custom instructions via the UI (write_mcp_context). No auto-creation
+        // of empty/template files — they add no value and pollute the project.
     }
 
     Ok(())

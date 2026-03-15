@@ -1,5 +1,6 @@
 ---
 name: Web Performance
+description: Core Web Vitals optimization, loading speed, and bundle analysis
 category: business
 icon: ⚡
 builtin: true

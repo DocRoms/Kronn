@@ -2,12 +2,13 @@ import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { discussions as discussionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi } from '../lib/api';
-import type { Project, AgentDetection, Discussion, AgentType, AgentsConfig, Skill, AgentProfile, Directive } from '../types/generated';
+import { GitPanel } from '../components/GitPanel';
+import type { Project, AgentDetection, Discussion, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay } from '../types/generated';
 import { useT } from '../lib/I18nContext';
 import { AGENT_LABELS, agentColor, isAgentRestricted as isAgentRestrictedUtil, hasAgentFullAccess } from '../lib/constants';
 import type { ToastFn } from '../hooks/useToast';
 import {
-  Folder, ChevronRight, Cpu,
+  Folder, ChevronRight, Cpu, GitBranch, Server,
   Plus, Trash2, Loader2,
   MessageSquare, Send, X, Key, AlertTriangle, Users,
   StopCircle, RotateCcw, Pencil, ShieldCheck, Check, Archive, Zap, UserCircle, FileText, Settings, Rocket,
@@ -169,6 +170,7 @@ export interface DiscussionsPageProps {
   markDiscussionSeen: (discId: string, msgCount: number) => void;
   onActiveDiscussionChange: (id: string | null) => void;
   lastSeenMsgCount: Record<string, number>;
+  mcpConfigs?: McpConfigDisplay[];
 }
 
 export function DiscussionsPage({
@@ -197,6 +199,7 @@ export function DiscussionsPage({
   onActiveDiscussionChange,
   lastSeenMsgCount,
   initialActiveDiscussionId,
+  mcpConfigs = [],
 }: DiscussionsPageProps) {
   const { t } = useT();
 
@@ -209,6 +212,9 @@ export function DiscussionsPage({
   const [newDiscPrompt, setNewDiscPrompt] = useState('');
   const [newDiscPrefilled, setNewDiscPrefilled] = useState(false);
   const [showAdvancedOptions, setShowAdvancedOptions] = useState(false);
+  const [showGitPanel, setShowGitPanel] = useState(false);
+  const [showMcpPopover, setShowMcpPopover] = useState(false);
+  const [showProfileEditor, setShowProfileEditor] = useState(false);
   const [chatInput, setChatInput] = useState('');
   const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState('');
@@ -487,6 +493,7 @@ export function DiscussionsPage({
             tokens_used: 0,
             auth_mode: null,
           }],
+          message_count: disc.message_count + 1,
         },
       };
     });
@@ -494,28 +501,6 @@ export function DiscussionsPage({
     const controller = new AbortController();
     abortControllers.current[discId] = controller;
     setStreamingMap(prev => ({ ...prev, [discId]: '' }));
-
-    // Optimistic update: show user message immediately before agent starts
-    setLoadedDiscussions(prev => {
-      const disc = prev[discId];
-      if (!disc) return prev;
-      return {
-        ...prev,
-        [discId]: {
-          ...disc,
-          messages: [...disc.messages, {
-            id: `optimistic-${Date.now()}`,
-            role: 'User' as const,
-            content: msg,
-            agent_type: null,
-            timestamp: new Date().toISOString(),
-            tokens_used: 0,
-            auth_mode: null,
-          }],
-          message_count: disc.message_count + 1,
-        },
-      };
-    });
 
     await discussionsApi.sendMessageStream(
       discId,
@@ -901,7 +886,7 @@ export function DiscussionsPage({
                                     display: 'flex', alignItems: 'center', gap: 3,
                                     transition: 'all 0.15s',
                                   }}
-                                  title={skill.name}
+                                  title={skill.description || skill.name}
                                 >
                                   {selected && <Check size={9} />}
                                   {skill.name}
@@ -983,7 +968,7 @@ export function DiscussionsPage({
                                     display: 'flex', alignItems: 'center', gap: 3,
                                     transition: 'all 0.15s',
                                   }}
-                                  title={directive.name}
+                                  title={directive.description || directive.name}
                                 >
                                   {selected && <Check size={9} />}
                                   {directive.icon} {directive.name}
@@ -1070,15 +1055,27 @@ export function DiscussionsPage({
                       onChange={e => setEditingTitleText(e.target.value)}
                       onKeyDown={async e => {
                         if (e.key === 'Enter' && editingTitleText.trim()) {
-                          await discussionsApi.update(activeDiscussion.id, { title: editingTitleText.trim() });
+                          const newTitle = editingTitleText.trim();
+                          await discussionsApi.update(activeDiscussion.id, { title: newTitle });
                           setEditingTitleId(null);
+                          setLoadedDiscussions(prev => {
+                            const d = prev[activeDiscussion.id];
+                            if (!d) return prev;
+                            return { ...prev, [activeDiscussion.id]: { ...d, title: newTitle } };
+                          });
                           refetchDiscussions();
                         }
                         if (e.key === 'Escape') setEditingTitleId(null);
                       }}
                       onBlur={async () => {
                         if (editingTitleText.trim() && editingTitleText.trim() !== activeDiscussion.title) {
-                          await discussionsApi.update(activeDiscussion.id, { title: editingTitleText.trim() });
+                          const newTitle = editingTitleText.trim();
+                          await discussionsApi.update(activeDiscussion.id, { title: newTitle });
+                          setLoadedDiscussions(prev => {
+                            const d = prev[activeDiscussion.id];
+                            if (!d) return prev;
+                            return { ...prev, [activeDiscussion.id]: { ...d, title: newTitle } };
+                          });
                           refetchDiscussions();
                         }
                         setEditingTitleId(null);
@@ -1167,18 +1164,217 @@ export function DiscussionsPage({
                   )}
                 </div>
               </div>
-              <button
-                style={{ ...ls.iconBtn, color: '#ff4d6a' }}
-                onClick={async () => {
-                  if (!confirm(t('disc.confirmDelete'))) return;
-                  await discussionsApi.delete(activeDiscussion.id);
-                  setActiveDiscussionId(null);
-                  refetchDiscussions();
-                }}
-              >
-                <Trash2 size={12} />
-              </button>
+              <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                {/* MCP info button */}
+                <div style={{ position: 'relative' }}>
+                  <button
+                    style={{ ...ls.iconBtn, color: showMcpPopover ? '#00d4ff' : 'rgba(255,255,255,0.4)' }}
+                    onClick={() => { setShowMcpPopover(prev => !prev); setShowProfileEditor(false); }}
+                    title={t('disc.mcps')}
+                  >
+                    <Server size={13} />
+                  </button>
+                  {showMcpPopover && (() => {
+                    const discMcps = activeDiscussion.project_id
+                      ? mcpConfigs.filter(c => c.is_global || c.project_ids.includes(activeDiscussion.project_id!))
+                      : mcpConfigs.filter(c => c.include_general);
+                    return (
+                      <div style={{
+                        position: 'absolute', right: 0, top: '100%', marginTop: 4, zIndex: 100,
+                        background: '#161b22', border: '1px solid rgba(0,212,255,0.2)', borderRadius: 8,
+                        padding: '8px 0', minWidth: 180, boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
+                      }}>
+                        <div style={{ padding: '4px 12px 6px', fontSize: 10, color: 'rgba(255,255,255,0.35)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                          {t('disc.mcps')}
+                        </div>
+                        {discMcps.length === 0 ? (
+                          <div style={{ padding: '4px 12px', fontSize: 11, color: 'rgba(255,255,255,0.3)' }}>{t('disc.noMcps')}</div>
+                        ) : discMcps.map(c => (
+                          <div key={c.id} style={{ padding: '3px 12px', fontSize: 11, color: '#e8eaed', display: 'flex', alignItems: 'center', gap: 6 }}>
+                            <Server size={9} style={{ color: '#00d4ff', flexShrink: 0 }} />
+                            {c.label}
+                            <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.25)', marginLeft: 'auto' }}>{c.server_name}</span>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
+                </div>
+
+                {/* Edit profiles/skills button */}
+                <div style={{ position: 'relative' }}>
+                  <button
+                    style={{ ...ls.iconBtn, color: showProfileEditor ? '#a78bfa' : 'rgba(255,255,255,0.4)' }}
+                    onClick={() => { setShowProfileEditor(prev => !prev); setShowMcpPopover(false); }}
+                    title={t('disc.editConfig')}
+                  >
+                    <Settings size={13} />
+                  </button>
+                  {showProfileEditor && (
+                    <div style={{
+                      position: 'absolute', right: 0, top: '100%', marginTop: 4, zIndex: 100,
+                      background: '#161b22', border: '1px solid rgba(139,92,246,0.2)', borderRadius: 8,
+                      padding: 10, minWidth: 240, maxWidth: 320, boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
+                    }}>
+                      {/* Project */}
+                      <div style={{ marginBottom: 8 }}>
+                        <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', fontWeight: 600, marginBottom: 4 }}>{t('disc.project')}</div>
+                        <select
+                          style={{
+                            width: '100%', padding: '4px 6px', borderRadius: 6, fontSize: 11, fontFamily: 'inherit',
+                            background: '#1a1d26', border: '1px solid rgba(255,255,255,0.1)', color: '#e8eaed', outline: 'none',
+                          }}
+                          value={activeDiscussion.project_id ?? ''}
+                          onChange={async (e) => {
+                            const newPid = e.target.value || null;
+                            await discussionsApi.update(activeDiscussion.id, { project_id: newPid });
+                            refetchDiscussions();
+                            setLoadedDiscussions(prev => {
+                              const d = prev[activeDiscussion.id];
+                              if (!d) return prev;
+                              return { ...prev, [activeDiscussion.id]: { ...d, project_id: newPid } };
+                            });
+                          }}
+                        >
+                          <option value="">{t('disc.general')}</option>
+                          {projects.filter(p => !isHiddenPath(p.path)).map(p => (
+                            <option key={p.id} value={p.id}>{p.name}</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      {/* Profiles */}
+                      {availableProfiles.length > 0 && (
+                        <div style={{ marginBottom: 8 }}>
+                          <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', fontWeight: 600, marginBottom: 4 }}>{t('profiles.select')}</div>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                            {availableProfiles.map(profile => {
+                              const active = (activeDiscussion.profile_ids ?? []).includes(profile.id);
+                              return (
+                                <button key={profile.id} title={profile.role} style={{
+                                  padding: '2px 7px', borderRadius: 8, fontSize: 10, fontFamily: 'inherit', cursor: 'pointer',
+                                  border: `1px solid ${active ? (profile.color || 'rgba(139,92,246,0.4)') : 'rgba(255,255,255,0.08)'}`,
+                                  background: active ? `${profile.color}15` : 'transparent',
+                                  color: active ? (profile.color || '#a78bfa') : 'rgba(255,255,255,0.4)',
+                                  display: 'flex', alignItems: 'center', gap: 3,
+                                }} onClick={async () => {
+                                  const current = activeDiscussion.profile_ids ?? [];
+                                  const next = active ? current.filter((id: string) => id !== profile.id) : [...current, profile.id];
+                                  await discussionsApi.update(activeDiscussion.id, { profile_ids: next });
+                                  refetchDiscussions();
+                                  // Optimistic update
+                                  setLoadedDiscussions(prev => {
+                                    const d = prev[activeDiscussion.id];
+                                    if (!d) return prev;
+                                    return { ...prev, [activeDiscussion.id]: { ...d, profile_ids: next } };
+                                  });
+                                }}>
+                                  {active && <Check size={8} />}
+                                  {profile.avatar} {profile.persona_name || profile.name}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Skills */}
+                      {availableSkills.length > 0 && (
+                        <div style={{ marginBottom: 8 }}>
+                          <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', fontWeight: 600, marginBottom: 4 }}>{t('skills.selectSkills')}</div>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                            {availableSkills.map(skill => {
+                              const active = (activeDiscussion.skill_ids ?? []).includes(skill.id);
+                              return (
+                                <button key={skill.id} style={{
+                                  padding: '2px 7px', borderRadius: 8, fontSize: 10, fontFamily: 'inherit', cursor: 'pointer',
+                                  border: `1px solid ${active ? 'rgba(200,255,0,0.3)' : 'rgba(255,255,255,0.08)'}`,
+                                  background: active ? 'rgba(200,255,0,0.08)' : 'transparent',
+                                  color: active ? '#c8ff00' : 'rgba(255,255,255,0.4)',
+                                  display: 'flex', alignItems: 'center', gap: 3,
+                                }} onClick={async () => {
+                                  const current = activeDiscussion.skill_ids ?? [];
+                                  const next = active ? current.filter((id: string) => id !== skill.id) : [...current, skill.id];
+                                  await discussionsApi.update(activeDiscussion.id, { skill_ids: next });
+                                  refetchDiscussions();
+                                  setLoadedDiscussions(prev => {
+                                    const d = prev[activeDiscussion.id];
+                                    if (!d) return prev;
+                                    return { ...prev, [activeDiscussion.id]: { ...d, skill_ids: next } };
+                                  });
+                                }}>
+                                  {active && <Check size={8} />}
+                                  {skill.name}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Directives */}
+                      {availableDirectives.length > 0 && (
+                        <div>
+                          <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', fontWeight: 600, marginBottom: 4 }}>{t('directives.title')}</div>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                            {availableDirectives.map(directive => {
+                              const active = (activeDiscussion.directive_ids ?? []).includes(directive.id);
+                              return (
+                                <button key={directive.id} style={{
+                                  padding: '2px 7px', borderRadius: 8, fontSize: 10, fontFamily: 'inherit', cursor: 'pointer',
+                                  border: `1px solid ${active ? 'rgba(245,158,11,0.3)' : 'rgba(255,255,255,0.08)'}`,
+                                  background: active ? 'rgba(245,158,11,0.08)' : 'transparent',
+                                  color: active ? '#fbbf24' : 'rgba(255,255,255,0.4)',
+                                  display: 'flex', alignItems: 'center', gap: 3,
+                                }} onClick={async () => {
+                                  const current = activeDiscussion.directive_ids ?? [];
+                                  const next = active ? current.filter((id: string) => id !== directive.id) : [...current, directive.id];
+                                  await discussionsApi.update(activeDiscussion.id, { directive_ids: next });
+                                  refetchDiscussions();
+                                  setLoadedDiscussions(prev => {
+                                    const d = prev[activeDiscussion.id];
+                                    if (!d) return prev;
+                                    return { ...prev, [activeDiscussion.id]: { ...d, directive_ids: next } };
+                                  });
+                                }}>
+                                  {active && <Check size={8} />}
+                                  {directive.icon} {directive.name}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {activeDiscussion.project_id && (
+                  <button
+                    style={{ ...ls.iconBtn, color: showGitPanel ? '#c8ff00' : 'rgba(255,255,255,0.4)' }}
+                    onClick={() => setShowGitPanel(prev => !prev)}
+                    title={t('git.filesBtn')}
+                  >
+                    <GitBranch size={13} />
+                  </button>
+                )}
+                <button
+                  style={{ ...ls.iconBtn, color: '#ff4d6a' }}
+                  onClick={async () => {
+                    if (!confirm(t('disc.confirmDelete'))) return;
+                    await discussionsApi.delete(activeDiscussion.id);
+                    setActiveDiscussionId(null);
+                    refetchDiscussions();
+                  }}
+                >
+                  <Trash2 size={12} />
+                </button>
+              </div>
             </div>
+
+            {/* Messages + Git Panel side by side */}
+            <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
 
             {/* Messages */}
             <div style={ds.messages}>
@@ -1628,7 +1824,7 @@ export function DiscussionsPage({
                               return (
                                 <button
                                   key={skill.id}
-                                  title={skill.name}
+                                  title={skill.description || skill.name}
                                   onClick={() => setDebateSkillIds(prev =>
                                     prev.includes(skill.id)
                                       ? prev.filter(id => id !== skill.id)
@@ -1663,7 +1859,7 @@ export function DiscussionsPage({
                             return (
                               <button
                                 key={directive.id}
-                                title={directive.name}
+                                title={directive.description || directive.name}
                                 onClick={() => setDebateDirectiveIds(prev =>
                                   prev.includes(directive.id)
                                     ? prev.filter(id => id !== directive.id)
@@ -1731,6 +1927,18 @@ export function DiscussionsPage({
                 </button>
               )}
             </div>
+
+            </div>{/* end messages column */}
+
+            {/* Git Panel (side panel) */}
+            {showGitPanel && activeDiscussion.project_id && (
+              <GitPanel
+                projectId={activeDiscussion.project_id}
+                onClose={() => setShowGitPanel(false)}
+              />
+            )}
+
+            </div>{/* end flex row (messages + git panel) */}
           </>
         ) : !showNewDiscussion && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, color: 'rgba(255,255,255,0.2)' }}>

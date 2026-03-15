@@ -1,5 +1,6 @@
 ---
 name: Token Saver
+description: Minimize token usage with concise, focused responses
 category: output
 icon: ⚡
 builtin: true

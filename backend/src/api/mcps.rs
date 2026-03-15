@@ -111,6 +111,7 @@ pub async fn create_config(
             env_encrypted,
             args_override: req.args_override,
             is_global: req.is_global,
+            include_general: true,
             config_hash: hash,
             project_ids: req.project_ids,
         };
@@ -186,6 +187,7 @@ pub async fn update_config(
             req.args_override.as_ref(),
             req.is_global,
             new_hash.as_deref(),
+            req.include_general,
         )?;
 
         // Sync .mcp.json to disk — always sync all when secrets change
@@ -424,6 +426,7 @@ pub async fn refresh(
                         env_encrypted,
                         args_override: None,
                         is_global: false,
+                        include_general: true,
                         config_hash: hash,
                         project_ids: vec![project.id.clone()],
                     };

@@ -1,5 +1,6 @@
 ---
 name: JSON Output
+description: Force all responses to be valid, parseable JSON objects
 category: output
 icon: 📋
 builtin: true

@@ -1,5 +1,6 @@
 ---
 name: Data Engineering
+description: ETL/ELT pipelines, data modeling, quality, and orchestration
 category: domain
 icon: 📊
 builtin: true

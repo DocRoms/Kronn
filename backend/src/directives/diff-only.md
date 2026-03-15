@@ -1,5 +1,6 @@
 ---
 name: Diff Only
+description: Output only unified diffs showing what changed, nothing else
 category: output
 icon: 🔀
 builtin: true

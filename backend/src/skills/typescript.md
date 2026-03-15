@@ -1,5 +1,6 @@
 ---
 name: TypeScript
+description: Strict typing, modern patterns, and best practices for TS projects
 category: language
 icon: 🔷
 builtin: true

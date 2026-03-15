@@ -1,5 +1,6 @@
 ---
 name: GDPR & Privacy
+description: Data protection, consent management, and privacy compliance (GDPR/CCPA)
 category: business
 icon: 🛡️
 builtin: true

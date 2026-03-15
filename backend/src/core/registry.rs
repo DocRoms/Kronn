@@ -440,6 +440,18 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             token_url: Some("https://dashboard.exa.ai/api-keys".into()),
             token_help: Some("API key from Exa dashboard (free tier available)".into()),
         },
+        McpDefinition {
+            id: "mcp-datagouv".into(),
+            name: "data.gouv.fr".into(),
+            description: "Search and explore French Open Data datasets — official data.gouv.fr server".into(),
+            transport: McpTransport::Sse {
+                url: "http://localhost:8000/sse".into(),
+            },
+            env_keys: vec![],
+            tags: vec!["search".into(), "opendata".into(), "france".into()],
+            token_url: Some("https://github.com/datagouv/datagouv-mcp".into()),
+            token_help: Some("No API key needed. Run: docker compose up -d (from cloned repo)".into()),
+        },
         // ── Scraping ────────────────────────────────────────────────────
         McpDefinition {
             id: "mcp-firecrawl".into(),

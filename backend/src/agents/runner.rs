@@ -68,14 +68,15 @@ impl AgentProcess {
     }
 
     /// Fix file ownership after agent execution.
-    /// Agents run as root in Docker but files on host volumes should be owned by the host user.
+    /// Files created by agents may have wrong ownership if container UID differs from host UID.
     pub fn fix_ownership(&self) {
         fix_file_ownership(&self.work_dir);
     }
 }
 
 /// Fix file ownership after agent execution or file operations.
-/// Files created in Docker may have wrong ownership; this restores them to the host user.
+/// Files created in Docker may have wrong ownership if container UID differs from host UID.
+/// On macOS with VirtioFS, chown is silently ignored by the filesystem driver.
 pub fn fix_file_ownership(work_dir: &Path) {
     let uid = std::env::var("KRONN_HOST_UID").unwrap_or_default();
     let gid = std::env::var("KRONN_HOST_GID").unwrap_or_default();
@@ -83,14 +84,34 @@ pub fn fix_file_ownership(work_dir: &Path) {
         return; // Not in Docker or no UID/GID configured
     }
 
+    // Skip if container user already matches the desired UID (expected when
+    // APP_UID build arg matches KRONN_HOST_UID — the normal case after the fix).
+    if let Ok(output) = std::process::Command::new("id").arg("-u")
+        .stdout(Stdio::piped()).stderr(Stdio::null()).output()
+    {
+        let current_uid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if current_uid == uid {
+            return; // Already correct UID, no chown needed
+        }
+    }
+
     let ownership = format!("{}:{}", uid, gid);
     // Only fix files in the work directory, not system files
-    let _ = std::process::Command::new("chown")
+    let status = std::process::Command::new("chown")
         .args(["-R", &ownership])
         .arg(work_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
+
+    if let Ok(s) = status {
+        if !s.success() {
+            tracing::debug!(
+                "chown failed (exit {}), likely non-root container or VirtioFS — skipping",
+                s.code().unwrap_or(-1)
+            );
+        }
+    }
 }
 
 /// Configuration for starting an agent process.
@@ -106,6 +127,9 @@ pub struct AgentStartConfig<'a> {
     pub skill_ids: &'a [String],
     pub directive_ids: &'a [String],
     pub profile_ids: &'a [String],
+    /// Override MCP context instead of reading from project filesystem.
+    /// Used for general discussions to inject global MCP configs.
+    pub mcp_context_override: Option<&'a str>,
 }
 
 /// Start an agent process with minimal config (no skills/directives/profiles).
@@ -119,13 +143,17 @@ pub async fn start_agent(
     start_agent_with_config(AgentStartConfig {
         agent_type, project_path, work_dir: None, prompt, tokens, full_access,
         skill_ids: &[], directive_ids: &[], profile_ids: &[],
+        mcp_context_override: None,
     }).await
 }
 
 /// Start an agent process with full configuration.
 pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<AgentProcess, String> {
-    // Read MCP context files from the original project path (not the worktree)
-    let mcp_context = if !config.project_path.is_empty() {
+    // Read MCP context: use override if provided (general discussions),
+    // otherwise read from project filesystem.
+    let mcp_context = if let Some(override_ctx) = config.mcp_context_override {
+        override_ctx.to_string()
+    } else if !config.project_path.is_empty() {
         crate::core::mcp_scanner::read_all_mcp_contexts(config.project_path)
     } else {
         String::new()
@@ -269,6 +297,16 @@ fn agent_command(agent_type: &AgentType, prompt: &str, full_access: bool, mcp_co
             // Codex requires a trusted git directory by default.
             // Inside Docker the paths are mapped, so skip the check.
             args.push("--skip-git-repo-check".into());
+            // In Docker, container paths don't match host trusted paths,
+            // causing "Permission denied" on CWD listing with default sandbox.
+            // Use workspace-write (safe) or danger-full-access (if full_access enabled).
+            if std::env::var("KRONN_HOST_HOME").is_ok() {
+                if full_access {
+                    args.push("--sandbox=danger-full-access".into());
+                } else {
+                    args.push("--sandbox=workspace-write".into());
+                }
+            }
             // Codex has no system prompt flag — prepend context to the prompt
             let full_prompt = if mcp_context.is_empty() {
                 prompt.into()
@@ -389,6 +427,15 @@ fn try_spawn(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    // Set TMPDIR to a directory on the same filesystem as work_dir.
+    // Prevents EXDEV (cross-device link) errors when agents like Codex do
+    // os.rename() from temp files to the work directory (macOS Docker + VirtioFS).
+    let agent_tmpdir = work_dir.join(".kronn-tmp");
+    let _ = std::fs::create_dir_all(&agent_tmpdir);
+    cmd.env("TMPDIR", &agent_tmpdir);
+    cmd.env("TEMP", &agent_tmpdir);
+    cmd.env("TMP", &agent_tmpdir);
 
     // Tell Claude Code we're in a containerized environment.
     // This bypasses the root/sudo check for --dangerously-skip-permissions.

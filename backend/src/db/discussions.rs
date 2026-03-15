@@ -132,23 +132,23 @@ pub fn delete_discussion(conn: &Connection, id: &str) -> Result<bool> {
     Ok(affected > 0)
 }
 
-pub fn update_discussion(conn: &Connection, id: &str, title: Option<&str>, archived: Option<bool>) -> Result<bool> {
-    update_discussion_fields(conn, id, title, archived, None, None, None)
+pub fn update_discussion(conn: &Connection, id: &str, title: Option<&str>, archived: Option<bool>, project_id: Option<Option<&str>>) -> Result<bool> {
+    update_discussion_fields(conn, id, title, archived, None, None, None, project_id)
 }
 
 pub fn update_discussion_skill_ids(conn: &Connection, id: &str, skill_ids: &[String]) -> Result<bool> {
-    update_discussion_fields(conn, id, None, None, Some(skill_ids), None, None)
+    update_discussion_fields(conn, id, None, None, Some(skill_ids), None, None, None)
 }
 
 pub fn update_discussion_profile_ids(conn: &Connection, id: &str, profile_ids: &[String]) -> Result<bool> {
-    update_discussion_fields(conn, id, None, None, None, Some(profile_ids), None)
+    update_discussion_fields(conn, id, None, None, None, Some(profile_ids), None, None)
 }
 
 pub fn update_discussion_directive_ids(conn: &Connection, id: &str, directive_ids: &[String]) -> Result<bool> {
-    update_discussion_fields(conn, id, None, None, None, None, Some(directive_ids))
+    update_discussion_fields(conn, id, None, None, None, None, Some(directive_ids), None)
 }
 
-fn update_discussion_fields(conn: &Connection, id: &str, title: Option<&str>, archived: Option<bool>, skill_ids: Option<&[String]>, profile_ids: Option<&[String]>, directive_ids: Option<&[String]>) -> Result<bool> {
+fn update_discussion_fields(conn: &Connection, id: &str, title: Option<&str>, archived: Option<bool>, skill_ids: Option<&[String]>, profile_ids: Option<&[String]>, directive_ids: Option<&[String]>, project_id: Option<Option<&str>>) -> Result<bool> {
     let mut sets = Vec::new();
     let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
@@ -159,6 +159,10 @@ fn update_discussion_fields(conn: &Connection, id: &str, title: Option<&str>, ar
     if let Some(a) = archived {
         sets.push("archived = ?");
         values.push(Box::new(a as i32));
+    }
+    if let Some(pid) = project_id {
+        sets.push("project_id = ?");
+        values.push(Box::new(pid.map(|s| s.to_string())));
     }
     if let Some(s) = skill_ids {
         sets.push("skill_ids_json = ?");

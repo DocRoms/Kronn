@@ -162,6 +162,7 @@ async fn run_agent_with_timeout(
         skill_ids: &step.skill_ids,
         directive_ids: &step.directive_ids,
         profile_ids: &step.profile_ids,
+        mcp_context_override: None,
     }).await.map_err(|e| anyhow::anyhow!(e))?;
 
     let mut output = String::new();
