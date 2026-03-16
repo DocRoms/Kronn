@@ -950,9 +950,17 @@ pub struct Discussion {
     pub directive_ids: Vec<String>,
     #[serde(default)]
     pub archived: bool,
+    #[serde(default = "default_workspace_mode")]
+    pub workspace_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_branch: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
+
+fn default_workspace_mode() -> String { "Direct".into() }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -1106,6 +1114,10 @@ pub struct CreateDiscussionRequest {
     pub profile_ids: Vec<String>,
     #[serde(default)]
     pub directive_ids: Vec<String>,
+    #[serde(default)]
+    pub workspace_mode: Option<String>,
+    #[serde(default)]
+    pub base_branch: Option<String>,
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -1240,6 +1252,10 @@ pub struct GitStatusResponse {
     pub files: Vec<GitFileStatus>,
     pub ahead: u32,
     pub behind: u32,
+    pub has_upstream: bool,
+    pub provider: String,  // "github", "gitlab", or "unknown"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pr_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -1280,6 +1296,10 @@ pub struct GitBranchResponse {
 pub struct GitCommitRequest {
     pub files: Vec<String>,
     pub message: String,
+    #[serde(default)]
+    pub amend: bool,
+    #[serde(default)]
+    pub sign: bool,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -1295,6 +1315,17 @@ pub struct GitPushResponse {
     pub success: bool,
     pub message: String,
 }
+
+#[derive(Debug, Deserialize)]
+pub struct CreatePrRequest {
+    pub title: String,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default = "default_pr_base")]
+    pub base: String,
+}
+
+fn default_pr_base() -> String { "main".into() }
 
 #[derive(Debug, Deserialize)]
 pub struct ExecRequest {

@@ -8,3 +8,4 @@ pub mod stats;
 pub mod skills;
 pub mod profiles;
 pub mod directives;
+pub mod git_ops;

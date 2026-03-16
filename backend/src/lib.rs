@@ -185,6 +185,8 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/projects/:id/git-branch", post(api::projects::git_branch))
         .route("/api/projects/:id/git-commit", post(api::projects::git_commit))
         .route("/api/projects/:id/git-push", post(api::projects::git_push))
+        .route("/api/projects/:id/git-pr", post(api::projects::create_pr))
+        .route("/api/projects/:id/pr-template", get(api::projects::pr_template))
         .route("/api/projects/:id/exec", post(api::projects::project_exec))
         // ── Agents ──
         .route("/api/agents", get(api::agents::detect))
@@ -216,6 +218,13 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/discussions/:id/messages/last", delete(api::discussions::delete_last_agent_messages).patch(api::discussions::edit_last_user_message))
         .route("/api/discussions/:id/run", post(api::discussions::run_agent))
         .route("/api/discussions/:id/orchestrate", post(api::discussions::orchestrate))
+        .route("/api/discussions/:id/git-status", get(api::discussions::disc_git_status))
+        .route("/api/discussions/:id/git-diff", get(api::discussions::disc_git_diff))
+        .route("/api/discussions/:id/git-commit", post(api::discussions::disc_git_commit))
+        .route("/api/discussions/:id/git-push", post(api::discussions::disc_git_push))
+        .route("/api/discussions/:id/git-pr", post(api::discussions::disc_create_pr))
+        .route("/api/discussions/:id/pr-template", get(api::discussions::disc_pr_template))
+        .route("/api/discussions/:id/exec", post(api::discussions::disc_exec))
         // ── Skills ──
         .route("/api/skills", get(api::skills::list).post(api::skills::create))
         .route("/api/skills/:id", put(api::skills::update).delete(api::skills::delete))

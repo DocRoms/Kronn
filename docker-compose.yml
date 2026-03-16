@@ -25,6 +25,9 @@ services:
       - npm-cache:/home/kronn/.npm  # Persistent npm cache for npx agent execution
       - ${HOME}/.cache/uv:/home/kronn/.cache/uv:rw  # Share host uv cache for Python MCP servers
       - uv-tools:/home/kronn/.local/share/uv  # Persistent uv tool installs (CloudWatch, Atlassian MCP servers)
+      # SSH auth for git push (forward host SSH keys)
+      - ${HOME}/.ssh:/home/kronn/.ssh:ro                    # SSH keys + known_hosts
+      - ${SSH_AUTH_SOCK:-/dev/null}:/run/host-ssh-agent.sock  # SSH agent socket
       # Agent auth directories (local subscriptions)
       - ${HOME}/.claude.json:/home/kronn/.claude.json:ro    # Claude Code main config
       - ${HOME}/.claude:/home/kronn/.claude:rw              # Claude Code auth/config + session state (needs write)
@@ -43,6 +46,7 @@ services:
       - KRONN_HOST_OS=${KRONN_HOST_OS:-Linux}
       - KRONN_HOST_UID=${KRONN_HOST_UID:-1000}
       - KRONN_HOST_GID=${KRONN_HOST_GID:-1000}
+      - SSH_AUTH_SOCK=/run/host-ssh-agent.sock
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}

@@ -88,6 +88,7 @@ const makeListDiscussion = (id: string, msgCount: number): Discussion => ({
   messages: [],           // list endpoint returns empty messages
   message_count: msgCount, // but provides the count
   archived: false,
+  workspace_mode: 'Direct',
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
 });

@@ -48,8 +48,13 @@ RUN if getent group ${APP_GID} >/dev/null 2>&1; then \
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates git curl nodejs npm python3 python3-pip \
-    make gh \
+    make gh openssh-client \
     && rm -rf /var/lib/apt/lists/*
+
+# Install glab (GitLab CLI) for MR creation
+RUN ARCH=$(dpkg --print-architecture) && \
+    curl -fsSL "https://gitlab.com/gitlab-org/cli/-/releases/v1.52.0/downloads/glab_1.52.0_linux_${ARCH}.deb" -o /tmp/glab.deb && \
+    dpkg -i /tmp/glab.deb && rm /tmp/glab.deb
 
 # Install uv as root, then make available to kronn user
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
