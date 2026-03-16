@@ -2,7 +2,7 @@ use std::convert::Infallible;
 use std::pin::Pin;
 use std::time::Duration;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     response::sse::{Event, Sse},
     Json,
 };
@@ -103,6 +103,9 @@ pub async fn create(
         auth_mode: None,
     };
 
+    let workspace_mode = req.workspace_mode.unwrap_or_else(|| "Direct".into());
+    let base_branch = req.base_branch;
+
     let discussion = Discussion {
         id: Uuid::new_v4().to_string(),
         project_id: req.project_id,
@@ -116,6 +119,9 @@ pub async fn create(
         profile_ids: req.profile_ids,
         directive_ids: req.directive_ids,
         archived: false,
+        workspace_mode: workspace_mode.clone(),
+        workspace_path: None,
+        worktree_branch: None,
         created_at: now,
         updated_at: now,
     };
@@ -127,7 +133,53 @@ pub async fn create(
         crate::db::discussions::insert_message(conn, &disc.id, &msg)?;
         Ok(())
     }).await {
-        Ok(()) => Json(ApiResponse::ok(discussion)),
+        Ok(()) => {
+            // If workspace_mode is "Isolated", create a worktree
+            if workspace_mode == "Isolated" {
+                if let Some(ref pid) = discussion.project_id {
+                    let pid = pid.clone();
+                    let project = state.db.with_conn(move |conn| {
+                        crate::db::projects::get_project(conn, &pid)
+                    }).await.ok().flatten();
+
+                    if let Some(project) = project {
+                        let resolved = crate::core::scanner::resolve_host_path(&project.path);
+                        let repo_path = std::path::Path::new(&resolved);
+
+                        let project_slug = &project.name;
+                        let discussion_slug = &discussion.title;
+                        let branch = base_branch.as_deref().unwrap_or("main");
+
+                        match crate::core::worktree::create_discussion_worktree(
+                            repo_path, project_slug, discussion_slug, branch,
+                        ) {
+                            Ok(info) => {
+                                let disc_id = discussion.id.clone();
+                                let wp = info.path.clone();
+                                let wb = info.branch.clone();
+                                let _ = state.db.with_conn(move |conn| {
+                                    crate::db::discussions::update_discussion_workspace(conn, &disc_id, &wp, &wb)
+                                }).await;
+
+                                // Return the updated discussion
+                                let disc_id = discussion.id.clone();
+                                if let Ok(Some(updated)) = state.db.with_conn(move |conn| {
+                                    crate::db::discussions::get_discussion(conn, &disc_id)
+                                }).await {
+                                    return Json(ApiResponse::ok(updated));
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to create worktree for discussion {}: {}", discussion.id, e);
+                                // Discussion is still created in Direct mode — don't fail the whole request
+                            }
+                        }
+                    }
+                }
+            }
+
+            Json(ApiResponse::ok(discussion))
+        },
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
 }
@@ -170,6 +222,33 @@ pub async fn delete(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<()>> {
+    // Fetch discussion to check for worktree before deleting
+    let disc = state.db.with_conn({
+        let did = id.clone();
+        move |conn| crate::db::discussions::get_discussion(conn, &did)
+    }).await.ok().flatten();
+
+    // Clean up worktree if present
+    if let Some(ref d) = disc {
+        if let Some(ref wp) = d.workspace_path {
+            if let Some(ref pid) = d.project_id {
+                let pid = pid.clone();
+                let project_path = state.db.with_conn(move |conn| {
+                    let p = crate::db::projects::get_project(conn, &pid)?;
+                    Ok(p.map(|p| p.path).unwrap_or_default())
+                }).await.unwrap_or_default();
+
+                if !project_path.is_empty() {
+                    let resolved = crate::core::scanner::resolve_host_path(&project_path);
+                    let repo_path = std::path::Path::new(&resolved);
+                    if let Err(e) = crate::core::worktree::remove_discussion_worktree(repo_path, wp, true) {
+                        tracing::warn!("Failed to remove worktree for discussion {}: {}", id, e);
+                    }
+                }
+            }
+        }
+    }
+
     match state.db.with_conn(move |conn| crate::db::discussions::delete_discussion(conn, &id)).await {
         Ok(true) => Json(ApiResponse::ok(())),
         Ok(false) => Json(ApiResponse::err("Discussion not found")),
@@ -288,6 +367,7 @@ async fn make_agent_stream(
     let skill_ids = disc.skill_ids.clone();
     let directive_ids = disc.directive_ids.clone();
     let profile_ids = disc.profile_ids.clone();
+    let workspace_path = disc.workspace_path.clone();
 
     let project_path = if let Some(ref pid) = disc.project_id {
         let pid = pid.clone();
@@ -336,7 +416,8 @@ async fn make_agent_stream(
         let _ = tx.send(AgentStreamEvent::Meta { auth_mode: auth_mode_str.clone() }).await;
 
         match runner::start_agent_with_config(runner::AgentStartConfig {
-            agent_type: &agent_type, project_path: &project_path, work_dir: None,
+            agent_type: &agent_type, project_path: &project_path,
+            work_dir: workspace_path.as_deref(),
             prompt: &prompt, tokens: &tokens, full_access,
             skill_ids: &skill_ids, directive_ids: &directive_ids, profile_ids: &profile_ids,
             mcp_context_override: global_mcp_context.as_deref(),
@@ -565,6 +646,7 @@ pub async fn orchestrate(
     }
 
     let disc = disc.unwrap();
+    let orch_workspace_path = disc.workspace_path.clone();
     let original_question = disc.messages.iter().rev()
         .find(|m| matches!(m.role, MessageRole::User))
         .map(|m| m.content.clone())
@@ -741,7 +823,8 @@ pub async fn orchestrate(
 
             let fa = *agent_access.get(&format!("{:?}", primary_agent_type)).unwrap_or(&false);
             match runner::start_agent_with_config(runner::AgentStartConfig {
-                agent_type: &primary_agent_type, project_path: &project_path, work_dir: None,
+                agent_type: &primary_agent_type, project_path: &project_path,
+                work_dir: orch_workspace_path.as_deref(),
                 prompt: &summary_prompt, tokens: &tokens, full_access: fa,
                 skill_ids: &[], directive_ids: &[], profile_ids: &[],
                 mcp_context_override: global_mcp_context.as_deref(),
@@ -800,7 +883,8 @@ pub async fn orchestrate(
 
                 let fa = *agent_access.get(&format!("{:?}", agent_type)).unwrap_or(&false);
                 match runner::start_agent_with_config(runner::AgentStartConfig {
-                    agent_type, project_path: &project_path, work_dir: None,
+                    agent_type, project_path: &project_path,
+                    work_dir: orch_workspace_path.as_deref(),
                     prompt: &prompt, tokens: &tokens, full_access: fa,
                     skill_ids: &orch_skill_ids, directive_ids: &orch_directive_ids, profile_ids: &orch_profile_ids,
                     mcp_context_override: global_mcp_context.as_deref(),
@@ -936,7 +1020,8 @@ pub async fn orchestrate(
             let synth_prompt = build_synthesis_prompt(&original_question, &round_responses, &disc_language);
             let synth_fa = *agent_access.get(&format!("{:?}", primary_agent_type)).unwrap_or(&false);
             match runner::start_agent_with_config(runner::AgentStartConfig {
-                agent_type: &primary_agent_type, project_path: &project_path, work_dir: None,
+                agent_type: &primary_agent_type, project_path: &project_path,
+                work_dir: orch_workspace_path.as_deref(),
                 prompt: &synth_prompt, tokens: &tokens, full_access: synth_fa,
                 skill_ids: &orch_skill_ids, directive_ids: &orch_directive_ids, profile_ids: &orch_profile_ids,
                 mcp_context_override: global_mcp_context.as_deref(),
@@ -1453,7 +1538,233 @@ pub(crate) fn detect_agent_error_hint(output: &str) -> Option<String> {
     None
 }
 
-#[allow(clippy::items_after_test_module)]
+// ═══════════════════════════════════════════════════════════════════════════════
+// Discussion-scoped Git Operations
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Resolve the working directory for a discussion.
+/// Returns (work_dir, project_path) — work_dir is the worktree path if isolated, else project path.
+async fn resolve_discussion_work_dir(state: &AppState, discussion_id: &str) -> Result<(std::path::PathBuf, String), String> {
+    let did = discussion_id.to_string();
+    let disc = state.db.with_conn(move |conn| crate::db::discussions::get_discussion(conn, &did))
+        .await
+        .map_err(|e| format!("DB error: {}", e))?;
+    let disc = disc.ok_or_else(|| "Discussion not found".to_string())?;
+
+    let project_id = disc.project_id.ok_or_else(|| "Discussion has no project".to_string())?;
+
+    let pid = project_id.clone();
+    let project = state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &pid))
+        .await
+        .map_err(|e| format!("DB error: {}", e))?;
+    let project = project.ok_or_else(|| "Project not found".to_string())?;
+
+    if let Some(ref wp) = disc.workspace_path {
+        let resolved = crate::core::scanner::resolve_host_path(wp);
+        if !resolved.exists() {
+            return Err(format!("Worktree path not found: {}", resolved.display()));
+        }
+        Ok((resolved, project.path))
+    } else {
+        let resolved = crate::core::scanner::resolve_host_path(&project.path);
+        if !resolved.exists() {
+            return Err(format!("Project path not found: {}", resolved.display()));
+        }
+        Ok((resolved, project.path))
+    }
+}
+
+/// GET /api/discussions/:id/git-status
+pub async fn disc_git_status(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<GitStatusResponse>> {
+    let (work_dir, _) = match resolve_discussion_work_dir(&state, &id).await {
+        Ok(v) => v,
+        Err(e) => return Json(ApiResponse::err(e)),
+    };
+
+    let result = tokio::task::spawn_blocking(move || {
+        super::git_ops::run_git_status(&work_dir)
+    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+
+    match result {
+        Ok(status) => Json(ApiResponse::ok(status)),
+        Err(e) => Json(ApiResponse::err(e)),
+    }
+}
+
+/// GET /api/discussions/:id/git-diff?path=...
+pub async fn disc_git_diff(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<GitDiffQuery>,
+) -> Json<ApiResponse<GitDiffResponse>> {
+    if query.path.contains("..") {
+        return Json(ApiResponse::err("Invalid path"));
+    }
+
+    let (work_dir, _) = match resolve_discussion_work_dir(&state, &id).await {
+        Ok(v) => v,
+        Err(e) => return Json(ApiResponse::err(e)),
+    };
+
+    let file_path = query.path.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        super::git_ops::run_git_diff(&work_dir, &file_path)
+    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+
+    match result {
+        Ok(diff) => Json(ApiResponse::ok(diff)),
+        Err(e) => Json(ApiResponse::err(e)),
+    }
+}
+
+/// POST /api/discussions/:id/git-commit
+pub async fn disc_git_commit(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<GitCommitRequest>,
+) -> Json<ApiResponse<GitCommitResponse>> {
+    if req.files.is_empty() {
+        return Json(ApiResponse::err("No files specified"));
+    }
+    if req.message.is_empty() {
+        return Json(ApiResponse::err("Commit message is required"));
+    }
+    for f in &req.files {
+        if f.contains("..") {
+            return Json(ApiResponse::err(format!("Invalid file path: {}", f)));
+        }
+    }
+
+    let (work_dir, _) = match resolve_discussion_work_dir(&state, &id).await {
+        Ok(v) => v,
+        Err(e) => return Json(ApiResponse::err(e)),
+    };
+
+    let files = req.files.clone();
+    let message = req.message.clone();
+    let amend = req.amend;
+    let sign = req.sign;
+    let result = tokio::task::spawn_blocking(move || {
+        super::git_ops::run_git_commit(&work_dir, &files, &message, amend, sign)
+    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+
+    match result {
+        Ok(resp) => Json(ApiResponse::ok(resp)),
+        Err(e) => Json(ApiResponse::err(e)),
+    }
+}
+
+/// POST /api/discussions/:id/git-push
+pub async fn disc_git_push(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<GitPushResponse>> {
+    let (work_dir, _) = match resolve_discussion_work_dir(&state, &id).await {
+        Ok(v) => v,
+        Err(e) => return Json(ApiResponse::err(e)),
+    };
+
+    let result = tokio::task::spawn_blocking(move || {
+        super::git_ops::run_git_push(&work_dir)
+    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+
+    match result {
+        Ok(resp) => Json(ApiResponse::ok(resp)),
+        Err(e) => Json(ApiResponse::err(e)),
+    }
+}
+
+/// POST /api/discussions/:id/exec
+pub async fn disc_exec(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<ExecRequest>,
+) -> Json<ApiResponse<ExecResponse>> {
+    let cmd = req.command.trim().to_string();
+    if cmd.is_empty() {
+        return Json(ApiResponse::err("Empty command"));
+    }
+
+    let first_word = cmd.split_whitespace().next().unwrap_or("");
+    const BLOCKED: &[&str] = &["rm", "sudo", "chmod", "chown", "kill", "reboot", "shutdown", "mkfs", "dd"];
+    if BLOCKED.contains(&first_word) {
+        return Json(ApiResponse::err(format!("Command '{}' is not allowed", first_word)));
+    }
+
+    let (work_dir, _) = match resolve_discussion_work_dir(&state, &id).await {
+        Ok(v) => v,
+        Err(e) => return Json(ApiResponse::err(e)),
+    };
+
+    let result = tokio::task::spawn_blocking(move || {
+        super::git_ops::run_exec(&work_dir, &cmd)
+    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+
+    match result {
+        Ok(resp) => Json(ApiResponse::ok(resp)),
+        Err(e) => Json(ApiResponse::err(e)),
+    }
+}
+
+/// POST /api/discussions/:id/git-pr
+pub async fn disc_create_pr(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<CreatePrRequest>,
+) -> Json<ApiResponse<serde_json::Value>> {
+    let (work_dir, _) = match resolve_discussion_work_dir(&state, &id).await {
+        Ok(v) => v,
+        Err(e) => return Json(ApiResponse::err(e)),
+    };
+
+    let title = req.title;
+    let body = req.body;
+    let base = req.base;
+    let result = tokio::task::spawn_blocking(move || {
+        super::git_ops::run_create_pr(&work_dir, &title, &body, &base)
+    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+
+    match result {
+        Ok(url) => Json(ApiResponse::ok(serde_json::json!({ "url": url }))),
+        Err(e) => Json(ApiResponse::err(e)),
+    }
+}
+
+/// GET /api/discussions/:id/pr-template
+pub async fn disc_pr_template(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<serde_json::Value>> {
+    let (work_dir, _) = match resolve_discussion_work_dir(&state, &id).await {
+        Ok(v) => v,
+        Err(e) => return Json(ApiResponse::err(e)),
+    };
+
+    let branch = std::process::Command::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(&work_dir)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+
+    let template = super::git_ops::read_pr_template(&work_dir)
+        .unwrap_or_else(|| super::git_ops::default_pr_template(&branch));
+
+    let source = if super::git_ops::read_pr_template(&work_dir).is_some() {
+        "project"
+    } else {
+        "kronn"
+    };
+
+    Json(ApiResponse::ok(serde_json::json!({
+        "template": template,
+        "source": source,
+    })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

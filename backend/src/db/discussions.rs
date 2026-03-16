@@ -11,7 +11,8 @@ pub fn list_discussions(conn: &Connection) -> Result<Vec<Discussion>> {
         "SELECT d.id, d.project_id, d.title, d.agent, d.language, d.participants_json,
                 d.created_at, d.updated_at, d.archived, d.skill_ids_json,
                 (SELECT COUNT(*) FROM messages m WHERE m.discussion_id = d.id) as msg_count,
-                d.profile_ids_json, d.directive_ids_json
+                d.profile_ids_json, d.directive_ids_json,
+                d.workspace_mode, d.workspace_path, d.worktree_branch
          FROM discussions d ORDER BY d.updated_at DESC"
     )?;
 
@@ -35,6 +36,9 @@ pub fn list_discussions(conn: &Connection) -> Result<Vec<Discussion>> {
             profile_ids: serde_json::from_str(&profile_ids_str).unwrap_or_default(),
             directive_ids: serde_json::from_str(&directive_ids_str).unwrap_or_default(),
             archived: row.get::<_, i32>(8).unwrap_or(0) != 0,
+            workspace_mode: row.get::<_, String>(13).unwrap_or_else(|_| "Direct".into()),
+            workspace_path: row.get::<_, Option<String>>(14).unwrap_or(None),
+            worktree_branch: row.get::<_, Option<String>>(15).unwrap_or(None),
             created_at: parse_dt(row.get::<_, String>(6)?),
             updated_at: parse_dt(row.get::<_, String>(7)?),
         })
@@ -67,7 +71,8 @@ pub fn list_discussions_with_messages(conn: &Connection) -> Result<Vec<Discussio
 pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>> {
     let mut stmt = conn.prepare(
         "SELECT id, project_id, title, agent, language, participants_json,
-                created_at, updated_at, archived, skill_ids_json, profile_ids_json, directive_ids_json
+                created_at, updated_at, archived, skill_ids_json, profile_ids_json, directive_ids_json,
+                workspace_mode, workspace_path, worktree_branch
          FROM discussions WHERE id = ?1"
     )?;
 
@@ -91,6 +96,9 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
             profile_ids: serde_json::from_str(&profile_ids_str).unwrap_or_default(),
             directive_ids: serde_json::from_str(&directive_ids_str).unwrap_or_default(),
             archived: row.get::<_, i32>(8).unwrap_or(0) != 0,
+            workspace_mode: row.get::<_, String>(12).unwrap_or_else(|_| "Direct".into()),
+            workspace_path: row.get::<_, Option<String>>(13).unwrap_or(None),
+            worktree_branch: row.get::<_, Option<String>>(14).unwrap_or(None),
             created_at: parse_dt(row.get::<_, String>(6)?),
             updated_at: parse_dt(row.get::<_, String>(7)?),
         })
@@ -107,8 +115,8 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
 
 pub fn insert_discussion(conn: &Connection, disc: &Discussion) -> Result<()> {
     conn.execute(
-        "INSERT INTO discussions (id, project_id, title, agent, language, participants_json, created_at, updated_at, archived, skill_ids_json, profile_ids_json, directive_ids_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        "INSERT INTO discussions (id, project_id, title, agent, language, participants_json, created_at, updated_at, archived, skill_ids_json, profile_ids_json, directive_ids_json, workspace_mode, workspace_path, worktree_branch)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             disc.id,
             disc.project_id,
@@ -122,6 +130,9 @@ pub fn insert_discussion(conn: &Connection, disc: &Discussion) -> Result<()> {
             serde_json::to_string(&disc.skill_ids)?,
             serde_json::to_string(&disc.profile_ids)?,
             serde_json::to_string(&disc.directive_ids)?,
+            disc.workspace_mode,
+            disc.workspace_path,
+            disc.worktree_branch,
         ],
     )?;
     Ok(())
@@ -146,6 +157,15 @@ pub fn update_discussion_profile_ids(conn: &Connection, id: &str, profile_ids: &
 
 pub fn update_discussion_directive_ids(conn: &Connection, id: &str, directive_ids: &[String]) -> Result<bool> {
     update_discussion_fields(conn, id, None, None, None, None, Some(directive_ids), None)
+}
+
+/// Update workspace_path and worktree_branch for a discussion (used after worktree creation).
+pub fn update_discussion_workspace(conn: &Connection, id: &str, workspace_path: &str, worktree_branch: &str) -> Result<bool> {
+    let affected = conn.execute(
+        "UPDATE discussions SET workspace_path = ?1, worktree_branch = ?2, updated_at = ?3 WHERE id = ?4",
+        params![workspace_path, worktree_branch, Utc::now().to_rfc3339(), id],
+    )?;
+    Ok(affected > 0)
 }
 
 #[allow(clippy::too_many_arguments)]

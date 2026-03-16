@@ -44,6 +44,9 @@ fn sample_discussion(id: &str, project_id: Option<&str>) -> Discussion {
         profile_ids: vec![],
         directive_ids: vec![],
         archived: false,
+        workspace_mode: "Direct".into(),
+        workspace_path: None,
+        worktree_branch: None,
         created_at: now,
         updated_at: now,
     }

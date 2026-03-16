@@ -24,6 +24,7 @@ pub fn run(conn: &Connection) -> Result<()> {
         ("010_directives", include_str!("sql/010_directives.sql")),
         ("011_multi_profiles", include_str!("sql/011_multi_profiles.sql")),
         ("012_mcp_general", include_str!("sql/012_mcp_general.sql")),
+        ("013_discussion_worktrees", include_str!("sql/013_discussion_worktrees.sql")),
     ];
 
     for (name, sql) in migrations {

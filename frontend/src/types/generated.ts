@@ -580,6 +580,9 @@ export interface Discussion {
   profile_ids?: string[];
   directive_ids?: string[];
   archived: boolean;
+  workspace_mode: string;
+  workspace_path?: string | null;
+  worktree_branch?: string | null;
   created_at: string; // ISO 8601
   updated_at: string;
 }
@@ -648,6 +651,8 @@ export interface CreateDiscussionRequest {
   skill_ids?: string[];
   profile_ids?: string[];
   directive_ids?: string[];
+  workspace_mode?: string;
+  base_branch?: string;
 }
 
 export interface SendMessageRequest {

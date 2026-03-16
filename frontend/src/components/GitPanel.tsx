@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { projects as projectsApi } from '../lib/api';
+import { projects as projectsApi, discussions as discussionsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
+import ReactMarkdown from 'react-markdown';
 import {
-  GitBranch, GitCommit, Upload, RefreshCw, ChevronLeft,
-  FileEdit, FilePlus, FileMinus, FileX, AlertTriangle,
+  GitBranch, GitCommit, GitPullRequest, Upload, RefreshCw, ChevronLeft,
+  FileEdit, FilePlus, FileMinus, FileX, AlertTriangle, ExternalLink,
   Loader2, Check, X, Terminal,
 } from 'lucide-react';
 
@@ -22,10 +23,14 @@ interface GitStatus {
   files: GitFile[];
   ahead: number;
   behind: number;
+  has_upstream: boolean;
+  provider: string;  // "github", "gitlab", "unknown"
+  pr_url?: string | null;
 }
 
 interface Props {
-  projectId: string;
+  projectId?: string;
+  discussionId?: string;
   onClose: () => void;
 }
 
@@ -47,7 +52,7 @@ const STATUS_COLORS: Record<string, string> = {
   untracked: 'rgba(255,255,255,0.3)',
 };
 
-export function GitPanel({ projectId, onClose }: Props) {
+export function GitPanel({ projectId, discussionId, onClose }: Props) {
   const { t } = useT();
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [loading, setLoading] = useState(true);
@@ -68,10 +73,20 @@ export function GitPanel({ projectId, onClose }: Props) {
   const [commitMsg, setCommitMsg] = useState('');
   const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
   const [commitLoading, setCommitLoading] = useState(false);
+  const [commitAmend, setCommitAmend] = useState(false);
+  const [commitSign, setCommitSign] = useState(false);
 
   // Push
   const [pushLoading, setPushLoading] = useState(false);
   const [pushResult, setPushResult] = useState<string | null>(null);
+
+  // PR form
+  const [showPrForm, setShowPrForm] = useState(false);
+  const [prTitle, setPrTitle] = useState('');
+  const [prBody, setPrBody] = useState('');
+  const [prPreview, setPrPreview] = useState(false);
+  const [prTemplateSource, setPrTemplateSource] = useState('');
+  const [prLoading, setPrLoading] = useState(false);
 
   // Terminal
   const [showTerminal, setShowTerminal] = useState(false);
@@ -84,14 +99,19 @@ export function GitPanel({ projectId, onClose }: Props) {
     setLoading(true);
     setError('');
     try {
-      const res = await projectsApi.gitStatus(projectId);
-      setStatus(res);
+      const res = discussionId
+        ? await discussionsApi.gitStatus(discussionId)
+        : projectId
+          ? await projectsApi.gitStatus(projectId)
+          : null;
+      if (res) setStatus(res);
+      else setError('No project or discussion ID');
     } catch (e) {
       setError(String(e));
     } finally {
       setLoading(false);
     }
-  }, [projectId]);
+  }, [projectId, discussionId]);
 
   useEffect(() => { fetchStatus(); }, [fetchStatus]);
 
@@ -99,7 +119,9 @@ export function GitPanel({ projectId, onClose }: Props) {
     setDiffPath(path);
     setDiffLoading(true);
     try {
-      const res = await projectsApi.gitDiff(projectId, path);
+      const res = discussionId
+        ? await discussionsApi.gitDiff(discussionId, path)
+        : await projectsApi.gitDiff(projectId!, path);
       setDiffContent(res.diff);
     } catch (e) {
       setDiffContent(`Error: ${e}`);
@@ -109,7 +131,7 @@ export function GitPanel({ projectId, onClose }: Props) {
   };
 
   const handleCreateBranch = async () => {
-    if (!branchName.trim()) return;
+    if (!branchName.trim() || !projectId) return;
     setBranchLoading(true);
     try {
       await projectsApi.gitCreateBranch(projectId, { name: branchName.trim() });
@@ -127,10 +149,16 @@ export function GitPanel({ projectId, onClose }: Props) {
     if (!commitMsg.trim() || selectedFiles.length === 0) return;
     setCommitLoading(true);
     try {
-      await projectsApi.gitCommit(projectId, { files: selectedFiles, message: commitMsg.trim() });
+      const commitReq = { files: selectedFiles, message: commitMsg.trim(), amend: commitAmend, sign: commitSign };
+      if (discussionId) {
+        await discussionsApi.gitCommit(discussionId, commitReq);
+      } else {
+        await projectsApi.gitCommit(projectId!, commitReq);
+      }
       setShowCommit(false);
       setCommitMsg('');
       setSelectedFiles([]);
+      setCommitAmend(false);
       await fetchStatus();
     } catch (e) {
       setError(String(e));
@@ -143,13 +171,61 @@ export function GitPanel({ projectId, onClose }: Props) {
     setPushLoading(true);
     setPushResult(null);
     try {
-      await projectsApi.gitPush(projectId);
+      if (discussionId) {
+        await discussionsApi.gitPush(discussionId);
+      } else {
+        await projectsApi.gitPush(projectId!);
+      }
       setPushResult('success');
       await fetchStatus();
     } catch (e) {
       setPushResult(String(e));
     } finally {
       setPushLoading(false);
+    }
+  };
+
+  const openPrForm = async () => {
+    if (!status) return;
+    const api = discussionId ? discussionsApi : projectsApi;
+    const id = discussionId || projectId!;
+    // Auto-fill title from branch name
+    setPrTitle(status.branch.replace('kronn/', '').replace(/-/g, ' '));
+    setPrPreview(false);
+    setShowPrForm(true);
+    // Fetch template
+    try {
+      const res = await api.prTemplate(id);
+      setPrBody(res.template);
+      setPrTemplateSource(res.source);
+    } catch {
+      setPrBody('');
+      setPrTemplateSource('');
+    }
+  };
+
+  const handleCreatePr = async () => {
+    if (!prTitle.trim()) return;
+    setPrLoading(true);
+    try {
+      const api = discussionId ? discussionsApi : projectsApi;
+      const id = discussionId || projectId!;
+      // Auto-push if branch has no upstream yet
+      if (status && !status.has_upstream) {
+        await api.gitPush(id);
+      }
+      const res = await api.createPr(id, {
+        title: prTitle.trim(),
+        body: prBody.trim(),
+        base: status?.default_branch || 'main',
+      });
+      setPushResult(`PR: ${res.url}`);
+      setShowPrForm(false);
+      await fetchStatus();
+    } catch (e) {
+      setPushResult(String(e));
+    } finally {
+      setPrLoading(false);
     }
   };
 
@@ -174,7 +250,9 @@ export function GitPanel({ projectId, onClose }: Props) {
     setTermLoading(true);
     setTermInput('');
     try {
-      const res = await projectsApi.exec(projectId, cmd);
+      const res = discussionId
+        ? await discussionsApi.exec(discussionId, cmd)
+        : await projectsApi.exec(projectId!, cmd);
       setTermHistory(prev => [...prev, { cmd, stdout: res.stdout, stderr: res.stderr, code: res.exit_code }]);
     } catch (e) {
       setTermHistory(prev => [...prev, { cmd, stdout: '', stderr: String(e), code: 1 }]);
@@ -281,6 +359,100 @@ export function GitPanel({ projectId, onClose }: Props) {
             </div>
           )}
 
+          {/* Actions bar: push, create PR — always visible when applicable */}
+          <div style={{ display: 'flex', gap: 4, padding: '4px 12px', flexWrap: 'wrap' }}>
+            {status.ahead > 0 && (
+              <button style={{ ...styles.smallBtn, borderColor: 'rgba(96,165,250,0.3)', color: '#60a5fa' }} onClick={handlePush} disabled={pushLoading}>
+                {pushLoading ? <Loader2 size={10} style={{ animation: 'spin 1s linear infinite' }} /> : <Upload size={10} />}
+                {t('git.push')}
+              </button>
+            )}
+            {/* Create PR/MR button: show when on a non-default branch and no PR exists */}
+            {!status.is_default_branch && !status.pr_url && !showPrForm && (
+              <button style={{ ...styles.smallBtn, borderColor: 'rgba(139,92,246,0.3)', color: '#a78bfa' }} onClick={openPrForm}>
+                <GitPullRequest size={10} />
+                {status.provider === 'gitlab' ? t('git.createMr') : t('git.createPr')}
+              </button>
+            )}
+          </div>
+
+          {/* PR link */}
+          {status.pr_url && (
+            <div style={{ ...styles.success, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <GitPullRequest size={11} style={{ flexShrink: 0 }} />
+              <a href={status.pr_url} target="_blank" rel="noopener noreferrer" style={{ color: '#a78bfa', textDecoration: 'underline', fontSize: 11, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                {status.pr_url.replace('https://github.com/', '').replace('https://gitlab.com/', '')}
+              </a>
+              <ExternalLink size={9} style={{ flexShrink: 0, color: 'rgba(255,255,255,0.3)' }} />
+            </div>
+          )}
+
+          {/* PR creation form */}
+          {showPrForm && (
+            <div style={{ margin: '4px 12px', padding: '10px 12px', borderRadius: 8, background: 'rgba(139,92,246,0.04)', border: '1px solid rgba(139,92,246,0.15)', display: 'flex', flexDirection: 'column' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                <span style={{ fontSize: 11, fontWeight: 600, color: '#a78bfa', display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <GitPullRequest size={11} /> {status?.provider === 'gitlab' ? t('git.createMr') : t('git.createPr')}
+                </span>
+                <div style={{ display: 'flex', gap: 2 }}>
+                  {prTemplateSource && (
+                    <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.3)' }}>
+                      {prTemplateSource === 'project' ? t('git.prTemplateProject') : t('git.prTemplateKronn')}
+                    </span>
+                  )}
+                  <button style={styles.iconBtn} onClick={() => setShowPrForm(false)}><X size={10} /></button>
+                </div>
+              </div>
+              <input
+                style={{ ...styles.input, marginBottom: 6, width: '100%', boxSizing: 'border-box' }}
+                value={prTitle}
+                onChange={e => setPrTitle(e.target.value)}
+                placeholder={t('git.prTitle')}
+                autoFocus
+              />
+              <div style={{ display: 'flex', gap: 0, marginBottom: 4 }}>
+                <button
+                  style={{ ...styles.smallBtn, borderRadius: '6px 0 0 6px', fontSize: 9, background: !prPreview ? 'rgba(139,92,246,0.15)' : 'transparent', borderColor: 'rgba(139,92,246,0.2)', color: !prPreview ? '#a78bfa' : 'rgba(255,255,255,0.35)' }}
+                  onClick={() => setPrPreview(false)}
+                >
+                  {t('git.prEdit')}
+                </button>
+                <button
+                  style={{ ...styles.smallBtn, borderRadius: '0 6px 6px 0', fontSize: 9, background: prPreview ? 'rgba(139,92,246,0.15)' : 'transparent', borderColor: 'rgba(139,92,246,0.2)', color: prPreview ? '#a78bfa' : 'rgba(255,255,255,0.35)' }}
+                  onClick={() => setPrPreview(true)}
+                >
+                  {t('git.prPreview')}
+                </button>
+              </div>
+              {prPreview ? (
+                <div style={{ padding: '8px 10px', borderRadius: 6, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)', fontSize: 12, color: 'rgba(255,255,255,0.7)', minHeight: 180, maxHeight: 300, overflowY: 'auto', lineHeight: 1.6, width: '100%', boxSizing: 'border-box' }}>
+                  <ReactMarkdown>{prBody || '*No description*'}</ReactMarkdown>
+                </div>
+              ) : (
+                <textarea
+                  style={{ ...styles.input, minHeight: 180, maxHeight: 300, resize: 'vertical', fontFamily: 'monospace', fontSize: 12, lineHeight: 1.5, width: '100%', boxSizing: 'border-box' }}
+                  value={prBody}
+                  onChange={e => setPrBody(e.target.value)}
+                  placeholder={t('git.prBodyPlaceholder')}
+                />
+              )}
+              <button
+                style={{ ...styles.actionBtn, marginTop: 6, width: '100%', justifyContent: 'center', borderColor: 'rgba(139,92,246,0.3)', background: 'rgba(139,92,246,0.1)', color: '#a78bfa' }}
+                onClick={handleCreatePr}
+                disabled={prLoading || !prTitle.trim()}
+              >
+                {prLoading ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <GitPullRequest size={12} />}
+                {status?.provider === 'gitlab' ? t('git.submitMr') : t('git.submitPr')}
+              </button>
+            </div>
+          )}
+
+          {pushResult && (
+            <div style={pushResult === 'success' || pushResult.startsWith('PR:') ? styles.success : styles.error}>
+              {pushResult === 'success' ? t('git.pushSuccess') : pushResult.startsWith('PR:') ? pushResult.replace('PR: ', '✓ PR created: ') : pushResult}
+            </div>
+          )}
+
           {/* File list */}
           {status.files.length === 0 ? (
             <div style={styles.empty}>{t('git.noChanges')}</div>
@@ -296,20 +468,8 @@ export function GitPanel({ projectId, onClose }: Props) {
                       <GitCommit size={10} /> {t('git.commit')}
                     </button>
                   )}
-                  {status.ahead > 0 && (
-                    <button style={{ ...styles.smallBtn, borderColor: 'rgba(96,165,250,0.3)', color: '#60a5fa' }} onClick={handlePush} disabled={pushLoading}>
-                      {pushLoading ? <Loader2 size={10} style={{ animation: 'spin 1s linear infinite' }} /> : <Upload size={10} />}
-                      {t('git.push')}
-                    </button>
-                  )}
                 </div>
               </div>
-
-              {pushResult && (
-                <div style={pushResult === 'success' ? styles.success : styles.error}>
-                  {pushResult === 'success' ? t('git.pushSuccess') : pushResult}
-                </div>
-              )}
 
               {/* Commit form */}
               {showCommit && (
@@ -328,6 +488,16 @@ export function GitPanel({ projectId, onClose }: Props) {
                     onKeyDown={e => e.key === 'Enter' && handleCommit()}
                     autoFocus
                   />
+                  <div style={{ display: 'flex', gap: 12, marginTop: 6, fontSize: 11, color: 'rgba(255,255,255,0.5)' }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
+                      <input type="checkbox" checked={commitAmend} onChange={e => setCommitAmend(e.target.checked)} style={{ accentColor: '#c8ff00' }} />
+                      {t('git.amend')}
+                    </label>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
+                      <input type="checkbox" checked={commitSign} onChange={e => setCommitSign(e.target.checked)} style={{ accentColor: '#c8ff00' }} />
+                      {t('git.sign')}
+                    </label>
+                  </div>
                   <button
                     style={{ ...styles.actionBtn, marginTop: 6, width: '100%', justifyContent: 'center' }}
                     onClick={handleCommit}
@@ -416,7 +586,7 @@ export function GitPanel({ projectId, onClose }: Props) {
 
 const styles: Record<string, React.CSSProperties> = {
   panel: {
-    width: 340, height: '100%', display: 'flex', flexDirection: 'column',
+    width: 380, height: '100%', display: 'flex', flexDirection: 'column',
     background: '#0d1017', borderLeft: '1px solid rgba(255,255,255,0.08)',
   },
   header: {

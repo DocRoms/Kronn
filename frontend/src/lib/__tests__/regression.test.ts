@@ -136,6 +136,7 @@ describe('regression tests', () => {
         messages: [],
         message_count: 5,
         archived: false,
+        workspace_mode: 'Direct',
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
       };
@@ -156,6 +157,7 @@ describe('regression tests', () => {
         messages: [],       // empty from list endpoint
         message_count: 10,  // real count from backend
         archived: false,
+        workspace_mode: 'Direct',
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
       };

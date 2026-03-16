@@ -119,6 +119,7 @@ function SwipeableDiscItem({ disc, isActive, lastSeenCount, sendingMap, onSelect
           <div style={{ fontSize: 12, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 4 }}>
             {isValidationDisc(disc.title) && <ShieldCheck size={10} style={{ color: '#c8ff00', flexShrink: 0 }} />}
             {isBootstrapDisc(disc.title) && <Rocket size={10} style={{ color: '#c8ff00', flexShrink: 0 }} />}
+            {disc.workspace_mode === 'Isolated' && <GitBranch size={10} style={{ color: '#60a5fa', flexShrink: 0 }} />}
             {disc.title}
             {showBadge && (
               <span style={{
@@ -243,6 +244,9 @@ export function DiscussionsPage({
   const [newDiscProfileIds, setNewDiscProfileIds] = useState<string[]>([]);
   const [newDiscDirectiveIds, setNewDiscDirectiveIds] = useState<string[]>([]);
   const [availableDirectives, setAvailableDirectives] = useState<Directive[]>([]);
+  const [newDiscWorkspaceMode, setNewDiscWorkspaceMode] = useState<'Direct' | 'Isolated'>('Direct');
+  const [newDiscBranchName, setNewDiscBranchName] = useState('');
+  const [newDiscBaseBranch, setNewDiscBaseBranch] = useState('main');
 
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -434,6 +438,8 @@ export function DiscussionsPage({
       skill_ids: newDiscSkillIds.length > 0 ? newDiscSkillIds : undefined,
       profile_ids: newDiscProfileIds.length > 0 ? newDiscProfileIds : undefined,
       ...(newDiscDirectiveIds.length > 0 ? { directive_ids: newDiscDirectiveIds } : {}),
+      workspace_mode: newDiscWorkspaceMode === 'Isolated' ? 'Isolated' : undefined,
+      base_branch: newDiscWorkspaceMode === 'Isolated' ? newDiscBaseBranch : undefined,
     });
     setShowNewDiscussion(false);
     setNewDiscTitle('');
@@ -442,6 +448,9 @@ export function DiscussionsPage({
     setNewDiscSkillIds([]);
     setNewDiscDirectiveIds([]);
     setNewDiscProfileIds([]);
+    setNewDiscWorkspaceMode('Direct');
+    setNewDiscBranchName('');
+    setNewDiscBaseBranch('main');
     setActiveDiscussionId(disc.id);
     refetchDiscussions();
 
@@ -794,7 +803,7 @@ export function DiscussionsPage({
             >
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
                 <span style={{ fontWeight: 700, fontSize: 15, color: '#e8eaed' }}>{t('disc.newTitle')}</span>
-                <button style={ls.iconBtn} onClick={() => { setShowNewDiscussion(false); setNewDiscPrefilled(false); }}><X size={14} /></button>
+                <button style={ls.iconBtn} onClick={() => { setShowNewDiscussion(false); setNewDiscPrefilled(false); setNewDiscWorkspaceMode('Direct'); setNewDiscBranchName(''); setNewDiscBaseBranch('main'); }}><X size={14} /></button>
               </div>
 
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
@@ -806,6 +815,9 @@ export function DiscussionsPage({
                     const proj = projects.find(p => p.id === pid);
                     if (proj?.default_skill_ids?.length) setNewDiscSkillIds(proj.default_skill_ids);
                     if ((proj as any)?.default_profile_id) setNewDiscProfileIds([(proj as any).default_profile_id]);
+                    setNewDiscWorkspaceMode('Direct');
+                    setNewDiscBranchName('');
+                    setNewDiscBaseBranch('main');
                   }} disabled={newDiscPrefilled}>
                     <option value="">{t('disc.noProject')}</option>
                     {projects.filter(p => !isHiddenPath(p.path)).map(p => (
@@ -836,6 +848,84 @@ export function DiscussionsPage({
                   </span>
                 </div>
               )}
+
+              {/* Workspace mode toggle — only for git projects */}
+              {(() => {
+                const selectedProj = projects.find(p => p.id === newDiscProjectId);
+                if (!newDiscProjectId || !selectedProj?.repo_url) return null;
+                return (
+                  <div style={{ marginBottom: 12 }}>
+                    <label style={ds.label}>{t('disc.workspaceDirect').replace(/.*/, 'Workspace')}</label>
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <button
+                        type="button"
+                        onClick={() => { setNewDiscWorkspaceMode('Direct'); setNewDiscBranchName(''); }}
+                        style={{
+                          flex: 1, padding: '8px 10px', borderRadius: 8, fontSize: 11, fontFamily: 'inherit',
+                          cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6,
+                          border: newDiscWorkspaceMode === 'Direct' ? '1px solid rgba(255,255,255,0.2)' : '1px solid rgba(255,255,255,0.06)',
+                          background: newDiscWorkspaceMode === 'Direct' ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.02)',
+                          color: newDiscWorkspaceMode === 'Direct' ? '#e8eaed' : 'rgba(255,255,255,0.35)',
+                          transition: 'all 0.15s',
+                        }}
+                      >
+                        <Folder size={12} />
+                        <div>
+                          <div style={{ fontWeight: 600 }}>{t('disc.workspaceDirect')}</div>
+                          <div style={{ fontSize: 9, opacity: 0.6, marginTop: 1 }}>{t('disc.workspaceDirectDesc')}</div>
+                        </div>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setNewDiscWorkspaceMode('Isolated');
+                          if (!newDiscBranchName) {
+                            const title = newDiscTitle.trim();
+                            const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+                            setNewDiscBranchName(slug || `disc-${Date.now()}`);
+                          }
+                        }}
+                        style={{
+                          flex: 1, padding: '8px 10px', borderRadius: 8, fontSize: 11, fontFamily: 'inherit',
+                          cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6,
+                          border: newDiscWorkspaceMode === 'Isolated' ? '1px solid rgba(96,165,250,0.4)' : '1px solid rgba(255,255,255,0.06)',
+                          background: newDiscWorkspaceMode === 'Isolated' ? 'rgba(96,165,250,0.08)' : 'rgba(255,255,255,0.02)',
+                          color: newDiscWorkspaceMode === 'Isolated' ? '#60a5fa' : 'rgba(255,255,255,0.35)',
+                          transition: 'all 0.15s',
+                        }}
+                      >
+                        <GitBranch size={12} />
+                        <div>
+                          <div style={{ fontWeight: 600 }}>{t('disc.workspaceIsolated')}</div>
+                          <div style={{ fontSize: 9, opacity: 0.6, marginTop: 1 }}>{t('disc.workspaceIsolatedDesc')}</div>
+                        </div>
+                      </button>
+                    </div>
+                    {newDiscWorkspaceMode === 'Isolated' && (
+                      <div style={{ marginTop: 8, display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 8 }}>
+                        <div>
+                          <label style={{ ...ds.label, fontSize: 10 }}>{t('disc.branchName')}</label>
+                          <input
+                            style={ds.inputStyled}
+                            value={newDiscBranchName}
+                            onChange={e => setNewDiscBranchName(e.target.value)}
+                            placeholder="feature/my-branch"
+                          />
+                        </div>
+                        <div>
+                          <label style={{ ...ds.label, fontSize: 10 }}>{t('disc.baseBranch')}</label>
+                          <input
+                            style={ds.inputStyled}
+                            value={newDiscBaseBranch}
+                            onChange={e => setNewDiscBaseBranch(e.target.value)}
+                            placeholder="main"
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
 
               {/* Advanced options (collapsible) */}
               {(availableSkills.length > 0 || availableProfiles.length > 0 || availableDirectives.length > 0) && (
@@ -988,7 +1078,15 @@ export function DiscussionsPage({
                 style={{ ...ds.inputStyled, ...(newDiscPrefilled ? { opacity: 0.5, cursor: 'not-allowed' } : {}) }}
                 placeholder={t('disc.titlePlaceholder')}
                 value={newDiscTitle}
-                onChange={e => !newDiscPrefilled && setNewDiscTitle(e.target.value)}
+                onChange={e => {
+                  if (newDiscPrefilled) return;
+                  const val = e.target.value;
+                  setNewDiscTitle(val);
+                  if (newDiscWorkspaceMode === 'Isolated') {
+                    const slug = val.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+                    setNewDiscBranchName(slug || `disc-${Date.now()}`);
+                  }
+                }}
                 readOnly={newDiscPrefilled}
               />
 
@@ -1113,6 +1211,12 @@ export function DiscussionsPage({
                 </div>
                 <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', marginTop: 2, display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
                   <span>{activeDiscussion.project_id ? (projects.find(p => p.id === activeDiscussion.project_id)?.name ?? '?') : t('disc.general')} · {activeDiscussion.agent}</span>
+                  {activeDiscussion.workspace_mode === 'Isolated' && (
+                    <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 6, background: 'rgba(96,165,250,0.1)', color: '#60a5fa', border: '1px solid rgba(96,165,250,0.2)', display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                      <GitBranch size={8} /> {activeDiscussion.worktree_branch ?? t('disc.isolatedBadge')}
+                      <span style={{ opacity: 0.5, fontSize: 9 }}>worktree</span>
+                    </span>
+                  )}
                   {(activeDiscussion.profile_ids?.length ?? 0) > 0 && (
                     <>
                       <span style={{ color: 'rgba(255,255,255,0.15)' }}>·</span>
@@ -1934,6 +2038,7 @@ export function DiscussionsPage({
             {showGitPanel && activeDiscussion.project_id && (
               <GitPanel
                 projectId={activeDiscussion.project_id}
+                discussionId={activeDiscussion.workspace_mode === 'Isolated' ? activeDiscussion.id : undefined}
                 onClose={() => setShowGitPanel(false)}
               />
             )}
