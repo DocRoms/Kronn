@@ -73,7 +73,7 @@ mod tests {
         insert_discussion(&conn, &d2).unwrap();
 
         // Update d1 so it becomes most recent
-        update_discussion(&conn, "d1", Some("Updated Title"), None).unwrap();
+        update_discussion(&conn, "d1", Some("Updated Title"), None, None).unwrap();
 
         let all = list_discussions(&conn).unwrap();
         assert_eq!(all.len(), 2);
@@ -116,7 +116,7 @@ mod tests {
         let conn = test_conn();
         insert_discussion(&conn, &make_discussion("d1")).unwrap();
 
-        let updated = update_discussion(&conn, "d1", Some("New Title"), None).unwrap();
+        let updated = update_discussion(&conn, "d1", Some("New Title"), None, None).unwrap();
         assert!(updated);
 
         let disc = get_discussion(&conn, "d1").unwrap().unwrap();
@@ -126,7 +126,7 @@ mod tests {
     #[test]
     fn update_discussion_title_nonexistent_returns_false() {
         let conn = test_conn();
-        let updated = update_discussion(&conn, "nonexistent", Some("Title"), None).unwrap();
+        let updated = update_discussion(&conn, "nonexistent", Some("Title"), None, None).unwrap();
         assert!(!updated);
     }
 
@@ -134,7 +134,7 @@ mod tests {
     fn update_discussion_no_fields_returns_false() {
         let conn = test_conn();
         insert_discussion(&conn, &make_discussion("d1")).unwrap();
-        let updated = update_discussion(&conn, "d1", None, None).unwrap();
+        let updated = update_discussion(&conn, "d1", None, None, None).unwrap();
         assert!(!updated);
     }
 
@@ -147,7 +147,7 @@ mod tests {
         let conn = test_conn();
         insert_discussion(&conn, &make_discussion("d1")).unwrap();
 
-        let updated = update_discussion(&conn, "d1", None, Some(true)).unwrap();
+        let updated = update_discussion(&conn, "d1", None, Some(true), None).unwrap();
         assert!(updated);
 
         let disc = get_discussion(&conn, "d1").unwrap().unwrap();
@@ -161,7 +161,7 @@ mod tests {
         disc.archived = true;
         insert_discussion(&conn, &disc).unwrap();
 
-        update_discussion(&conn, "d1", None, Some(false)).unwrap();
+        update_discussion(&conn, "d1", None, Some(false), None).unwrap();
 
         let disc = get_discussion(&conn, "d1").unwrap().unwrap();
         assert!(!disc.archived);
@@ -172,7 +172,7 @@ mod tests {
         let conn = test_conn();
         insert_discussion(&conn, &make_discussion("d1")).unwrap();
 
-        update_discussion(&conn, "d1", Some("Archived Disc"), Some(true)).unwrap();
+        update_discussion(&conn, "d1", Some("Archived Disc"), Some(true), None).unwrap();
 
         let disc = get_discussion(&conn, "d1").unwrap().unwrap();
         assert_eq!(disc.title, "Archived Disc");

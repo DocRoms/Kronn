@@ -148,6 +148,7 @@ pub fn update_discussion_directive_ids(conn: &Connection, id: &str, directive_id
     update_discussion_fields(conn, id, None, None, None, None, Some(directive_ids), None)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_discussion_fields(conn: &Connection, id: &str, title: Option<&str>, archived: Option<bool>, skill_ids: Option<&[String]>, profile_ids: Option<&[String]>, directive_ids: Option<&[String]>, project_id: Option<Option<&str>>) -> Result<bool> {
     let mut sets = Vec::new();
     let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
