@@ -76,7 +76,7 @@ RESET  := \033[0m
 ## Generate docker-compose.override.yml for extra repo dirs (KRONN_EXTRA_REPOS)
 .PHONY: _gen-override
 _gen-override:
-	@. ./.env 2>/dev/null; \
+	@KRONN_EXTRA_REPOS=$$(sed -n 's/^KRONN_EXTRA_REPOS=//p' .env | tail -n 1); \
 	if [ -n "$$KRONN_EXTRA_REPOS" ]; then \
 		echo "# Auto-generated — extra rw mounts from KRONN_EXTRA_REPOS" > docker-compose.override.yml; \
 		echo "services:" >> docker-compose.override.yml; \

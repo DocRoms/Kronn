@@ -91,6 +91,9 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
       - name: Cache cargo-audit binary
         id: cache-audit
         uses: actions/cache@v4
@@ -101,10 +104,16 @@ jobs:
       - name: Install cargo-audit
         if: steps.cache-audit.outputs.cache-hit != 'true'
         run: cargo install cargo-audit --locked
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: "sccache"
 
       - name: Run cargo audit
         working-directory: backend
         run: cargo audit
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: "sccache"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

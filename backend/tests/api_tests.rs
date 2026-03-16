@@ -1446,7 +1446,7 @@ async fn exec_empty_command_rejected() {
 
 #[tokio::test]
 async fn exec_dangerous_command_blocked() {
-    let app = test_app();
+    let _app = test_app();
     let blocked_commands = ["rm -rf /", "sudo apt install", "chmod 777 .", "chown root .", "kill -9 1", "reboot", "shutdown now", "mkfs /dev/sda", "dd if=/dev/zero"];
 
     for cmd in &blocked_commands {

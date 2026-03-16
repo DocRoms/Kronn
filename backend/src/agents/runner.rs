@@ -291,17 +291,17 @@ fn agent_command(agent_type: &AgentType, prompt: &str, full_access: bool, mcp_co
         },
         AgentType::Codex => {
             let mut args: Vec<String> = vec!["exec".into()];
-            if full_access {
-                args.push("--full-auto".into());
-            }
             // Codex requires a trusted git directory by default.
             // Inside Docker the paths are mapped, so skip the check.
             args.push("--skip-git-repo-check".into());
             // In Docker, container paths don't match host trusted paths,
             // causing "Permission denied" on CWD listing with default sandbox.
-            // Use workspace-write (safe) or danger-full-access (if full_access enabled).
+            // On macOS Docker, workspace-write can block shell/apply_patch writes
+            // despite rw mounts; prefer danger-full-access there.
             if std::env::var("KRONN_HOST_HOME").is_ok() {
-                if full_access {
+                let host_os = std::env::var("KRONN_HOST_OS").unwrap_or_default();
+                let force_full_access = host_os.eq_ignore_ascii_case("macOS");
+                if full_access || force_full_access {
                     args.push("--sandbox=danger-full-access".into());
                 } else {
                     args.push("--sandbox=workspace-write".into());
@@ -406,7 +406,7 @@ fn try_spawn(
     env_key: &str,
     api_key: Option<&str>,
 ) -> Result<tokio::process::Child, String> {
-    let (cmd_name, cmd_args) = if let Some(pkg) = npx_package {
+    let (cmd_name, mut cmd_args) = if let Some(pkg) = npx_package {
         let mut npx_args = vec!["--yes".to_string(), pkg.to_string()];
         npx_args.extend_from_slice(args);
         ("npx".to_string(), npx_args)
@@ -416,6 +416,29 @@ fn try_spawn(
         (bin_loc.path, args.to_vec())
     };
 
+    // Force current workspace as trusted for Codex sessions inside Docker.
+    // This avoids path-style mismatch issues (/Users/... vs /host-home/...).
+    let is_codex = binary == "codex" || npx_package == Some("@openai/codex");
+    if is_codex {
+        if let Some(exec_idx) = cmd_args.iter().position(|a| a == "exec") {
+            let workdir_s = work_dir.display().to_string();
+            let mut overrides = vec![
+                "-c".to_string(),
+                format!("projects.\"{}\".trust_level=\"trusted\"", workdir_s),
+            ];
+            if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {
+                if let Some(relative) = workdir_s.strip_prefix("/host-home") {
+                    overrides.push("-c".to_string());
+                    let host_path = format!("{}{}", host_home, relative);
+                    overrides.push(format!(
+                        "projects.\"{}\".trust_level=\"trusted\"",
+                        host_path,
+                    ));
+                }
+            }
+            cmd_args.splice(exec_idx + 1..exec_idx + 1, overrides);
+        }
+    }
     tracing::info!("Spawning agent: {} {:?} in {} (key: {})",
         cmd_name, cmd_args, work_dir.display(),
         if api_key.is_some() { "override" } else { "local auth" }
@@ -442,6 +465,8 @@ fn try_spawn(
     // Note: use CLAUDE_CODE_BUBBLEWRAP, not IS_SANDBOX — IS_SANDBOX also
     // suppresses 529 overloaded errors causing infinite silent retries.
     cmd.env("CLAUDE_CODE_BUBBLEWRAP", "1");
+    // Hint shell-aware tools to use bash (dash does not support `-l`).
+    cmd.env("SHELL", "/bin/bash");
 
     // Only set API key env var if explicitly configured (override)
     // Otherwise let the agent use its own local auth

@@ -171,12 +171,12 @@ mod tests {
     }
 
     #[test]
-    fn codex_full_access_adds_full_auto() {
+    fn codex_full_access_uses_explicit_sandbox_only() {
         let (_, _, args, _, _, _) = super::super::agent_command(
             &AgentType::Codex, "test prompt", true, "",
         );
-        assert!(args.contains(&"--full-auto".to_string()),
-            "Codex with full_access should include --full-auto");
+        assert!(!args.contains(&"--full-auto".to_string()),
+            "Codex should not include --full-auto (it overrides explicit sandbox)");
     }
 
     #[test]
