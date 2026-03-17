@@ -64,6 +64,38 @@ agent = "${SELECTED_AGENT:-}"
 TOML
 }
 
+kiro_container_available() {
+    (cd "$KRONN_DIR" && docker compose exec -T backend /bin/sh -lc \
+        'PATH="$HOME/.local/bin:$PATH"; command -v kiro-cli >/dev/null 2>&1') >/dev/null 2>&1
+}
+
+kiro_container_authenticated() {
+    (cd "$KRONN_DIR" && docker compose exec -T backend /bin/sh -lc \
+        'PATH="$HOME/.local/bin:$PATH"; kiro-cli whoami --format json >/dev/null 2>&1') >/dev/null 2>&1
+}
+
+maybe_login_kiro() {
+    # Kiro container bootstrap is required on macOS hosts.
+    [[ "$(uname -s 2>/dev/null || true)" == "Darwin" ]] || return 0
+
+    if ! kiro_container_available; then
+        warn "kiro-cli n'est pas disponible dans le conteneur (installation en cours ou échouée)."
+        return 0
+    fi
+
+    info "Kiro détecté — vérification de l'authentification..."
+    if kiro_container_authenticated; then
+        success "Kiro déjà authentifié."
+        return 0
+    fi
+
+    warn "Kiro non authentifié dans le conteneur."
+    info "Lancement du login Kiro (device flow)..."
+    if ! (cd "$KRONN_DIR" && make kiro-login); then
+        warn "Login Kiro non finalisé. Tu peux relancer: make kiro-login"
+    fi
+}
+
 # ─── Commands ────────────────────────────────────────────────────────────────
 
 cmd_start() {
@@ -109,6 +141,7 @@ cmd_web() {
 
     info "Build & démarrage..."
     (cd "$KRONN_DIR" && make start)
+    maybe_login_kiro
 }
 
 cmd_repos() {

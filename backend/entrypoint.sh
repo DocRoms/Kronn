@@ -41,4 +41,20 @@ if [ -d "$UV_TOOLS" ]; then
   done
 fi
 
+# On macOS hosts, never rely on host-mounted kiro-cli (Darwin binary).
+# Ensure a Linux kiro-cli is present in the container.
+PATH="${HOME}/.local/bin:${PATH}"
+if [ "${KRONN_HOST_OS:-}" = "macOS" ]; then
+  if ! command -v kiro-cli >/dev/null 2>&1; then
+    echo "[entrypoint] macOS host detected: installing Linux kiro-cli..."
+    if command -v unzip >/dev/null 2>&1; then
+      if ! curl -fsSL https://cli.kiro.dev/install | bash; then
+        echo "[entrypoint] warning: kiro-cli install failed (Kiro unavailable until fixed)."
+      fi
+    else
+      echo "[entrypoint] warning: unzip missing, cannot install kiro-cli."
+    fi
+  fi
+fi
+
 exec "$@"

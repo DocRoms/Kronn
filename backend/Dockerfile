@@ -48,7 +48,7 @@ RUN if getent group ${APP_GID} >/dev/null 2>&1; then \
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates git curl nodejs npm python3 python3-pip \
-    make gh openssh-client \
+    make gh openssh-client unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # Install glab (GitLab CLI) for MR creation
