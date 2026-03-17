@@ -25,6 +25,9 @@ pub fn run(conn: &Connection) -> Result<()> {
         ("011_multi_profiles", include_str!("sql/011_multi_profiles.sql")),
         ("012_mcp_general", include_str!("sql/012_mcp_general.sql")),
         ("013_discussion_worktrees", include_str!("sql/013_discussion_worktrees.sql")),
+        ("014_summary_cache", include_str!("sql/014_summary_cache.sql")),
+        ("015_model_tier", include_str!("sql/015_model_tier.sql")),
+        ("016_message_model_tier", include_str!("sql/016_message_model_tier.sql")),
     ];
 
     for (name, sql) in migrations {

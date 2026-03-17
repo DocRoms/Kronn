@@ -4,7 +4,7 @@ import { useApi } from '../hooks/useApi';
 import { useT } from '../lib/I18nContext';
 import { UI_LOCALES } from '../lib/i18n';
 import { AGENT_COLORS } from '../lib/constants';
-import type { AgentDetection, AgentsConfig, Skill, AgentProfile, Project, Directive } from '../types/generated';
+import type { AgentDetection, AgentsConfig, ModelTiersConfig, Skill, AgentProfile, Project, Directive } from '../types/generated';
 import type { ToastFn } from '../hooks/useToast';
 import {
   MessageSquare, Cpu, Zap, Key, AlertTriangle, Save,
@@ -60,6 +60,7 @@ export function SettingsPage({
   const [tokenVisible, setTokenVisible] = useState<Set<string>>(new Set());
   const [usageExpanded, setUsageExpanded] = useState<string | null>(null);
   const [usageSearch, setUsageSearch] = useState('');
+  const [tierEditing, setTierEditing] = useState<Record<string, { economy: string; reasoning: string }>>({});
   const [scanDepth, setScanDepth] = useState(4);
   const [scanPaths, setScanPaths] = useState<string[]>([]);
   const [scanIgnore, setScanIgnore] = useState<string[]>([]);
@@ -123,6 +124,16 @@ export function SettingsPage({
     skillsApi.list().then(setAvailableSkills).catch(() => {});
     profilesApi.list().then(setAvailableProfiles).catch(() => {});
     directivesApi.list().then(setAvailableDirectives).catch(console.error);
+    configApi.getModelTiers().then(tiers => {
+      if (tiers) {
+        // Initialize editing state with current values
+        const editing: Record<string, { economy: string; reasoning: string }> = {};
+        for (const key of ['claude_code', 'codex', 'gemini_cli', 'kiro', 'vibe'] as const) {
+          editing[key] = { economy: tiers[key]?.economy ?? '', reasoning: tiers[key]?.reasoning ?? '' };
+        }
+        setTierEditing(editing);
+      }
+    }).catch(() => {});
   }, []);
 
   const handleInstallAgent = async (agent: AgentDetection) => {
@@ -716,6 +727,104 @@ export function SettingsPage({
                 </div>
                 );
               })()}
+              {/* Model tier configuration */}
+              {(agent.installed || agent.runtime_available) && (() => {
+                const agentKey = agent.agent_type === 'ClaudeCode' ? 'claude_code'
+                  : agent.agent_type === 'Codex' ? 'codex'
+                  : agent.agent_type === 'GeminiCli' ? 'gemini_cli'
+                  : agent.agent_type === 'Kiro' ? 'kiro'
+                  : 'vibe';
+                const editing = tierEditing[agentKey];
+                if (!editing) return null;
+
+                // Known models per agent — first item is the default for that tier
+                const knownModels: Record<string, { economy: string[]; reasoning: string[]; modelsUrl: string }> = {
+                  claude_code: {
+                    economy: ['haiku', 'sonnet'],
+                    reasoning: ['opus', 'sonnet'],
+                    modelsUrl: 'https://docs.anthropic.com/en/docs/about-claude/models',
+                  },
+                  codex: {
+                    economy: ['gpt-5-codex-mini', 'gpt-5.1-codex', 'gpt-5-codex'],
+                    reasoning: ['gpt-5.4', 'gpt-5.3-codex', 'gpt-5.2-codex', 'gpt-5.1-codex-max'],
+                    modelsUrl: 'https://developers.openai.com/codex/models',
+                  },
+                  gemini_cli: {
+                    economy: ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-3-flash-preview'],
+                    reasoning: ['gemini-3.1-pro-preview', 'gemini-2.5-pro'],
+                    modelsUrl: 'https://ai.google.dev/gemini-api/docs/models',
+                  },
+                  kiro: { economy: [], reasoning: [], modelsUrl: '' },
+                  vibe: { economy: [], reasoning: [], modelsUrl: '' },
+                };
+                const models = knownModels[agentKey];
+
+                const saveTiers = async (field: 'economy' | 'reasoning', value: string) => {
+                  const newEditing = { ...tierEditing, [agentKey]: { ...editing, [field]: value } };
+                  setTierEditing(newEditing);
+                  const newTiers: ModelTiersConfig = {
+                    claude_code: { economy: newEditing.claude_code?.economy || null, reasoning: newEditing.claude_code?.reasoning || null },
+                    codex: { economy: newEditing.codex?.economy || null, reasoning: newEditing.codex?.reasoning || null },
+                    gemini_cli: { economy: newEditing.gemini_cli?.economy || null, reasoning: newEditing.gemini_cli?.reasoning || null },
+                    kiro: { economy: newEditing.kiro?.economy || null, reasoning: newEditing.kiro?.reasoning || null },
+                    vibe: { economy: newEditing.vibe?.economy || null, reasoning: newEditing.vibe?.reasoning || null },
+                  };
+                  try { await configApi.setModelTiers(newTiers); toast(t('config.saved'), 'success'); } catch { toast(t('config.saveError'), 'error'); }
+                };
+
+                const selectStyle = {
+                  background: '#1a1d24', border: '1px solid rgba(255,255,255,0.12)',
+                  borderRadius: 4, padding: '3px 6px', fontSize: 10, color: '#e8eaed',
+                  fontFamily: 'inherit', width: 150, outline: 'none', cursor: 'pointer' as const,
+                  WebkitAppearance: 'none' as const, MozAppearance: 'none' as const,
+                  appearance: 'none' as const,
+                  backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23666'/%3E%3C/svg%3E")`,
+                  backgroundRepeat: 'no-repeat', backgroundPosition: 'right 6px center',
+                  paddingRight: 20,
+                };
+
+                const renderSelect = (field: 'economy' | 'reasoning', options: string[], icon: string, iconColor: string) => {
+                  if (options.length === 0) return (
+                    <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.2)', padding: '2px 6px' }}>{icon} N/A</span>
+                  );
+                  return (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                      <span style={{ fontSize: 9, color: iconColor, width: 14 }} title={field}>{icon}</span>
+                      <select
+                        style={selectStyle}
+                        value={editing[field]}
+                        onChange={e => saveTiers(field, e.target.value)}
+                      >
+                        <option value="" style={{ background: '#1a1d24', color: '#e8eaed' }}>{t('config.defaultModel')} ({options[0]})</option>
+                        {options.map(m => (
+                          <option key={m} value={m} style={{ background: '#1a1d24', color: '#e8eaed' }}>{m}</option>
+                        ))}
+                      </select>
+                    </div>
+                  );
+                };
+
+                return (
+                  <div style={{ marginLeft: 22, marginTop: 6 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                      <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', fontWeight: 600 }}>{t('disc.modelTier')}</span>
+                      {models.modelsUrl && (
+                        <a href={models.modelsUrl} target="_blank" rel="noopener noreferrer"
+                          style={{ fontSize: 9, color: 'rgba(100,180,255,0.5)', display: 'flex', alignItems: 'center', gap: 2, textDecoration: 'none' }}
+                          title={t('config.viewModels')}
+                        >
+                          <ExternalLink size={8} /> {t('config.viewModels')}
+                        </a>
+                      )}
+                    </div>
+                    <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+                      {renderSelect('economy', models.economy, '⚡', 'rgba(52,211,153,0.6)')}
+                      {renderSelect('reasoning', models.reasoning, '🧠', 'rgba(245,158,11,0.6)')}
+                    </div>
+                  </div>
+                );
+              })()}
+
               {/* Estimated token usage per agent */}
               {(agent.installed || agent.runtime_available) && (() => {
                 const agentUsage = agentUsageData?.find(a => a.agent_type === agent.agent_type);
@@ -812,6 +921,11 @@ export function SettingsPage({
                     ) : (
                       <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 6, background: 'rgba(139,92,246,0.1)', color: 'rgba(139,92,246,0.7)', border: '1px solid rgba(139,92,246,0.2)' }}>
                         {t('skills.custom')}
+                      </span>
+                    )}
+                    {skill.token_estimate > 0 && (
+                      <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 6, background: 'rgba(255,165,0,0.1)', color: 'rgba(255,165,0,0.7)', border: '1px solid rgba(255,165,0,0.2)' }} title={t('config.tokenCostHint')}>
+                        ~{skill.token_estimate} tok
                       </span>
                     )}
                   </div>
@@ -1045,7 +1159,14 @@ export function SettingsPage({
                       <span style={{ color: 'rgba(255,255,255,0.25)' }}>·</span>
                       {profile.name}
                     </div>
-                    <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', marginTop: 2 }}>{profile.role}</div>
+                    <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', marginTop: 2, display: 'flex', alignItems: 'center', gap: 6 }}>
+                      {profile.role}
+                      {profile.token_estimate > 0 && (
+                        <span style={{ fontSize: 9, padding: '0px 5px', borderRadius: 6, background: 'rgba(255,165,0,0.1)', color: 'rgba(255,165,0,0.7)', border: '1px solid rgba(255,165,0,0.2)' }} title={t('config.tokenCostHint')}>
+                          ~{profile.token_estimate} tok
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </div>
                 {/* Description: expandable persona_prompt */}
@@ -1328,6 +1449,11 @@ export function SettingsPage({
                     ) : (
                       <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 6, background: 'rgba(245,158,11,0.1)', color: 'rgba(245,158,11,0.7)', border: '1px solid rgba(245,158,11,0.2)' }}>
                         {t('directives.custom')}
+                      </span>
+                    )}
+                    {directive.token_estimate > 0 && (
+                      <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 6, background: 'rgba(255,165,0,0.1)', color: 'rgba(255,165,0,0.7)', border: '1px solid rgba(255,165,0,0.2)' }} title={t('config.tokenCostHint')}>
+                        ~{directive.token_estimate} tok
                       </span>
                     )}
                   </div>

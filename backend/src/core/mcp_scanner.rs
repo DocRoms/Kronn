@@ -77,8 +77,20 @@ pub fn read_mcp_json(project_path: &str) -> Option<McpJsonFile> {
 
 /// Write a McpJsonFile to the project's .mcp.json.
 pub fn write_mcp_json(project_path: &str, data: &McpJsonFile) -> Result<(), String> {
+    write_mcp_json_to_subpath(project_path, ".mcp.json", data)
+}
+
+/// Write a McpJsonFile to an arbitrary subpath within a project directory.
+/// Creates parent directories if needed. Used for Claude (.mcp.json),
+/// Kiro (.kiro/settings/mcp.json), and Gemini (.gemini/settings.json).
+pub fn write_mcp_json_to_subpath(project_path: &str, subpath: &str, data: &McpJsonFile) -> Result<(), String> {
     let resolved = resolve_host_path(project_path);
-    let file = Path::new(&resolved).join(".mcp.json");
+    let file = Path::new(&resolved).join(subpath);
+    // Create parent directories (e.g., .kiro/settings/)
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create dir {}: {}", parent.display(), e))?;
+    }
     let content = serde_json::to_string_pretty(data)
         .map_err(|e| format!("JSON serialize error: {}", e))?;
     std::fs::write(&file, content)
@@ -168,7 +180,7 @@ pub fn sync_project_mcps_to_disk(
     if mcp_servers.is_empty() {
         // Remove config files if no MCPs
         let resolved = resolve_host_path(&project.path);
-        for filename in &[".mcp.json", ".vibe/config.toml"] {
+        for filename in &[".mcp.json", ".vibe/config.toml", ".kiro/settings/mcp.json", ".gemini/settings.json"] {
             let file = std::path::Path::new(&resolved).join(filename);
             if file.exists() {
                 let _ = std::fs::remove_file(&file);
@@ -185,12 +197,88 @@ pub fn sync_project_mcps_to_disk(
         // ── Vibe: .vibe/config.toml ──
         sync_vibe_project_config(&project.path, &configs, &server_map, secret);
 
+        // ── Kiro: .kiro/settings/mcp.json (same JSON format as Claude) ──
+        if let Err(e) = write_mcp_json_to_subpath(&project.path, ".kiro/settings/mcp.json", &data) {
+            tracing::warn!("Failed to sync Kiro MCP config: {}", e);
+        } else {
+            ensure_gitignore(&project.path, ".kiro/settings/");
+            tracing::info!("Synced .kiro/settings/mcp.json for {}", project.path);
+        }
+
+        // ── Gemini CLI: .gemini/settings.json (same JSON format as Claude) ──
+        if let Err(e) = write_mcp_json_to_subpath(&project.path, ".gemini/settings.json", &data) {
+            tracing::warn!("Failed to sync Gemini MCP config: {}", e);
+        } else {
+            ensure_gitignore(&project.path, ".gemini/");
+            tracing::info!("Synced .gemini/settings.json for {}", project.path);
+        }
+
         // MCP context files are only created when the user explicitly writes
         // custom instructions via the UI (write_mcp_context). No auto-creation
         // of empty/template files — they add no value and pollute the project.
     }
 
+    // ── Ensure redirector files exist (auto-update for projects with ai/) ──
+    ensure_redirectors(&project.path);
+
     Ok(())
+}
+
+/// Public wrapper for tests.
+pub fn ensure_redirectors_public(project_path: &str) {
+    ensure_redirectors(project_path);
+}
+
+/// Ensure all agent redirector files exist in a project that has an ai/ directory.
+/// Non-destructive: only creates missing files, never overwrites existing ones.
+/// Called during MCP sync to keep redirectors up-to-date when Kronn adds new agent support.
+fn ensure_redirectors(project_path: &str) {
+    let resolved = resolve_host_path(project_path);
+    let project_dir = Path::new(&resolved);
+
+    // Only for projects that have an ai/ directory
+    if !project_dir.join("ai").is_dir() {
+        return;
+    }
+
+    let template_dir = std::env::var("KRONN_TEMPLATES_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("templates"));
+
+    if !template_dir.is_dir() {
+        return;
+    }
+
+    // Simple redirector files (flat)
+    let redirectors = [
+        "CLAUDE.md", "GEMINI.md", "AGENTS.md",
+        ".cursorrules", ".windsurfrules", ".clinerules",
+    ];
+
+    for filename in &redirectors {
+        let src = template_dir.join(filename);
+        let dst = project_dir.join(filename);
+        if src.exists() && !dst.exists() {
+            let _ = std::fs::copy(&src, &dst);
+        }
+    }
+
+    // Nested redirectors (need parent dir creation)
+    let nested = [
+        ".github/copilot-instructions.md",
+        ".kiro/steering/instructions.md",
+    ];
+
+    for subpath in &nested {
+        let src = template_dir.join(subpath);
+        let dst = project_dir.join(subpath);
+        if src.exists() && !dst.exists() {
+            if let Some(parent) = dst.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::copy(&src, &dst);
+        }
+    }
 }
 
 // ─── Vibe per-project sync ────────────────────────────────────────────────────

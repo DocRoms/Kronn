@@ -119,6 +119,13 @@ describe('DiscussionsPage', () => {
       gemini_cli: { path: null, installed: false, version: null, full_access: false },
       kiro: { path: null, installed: false, version: null, full_access: false },
       vibe: { path: null, installed: false, version: null, full_access: false },
+      model_tiers: {
+        claude_code: { economy: null, reasoning: null },
+        codex: { economy: null, reasoning: null },
+        gemini_cli: { economy: null, reasoning: null },
+        kiro: { economy: null, reasoning: null },
+        vibe: { economy: null, reasoning: null },
+      },
     };
     await wrap(
       <DiscussionsPage

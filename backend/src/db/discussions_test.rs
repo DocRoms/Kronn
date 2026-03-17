@@ -31,6 +31,9 @@ mod tests {
             workspace_mode: "Direct".into(),
             workspace_path: None,
             worktree_branch: None,
+            tier: ModelTier::Default,
+            summary_cache: None,
+            summary_up_to_msg_idx: None,
             created_at: now,
             updated_at: now,
         }
@@ -45,6 +48,7 @@ mod tests {
             timestamp: Utc::now(),
             tokens_used: 0,
             auth_mode: None,
+            model_tier: None,
         }
     }
 

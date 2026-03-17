@@ -245,6 +245,7 @@ export function DiscussionsPage({
   const [newDiscDirectiveIds, setNewDiscDirectiveIds] = useState<string[]>([]);
   const [availableDirectives, setAvailableDirectives] = useState<Directive[]>([]);
   const [newDiscWorkspaceMode, setNewDiscWorkspaceMode] = useState<'Direct' | 'Isolated'>('Direct');
+  const [newDiscTier, setNewDiscTier] = useState<'economy' | 'default' | 'reasoning'>('default');
   const [newDiscBranchName, setNewDiscBranchName] = useState('');
   const [newDiscBaseBranch, setNewDiscBaseBranch] = useState('main');
 
@@ -440,6 +441,7 @@ export function DiscussionsPage({
       ...(newDiscDirectiveIds.length > 0 ? { directive_ids: newDiscDirectiveIds } : {}),
       workspace_mode: newDiscWorkspaceMode === 'Isolated' ? 'Isolated' : undefined,
       base_branch: newDiscWorkspaceMode === 'Isolated' ? newDiscBaseBranch : undefined,
+      tier: newDiscTier !== 'default' ? newDiscTier : undefined,
     });
     setShowNewDiscussion(false);
     setNewDiscTitle('');
@@ -449,6 +451,7 @@ export function DiscussionsPage({
     setNewDiscDirectiveIds([]);
     setNewDiscProfileIds([]);
     setNewDiscWorkspaceMode('Direct');
+    setNewDiscTier('default');
     setNewDiscBranchName('');
     setNewDiscBaseBranch('main');
     setActiveDiscussionId(disc.id);
@@ -942,15 +945,34 @@ export function DiscussionsPage({
                     <ChevronRight size={11} style={{ transform: showAdvancedOptions ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s' }} />
                     <Settings size={10} />
                     {t('disc.advancedOptions')}
-                    {(newDiscSkillIds.length > 0 || newDiscProfileIds.length > 0 || newDiscDirectiveIds.length > 0) && (
+                    {(newDiscSkillIds.length > 0 || newDiscProfileIds.length > 0 || newDiscDirectiveIds.length > 0 || newDiscTier !== 'default') && (
                       <span style={{ fontSize: 9, color: '#c8ff00', marginLeft: 2 }}>
-                        ({newDiscSkillIds.length + newDiscProfileIds.length + newDiscDirectiveIds.length})
+                        ({newDiscSkillIds.length + newDiscProfileIds.length + newDiscDirectiveIds.length}{newDiscTier !== 'default' ? ` · ${newDiscTier === 'economy' ? '⚡' : '🧠'}` : ''})
                       </span>
                     )}
                   </button>
 
                   {showAdvancedOptions && (
                     <div style={{ marginTop: 8, padding: '10px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)' }}>
+
+                      {/* Model tier selector */}
+                      <div style={{ marginBottom: 10 }}>
+                        <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', fontWeight: 600, marginBottom: 4 }}>{t('disc.modelTier')}</div>
+                        <div style={{ display: 'flex', gap: 4 }}>
+                          {(['economy', 'default', 'reasoning'] as const).map(tier => (
+                            <button key={tier} type="button" onClick={() => setNewDiscTier(tier)} style={{
+                              flex: 1, padding: '4px 6px', borderRadius: 6, fontSize: 10, fontFamily: 'inherit',
+                              cursor: 'pointer', textAlign: 'center' as const,
+                              border: newDiscTier === tier ? '1px solid rgba(255,255,255,0.2)' : '1px solid rgba(255,255,255,0.06)',
+                              background: newDiscTier === tier ? 'rgba(255,255,255,0.06)' : 'transparent',
+                              color: newDiscTier === tier ? (tier === 'economy' ? '#34d399' : tier === 'reasoning' ? '#f59e0b' : '#e8eaed') : 'rgba(255,255,255,0.35)',
+                            }}>
+                              {tier === 'economy' ? '⚡' : tier === 'reasoning' ? '🧠' : '⚙️'} {t(`disc.tier.${tier}`)}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
                       {/* Skills selector */}
                       {availableSkills.length > 0 && (
                         <div style={{ marginBottom: 10 }}>
@@ -1416,6 +1438,36 @@ export function DiscussionsPage({
                         </div>
                       )}
 
+                      {/* Model Tier */}
+                      <div style={{ marginBottom: 8 }}>
+                        <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', fontWeight: 600, marginBottom: 4 }}>{t('disc.modelTier')}</div>
+                        <div style={{ display: 'flex', gap: 4 }}>
+                          {(['economy', 'default', 'reasoning'] as const).map(tier => {
+                            const active = (activeDiscussion.tier ?? 'default') === tier;
+                            return (
+                              <button key={tier} style={{
+                                padding: '2px 7px', borderRadius: 8, fontSize: 10, fontFamily: 'inherit', cursor: 'pointer',
+                                border: `1px solid ${active ? 'rgba(255,255,255,0.2)' : 'rgba(255,255,255,0.08)'}`,
+                                background: active ? 'rgba(255,255,255,0.06)' : 'transparent',
+                                color: active
+                                  ? (tier === 'economy' ? '#34d399' : tier === 'reasoning' ? '#f59e0b' : '#e8eaed')
+                                  : 'rgba(255,255,255,0.4)',
+                              }} onClick={async () => {
+                                await discussionsApi.update(activeDiscussion.id, { tier });
+                                refetchDiscussions();
+                                setLoadedDiscussions(prev => {
+                                  const d = prev[activeDiscussion.id];
+                                  if (!d) return prev;
+                                  return { ...prev, [activeDiscussion.id]: { ...d, tier } };
+                                });
+                              }}>
+                                {tier === 'economy' ? '⚡' : tier === 'reasoning' ? '🧠' : '⚙️'} {t(`disc.tier.${tier}`)}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+
                       {/* Directives */}
                       {availableDirectives.length > 0 && (
                         <div>
@@ -1479,6 +1531,18 @@ export function DiscussionsPage({
             {/* Messages + Git Panel side by side */}
             <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
             <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+
+            {/* Kiro output notice */}
+            {activeDiscussion.agent === 'Kiro' && (
+              <div style={{
+                padding: '6px 16px', fontSize: 10, color: 'rgba(123,97,255,0.6)',
+                background: 'rgba(123,97,255,0.04)', borderBottom: '1px solid rgba(123,97,255,0.08)',
+                display: 'flex', alignItems: 'center', gap: 6,
+              }}>
+                <span>ℹ</span>
+                <span>Kiro CLI: output may include tool logs. <a href="https://github.com/kirodotdev/Kiro/issues/5006" target="_blank" rel="noopener noreferrer" style={{ color: 'rgba(123,97,255,0.8)', textDecoration: 'underline' }}>Tracking issue</a></span>
+              </div>
+            )}
 
             {/* Messages */}
             <div style={ds.messages}>
@@ -1574,6 +1638,17 @@ export function DiscussionsPage({
                           }}>
                             <AlertTriangle size={8} />
                             {t('config.fullAccessBadge')}
+                          </span>
+                        )}
+                        {msg.role === 'Agent' && msg.model_tier && (
+                          <span style={{
+                            display: 'inline-flex', alignItems: 'center', gap: 3,
+                            fontSize: 9, padding: '1px 5px', borderRadius: 4,
+                            color: msg.model_tier === 'economy' ? 'rgba(52,211,153,0.6)' : 'rgba(245,158,11,0.6)',
+                            background: msg.model_tier === 'economy' ? 'rgba(52,211,153,0.06)' : 'rgba(245,158,11,0.06)',
+                            border: `1px solid ${msg.model_tier === 'economy' ? 'rgba(52,211,153,0.15)' : 'rgba(245,158,11,0.15)'}`,
+                          }}>
+                            {msg.model_tier === 'economy' ? '⚡' : '🧠'} {t(`disc.tier.${msg.model_tier}`)}
                           </span>
                         )}
                         {!sending && !isEditing && (isLastUser || isLastAgent) && (

@@ -29,3 +29,5 @@ docker-compose.override.yml
 .vibe/
 .env
 /node_modules/
+.kiro/settings/
+.gemini/

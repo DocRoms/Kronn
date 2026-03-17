@@ -147,6 +147,9 @@ pub struct AgentsConfig {
     pub kiro: AgentConfig,
     #[serde(default)]
     pub vibe: AgentConfig,
+    /// Per-agent model tier overrides (Economy/Reasoning model names).
+    #[serde(default)]
+    pub model_tiers: ModelTiersConfig,
 }
 
 impl AgentsConfig {
@@ -172,6 +175,48 @@ pub struct AgentConfig {
     pub version: Option<String>,
     #[serde(default)]
     pub full_access: bool,
+}
+
+/// Abstract model capability tier. Kronn maps each tier to a concrete --model flag per agent.
+/// Priority: AgentSettings.model (explicit) > ModelTier > Default (no flag).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum ModelTier {
+    /// Cheap/fast model (haiku, gpt-4.1-mini, flash). For summaries, bulk ops.
+    Economy,
+    /// Agent's built-in default. No --model flag passed.
+    #[default]
+    Default,
+    /// Most capable model (opus, o4-mini, pro). For audits, complex analysis.
+    Reasoning,
+}
+
+/// Per-agent model tier configuration. Maps Economy/Reasoning to concrete model names.
+/// Stored in config.toml under [agents.model_tiers].
+#[derive(Debug, Clone, Serialize, Deserialize, Default, TS)]
+#[ts(export)]
+pub struct ModelTierConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub economy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+}
+
+/// Global model tier overrides per agent.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, TS)]
+#[ts(export)]
+pub struct ModelTiersConfig {
+    #[serde(default)]
+    pub claude_code: ModelTierConfig,
+    #[serde(default)]
+    pub codex: ModelTierConfig,
+    #[serde(default)]
+    pub gemini_cli: ModelTierConfig,
+    #[serde(default)]
+    pub kiro: ModelTierConfig,
+    #[serde(default)]
+    pub vibe: ModelTierConfig,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -595,8 +640,12 @@ pub enum StepMode {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct AgentSettings {
+    /// Explicit model override (expert mode). Takes priority over tier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Abstract tier selection. Resolved to a concrete --model flag per agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<ModelTier>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -748,6 +797,8 @@ pub struct Skill {
     pub category: SkillCategory,
     pub content: String,
     pub is_builtin: bool,
+    /// Estimated token cost when injected into an agent prompt (~4 chars = 1 token).
+    pub token_estimate: u32,
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -787,6 +838,8 @@ pub struct AgentProfile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_engine: Option<String>,
     pub is_builtin: bool,
+    /// Estimated token cost when injected into an agent prompt (~4 chars = 1 token).
+    pub token_estimate: u32,
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -827,6 +880,8 @@ pub struct Directive {
     pub is_builtin: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conflicts: Vec<String>,
+    /// Estimated token cost when injected into an agent prompt (~4 chars = 1 token).
+    pub token_estimate: u32,
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -956,6 +1011,15 @@ pub struct Discussion {
     pub workspace_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_branch: Option<String>,
+    /// Model capability tier for this discussion.
+    #[serde(default)]
+    pub tier: ModelTier,
+    /// Cached summary of older messages (eco-design: avoids re-sending full history).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_cache: Option<String>,
+    /// Index of the last message included in summary_cache (0-based).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_up_to_msg_idx: Option<u32>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -974,6 +1038,9 @@ pub struct DiscussionMessage {
     pub tokens_used: u64,
     #[serde(default)]
     pub auth_mode: Option<String>,
+    /// Which model tier was used for this message (economy/default/reasoning).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_tier: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -1118,6 +1185,9 @@ pub struct CreateDiscussionRequest {
     pub workspace_mode: Option<String>,
     #[serde(default)]
     pub base_branch: Option<String>,
+    /// Model capability tier (economy / default / reasoning).
+    #[serde(default)]
+    pub tier: ModelTier,
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -1131,6 +1201,9 @@ pub struct UpdateDiscussionRequest {
     /// Change project: Some(Some("id")) = set, Some(None) = unset, absent = no change
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<Option<String>>,
+    /// Change model tier for this discussion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<ModelTier>,
 }
 
 fn default_language() -> String {

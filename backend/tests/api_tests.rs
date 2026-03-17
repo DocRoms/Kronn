@@ -807,7 +807,7 @@ fn template_mcp_template_exists() {
     let content = std::fs::read_to_string(&mcp_template).unwrap();
     assert!(content.contains("{{MCP_NAME}}"), "MCP template should have {{MCP_NAME}} placeholder");
     assert!(content.contains("Rules"), "MCP template should have Rules section");
-    assert!(content.contains("Examples") || content.contains("usage patterns"), "MCP template should have examples section");
+    assert!(content.contains("Gotchas") || content.contains("Examples") || content.contains("usage patterns"), "MCP template should have gotchas or examples section");
 }
 
 #[test]
@@ -830,7 +830,7 @@ fn template_inconsistencies_has_outdated_prerequisites_table() {
     }
 
     let content = std::fs::read_to_string(template_dir.join("inconsistencies-tech-debt.md")).unwrap();
-    assert!(content.contains("Outdated prerequisites"), "Should have outdated prerequisites section");
+    assert!(content.contains("Outdated dependencies") || content.contains("Outdated prerequisites"), "Should have outdated dependencies/prerequisites section");
     assert!(content.contains("Severity"), "Should have severity column");
     assert!(content.contains("ai/tech-debt/"), "Should reference tech-debt detail files");
 }

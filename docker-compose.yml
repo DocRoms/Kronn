@@ -55,6 +55,12 @@ services:
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       - GH_TOKEN=${GH_TOKEN:-${GITHUB_TOKEN:-}}
       - RUST_LOG=kronn=debug,tower_http=debug
+    # Resource limits — prevents runaway agents from consuming all host resources
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2.0'
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3140/api/health"]
       interval: 10s
@@ -68,6 +74,11 @@ services:
       dockerfile: Dockerfile
     ports:
       - "3141:80"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost/"]
       interval: 10s
@@ -81,6 +92,11 @@ services:
   # Single entry point: nginx reverse proxy
   gateway:
     image: nginx:alpine
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.25'
     ports:
       - "3140:80"
     volumes:

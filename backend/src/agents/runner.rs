@@ -5,7 +5,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
-use crate::models::{AgentType, TokensConfig};
+use crate::models::{AgentType, ModelTier, ModelTiersConfig, TokensConfig};
 
 /// Output mode — how to interpret stdout from the agent
 #[derive(Clone, Copy, PartialEq)]
@@ -130,6 +130,53 @@ pub struct AgentStartConfig<'a> {
     /// Override MCP context instead of reading from project filesystem.
     /// Used for general discussions to inject global MCP configs.
     pub mcp_context_override: Option<&'a str>,
+    /// Model capability tier. Resolved to a --model flag per agent.
+    /// Priority: explicit model string > tier > Default (no flag).
+    pub tier: ModelTier,
+    /// Per-agent model tier config (from global settings). Used to resolve tier to model name.
+    pub model_tiers: Option<&'a ModelTiersConfig>,
+}
+
+/// Resolve a ModelTier to a concrete --model flag value for a given agent.
+/// Returns None for Default tier or agents without --model support.
+fn resolve_model_flag(agent_type: &AgentType, tier: ModelTier, overrides: Option<&ModelTiersConfig>) -> Option<String> {
+    // Check user overrides first (all tiers including Default)
+    if let Some(cfg) = overrides {
+        let agent_cfg = match agent_type {
+            AgentType::ClaudeCode => &cfg.claude_code,
+            AgentType::Codex => &cfg.codex,
+            AgentType::GeminiCli => &cfg.gemini_cli,
+            AgentType::Kiro => &cfg.kiro,
+            AgentType::Vibe => &cfg.vibe,
+            AgentType::Custom => return None,
+        };
+        let override_val = match tier {
+            ModelTier::Economy => &agent_cfg.economy,
+            ModelTier::Reasoning => &agent_cfg.reasoning,
+            ModelTier::Default => &None, // Default uses built-in below
+        };
+        if let Some(ref val) = override_val {
+            if !val.is_empty() {
+                return Some(val.clone());
+            }
+        }
+    }
+
+    // Built-in defaults — explicit model for each tier so tiers are always distinct.
+    // Default maps to the "standard" model, not "no flag" (which depends on user subscription).
+    match (agent_type, tier) {
+        (AgentType::ClaudeCode, ModelTier::Economy)  => Some("haiku".into()),
+        (AgentType::ClaudeCode, ModelTier::Default)   => Some("sonnet".into()),
+        (AgentType::ClaudeCode, ModelTier::Reasoning) => Some("opus".into()),
+        (AgentType::Codex, ModelTier::Economy)        => Some("gpt-5-codex-mini".into()),
+        (AgentType::Codex, ModelTier::Default)        => None, // Codex default is fine
+        (AgentType::Codex, ModelTier::Reasoning)      => Some("gpt-5.4".into()),
+        (AgentType::GeminiCli, ModelTier::Economy)    => Some("gemini-2.5-flash".into()),
+        (AgentType::GeminiCli, ModelTier::Default)    => None, // Gemini default is fine
+        (AgentType::GeminiCli, ModelTier::Reasoning)  => Some("gemini-3.1-pro-preview".into()),
+        // Kiro, Vibe: no --model flag support
+        _ => None,
+    }
 }
 
 /// Start an agent process with minimal config (no skills/directives/profiles).
@@ -144,6 +191,8 @@ pub async fn start_agent(
         agent_type, project_path, work_dir: None, prompt, tokens, full_access,
         skill_ids: &[], directive_ids: &[], profile_ids: &[],
         mcp_context_override: None,
+        tier: ModelTier::Default,
+        model_tiers: None,
     }).await
 }
 
@@ -159,14 +208,25 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         String::new()
     };
 
+    // Use compact format for agents with small context windows (eco-design)
+    let compact = matches!(config.agent_type, AgentType::Codex | AgentType::Kiro | AgentType::Vibe);
+
     // Build skills prompt
-    let skills_prompt = crate::core::skills::build_skills_prompt(config.skill_ids);
+    let skills_prompt = if compact {
+        crate::core::skills::build_skills_prompt_compact(config.skill_ids)
+    } else {
+        crate::core::skills::build_skills_prompt(config.skill_ids)
+    };
 
     // Build directives prompt
     let directives_prompt = crate::core::directives::build_directives_prompt(config.directive_ids);
 
     // Build profiles prompt
-    let profiles_prompt = crate::core::profiles::build_profiles_prompt(config.profile_ids);
+    let profiles_prompt = if compact {
+        crate::core::profiles::build_profiles_prompt_compact(config.profile_ids)
+    } else {
+        crate::core::profiles::build_profiles_prompt(config.profile_ids)
+    };
 
     // Combine all context parts
     let mut parts = Vec::new();
@@ -176,8 +236,11 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     if !mcp_context.is_empty() { parts.push(mcp_context); }
     let extra_context = parts.join("\n\n");
 
+    // Resolve model tier to a --model flag
+    let model_flag = resolve_model_flag(config.agent_type, config.tier, config.model_tiers);
+
     let (binary, npx_pkg, args, env_key, stderr_mode, output_mode) =
-        agent_command(config.agent_type, config.prompt, config.full_access, &extra_context);
+        agent_command(config.agent_type, config.prompt, config.full_access, &extra_context, model_flag.as_deref());
 
     // Use work_dir (or project_path) for the agent's CWD
     let effective_work_dir = config.work_dir.unwrap_or(config.project_path);
@@ -262,7 +325,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
 /// MCP context is injected via --append-system-prompt for Claude Code,
 /// or prepended to the prompt for other agents.
 /// Returns: (binary, npx_package, args, env_key, stderr_mode, output_mode)
-fn agent_command(agent_type: &AgentType, prompt: &str, full_access: bool, mcp_context: &str) -> (&'static str, Option<&'static str>, Vec<String>, &'static str, StderrMode, OutputMode) {
+fn agent_command(agent_type: &AgentType, prompt: &str, full_access: bool, mcp_context: &str, model_flag: Option<&str>) -> (&'static str, Option<&'static str>, Vec<String>, &'static str, StderrMode, OutputMode) {
     match agent_type {
         AgentType::ClaudeCode => {
             let mut args = vec![
@@ -271,6 +334,10 @@ fn agent_command(agent_type: &AgentType, prompt: &str, full_access: bool, mcp_co
                 "--verbose".into(),
                 "--include-partial-messages".into(),
             ];
+            if let Some(model) = model_flag {
+                args.push("--model".into());
+                args.push(model.into());
+            }
             if full_access {
                 args.push("--dangerously-skip-permissions".into());
             }
@@ -291,6 +358,10 @@ fn agent_command(agent_type: &AgentType, prompt: &str, full_access: bool, mcp_co
         },
         AgentType::Codex => {
             let mut args: Vec<String> = vec!["exec".into()];
+            if let Some(model) = model_flag {
+                args.push("--model".into());
+                args.push(model.into());
+            }
             // Codex requires a trusted git directory by default.
             // Inside Docker the paths are mapped, so skip the check.
             args.push("--skip-git-repo-check".into());
@@ -342,6 +413,10 @@ fn agent_command(agent_type: &AgentType, prompt: &str, full_access: bool, mcp_co
         },
         AgentType::GeminiCli => {
             let mut args: Vec<String> = vec!["-p".into()];
+            if let Some(model) = model_flag {
+                args.push("--model".into());
+                args.push(model.into());
+            }
             if full_access {
                 args.push("--yolo".into());
             }
@@ -563,11 +638,14 @@ pub fn parse_claude_stream_line(line: &str) -> StreamJsonEvent {
 /// Strip ANSI escape codes from a string.
 /// Handles CSI sequences (\x1b[...m), OSC, and other common escape patterns.
 pub fn strip_ansi(s: &str) -> String {
-    let re = regex_lite::Regex::new(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][0-9A-B]").unwrap();
-    re.replace_all(s, "").to_string()
+    static RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
+        regex_lite::Regex::new(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][0-9A-B]").unwrap()
+    });
+    RE.replace_all(s, "").to_string()
 }
 
 /// Clean Kiro CLI output: strip ANSI codes, remove the "> " prefix, and filter noise lines.
+/// Kiro mixes tool execution logs with actual response text. Filter out tool noise.
 pub fn clean_kiro_line(line: &str) -> Option<String> {
     let clean = strip_ansi(line);
     let trimmed = clean.trim();
@@ -576,6 +654,21 @@ pub fn clean_kiro_line(line: &str) -> Option<String> {
         || trimmed.chars().all(|c| c.is_whitespace() || c == '\u{2800}') // braille blank chars in banner
         || trimmed.starts_with("Credits:")
         || trimmed.starts_with("▸ Credits:")
+        // ── Kiro tool execution logs (structural patterns, language-independent) ──
+        // Unicode marker lines
+        || trimmed.starts_with("✓ ")       // ✓ Successfully read/found/etc.
+        || trimmed.starts_with("↱ ")       // ↱ Operation N: ...
+        || trimmed.starts_with("⋮")        // truncation marker
+        || trimmed.starts_with("❗ ")       // ❗ No matches found ...
+        // Tool invocation patterns (always in English — Kiro CLI log format)
+        || trimmed.contains("(using tool:")           // "Reading file: X (using tool: read)"
+        || trimmed.contains("(from mcp server:")      // "Running tool X ... (from mcp server: Y)"
+        // Structured result lines (start with "- " followed by keyword)
+        || trimmed.starts_with("- Completed in ")
+        || trimmed.starts_with("- Summary: ")
+        // Batch operation headers
+        || trimmed.starts_with("Batch fs_read")
+        || trimmed.starts_with("Batch ")
     {
         return None;
     }

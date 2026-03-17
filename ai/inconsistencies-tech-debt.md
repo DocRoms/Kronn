@@ -23,7 +23,7 @@
 
 ## Current list
 
-| ID | Problem | Area | Priority |
+| ID | Problem | Area | Severity |
 |----|---------|------|----------|
 | TD-20260306-inline-styles | All styles are inline — no theming or consistency system | Frontend | Low |
 | TD-20260310-audit-conversation-display | **GH #11** — Audit validation conversation not displayed correctly when audit is in progress. | Frontend | Low |

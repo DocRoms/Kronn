@@ -364,6 +364,27 @@ pub async fn set_agent_access(
     }
 }
 
+/// GET /api/config/model-tiers
+pub async fn get_model_tiers(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<ModelTiersConfig>> {
+    let config = state.config.read().await;
+    Json(ApiResponse::ok(config.agents.model_tiers.clone()))
+}
+
+/// POST /api/config/model-tiers
+pub async fn set_model_tiers(
+    State(state): State<AppState>,
+    Json(req): Json<ModelTiersConfig>,
+) -> Json<ApiResponse<()>> {
+    let mut config = state.config.write().await;
+    config.agents.model_tiers = req;
+    match config::save(&config).await {
+        Ok(_) => Json(ApiResponse::ok(())),
+        Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
+    }
+}
+
 /// GET /api/config/server
 pub async fn get_server_config(
     State(state): State<AppState>,

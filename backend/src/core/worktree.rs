@@ -106,6 +106,32 @@ pub fn create_discussion_worktree(
         }
     }
 
+    // Copy .kiro/settings/mcp.json if it exists (for Kiro agent)
+    let kiro_src = repo_path.join(".kiro").join("settings").join("mcp.json");
+    if kiro_src.exists() {
+        let kiro_dir = worktree_path.join(".kiro").join("settings");
+        let _ = std::fs::create_dir_all(&kiro_dir);
+        let kiro_dst = kiro_dir.join("mcp.json");
+        if let Err(e) = std::fs::copy(&kiro_src, &kiro_dst) {
+            tracing::warn!("Failed to copy .kiro/settings/mcp.json to worktree: {}", e);
+        } else {
+            tracing::info!("Copied .kiro/settings/mcp.json to worktree");
+        }
+    }
+
+    // Copy .gemini/settings.json if it exists (for Gemini CLI agent)
+    let gemini_src = repo_path.join(".gemini").join("settings.json");
+    if gemini_src.exists() {
+        let gemini_dir = worktree_path.join(".gemini");
+        let _ = std::fs::create_dir_all(&gemini_dir);
+        let gemini_dst = gemini_dir.join("settings.json");
+        if let Err(e) = std::fs::copy(&gemini_src, &gemini_dst) {
+            tracing::warn!("Failed to copy .gemini/settings.json to worktree: {}", e);
+        } else {
+            tracing::info!("Copied .gemini/settings.json to worktree");
+        }
+    }
+
     Ok(WorktreeInfo {
         path: worktree_path.to_string_lossy().to_string(),
         branch,
