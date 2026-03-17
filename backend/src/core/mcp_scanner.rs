@@ -168,7 +168,7 @@ pub fn sync_project_mcps_to_disk(
     if mcp_servers.is_empty() {
         // Remove config files if no MCPs
         let resolved = resolve_host_path(&project.path);
-        for filename in &[".mcp.json", ".vibe/config.toml"] {
+        for filename in &[".mcp.json", ".vibe/config.toml", ".kiro/settings/mcp.json", ".gemini/settings.json"] {
             let file = std::path::Path::new(&resolved).join(filename);
             if file.exists() {
                 let _ = std::fs::remove_file(&file);
@@ -182,6 +182,12 @@ pub fn sync_project_mcps_to_disk(
         ensure_gitignore(&project.path, ".mcp.json");
         tracing::info!("Synced .mcp.json for {} ({} MCPs)", project.path, configs.len());
 
+        // ── Kiro: .kiro/settings/mcp.json ──
+        sync_kiro_project_config(&project.path, &data);
+
+        // ── Gemini CLI: .gemini/settings.json ──
+        sync_gemini_project_config(&project.path, &data);
+
         // ── Vibe: .vibe/config.toml ──
         sync_vibe_project_config(&project.path, &configs, &server_map, secret);
 
@@ -191,6 +197,74 @@ pub fn sync_project_mcps_to_disk(
     }
 
     Ok(())
+}
+
+// ─── Kiro per-project sync ────────────────────────────────────────────────────
+
+/// Write .kiro/settings/mcp.json for a project.
+/// Kiro uses the same mcpServers JSON format as Claude Code.
+fn sync_kiro_project_config(project_path: &str, data: &McpJsonFile) {
+    let resolved = resolve_host_path(project_path);
+    let kiro_dir = Path::new(&resolved).join(".kiro").join("settings");
+    let kiro_config = kiro_dir.join("mcp.json");
+
+    if let Err(e) = std::fs::create_dir_all(&kiro_dir) {
+        tracing::warn!("Failed to create .kiro/settings dir at {}: {}", kiro_dir.display(), e);
+        return;
+    }
+
+    match serde_json::to_string_pretty(data) {
+        Ok(content) => {
+            if let Err(e) = std::fs::write(&kiro_config, &content) {
+                tracing::warn!("Failed to write Kiro config {}: {}", kiro_config.display(), e);
+            } else {
+                tracing::info!("Synced .kiro/settings/mcp.json for {}", project_path);
+            }
+        }
+        Err(e) => tracing::warn!("Failed to serialize Kiro config: {}", e),
+    }
+}
+
+// ─── Gemini CLI per-project sync ──────────────────────────────────────────────
+
+/// Write .gemini/settings.json for a project.
+/// Gemini CLI uses the same mcpServers JSON format as Claude Code.
+fn sync_gemini_project_config(project_path: &str, data: &McpJsonFile) {
+    let resolved = resolve_host_path(project_path);
+    let gemini_dir = Path::new(&resolved).join(".gemini");
+    let gemini_config = gemini_dir.join("settings.json");
+
+    if let Err(e) = std::fs::create_dir_all(&gemini_dir) {
+        tracing::warn!("Failed to create .gemini dir at {}: {}", gemini_dir.display(), e);
+        return;
+    }
+
+    // Preserve existing settings (e.g. theme, model preferences)
+    let mut doc: serde_json::Value = if gemini_config.exists() {
+        std::fs::read_to_string(&gemini_config)
+            .ok()
+            .and_then(|c| serde_json::from_str(&c).ok())
+            .unwrap_or_else(|| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    // Replace mcpServers section
+    if let Some(obj) = doc.as_object_mut() {
+        obj.insert("mcpServers".into(), serde_json::to_value(&data.mcp_servers).unwrap_or_default());
+    }
+
+    match serde_json::to_string_pretty(&doc) {
+        Ok(content) => {
+            if let Err(e) = std::fs::write(&gemini_config, &content) {
+                tracing::warn!("Failed to write Gemini config {}: {}", gemini_config.display(), e);
+            } else {
+                ensure_gitignore(project_path, ".gemini/");
+                tracing::info!("Synced .gemini/settings.json for {}", project_path);
+            }
+        }
+        Err(e) => tracing::warn!("Failed to serialize Gemini config: {}", e),
+    }
 }
 
 // ─── Vibe per-project sync ────────────────────────────────────────────────────
@@ -425,7 +499,7 @@ pub fn sync_affected_projects(
     project_ids: &[String],
     secret: &str,
 ) {
-    // Sync per-project configs (Claude Code .mcp.json + Vibe .vibe/config.toml)
+    // Sync per-project configs (Claude Code .mcp.json + Kiro .kiro/settings/mcp.json + Gemini .gemini/settings.json + Vibe .vibe/config.toml)
     for pid in project_ids {
         if let Err(e) = sync_project_mcps_to_disk(conn, pid, secret) {
             tracing::warn!("Failed to sync MCP configs for project {}: {}", pid, e);
