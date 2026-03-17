@@ -312,6 +312,12 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // API key is optional — agents use their own local auth by default
     let api_key = get_api_key(env_key, config.tokens);
 
+    // On macOS hosts, host-mounted kiro-cli is not runnable in Linux containers.
+    // Ensure a Linux kiro-cli exists locally before spawning Kiro.
+    if matches!(config.agent_type, AgentType::Kiro) {
+        ensure_kiro_cli_available().await?;
+    }
+
     // Try direct binary first, then npx fallback
     let mut child = match try_spawn(binary, None, &args, &work_dir, env_key, api_key.as_deref()) {
         Ok(c) => c,
@@ -369,6 +375,49 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     }
 
     Ok(AgentProcess { child, output_mode, work_dir, agent_type: config.agent_type.clone(), rx, stderr_capture, stderr_task: stderr_handle })
+}
+
+/// Ensure kiro-cli is available inside the container.
+/// Uses the official installer if missing.
+pub(crate) async fn ensure_kiro_cli_available() -> Result<(), String> {
+    if super::find_binary("kiro-cli").is_some() {
+        return Ok(());
+    }
+
+    tracing::info!("kiro-cli not found, installing Linux kiro-cli...");
+    let output = Command::new("sh")
+        .args([
+            "-c",
+            "command -v unzip >/dev/null 2>&1 || { echo 'Missing dependency: unzip' >&2; exit 127; }; \
+             curl -fsSL https://cli.kiro.dev/install | bash",
+        ])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to launch Kiro installer: {e}"))?;
+
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "Kiro CLI install failed (exit {:?}): {}{}",
+            output.status.code(),
+            stderr.trim(),
+            if stdout.trim().is_empty() {
+                String::new()
+            } else {
+                format!("\n{stdout}")
+            }
+        ));
+    }
+
+    if super::find_binary("kiro-cli").is_none() {
+        return Err(
+            "Kiro CLI installed but not found in PATH. Ensure /home/kronn/.local/bin is in PATH."
+                .into(),
+        );
+    }
+
+    Ok(())
 }
 
 /// Get the command configuration for an agent type.

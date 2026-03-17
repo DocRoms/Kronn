@@ -59,6 +59,13 @@ fn detect_host_label() -> String {
     "Linux".into()
 }
 
+fn host_is_macos() -> bool {
+    std::env::var("KRONN_HOST_OS")
+        .map(|os| os.eq_ignore_ascii_case("macos"))
+        .unwrap_or(false)
+        || detect_host_label() == "macOS"
+}
+
 /// Detect all known agents on the system
 pub async fn detect_all() -> Vec<AgentDetection> {
     let mut agents = Vec::new();
@@ -195,6 +202,11 @@ pub fn find_binary(name: &str) -> Option<BinaryLocation> {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 if entry.file_name() == name {
+                    // On macOS hosts, host-mounted kiro-cli is a macOS binary
+                    // and cannot be executed from this Linux container.
+                    if name == "kiro-cli" && host_is_macos() {
+                        continue;
+                    }
                     return Some(BinaryLocation {
                         path: entry.path().to_string_lossy().to_string(),
                         host_managed: true,
@@ -284,5 +296,42 @@ pub async fn uninstall_agent(agent_type: &AgentType) -> Result<String> {
     } else {
         let err = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!("Uninstall failed: {}", err)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+
+    #[test]
+    #[serial]
+    fn host_is_macos_detects_env_var() {
+        std::env::set_var("KRONN_HOST_OS", "macOS");
+        assert!(host_is_macos(), "Should detect macOS from KRONN_HOST_OS");
+        std::env::remove_var("KRONN_HOST_OS");
+    }
+
+    #[test]
+    #[serial]
+    fn host_is_macos_case_insensitive() {
+        std::env::set_var("KRONN_HOST_OS", "MACOS");
+        assert!(host_is_macos(), "Should be case-insensitive");
+        std::env::remove_var("KRONN_HOST_OS");
+    }
+
+    #[test]
+    #[serial]
+    fn host_is_not_macos_on_linux() {
+        std::env::set_var("KRONN_HOST_OS", "Linux");
+        assert!(!host_is_macos(), "Linux should not be detected as macOS");
+        std::env::remove_var("KRONN_HOST_OS");
+    }
+
+    #[test]
+    #[serial]
+    fn host_is_not_macos_when_unset() {
+        std::env::remove_var("KRONN_HOST_OS");
+        assert!(!host_is_macos(), "Should not be macOS when env is unset on Linux");
     }
 }

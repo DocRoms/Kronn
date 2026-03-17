@@ -1,4 +1,4 @@
-.PHONY: start start-prod stop logs clean build dev-backend dev-frontend setup check test-shell lint-backend .env
+.PHONY: start start-prod stop logs clean build dev-backend dev-frontend setup check test-shell lint-backend .env kiro-login
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 APP_NAME    := kronn
@@ -76,13 +76,13 @@ RESET  := \033[0m
 ## Generate docker-compose.override.yml for extra repo dirs (KRONN_EXTRA_REPOS)
 .PHONY: _gen-override
 _gen-override:
-	@KRONN_EXTRA_REPOS=$$(sed -n 's/^KRONN_EXTRA_REPOS=//p' .env | tail -n 1); \
-	if [ -n "$$KRONN_EXTRA_REPOS" ]; then \
+	@extra_repos=$$(sed -n 's/^KRONN_EXTRA_REPOS=//p' .env | tail -n 1); \
+	if [ -n "$$extra_repos" ]; then \
 		echo "# Auto-generated — extra rw mounts from KRONN_EXTRA_REPOS" > docker-compose.override.yml; \
 		echo "services:" >> docker-compose.override.yml; \
 		echo "  backend:" >> docker-compose.override.yml; \
 		echo "    volumes:" >> docker-compose.override.yml; \
-		IFS=':'; for dir in $$KRONN_EXTRA_REPOS; do \
+		IFS=':'; for dir in $$extra_repos; do \
 			rel=$${dir#$$HOME/}; \
 			echo "      - $$dir:/host-home/$$rel:rw" >> docker-compose.override.yml; \
 			echo "$(CYAN)  Extra rw mount: $$dir$(RESET)"; \
@@ -125,6 +125,11 @@ stop:
 ## Tail logs
 logs:
 	@$(DOCKER_COMP) logs -f
+
+## Login to Kiro from the backend container (headless-safe OAuth device flow)
+kiro-login: .env _gen-override
+	@echo "$(CYAN)▸ Kiro login (device flow)...$(RESET)"
+	@$(DOCKER_COMP) exec backend /bin/sh -lc 'set -e; PATH="$$HOME/.local/bin:$$PATH"; command -v kiro-cli >/dev/null 2>&1 || (command -v unzip >/dev/null 2>&1 || { echo "Missing unzip in backend image. Rebuild with make start."; exit 1; } ; echo "Installing kiro-cli in container..." ; curl -fsSL https://cli.kiro.dev/install | bash); kiro-cli login --use-device-flow'
 
 ## Clean everything
 clean:
@@ -204,6 +209,7 @@ help:
 	@echo "  make dev-backend    Rust hot reload"
 	@echo "  make dev-frontend   Vite dev server"
 	@echo "  make check          Verify prerequisites"
+	@echo "  make kiro-login     Kiro OAuth login (device flow in container)"
 	@echo "  make typegen        Sync Rust → TS types"
 	@echo "  make test-shell     Run shell tests (bats)"
 	@echo ""
