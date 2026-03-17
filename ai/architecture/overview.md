@@ -32,7 +32,7 @@ Three Docker services behind nginx gateway:
 - **Two output modes**: `Text` (line-by-line stdout, default for Codex/Vibe/Gemini) and `StreamJson` (Claude Code with `--output-format stream-json --verbose --include-partial-messages`). In StreamJson mode, each line is a JSON event parsed by `parse_claude_stream_line()` — text deltas from `stream_event` events, token usage from `result` event.
 - Agents run in the project's directory context (or temp dir for global discussions).
 - **Runtime probe**: if no local binary is found, `probe_runtime()` tests npx availability (15s timeout, 5min cache). `AgentDetection.runtime_available` distinguishes "installed locally" from "runnable via npx". Frontend uses `isUsable(agent) = (installed || runtime_available) && enabled`.
-- MCPs work with all 3 agents: Claude Code (`.mcp.json`), Codex (`~/.codex/config.toml`), Vibe (`.vibe/config.toml`). Disk sync writes all formats simultaneously. Kiro uses AWS Builder ID (no API key).
+- MCPs work with all 5 agents: Claude Code (`.mcp.json`), Kiro (`.kiro/settings/mcp.json`), Gemini CLI (`.gemini/settings.json`), Vibe (`.vibe/config.toml`), Codex (`~/.codex/config.toml`). Disk sync writes all formats simultaneously. Claude/Kiro/Gemini use identical JSON format (`mcpServers`). Kiro auth via AWS Builder ID.
 - **Prompt injection order**: profiles → skills → directives → MCP context. All injected via `extra_context` parameter to `agent_command()`.
 - `AgentConfig` has `full_access: bool` field (persisted in config.toml). When enabled, runner adds `--dangerously-skip-permissions` (Claude), `--full-auto` (Codex), `--trust-all-tools` (Kiro).
 - API: `GET/POST /api/config/agent-access` to read/set the full_access flag. UI toggle in Config > Agents card.

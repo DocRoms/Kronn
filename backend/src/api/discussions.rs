@@ -23,6 +23,20 @@ const AGENT_GLOBAL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// Stall timeout — abort if no output line received for this long (5 minutes).
 const AGENT_STALL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
+/// Per-agent prompt budget in characters.
+/// Leaves room for the agent's response within its context window.
+/// Conservative estimates — better to truncate safely than crash.
+fn agent_prompt_budget(agent_type: &AgentType) -> usize {
+    match agent_type {
+        AgentType::ClaudeCode => 400_000, // ~100K tokens, 200K window
+        AgentType::GeminiCli  => 800_000, // ~200K tokens, 1M window
+        AgentType::Codex      =>  16_000, // ~4K tokens, small context
+        AgentType::Kiro       =>  16_000, // ~4K tokens, similar to Codex
+        AgentType::Vibe       =>  24_000, // ~6K tokens, moderate
+        AgentType::Custom     =>  24_000, // safe default
+    }
+}
+
 #[derive(Clone, Debug)]
 enum AgentStreamEvent {
     Start,
@@ -70,6 +84,15 @@ pub async fn create(
         return Json(ApiResponse::err(format!("Prompt too long ({} bytes, max {})", req.initial_prompt.len(), MAX_CONTENT_LEN)));
     }
 
+    // Reject conflicting directives (eco: avoids injecting contradictory instructions that waste tokens)
+    if !req.directive_ids.is_empty() {
+        let conflicts = crate::core::directives::validate_no_conflicts(&req.directive_ids);
+        if !conflicts.is_empty() {
+            let pairs: Vec<String> = conflicts.iter().map(|(a, b)| format!("{} <> {}", a, b)).collect();
+            return Json(ApiResponse::err(format!("Conflicting directives: {}", pairs.join(", "))));
+        }
+    }
+
     // Validate project exists (if specified)
     if let Some(ref pid) = req.project_id {
         let pid = pid.clone();
@@ -101,6 +124,7 @@ pub async fn create(
         timestamp: now,
         tokens_used: 0,
         auth_mode: None,
+        model_tier: None,
     };
 
     let workspace_mode = req.workspace_mode.unwrap_or_else(|| "Direct".into());
@@ -118,10 +142,13 @@ pub async fn create(
         skill_ids: req.skill_ids,
         profile_ids: req.profile_ids,
         directive_ids: req.directive_ids,
+        tier: req.tier,
         archived: false,
         workspace_mode: workspace_mode.clone(),
         workspace_path: None,
         worktree_branch: None,
+        summary_cache: None,
+        summary_up_to_msg_idx: None,
         created_at: now,
         updated_at: now,
     };
@@ -196,6 +223,19 @@ pub async fn update(
     let profile_ids = req.profile_ids;
     let directive_ids = req.directive_ids;
     let project_id = req.project_id;
+    let tier = req.tier;
+
+    // Reject conflicting directives on update
+    if let Some(ref ids) = directive_ids {
+        if !ids.is_empty() {
+            let conflicts = crate::core::directives::validate_no_conflicts(ids);
+            if !conflicts.is_empty() {
+                let pairs: Vec<String> = conflicts.iter().map(|(a, b)| format!("{} <> {}", a, b)).collect();
+                return Json(ApiResponse::err(format!("Conflicting directives: {}", pairs.join(", "))));
+            }
+        }
+    }
+
     match state.db.with_conn(move |conn| {
         // project_id: None = don't change, Some(None) = unset, Some(Some("id")) = set
         let pid_update = project_id.as_ref().map(|p| p.as_deref());
@@ -208,6 +248,9 @@ pub async fn update(
         }
         if let Some(ref ids) = directive_ids {
             updated = crate::db::discussions::update_discussion_directive_ids(conn, &id, ids)? || updated;
+        }
+        if let Some(ref t) = tier {
+            updated = crate::db::discussions::update_discussion_tier(conn, &id, t)? || updated;
         }
         Ok(updated)
     }).await {
@@ -309,6 +352,7 @@ pub async fn send_message(
         timestamp: Utc::now(),
         tokens_used: 0,
         auth_mode: None,
+        model_tier: None,
     };
     let disc_id = id.clone();
     let msg = user_msg.clone();
@@ -363,7 +407,7 @@ async fn make_agent_stream(
 
     let disc = disc.unwrap();
     let agent_type = agent_override.unwrap_or_else(|| disc.agent.clone());
-    let prompt = build_agent_prompt(&disc);
+    let disc_tier = disc.tier;
     let skill_ids = disc.skill_ids.clone();
     let directive_ids = disc.directive_ids.clone();
     let profile_ids = disc.profile_ids.clone();
@@ -386,10 +430,18 @@ async fn make_agent_stream(
         None
     };
 
-    let (tokens, full_access) = {
+    // Estimate extra_context size so build_agent_prompt can respect the agent's budget.
+    // This mirrors what runner::start_agent_with_config will build.
+    let extra_context_len = estimate_extra_context_len(
+        &skill_ids, &directive_ids, &profile_ids,
+        &project_path, global_mcp_context.as_deref(), &agent_type,
+    );
+    let prompt = build_agent_prompt(&disc, &agent_type, extra_context_len);
+
+    let (tokens, full_access, model_tiers_config) = {
         let config = state.config.read().await;
         let fa = config.agents.full_access_for(&agent_type);
-        (config.tokens.clone(), fa)
+        (config.tokens.clone(), fa, config.agents.model_tiers.clone())
     };
 
     let auth_mode_str = auth_mode_for(&agent_type, &tokens);
@@ -421,6 +473,7 @@ async fn make_agent_stream(
             prompt: &prompt, tokens: &tokens, full_access,
             skill_ids: &skill_ids, directive_ids: &directive_ids, profile_ids: &profile_ids,
             mcp_context_override: global_mcp_context.as_deref(),
+            tier: disc_tier, model_tiers: Some(&model_tiers_config),
         }).await {
             Ok(mut process) => {
                 let mut full_response = String::new();
@@ -541,6 +594,11 @@ async fn make_agent_stream(
                 };
 
                 // Save agent response to DB — always runs even if client is gone
+                let tier_label = match disc_tier {
+                    crate::models::ModelTier::Economy => Some("economy".to_string()),
+                    crate::models::ModelTier::Reasoning => Some("reasoning".to_string()),
+                    crate::models::ModelTier::Default => None, // Don't clutter with "default"
+                };
                 let agent_msg = DiscussionMessage {
                     id: Uuid::new_v4().to_string(),
                     role: MessageRole::Agent,
@@ -549,6 +607,7 @@ async fn make_agent_stream(
                     timestamp: Utc::now(),
                     tokens_used,
                     auth_mode: Some(auth_mode_str.clone()),
+                    model_tier: tier_label,
                 };
 
                 let did = disc_id.clone();
@@ -556,6 +615,20 @@ async fn make_agent_stream(
                 let _ = state.db.with_conn(move |conn| {
                     crate::db::discussions::insert_message(conn, &did, &msg)
                 }).await;
+
+                // Trigger background summary generation if conversation is long enough
+                if success {
+                    let summary_state = state.clone();
+                    let summary_disc_id = disc_id.clone();
+                    let summary_agent_type = agent_type.clone();
+                    let summary_tokens = tokens.clone();
+                    tokio::spawn(async move {
+                        maybe_generate_summary(
+                            &summary_state, &summary_disc_id,
+                            &summary_agent_type, &summary_tokens,
+                        ).await;
+                    });
+                }
 
                 let done = serde_json::json!({ "message_id": agent_msg.id, "success": success, "tokens_used": tokens_used });
                 let _ = tx.send(AgentStreamEvent::Done { data: done }).await;
@@ -571,6 +644,7 @@ async fn make_agent_stream(
                     timestamp: Utc::now(),
                     tokens_used: 0,
                     auth_mode: None,
+                    model_tier: None,
                 };
 
                 let did = disc_id.clone();
@@ -777,6 +851,7 @@ pub async fn orchestrate(
                 timestamp: Utc::now(),
                 tokens_used: 0,
                 auth_mode: None,
+            model_tier: None,
             };
             let did = disc_id.clone();
             let _ = state.db.with_conn(move |conn| {
@@ -828,6 +903,7 @@ pub async fn orchestrate(
                 prompt: &summary_prompt, tokens: &tokens, full_access: fa,
                 skill_ids: &[], directive_ids: &[], profile_ids: &[],
                 mcp_context_override: global_mcp_context.as_deref(),
+                tier: crate::models::ModelTier::Default, model_tiers: None,
             }).await {
                 Ok(mut process) => {
                     let mut summary = String::new();
@@ -888,6 +964,7 @@ pub async fn orchestrate(
                     prompt: &prompt, tokens: &tokens, full_access: fa,
                     skill_ids: &orch_skill_ids, directive_ids: &orch_directive_ids, profile_ids: &orch_profile_ids,
                     mcp_context_override: global_mcp_context.as_deref(),
+                    tier: crate::models::ModelTier::Default, model_tiers: None,
                 }).await {
                     Ok(mut process) => {
                         let mut full_response = String::new();
@@ -976,6 +1053,7 @@ pub async fn orchestrate(
                                 timestamp: Utc::now(),
                                 tokens_used,
                                 auth_mode: Some(auth_mode_for(agent_type, &tokens)),
+                                model_tier: None, // orchestration uses Default tier
                             };
                             let did = disc_id.clone();
                             let _ = state.db.with_conn(move |conn| {
@@ -1025,6 +1103,7 @@ pub async fn orchestrate(
                 prompt: &synth_prompt, tokens: &tokens, full_access: synth_fa,
                 skill_ids: &orch_skill_ids, directive_ids: &orch_directive_ids, profile_ids: &orch_profile_ids,
                 mcp_context_override: global_mcp_context.as_deref(),
+                tier: crate::models::ModelTier::Default, model_tiers: None,
             }).await {
                 Ok(mut process) => {
                     let mut full_response = String::new();
@@ -1083,6 +1162,7 @@ pub async fn orchestrate(
                             timestamp: Utc::now(),
                             tokens_used,
                             auth_mode: Some(auth_mode_for(&primary_agent_type, &tokens)),
+                            model_tier: None,
                         };
                         let did = disc_id.clone();
                         let _ = state.db.with_conn(move |conn| {
@@ -1384,6 +1464,164 @@ fn build_synthesis_prompt(
     ctx
 }
 
+/// Summary generation threshold: min messages before first summary.
+const SUMMARY_MSG_THRESHOLD: u32 = 12;
+/// Cooldown: min new messages since last summary before re-summarizing.
+const SUMMARY_COOLDOWN: u32 = 4;
+
+/// Background task: generate a conversation summary if the discussion is long enough.
+/// Uses the discussion's own agent in Economy tier. Fire-and-forget, errors are logged.
+async fn maybe_generate_summary(
+    state: &AppState,
+    discussion_id: &str,
+    agent_type: &AgentType,
+    tokens: &TokensConfig,
+) {
+    // Load discussion to check if summary is needed
+    let disc = match state.db.with_conn({
+        let did = discussion_id.to_string();
+        move |conn| crate::db::discussions::get_discussion(conn, &did)
+    }).await {
+        Ok(Some(d)) => d,
+        _ => return,
+    };
+
+    let msg_count = disc.message_count;
+    if msg_count < SUMMARY_MSG_THRESHOLD {
+        return;
+    }
+
+    // Check cooldown: only re-summarize if enough new messages since last summary
+    let last_summary_idx = disc.summary_up_to_msg_idx.unwrap_or(0);
+    let msgs_since_summary = msg_count.saturating_sub(last_summary_idx);
+    if disc.summary_cache.is_some() && msgs_since_summary < SUMMARY_COOLDOWN {
+        return;
+    }
+
+    // Build the text to summarize: all non-System messages
+    let messages_to_summarize: Vec<String> = disc.messages.iter()
+        .filter(|m| !matches!(m.role, MessageRole::System))
+        .map(|m| {
+            let role = match m.role {
+                MessageRole::User => "User".to_string(),
+                MessageRole::Agent => m.agent_type.as_ref()
+                    .map(agent_display_name)
+                    .unwrap_or_else(|| "Agent".into()),
+                MessageRole::System => unreachable!(),
+            };
+            format!("{}: {}", role, m.content)
+        })
+        .collect();
+
+    let conversation_text = messages_to_summarize.join("\n\n");
+
+    // Limit input size to avoid blowing the summary agent's context
+    let max_input = 20_000; // ~5K tokens
+    let truncated = if conversation_text.len() > max_input {
+        &conversation_text[conversation_text.len() - max_input..]
+    } else {
+        &conversation_text
+    };
+
+    let summary_prompt = format!(
+        "Summarize this conversation in 3-5 sentences, max 150 words. \
+        Include: key decisions made, questions asked and answered, current state of the task. \
+        Facts only, no opinions.\n\n{}",
+        truncated
+    );
+
+    // Use the discussion's own agent in Economy tier
+    let model_tiers = {
+        let config = state.config.read().await;
+        config.agents.model_tiers.clone()
+    };
+
+    match runner::start_agent_with_config(runner::AgentStartConfig {
+        agent_type,
+        project_path: "",
+        work_dir: None,
+        prompt: &summary_prompt,
+        tokens,
+        full_access: false,
+        skill_ids: &[],
+        directive_ids: &[],
+        profile_ids: &[],
+        mcp_context_override: Some(""),
+        tier: crate::models::ModelTier::Economy,
+        model_tiers: Some(&model_tiers),
+    }).await {
+        Ok(mut process) => {
+            let mut summary = String::new();
+            while let Some(line) = process.next_line().await {
+                if process.output_mode == runner::OutputMode::StreamJson {
+                    if let runner::StreamJsonEvent::Text(text) = runner::parse_claude_stream_line(&line) {
+                        summary.push_str(&text);
+                    }
+                } else {
+                    if !summary.is_empty() { summary.push('\n'); }
+                    summary.push_str(&line);
+                }
+            }
+            let _ = process.child.wait().await;
+
+            if !summary.is_empty() && summary.len() < 3000 {
+                let did = discussion_id.to_string();
+                let summary_len = summary.len();
+                let _ = state.db.with_conn(move |conn| {
+                    crate::db::discussions::update_summary_cache(conn, &did, &summary, msg_count)
+                }).await;
+                tracing::info!("Summary generated for discussion {} ({} chars, up to msg {})",
+                    discussion_id, summary_len, msg_count);
+            } else {
+                tracing::warn!("Summary generation produced empty or oversized result for {}",
+                    discussion_id);
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Summary generation failed for {}: {} (fallback: truncation only)", discussion_id, e);
+        }
+    }
+}
+
+/// Estimate the size of extra_context (profiles + skills + directives + MCP)
+/// so that build_agent_prompt can budget the conversation history accordingly.
+/// Uses compact format for constrained agents (Codex, Kiro, Vibe).
+fn estimate_extra_context_len(
+    skill_ids: &[String],
+    directive_ids: &[String],
+    profile_ids: &[String],
+    project_path: &str,
+    mcp_override: Option<&str>,
+    agent_type: &AgentType,
+) -> usize {
+    let compact = is_compact_agent(agent_type);
+    let profiles_len = if compact {
+        crate::core::profiles::build_profiles_prompt_compact(profile_ids).len()
+    } else {
+        crate::core::profiles::build_profiles_prompt(profile_ids).len()
+    };
+    let skills_len = if compact {
+        crate::core::skills::build_skills_prompt_compact(skill_ids).len()
+    } else {
+        crate::core::skills::build_skills_prompt(skill_ids).len()
+    };
+    let directives_len = crate::core::directives::build_directives_prompt(directive_ids).len();
+    let mcp_len = if let Some(ctx) = mcp_override {
+        ctx.len()
+    } else if !project_path.is_empty() {
+        crate::core::mcp_scanner::read_all_mcp_contexts(project_path).len()
+    } else {
+        0
+    };
+    // Add separators between non-empty parts
+    profiles_len + skills_len + directives_len + mcp_len + 20
+}
+
+/// Agents with small context windows that need compact prompts.
+fn is_compact_agent(agent_type: &AgentType) -> bool {
+    matches!(agent_type, AgentType::Codex | AgentType::Kiro | AgentType::Vibe)
+}
+
 fn language_instruction(lang: &str) -> &'static str {
     match lang {
         "fr" => "Reponds en francais.",
@@ -1394,7 +1632,14 @@ fn language_instruction(lang: &str) -> &'static str {
     }
 }
 
-fn build_agent_prompt(disc: &Discussion) -> String {
+/// Build the agent prompt with conversation history, respecting the agent's prompt budget.
+///
+/// Strategy: always include the latest user message. Then fill backwards from recent
+/// messages until we hit the budget. If older messages are truncated, prepend a notice.
+/// `extra_context_len` is the size of profiles+skills+directives+MCP that will be
+/// added alongside this prompt (so we don't exceed the agent's total budget).
+fn build_agent_prompt(disc: &Discussion, agent_type: &AgentType, extra_context_len: usize) -> String {
+    let budget = agent_prompt_budget(agent_type).saturating_sub(extra_context_len);
     let lang_instr = language_instruction(&disc.language);
 
     // Include discussion title as context if it's meaningful (not auto-generated placeholder)
@@ -1417,37 +1662,79 @@ fn build_agent_prompt(disc: &Discussion) -> String {
         return format!("{}\n\n{}{}", lang_instr, title_ctx, content);
     }
 
-    let mut prompt = format!("{}\n\n{}Previous conversation:\n\n", lang_instr, title_ctx);
-    for msg in &disc.messages {
-        match msg.role {
-            MessageRole::User => prompt.push_str(&format!("User: {}\n\n", msg.content)),
+    // Fixed overhead: header + footer
+    let header = format!("{}\n\n{}Previous conversation:\n\n", lang_instr, title_ctx);
+    let footer = "Please respond to the latest user message above.";
+    let overhead = header.len() + footer.len() + 100; // 100 = notice template space
+
+    // If we have a cached summary, inject it and only include messages after the summary
+    let summary_block = if let Some(ref summary) = disc.summary_cache {
+        let idx = disc.summary_up_to_msg_idx.unwrap_or(0) as usize;
+        format!("Summary of earlier conversation (messages 1-{}):\n{}\n\n", idx, summary)
+    } else {
+        String::new()
+    };
+
+    let remaining_budget = budget.saturating_sub(overhead + summary_block.len());
+
+    // Format all messages (skip System), then select from the end to fit budget
+    let formatted_msgs: Vec<String> = disc.messages.iter()
+        .filter(|m| !matches!(m.role, MessageRole::System))
+        .map(|msg| match msg.role {
+            MessageRole::User => format!("User: {}\n\n", msg.content),
             MessageRole::Agent => {
                 let agent_label = msg.agent_type.as_ref()
                     .map(agent_display_name)
                     .unwrap_or_else(|| "Agent".into());
-                prompt.push_str(&format!("{}: {}\n\n", agent_label, msg.content));
+                format!("{}: {}\n\n", agent_label, msg.content)
             }
-            MessageRole::System => {}
+            MessageRole::System => unreachable!(),
+        })
+        .collect();
+
+    // Always include the last message (latest user prompt). Walk backwards to fill budget.
+    let total_msgs = formatted_msgs.len();
+    let mut included_from_end = 0;
+    let mut cumulative_len = 0;
+
+    for msg in formatted_msgs.iter().rev() {
+        if cumulative_len + msg.len() > remaining_budget && included_from_end > 0 {
+            break;
         }
+        cumulative_len += msg.len();
+        included_from_end += 1;
     }
 
-    // Remind the agent about active profiles/skills if they were changed mid-conversation.
-    // The profiles are also in the system prompt, but this explicit note in the conversation
-    // ensures the agent notices the change even when continuing a long conversation.
-    if !disc.profile_ids.is_empty() {
-        let profile_names: Vec<String> = disc.profile_ids.iter()
-            .map(|id| crate::core::profiles::get_profile(id)
-                .map(|p| format!("{} {} ({})", p.avatar, p.persona_name, p.role))
-                .unwrap_or_else(|| id.clone()))
-            .collect();
+    let start_idx = total_msgs - included_from_end;
+    let omitted_count = start_idx;
+
+    let mut prompt = header;
+
+    // Inject summary if available
+    if !summary_block.is_empty() {
+        prompt.push_str(&summary_block);
+    }
+
+    if omitted_count > 0 && summary_block.is_empty() {
+        // Only show omitted notice if there's no summary covering those messages
         prompt.push_str(&format!(
-            "[System note: The user has configured the following agent profiles for this conversation: {}. \
-            You MUST respond as these profiles — follow their personas as defined in your system instructions.]\n\n",
-            profile_names.join(", ")
+            "(... {} earlier messages omitted to fit context window ...)\n\n",
+            omitted_count
         ));
     }
 
-    prompt.push_str("Please respond to the latest user message above.");
+    if omitted_count > 0 {
+        tracing::info!(
+            "Prompt truncation: {} of {} messages omitted for {:?} (budget: {} chars, has_summary: {})",
+            omitted_count, total_msgs, agent_type, budget, !summary_block.is_empty()
+        );
+    }
+
+    for msg in &formatted_msgs[start_idx..] {
+        prompt.push_str(msg);
+    }
+
+    prompt.push_str(footer);
     prompt
 }
 
@@ -1765,6 +2052,40 @@ pub async fn disc_pr_template(
     })))
 }
 
+/// Build MCP context from global MCP configs for general discussions (no project).
+/// Lists the server names so the agent knows which MCP tools are available.
+async fn build_global_mcp_context(state: &AppState) -> Option<String> {
+    let configs = state.db.with_conn(|conn| {
+        crate::db::mcps::list_configs(conn)
+    }).await.ok()?;
+
+    let global_configs: Vec<_> = configs.into_iter().filter(|c| c.include_general).collect();
+    if global_configs.is_empty() {
+        return None;
+    }
+
+    let servers = state.db.with_conn(|conn| {
+        crate::db::mcps::list_servers(conn)
+    }).await.unwrap_or_default();
+    let server_map: std::collections::HashMap<String, String> = servers.into_iter()
+        .map(|s| (s.id.clone(), s.name.clone()))
+        .collect();
+
+    let mut result = String::from("## MCP Servers available\n\n");
+    result.push_str("You have access to the following MCP servers (global). ");
+    result.push_str("Use their tools (prefixed `mcp__<server>__<tool>`) instead of Bash workarounds.\n\n");
+    result.push_str("Available servers:\n");
+    for cfg in &global_configs {
+        let name = server_map.get(&cfg.server_id)
+            .cloned()
+            .unwrap_or_else(|| cfg.label.clone());
+        result.push_str(&format!("- **{}** ({})\n", cfg.label, name));
+    }
+    result.push('\n');
+
+    Some(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1865,39 +2186,4 @@ mod tests {
         let hint = detect_agent_error_hint("UNAUTHORIZED ACCESS DENIED");
         assert!(hint.is_some());
     }
-}
-
-/// Build MCP context from global MCP configs for general discussions (no project).
-/// Lists the server names so the agent knows which MCP tools are available.
-async fn build_global_mcp_context(state: &AppState) -> Option<String> {
-    let configs = state.db.with_conn(|conn| {
-        crate::db::mcps::list_configs(conn)
-    }).await.ok()?;
-
-    let global_configs: Vec<_> = configs.into_iter().filter(|c| c.include_general).collect();
-    if global_configs.is_empty() {
-        return None;
-    }
-
-    // Get server names for the global configs
-    let servers = state.db.with_conn(|conn| {
-        crate::db::mcps::list_servers(conn)
-    }).await.unwrap_or_default();
-    let server_map: std::collections::HashMap<String, String> = servers.into_iter()
-        .map(|s| (s.id.clone(), s.name.clone()))
-        .collect();
-
-    let mut result = String::from("## MCP Servers available\n\n");
-    result.push_str("You have access to the following MCP servers (global). ");
-    result.push_str("Use their tools (prefixed `mcp__<server>__<tool>`) instead of Bash workarounds.\n\n");
-    result.push_str("Available servers:\n");
-    for cfg in &global_configs {
-        let name = server_map.get(&cfg.server_id)
-            .cloned()
-            .unwrap_or_else(|| cfg.label.clone());
-        result.push_str(&format!("- **{}** ({})\n", cfg.label, name));
-    }
-    result.push('\n');
-
-    Some(result)
 }

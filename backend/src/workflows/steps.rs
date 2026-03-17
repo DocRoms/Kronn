@@ -163,6 +163,10 @@ async fn run_agent_with_timeout(
         directive_ids: &step.directive_ids,
         profile_ids: &step.profile_ids,
         mcp_context_override: None,
+        tier: step.agent_settings.as_ref()
+            .and_then(|s| s.tier)
+            .unwrap_or_default(),
+        model_tiers: None,
     }).await.map_err(|e| anyhow::anyhow!(e))?;
 
     let mut output = String::new();

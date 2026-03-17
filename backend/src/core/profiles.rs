@@ -120,6 +120,8 @@ fn parse_profile_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Agent
         persona_name = name.chars().take(3).collect();
     }
 
+    let token_estimate = ((body.len() + persona_name.len() + role.len() + 30) / 4) as u32;
+
     Some(AgentProfile {
         id: id.to_string(),
         name,
@@ -128,6 +130,7 @@ fn parse_profile_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Agent
         avatar,
         color,
         category,
+        token_estimate,
         persona_prompt: body,
         default_engine,
         is_builtin,
@@ -229,6 +232,36 @@ pub fn build_profiles_prompt(profile_ids: &[String]) -> String {
     for p in &profiles {
         prompt.push_str(&format!("FirstName: {}\nAvatar: {}\nRole: {}\n{}\n\n",
             p.persona_name, p.avatar, p.role, p.persona_prompt));
+    }
+
+    prompt
+}
+
+/// Build a compact profiles prompt for agents with small context windows.
+/// Uses a terse one-line format instead of full persona prompts (~80% token savings).
+pub fn build_profiles_prompt_compact(profile_ids: &[String]) -> String {
+    if profile_ids.is_empty() {
+        return String::new();
+    }
+
+    let profiles: Vec<AgentProfile> = profile_ids.iter()
+        .filter_map(|id| get_profile(id))
+        .collect();
+
+    if profiles.is_empty() {
+        return String::new();
+    }
+
+    let mut prompt = String::from("=== Profiles ===\n");
+    for p in &profiles {
+        prompt.push_str(&format!("[{} {} | {} | {}]\n", p.avatar, p.persona_name, p.role,
+            // Extract first sentence of persona_prompt as a compact description
+            p.persona_prompt.split('.').next().unwrap_or("").trim()
+        ));
+    }
+
+    if profiles.len() > 1 {
+        prompt.push_str("Respond as each profile separately. Be concise (3-5 sentences each). End with a synthesis.\n");
     }
 
     prompt

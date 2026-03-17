@@ -155,7 +155,7 @@ mod tests {
     #[test]
     fn claude_code_full_access_adds_skip_permissions() {
         let (_, _, args, _, _, _) = super::super::agent_command(
-            &AgentType::ClaudeCode, "test prompt", true, "",
+            &AgentType::ClaudeCode, "test prompt", true, "", None,
         );
         assert!(args.contains(&"--dangerously-skip-permissions".to_string()),
             "Claude Code with full_access should include --dangerously-skip-permissions");
@@ -164,7 +164,7 @@ mod tests {
     #[test]
     fn claude_code_no_full_access_omits_skip_permissions() {
         let (_, _, args, _, _, _) = super::super::agent_command(
-            &AgentType::ClaudeCode, "test prompt", false, "",
+            &AgentType::ClaudeCode, "test prompt", false, "", None,
         );
         assert!(!args.contains(&"--dangerously-skip-permissions".to_string()),
             "Claude Code without full_access should NOT include --dangerously-skip-permissions");
@@ -173,7 +173,7 @@ mod tests {
     #[test]
     fn codex_full_access_uses_explicit_sandbox_only() {
         let (_, _, args, _, _, _) = super::super::agent_command(
-            &AgentType::Codex, "test prompt", true, "",
+            &AgentType::Codex, "test prompt", true, "", None,
         );
         assert!(!args.contains(&"--full-auto".to_string()),
             "Codex should not include --full-auto (it overrides explicit sandbox)");
@@ -182,7 +182,7 @@ mod tests {
     #[test]
     fn codex_no_full_access_omits_full_auto() {
         let (_, _, args, _, _, _) = super::super::agent_command(
-            &AgentType::Codex, "test prompt", false, "",
+            &AgentType::Codex, "test prompt", false, "", None,
         );
         assert!(!args.contains(&"--full-auto".to_string()),
             "Codex without full_access should NOT include --full-auto");
@@ -191,7 +191,7 @@ mod tests {
     #[test]
     fn gemini_full_access_adds_yolo() {
         let (_, _, args, _, _, _) = super::super::agent_command(
-            &AgentType::GeminiCli, "test prompt", true, "",
+            &AgentType::GeminiCli, "test prompt", true, "", None,
         );
         assert!(args.contains(&"--yolo".to_string()),
             "Gemini CLI with full_access should include --yolo");
@@ -202,7 +202,7 @@ mod tests {
     #[test]
     fn claude_code_injects_context_via_append_system_prompt() {
         let (_, _, args, _, _, _) = super::super::agent_command(
-            &AgentType::ClaudeCode, "prompt", false, "MCP context here",
+            &AgentType::ClaudeCode, "prompt", false, "MCP context here", None,
         );
         let idx = args.iter().position(|a| a == "--append-system-prompt");
         assert!(idx.is_some(), "Should have --append-system-prompt flag");
@@ -212,7 +212,7 @@ mod tests {
     #[test]
     fn codex_prepends_context_to_prompt() {
         let (_, _, args, _, _, _) = super::super::agent_command(
-            &AgentType::Codex, "user prompt", false, "MCP context",
+            &AgentType::Codex, "user prompt", false, "MCP context", None,
         );
         let last = args.last().unwrap();
         assert!(last.starts_with("MCP context"), "Context should be prepended to prompt");
@@ -222,7 +222,7 @@ mod tests {
     #[test]
     fn agent_command_no_context_when_empty() {
         let (_, _, args, _, _, _) = super::super::agent_command(
-            &AgentType::ClaudeCode, "prompt", false, "",
+            &AgentType::ClaudeCode, "prompt", false, "", None,
         );
         assert!(!args.contains(&"--append-system-prompt".to_string()),
             "Should not add --append-system-prompt when context is empty");
@@ -242,5 +242,71 @@ mod tests {
         let stderr = vec!["Credits: 1.23 • Time: 10s".into()];
         let (_, tokens) = parse_token_usage(&AgentType::Kiro, "response", &stderr);
         assert_eq!(tokens, 12300); // 1.23 × 10000
+    }
+
+    // ─── clean_kiro_line: structural pattern filtering ───────────────────────
+
+    #[test]
+    fn kiro_filters_tool_use_lines() {
+        // Lines with "(using tool: X)" should be filtered regardless of language
+        assert!(clean_kiro_line("Reading file: /some/path (using tool: read)").is_none());
+        assert!(clean_kiro_line("Recherche de symboles (using tool: code)").is_none());
+        assert!(clean_kiro_line("Buscando archivos (using tool: grep)").is_none());
+        assert!(clean_kiro_line("ファイルを書いています (using tool: write)").is_none());
+    }
+
+    #[test]
+    fn kiro_filters_mcp_tool_calls() {
+        assert!(clean_kiro_line("Running tool jira_get_issue with params (from mcp server: atlassian)").is_none());
+        assert!(clean_kiro_line("Appel de l'outil get_repos (from mcp server: github)").is_none());
+    }
+
+    #[test]
+    fn kiro_filters_unicode_markers() {
+        assert!(clean_kiro_line("✓ Successfully read 7951 bytes").is_none());
+        assert!(clean_kiro_line("↱ Operation 1: Reading file").is_none());
+        assert!(clean_kiro_line("⋮").is_none());
+        assert!(clean_kiro_line("❗ No matches found for pattern: X").is_none());
+    }
+
+    #[test]
+    fn kiro_filters_structured_results() {
+        assert!(clean_kiro_line("- Completed in 0.39s").is_none());
+        assert!(clean_kiro_line("- Summary: 2 operations processed").is_none());
+        assert!(clean_kiro_line("Batch fs_read operation with 2 operations").is_none());
+    }
+
+    #[test]
+    fn kiro_filters_credits_and_empty() {
+        assert!(clean_kiro_line("Credits: 0.05 • Time: 3s").is_none());
+        assert!(clean_kiro_line("▸ Credits: 1.23").is_none());
+        assert!(clean_kiro_line("").is_none());
+        assert!(clean_kiro_line("   ").is_none());
+    }
+
+    #[test]
+    fn kiro_filters_shell_commands_and_symbol_lookups() {
+        // Real examples from Kiro output — "I will run..." contains "(using tool: shell)"
+        assert!(clean_kiro_line("I will run the following command: find /some/path -name '*.yaml' (using tool: shell)").is_none());
+        assert!(clean_kiro_line("Getting symbols from: /some/file.php [top_level=true] (using tool: code)").is_none());
+        // French variant
+        assert!(clean_kiro_line("Je vais exécuter la commande suivante: ls -la (using tool: shell)").is_none());
+    }
+
+    #[test]
+    fn kiro_keeps_real_content() {
+        // Actual response text should NOT be filtered
+        assert_eq!(clean_kiro_line("Voici l'analyse du problème :"), Some("Voici l'analyse du problème :".into()));
+        assert_eq!(clean_kiro_line("## Architecture des redirections"), Some("## Architecture des redirections".into()));
+        assert_eq!(clean_kiro_line("Layer 1 — YAML"), Some("Layer 1 — YAML".into()));
+        assert_eq!(clean_kiro_line("The fix needed: preserve query params"), Some("The fix needed: preserve query params".into()));
+    }
+
+    #[test]
+    fn kiro_strips_ansi_and_prefix() {
+        // ANSI codes should be stripped
+        assert_eq!(clean_kiro_line("\x1b[32mSome text\x1b[0m"), Some("Some text".into()));
+        // "> " prefix should be stripped
+        assert_eq!(clean_kiro_line("> Response text"), Some("Response text".into()));
     }
 }

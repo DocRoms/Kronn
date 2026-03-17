@@ -170,6 +170,7 @@ pub fn default_config() -> AppConfig {
             gemini_cli: AgentConfig::default(),
             kiro: AgentConfig::default(),
             vibe: AgentConfig::default(),
+            model_tiers: Default::default(),
         },
         language: "fr".into(),
         disabled_agents: vec![],

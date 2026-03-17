@@ -67,6 +67,22 @@ export interface AgentsConfig {
   gemini_cli: AgentConfig;
   kiro: AgentConfig;
   vibe: AgentConfig;
+  model_tiers: ModelTiersConfig;
+}
+
+export type ModelTier = "economy" | "default" | "reasoning";
+
+export interface ModelTierConfig {
+  economy: string | null;
+  reasoning: string | null;
+}
+
+export interface ModelTiersConfig {
+  claude_code: ModelTierConfig;
+  codex: ModelTierConfig;
+  gemini_cli: ModelTierConfig;
+  kiro: ModelTierConfig;
+  vibe: ModelTierConfig;
 }
 
 export interface SetAgentAccessRequest {
@@ -316,6 +332,7 @@ export type StepMode =
 
 export interface AgentSettings {
   model?: string | null;
+  tier?: ModelTier | null;
   reasoning_effort?: string | null;
   max_tokens?: number | null;
 }
@@ -503,6 +520,7 @@ export interface Skill {
   category: SkillCategory;
   content: string;
   is_builtin: boolean;
+  token_estimate: number;
 }
 
 export interface CreateSkillRequest {
@@ -528,6 +546,7 @@ export interface AgentProfile {
   persona_prompt: string;
   default_engine?: string;
   is_builtin: boolean;
+  token_estimate: number;
 }
 
 export interface CreateProfileRequest {
@@ -554,6 +573,7 @@ export interface Directive {
   content: string;
   is_builtin: boolean;
   conflicts?: string[];
+  token_estimate: number;
 }
 
 export interface CreateDirectiveRequest {
@@ -579,10 +599,13 @@ export interface Discussion {
   skill_ids?: string[];
   profile_ids?: string[];
   directive_ids?: string[];
+  tier?: ModelTier;
   archived: boolean;
   workspace_mode: string;
   workspace_path?: string | null;
   worktree_branch?: string | null;
+  summary_cache?: string | null;
+  summary_up_to_msg_idx?: number | null;
   created_at: string; // ISO 8601
   updated_at: string;
 }
@@ -595,6 +618,7 @@ export interface DiscussionMessage {
   timestamp: string; // ISO 8601
   tokens_used: number;
   auth_mode: string | null;
+  model_tier?: string | null;
 }
 
 export type MessageRole = "User" | "Agent" | "System";
@@ -653,6 +677,7 @@ export interface CreateDiscussionRequest {
   directive_ids?: string[];
   workspace_mode?: string;
   base_branch?: string;
+  tier?: ModelTier;
 }
 
 export interface SendMessageRequest {

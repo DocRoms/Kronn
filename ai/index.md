@@ -144,7 +144,7 @@ After completing a task: if you discovered something non-obvious (a gotcha, a mi
 | Streaming | SSE (Server-Sent Events) for agent responses and workflow run updates |
 | Container | Docker Compose (backend + frontend + nginx gateway) |
 | Agents | Claude Code CLI, OpenAI Codex CLI, Vibe (Mistral), Gemini CLI (Google), Kiro (Amazon). Planned: OpenCode, DeepSeek |
-| MCP sync | 3 formats: `.mcp.json` (Claude, Gemini), `.vibe/config.toml` (Vibe), `~/.codex/config.toml` (Codex) |
+| MCP sync | 5 formats: `.mcp.json` (Claude), `.kiro/settings/mcp.json` (Kiro), `.gemini/settings.json` (Gemini CLI), `.vibe/config.toml` (Vibe), `~/.codex/config.toml` (Codex) |
 | API keys | Multi-key per provider (named keys, active selection), stored in `config.toml` as `[[tokens.keys]]` array. Agent auth files synced (e.g. `~/.codex/auth.json`). Override toggle per provider without deleting keys. |
 | Token tracking | Per-message `tokens_used` + `auth_mode` (override/local). Codex: parsed from stderr. Claude Code: `--output-format stream-json --verbose --include-partial-messages` (tokens from `result` event and `message_delta`). Gemini/Vibe: TODO. |
 
@@ -188,7 +188,7 @@ Projects display 3 badges next to the title: `[FileCode] AI context`, `[Cpu] AI 
 | Validated | green | green | green | Validation discussion resolved all TODOs |
 
 - **Template install**: copies `ai/` skeleton + redirector files (CLAUDE.md, .cursorrules, etc.) + injects bootstrap prompt
-- **AI audit**: 10-step SSE streaming, ~20 min, high token usage. Fills all `ai/` files.
+- **AI audit**: 10-step SSE streaming, ~20 min. **Token cost: ~50K–150K tokens per audit** (depends on project size and agent model). With Claude Sonnet API pricing, expect ~$0.50–$2.00 per audit. Fills all `ai/` files.
 - **Validation**: opens a prefilled discussion (locked title/prompt) where the AI asks questions about ambiguities. AI updates `ai/` files after each answer. Project page shows "validation en cours" + link to discussion (no validate button on project page).
 - When the AI finishes all questions, it includes `KRONN:VALIDATION_COMPLETE` in its last message. This triggers a green banner in the discussion with a "Marquer l'audit comme valide" button.
 - **Mark as validated**: injects `<!-- KRONN:VALIDATED:date -->` marker into `ai/index.md`.
@@ -198,7 +198,7 @@ Projects display 3 badges next to the title: `[FileCode] AI context`, `[Cpu] AI 
 
 ## 10. Multi-agent configuration
 
-Redirectors to this file: `CLAUDE.md`.
+Redirectors to this file: `CLAUDE.md`, `GEMINI.md`, `AGENTS.md`, `.kiro/steering/instructions.md`, `.cursorrules`, `.github/copilot-instructions.md`, `.windsurfrules`, `.clinerules`.
 
 **Maintenance rule**: all content lives in `ai/`. Redirectors never need changes.
 

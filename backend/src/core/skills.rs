@@ -79,6 +79,9 @@ fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Skill> 
         return None;
     }
 
+    // Estimate token cost: ~4 chars per token, including framing overhead
+    let token_estimate = ((body.len() + name.len() + 20) / 4) as u32;
+
     Some(Skill {
         id: id.to_string(),
         name,
@@ -87,6 +90,7 @@ fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Skill> 
         category,
         content: body,
         is_builtin,
+        token_estimate,
     })
 }
 
@@ -153,6 +157,25 @@ pub fn build_skills_prompt(skill_ids: &[String]) -> String {
     let mut prompt = String::from("=== Active Skills ===\n\n");
     for skill in &skills {
         prompt.push_str(&format!("--- {} ---\n{}\n\n", skill.name, skill.content));
+    }
+    prompt
+}
+
+/// Build a compact skills prompt for agents with small context windows.
+/// Uses only the first line of each skill's content (~50% token savings).
+pub fn build_skills_prompt_compact(skill_ids: &[String]) -> String {
+    let skills = get_skills_by_ids(skill_ids);
+    if skills.is_empty() {
+        return String::new();
+    }
+
+    let mut prompt = String::from("=== Skills ===\n");
+    for skill in &skills {
+        // Take first meaningful line of content as a compact summary
+        let summary = skill.content.lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or(&skill.name);
+        prompt.push_str(&format!("[{}: {}]\n", skill.name, summary.trim()));
     }
     prompt
 }

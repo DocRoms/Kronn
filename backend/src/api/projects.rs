@@ -205,12 +205,22 @@ pub async fn bootstrap(
                 if ai_template.is_dir() {
                     copy_dir_nondestructive(&ai_template, &ai_target)?;
                 }
-                for filename in &["CLAUDE.md", ".cursorrules", ".windsurfrules", ".clinerules"] {
+                for filename in AUDIT_REDIRECTOR_FILES {
                     let src = template_dir.join(filename);
                     let dst = project_path.join(filename);
                     if src.exists() && !dst.exists() {
+                        if let Some(parent) = dst.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
                         let _ = std::fs::copy(&src, &dst);
                     }
+                }
+                // Kiro steering (nested path, not in AUDIT_REDIRECTOR_FILES)
+                let kiro_src = template_dir.join(".kiro/steering/instructions.md");
+                let kiro_dst = project_path.join(".kiro/steering/instructions.md");
+                if kiro_src.exists() && !kiro_dst.exists() {
+                    let _ = std::fs::create_dir_all(kiro_dst.parent().unwrap());
+                    let _ = std::fs::copy(&kiro_src, &kiro_dst);
                 }
             }
 
@@ -289,6 +299,7 @@ pub async fn bootstrap(
         timestamp: now,
         tokens_used: 0,
         auth_mode: None,
+        model_tier: None,
     };
 
     let discussion = Discussion {
@@ -309,7 +320,10 @@ pub async fn bootstrap(
         archived: false,
         workspace_mode: "Direct".into(),
         workspace_path: None,
+        tier: crate::models::ModelTier::Default,
         worktree_branch: None,
+        summary_cache: None,
+        summary_up_to_msg_idx: None,
         created_at: now,
         updated_at: now,
     };
@@ -738,9 +752,10 @@ fn inject_bootstrap_prompt(index_file: &std::path::Path) {
 > 8. **`ai/operations/mcp-servers.md`** — MCP servers if .mcp.json exists.
 >    Only create `ai/operations/mcp-servers/<slug>.md` if there are project-specific rules to document.
 >
-> 9. **`ai/inconsistencies-tech-debt.md`** — Real issues found during analysis.
->    Create `ai/tech-debt/TD-*.md` detail files for each entry.
->    Flag outdated prerequisites (old runtimes, deprecated dependencies, obsolete tooling).
+> 9. **`ai/inconsistencies-tech-debt.md`** — Scan source code across: dependencies (EOL/deprecated),
+>    security (secrets, injection, auth), code quality (complexity, SRP, dead code), scalability (N+1, leaks),
+>    maintainability (coupling, missing tests), compliance (GDPR, licenses), infrastructure (Docker, CI).
+>    Create `ai/tech-debt/TD-*.md` detail files for each entry. Cite file paths.
 >
 > 10. **Review** — Check all files for consistency, completeness, no remaining placeholders.
 >
@@ -765,10 +780,12 @@ fn inject_bootstrap_prompt(index_file: &std::path::Path) {
 const PROMPT_PREAMBLE: &str = "\
 Rules: Write in English. Be factual and concise — this is AI context for coding agents, NOT human documentation.\n\
 - Do NOT invent information — mark unknowns with `<!-- TODO: verify -->`.\n\
-- Replace ALL `{{PLACEHOLDERS}}` and `<!-- ... -->` comment placeholders with real content.\n\
+- Replace ALL `{{PLACEHOLDERS}}` and `<!-- ... -->` comment placeholders with real content. {{PLACEHOLDERS}} are literal text markers — replace by editing file content directly.\n\
 - Keep the existing file structure and section headings — fill in the blanks, do NOT rewrite the file from scratch.\n\
+- If a section does not apply to this project, replace placeholders with 'N/A — not used in this project.' Do not delete the section.\n\
 - Write plain facts, not opinions or recommendations. No debate, no trade-offs analysis.\n\
-- Each section should be self-contained: another AI agent reading just that section should get the full picture.";
+- Each section should be self-contained: another AI agent reading just that section should get the full picture.\n\
+- Add or remove table rows as needed to match the project. Write fewer entries rather than inventing content to fill slots.";
 
 const ANALYSIS_STEPS: &[(&str, &str)] = &[
     // Step 1: Project analysis + index
@@ -789,27 +806,21 @@ Then fill ai/index.md — replace ALL {{PLACEHOLDERS}} in each section:\n\
 
     // Step 2: Glossary (early — defines vocabulary for subsequent steps)
     ("ai/glossary.md", "\
-Read ai/index.md for project context. Search the codebase for domain-specific terms, abbreviations, \
-internal naming conventions, and project jargon.\n\n\
-Fill ai/glossary.md — replace ALL {{PLACEHOLDERS}} in the tables:\n\
-- Organize terms by category: Architecture/Stack, Domain/Business, Environments, Third Parties, Abbreviations\n\
-- Each term: one-line definition + optional link to relevant ai/ file\n\
-- Include: framework-specific terms, model names, service names, acronyms used in code\n\
-- Aim for 30-60 terms total across all categories\n\
-- IMPORTANT: if you encounter a domain term you don't understand, add it with `<!-- TODO: ask user -->` \
-after the definition. Example: `| Widget | Some kind of business entity <!-- TODO: ask user --> | |`\n\
-- These TODO markers will be reviewed during the validation phase so the user can clarify them"),
+Read ai/index.md. Search codebase for domain terms, abbreviations, naming conventions.\n\n\
+Fill ai/glossary.md — replace ALL {{PLACEHOLDERS}}:\n\
+- Categorize: Architecture, Domain, Environments, External, Abbreviations\n\
+- Each term: one-line definition + optional ai/ reference\n\
+- Unknown domain terms: add `<!-- TODO: ask user -->` after the definition\n\
+- Cover: framework terms, model names, services, acronyms in code"),
 
     // Step 3: Repo map
     ("ai/repo-map.md", "\
 Read ai/index.md and ai/glossary.md for context. Explore the directory structure (2-3 levels deep).\n\n\
 Fill ai/repo-map.md — replace ALL {{PLACEHOLDERS}}:\n\
 - {{STACK_OVERVIEW}}: one paragraph summarizing the architecture\n\
-- Key folders tree: replace {{FOLDER_*}} and {{SUBFOLDER_*}} with every major directory (2-3 levels deep)\n\
-  Use the tree-like format already in the file with inline annotations\n\
-- Primary entrypoints table: replace {{ENTRYPOINT_*}} with 5-7 key files (main config, routes, models, etc.)\n\
-- Auto-generated files table: replace {{FILE_PATTERN}} with files that should NOT be edited manually\n\
-- Note any auto-generated files that should NOT be edited manually"),
+- Key folders tree: replace {{FOLDER_*}} with every major directory (2-3 levels deep), tree format with annotations\n\
+- Entrypoints table: replace {{ENTRYPOINT_*}} with 5-7 key files (config, routes, models, etc.)\n\
+- Auto-generated files: replace {{FILE_PATTERN}} with files NOT to edit manually"),
 
     // Step 4: Coding rules
     ("ai/coding-rules.md", "\
@@ -818,8 +829,9 @@ Read ai/index.md for context. Find ALL linter, formatter, and type-checker confi
 Fill ai/coding-rules.md — replace ALL {{PLACEHOLDERS}}:\n\
 - Replace {{LANGUAGE_*}} with one section per language/framework used in the project\n\
 - For each language, fill the Tools table: {{CONFIG}} and {{COMMAND}} for linter, formatter, type checker\n\
-- Replace {{CONVENTION_*}} with 5-10 coding conventions per language (naming, error handling, imports)\n\
-- Replace {{MISTAKE_*}} with common mistakes to avoid (linter patterns, framework gotchas)\n\
+- Replace {{CONVENTION_*}} with coding conventions OBSERVED in existing code (naming, error handling, imports). Write fewer rather than inventing.\n\
+- Replace {{MISTAKE_*}} with common mistakes to avoid (from linter configs, framework gotchas observed in code)\n\
+- If no linter/formatter is configured, write 'Not configured' in the Config column\n\
 - Add or remove language sections as needed to match the actual project stack"),
 
     // Step 5: Testing & quality
@@ -869,38 +881,42 @@ If no MCP config exists: replace ai/operations/mcp-servers.md content with:\n\
 
     // Step 9: Inconsistencies & tech debt
     ("ai/inconsistencies-tech-debt.md", "\
-Read ai/index.md and browse ALL the other ai/ files you filled in previous steps.\n\
-Based on everything you observed during analysis, note any inconsistencies, legacy patterns, \
-outdated configs, or technical debt.\n\n\
-Fill ai/inconsistencies-tech-debt.md — replace ALL {{PLACEHOLDERS}} and <!-- ... --> placeholders:\n\
-1. Fill the 'Outdated prerequisites' table: check language runtime versions (PHP, Node, Python, Ruby, etc.), \
-   framework versions, deprecated bundles/packages, obsolete CSS/SASS tooling. \
-   Flag anything that is EOL, deprecated, or significantly behind latest stable.\n\
-2. Add concrete, factual entries to the 'Current list' table (ID, Problem, Area, Severity)\n\
-3. For EACH entry in the table, also create a detail file at `ai/tech-debt/TD-YYYYMMDD-short-slug.md` \
-   using the entry template format from the index file. Include: ID, Area, Severity, Problem, \
-   Why we can't fix now, Impact, Where (file paths), Suggested direction, Next step.\n\
-4. If no issues found, add a single row: 'None identified during initial audit'\n\
-- Each entry should describe a real issue found, not a hypothetical one"),
+Real issues only, not hypothetical. Read all ai/ files AND scan source code.\n\
+Scan: entry points, config files, Dockerfiles, CI configs, and 5-10 core source files \
+(prioritize auth, data persistence, external input handling).\n\n\
+Systematically audit across these dimensions:\n\
+- Dependencies: EOL/deprecated runtimes, frameworks, packages, or versions significantly behind stable\n\
+- Security: hardcoded secrets, missing auth checks, injection vectors (SQL/XSS), insecure defaults, exposed debug endpoints\n\
+- Code quality: functions >50 lines, god classes, SRP violations, dead code, error swallowing (empty catch/let _ =)\n\
+- Scalability: N+1 queries, unbounded loops, missing pagination, memory leaks, missing indexes\n\
+- Maintainability: tight coupling, circular dependencies, missing tests for critical paths, unclear naming\n\
+- Compliance: GDPR issues (external resources, data retention), license incompatibilities\n\
+- Infrastructure: Docker misconfigs (root user, no resource limits), CI gaps, missing health checks\n\n\
+Fill ai/inconsistencies-tech-debt.md — replace ALL {{PLACEHOLDERS}} and <!-- ... --> comments:\n\
+1. Outdated prerequisites table: flag EOL/deprecated/behind-stable runtimes, frameworks, packages\n\
+2. For each issue found: (a) create `ai/tech-debt/TD-YYYYMMDD-slug.md` (YYYYMMDD=today) first, \
+then (b) add the one-line entry to the Current list table. Do both or neither.\n\
+   Severity: Critical=security/data loss, High=blocks prod, Medium=dev friction/perf, Low=cosmetic. Cite file paths.\n\
+3. Limit to 15-20 most impactful findings. Prioritize Critical and High.\n\
+4. No issues found → single row: 'None identified during initial audit'\n\n\
+Detail file format:\n\
+- **ID**: TD-YYYYMMDD-slug\n\
+- **Area**: Backend | Frontend | CI | Infra | Security | Docs\n\
+- **Severity**: Critical | High | Medium | Low\n\
+- **Problem (fact)**: one-line description\n\
+- **Impact**: what goes wrong if not fixed\n\
+- **Where (pointers)**: file paths with line numbers\n\
+- **Suggested direction**: non-binding fix suggestion\n\
+- **Next step**: create ticket"),
 
     // Step 10: Final review
     ("REVIEW", "\
-Read ALL ai/ files one by one. This is the final quality pass.\n\n\
-Check each file for:\n\
-1. No remaining {{PLACEHOLDERS}} — ALL must be replaced with real content (search for `{{` in all files)\n\
-2. No remaining <!-- fill --> or <!-- ... --> placeholder comments — replace or remove them \
-   (except `<!-- TODO: ask user -->` and `<!-- TODO: verify -->` which are intentional)\n\
-3. No duplicate information across files (same fact documented in two places)\n\
-4. Terminology consistency: terms in ai/glossary.md used consistently everywhere\n\
-5. Cross-references: file paths mentioned in one file exist and match other files\n\
-6. No contradictions: numbers, service names, commands agree across all files\n\
-7. Completeness: no critical section left empty (stack table, prerequisites, test list, etc.)\n\
-8. Format: markdown is clean, tables render correctly, headings are consistent\n\
-9. Tech debt files: verify each entry in ai/inconsistencies-tech-debt.md has a matching \
-   detail file in ai/tech-debt/\n\
-10. Glossary TODO markers: verify all `<!-- TODO: ask user -->` terms are genuine unknowns\n\n\
-Fix any issues found directly in the files. If a section is genuinely empty because the project \
-doesn't have that feature, add a note like 'N/A — this project does not use X'."),
+Read ALL ai/ files. Final quality pass — fix issues directly.\n\n\
+Check: no remaining `{{` placeholders · no orphan `<!-- fill -->` comments (keep `<!-- TODO: ask user -->`) \
+· no duplicated facts · consistent terminology with glossary · valid cross-references \
+· no contradictions · no empty critical sections · clean markdown · each tech-debt entry has a detail file \
+· TODO markers are genuine unknowns.\n\n\
+Empty sections for missing features → 'N/A — not used'."),
 ];
 
 /// POST /api/projects/:id/ai-audit
@@ -949,7 +965,7 @@ pub async fn run_audit(
 
         for (step_num, (target_file, step_prompt)) in ANALYSIS_STEPS.iter().enumerate() {
             let step = step_num + 1;
-            let file_label = if *target_file == "REVIEW" { "Relecture finale" } else { target_file };
+            let file_label = if *target_file == "REVIEW" { "Final review" } else { target_file };
 
             let step_start = serde_json::json!({
                 "step": step,
@@ -958,7 +974,13 @@ pub async fn run_audit(
             });
             yield Event::default().event("step_start").data(step_start.to_string());
 
-            let full_prompt = format!("{}\n\n{}", PROMPT_PREAMBLE, step_prompt);
+            // Inject today's date so agents don't have to guess it
+            let today = Utc::now().format("%Y-%m-%d").to_string();
+            let today_compact = Utc::now().format("%Y%m%d").to_string();
+            let full_prompt = format!("{}\n\n{}", PROMPT_PREAMBLE, step_prompt)
+                .replace("YYYYMMDD=today", &format!("YYYYMMDD={}", today_compact))
+                .replace("today's date (YYYY-MM-DD)", &today)
+                .replace("set to today's date", &format!("set to {}", today));
 
             // No profiles for audit — solo agent mode produces clean factual documentation.
             // Multi-profile debate format would pollute ai/ files with discussion artifacts.
@@ -969,6 +991,7 @@ pub async fn run_audit(
                 prompt: &full_prompt, tokens: &tokens, full_access: true,
                 skill_ids: &[], directive_ids: &[], profile_ids: &[],
                 mcp_context_override: None,
+                tier: crate::models::ModelTier::Reasoning, model_tiers: None,
             }).await {
                 Ok(mut process) => {
                     while let Some(line) = process.next_line().await {
@@ -1201,123 +1224,96 @@ fn build_validation_prompt(language: &str, info: &AuditInfo, has_issue_tracker_m
     let base = match language {
         "en" => {
             let mut s = String::from(concat!(
-                "Here is the AI context for the project (ai/ folder). You must follow a **strict 4-phase validation protocol**. ",
-                "Do NOT emit KRONN:VALIDATION_COMPLETE until ALL 4 phases are done.\n\n",
+                "Validate the AI context (ai/ folder). Follow this 4-phase protocol. ",
+                "Do NOT emit KRONN:VALIDATION_COMPLETE until ALL phases are done.\n\n",
                 "## Phase 1 — Auto-fix (autonomous)\n",
-                "Read the project source code and resolve all issues you can handle autonomously:\n",
-                "- Orphan <!-- TODO --> markers that reference nonexistent content\n",
-                "- Empty/skeleton files where you can infer the content from the actual codebase\n",
-                "- Outdated or incorrect information you can verify from the code\n",
-                "Update the ai/ files directly. Report what you fixed.\n\n",
+                "Read source code. Fix autonomously: orphan TODO markers, empty/skeleton files inferable from code, outdated info. ",
+                "Update ai/ files directly. Report fixes.\n\n",
                 "## Phase 2 — Ambiguity questions (interactive)\n",
-                "For remaining ambiguities or decisions only a human can make, ask your questions **one by one**.\n",
-                "- After each of my answers, **immediately update** the relevant ai/ files before asking the next question.\n",
-                "- If my answer reveals new unknowns or contradictions, ask follow-up questions — do NOT skip them.\n",
-                "- Do NOT move to Phase 3 until all ambiguities are resolved.\n\n",
-                "## Phase 3 — Tech debt & inconsistencies review (interactive)\n",
-                "Review EVERY entry in `ai/inconsistencies-tech-debt.md` and the detail files in `ai/tech-debt/`.\n",
-                "For each tech-debt item, present it to me and ask:\n",
-                "- Is this assessment accurate? Should the severity be adjusted?\n",
-                "- What is the priority for fixing this?\n",
+                "Ask remaining ambiguities **one by one**. After each answer, update ai/ files immediately. ",
+                "Follow-up on new unknowns. Do not skip to Phase 3 until resolved.\n",
+                "If user answers 'I don't know' or 'skip', mark as `<!-- TODO: unknown -->` and move on.\n",
+                "Phase 2 ends when all TODOs are addressed or explicitly skipped.\n\n",
+                "## Phase 3 — Tech debt review (interactive)\n",
+                "For each entry in `ai/inconsistencies-tech-debt.md`:\n",
+                "1. Read its detail file in `ai/tech-debt/`\n",
+                "2. Verify against source code — does the issue still exist? Is the description accurate?\n",
+                "3. Present to user one by one (or grouped by area if >10). Ask: confirm/reject? correct severity? priority?\n",
             ));
             if has_issue_tracker_mcp {
-                s.push_str("- Should I create a ticket/issue for this item? (I have access to your issue tracker via MCP)\n");
+                s.push_str("Also ask: create a ticket? (issue tracker available via MCP)\n");
             }
             s.push_str(concat!(
-                "Update entries based on my feedback. Remove false positives. Add any issues I mention that were missed.\n",
-                "If there are many items, you may group them by area (e.g. \"Here are the 3 Backend items...\") ",
-                "but still require explicit confirmation for each.\n\n",
-                "## Phase 4 — Documentation challenge (interactive)\n",
-                "Ask me 2-3 practical questions that a developer joining the project might ask, for example:\n",
-                "- \"How do I add a new API endpoint?\" or \"How do I run the tests?\"\n",
-                "- Then check if the ai/ documentation answers them correctly and completely.\n",
-                "- If the documentation is insufficient or wrong, update it and ask another question.\n",
-                "- If all questions are answered correctly by the docs, this phase is complete.\n\n",
+                "Do not batch-confirm. Update/remove entries per feedback.\n",
+                "Also ask: did the audit miss anything obvious? (security, performance, compliance)\n\n",
+                "## Phase 4 — Doc challenge (interactive)\n",
+                "Ask 2-3 practical onboarding questions that must be answerable from ai/ files alone. ",
+                "Examples: 'How would a new dev add a new API endpoint?', 'What command runs all tests?', 'Where is the DB schema?'. ",
+                "Check if ai/ docs answer them correctly. Fix gaps.\n\n",
                 "## Completion\n",
-                "Only when ALL 4 phases are fully complete (no remaining ambiguities, all tech-debt items reviewed, ",
-                "documentation validated), end your message with the exact phrase: \"KRONN:VALIDATION_COMPLETE\".\n",
-                "NEVER emit this phrase early. If in doubt, ask one more question.",
+                "All phases done → end with exact phrase: \"KRONN:VALIDATION_COMPLETE\". Never emit early.",
             ));
             s
         },
         "es" => {
             let mut s = String::from(concat!(
-                "Aqui esta el contexto AI del proyecto (carpeta ai/). Debes seguir un **protocolo estricto de validacion en 4 fases**. ",
-                "NO emitas KRONN:VALIDATION_COMPLETE hasta que las 4 fases esten completas.\n\n",
+                "Valida el contexto AI (carpeta ai/). Sigue este protocolo de 4 fases. ",
+                "NO emitas KRONN:VALIDATION_COMPLETE hasta completar TODAS las fases.\n\n",
                 "## Fase 1 — Auto-correccion (autonoma)\n",
-                "Lee el codigo fuente del proyecto y resuelve todo lo que puedas de forma autonoma:\n",
-                "- Marcadores <!-- TODO --> huerfanos que referencian contenido inexistente\n",
-                "- Archivos vacios/esqueleto donde puedas inferir el contenido del codigo real\n",
-                "- Informacion desactualizada o incorrecta que puedas verificar del codigo\n",
-                "Actualiza los archivos ai/ directamente. Reporta lo que corregiste.\n\n",
-                "## Fase 2 — Preguntas de ambiguedad (interactiva)\n",
-                "Para ambiguedades restantes o decisiones que solo un humano puede tomar, haz tus preguntas **una por una**.\n",
-                "- Con cada respuesta mia, **actualiza inmediatamente** los archivos ai/ correspondientes antes de la siguiente pregunta.\n",
-                "- Si mi respuesta revela nuevas incognitas o contradicciones, haz preguntas de seguimiento — NO las omitas.\n",
-                "- NO pases a la Fase 3 hasta que todas las ambiguedades esten resueltas.\n\n",
-                "## Fase 3 — Revision de deuda tecnica e inconsistencias (interactiva)\n",
-                "Revisa CADA entrada en `ai/inconsistencies-tech-debt.md` y los archivos detalle en `ai/tech-debt/`.\n",
-                "Para cada item de deuda tecnica, presentamelo y pregunta:\n",
-                "- ¿Es precisa esta evaluacion? ¿Debe ajustarse la severidad?\n",
-                "- ¿Cual es la prioridad para corregir esto?\n",
+                "Lee el codigo. Corrige: TODOs huerfanos, archivos esqueleto inferibles del codigo, info obsoleta. ",
+                "Actualiza ai/ directamente. Reporta.\n\n",
+                "## Fase 2 — Preguntas (interactiva)\n",
+                "Pregunta ambiguedades **una por una**. Tras cada respuesta, actualiza ai/ antes de seguir. ",
+                "No pases a Fase 3 sin resolver todo.\n",
+                "Si el usuario responde 'no se' o 'saltar', marca como `<!-- TODO: unknown -->` y continua.\n\n",
+                "## Fase 3 — Deuda tecnica (interactiva)\n",
+                "Para cada entrada en `ai/inconsistencies-tech-debt.md`:\n",
+                "1. Lee su archivo detalle en `ai/tech-debt/`\n",
+                "2. Verifica contra el codigo fuente — ¿el problema existe? ¿la descripcion es correcta?\n",
+                "3. Presenta al usuario una por una (o agrupadas por area si >10). Pregunta: ¿confirmar/rechazar? ¿severidad? ¿prioridad?\n",
             ));
             if has_issue_tracker_mcp {
-                s.push_str("- ¿Debo crear un ticket/issue para este item? (Tengo acceso a tu gestor de issues via MCP)\n");
+                s.push_str("Tambien: ¿crear ticket? (gestor de issues disponible via MCP)\n");
             }
             s.push_str(concat!(
-                "Actualiza las entradas segun mi feedback. Elimina falsos positivos. Agrega problemas que mencione y se hayan omitido.\n",
-                "Si hay muchos items, puedes agruparlos por area pero requiere confirmacion explicita para cada uno.\n\n",
-                "## Fase 4 — Desafio de documentacion (interactiva)\n",
-                "Hazme 2-3 preguntas practicas que un desarrollador nuevo en el proyecto podria hacer, por ejemplo:\n",
-                "- \"¿Como agrego un nuevo endpoint API?\" o \"¿Como ejecuto los tests?\"\n",
-                "- Luego verifica si la documentacion ai/ las responde correcta y completamente.\n",
-                "- Si la documentacion es insuficiente o incorrecta, actualizala y haz otra pregunta.\n",
-                "- Si todas las preguntas son respondidas correctamente por la doc, esta fase esta completa.\n\n",
-                "## Finalizacion\n",
-                "Solo cuando las 4 fases esten completamente terminadas (sin ambiguedades, todos los items de deuda tecnica revisados, ",
-                "documentacion validada), termina tu mensaje con la frase exacta: \"KRONN:VALIDATION_COMPLETE\".\n",
-                "NUNCA emitas esta frase antes de tiempo. Si tienes dudas, haz una pregunta mas.",
+                "No confirmar en lote. Actualiza/elimina segun feedback.\n",
+                "Tambien pregunta: ¿la auditoria omitio algo obvio? (seguridad, rendimiento, cumplimiento)\n\n",
+                "## Fase 4 — Challenge doc (interactiva)\n",
+                "Haz 2-3 preguntas practicas de onboarding que deben ser respondibles solo con los archivos ai/. ",
+                "Ejemplos: '¿Como agregar un endpoint?', '¿Que comando ejecuta los tests?'. Corrige gaps.\n\n",
+                "## Fin\n",
+                "Todas las fases completas → termina con: \"KRONN:VALIDATION_COMPLETE\". Nunca antes.",
             ));
             s
         },
         _ => {
             let mut s = String::from(concat!(
-                "Voici le contexte AI du projet (dossier ai/). Tu dois suivre un **protocole strict de validation en 4 phases**. ",
-                "NE PAS emettre KRONN:VALIDATION_COMPLETE tant que les 4 phases ne sont pas terminees.\n\n",
+                "Valide le contexte AI (dossier ai/). Suis ce protocole en 4 phases. ",
+                "NE PAS emettre KRONN:VALIDATION_COMPLETE avant la fin des 4 phases.\n\n",
                 "## Phase 1 — Auto-correction (autonome)\n",
-                "Lis le code source du projet et resous tout ce que tu peux gerer de facon autonome :\n",
-                "- Marqueurs <!-- TODO --> orphelins qui referencent du contenu inexistant\n",
-                "- Fichiers vides/squelettes ou tu peux inferer le contenu depuis le code reel\n",
-                "- Informations obsoletes ou incorrectes verifiables depuis le code\n",
-                "Mets a jour les fichiers ai/ directement. Indique ce que tu as corrige.\n\n",
-                "## Phase 2 — Questions d'ambiguite (interactif)\n",
-                "Pour les ambiguites restantes ou les decisions que seul un humain peut prendre, pose tes questions **une par une**.\n",
-                "- A chaque reponse de ma part, **mets immediatement a jour** les fichiers ai/ concernes avant la question suivante.\n",
-                "- Si ma reponse revele de nouvelles zones d'ombre ou des contradictions, pose des questions de suivi — ne les ignore PAS.\n",
-                "- NE passe PAS a la Phase 3 tant que toutes les ambiguites ne sont pas resolues.\n\n",
-                "## Phase 3 — Revue de la dette technique et des inconsistances (interactif)\n",
-                "Passe en revue CHAQUE entree dans `ai/inconsistencies-tech-debt.md` et les fichiers detail dans `ai/tech-debt/`.\n",
-                "Pour chaque item de dette technique, presente-le-moi et demande :\n",
-                "- Cette evaluation est-elle correcte ? Faut-il ajuster la severite ?\n",
-                "- Quelle est la priorite pour corriger ce point ?\n",
+                "Lis le code source. Corrige : TODOs orphelins, fichiers squelettes inferables du code, infos obsoletes. ",
+                "Mets a jour ai/ directement. Rapporte les corrections.\n\n",
+                "## Phase 2 — Questions (interactif)\n",
+                "Pose les ambiguites **une par une**. Apres chaque reponse, mets a jour ai/ avant la question suivante. ",
+                "Ne passe pas a la Phase 3 sans tout resoudre.\n",
+                "Si l'utilisateur repond 'je ne sais pas' ou 'passer', marque `<!-- TODO: unknown -->` et continue.\n\n",
+                "## Phase 3 — Dette technique (interactif)\n",
+                "Pour chaque entree dans `ai/inconsistencies-tech-debt.md` :\n",
+                "1. Lis son fichier detail dans `ai/tech-debt/`\n",
+                "2. Verifie dans le code source — le probleme existe-t-il ? La description est-elle exacte ?\n",
+                "3. Presente a l'utilisateur un par un (ou par domaine si >10). Demande : confirmer/rejeter ? severite ? priorite ?\n",
             ));
             if has_issue_tracker_mcp {
-                s.push_str("- Dois-je creer un ticket/issue pour cet item ? (J'ai acces a ton gestionnaire d'issues via MCP)\n");
+                s.push_str("Aussi : creer un ticket ? (gestionnaire d'issues dispo via MCP)\n");
             }
             s.push_str(concat!(
-                "Mets a jour les entrees selon mon retour. Supprime les faux positifs. Ajoute les problemes que je signale et qui ont ete oublies.\n",
-                "S'il y a beaucoup d'items, tu peux les regrouper par domaine (ex : \"Voici les 3 items Backend...\") ",
-                "mais exige une confirmation explicite pour chacun.\n\n",
-                "## Phase 4 — Challenge de la documentation (interactif)\n",
-                "Pose-moi 2-3 questions pratiques qu'un developpeur rejoignant le projet pourrait poser, par exemple :\n",
-                "- \"Comment ajouter un nouvel endpoint API ?\" ou \"Comment lancer les tests ?\"\n",
-                "- Puis verifie si la documentation ai/ y repond correctement et completement.\n",
-                "- Si la documentation est insuffisante ou incorrecte, mets-la a jour et pose une autre question.\n",
-                "- Si toutes les questions sont correctement couvertes par la doc, cette phase est terminee.\n\n",
+                "Pas de confirmation en lot. Mets a jour/supprime selon feedback.\n",
+                "Demande aussi : l'audit a-t-il rate quelque chose d'evident ? (securite, performance, conformite)\n\n",
+                "## Phase 4 — Challenge doc (interactif)\n",
+                "Pose 2-3 questions pratiques d'onboarding qui doivent etre couvertes par les fichiers ai/ seuls. ",
+                "Exemples : 'Comment ajouter un endpoint ?', 'Quelle commande lance les tests ?'. Corrige les lacunes.\n\n",
                 "## Fin\n",
-                "Uniquement quand les 4 phases sont entierement terminees (plus aucune ambiguite, tous les items de dette technique revus, ",
-                "documentation validee), termine ton message par la phrase exacte : \"KRONN:VALIDATION_COMPLETE\".\n",
-                "NE JAMAIS emettre cette phrase en avance. En cas de doute, pose encore une question.",
+                "Toutes les phases terminees → termine par : \"KRONN:VALIDATION_COMPLETE\". Jamais avant.",
             ));
             s
         },
@@ -1486,20 +1482,26 @@ pub async fn full_audit(
             }
 
             let step = step_num + 1;
-            let file_label = if *target_file == "REVIEW" { "Relecture finale" } else { target_file };
+            let file_label = if *target_file == "REVIEW" { "Final review" } else { target_file };
 
             let step_start = serde_json::json!({
                 "step": step, "total": total_steps, "file": file_label
             });
             yield Event::default().event("step_start").data(step_start.to_string());
 
-            let full_prompt = format!("{}\n\n{}", PROMPT_PREAMBLE, step_prompt);
+            let today = Utc::now().format("%Y-%m-%d").to_string();
+            let today_compact = Utc::now().format("%Y%m%d").to_string();
+            let full_prompt = format!("{}\n\n{}", PROMPT_PREAMBLE, step_prompt)
+                .replace("YYYYMMDD=today", &format!("YYYYMMDD={}", today_compact))
+                .replace("today's date (YYYY-MM-DD)", &today)
+                .replace("set to today's date", &format!("set to {}", today));
 
             match runner::start_agent_with_config(runner::AgentStartConfig {
                 agent_type: &agent_type, project_path: &project_path_str, work_dir: None,
                 prompt: &full_prompt, tokens: &tokens, full_access: true,
                 skill_ids: &[], directive_ids: &[], profile_ids: &[],
                 mcp_context_override: None,
+                tier: crate::models::ModelTier::Reasoning, model_tiers: None,
             }).await {
                 Ok(mut process) => {
                     // Register the child PID for cancellation
@@ -1581,6 +1583,7 @@ pub async fn full_audit(
             timestamp: now,
             tokens_used: 0,
             auth_mode: None,
+            model_tier: None,
         };
 
         let discussion = Discussion {
@@ -1600,10 +1603,13 @@ pub async fn full_audit(
                 "devils-advocate".into(),
             ],
             directive_ids: vec![],
+            tier: crate::models::ModelTier::Default,
             archived: false,
             workspace_mode: "Direct".into(),
             workspace_path: None,
             worktree_branch: None,
+            summary_cache: None,
+            summary_up_to_msg_idx: None,
             created_at: now,
             updated_at: now,
         };
@@ -1766,7 +1772,11 @@ fn find_common_parent(projects: &[Project]) -> Option<String> {
 }
 
 /// Files installed by the audit template (to be removed on cancel).
-const AUDIT_REDIRECTOR_FILES: &[&str] = &["CLAUDE.md", ".cursorrules", ".windsurfrules", ".clinerules"];
+const AUDIT_REDIRECTOR_FILES: &[&str] = &[
+    "CLAUDE.md", "GEMINI.md", "AGENTS.md",
+    ".cursorrules", ".windsurfrules", ".clinerules",
+    ".github/copilot-instructions.md",
+];
 
 /// POST /api/projects/:id/cancel-audit
 /// Cancel a running audit and remove ALL files created by the audit.

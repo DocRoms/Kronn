@@ -1,37 +1,16 @@
-# Glossary — Project terminology
+# Glossary
 
-Project-specific terms. For deep dives, follow the linked `ai/architecture/` files.
+Terms marked `<!-- TODO: ask user -->` need human confirmation.
 
-> Terms marked with `<!-- TODO: ask user -->` were identified during audit but need human confirmation.
+| Category | Term | Definition | Reference |
+|----------|------|-----------|-----------|
+| Architecture | {{TERM}} | {{DEFINITION}} | `ai/architecture/overview.md` |
+| Domain | {{TERM}} | {{DEFINITION}} | |
+| Environment | {{TERM}} | {{DEFINITION}} | |
+| External | {{TERM}} | {{DEFINITION}} | |
 
----
+## Abbreviations
 
-## Architecture / Stack
-
-| Term | Definition | Reference |
-|------|-----------|-----------|
-| {{TERM}} | {{DEFINITION}} | `ai/architecture/overview.md` |
-
-## Domain / Business concepts
-
-| Term | Definition | Reference |
-|------|-----------|-----------|
-| {{TERM}} | {{DEFINITION}} | |
-
-## Environments
-
-| Term | Definition | Reference |
-|------|-----------|-----------|
-| {{TERM}} | {{DEFINITION}} | |
-
-## Third parties / External services
-
-| Term | Definition | Reference |
-|------|-----------|-----------|
-| {{TERM}} | {{DEFINITION}} | |
-
-## Abbreviations & acronyms
-
-| Abbreviation | Full form | Context |
-|-------------|-----------|---------|
+| Abbr | Full form | Context |
+|------|-----------|---------|
 | {{ABBR}} | {{FULL_FORM}} | {{CONTEXT}} |

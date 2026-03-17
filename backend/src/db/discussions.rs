@@ -2,7 +2,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 
-use crate::models::*;
+use crate::models::{*, ModelTier};
 
 // ─── Discussions ────────────────────────────────────────────────────────────
 
@@ -12,7 +12,8 @@ pub fn list_discussions(conn: &Connection) -> Result<Vec<Discussion>> {
                 d.created_at, d.updated_at, d.archived, d.skill_ids_json,
                 (SELECT COUNT(*) FROM messages m WHERE m.discussion_id = d.id) as msg_count,
                 d.profile_ids_json, d.directive_ids_json,
-                d.workspace_mode, d.workspace_path, d.worktree_branch
+                d.workspace_mode, d.workspace_path, d.worktree_branch,
+                d.summary_cache, d.summary_up_to_msg_idx, d.model_tier
          FROM discussions d ORDER BY d.updated_at DESC"
     )?;
 
@@ -39,6 +40,9 @@ pub fn list_discussions(conn: &Connection) -> Result<Vec<Discussion>> {
             workspace_mode: row.get::<_, String>(13).unwrap_or_else(|_| "Direct".into()),
             workspace_path: row.get::<_, Option<String>>(14).unwrap_or(None),
             worktree_branch: row.get::<_, Option<String>>(15).unwrap_or(None),
+            tier: parse_model_tier(&row.get::<_, String>(18).unwrap_or_else(|_| "default".into())),
+            summary_cache: row.get::<_, Option<String>>(16).unwrap_or(None),
+            summary_up_to_msg_idx: row.get::<_, Option<u32>>(17).unwrap_or(None),
             created_at: parse_dt(row.get::<_, String>(6)?),
             updated_at: parse_dt(row.get::<_, String>(7)?),
         })
@@ -72,7 +76,8 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
     let mut stmt = conn.prepare(
         "SELECT id, project_id, title, agent, language, participants_json,
                 created_at, updated_at, archived, skill_ids_json, profile_ids_json, directive_ids_json,
-                workspace_mode, workspace_path, worktree_branch
+                workspace_mode, workspace_path, worktree_branch,
+                summary_cache, summary_up_to_msg_idx, model_tier
          FROM discussions WHERE id = ?1"
     )?;
 
@@ -99,6 +104,9 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
             workspace_mode: row.get::<_, String>(12).unwrap_or_else(|_| "Direct".into()),
             workspace_path: row.get::<_, Option<String>>(13).unwrap_or(None),
             worktree_branch: row.get::<_, Option<String>>(14).unwrap_or(None),
+            tier: parse_model_tier(&row.get::<_, String>(17).unwrap_or_else(|_| "default".into())),
+            summary_cache: row.get::<_, Option<String>>(15).unwrap_or(None),
+            summary_up_to_msg_idx: row.get::<_, Option<u32>>(16).unwrap_or(None),
             created_at: parse_dt(row.get::<_, String>(6)?),
             updated_at: parse_dt(row.get::<_, String>(7)?),
         })
@@ -115,8 +123,8 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
 
 pub fn insert_discussion(conn: &Connection, disc: &Discussion) -> Result<()> {
     conn.execute(
-        "INSERT INTO discussions (id, project_id, title, agent, language, participants_json, created_at, updated_at, archived, skill_ids_json, profile_ids_json, directive_ids_json, workspace_mode, workspace_path, worktree_branch)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        "INSERT INTO discussions (id, project_id, title, agent, language, participants_json, created_at, updated_at, archived, skill_ids_json, profile_ids_json, directive_ids_json, workspace_mode, workspace_path, worktree_branch, model_tier)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             disc.id,
             disc.project_id,
@@ -133,6 +141,7 @@ pub fn insert_discussion(conn: &Connection, disc: &Discussion) -> Result<()> {
             disc.workspace_mode,
             disc.workspace_path,
             disc.worktree_branch,
+            format_model_tier(&disc.tier),
         ],
     )?;
     Ok(())
@@ -153,6 +162,14 @@ pub fn update_discussion_skill_ids(conn: &Connection, id: &str, skill_ids: &[Str
 
 pub fn update_discussion_profile_ids(conn: &Connection, id: &str, profile_ids: &[String]) -> Result<bool> {
     update_discussion_fields(conn, id, None, None, None, Some(profile_ids), None, None)
+}
+
+pub fn update_discussion_tier(conn: &Connection, id: &str, tier: &ModelTier) -> Result<bool> {
+    let affected = conn.execute(
+        "UPDATE discussions SET model_tier = ?1, updated_at = ?2 WHERE id = ?3",
+        params![format_model_tier(tier), Utc::now().to_rfc3339(), id],
+    )?;
+    Ok(affected > 0)
 }
 
 pub fn update_discussion_directive_ids(conn: &Connection, id: &str, directive_ids: &[String]) -> Result<bool> {
@@ -238,7 +255,7 @@ pub fn update_discussion_participants(conn: &Connection, id: &str, participants:
 /// Load all messages grouped by discussion_id in a single query (avoids N+1).
 fn list_all_messages(conn: &Connection) -> Result<std::collections::HashMap<String, Vec<DiscussionMessage>>> {
     let mut stmt = conn.prepare(
-        "SELECT discussion_id, id, role, content, agent_type, timestamp, tokens_used, auth_mode
+        "SELECT discussion_id, id, role, content, agent_type, timestamp, tokens_used, auth_mode, model_tier
          FROM messages ORDER BY sort_order, timestamp"
     )?;
 
@@ -256,6 +273,7 @@ fn list_all_messages(conn: &Connection) -> Result<std::collections::HashMap<Stri
             timestamp: parse_dt(row.get::<_, String>(5)?),
             tokens_used: row.get::<_, i64>(6).unwrap_or(0) as u64,
             auth_mode: row.get(7)?,
+            model_tier: row.get::<_, Option<String>>(8).unwrap_or(None),
         }))
     })?;
 
@@ -268,7 +286,7 @@ fn list_all_messages(conn: &Connection) -> Result<std::collections::HashMap<Stri
 
 pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<DiscussionMessage>> {
     let mut stmt = conn.prepare(
-        "SELECT id, role, content, agent_type, timestamp, tokens_used, auth_mode
+        "SELECT id, role, content, agent_type, timestamp, tokens_used, auth_mode, model_tier
          FROM messages WHERE discussion_id = ?1
          ORDER BY sort_order, timestamp"
     )?;
@@ -285,6 +303,7 @@ pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<Discu
             timestamp: parse_dt(row.get::<_, String>(4)?),
             tokens_used: row.get::<_, i64>(5).unwrap_or(0) as u64,
             auth_mode: row.get(6)?,
+            model_tier: row.get::<_, Option<String>>(7).unwrap_or(None),
         })
     })?.filter_map(|r| r.ok()).collect();
 
@@ -300,8 +319,8 @@ pub fn insert_message(conn: &Connection, discussion_id: &str, msg: &DiscussionMe
     )?;
 
     conn.execute(
-        "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, sort_order, tokens_used, auth_mode)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, sort_order, tokens_used, auth_mode, model_tier)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             msg.id,
             discussion_id,
@@ -312,6 +331,7 @@ pub fn insert_message(conn: &Connection, discussion_id: &str, msg: &DiscussionMe
             next_order,
             msg.tokens_used as i64,
             msg.auth_mode,
+            msg.model_tier,
         ],
     )?;
 
@@ -342,7 +362,27 @@ pub fn edit_last_user_message(conn: &Connection, discussion_id: &str, content: &
     )?;
 
     update_discussion_timestamp(conn, discussion_id)?;
+    // Invalidate cached summary since conversation content changed
+    let _ = invalidate_summary_cache(conn, discussion_id);
     Ok(affected > 0)
+}
+
+/// Save a conversation summary cache for a discussion.
+pub fn update_summary_cache(conn: &Connection, discussion_id: &str, summary: &str, up_to_msg_idx: u32) -> Result<()> {
+    conn.execute(
+        "UPDATE discussions SET summary_cache = ?1, summary_up_to_msg_idx = ?2 WHERE id = ?3",
+        params![summary, up_to_msg_idx, discussion_id],
+    )?;
+    Ok(())
+}
+
+/// Invalidate summary cache (e.g., when messages are edited or deleted).
+pub fn invalidate_summary_cache(conn: &Connection, discussion_id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE discussions SET summary_cache = NULL, summary_up_to_msg_idx = NULL WHERE id = ?1",
+        params![discussion_id],
+    )?;
+    Ok(())
 }
 
 pub fn update_message_tokens(conn: &Connection, message_id: &str, tokens_used: u64, auth_mode: Option<&str>) -> Result<()> {
@@ -383,6 +423,22 @@ fn format_agent_type(a: &AgentType) -> String {
         AgentType::GeminiCli => "GeminiCli".into(),
         AgentType::Kiro => "Kiro".into(),
         AgentType::Custom => "Custom".into(),
+    }
+}
+
+fn parse_model_tier(s: &str) -> ModelTier {
+    match s {
+        "economy" => ModelTier::Economy,
+        "reasoning" => ModelTier::Reasoning,
+        _ => ModelTier::Default,
+    }
+}
+
+fn format_model_tier(t: &ModelTier) -> &'static str {
+    match t {
+        ModelTier::Economy => "economy",
+        ModelTier::Default => "default",
+        ModelTier::Reasoning => "reasoning",
     }
 }
 

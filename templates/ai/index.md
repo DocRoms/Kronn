@@ -1,69 +1,44 @@
-# AI context index — Single entry point
+# AI context — Entry point
 
 **Project:** {{PROJECT_NAME}} — {{STACK_SUMMARY}}.
 
-> **All files under `ai/` are in English by default.** AI context documentation must be written in English.
-> **ATTENTION — This is the reference file for all AI agents.**
-> Read this file first, then follow the context loading strategy below.
-> Do not read the other config files (.cursorrules, copilot-instructions, etc.) — they redirect here.
+> **Rules:** All `ai/` files in English. Never hallucinate — check docs, then ask user. Update `ai/` after learning something new.
+> **MCP:** If `ai/operations/mcp-servers/<name>.md` exists for an MCP you're about to use, read it first.
 
-> **CRITICAL — Never hallucinate.**
-> - **Never invent information** (tech stack, conventions, architecture, file paths...).
-> - If you are unsure about something: **check the `ai/` documentation first**.
-> - If you still don't find the answer: **ask the user** rather than guessing.
-> - After getting the answer: **update the relevant `ai/` file** so the knowledge is captured.
-> - Getting it right matters more than answering fast — hallucinations waste everyone's time.
-
-> **CRITICAL — MCP tool usage.**
-> Before calling any MCP tool, **read the matching context file** in `ai/operations/mcp-servers/<mcp-name>.md`.
-> These files contain project-specific rules, constraints, and examples that prevent hallucinations and misuse.
-> If no context file exists for an MCP you need to use, ask the user before proceeding.
-
-**Unknown term?** → `ai/glossary.md` first.
-
-This folder (`ai/`) contains AI-optimized project context (not human docs). Use paths relative to repo root.
+**Unknown term?** → `ai/glossary.md`.
 
 ---
 
-## 1. Entry procedure (mandatory)
+## 1. Context loading (mandatory)
 
-### Tiered context loading strategy
+**Tier 1 — Always:** `ai/index.md` (this file). Sufficient for trivial tasks.
 
-#### Tier 1 — Always read
-- `ai/index.md` (this file)
+**Common tasks — load exactly:**
 
-**Trivial tasks** (typos, config tweaks, simple style fixes): Tier 1 may suffice.
-
-#### Common tasks — load exactly these files
-
-| Task | Files to load |
-|------|---------------|
+| Task | Files |
+|------|-------|
 | {{TASK_EXAMPLE_1}} | `ai/repo-map.md`, `ai/coding-rules.md` |
 | {{TASK_EXAMPLE_2}} | `ai/testing-quality.md` |
 | {{TASK_EXAMPLE_3}} | `ai/architecture/overview.md`, `ai/repo-map.md` |
 | {{TASK_EXAMPLE_4}} | `ai/operations/debug-operations.md` |
 | {{TASK_EXAMPLE_5}} | `ai/glossary.md`, `ai/architecture/overview.md` |
 
-#### Tier 2 — For needs not covered above (max 3 files)
+**Tier 2 — Max 3 files if above doesn't cover:**
 
 | Need | File |
 |------|------|
-| repo structure / code placement | `ai/repo-map.md` |
-| testing / quality | `ai/testing-quality.md` |
-| coding rules | `ai/coding-rules.md` |
-| known issues / tech debt | `ai/inconsistencies-tech-debt.md` |
-| MCP servers / agent tools setup | `ai/operations/mcp-servers.md` |
-| term definitions / project jargon | `ai/glossary.md` |
+| Repo structure | `ai/repo-map.md` |
+| Testing | `ai/testing-quality.md` |
+| Coding rules | `ai/coding-rules.md` |
+| Known issues | `ai/inconsistencies-tech-debt.md` |
+| MCP setup | `ai/operations/mcp-servers.md` |
+| Glossary | `ai/glossary.md` |
 
-#### Tier 3 — Escalation
-Only if Tier 1 + 2 are insufficient: state which file you need and why, read it, or ask the user.
-Never load everything "just in case".
-- Architecture overview → `ai/architecture/overview.md`
-- Tech debt details → `ai/tech-debt/TD-*.md` (only the specific issue)
+**Tier 3:** Only if Tier 1+2 insufficient. State which file and why. Never load all files.
 
 ---
 
-## 2. Prerequisites before running commands
+## 2. Prerequisites
 
 | Prerequisite | Command / Version | Notes |
 |-------------|-------------------|-------|
@@ -72,21 +47,21 @@ Never load everything "just in case".
 
 ---
 
-## 3. DO NOT (common mistakes)
+## 3. DO NOT
 
-- Do **not** guess when information is missing — ask the user.
-- Do **not** load all Tier 2 files at once — pick up to 3 max.
-- Do **not** modify business code when the task is only about AI context — edit `ai/` only.
+- Guess when info is missing — ask the user.
+- Load all Tier 2 files at once — max 3.
+- Modify business code for AI context tasks — edit `ai/` only.
 - {{DO_NOT_1}}
 - {{DO_NOT_2}}
 - {{DO_NOT_3}}
 
 ---
 
-## 4. Workflow constraints
+## 4. Constraints
 
-- **Quality is mandatory**: follow existing code style; add/update tests when changing behavior.
-- If stdout/stderr is missing: ask the user to copy/paste the full output.
+- Quality: follow code style, add/update tests when changing behavior.
+- If no command output: ask user to paste it.
 - {{WORKFLOW_CONSTRAINT_1}}
 - {{WORKFLOW_CONSTRAINT_2}}
 
@@ -104,30 +79,27 @@ Never load everything "just in case".
 
 ## 6. Code placement
 
-Use `ai/repo-map.md` to decide.
+Use `ai/repo-map.md`. New code goes:
 
-| Type of code | Where to put it |
-|-------------|----------------|
+| Type | Location |
+|------|----------|
 | {{CODE_TYPE_1}} | {{LOCATION_1}} |
 | {{CODE_TYPE_2}} | {{LOCATION_2}} |
 | {{CODE_TYPE_3}} | {{LOCATION_3}} |
 
 ---
 
-## 7. Code generation (critical behavior)
+## 7. Code generation
 
-- Search the repo for similar implementations before writing.
-- Use `ai/examples/*.md` instead of inventing new architecture.
-- Use `ai/repo-map.md` to decide where code goes.
-- If info is missing or ambiguous: ask questions; do not guess.
-- If a "logical fix" requires a large/risky refactor: add an entry to `ai/inconsistencies-tech-debt.md`.
-
-### AI context maintenance rule
-After completing a task: if you discovered something non-obvious (a gotcha, a missing pattern, an outdated doc), update the relevant `ai/` file before closing. Keep entries factual and concise.
+- Search repo for similar implementations first.
+- Use `ai/repo-map.md` for placement.
+- Missing/ambiguous info → ask, don't guess.
+- Large refactor needed → add to `ai/inconsistencies-tech-debt.md`.
+- After task: update `ai/` if you learned something non-obvious.
 
 ---
 
-## 8. Stack (facts)
+## 8. Stack
 
 | Technology | Version | Role |
 |-----------|---------|------|
@@ -137,16 +109,13 @@ After completing a task: if you discovered something non-obvious (a gotcha, a mi
 
 ---
 
-## 9. Multi-agent configuration
+## 9. Multi-agent config
 
-Redirectors to this file: `.cursorrules`, `.cursor/rules/repo-instructions.mdc`,
-`.github/copilot-instructions.md`, `CLAUDE.md`, `.windsurfrules`, `.clinerules`.
-
-**Maintenance rule**: all content lives in `ai/`. Redirectors never need changes.
+Redirectors: `CLAUDE.md`, `GEMINI.md`, `AGENTS.md`, `.kiro/steering/instructions.md`, `.cursorrules`, `.github/copilot-instructions.md`, `.windsurfrules`, `.clinerules`. All content lives in `ai/` — redirectors never need changes.
 
 ---
 
-## 10. AI Exchanges (read on arrival)
+## 10. AI Exchanges
 
 - hasActualConversation: OFF
 - currentConversation: none

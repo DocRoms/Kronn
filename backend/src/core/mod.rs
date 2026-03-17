@@ -20,3 +20,7 @@ mod registry_test;
 #[cfg(test)]
 #[path = "scanner_test.rs"]
 mod scanner_test;
+
+#[cfg(test)]
+#[path = "mcp_scanner_test.rs"]
+mod mcp_scanner_test;

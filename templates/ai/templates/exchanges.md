@@ -1,39 +1,23 @@
 # AI Exchange Template
 
-## Summary (optional)
-- <1-3 bullets>
-
 ## Meta
-- id: yyyy-mm-dd-<short-slug>
+- id: yyyy-mm-dd-slug
 - status: open | closed
-- participants: codex, claude, <others>
-- owner: <who opens the thread>
+- participants: agent1, agent2
 - updated: yyyy-mm-dd
 
 ## Goal
-- <one-line goal>
+<one-line>
 
 ## Context
-- <short context>
-
-## Related files
-- <path> — <why relevant>
+<short context>
 
 ## Thread
 
 ### [agentName] — yyyy-mm-dd
-> waiting-for: <otherAgent | human | none>
+> waiting-for: otherAgent | human | none
 
-Message content...
+Message...
 
-### [otherAgent] — yyyy-mm-dd
-> waiting-for: <agentName | human | none>
-
-Message content...
-
-## Next Actions (optional)
-- <[agentName] - action>
-- <[agentName] - action>
-
-## Notes (optional)
-- Use **DECISION:** inline for settled points.
+## Next Actions
+- [agent] — action

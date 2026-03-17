@@ -50,6 +50,8 @@ import type {
   AiFileNode,
   AiFileContent,
   AiSearchResult,
+  ModelTier,
+  ModelTiersConfig,
 } from '../types/generated';
 import type { DiscoverKeysResponse } from '../types/extensions';
 
@@ -143,6 +145,8 @@ export const config = {
   setScanDepth: (depth: number) => api<number>('POST', '/config/scan-depth', depth),
   getAgentAccess: () => api<AgentsConfig>('GET', '/config/agent-access'),
   setAgentAccess: (req: SetAgentAccessRequest) => api<void>('POST', '/config/agent-access', req),
+  getModelTiers: () => api<ModelTiersConfig>('GET', '/config/model-tiers'),
+  setModelTiers: (tiers: ModelTiersConfig) => api<void>('POST', '/config/model-tiers', tiers),
   dbInfo: () => api<DbInfo>('GET', '/config/db-info'),
   exportData: () => api<DbExport>('GET', '/config/export'),
   importData: (data: DbExport) => api<void>('POST', '/config/import', data),
@@ -373,7 +377,7 @@ export const discussions = {
   get: (id: string) => api<Discussion>('GET', `/discussions/${id}`),
   create: (req: CreateDiscussionRequest) => api<Discussion>('POST', '/discussions', req),
   delete: (id: string) => api<void>('DELETE', `/discussions/${id}`),
-  update: (id: string, body: { title?: string; archived?: boolean; skill_ids?: string[]; profile_ids?: string[]; directive_ids?: string[]; project_id?: string | null }) => api<void>('PATCH', `/discussions/${id}`, body),
+  update: (id: string, body: { title?: string; archived?: boolean; skill_ids?: string[]; profile_ids?: string[]; directive_ids?: string[]; project_id?: string | null; tier?: ModelTier }) => api<void>('PATCH', `/discussions/${id}`, body),
 
   /** Stream SSE helper shared by sendMessage and run. */
   _streamSSE: async (

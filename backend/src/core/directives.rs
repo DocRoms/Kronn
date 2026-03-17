@@ -80,6 +80,8 @@ fn parse_directive_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Dir
         return None;
     }
 
+    let token_estimate = ((body.len() + name.len() + 20) / 4) as u32;
+
     Some(Directive {
         id: id.to_string(),
         name,
@@ -89,6 +91,7 @@ fn parse_directive_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Dir
         content: body,
         is_builtin,
         conflicts,
+        token_estimate,
     })
 }
 

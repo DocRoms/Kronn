@@ -154,6 +154,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/config/scan-ignore", get(api::setup::get_scan_ignore).post(api::setup::set_scan_ignore))
         .route("/api/config/scan-depth", get(api::setup::get_scan_depth).post(api::setup::set_scan_depth))
         .route("/api/config/agent-access", get(api::setup::get_agent_access).post(api::setup::set_agent_access))
+        .route("/api/config/model-tiers", get(api::setup::get_model_tiers).post(api::setup::set_model_tiers))
         .route("/api/config/server", get(api::setup::get_server_config).post(api::setup::set_server_config))
         .route("/api/config/auth-token/regenerate", post(api::setup::regenerate_auth_token))
         .route("/api/config/db-info", get(api::setup::db_info))
