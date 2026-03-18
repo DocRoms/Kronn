@@ -32,6 +32,7 @@ interface Props {
   projectId?: string;
   discussionId?: string;
   onClose: () => void;
+  terminalEnabled?: boolean;
 }
 
 const STATUS_ICONS: Record<string, typeof FileEdit> = {
@@ -52,7 +53,7 @@ const STATUS_COLORS: Record<string, string> = {
   untracked: 'rgba(255,255,255,0.3)',
 };
 
-export function GitPanel({ projectId, discussionId, onClose }: Props) {
+export function GitPanel({ projectId, discussionId, onClose, terminalEnabled = false }: Props) {
   const { t } = useT();
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [loading, setLoading] = useState(true);
@@ -267,11 +268,11 @@ export function GitPanel({ projectId, discussionId, onClose }: Props) {
     return (
       <div style={styles.panel}>
         <div style={styles.header}>
-          <button style={styles.backBtn} onClick={() => setDiffPath(null)}>
+          <button style={styles.backBtn} onClick={() => setDiffPath(null)} aria-label="Back">
             <ChevronLeft size={14} />
           </button>
           <span style={styles.headerTitle}>{diffPath}</span>
-          <button style={styles.closeBtn} onClick={onClose}><X size={14} /></button>
+          <button style={styles.closeBtn} onClick={onClose} aria-label="Close git panel"><X size={14} /></button>
         </div>
         <div style={styles.diffContainer}>
           {diffLoading ? (
@@ -302,10 +303,10 @@ export function GitPanel({ projectId, discussionId, onClose }: Props) {
           {t('git.title')}
         </span>
         <div style={{ display: 'flex', gap: 4 }}>
-          <button style={styles.iconBtn} onClick={fetchStatus} title={t('git.refresh')}>
+          <button style={styles.iconBtn} onClick={fetchStatus} title={t('git.refresh')} aria-label={t('git.refresh')}>
             <RefreshCw size={12} />
           </button>
-          <button style={styles.closeBtn} onClick={onClose}><X size={14} /></button>
+          <button style={styles.closeBtn} onClick={onClose} aria-label="Close git panel"><X size={14} /></button>
         </div>
       </div>
 
@@ -355,7 +356,7 @@ export function GitPanel({ projectId, discussionId, onClose }: Props) {
               <button style={styles.actionBtn} onClick={handleCreateBranch} disabled={branchLoading}>
                 {branchLoading ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <Check size={12} />}
               </button>
-              <button style={styles.iconBtn} onClick={() => setShowBranch(false)}><X size={12} /></button>
+              <button style={styles.iconBtn} onClick={() => setShowBranch(false)} aria-label="Cancel branch creation"><X size={12} /></button>
             </div>
           )}
 
@@ -400,7 +401,7 @@ export function GitPanel({ projectId, discussionId, onClose }: Props) {
                       {prTemplateSource === 'project' ? t('git.prTemplateProject') : t('git.prTemplateKronn')}
                     </span>
                   )}
-                  <button style={styles.iconBtn} onClick={() => setShowPrForm(false)}><X size={10} /></button>
+                  <button style={styles.iconBtn} onClick={() => setShowPrForm(false)} aria-label="Close PR form"><X size={10} /></button>
                 </div>
               </div>
               <input
@@ -478,7 +479,7 @@ export function GitPanel({ projectId, discussionId, onClose }: Props) {
                     <button style={{ ...styles.linkBtn, fontSize: 10 }} onClick={selectAll}>
                       {selectedFiles.length === status.files.length ? t('git.deselectAll') : t('git.selectAll')}
                     </button>
-                    <button style={styles.iconBtn} onClick={() => setShowCommit(false)}><X size={10} /></button>
+                    <button style={styles.iconBtn} onClick={() => setShowCommit(false)} aria-label="Cancel commit"><X size={10} /></button>
                   </div>
                   <input
                     style={styles.input}
@@ -542,42 +543,44 @@ export function GitPanel({ projectId, discussionId, onClose }: Props) {
       )}
 
       {/* Mini Terminal */}
-      <div style={styles.termSection}>
-        <button
-          style={styles.termToggle}
-          onClick={() => setShowTerminal(prev => !prev)}
-        >
-          <Terminal size={11} />
-          <span>{t('git.terminal')}</span>
-        </button>
-        {showTerminal && (
-          <div style={styles.termBody}>
-            <div style={styles.termOutput}>
-              {termHistory.map((entry, i) => (
-                <div key={i}>
-                  <div style={{ color: '#c8ff00', fontSize: 11 }}>$ {entry.cmd}</div>
-                  {entry.stdout && <pre style={styles.termPre}>{entry.stdout}</pre>}
-                  {entry.stderr && <pre style={{ ...styles.termPre, color: entry.code !== 0 ? '#ff8a9e' : 'rgba(255,255,255,0.4)' }}>{entry.stderr}</pre>}
-                </div>
-              ))}
-              <div ref={termEndRef} />
+      {terminalEnabled && (
+        <div style={styles.termSection}>
+          <button
+            style={styles.termToggle}
+            onClick={() => setShowTerminal(prev => !prev)}
+          >
+            <Terminal size={11} />
+            <span>{t('git.terminal')}</span>
+          </button>
+          {showTerminal && (
+            <div style={styles.termBody}>
+              <div style={styles.termOutput}>
+                {termHistory.map((entry, i) => (
+                  <div key={i}>
+                    <div style={{ color: '#c8ff00', fontSize: 11 }}>$ {entry.cmd}</div>
+                    {entry.stdout && <pre style={styles.termPre}>{entry.stdout}</pre>}
+                    {entry.stderr && <pre style={{ ...styles.termPre, color: entry.code !== 0 ? '#ff8a9e' : 'rgba(255,255,255,0.4)' }}>{entry.stderr}</pre>}
+                  </div>
+                ))}
+                <div ref={termEndRef} />
+              </div>
+              <div style={styles.termInputRow}>
+                <span style={{ color: '#c8ff00', fontSize: 11, flexShrink: 0 }}>$</span>
+                <input
+                  style={styles.termInput}
+                  value={termInput}
+                  onChange={e => setTermInput(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && handleExec()}
+                  placeholder={t('git.terminalPlaceholder')}
+                  disabled={termLoading}
+                  autoFocus
+                />
+                {termLoading && <Loader2 size={12} style={{ animation: 'spin 1s linear infinite', color: 'rgba(255,255,255,0.3)' }} />}
+              </div>
             </div>
-            <div style={styles.termInputRow}>
-              <span style={{ color: '#c8ff00', fontSize: 11, flexShrink: 0 }}>$</span>
-              <input
-                style={styles.termInput}
-                value={termInput}
-                onChange={e => setTermInput(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && handleExec()}
-                placeholder={t('git.terminalPlaceholder')}
-                disabled={termLoading}
-                autoFocus
-              />
-              {termLoading && <Loader2 size={12} style={{ animation: 'spin 1s linear infinite', color: 'rgba(255,255,255,0.3)' }} />}
-            </div>
-          </div>
-        )}
-      </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -635,7 +638,7 @@ const styles: Record<string, React.CSSProperties> = {
   input: {
     flex: 1, padding: '5px 8px', borderRadius: 6, fontSize: 12, fontFamily: 'inherit',
     border: '1px solid rgba(255,255,255,0.1)', background: 'rgba(255,255,255,0.04)',
-    color: '#e8eaed', outline: 'none',
+    color: '#e8eaed',
   },
   commitForm: {
     margin: '4px 12px', padding: '8px 10px', borderRadius: 6,
@@ -709,7 +712,7 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '4px 10px 6px', borderTop: '1px solid rgba(255,255,255,0.04)',
   },
   termInput: {
-    flex: 1, background: 'none', border: 'none', outline: 'none',
+    flex: 1, background: 'none', border: 'none',
     color: '#e8eaed', fontSize: 11, fontFamily: 'monospace',
   },
 };

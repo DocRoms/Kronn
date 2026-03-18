@@ -9,17 +9,17 @@ pub mod workflows;
 mod tests;
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
 use rusqlite::Connection;
-use tokio::sync::Mutex;
 
 use crate::core::config;
 
 /// Thread-safe database handle.
-/// rusqlite::Connection is not Send, so we wrap in a sync Mutex
-/// accessed only via `tokio::task::spawn_blocking`.
+/// Uses std::sync::Mutex so the lock can be held inside spawn_blocking
+/// (tokio::sync::Mutex cannot be used in a blocking context).
 pub struct Database {
-    conn: Mutex<Connection>,
+    conn: Arc<Mutex<Connection>>,
     path: PathBuf,
 }
 
@@ -38,7 +38,7 @@ impl Database {
             .context("Failed to open in-memory database")?;
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
         migrations::run(&conn)?;
-        Ok(Self { conn: Mutex::new(conn), path: PathBuf::from(":memory:") })
+        Ok(Self { conn: Arc::new(Mutex::new(conn)), path: PathBuf::from(":memory:") })
     }
 
     /// Open a database at a specific path (useful for testing).
@@ -64,7 +64,7 @@ impl Database {
         // Run migrations before wrapping in Mutex (avoids blocking_lock inside async runtime)
         migrations::run(&conn)?;
 
-        Ok(Self { conn: Mutex::new(conn), path: path.clone() })
+        Ok(Self { conn: Arc::new(Mutex::new(conn)), path: path.clone() })
     }
 
     /// Get the database file path.
@@ -73,15 +73,19 @@ impl Database {
     }
 
     /// Execute a blocking closure with the database connection.
-    /// All DB access goes through this to avoid holding async locks.
+    /// Runs inside `spawn_blocking` so the Tokio worker thread is never blocked
+    /// waiting on the mutex or executing a synchronous SQLite query.
     pub async fn with_conn<F, T>(&self, f: F) -> Result<T>
     where
         F: FnOnce(&Connection) -> Result<T> + Send + 'static,
         T: Send + 'static,
     {
-        let conn = self.conn.lock().await;
-        // rusqlite Connection is not Send, so we can't use spawn_blocking directly.
-        // Instead we hold the mutex and run synchronously (SQLite ops are fast).
-        f(&conn)
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().map_err(|e| anyhow::anyhow!("Mutex poisoned: {e}"))?;
+            f(&conn)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("spawn_blocking failed: {e}"))?
     }
 }

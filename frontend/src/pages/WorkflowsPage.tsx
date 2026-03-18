@@ -190,6 +190,13 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess }: Wo
       <style>{`
         @keyframes spin { to { transform: rotate(360deg) } }
         @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.3 } }
+        @media (prefers-reduced-motion: reduce) {
+          *, *::before, *::after {
+            animation-duration: 0.01ms !important;
+            animation-iteration-count: 1 !important;
+            transition-duration: 0.01ms !important;
+          }
+        }
       `}</style>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
         <div>
@@ -243,19 +250,20 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess }: Wo
             {groupedWorkflows.map(group => (
               <div key={group.key} style={{ marginBottom: 12 }}>
                 {/* Group header */}
-                <div
+                <button
                   style={{
                     display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px',
                     cursor: 'pointer', borderRadius: 6, fontSize: 12, fontWeight: 600,
                     color: 'rgba(255,255,255,0.6)', background: 'rgba(255,255,255,0.03)',
-                    userSelect: 'none',
+                    userSelect: 'none', border: 'none', width: '100%', font: 'inherit', textAlign: 'left' as const,
                   }}
                   onClick={() => toggleGroup(group.key)}
+                  aria-expanded={!collapsedGroups[group.key]}
                 >
                   {collapsedGroups[group.key] ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
                   <span style={{ flex: 1 }}>{group.label}</span>
-                  <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)' }}>{group.workflows.length}</span>
-                </div>
+                  <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.6)' }}>{group.workflows.length}</span>
+                </button>
 
                 {/* Workflow cards */}
                 {!collapsedGroups[group.key] && group.workflows.map(wf => (
@@ -276,6 +284,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess }: Wo
                         style={{ ...ws.iconBtn, color: wf.enabled ? '#34d399' : 'rgba(255,255,255,0.3)' }}
                         onClick={(e) => { e.stopPropagation(); handleToggle(wf); }}
                         title={wf.enabled ? t('wf.active') : t('wf.inactive')}
+                        aria-pressed={wf.enabled}
+                        aria-label={wf.enabled ? t('wf.active') : t('wf.inactive')}
                       >
                         {wf.enabled ? <ToggleRight size={16} /> : <ToggleLeft size={16} />}
                       </button>
@@ -631,7 +641,7 @@ function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit,
             <Trash2 size={9} /> {t('wf.deleteAll')}
           </button>
         )}
-        <button style={ws.iconBtn} onClick={() => setShowRuns(!showRuns)}>
+        <button style={ws.iconBtn} onClick={() => setShowRuns(!showRuns)} aria-label={showRuns ? 'Collapse runs' : 'Expand runs'}>
           <ChevronRight size={12} style={{ transform: showRuns ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s' }} />
         </button>
       </div>
@@ -703,13 +713,15 @@ function RunDetail({ run, onDelete }: { run: WorkflowRun; onDelete: () => void }
                 border: isExpanded ? '1px solid rgba(255,255,255,0.08)' : '1px solid transparent',
                 background: isExpanded ? 'rgba(255,255,255,0.02)' : 'transparent',
               }}>
-                <div
+                <button
                   style={{
                     display: 'flex', alignItems: 'center', gap: 6,
                     padding: isExpanded ? '6px 8px' : '2px 0',
                     fontSize: 11, cursor: 'pointer',
+                    background: 'none', border: 'none', width: '100%', font: 'inherit', color: 'inherit', textAlign: 'left' as const,
                   }}
                   onClick={() => setExpandedStep(isExpanded ? null : i)}
+                  aria-expanded={isExpanded}
                 >
                   <span style={{
                     width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
@@ -746,7 +758,7 @@ function RunDetail({ run, onDelete }: { run: WorkflowRun; onDelete: () => void }
                     transform: isExpanded ? 'rotate(90deg)' : 'none',
                     transition: 'transform 0.15s',
                   }} />
-                </div>
+                </button>
 
                 {isExpanded && (
                   <div style={{
@@ -1277,7 +1289,7 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAge
                     ))}
                   </select>
                   {steps.length > 1 && (
-                    <button style={ws.iconBtn} onClick={() => removeStep(i)}>
+                    <button style={ws.iconBtn} onClick={() => removeStep(i)} aria-label="Remove step">
                       <X size={12} />
                     </button>
                   )}
@@ -1611,7 +1623,7 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAge
                               placeholder="step name"
                             />
                           )}
-                          <button style={ws.iconBtn} onClick={() => removeCondition(i, j)}>
+                          <button style={ws.iconBtn} onClick={() => removeCondition(i, j)} aria-label="Remove condition">
                             <X size={10} />
                           </button>
                         </div>
@@ -1881,12 +1893,12 @@ const ws = {
   input: {
     width: '100%', padding: '9px 12px', background: '#1a1d26',
     border: '1px solid rgba(255,255,255,0.12)', borderRadius: 8, color: '#e8eaed',
-    fontSize: 13, fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box' as const,
+    fontSize: 13, fontFamily: 'inherit', boxSizing: 'border-box' as const,
   } as const,
   select: {
     padding: '9px 12px', background: '#1a1d26',
     border: '1px solid rgba(255,255,255,0.12)', borderRadius: 8, color: '#e8eaed',
-    fontSize: 13, fontFamily: 'inherit', outline: 'none', cursor: 'pointer',
+    fontSize: 13, fontFamily: 'inherit', cursor: 'pointer',
     appearance: 'none' as const,
     backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E")`,
     backgroundRepeat: 'no-repeat' as const, backgroundPosition: 'right 10px center',
@@ -1895,7 +1907,7 @@ const ws = {
   textarea: {
     width: '100%', padding: '9px 12px', background: '#1a1d26',
     border: '1px solid rgba(255,255,255,0.12)', borderRadius: 8, color: '#e8eaed',
-    fontSize: 13, fontFamily: 'inherit', outline: 'none', resize: 'vertical' as const,
+    fontSize: 13, fontFamily: 'inherit', resize: 'vertical' as const,
     boxSizing: 'border-box' as const, lineHeight: 1.5,
   } as const,
   triggerBtn: {

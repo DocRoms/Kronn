@@ -180,12 +180,16 @@ const fr: TranslationDict = {
   'git.filesBtn': 'Fichiers',
   'git.terminal': 'Terminal',
   'git.terminalPlaceholder': 'git log --oneline -5',
+  'git.terminalRestricted': 'Terminal désactivé — activez full_access sur un agent dans Config',
   'disc.empty': 'Aucune discussion.\nCliquez "Nouvelle" pour commencer.',
   'disc.selectOrCreate': 'Selectionnez ou creez une discussion',
   'disc.mentionHint': '{0} pour cibler un agent...',
   'disc.messagePlaceholder': 'Votre message...',
   'disc.general': 'General',
   'disc.system': 'Systeme',
+  'disc.summaryCached': 'Synthese',
+  'disc.viewSummary': 'Voir',
+  'disc.hideSummary': 'Masquer',
   'disc.thinking': '{0} reflechit...',
   'disc.running': "Agent en cours d'execution...",
   'disc.synthesis': 'Synthese',
@@ -515,6 +519,7 @@ const fr: TranslationDict = {
   'skills.deleteConfirm': 'Supprimer ce skill ?',
   'skills.projectDefaults': 'Skills par defaut',
   'skills.projectDefaultsHint': 'Pre-selectionnes pour les discussions et workflows de ce projet',
+  'skills.searchProjects': 'Rechercher un projet…',
 
   // ── Profiles (WHO) ──
   'profiles.title': 'Profils agent',
@@ -538,6 +543,7 @@ const fr: TranslationDict = {
   'profiles.deleteConfirm': 'Supprimer ce profil ?',
   'profiles.projectDefault': 'Profil par defaut du projet',
   'profiles.projectDefaultHint': 'Pre-selectionne pour les nouvelles discussions de ce projet',
+  'profiles.searchProjects': 'Rechercher un projet…',
 
   // ── Directives (HOW) ──
   'directives.title': 'Directives',
@@ -726,12 +732,16 @@ const en: TranslationDict = {
   'git.filesBtn': 'Files',
   'git.terminal': 'Terminal',
   'git.terminalPlaceholder': 'git log --oneline -5',
+  'git.terminalRestricted': 'Terminal disabled — enable full_access on an agent in Config',
   'disc.empty': 'No discussions.\nClick "New" to start.',
   'disc.selectOrCreate': 'Select or create a discussion',
   'disc.mentionHint': '{0} to target an agent...',
   'disc.messagePlaceholder': 'Your message...',
   'disc.general': 'General',
   'disc.system': 'System',
+  'disc.summaryCached': 'Summary',
+  'disc.viewSummary': 'View',
+  'disc.hideSummary': 'Hide',
   'disc.thinking': '{0} is thinking...',
   'disc.running': 'Agent running...',
   'disc.synthesis': 'Synthesis',
@@ -1060,6 +1070,7 @@ const en: TranslationDict = {
   'skills.deleteConfirm': 'Delete this skill?',
   'skills.projectDefaults': 'Default skills',
   'skills.projectDefaultsHint': 'Pre-selected for discussions and workflows of this project',
+  'skills.searchProjects': 'Search projects…',
 
   // ── Profiles (WHO) ──
   'profiles.title': 'Agent Profiles',
@@ -1083,6 +1094,7 @@ const en: TranslationDict = {
   'profiles.deleteConfirm': 'Delete this profile?',
   'profiles.projectDefault': 'Default project profile',
   'profiles.projectDefaultHint': 'Pre-selected for new discussions of this project',
+  'profiles.searchProjects': 'Search projects…',
 
   // ── Directives (HOW) ──
   'directives.title': 'Directives',
@@ -1271,12 +1283,16 @@ const es: TranslationDict = {
   'git.filesBtn': 'Archivos',
   'git.terminal': 'Terminal',
   'git.terminalPlaceholder': 'git log --oneline -5',
+  'git.terminalRestricted': 'Terminal desactivado — active full_access en un agente en Config',
   'disc.empty': 'Sin discusiones.\nHaga clic en "Nueva" para comenzar.',
   'disc.selectOrCreate': 'Seleccione o cree una discusion',
   'disc.mentionHint': '{0} para dirigirse a un agente...',
   'disc.messagePlaceholder': 'Su mensaje...',
   'disc.general': 'General',
   'disc.system': 'Sistema',
+  'disc.summaryCached': 'Sintesis',
+  'disc.viewSummary': 'Ver',
+  'disc.hideSummary': 'Ocultar',
   'disc.thinking': '{0} esta pensando...',
   'disc.running': 'Agente en ejecucion...',
   'disc.synthesis': 'Sintesis',
@@ -1605,6 +1621,7 @@ const es: TranslationDict = {
   'skills.deleteConfirm': 'Eliminar este skill?',
   'skills.projectDefaults': 'Skills por defecto',
   'skills.projectDefaultsHint': 'Pre-seleccionados para discusiones y workflows de este proyecto',
+  'skills.searchProjects': 'Buscar proyectos…',
 
   // ── Profiles (WHO) ──
   'profiles.title': 'Perfiles de agente',
@@ -1628,6 +1645,7 @@ const es: TranslationDict = {
   'profiles.deleteConfirm': 'Eliminar este perfil?',
   'profiles.projectDefault': 'Perfil por defecto del proyecto',
   'profiles.projectDefaultHint': 'Pre-seleccionado para nuevas discusiones de este proyecto',
+  'profiles.searchProjects': 'Buscar proyectos…',
 
   // ── Directives (HOW) ──
   'directives.title': 'Directivas',

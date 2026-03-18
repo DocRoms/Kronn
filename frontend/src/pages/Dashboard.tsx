@@ -119,7 +119,7 @@ export function Dashboard({ onReset }: DashboardProps) {
 
   // Poll discussions for notifications — faster when on discussions page, slower otherwise
   useEffect(() => {
-    const pollInterval = page === 'discussions' ? 5000 : 30000;
+    const pollInterval = page === 'discussions' ? 15000 : 30000;
     const interval = setInterval(() => { refetchDiscussions(); }, pollInterval);
     const onVisibilityChange = () => {
       if (document.visibilityState === 'visible') refetchDiscussions();
@@ -164,6 +164,17 @@ export function Dashboard({ onReset }: DashboardProps) {
     const unseen = (disc.message_count ?? disc.messages.length) - (lastSeenMsgCount[disc.id] ?? 0);
     return acc + (unseen > 0 && disc.id !== activeDiscussionId ? unseen : 0);
   }, 0), [allDiscussions, lastSeenMsgCount, activeDiscussionId]);
+
+  // O(N) group-by map — avoids O(N×M) inline filter per project in the render loop
+  const discussionsByProject = useMemo(() => {
+    const map: Record<string, typeof allDiscussions> = {};
+    for (const d of allDiscussions) {
+      if (d.project_id) {
+        (map[d.project_id] ??= []).push(d);
+      }
+    }
+    return map;
+  }, [allDiscussions]);
 
   useEffect(() => {
     document.title = totalUnseen > 0 ? `(${totalUnseen}) Kronn` : 'Kronn';
@@ -374,7 +385,14 @@ export function Dashboard({ onReset }: DashboardProps) {
   return (
     <div style={s.app}>
       <ToastContainer />
-      <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
+      <style>{`@keyframes spin { to { transform: rotate(360deg) } }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}`}</style>
       {/* Nav */}
       <nav style={s.nav}>
         <div style={s.navBrand}>
@@ -427,13 +445,20 @@ export function Dashboard({ onReset }: DashboardProps) {
           position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', zIndex: 1000,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
         }} onClick={() => !bootstrapLoading && !cloneLoading && setShowBootstrap(false)}>
-          <div style={{
-            background: '#161b22', border: '1px solid rgba(200,255,0,0.15)', borderRadius: 12,
-            padding: 24, width: 480, maxWidth: '90vw',
-          }} onClick={e => e.stopPropagation()}>
+          <div
+            style={{
+              background: '#161b22', border: '1px solid rgba(200,255,0,0.15)', borderRadius: 12,
+              padding: 24, width: 480, maxWidth: '90vw',
+            }}
+            onClick={e => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="bootstrap-modal-title"
+            onKeyDown={e => { if (e.key === 'Escape' && !bootstrapLoading && !cloneLoading) setShowBootstrap(false); }}
+          >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-              <h3 style={{ margin: 0, color: '#c8ff00', fontSize: 16 }}>{t('projects.bootstrap')}</h3>
-              <button onClick={() => setShowBootstrap(false)} style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.5)', cursor: 'pointer' }}>
+              <h3 id="bootstrap-modal-title" style={{ margin: 0, color: '#c8ff00', fontSize: 16 }}>{t('projects.bootstrap')}</h3>
+              <button onClick={() => setShowBootstrap(false)} style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.5)', cursor: 'pointer' }} aria-label="Close">
                 <X size={16} />
               </button>
             </div>
@@ -650,7 +675,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                             width: '100%', padding: '6px 10px', borderRadius: 6,
                             border: '1px solid rgba(255,255,255,0.1)', background: 'rgba(255,255,255,0.04)',
                             color: '#e6edf3', fontSize: 12, fontFamily: 'inherit',
-                            outline: 'none', boxSizing: 'border-box',
+                            boxSizing: 'border-box',
                           }}
                         />
                       </div>
@@ -776,7 +801,7 @@ export function Dashboard({ onReset }: DashboardProps) {
               </div>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                 {hiddenProjects.length > 0 && (
-                  <button style={s.iconBtn} onClick={() => setShowHidden(!showHidden)} title={showHidden ? t('projects.hideHidden') : t('projects.showHidden')}>
+                  <button style={s.iconBtn} onClick={() => setShowHidden(!showHidden)} title={showHidden ? t('projects.hideHidden') : t('projects.showHidden')} aria-label={showHidden ? t('projects.hideHidden') : t('projects.showHidden')}>
                     <Eye size={14} style={{ color: showHidden ? '#c8ff00' : undefined }} />
                   </button>
                 )}
@@ -788,7 +813,7 @@ export function Dashboard({ onReset }: DashboardProps) {
               <div style={{ position: 'relative', marginBottom: 12 }}>
                 <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'rgba(255,255,255,0.25)', pointerEvents: 'none' }} />
                 <input
-                  style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 6, padding: '8px 12px 8px 32px', color: '#e8eaed', fontSize: 12, fontFamily: 'inherit', width: '100%', outline: 'none' }}
+                  style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 6, padding: '8px 12px 8px 32px', color: '#e8eaed', fontSize: 12, fontFamily: 'inherit', width: '100%' }}
                   placeholder={t('projects.search')}
                   value={projectSearch}
                   onChange={(e) => setProjectSearch(e.target.value)}
@@ -797,6 +822,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                   <button
                     style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: 'rgba(255,255,255,0.3)', padding: 2 }}
                     onClick={() => setProjectSearch('')}
+                    aria-label="Clear search"
                   >
                     <X size={12} />
                   </button>
@@ -812,9 +838,10 @@ export function Dashboard({ onReset }: DashboardProps) {
               const prevGroup = idx > 0 ? getProjectGroup(displayProjects[idx - 1]) : null;
               const showGroupHeader = !projectSearch && groupedProjects.length > 1 && currentGroup !== prevGroup;
               const groupColor = currentGroup === t('projects.group.local') ? 'rgba(255,255,255,0.3)' : `hsl(${Math.abs([...currentGroup].reduce((h, c) => h * 31 + c.charCodeAt(0), 0)) % 360}, 60%, 65%)`;
-              const validationDisc = allDiscussions.find(d => d.project_id === proj.id && d.title === 'Validation audit AI');
+              const projDiscussions = discussionsByProject[proj.id] ?? [];
+              const validationDisc = projDiscussions.find(d => d.title === 'Validation audit AI');
               const validationInProgress = !!validationDisc && proj.audit_status === 'Audited';
-              const bootstrapDisc = allDiscussions.find(d => d.project_id === proj.id && d.title.startsWith('Bootstrap: '));
+              const bootstrapDisc = projDiscussions.find(d => d.title.startsWith('Bootstrap: '));
               const bootstrapInProgress = !!bootstrapDisc && proj.audit_status === 'TemplateInstalled';
               const groupProjectCount = groupedProjects.find(g => g.group === currentGroup)?.projects.length ?? 0;
               return (
@@ -822,32 +849,34 @@ export function Dashboard({ onReset }: DashboardProps) {
                 {showGroupHeader && (() => {
                   const isCollapsed = collapsedGroups.has(currentGroup);
                   return (
-                  <div
+                  <button
                     style={{
                       display: 'flex', alignItems: 'center', gap: 8, margin: idx === 0 ? '0 0 6px' : '16px 0 6px',
                       padding: '4px 0', cursor: 'pointer', userSelect: 'none',
+                      background: 'none', border: 'none', width: '100%', font: 'inherit', color: 'inherit', textAlign: 'left',
                     }}
                     onClick={() => setCollapsedGroups(prev => {
                       const next = new Set(prev);
                       if (next.has(currentGroup)) next.delete(currentGroup); else next.add(currentGroup);
                       return next;
                     })}
+                    aria-expanded={!isCollapsed}
                   >
                     <ChevronDown size={12} style={{ color: groupColor, transform: isCollapsed ? 'rotate(-90deg)' : 'none', transition: 'transform 0.15s', flexShrink: 0 }} />
                     <div style={{ width: 3, height: 14, borderRadius: 2, background: groupColor }} />
                     <span style={{ fontSize: 11, fontWeight: 700, color: groupColor, letterSpacing: '0.03em' }}>
                       {currentGroup}
                     </span>
-                    <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)' }}>
+                    <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.55)' }}>
                       ({groupProjectCount})
                     </span>
                     <div style={{ flex: 1, height: 1, background: `${groupColor}20` }} />
-                  </div>
+                  </button>
                   );
                 })()}
                 {collapsedGroups.has(currentGroup) ? null : (
                 <div style={{ ...s.card(isOpen), opacity: projHidden ? 0.5 : 1 }}>
-                  <div style={s.cardHeader} onClick={() => setExpandedId(isOpen ? null : proj.id)}>
+                  <button style={s.cardHeader} onClick={() => setExpandedId(isOpen ? null : proj.id)} aria-expanded={isOpen}>
                     <ChevronRight size={14} style={{ color: '#c8ff00', transform: isOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s' }} />
                     <div style={{ flex: 1 }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
@@ -893,24 +922,29 @@ export function Dashboard({ onReset }: DashboardProps) {
                     </div>
                     <div style={s.projMeta}>
                       <span style={s.metaItem}><Server size={12} /> {mcpOverview.configs.filter(c => c.is_global || c.project_ids.includes(proj.id)).length}</span>
-                      <span style={s.metaItem}><MessageSquare size={12} /> {allDiscussions.filter(d => d.project_id === proj.id).length}</span>
+                      <span style={s.metaItem}><MessageSquare size={12} /> {projDiscussions.length}</span>
                     </div>
-                  </div>
+                  </button>
 
                   {isOpen && (
                     <div style={s.cardBody} onClick={(e) => e.stopPropagation()}>
                       {/* ── 1. Discussions (open after audit, closed before) ── */}
                       <div style={s.section}>
-                        <div style={s.collapsibleHeader} onClick={() => toggleSection(proj.id, 'discussions')}>
+                        <button style={s.collapsibleHeader} onClick={() => toggleSection(proj.id, 'discussions')} aria-expanded={isSectionOpen(proj.id, 'discussions', proj.audit_status)}>
                           {isSectionOpen(proj.id, 'discussions', proj.audit_status) ? <ChevronDown size={12} style={{ flexShrink: 0 }} /> : <ChevronRight size={12} style={{ flexShrink: 0 }} />}
                           <MessageSquare size={14} /> <span style={s.sectionTitle}>Discussions</span>
-                          <span style={s.count}>{allDiscussions.filter(d => d.project_id === proj.id).length}</span>
-                        </div>
+                          <span style={s.count}>{projDiscussions.length}</span>
+                        </button>
                         {isSectionOpen(proj.id, 'discussions', proj.audit_status) && (
                           <>
-                            {allDiscussions.filter(d => d.project_id === proj.id).slice(0, 3).map(disc => (
+                            {projDiscussions.slice(0, 3).map(disc => (
                               <div key={disc.id} style={s.row}>
-                                <div style={s.dot(true)} />
+                                <div style={{ position: 'relative' }}>
+                                  <div aria-hidden="true" style={s.dot(true)} />
+                                  <span style={{ position: 'absolute', width: 1, height: 1, padding: 0, margin: -1, overflow: 'hidden', clip: 'rect(0,0,0,0)', whiteSpace: 'nowrap', border: 0 }}>
+                                    {t('config.enabled')}
+                                  </span>
+                                </div>
                                 <div style={{ flex: 1 }}>
                                   <span style={{ fontWeight: 600, fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
                                     {isValidationDisc(disc.title) && <ShieldCheck size={10} style={{ color: '#c8ff00' }} />}
@@ -920,7 +954,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                                     {disc.message_count ?? disc.messages.length} msg · {disc.agent}
                                   </span>
                                 </div>
-                                <button style={s.iconBtn} onClick={() => { setPage('discussions'); }}>
+                                <button style={s.iconBtn} onClick={() => { setPage('discussions'); }} aria-label="Open discussion">
                                   <ChevronRight size={12} />
                                 </button>
                               </div>
@@ -938,10 +972,10 @@ export function Dashboard({ onReset }: DashboardProps) {
                       {/* ── 2. Documentation AI (closed, only when validated) ── */}
                       {proj.audit_status === 'Validated' && (
                         <div style={s.section}>
-                          <div style={s.collapsibleHeader} onClick={() => toggleSection(proj.id, 'docAi')}>
+                          <button style={s.collapsibleHeader} onClick={() => toggleSection(proj.id, 'docAi')} aria-expanded={isSectionOpen(proj.id, 'docAi', proj.audit_status)}>
                             {isSectionOpen(proj.id, 'docAi', proj.audit_status) ? <ChevronDown size={12} style={{ flexShrink: 0 }} /> : <ChevronRight size={12} style={{ flexShrink: 0 }} />}
                             <BookOpen size={14} /> <span style={s.sectionTitle}>{t('projects.docAi')}</span>
-                          </div>
+                          </button>
                           {isSectionOpen(proj.id, 'docAi', proj.audit_status) && (
                             <AiDocViewer
                               projectId={proj.id}
@@ -963,16 +997,21 @@ export function Dashboard({ onReset }: DashboardProps) {
                         const projMcps = mcpOverview.configs.filter(c => c.is_global || c.project_ids.includes(proj.id));
                         return (
                           <div style={s.section}>
-                            <div style={s.collapsibleHeader} onClick={() => toggleSection(proj.id, 'mcps')}>
+                            <button style={s.collapsibleHeader} onClick={() => toggleSection(proj.id, 'mcps')} aria-expanded={isSectionOpen(proj.id, 'mcps', proj.audit_status)}>
                               {isSectionOpen(proj.id, 'mcps', proj.audit_status) ? <ChevronDown size={12} style={{ flexShrink: 0 }} /> : <ChevronRight size={12} style={{ flexShrink: 0 }} />}
                               <Server size={14} /> <span style={s.sectionTitle}>MCP</span>
                               <span style={s.count}>{projMcps.length}</span>
-                            </div>
+                            </button>
                             {isSectionOpen(proj.id, 'mcps', proj.audit_status) && (
                               <>
                                 {projMcps.map(cfg => (
                                   <div key={cfg.id} style={s.row}>
-                                    <div style={s.dot(true)} />
+                                    <div style={{ position: 'relative' }}>
+                                      <div aria-hidden="true" style={s.dot(true)} />
+                                      <span style={{ position: 'absolute', width: 1, height: 1, padding: 0, margin: -1, overflow: 'hidden', clip: 'rect(0,0,0,0)', whiteSpace: 'nowrap', border: 0 }}>
+                                        {t('config.enabled')}
+                                      </span>
+                                    </div>
                                     <div style={{ flex: 1 }}>
                                       <span style={{ fontWeight: 600, fontSize: 12 }}>{cfg.server_name}</span>
                                       <span style={{ marginLeft: 6, fontSize: 11, color: 'rgba(255,255,255,0.3)' }}>{cfg.label}</span>
@@ -982,13 +1021,14 @@ export function Dashboard({ onReset }: DashboardProps) {
                                       style={s.iconBtn}
                                       onClick={() => setPage('mcps')}
                                       title={t('projects.manageMcps')}
+                                      aria-label={t('projects.manageMcps')}
                                     >
                                       <ChevronRight size={12} />
                                     </button>
                                   </div>
                                 ))}
                                 {projMcps.length === 0 && (
-                                  <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.25)', padding: '4px 0' }}>
+                                  <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.55)', padding: '4px 0' }}>
                                     {t('projects.noMcp').split(' — ')[0]} — <button style={{ ...s.iconBtn, fontSize: 11, color: '#c8ff00' }} onClick={() => setPage('mcps')}>{t('projects.noMcp').split(' — ')[1]}</button>
                                   </div>
                                 )}
@@ -1003,16 +1043,21 @@ export function Dashboard({ onReset }: DashboardProps) {
                         const projWorkflows = (workflowList ?? []).filter(w => w.project_id === proj.id);
                         return (
                           <div style={s.section}>
-                            <div style={s.collapsibleHeader} onClick={() => toggleSection(proj.id, 'workflows')}>
+                            <button style={s.collapsibleHeader} onClick={() => toggleSection(proj.id, 'workflows')} aria-expanded={isSectionOpen(proj.id, 'workflows', proj.audit_status)}>
                               {isSectionOpen(proj.id, 'workflows', proj.audit_status) ? <ChevronDown size={12} style={{ flexShrink: 0 }} /> : <ChevronRight size={12} style={{ flexShrink: 0 }} />}
                               <Workflow size={14} /> <span style={s.sectionTitle}>{t('projects.workflows')}</span>
                               <span style={s.count}>{projWorkflows.length}</span>
-                            </div>
+                            </button>
                             {isSectionOpen(proj.id, 'workflows', proj.audit_status) && (
                               <>
                                 {projWorkflows.map(wf => (
                                   <div key={wf.id} style={s.row}>
-                                    <div style={s.dot(wf.enabled)} />
+                                    <div style={{ position: 'relative' }}>
+                                      <div aria-hidden="true" style={s.dot(wf.enabled)} />
+                                      <span style={{ position: 'absolute', width: 1, height: 1, padding: 0, margin: -1, overflow: 'hidden', clip: 'rect(0,0,0,0)', whiteSpace: 'nowrap', border: 0 }}>
+                                        {wf.enabled ? t('config.enabled') : t('config.disabled')}
+                                      </span>
+                                    </div>
                                     <div style={{ flex: 1 }}>
                                       <span style={{ fontWeight: 600, fontSize: 12 }}>{wf.name}</span>
                                       <span style={{ marginLeft: 6, fontSize: 10, color: 'rgba(255,255,255,0.3)' }}>
@@ -1028,13 +1073,14 @@ export function Dashboard({ onReset }: DashboardProps) {
                                       style={s.iconBtn}
                                       onClick={() => setPage('workflows')}
                                       title={t('projects.workflows')}
+                                      aria-label={t('projects.workflows')}
                                     >
                                       <ChevronRight size={12} />
                                     </button>
                                   </div>
                                 ))}
                                 {projWorkflows.length === 0 && (
-                                  <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.25)', padding: '4px 0' }}>
+                                  <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.55)', padding: '4px 0' }}>
                                     {t('projects.noWorkflows').split(' — ')[0]} — <button style={{ ...s.iconBtn, fontSize: 11, color: '#c8ff00' }} onClick={() => setPage('workflows')}>{t('projects.noWorkflows').split(' — ')[1]}</button>
                                   </div>
                                 )}
@@ -1046,11 +1092,11 @@ export function Dashboard({ onReset }: DashboardProps) {
 
                       {/* ── 5. Skills (closed) ── */}
                       <div style={s.section}>
-                        <div style={s.collapsibleHeader} onClick={() => toggleSection(proj.id, 'skills')}>
+                        <button style={s.collapsibleHeader} onClick={() => toggleSection(proj.id, 'skills')} aria-expanded={isSectionOpen(proj.id, 'skills', proj.audit_status)}>
                           {isSectionOpen(proj.id, 'skills', proj.audit_status) ? <ChevronDown size={12} style={{ flexShrink: 0 }} /> : <ChevronRight size={12} style={{ flexShrink: 0 }} />}
                           <Zap size={14} /> <span style={s.sectionTitle}>{t('projects.skills')}</span>
                           <span style={s.count}>{(proj.default_skill_ids ?? []).length}</span>
-                        </div>
+                        </button>
                         {isSectionOpen(proj.id, 'skills', proj.audit_status) && (
                           <div style={{ paddingTop: 6 }}>
                             <ProjectSkills
@@ -1065,13 +1111,13 @@ export function Dashboard({ onReset }: DashboardProps) {
 
                       {/* ── 6. AI Context / Audit (closed) ── */}
                       <div style={s.section}>
-                        <div style={s.collapsibleHeader} onClick={() => toggleSection(proj.id, 'aiContext')}>
+                        <button style={s.collapsibleHeader} onClick={() => toggleSection(proj.id, 'aiContext')} aria-expanded={isSectionOpen(proj.id, 'aiContext', proj.audit_status)}>
                           {isSectionOpen(proj.id, 'aiContext', proj.audit_status) ? <ChevronDown size={12} style={{ flexShrink: 0 }} /> : <ChevronRight size={12} style={{ flexShrink: 0 }} />}
                           <FileCode size={14} /> <span style={s.sectionTitle}>AI Context</span>
                           <span style={s.count}>
                             {proj.audit_status === 'Validated' ? t('projects.status.valid') : validationInProgress ? t('projects.status.validating') : proj.audit_status === 'Audited' ? t('projects.status.auditOk') : proj.audit_status === 'Bootstrapped' ? t('projects.status.bootstrapped') : bootstrapInProgress ? t('projects.status.bootstrapping') : proj.audit_status === 'TemplateInstalled' ? t('projects.status.template') : t('projects.status.none')}
                           </span>
-                        </div>
+                        </button>
                         {isSectionOpen(proj.id, 'aiContext', proj.audit_status) && (
                           <>
                             {(proj.audit_status === 'NoTemplate' || (proj.audit_status === 'TemplateInstalled' && !bootstrapInProgress)) && !auditState[proj.id]?.active && (
@@ -1079,7 +1125,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                                 <p style={{ fontSize: 11, color: 'rgba(255,200,0,0.7)', margin: '0 0 8px', display: 'flex', alignItems: 'center', gap: 4 }}>
                                   <AlertTriangle size={11} /> {proj.audit_status === 'NoTemplate' ? t('audit.noTemplate') : t('audit.description')}
                                 </p>
-                                <p style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)', margin: '0 0 8px' }}>
+                                <p style={{ fontSize: 10, color: 'rgba(255,255,255,0.55)', margin: '0 0 8px' }}>
                                   {t('audit.fullAuditDesc')}
                                 </p>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -1183,7 +1229,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                                     <p style={{ fontSize: 11, color: 'rgba(255,200,0,0.7)', margin: '0 0 8px', display: 'flex', alignItems: 'center', gap: 4 }}>
                                       <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> {t('audit.validationInProgress', validationDisc.message_count ?? validationDisc.messages.length)}
                                     </p>
-                                    <p style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)', margin: '0 0 8px' }}>
+                                    <p style={{ fontSize: 10, color: 'rgba(255,255,255,0.55)', margin: '0 0 8px' }}>
                                       {t('audit.validationHint')}
                                     </p>
                                     <button
@@ -1195,7 +1241,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                                   </>
                                 ) : (
                                   <>
-                                    <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', margin: '0 0 8px' }}>
+                                    <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.6)', margin: '0 0 8px' }}>
                                       {t('audit.readyToValidate')}
                                     </p>
                                     <button
@@ -1383,7 +1429,7 @@ export function Dashboard({ onReset }: DashboardProps) {
 // Standalone styled select for audit agent chooser (was ds.selectStyled)
 const auditSelectStyle = {
   width: '100%', padding: '9px 12px', background: '#1a1d26', border: '1px solid rgba(255,255,255,0.12)',
-  borderRadius: 8, color: '#e8eaed', fontSize: 13, fontFamily: 'inherit', outline: 'none',
+  borderRadius: 8, color: '#e8eaed', fontSize: 13, fontFamily: 'inherit',
   cursor: 'pointer', appearance: 'none' as const,
   backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E")`,
   backgroundRepeat: 'no-repeat', backgroundPosition: 'right 10px center',
@@ -1403,15 +1449,15 @@ const s = {
   h1: { fontSize: 20, fontWeight: 700, letterSpacing: '-0.02em' } as const,
   meta: { color: 'rgba(255,255,255,0.4)', fontSize: 12, marginTop: 4 } as const,
   card: (active: boolean) => ({ background: '#12151c', border: `1px solid ${active ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.07)'}`, borderRadius: 10, marginBottom: 12, transition: 'border-color 0.2s' } as const),
-  cardHeader: { display: 'flex', alignItems: 'center', gap: 12, padding: '16px 20px', cursor: 'pointer' } as const,
+  cardHeader: { display: 'flex', alignItems: 'center', gap: 12, padding: '16px 20px', cursor: 'pointer', background: 'none', border: 'none', width: '100%', font: 'inherit', color: 'inherit', textAlign: 'left' as const } as const,
   cardBody: { padding: '0 20px 20px', borderTop: '1px solid rgba(255,255,255,0.05)' } as const,
   projName: { fontWeight: 600, fontSize: 14 } as const,
-  projPath: { fontSize: 11, color: 'rgba(255,255,255,0.25)', fontFamily: 'JetBrains Mono, monospace', marginTop: 2 } as const,
+  projPath: { fontSize: 11, color: 'rgba(255,255,255,0.55)', fontFamily: 'JetBrains Mono, monospace', marginTop: 2 } as const,
   projMeta: { display: 'flex', gap: 14, fontSize: 11, color: 'rgba(255,255,255,0.4)', flexShrink: 0 } as const,
   metaItem: { display: 'flex', alignItems: 'center', gap: 4 } as const,
   section: { marginTop: 16 } as const,
   sectionHeader: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, color: 'rgba(255,255,255,0.6)', fontSize: 12 } as const,
-  collapsibleHeader: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, color: 'rgba(255,255,255,0.6)', fontSize: 12, cursor: 'pointer', userSelect: 'none' as const, padding: '4px 0', borderRadius: 4 } as const,
+  collapsibleHeader: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, color: 'rgba(255,255,255,0.6)', fontSize: 12, cursor: 'pointer', userSelect: 'none' as const, padding: '4px 0', borderRadius: 4, background: 'none', border: 'none', width: '100%', font: 'inherit', textAlign: 'left' as const } as const,
   sectionTitle: { fontWeight: 600 } as const,
   sectionLabel: { fontSize: 11, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 10 },
   count: { fontSize: 10, padding: '1px 6px', borderRadius: 10, background: 'rgba(255,255,255,0.06)', color: 'rgba(255,255,255,0.4)' } as const,
@@ -1421,15 +1467,15 @@ const s = {
   aiBadge: { display: 'inline-block', padding: '2px 7px', borderRadius: 4, fontSize: 10, fontWeight: 600, background: 'rgba(52,211,153,0.1)', color: 'rgba(52,211,153,0.7)', border: '1px solid rgba(52,211,153,0.15)' } as const,
   badgeGreen: { display: 'inline-flex', alignItems: 'center', gap: 3, padding: '2px 7px', borderRadius: 4, fontSize: 10, fontWeight: 600, background: 'rgba(200,255,0,0.1)', color: 'rgba(200,255,0,0.7)', border: '1px solid rgba(200,255,0,0.15)' } as const,
   badgeOrange: { display: 'inline-flex', alignItems: 'center', gap: 3, padding: '2px 7px', borderRadius: 4, fontSize: 10, fontWeight: 600, background: 'rgba(255,200,0,0.08)', color: 'rgba(255,200,0,0.6)', border: '1px solid rgba(255,200,0,0.12)' } as const,
-  badgeGray: { display: 'inline-flex', alignItems: 'center', gap: 3, padding: '2px 7px', borderRadius: 4, fontSize: 10, fontWeight: 600, background: 'rgba(255,255,255,0.03)', color: 'rgba(255,255,255,0.2)', border: '1px solid rgba(255,255,255,0.05)' } as const,
+  badgeGray: { display: 'inline-flex', alignItems: 'center', gap: 3, padding: '2px 7px', borderRadius: 4, fontSize: 10, fontWeight: 600, background: 'rgba(255,255,255,0.03)', color: 'rgba(255,255,255,0.55)', border: '1px solid rgba(255,255,255,0.05)' } as const,
   agentBadge: { display: 'inline-flex', alignItems: 'center', gap: 3, padding: '2px 7px', borderRadius: 4, fontSize: 10, fontWeight: 600, background: 'rgba(139,92,246,0.1)', color: 'rgba(139,92,246,0.7)', border: '1px solid rgba(139,92,246,0.15)' } as const,
   iconBtn: { background: 'none', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 4, padding: '4px 8px', color: 'rgba(255,255,255,0.5)', cursor: 'pointer', display: 'flex', alignItems: 'center', fontSize: 11 } as const,
   dangerBtn: { background: 'rgba(255,77,106,0.08)', border: '1px solid rgba(255,77,106,0.2)', borderRadius: 6, padding: '6px 14px', color: '#ff4d6a', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, fontFamily: 'inherit' } as const,
   installBtn: { padding: '6px 14px', background: 'rgba(200,255,0,0.1)', color: '#c8ff00', border: '1px solid rgba(200,255,0,0.2)', borderRadius: 6, fontSize: 12, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'inherit' } as const,
-  input: { width: '100%', padding: '8px 12px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 6, color: '#e8eaed', fontSize: 12, fontFamily: 'inherit', outline: 'none' } as const,
+  input: { width: '100%', padding: '8px 12px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 6, color: '#e8eaed', fontSize: 12, fontFamily: 'inherit' } as const,
   mcpDropdown: { marginTop: 4, borderRadius: 8, border: '1px solid rgba(255,255,255,0.08)', background: '#181c26', overflow: 'hidden' } as const,
   mcpOption: { display: 'flex', alignItems: 'center', gap: 8, padding: '10px 12px', cursor: 'pointer', fontSize: 12, borderBottom: '1px solid rgba(255,255,255,0.04)' } as const,
-  empty: { padding: 16, textAlign: 'center' as const, color: 'rgba(255,255,255,0.25)', fontSize: 12 },
+  empty: { padding: 16, textAlign: 'center' as const, color: 'rgba(255,255,255,0.55)', fontSize: 12 },
   agentCard: { display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', borderRadius: 8, background: 'rgba(255,255,255,0.03)', marginBottom: 6 } as const,
   originBadge: { fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 4, background: 'rgba(100,180,255,0.1)', color: 'rgba(100,180,255,0.7)', border: '1px solid rgba(100,180,255,0.15)' } as const,
   updateBadge: { fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 4, background: 'rgba(255,200,0,0.1)', color: '#ffc800', marginLeft: 6 } as const,

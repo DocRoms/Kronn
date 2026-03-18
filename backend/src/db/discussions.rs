@@ -10,7 +10,7 @@ pub fn list_discussions(conn: &Connection) -> Result<Vec<Discussion>> {
     let mut stmt = conn.prepare(
         "SELECT d.id, d.project_id, d.title, d.agent, d.language, d.participants_json,
                 d.created_at, d.updated_at, d.archived, d.skill_ids_json,
-                (SELECT COUNT(*) FROM messages m WHERE m.discussion_id = d.id) as msg_count,
+                d.message_count,
                 d.profile_ids_json, d.directive_ids_json,
                 d.workspace_mode, d.workspace_path, d.worktree_branch,
                 d.summary_cache, d.summary_up_to_msg_idx, d.model_tier
@@ -335,6 +335,11 @@ pub fn insert_message(conn: &Connection, discussion_id: &str, msg: &DiscussionMe
         ],
     )?;
 
+    conn.execute(
+        "UPDATE discussions SET message_count = message_count + 1 WHERE id = ?1",
+        params![discussion_id],
+    )?;
+
     update_discussion_timestamp(conn, discussion_id)?;
     Ok(())
 }
@@ -346,6 +351,14 @@ pub fn delete_last_agent_messages(conn: &Connection, discussion_id: &str) -> Res
             SELECT COALESCE(MAX(sort_order), -1) FROM messages
             WHERE discussion_id = ?1 AND role = 'User'
         )",
+        params![discussion_id],
+    )?;
+
+    // Recount to keep message_count accurate after bulk delete
+    conn.execute(
+        "UPDATE discussions SET message_count = (
+            SELECT COUNT(*) FROM messages WHERE discussion_id = ?1
+         ) WHERE id = ?1",
         params![discussion_id],
     )?;
 

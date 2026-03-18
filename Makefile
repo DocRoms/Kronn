@@ -1,4 +1,4 @@
-.PHONY: start start-fast stop logs clean build dev-backend dev-frontend setup check test-shell lint-backend .env
+.PHONY: start start-prod stop logs clean build dev-backend dev-frontend setup check test-shell lint-backend .env
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 APP_NAME    := kronn
@@ -91,13 +91,8 @@ _gen-override:
 		rm -f docker-compose.override.yml; \
 	fi
 
-## Start everything (Docker, release build — slow first time, fast after)
+## Start everything (Docker, fast build — no LTO, ~4x faster than prod)
 start: .env _gen-override
-	@echo "$(GREEN)▸ Building $(APP_NAME)...$(RESET)"
-	@$(DOCKER_COMP) up -d --build
-
-## Start with fast build (no LTO — ~4x faster rebuild, slightly larger binary)
-start-fast: .env _gen-override
 	@echo "$(GREEN)▸ Building $(APP_NAME) (fast profile)...$(RESET)"
 	@CARGO_PROFILE=fast $(DOCKER_COMP) up -d --build
 	@echo ""
@@ -111,6 +106,11 @@ start-fast: .env _gen-override
 	@echo "       $(CYAN)kronn logs$(RESET)     Logs"
 	@echo "       $(CYAN)kronn restart$(RESET)  Restart"
 	@echo ""
+
+## Production build (Docker, release with LTO — slow but optimized binary)
+start-prod: .env _gen-override
+	@echo "$(GREEN)▸ Building $(APP_NAME) (production release)...$(RESET)"
+	@$(DOCKER_COMP) up -d --build
 
 ## Stop all services
 stop:
@@ -195,8 +195,8 @@ help:
 	@echo "$(CYAN)$(APP_NAME) — Enter the grid. Command your agents.$(RESET)"
 	@echo ""
 	@echo "$(GREEN)Usage:$(RESET)"
-	@echo "  make start          Build & launch (Docker, release)"
-	@echo "  make start-fast     Build & launch (Docker, fast — no LTO)"
+	@echo "  make start          Build & launch (Docker, fast — default)"
+	@echo "  make start-prod     Build & launch (Docker, release + LTO)"
 	@echo "  make stop           Stop services"
 	@echo "  make logs           Tail logs"
 	@echo "  make clean          Remove containers & data"

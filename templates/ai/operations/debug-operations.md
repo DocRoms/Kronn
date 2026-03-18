@@ -1,35 +1,18 @@
 # Debug & operations (AI reference)
 
+> **TEMPLATE FILE.** If commands below contain `{{...}}`, say `NOT_FOUND` — never invent commands or ports.
+
 ## Common commands
 
-| Action | Command | Notes |
-|--------|---------|-------|
-| {{ACTION_1}} | `{{COMMAND_1}}` | {{NOTES}} |
-| {{ACTION_2}} | `{{COMMAND_2}}` | {{NOTES}} |
-| {{ACTION_3}} | `{{COMMAND_3}}` | {{NOTES}} |
-| {{ACTION_4}} | `{{COMMAND_4}}` | {{NOTES}} |
-| {{ACTION_5}} | `{{COMMAND_5}}` | {{NOTES}} |
+<!-- Fill after audit: build, run, test, deploy commands -->
+{{COMMANDS}}
 
 ## Docker services
 
-| Service | Port | Role | Health check |
-|---------|------|------|-------------|
-| {{SERVICE_1}} | {{PORT}} | {{ROLE}} | {{HEALTH}} |
-| {{SERVICE_2}} | {{PORT}} | {{ROLE}} | {{HEALTH}} |
+<!-- Fill after audit: service list with ports, roles, health checks -->
+{{DOCKER_SERVICES}}
 
 ## Troubleshooting
 
-### {{ISSUE_1_TITLE}}
-- **Symptom**: {{SYMPTOM}}
-- **Cause**: {{CAUSE}}
-- **Fix**: {{FIX}}
-
-### {{ISSUE_2_TITLE}}
-- **Symptom**: {{SYMPTOM}}
-- **Cause**: {{CAUSE}}
-- **Fix**: {{FIX}}
-
-### {{ISSUE_3_TITLE}}
-- **Symptom**: {{SYMPTOM}}
-- **Cause**: {{CAUSE}}
-- **Fix**: {{FIX}}
+<!-- Fill after audit: known issues with symptom → cause → fix -->
+{{TROUBLESHOOTING}}

@@ -52,7 +52,9 @@ pub async fn install(
             // Auto-enable after install: remove from disabled_agents if present
             let mut config = state.config.write().await;
             config.disabled_agents.retain(|a| a != &agent_type);
-            let _ = crate::core::config::save(&config).await;
+            if let Err(e) = crate::core::config::save(&config).await {
+                tracing::error!("Failed to save config after agent install: {e}");
+            }
             Json(ApiResponse::ok(output))
         }
         Err(e) => Json(ApiResponse::err(format!("{}", e))),
@@ -91,7 +93,9 @@ pub async fn uninstall(
             let mut config = state.config.write().await;
             if !config.disabled_agents.contains(&agent_type) {
                 config.disabled_agents.push(agent_type);
-                let _ = crate::core::config::save(&config).await;
+                if let Err(e) = crate::core::config::save(&config).await {
+                    tracing::error!("Failed to save config after agent uninstall: {e}");
+                }
             }
             Json(ApiResponse::ok(output))
         }
@@ -100,7 +104,9 @@ pub async fn uninstall(
             let mut config = state.config.write().await;
             if !config.disabled_agents.contains(&agent_type) {
                 config.disabled_agents.push(agent_type);
-                let _ = crate::core::config::save(&config).await;
+                if let Err(e) = crate::core::config::save(&config).await {
+                    tracing::error!("Failed to save config after failed agent uninstall: {e}");
+                }
             }
             tracing::warn!("Uninstall command failed (agent disabled anyway): {}", e);
             Json(ApiResponse::ok(format!("Uninstall failed but agent disabled: {}", e)))

@@ -164,6 +164,23 @@ impl AgentsConfig {
             _ => false,
         }
     }
+
+    pub fn any_full_access(&self) -> bool {
+        self.claude_code.full_access
+            || self.codex.full_access
+            || self.gemini_cli.full_access
+            || self.kiro.full_access
+            || self.vibe.full_access
+    }
+
+    /// Returns true if at least one agent is marked as installed.
+    pub fn any_installed(&self) -> bool {
+        self.claude_code.installed
+            || self.codex.installed
+            || self.gemini_cli.installed
+            || self.kiro.installed
+            || self.vibe.installed
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]

@@ -669,24 +669,32 @@ pub async fn import_data(
         for msg in &disc.messages {
             let m = msg.clone();
             let id = did.clone();
-            let _ = state.db.with_conn(move |conn| crate::db::discussions::insert_message(conn, &id, &m)).await;
+            if let Err(e) = state.db.with_conn(move |conn| crate::db::discussions::insert_message(conn, &id, &m)).await {
+                tracing::error!("Failed to import discussion message: {e}");
+            }
         }
     }
 
     // Import MCP servers & configs
     for server in &data.mcp_servers {
         let s = server.clone();
-        let _ = state.db.with_conn(move |conn| crate::db::mcps::upsert_server(conn, &s)).await;
+        if let Err(e) = state.db.with_conn(move |conn| crate::db::mcps::upsert_server(conn, &s)).await {
+            tracing::error!("Failed to import MCP server: {e}");
+        }
     }
     for config in &data.mcp_configs {
         let c = config.clone();
-        let _ = state.db.with_conn(move |conn| crate::db::mcps::insert_config(conn, &c)).await;
+        if let Err(e) = state.db.with_conn(move |conn| crate::db::mcps::insert_config(conn, &c)).await {
+            tracing::error!("Failed to import MCP config: {e}");
+        }
     }
 
     // Import workflows
     for wf in &data.workflows {
         let w = wf.clone();
-        let _ = state.db.with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &w)).await;
+        if let Err(e) = state.db.with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &w)).await {
+            tracing::error!("Failed to import workflow: {e}");
+        }
     }
 
     // Import custom skills/directives/profiles (file-based)
@@ -735,12 +743,14 @@ pub async fn reset(
     *cfg = config::default_config();
 
     // Clear all data from DB
-    let _ = state.db.with_conn(|conn| {
+    if let Err(e) = state.db.with_conn(|conn| {
         conn.execute_batch(
             "DELETE FROM messages; DELETE FROM discussions; DELETE FROM mcp_config_projects; DELETE FROM mcp_configs; DELETE FROM mcp_servers; DELETE FROM projects;"
         )?;
         Ok(())
-    }).await;
+    }).await {
+        tracing::error!("Failed to clear database during reset: {e}");
+    }
 
     Json(ApiResponse::ok(()))
 }

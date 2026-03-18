@@ -187,10 +187,9 @@ describe('Dashboard — project list', () => {
 
     await wrap(<Dashboard onReset={vi.fn()} />);
 
-    // The new project button should exist (with the + icon, French text)
+    // The nav bar shows the project-creation button (French: "Ajouter un projet")
     const body = document.body.textContent!;
-    // The nav should have project-related UI
-    expect(body.length).toBeGreaterThan(0);
+    expect(body).toContain('Ajouter un projet');
   });
 });
 

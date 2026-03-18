@@ -2,6 +2,7 @@
 mod tests {
     use crate::agents::runner::*;
     use crate::models::AgentType;
+    use serial_test::serial;
 
     // ─── parse_claude_stream_line ─────────────────────────────────────────────
 
@@ -131,6 +132,7 @@ mod tests {
     // super::super:: because: runner.rs > runner_test (mod) > tests (mod)
 
     #[test]
+    #[serial]
     fn fix_file_ownership_no_env_vars_does_not_panic() {
         // When KRONN_HOST_UID / KRONN_HOST_GID are not set, fix_file_ownership
         // should return early without error.
@@ -140,6 +142,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn fix_file_ownership_with_nonexistent_dir_does_not_panic() {
         // Even with UID/GID set, chown on a nonexistent path should not panic.
         std::env::set_var("KRONN_HOST_UID", "1000");

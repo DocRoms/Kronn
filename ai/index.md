@@ -53,6 +53,7 @@ This folder (`ai/`) contains AI-optimized project context (not human docs). Use 
 | testing / quality | `ai/testing-quality.md` |
 | coding rules | `ai/coding-rules.md` |
 | known issues / tech debt | `ai/inconsistencies-tech-debt.md` |
+| Architecture decisions | `ai/decisions.md` |
 | term definitions / project jargon | `ai/glossary.md` |
 
 #### Tier 3 — Escalation
@@ -90,9 +91,32 @@ Never load everything "just in case".
 ## 4. Development constraints
 
 - **Docker-first**: the full app runs via `docker compose`. Backend, frontend, and gateway are separate services.
-- **Quality is mandatory**: `cargo clippy -- -D warnings` must pass. Frontend: `npx tsc --noEmit` + `pnpm test` (155+ tests must pass). Shell: `make test-shell` (186 bats tests must pass).
+- **Quality is mandatory**: `cargo clippy -- -D warnings` must pass. Frontend: `npx tsc --noEmit` + `pnpm test`. Shell: `make test-shell`.
 - **Type generation**: Rust models are the source of truth. TypeScript types are auto-generated via `ts-rs`.
 - If stdout/stderr is missing: ask the user to copy/paste the full output.
+
+### Testing rule (mandatory)
+
+**Every code change MUST include tests.** This is not optional — tests are the primary defense against regressions and AI hallucinations.
+
+| Change type | Required tests |
+|-------------|---------------|
+| New API endpoint | Integration test in `backend/tests/api_tests.rs` (HTTP request → response assertion) |
+| New backend function | Unit test in same file (`#[cfg(test)] mod tests`) |
+| Bug fix | Regression test proving the bug is fixed (test fails without fix, passes with) |
+| New frontend component | Test file in `__tests__/` (render + key interactions) |
+| Frontend behavior change | Update existing tests + add edge case coverage |
+| Database migration | Verify migration applies cleanly in existing DB tests |
+
+**Test quality rules:**
+- Test **behavior**, not implementation details.
+- Include **edge cases**: empty input, large input, unicode, error paths.
+- Assertions must be **meaningful** — not just "renders without crashing".
+- Mocks must match **real API shapes** (check `types/generated.ts`).
+- Run `cargo test` (backend) and `npx vitest run` (frontend) **before declaring a task done**.
+- If a test is flaky, fix the root cause — do not add retries or sleeps.
+
+**Why this matters:** A failing test catches a bug in seconds. Without tests, bugs surface in production, require debugging, and cost 10-100x more tokens to fix. Tests also prove to the user that the code works — "all 500 tests pass" is more convincing than "I think it's correct".
 
 ---
 
@@ -102,7 +126,7 @@ Never load everything "just in case".
 - Rust data models: `backend/src/models/mod.rs`.
 - TypeScript types: `frontend/src/types/generated.ts` (auto-generated from Rust).
 - API routes: `backend/src/lib.rs` (router definition in `build_router()`).
-- Database schema: `backend/src/db/sql/001_initial.sql` (+ migrations 002-011).
+- Database schema: `backend/src/db/sql/001_initial.sql` (+ migrations 002-017).
 - Docker config: `docker-compose.yml`.
 
 ---
@@ -125,6 +149,7 @@ Use `ai/repo-map.md` to decide.
 - Use `ai/repo-map.md` to decide where code goes.
 - If info is missing or ambiguous: ask questions; do not guess.
 - If a "logical fix" requires a large/risky refactor: add an entry to `ai/inconsistencies-tech-debt.md`.
+- **Write tests for every change** — see § 4 Testing rule. No exceptions.
 
 ### AI context maintenance rule
 After completing a task: if you discovered something non-obvious (a gotcha, a missing pattern, an outdated doc), update the relevant `ai/` file before closing. Keep entries factual and concise.
@@ -144,7 +169,7 @@ After completing a task: if you discovered something non-obvious (a gotcha, a mi
 | Streaming | SSE (Server-Sent Events) for agent responses and workflow run updates |
 | Container | Docker Compose (backend + frontend + nginx gateway) |
 | Agents | Claude Code CLI, OpenAI Codex CLI, Vibe (Mistral), Gemini CLI (Google), Kiro (Amazon). Planned: OpenCode, DeepSeek |
-| MCP sync | 5 formats: `.mcp.json` (Claude), `.kiro/settings/mcp.json` (Kiro), `.gemini/settings.json` (Gemini CLI), `.vibe/config.toml` (Vibe), `~/.codex/config.toml` (Codex) |
+| MCP sync | 6 formats: `.mcp.json` (Claude), `.kiro/settings/mcp.json` (Kiro), `.ai/mcp/mcp.json` (Kiro new), `.gemini/settings.json` (Gemini CLI), `.vibe/config.toml` (Vibe), `~/.codex/config.toml` (Codex) |
 | API keys | Multi-key per provider (named keys, active selection), stored in `config.toml` as `[[tokens.keys]]` array. Agent auth files synced (e.g. `~/.codex/auth.json`). Override toggle per provider without deleting keys. |
 | Token tracking | Per-message `tokens_used` + `auth_mode` (override/local). Codex: parsed from stderr. Claude Code: `--output-format stream-json --verbose --include-partial-messages` (tokens from `result` event and `message_delta`). Gemini/Vibe: TODO. |
 
@@ -198,20 +223,12 @@ Projects display 3 badges next to the title: `[FileCode] AI context`, `[Cpu] AI 
 
 ## 10. Multi-agent configuration
 
-Redirectors to this file: `CLAUDE.md`, `GEMINI.md`, `AGENTS.md`, `.kiro/steering/instructions.md`, `.cursorrules`, `.github/copilot-instructions.md`, `.windsurfrules`, `.clinerules`.
+Redirectors to this file: `CLAUDE.md`, `GEMINI.md`, `AGENTS.md`, `.kiro/steering/instructions.md`, `.vibe/instructions.md`, `.cursorrules`, `.cursor/rules/repo-instructions.mdc`, `.github/copilot-instructions.md`, `.windsurfrules`, `.clinerules`.
 
-**Maintenance rule**: all content lives in `ai/`. Redirectors never need changes.
-
----
-
-## 11. AI Exchanges (read on arrival)
-
-- hasActualConversation: OFF
-- currentConversation: none
-- Template: `ai/templates/exchanges.md`
+**Maintenance rule**: all content lives in `ai/`. Redirectors contain a summary of critical rules + pointer to `ai/index.md` as source of truth.
 
 ---
 
-## 12. Last updated
+## 11. Last updated
 
 AI context last reviewed: **2026-03-14**.

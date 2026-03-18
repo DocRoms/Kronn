@@ -69,6 +69,14 @@ git rebase --signoff HEAD~3
 
 Commits authored or co-authored by AI tools (Claude Code, Copilot, etc.) must still carry a human `Signed-off-by`. The human is responsible for reviewing and certifying the contribution.
 
+## AI Context (`ai/`)
+
+This project uses an AI-optimized context system in `ai/`. Before making changes:
+
+1. Read `ai/index.md` — it contains project rules, coding conventions, and architecture decisions.
+2. After completing your work, update the relevant `ai/` file if you discovered something non-obvious (a gotcha, a pattern, an outdated doc).
+3. **Do not confuse** `ai/` (context for agents working on THIS repo) with `templates/ai/` (template skeleton installed into projects managed by Kronn).
+
 ## Pull Request Guidelines
 
 1. Fork the repo and create a branch from `main`

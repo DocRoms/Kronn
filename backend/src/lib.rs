@@ -5,6 +5,9 @@ pub mod db;
 pub mod models;
 pub mod workflows;
 
+#[cfg(test)]
+mod api_tests;
+
 use std::sync::Arc;
 use axum::{
     extract::State,
