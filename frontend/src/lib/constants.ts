@@ -38,6 +38,18 @@ export function isAgentRestricted(agentAccess: AgentsConfig | undefined, agentTy
   return map[agentType] === false;
 }
 
+/** Extract org/owner from a project's repo_url for grouping.
+ *  Returns the org name (e.g. "Euronews-tech") or a fallback label. */
+export function getProjectGroup(p: { repo_url: string | null }, localLabel = 'Local', otherLabel = 'Other'): string {
+  if (!p.repo_url) return localLabel;
+  try {
+    const url = p.repo_url.replace('git@github.com:', 'https://github.com/')
+      .replace('git@gitlab.com:', 'https://gitlab.com/');
+    const parts = new URL(url).pathname.split('/').filter(Boolean);
+    return parts[0] || otherLabel;
+  } catch { return otherLabel; }
+}
+
 /** Check if an agent has full_access enabled. */
 export function hasAgentFullAccess(agentAccess: AgentsConfig | undefined, agentType: AgentType): boolean {
   if (!agentAccess) return false;

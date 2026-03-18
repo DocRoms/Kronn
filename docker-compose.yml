@@ -31,6 +31,7 @@ services:
       # Agent auth directories (local subscriptions)
       - ${HOME}/.claude.json:/home/kronn/.claude.json:ro    # Claude Code main config
       - ${HOME}/.claude:/home/kronn/.claude:rw              # Claude Code auth/config + session state (needs write)
+      - claude-projects:/home/kronn/.claude/projects         # Isolate Docker sessions from host (avoids ghost /host-home project dirs)
       - ${HOME}/.codex:/home/kronn/.codex:rw                # Codex auth + state (needs write)
       - ${HOME}/.config/codex:/home/kronn/.config/codex:ro  # Codex config (legacy path)
       - ${HOME}/.vibe:/home/kronn/.vibe:rw                  # Vibe auth + state (needs write)
@@ -111,3 +112,4 @@ volumes:
   kronn-data:
   npm-cache:
   uv-tools:
+  claude-projects:  # Isolates Docker Claude Code sessions from host ~/.claude/projects

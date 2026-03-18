@@ -218,4 +218,37 @@ describe('SettingsPage', () => {
     await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
     expect(screen.getByText('Auto-detecter')).toBeDefined();
   });
+
+  it('renders Vibe agent with API key management section', async () => {
+    const vibeAgent: AgentDetection = {
+      ...sampleAgent,
+      name: 'Vibe',
+      agent_type: 'Vibe',
+    };
+    await wrap(<SettingsPage {...defaultProps} agents={[vibeAgent]} />);
+    const body = document.body.textContent!;
+    expect(body).toContain('Vibe');
+    expect(body).toContain('auth locale');
+    expect(body).toContain('Ajouter une cle');
+  });
+
+  it('does NOT render per-project default skills section', async () => {
+    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
+    const body = document.body.textContent!;
+    expect(body).not.toContain('Skills par defaut par projet');
+    expect(body).not.toContain('Default skills per project');
+  });
+
+  it('does NOT render per-project default profiles section', async () => {
+    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
+    const body = document.body.textContent!;
+    expect(body).not.toContain('Profil par defaut par projet');
+    expect(body).not.toContain('Default profile per project');
+  });
+
+  it('shows usage dashboard link for Claude Code agent', async () => {
+    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
+    const links = document.querySelectorAll('a[href="https://claude.ai/settings/usage"]');
+    expect(links.length).toBeGreaterThanOrEqual(1);
+  });
 });

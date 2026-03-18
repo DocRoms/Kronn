@@ -5,7 +5,7 @@ import { I18nProvider } from '../../lib/I18nContext';
 // Mock API
 vi.mock('../../lib/api', () => ({
   mcps: {
-    overview: vi.fn().mockResolvedValue({ servers: [], configs: [], project_links: [], customized_contexts: [] }),
+    overview: vi.fn().mockResolvedValue({ servers: [], configs: [], project_links: [], customized_contexts: [], incompatibilities: [] }),
     registry: vi.fn().mockResolvedValue([]),
     refresh: vi.fn(),
     createConfig: vi.fn(),
@@ -75,7 +75,7 @@ const wrap = (ui: React.ReactElement) => render(<I18nProvider>{ui}</I18nProvider
 
 describe('McpPage', () => {
   it('renders empty state when no configs exist', () => {
-    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [] };
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [] };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
     // Empty state message should be visible
     const body = document.body.textContent!;
@@ -88,7 +88,7 @@ describe('McpPage', () => {
       makeConfig('c1', 'github', 'GitHub'),
       makeConfig('c2', 'slack', 'Slack'),
     ];
-    const overview: McpOverview = { servers, configs, customized_contexts: [] };
+    const overview: McpOverview = { servers, configs, customized_contexts: [], incompatibilities: [] };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
     expect(screen.getByText('GitHub')).toBeTruthy();
     expect(screen.getByText('Slack')).toBeTruthy();
@@ -99,7 +99,7 @@ describe('McpPage', () => {
       makeConfig('c1', 'github', 'GitHub', { label: 'GitHub Main' }),
       makeConfig('c2', 'github', 'GitHub', { label: 'GitHub Secondary' }),
     ];
-    const overview: McpOverview = { servers: [makeServer('github', 'GitHub')], configs, customized_contexts: [] };
+    const overview: McpOverview = { servers: [makeServer('github', 'GitHub')], configs, customized_contexts: [], incompatibilities: [] };
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
     // Click the server group header to expand it
@@ -114,7 +114,7 @@ describe('McpPage', () => {
     const configs = [
       makeConfig('c1', 'github', 'GitHub', { is_global: true }),
     ];
-    const overview: McpOverview = { servers: [makeServer('github', 'GitHub')], configs, customized_contexts: [] };
+    const overview: McpOverview = { servers: [makeServer('github', 'GitHub')], configs, customized_contexts: [], incompatibilities: [] };
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
     // Expand the server group
@@ -125,7 +125,7 @@ describe('McpPage', () => {
   });
 
   it('"Add MCP" button opens the add form', () => {
-    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [] };
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [] };
     const registry: McpDefinition[] = [
       { id: 'test-mcp', name: 'Test MCP', description: 'A test server', transport: { Stdio: { command: 'node', args: [] } }, env_keys: [], tags: ['core'], token_url: null, token_help: null },
     ];
@@ -140,12 +140,40 @@ describe('McpPage', () => {
     expect(document.body.textContent).toContain('A test server');
   });
 
+  it('shows incompatibility badge on server header', () => {
+    const servers = [makeServer('mcp-gitlab', 'GitLab')];
+    const configs = [makeConfig('c1', 'mcp-gitlab', 'GitLab')];
+    const overview: McpOverview = {
+      servers, configs, customized_contexts: [],
+      incompatibilities: [{ server_id: 'mcp-gitlab', agent: 'Kiro' as any, reason: 'Empty tool schemas — incompatible with Bedrock' }],
+    };
+    const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+
+    // The incompatibility badge should show the agent name
+    expect(container.textContent).toContain('Kiro');
+  });
+
+  it('does not show incompatibility badge for compatible servers', () => {
+    const servers = [makeServer('mcp-github', 'GitHub')];
+    const configs = [makeConfig('c1', 'mcp-github', 'GitHub')];
+    const overview: McpOverview = {
+      servers, configs, customized_contexts: [],
+      incompatibilities: [{ server_id: 'mcp-gitlab', agent: 'Kiro' as any, reason: 'test' }],
+    };
+    const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+
+    // GitHub should NOT show Kiro warning (only gitlab is incompatible)
+    // The page should render GitHub but the warning badge should not appear
+    expect(container.textContent).toContain('GitHub');
+    expect(container.textContent).not.toContain('Kiro');
+  });
+
   it('shows project names as badges when linked', () => {
     const projects = [makeProject('p1', 'my-app'), makeProject('p2', 'my-api')];
     const configs = [
       makeConfig('c1', 'github', 'GitHub', { project_ids: ['p1'], project_names: ['my-app'] }),
     ];
-    const overview: McpOverview = { servers: [makeServer('github', 'GitHub')], configs, customized_contexts: [] };
+    const overview: McpOverview = { servers: [makeServer('github', 'GitHub')], configs, customized_contexts: [], incompatibilities: [] };
     const { container } = wrap(<McpPage projects={projects} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
     // Expand to see config details

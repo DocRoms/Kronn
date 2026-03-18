@@ -44,6 +44,7 @@ pub struct AgentProcess {
     agent_type: AgentType,
     rx: mpsc::Receiver<String>,
     stderr_capture: Arc<Mutex<Vec<String>>>,
+    stderr_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl AgentProcess {
@@ -62,7 +63,21 @@ impl AgentProcess {
         }
     }
 
+    /// Wait for stderr reader to finish, then return captured lines.
+    /// Must be called after `child.wait()` to ensure all stderr is flushed.
+    pub async fn captured_stderr_flushed(&mut self) -> Vec<String> {
+        if let Some(handle) = self.stderr_task.take() {
+            // Give stderr reader a brief window to finish after process exit
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                handle,
+            ).await;
+        }
+        self.stderr_capture.lock().unwrap().clone()
+    }
+
     /// Return captured stderr lines (only populated in StdoutOnly mode)
+    /// Note: may be incomplete if called before process exit. Prefer `captured_stderr_flushed`.
     pub fn captured_stderr(&self) -> Vec<String> {
         self.stderr_capture.lock().unwrap().clone()
     }
@@ -239,7 +254,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // Resolve model tier to a --model flag
     let model_flag = resolve_model_flag(config.agent_type, config.tier, config.model_tiers);
 
-    let (binary, npx_pkg, args, env_key, stderr_mode, output_mode) =
+    let (binary, npx_pkg, mut args, env_key, stderr_mode, output_mode) =
         agent_command(config.agent_type, config.prompt, config.full_access, &extra_context, model_flag.as_deref());
 
     // Use work_dir (or project_path) for the agent's CWD
@@ -260,6 +275,40 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         }
     };
 
+    // Claude Code in --print mode does NOT auto-load .mcp.json from CWD.
+    // Explicitly pass it via --mcp-config so MCP tools are available.
+    // IMPORTANT: --mcp-config must come BEFORE --append-system-prompt and the
+    // prompt argument, because --append-system-prompt consumes the next
+    // positional arg. If --mcp-config is inserted between them, Claude Code
+    // mis-parses the arguments and fails with "MCP config file not found".
+    if *config.agent_type == AgentType::ClaudeCode {
+        let mcp_json = work_dir.join(".mcp.json");
+        if mcp_json.exists() {
+            // Pop prompt (last arg) and --append-system-prompt value + flag (if present)
+            let prompt_arg = args.pop();
+            let sys_prompt_val = if args.last().map(|a| !a.starts_with("--")).unwrap_or(false) {
+                // The last arg is the system prompt value (not a flag)
+                let val = args.pop();
+                let flag = args.pop(); // --append-system-prompt
+                Some((flag, val))
+            } else {
+                None
+            };
+
+            // Insert --mcp-config at current position (before system prompt & prompt)
+            args.push("--mcp-config".into());
+            args.push(mcp_json.to_string_lossy().to_string());
+
+            // Re-push --append-system-prompt and its value
+            if let Some((flag, val)) = sys_prompt_val {
+                if let Some(f) = flag { args.push(f); }
+                if let Some(v) = val { args.push(v); }
+            }
+            // Re-push prompt
+            if let Some(p) = prompt_arg { args.push(p); }
+        }
+    }
+
     // API key is optional — agents use their own local auth by default
     let api_key = get_api_key(env_key, config.tokens);
 
@@ -278,6 +327,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
 
     let (tx, rx) = mpsc::channel::<String>(256);
     let stderr_capture = Arc::new(Mutex::new(Vec::new()));
+    let mut stderr_handle: Option<tokio::task::JoinHandle<()>> = None;
 
     // Always stream stdout
     if let Some(stdout) = child.stdout.take() {
@@ -305,7 +355,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 // Log stderr for debugging but don't stream it to the user.
                 // Capture it so we can show it on failure.
                 let capture = stderr_capture.clone();
-                tokio::spawn(async move {
+                stderr_handle = Some(tokio::spawn(async move {
                     let mut lines = BufReader::new(stderr).lines();
                     while let Ok(Some(line)) = lines.next_line().await {
                         tracing::debug!("agent stderr: {}", line);
@@ -313,15 +363,29 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                             buf.push(line);
                         }
                     }
-                });
+                }));
             }
         }
     }
 
-    Ok(AgentProcess { child, output_mode, work_dir, agent_type: config.agent_type.clone(), rx, stderr_capture })
+    Ok(AgentProcess { child, output_mode, work_dir, agent_type: config.agent_type.clone(), rx, stderr_capture, stderr_task: stderr_handle })
 }
 
 /// Get the command configuration for an agent type.
+/// Resolve the path to vibe-runner.py (Mistral API wrapper).
+/// In Docker: bundled at /app/scripts/vibe-runner.py
+/// Native: relative to the binary at ../scripts/vibe-runner.py
+fn vibe_runner_path() -> String {
+    // Docker: scripts are copied into /app/scripts/
+    let docker_path = "/app/scripts/vibe-runner.py";
+    if std::path::Path::new(docker_path).exists() {
+        return docker_path.to_string();
+    }
+    // Native dev: relative to cargo manifest
+    let dev_path = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/vibe-runner.py");
+    dev_path.to_string()
+}
+
 /// MCP context is injected via --append-system-prompt for Claude Code,
 /// or prepended to the prompt for other agents.
 /// Returns: (binary, npx_package, args, env_key, stderr_mode, output_mode)
@@ -395,17 +459,25 @@ fn agent_command(agent_type: &AgentType, prompt: &str, full_access: bool, mcp_co
             )
         },
         AgentType::Vibe => {
-            // Vibe has no system prompt flag — prepend context to the prompt
-            let full_prompt = if mcp_context.is_empty() {
-                prompt.into()
-            } else {
-                format!("{}\n\n{}", mcp_context, prompt)
-            };
+            // Vibe CLI 2.5+ hangs in programmatic mode (asyncio + stdin issues).
+            // Use vibe-runner.py: a lightweight wrapper that calls the Mistral API
+            // directly with streaming, zero dependencies beyond Python stdlib.
+            // NOTE: MCP context is NOT injected — the API runner has no tool
+            // execution loop, so advertising tools causes the model to emit
+            // tool calls that never execute (stream appears "cut").
+            // When CLI mode is restored, re-enable MCP context injection.
+            let full_prompt: String = prompt.into();
+            let runner_script = vibe_runner_path();
+            let mut args = vec![runner_script];
+            if let Some(model) = model_flag {
+                args.push("--model".into());
+                args.push(model.into());
+            }
+            args.push(full_prompt);
             (
-                "uvx",
+                "python3",
                 None,
-                vec!["--from".into(), "mistral-vibe".into(), "vibe".into(),
-                     "-p".into(), full_prompt, "--output".into(), "text".into()],
+                args,
                 "MISTRAL_API_KEY",
                 StderrMode::StdoutOnly,
                 OutputMode::Text,
@@ -752,6 +824,7 @@ fn get_api_key(env_key: &str, tokens: &TokensConfig) -> Option<String> {
         "ANTHROPIC_API_KEY" => "anthropic",
         "OPENAI_API_KEY" => "openai",
         "GEMINI_API_KEY" => "google",
+        "MISTRAL_API_KEY" => "mistral",
         _ => return None,
     };
 

@@ -173,6 +173,82 @@ fn projects_list_ordered_by_name() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Projects — default skills / profile / cascade delete
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn projects_update_default_skills() {
+    let conn = test_db();
+    crate::db::projects::insert_project(&conn, &sample_project("p1", "A")).unwrap();
+
+    let skills = vec!["skill-rust-expert".to_string(), "skill-testing".to_string()];
+    let updated = crate::db::projects::update_project_default_skills(&conn, "p1", &skills).unwrap();
+    assert!(updated, "update should affect one row");
+
+    let p = crate::db::projects::get_project(&conn, "p1").unwrap().unwrap();
+    assert_eq!(p.default_skill_ids, skills, "Default skills must persist after update");
+}
+
+#[test]
+fn projects_update_default_skills_to_empty() {
+    let conn = test_db();
+    let mut proj = sample_project("p1", "A");
+    proj.default_skill_ids = vec!["old-skill".into()];
+    crate::db::projects::insert_project(&conn, &proj).unwrap();
+
+    crate::db::projects::update_project_default_skills(&conn, "p1", &[]).unwrap();
+
+    let p = crate::db::projects::get_project(&conn, "p1").unwrap().unwrap();
+    assert!(p.default_skill_ids.is_empty(), "Skills should be clearable to empty");
+}
+
+#[test]
+fn projects_update_default_profile() {
+    let conn = test_db();
+    crate::db::projects::insert_project(&conn, &sample_project("p1", "A")).unwrap();
+
+    // Set a profile
+    let updated = crate::db::projects::update_project_default_profile(&conn, "p1", Some("profile-senior")).unwrap();
+    assert!(updated);
+
+    let p = crate::db::projects::get_project(&conn, "p1").unwrap().unwrap();
+    assert_eq!(p.default_profile_id.as_deref(), Some("profile-senior"));
+
+    // Clear the profile
+    crate::db::projects::update_project_default_profile(&conn, "p1", None).unwrap();
+    let p = crate::db::projects::get_project(&conn, "p1").unwrap().unwrap();
+    assert!(p.default_profile_id.is_none(), "Profile should be clearable to None");
+}
+
+#[test]
+fn projects_delete_cascade_discussions() {
+    let conn = test_db();
+    crate::db::projects::insert_project(&conn, &sample_project("p1", "A")).unwrap();
+
+    // Insert discussions linked to project
+    let d1 = sample_discussion("d1", Some("p1"));
+    let d2 = sample_discussion("d2", Some("p1"));
+    let d3 = sample_discussion("d3", None); // unlinked
+    crate::db::discussions::insert_discussion(&conn, &d1).unwrap();
+    crate::db::discussions::insert_discussion(&conn, &d2).unwrap();
+    crate::db::discussions::insert_discussion(&conn, &d3).unwrap();
+
+    // Cascade delete project discussions
+    crate::db::projects::delete_project_discussions(&conn, "p1").unwrap();
+
+    let all = crate::db::discussions::list_discussions(&conn).unwrap();
+    assert_eq!(all.len(), 1, "Only unlinked discussion should remain");
+    assert_eq!(all[0].id, "d3");
+}
+
+#[test]
+fn projects_update_nonexistent_returns_false() {
+    let conn = test_db();
+    let updated = crate::db::projects::update_project_default_skills(&conn, "nonexistent", &["s1".into()]).unwrap();
+    assert!(!updated, "Updating nonexistent project should return false");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Discussions CRUD
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -472,6 +548,262 @@ fn mcp_config_hash_differs_on_env() {
     let h1 = crate::db::mcps::compute_config_hash(&server, &env1, None);
     let h2 = crate::db::mcps::compute_config_hash(&server, &env2, None);
     assert_ne!(h1, h2);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MCP Config Update & Sync
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn mcp_config_update_env_persists() {
+    let conn = test_db();
+    let secret = crate::core::crypto::generate_secret();
+
+    let server = McpServer {
+        id: "srv1".into(), name: "GitHub".into(), description: "".into(),
+        transport: McpTransport::Stdio { command: "npx".into(), args: vec!["-y".into(), "pkg".into()] },
+        source: McpSource::Registry,
+    };
+    crate::db::mcps::upsert_server(&conn, &server).unwrap();
+
+    let mut env = std::collections::HashMap::new();
+    env.insert("TOKEN".into(), "old-value".into());
+    let encrypted = crate::db::mcps::encrypt_env(&env, &secret).unwrap();
+
+    let config = McpConfig {
+        id: "cfg1".into(), server_id: "srv1".into(), label: "My GitHub".into(),
+        env_keys: vec!["TOKEN".into()], env_encrypted: encrypted,
+        args_override: None, is_global: false, include_general: true,
+        config_hash: "h1".into(), project_ids: vec![],
+    };
+    crate::db::mcps::insert_config(&conn, &config).unwrap();
+
+    // Update env with new value
+    let mut new_env = std::collections::HashMap::new();
+    new_env.insert("TOKEN".into(), "new-secret-value".into());
+    let new_encrypted = crate::db::mcps::encrypt_env(&new_env, &secret).unwrap();
+    let new_keys = vec!["TOKEN".to_string()];
+
+    let updated = crate::db::mcps::update_config(
+        &conn, "cfg1", None, Some(&new_encrypted), Some(&new_keys),
+        None, None, None, None,
+    ).unwrap();
+    assert!(updated, "update_config should return true");
+
+    // Verify the stored encrypted value decrypts to the new value
+    let loaded = crate::db::mcps::get_config(&conn, "cfg1").unwrap().unwrap();
+    let decrypted = crate::db::mcps::decrypt_env(&loaded.env_encrypted, &secret).unwrap();
+    assert_eq!(decrypted.get("TOKEN").unwrap(), "new-secret-value",
+        "Updated env value must persist after update_config");
+}
+
+#[test]
+fn mcp_config_update_nonexistent_returns_false() {
+    let conn = test_db();
+    let result = crate::db::mcps::update_config(
+        &conn, "nonexistent", Some("label"), None, None, None, None, None, None,
+    ).unwrap();
+    assert!(!result, "Updating a nonexistent config should return false");
+}
+
+#[test]
+fn mcp_decrypt_wrong_secret_fails() {
+    let secret1 = crate::core::crypto::generate_secret();
+    let secret2 = crate::core::crypto::generate_secret();
+
+    let mut env = std::collections::HashMap::new();
+    env.insert("KEY".into(), "secret-value".into());
+
+    let encrypted = crate::db::mcps::encrypt_env(&env, &secret1).unwrap();
+    let result = crate::db::mcps::decrypt_env(&encrypted, &secret2);
+    assert!(result.is_err(), "Decrypting with wrong secret must fail");
+}
+
+#[test]
+fn mcp_config_global_visible_to_all_projects() {
+    let conn = test_db();
+    let secret = crate::core::crypto::generate_secret();
+
+    let server = McpServer {
+        id: "srv1".into(), name: "Sentry".into(), description: "".into(),
+        transport: McpTransport::Stdio { command: "npx".into(), args: vec![] },
+        source: McpSource::Registry,
+    };
+    crate::db::mcps::upsert_server(&conn, &server).unwrap();
+    crate::db::projects::insert_project(&conn, &sample_project("p1", "ProjectA")).unwrap();
+    crate::db::projects::insert_project(&conn, &sample_project("p2", "ProjectB")).unwrap();
+
+    // Create a global config with encrypted env
+    let mut env = std::collections::HashMap::new();
+    env.insert("SENTRY_TOKEN".into(), "tok-123".into());
+    let encrypted = crate::db::mcps::encrypt_env(&env, &secret).unwrap();
+
+    let config = McpConfig {
+        id: "cfg-global".into(), server_id: "srv1".into(), label: "Sentry Global".into(),
+        env_keys: vec!["SENTRY_TOKEN".into()], env_encrypted: encrypted.clone(),
+        args_override: None, is_global: true, include_general: true,
+        config_hash: "h".into(), project_ids: vec![],
+    };
+    crate::db::mcps::insert_config(&conn, &config).unwrap();
+
+    // Both projects should see it
+    let for_p1 = crate::db::mcps::configs_for_project(&conn, "p1").unwrap();
+    let for_p2 = crate::db::mcps::configs_for_project(&conn, "p2").unwrap();
+    assert_eq!(for_p1.len(), 1, "P1 should see global config");
+    assert_eq!(for_p2.len(), 1, "P2 should see global config");
+
+    // Now update the global config's env
+    let mut new_env = std::collections::HashMap::new();
+    new_env.insert("SENTRY_TOKEN".into(), "tok-456-updated".into());
+    let new_encrypted = crate::db::mcps::encrypt_env(&new_env, &secret).unwrap();
+    crate::db::mcps::update_config(
+        &conn, "cfg-global", None, Some(&new_encrypted), None, None, None, None, None,
+    ).unwrap();
+
+    // Both projects should see the UPDATED value
+    let for_p1 = crate::db::mcps::configs_for_project(&conn, "p1").unwrap();
+    let decrypted = crate::db::mcps::decrypt_env(&for_p1[0].env_encrypted, &secret).unwrap();
+    assert_eq!(decrypted.get("SENTRY_TOKEN").unwrap(), "tok-456-updated",
+        "Global config update must be visible to all projects immediately");
+}
+
+#[test]
+fn mcp_set_config_projects_relinks() {
+    let conn = test_db();
+    let server = McpServer {
+        id: "srv1".into(), name: "S".into(), description: "".into(),
+        transport: McpTransport::Stdio { command: "test".into(), args: vec![] },
+        source: McpSource::Registry,
+    };
+    crate::db::mcps::upsert_server(&conn, &server).unwrap();
+    crate::db::projects::insert_project(&conn, &sample_project("p1", "P1")).unwrap();
+    crate::db::projects::insert_project(&conn, &sample_project("p2", "P2")).unwrap();
+    crate::db::projects::insert_project(&conn, &sample_project("p3", "P3")).unwrap();
+
+    let config = McpConfig {
+        id: "cfg1".into(), server_id: "srv1".into(), label: "Test".into(),
+        env_keys: vec![], env_encrypted: "".into(),
+        args_override: None, is_global: false, include_general: true,
+        config_hash: "h".into(), project_ids: vec!["p1".into(), "p2".into()],
+    };
+    crate::db::mcps::insert_config(&conn, &config).unwrap();
+
+    // Verify initial state
+    let loaded = crate::db::mcps::get_config(&conn, "cfg1").unwrap().unwrap();
+    assert_eq!(loaded.project_ids.len(), 2);
+
+    // Re-link to p2 and p3 (remove p1, add p3)
+    crate::db::mcps::set_config_projects(&conn, "cfg1", &["p2".into(), "p3".into()]).unwrap();
+
+    let reloaded = crate::db::mcps::get_config(&conn, "cfg1").unwrap().unwrap();
+    assert!(!reloaded.project_ids.contains(&"p1".to_string()), "p1 should be unlinked");
+    assert!(reloaded.project_ids.contains(&"p2".to_string()), "p2 should remain");
+    assert!(reloaded.project_ids.contains(&"p3".to_string()), "p3 should be added");
+
+    // p1 should no longer see this config
+    let for_p1 = crate::db::mcps::configs_for_project(&conn, "p1").unwrap();
+    assert!(for_p1.is_empty(), "p1 should have no configs after re-link");
+}
+
+#[test]
+fn mcp_delete_config_removes_project_links() {
+    let conn = test_db();
+    let server = McpServer {
+        id: "srv1".into(), name: "S".into(), description: "".into(),
+        transport: McpTransport::Stdio { command: "test".into(), args: vec![] },
+        source: McpSource::Registry,
+    };
+    crate::db::mcps::upsert_server(&conn, &server).unwrap();
+    crate::db::projects::insert_project(&conn, &sample_project("p1", "P1")).unwrap();
+
+    let config = McpConfig {
+        id: "cfg1".into(), server_id: "srv1".into(), label: "Test".into(),
+        env_keys: vec![], env_encrypted: "".into(),
+        args_override: None, is_global: false, include_general: true,
+        config_hash: "h".into(), project_ids: vec!["p1".into()],
+    };
+    crate::db::mcps::insert_config(&conn, &config).unwrap();
+
+    // Delete the config
+    let deleted = crate::db::mcps::delete_config(&conn, "cfg1").unwrap();
+    assert!(deleted);
+
+    // Project should have no configs
+    let for_p1 = crate::db::mcps::configs_for_project(&conn, "p1").unwrap();
+    assert!(for_p1.is_empty(), "Deleted config should not appear in project configs");
+}
+
+#[test]
+fn mcp_config_update_global_flag_changes_visibility() {
+    let conn = test_db();
+    let server = McpServer {
+        id: "srv1".into(), name: "S".into(), description: "".into(),
+        transport: McpTransport::Stdio { command: "test".into(), args: vec![] },
+        source: McpSource::Registry,
+    };
+    crate::db::mcps::upsert_server(&conn, &server).unwrap();
+    crate::db::projects::insert_project(&conn, &sample_project("p1", "P1")).unwrap();
+    crate::db::projects::insert_project(&conn, &sample_project("p2", "P2")).unwrap();
+
+    // Create non-global config linked to p1 only
+    let config = McpConfig {
+        id: "cfg1".into(), server_id: "srv1".into(), label: "Test".into(),
+        env_keys: vec![], env_encrypted: "".into(),
+        args_override: None, is_global: false, include_general: true,
+        config_hash: "h".into(), project_ids: vec!["p1".into()],
+    };
+    crate::db::mcps::insert_config(&conn, &config).unwrap();
+
+    // p2 should NOT see it
+    let for_p2 = crate::db::mcps::configs_for_project(&conn, "p2").unwrap();
+    assert!(for_p2.is_empty(), "Non-global config should not be visible to unlinked project");
+
+    // Promote to global
+    crate::db::mcps::update_config(
+        &conn, "cfg1", None, None, None, None, Some(true), None, None,
+    ).unwrap();
+
+    // Now p2 should see it
+    let for_p2 = crate::db::mcps::configs_for_project(&conn, "p2").unwrap();
+    assert_eq!(for_p2.len(), 1, "Global config must be visible to all projects");
+}
+
+#[test]
+fn mcp_config_hash_changes_on_env_update() {
+    let server = McpServer {
+        id: "srv".into(), name: "S".into(), description: "".into(),
+        transport: McpTransport::Stdio { command: "npx".into(), args: vec!["-y".into(), "pkg".into()] },
+        source: McpSource::Registry,
+    };
+
+    let mut env_old = std::collections::HashMap::new();
+    env_old.insert("TOKEN".into(), "old-value".into());
+    let mut env_new = std::collections::HashMap::new();
+    env_new.insert("TOKEN".into(), "new-value".into());
+
+    let hash_old = crate::db::mcps::compute_config_hash(&server, &env_old, None);
+    let hash_new = crate::db::mcps::compute_config_hash(&server, &env_new, None);
+
+    assert_ne!(hash_old, hash_new,
+        "Config hash must change when env values change (dedup detection)");
+}
+
+#[test]
+fn mcp_config_hash_changes_on_args_override() {
+    let server = McpServer {
+        id: "srv".into(), name: "S".into(), description: "".into(),
+        transport: McpTransport::Stdio { command: "npx".into(), args: vec!["-y".into(), "pkg".into()] },
+        source: McpSource::Registry,
+    };
+    let env = std::collections::HashMap::new();
+
+    let hash_default = crate::db::mcps::compute_config_hash(&server, &env, None);
+    let hash_override = crate::db::mcps::compute_config_hash(
+        &server, &env, Some(&vec!["--custom-flag".into()]),
+    );
+
+    assert_ne!(hash_default, hash_override,
+        "Config hash must differ when args_override is set");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

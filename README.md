@@ -194,25 +194,25 @@ Kronn reads Symphony's `WORKFLOW.md` natively. Existing users can migrate withou
 Three independent axes shape how agents behave — all multi-selectable, all available in discussions and workflow steps:
 
 #### Profiles (WHO — persona)
-8 built-in agent profiles with distinct personalities, expertise, and avatars. Each profile has an editable persona name (Kai, Mia, Sam, Noa, Kim, Eve, Max, Zia) — customize even the builtins. When multiple profiles are selected, agents adopt a **collaborative mode**: consider each perspective, identify trade-offs, challenge assumptions.
+11 built-in agent profiles with distinct personalities, expertise, and avatars. Each profile has an editable persona name — customize even the builtins. When multiple profiles are selected, agents adopt a **collaborative mode**: consider each perspective, identify trade-offs, challenge assumptions.
 
 | Category | Profiles |
 |----------|----------|
-| Technical | Architect (Kai), Tech Lead (Mia), QA Engineer (Sam) |
-| Business | Product Owner (Noa), Scrum Master (Kim), Technical Writer (Eve) |
-| Meta | Devil's Advocate (Max), Mentor (Zia) |
+| Technical | Architect, Tech Lead, QA Engineer, Game Developer |
+| Business | Product Owner, Scrum Master, Technical Writer, Entrepreneur, UX Designer |
+| Meta | Devil's Advocate, Mentor |
 
 #### Skills (WHAT — domain expertise)
-13 built-in skills + custom skills. Injected into agent prompts as domain knowledge.
+22 built-in skills + custom skills. Injected into agent prompts as domain knowledge.
 
 | Category | Skills |
 |----------|--------|
-| Language | TypeScript Dev, Rust Dev |
-| Domain | Security Auditor, DevOps Expert, SEO Expert, Green IT Expert, Data Engineer |
-| Business | Product Owner, QA Engineer, Tech Lead |
+| Language | Rust, TypeScript, Python, Go, PHP, Java, Kotlin, Swift, C# |
+| Domain | Security, DevOps, Data Engineering, Database, Terraform/IaC, Testing, API Design, Mobile |
+| Business | SEO, Web Performance, Green IT, Accessibility, GDPR |
 
 #### Directives (HOW — output behavior)
-Control output format, language, and verbosity. Conflict detection prevents contradictory directives.
+Control output format and verbosity. Conflict detection prevents contradictory directives.
 
 Custom profiles, skills, and directives are stored as Markdown files with YAML frontmatter in `~/.config/kronn/`. Create, edit, and delete from the dashboard.
 
@@ -300,8 +300,8 @@ kronn/
 │       ├── core/           # config, scanner, registry, mcp_scanner, crypto, profiles, directives
 │       ├── agents/         # Agent runner (spawns CLIs, streams stdout)
 │       ├── workflows/      # Workflow engine, triggers, steps, tracker adapters
-│       ├── skills/         # 13 built-in skill profiles (Markdown + YAML frontmatter)
-│       ├── profiles/      # 8 built-in agent profiles (persona + YAML frontmatter)
+│       ├── skills/         # 22 built-in skills (Markdown + YAML frontmatter)
+│       ├── profiles/      # 11 built-in agent profiles (persona + YAML frontmatter)
 │       ├── directives/    # Built-in output directives (Markdown + YAML frontmatter)
 │       └── models/         # Shared types → auto-exported to TS via ts-rs
 ├── frontend/           # React + TypeScript + Vite

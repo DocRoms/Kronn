@@ -556,7 +556,7 @@ async fn make_agent_stream(
                 };
                 let success = !was_interrupted && status.map(|s| s.success()).unwrap_or(false);
 
-                let stderr_lines = process.captured_stderr();
+                let stderr_lines = process.captured_stderr_flushed().await;
                 let stderr_text = stderr_lines.join("\n");
 
                 // Mark partial responses
@@ -1029,7 +1029,7 @@ pub async fn orchestrate(
                         };
                         let orch_success = status.map(|s| s.success()).unwrap_or(false);
 
-                        let orch_stderr = process.captured_stderr();
+                        let orch_stderr = process.captured_stderr_flushed().await;
                         let orch_stderr_text = orch_stderr.join("\n");
 
                         if full_response.is_empty() && !orch_success {
@@ -1163,7 +1163,7 @@ pub async fn orchestrate(
                     }
                     let _ = process.child.wait().await;
                     process.fix_ownership();
-                    let synth_stderr = process.captured_stderr();
+                    let synth_stderr = process.captured_stderr_flushed().await;
 
                     let tokens_used = if synth_stream_tokens > 0 {
                         synth_stream_tokens
@@ -1731,11 +1731,12 @@ fn is_compact_agent(agent_type: &AgentType) -> bool {
 
 fn language_instruction(lang: &str) -> &'static str {
     match lang {
-        "fr" => "Reponds en francais.",
-        "en" => "Respond in English.",
-        "zh" => "请用中文回答。",
-        "br" => "Respont e brezhoneg.",
-        _ => "Respond in English.",
+        "fr" => "[IMPORTANT] Tu DOIS répondre en français. Toutes tes réponses doivent être en français.",
+        "en" => "[IMPORTANT] You MUST respond in English. All your responses must be in English.",
+        "es" => "[IMPORTANTE] DEBES responder en español. Todas tus respuestas deben ser en español.",
+        "zh" => "[重要] 你必须用中文回答。你的所有回复都必须是中文。",
+        "br" => "[POUEZUS] Ret eo dit respont e brezhoneg. Holl da respontoù a rank bezañ e brezhoneg.",
+        _ => "[IMPORTANT] You MUST respond in English. All your responses must be in English.",
     }
 }
 
@@ -1771,7 +1772,9 @@ fn build_agent_prompt(disc: &Discussion, agent_type: &AgentType, extra_context_l
 
     if user_msgs.len() <= 1 {
         let content = user_msgs.last().map(|m| m.content.clone()).unwrap_or_default();
-        return format!("{}\n\n{}{}", lang_instr, title_ctx, content);
+        // Language instruction at end only — LLMs weight recent text more heavily,
+        // and MCP context is injected via --append-system-prompt (separate from prompt).
+        return format!("{}{}\n\n{}", title_ctx, content, lang_instr);
     }
 
     // Fixed overhead: header + footer (localized by discussion language)
@@ -1781,11 +1784,13 @@ fn build_agent_prompt(disc: &Discussion, agent_type: &AgentType, extra_context_l
         _ => "Previous conversation:\n\n",
     };
     let footer = match disc.language.as_str() {
-        "fr" => "Répondez au dernier message ci-dessus.",
-        "es" => "Responda al último mensaje anterior.",
-        _ => "Please respond to the latest user message above.",
+        "fr" => "Répondez au dernier message ci-dessus. Reponds en francais.",
+        "es" => "Responda al último mensaje anterior. Responda en español.",
+        "zh" => "请回复上面的最新用户消息。请用中文回答。",
+        "br" => "Respontet d'ar c'hemenn diwezhañ a-us. Respont e brezhoneg.",
+        _ => "Please respond to the latest user message above. Respond in English.",
     };
-    let header = format!("{}\n\n{}{}", lang_instr, title_ctx, prev_conv_label);
+    let header = format!("{}{}", title_ctx, prev_conv_label);
     let overhead = header.len() + footer.len() + 100; // 100 = notice template space
 
     // If we have a cached summary, inject it and only include messages after the summary
@@ -1887,6 +1892,19 @@ fn build_agent_prompt(disc: &Discussion, agent_type: &AgentType, extra_context_l
 /// Detect common agent error patterns and return a user-friendly hint.
 pub(crate) fn detect_agent_error_hint(output: &str) -> Option<String> {
     let lower = output.to_lowercase();
+
+    // MCP configuration errors
+    if lower.contains("invalid mcp configuration") || lower.contains("mcp config file not found")
+        || lower.contains("mcp server") && lower.contains("failed to start")
+    {
+        return Some(
+            "⚠️ **Erreur de configuration MCP.**\n\
+             Un serveur MCP n'a pas pu démarrer. Causes possibles :\n\
+             - Commande MCP non installée (npx/uvx introuvable)\n\
+             - Chemin de projet invalide (montage Docker)\n\
+             - `.mcp.json` corrompu → relancez un sync depuis MCPs > Actualiser".to_string()
+        );
+    }
 
     // Authentication / session errors
     if lower.contains("authentication_error")
@@ -2649,5 +2667,90 @@ mod tests {
         let prompt = build_agent_prompt(&disc, &AgentType::ClaudeCode, 0);
         assert!(prompt.contains("only-prompt"));
         assert!(!prompt.contains("Previous conversation:"));
+    }
+
+    // ─── language instruction tests ─────────────────────────────────────────────
+
+    fn make_discussion_with_lang(messages: Vec<DiscussionMessage>, lang: &str) -> Discussion {
+        let mut disc = make_discussion(messages);
+        disc.language = lang.to_string();
+        disc
+    }
+
+    #[test]
+    fn language_instruction_is_dynamic_per_discussion() {
+        let disc_fr = make_discussion_with_lang(
+            vec![make_msg(MessageRole::User, "salut")], "fr",
+        );
+        let disc_en = make_discussion_with_lang(
+            vec![make_msg(MessageRole::User, "hello")], "en",
+        );
+        let disc_es = make_discussion_with_lang(
+            vec![make_msg(MessageRole::User, "hola")], "es",
+        );
+
+        let prompt_fr = build_agent_prompt(&disc_fr, &AgentType::ClaudeCode, 0);
+        let prompt_en = build_agent_prompt(&disc_en, &AgentType::ClaudeCode, 0);
+        let prompt_es = build_agent_prompt(&disc_es, &AgentType::ClaudeCode, 0);
+
+        assert!(prompt_fr.contains("français"), "FR prompt must contain French instruction");
+        assert!(prompt_en.contains("English"), "EN prompt must contain English instruction");
+        assert!(prompt_es.contains("español"), "ES prompt must contain Spanish instruction");
+
+        // Must NOT leak other languages
+        assert!(!prompt_fr.contains("English"), "FR prompt must not contain English instruction");
+        assert!(!prompt_en.contains("français"), "EN prompt must not contain French instruction");
+    }
+
+    #[test]
+    fn single_message_language_instruction_at_end() {
+        let disc = make_discussion_with_lang(
+            vec![make_msg(MessageRole::User, "test prompt")], "fr",
+        );
+        let prompt = build_agent_prompt(&disc, &AgentType::Vibe, 0);
+
+        // Language instruction at end only (LLMs weight recent text more, saves tokens)
+        assert!(prompt.ends_with("français."), "Language reminder must be at end of prompt");
+        // The instruction block should appear exactly once (end only)
+        assert_eq!(prompt.matches("[IMPORTANT]").count(), 1,
+            "Language instruction block should appear once (end only) to save tokens");
+    }
+
+    #[test]
+    fn multi_message_footer_includes_language_reminder() {
+        let disc = make_discussion_with_lang(vec![
+            make_msg(MessageRole::User, "first message"),
+            make_msg(MessageRole::Agent, "agent reply"),
+            make_msg(MessageRole::User, "second message"),
+        ], "fr");
+        let prompt = build_agent_prompt(&disc, &AgentType::ClaudeCode, 0);
+
+        // Footer should contain language reminder
+        assert!(prompt.contains("Répondez au dernier message"), "Footer must be in French");
+        assert!(prompt.contains("francais"), "Footer must include language reminder");
+        // No duplicate language instruction at start (saves tokens)
+        assert!(!prompt.starts_with("[IMPORTANT]"), "Language instruction should not be duplicated at start");
+    }
+
+    #[test]
+    fn multi_message_footer_language_matches_discussion() {
+        let disc_en = make_discussion_with_lang(vec![
+            make_msg(MessageRole::User, "msg1"),
+            make_msg(MessageRole::Agent, "reply"),
+            make_msg(MessageRole::User, "msg2"),
+        ], "en");
+        let prompt = build_agent_prompt(&disc_en, &AgentType::GeminiCli, 0);
+
+        assert!(prompt.contains("Respond in English"), "EN footer must have English reminder");
+        assert!(!prompt.contains("français"), "EN prompt must not contain French");
+    }
+
+    #[test]
+    fn unknown_language_defaults_to_english() {
+        let disc = make_discussion_with_lang(
+            vec![make_msg(MessageRole::User, "test")], "xx",
+        );
+        let prompt = build_agent_prompt(&disc, &AgentType::ClaudeCode, 0);
+        assert!(prompt.contains("English"), "Unknown language should default to English");
     }
 }

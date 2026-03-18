@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES, agentColor } from '../constants';
+import { AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES, agentColor, getProjectGroup } from '../constants';
 
 describe('constants', () => {
   describe('AGENT_COLORS', () => {
@@ -67,6 +67,37 @@ describe('constants', () => {
     it('handles display name keys', () => {
       expect(agentColor('Claude Code')).toBe('#D4714E');
       expect(agentColor('Gemini CLI')).toBe('#4285f4');
+    });
+  });
+
+  describe('getProjectGroup()', () => {
+    it('extracts GitHub org from SSH URL', () => {
+      expect(getProjectGroup({ repo_url: 'git@github.com:Euronews-tech/front_euronews.git' }))
+        .toBe('Euronews-tech');
+    });
+
+    it('extracts GitHub org from HTTPS URL', () => {
+      expect(getProjectGroup({ repo_url: 'https://github.com/DocRoms/Kronn.git' }))
+        .toBe('DocRoms');
+    });
+
+    it('extracts GitLab org from SSH URL', () => {
+      expect(getProjectGroup({ repo_url: 'git@gitlab.com:myorg/myproject.git' }))
+        .toBe('myorg');
+    });
+
+    it('returns local label when no repo_url', () => {
+      expect(getProjectGroup({ repo_url: null })).toBe('Local');
+      expect(getProjectGroup({ repo_url: null }, 'Perso')).toBe('Perso');
+    });
+
+    it('returns other label on invalid URL', () => {
+      expect(getProjectGroup({ repo_url: 'not-a-url' })).toBe('Other');
+      expect(getProjectGroup({ repo_url: 'not-a-url' }, 'Local', 'Divers')).toBe('Divers');
+    });
+
+    it('returns empty string repo_url as local', () => {
+      expect(getProjectGroup({ repo_url: '' })).toBe('Local');
     });
   });
 });

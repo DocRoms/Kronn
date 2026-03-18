@@ -3,9 +3,9 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { discussions as discussionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi } from '../lib/api';
 import { GitPanel } from '../components/GitPanel';
-import type { Project, AgentDetection, Discussion, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay } from '../types/generated';
+import type { Project, AgentDetection, Discussion, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility } from '../types/generated';
 import { useT } from '../lib/I18nContext';
-import { AGENT_LABELS, agentColor, isAgentRestricted as isAgentRestrictedUtil, hasAgentFullAccess } from '../lib/constants';
+import { AGENT_LABELS, agentColor, isAgentRestricted as isAgentRestrictedUtil, hasAgentFullAccess, getProjectGroup } from '../lib/constants';
 import type { ToastFn } from '../hooks/useToast';
 import {
   Folder, ChevronRight, Cpu, GitBranch, Server,
@@ -172,6 +172,7 @@ export interface DiscussionsPageProps {
   onActiveDiscussionChange: (id: string | null) => void;
   lastSeenMsgCount: Record<string, number>;
   mcpConfigs?: McpConfigDisplay[];
+  mcpIncompatibilities?: McpIncompatibility[];
 }
 
 export function DiscussionsPage({
@@ -201,6 +202,7 @@ export function DiscussionsPage({
   lastSeenMsgCount,
   initialActiveDiscussionId,
   mcpConfigs = [],
+  mcpIncompatibilities = [],
 }: DiscussionsPageProps) {
   const { t } = useT();
 
@@ -219,7 +221,12 @@ export function DiscussionsPage({
   const [chatInput, setChatInput] = useState('');
   const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState('');
-  const [collapsedDiscGroups, setCollapsedDiscGroups] = useState<Set<string>>(new Set());
+  const [collapsedDiscGroups, setCollapsedDiscGroups] = useState<Set<string>>(() => {
+    try {
+      const saved = localStorage.getItem('kronn:discCollapsedGroups');
+      return saved ? new Set(JSON.parse(saved) as string[]) : new Set();
+    } catch { return new Set(); }
+  });
   const [showDebatePopover, setShowDebatePopover] = useState(false);
   const [debateAgents, setDebateAgents] = useState<AgentType[]>([]);
   const [debateRounds, setDebateRounds] = useState(2);
@@ -252,6 +259,11 @@ export function DiscussionsPage({
 
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // Persist sidebar collapse state to localStorage
+  useEffect(() => {
+    localStorage.setItem('kronn:discCollapsedGroups', JSON.stringify([...collapsedDiscGroups]));
+  }, [collapsedDiscGroups]);
 
   // Batched streaming: accumulate chunks in a ref, flush to state via rAF
   const streamBufferRef = useRef<Record<string, string>>({});
@@ -737,46 +749,93 @@ export function DiscussionsPage({
             );
           })()}
 
-          {/* Project discussions */}
-          {projects.filter(p => !isHiddenPath(p.path)).map(proj => {
-            const projDiscs = activeDiscByProject.get(proj.id) ?? [];
-            if (projDiscs.length === 0) return null;
-            const isCollapsed = collapsedDiscGroups.has(proj.id);
-            return (
-              <div key={proj.id}>
-                <button
-                  style={{ ...ds.projectGroup, cursor: 'pointer', userSelect: 'none' as const, background: 'none', border: 'none', width: '100%', font: 'inherit', color: 'inherit', textAlign: 'left' as const }}
-                  onClick={() => setCollapsedDiscGroups(prev => { const n = new Set(prev); isCollapsed ? n.delete(proj.id) : n.add(proj.id); return n; })}
-                  aria-expanded={!isCollapsed}
-                >
-                  <ChevronRight size={10} style={{ transform: isCollapsed ? 'none' : 'rotate(90deg)', transition: 'transform 0.15s' }} />
-                  <Folder size={10} /> {proj.name}
-                  <span style={{ fontWeight: 400, opacity: 0.5, marginLeft: 'auto' }}>{projDiscs.length}</span>
-                </button>
-                {!isCollapsed && projDiscs.sort((a, b) => b.updated_at.localeCompare(a.updated_at)).map(disc => (
-                  <SwipeableDiscItem
-                    key={disc.id}
-                    disc={disc}
-                    isActive={disc.id === activeDiscussionId}
-                    lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
-                    isSending={!!sendingMap[disc.id]}
-                    onSelect={() => { setActiveDiscussionId(disc.id); markDiscussionSeen(disc.id, disc.message_count ?? disc.messages.length); }}
-                    onArchive={async () => {
-                      await discussionsApi.update(disc.id, { archived: true });
-                      if (activeDiscussionId === disc.id) setActiveDiscussionId(null);
-                      refetchDiscussions();
-                    }}
-                    onDelete={async () => {
-                      await discussionsApi.delete(disc.id);
-                      if (activeDiscussionId === disc.id) setActiveDiscussionId(null);
-                      refetchDiscussions();
-                    }}
-                    t={t}
-                  />
-                ))}
-              </div>
-            );
-          })}
+          {/* Project discussions — grouped by org */}
+          {(() => {
+            const visibleProjects = projects.filter(p => !isHiddenPath(p.path) && (activeDiscByProject.get(p.id) ?? []).length > 0);
+            // Build org groups
+            const orgMap = new Map<string, typeof visibleProjects>();
+            for (const p of visibleProjects) {
+              const org = getProjectGroup(p, t('disc.local'), t('disc.local'));
+              const list = orgMap.get(org) ?? [];
+              list.push(p);
+              orgMap.set(org, list);
+            }
+            // Sort orgs alphabetically, "Local" last
+            const localLabel = t('disc.local');
+            const sortedOrgs = [...orgMap.entries()].sort(([a], [b]) => {
+              if (a === localLabel) return 1;
+              if (b === localLabel) return -1;
+              return a.localeCompare(b);
+            });
+
+            return sortedOrgs.map(([orgName, orgProjects]) => {
+              const orgKey = `org::${orgName}`;
+              const isOrgCollapsed = collapsedDiscGroups.has(orgKey);
+              const orgDiscCount = orgProjects.reduce((sum, p) => sum + (activeDiscByProject.get(p.id) ?? []).length, 0);
+              // Color from org name hash (same as Dashboard)
+              const orgColor = orgName === localLabel ? 'rgba(255,255,255,0.3)'
+                : `hsl(${[...orgName].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 0)}, 50%, 60%)`;
+
+              return (
+                <div key={orgKey}>
+                  {sortedOrgs.length > 1 && (
+                    <button
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px', width: '100%',
+                        background: 'none', border: 'none', borderTop: '1px solid rgba(255,255,255,0.05)',
+                        font: 'inherit', color: orgColor, cursor: 'pointer', fontSize: 10, fontWeight: 600,
+                        textTransform: 'uppercase', letterSpacing: '0.05em', userSelect: 'none' as const,
+                      }}
+                      onClick={() => setCollapsedDiscGroups(prev => { const n = new Set(prev); isOrgCollapsed ? n.delete(orgKey) : n.add(orgKey); return n; })}
+                      aria-expanded={!isOrgCollapsed}
+                    >
+                      <ChevronRight size={9} style={{ transform: isOrgCollapsed ? 'none' : 'rotate(90deg)', transition: 'transform 0.15s' }} />
+                      {orgName}
+                      <span style={{ fontWeight: 400, opacity: 0.5, marginLeft: 'auto' }}>{orgDiscCount}</span>
+                    </button>
+                  )}
+                  {!isOrgCollapsed && orgProjects.map(proj => {
+                    const projDiscs = activeDiscByProject.get(proj.id) ?? [];
+                    const isCollapsed = collapsedDiscGroups.has(proj.id);
+                    return (
+                      <div key={proj.id}>
+                        <button
+                          style={{ ...ds.projectGroup, cursor: 'pointer', userSelect: 'none' as const, background: 'none', border: 'none', width: '100%', font: 'inherit', color: 'inherit', textAlign: 'left' as const }}
+                          onClick={() => setCollapsedDiscGroups(prev => { const n = new Set(prev); isCollapsed ? n.delete(proj.id) : n.add(proj.id); return n; })}
+                          aria-expanded={!isCollapsed}
+                        >
+                          <ChevronRight size={10} style={{ transform: isCollapsed ? 'none' : 'rotate(90deg)', transition: 'transform 0.15s' }} />
+                          <Folder size={10} /> {proj.name}
+                          <span style={{ fontWeight: 400, opacity: 0.5, marginLeft: 'auto' }}>{projDiscs.length}</span>
+                        </button>
+                        {!isCollapsed && projDiscs.sort((a, b) => b.updated_at.localeCompare(a.updated_at)).map(disc => (
+                          <SwipeableDiscItem
+                            key={disc.id}
+                            disc={disc}
+                            isActive={disc.id === activeDiscussionId}
+                            lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
+                            isSending={!!sendingMap[disc.id]}
+                            onSelect={() => { setActiveDiscussionId(disc.id); markDiscussionSeen(disc.id, disc.message_count ?? disc.messages.length); }}
+                            onArchive={async () => {
+                              await discussionsApi.update(disc.id, { archived: true });
+                              if (activeDiscussionId === disc.id) setActiveDiscussionId(null);
+                              refetchDiscussions();
+                            }}
+                            onDelete={async () => {
+                              await discussionsApi.delete(disc.id);
+                              if (activeDiscussionId === disc.id) setActiveDiscussionId(null);
+                              refetchDiscussions();
+                            }}
+                            t={t}
+                          />
+                        ))}
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            });
+          })()}
 
           {allDiscussions.length === 0 && !showNewDiscussion && (
             <div style={{ padding: 24, textAlign: 'center', color: 'rgba(255,255,255,0.25)', fontSize: 12, whiteSpace: 'pre-line' }}>
@@ -1334,24 +1393,47 @@ export function DiscussionsPage({
                     const discMcps = activeDiscussion.project_id
                       ? mcpConfigs.filter(c => c.is_global || c.project_ids.includes(activeDiscussion.project_id!))
                       : mcpConfigs.filter(c => c.include_general);
+                    // Agents running via direct API (no CLI) cannot use MCP tools
+                    const apiOnlyAgents: AgentType[] = ['Vibe' as AgentType];
+                    const isApiOnly = apiOnlyAgents.includes(activeDiscussion.agent);
                     return (
                       <div style={{
                         position: 'absolute', right: 0, top: '100%', marginTop: 4, zIndex: 100,
                         background: '#161b22', border: '1px solid rgba(0,212,255,0.2)', borderRadius: 8,
-                        padding: '8px 0', minWidth: 180, boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
+                        padding: '8px 0', minWidth: 220, boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
                       }}>
                         <div style={{ padding: '4px 12px 6px', fontSize: 10, color: 'rgba(255,255,255,0.35)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
                           {t('disc.mcps')}
                         </div>
+                        {isApiOnly && (
+                          <div style={{ padding: '3px 12px 6px', fontSize: 10, color: '#f0a020', display: 'flex', alignItems: 'center', gap: 4 }}>
+                            <span style={{ fontSize: 10 }}>⚡</span>
+                            Mode API — MCPs indisponibles
+                          </div>
+                        )}
                         {discMcps.length === 0 ? (
                           <div style={{ padding: '4px 12px', fontSize: 11, color: 'rgba(255,255,255,0.3)' }}>{t('disc.noMcps')}</div>
-                        ) : discMcps.map(c => (
-                          <div key={c.id} style={{ padding: '3px 12px', fontSize: 11, color: '#e8eaed', display: 'flex', alignItems: 'center', gap: 6 }}>
-                            <Server size={9} style={{ color: '#00d4ff', flexShrink: 0 }} />
-                            {c.label}
-                            <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.25)', marginLeft: 'auto' }}>{c.server_name}</span>
-                          </div>
-                        ))}
+                        ) : discMcps.map(c => {
+                          const incomp = mcpIncompatibilities.find(
+                            i => i.server_id === c.server_id && i.agent === activeDiscussion.agent
+                          );
+                          return (
+                            <div
+                              key={c.id}
+                              title={incomp ? `⚠ ${incomp.reason}` : isApiOnly ? 'Non disponible en mode API' : undefined}
+                              style={{
+                                padding: '3px 12px', fontSize: 11, display: 'flex', alignItems: 'center', gap: 6,
+                                color: incomp ? '#ff6b6b' : isApiOnly ? 'rgba(255,255,255,0.25)' : '#e8eaed',
+                                opacity: incomp ? 0.7 : isApiOnly ? 0.5 : 1,
+                              }}
+                            >
+                              <Server size={9} style={{ color: incomp ? '#ff6b6b' : isApiOnly ? 'rgba(255,255,255,0.2)' : '#00d4ff', flexShrink: 0 }} />
+                              {c.label}
+                              {incomp && <span style={{ fontSize: 8, color: '#ff6b6b', fontStyle: 'italic' }}>incompatible</span>}
+                              <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.15)', marginLeft: 'auto' }}>{c.server_name}</span>
+                            </div>
+                          );
+                        })}
                       </div>
                     );
                   })()}
@@ -1564,6 +1646,18 @@ export function DiscussionsPage({
             {/* Messages + Git Panel side by side */}
             <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
             <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+
+            {/* Vibe API mode notice */}
+            {activeDiscussion.agent === 'Vibe' && (
+              <div style={{
+                padding: '6px 16px', fontSize: 10, color: 'rgba(240,160,32,0.8)',
+                background: 'rgba(240,160,32,0.06)', borderBottom: '1px solid rgba(240,160,32,0.12)',
+                display: 'flex', alignItems: 'center', gap: 6,
+              }}>
+                <span>⚠</span>
+                <span>Mode API directe — les outils MCP ne sont pas disponibles. Vibe répond en chat uniquement.</span>
+              </div>
+            )}
 
             {/* Kiro output notice */}
             {activeDiscussion.agent === 'Kiro' && (

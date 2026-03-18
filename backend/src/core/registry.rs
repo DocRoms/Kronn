@@ -480,6 +480,61 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             token_url: Some("https://e2b.dev/dashboard".into()),
             token_help: Some("API key from E2B dashboard".into()),
         },
+        // ── Cloud — Google ────────────────────────────────────────────
+        McpDefinition {
+            id: "mcp-gcloud".into(),
+            name: "Google Cloud (gcloud)".into(),
+            description: "GCP resource management via gcloud CLI — official Google server".into(),
+            transport: McpTransport::Stdio {
+                command: "npx".into(),
+                args: vec!["-y".into(), "@anthropic-ai/gcloud-mcp@latest".into()],
+            },
+            env_keys: vec![],
+            tags: vec!["cloud".into(), "gcp".into(), "google".into(), "devops".into()],
+            token_url: Some("https://console.cloud.google.com".into()),
+            token_help: Some("Uses gcloud CLI auth (gcloud auth login). No API key needed if already authenticated.".into()),
+        },
+        McpDefinition {
+            id: "mcp-bigquery".into(),
+            name: "BigQuery".into(),
+            description: "SQL analytics on large datasets — official Google server".into(),
+            transport: McpTransport::Stdio {
+                command: "npx".into(),
+                args: vec!["-y".into(), "@anthropic-ai/bigquery-mcp@latest".into()],
+            },
+            env_keys: vec!["GOOGLE_PROJECT_ID".into()],
+            tags: vec!["database".into(), "analytics".into(), "gcp".into(), "sql".into()],
+            token_url: Some("https://console.cloud.google.com/bigquery".into()),
+            token_help: Some("Requires gcloud auth + GOOGLE_PROJECT_ID env var".into()),
+        },
+        // ── Database (serverless) ─────────────────────────────────────
+        McpDefinition {
+            id: "mcp-neon".into(),
+            name: "Neon".into(),
+            description: "Serverless Postgres — branching, schema management — official Neon server".into(),
+            transport: McpTransport::Stdio {
+                command: "npx".into(),
+                args: vec!["-y".into(), "@neondatabase/mcp-server-neon@latest".into()],
+            },
+            env_keys: vec!["NEON_API_KEY".into()],
+            tags: vec!["database".into(), "postgres".into(), "serverless".into()],
+            token_url: Some("https://console.neon.tech/app/settings/api-keys".into()),
+            token_help: Some("API key from Neon console".into()),
+        },
+        // ── Observability ─────────────────────────────────────────────
+        McpDefinition {
+            id: "mcp-datadog".into(),
+            name: "Datadog".into(),
+            description: "Logs, metrics, APM, incidents — official Datadog server".into(),
+            transport: McpTransport::Stdio {
+                command: "npx".into(),
+                args: vec!["-y".into(), "@datadog/mcp-server-datadog".into()],
+            },
+            env_keys: vec!["DD_API_KEY".into(), "DD_APP_KEY".into()],
+            tags: vec!["monitoring".into(), "observability".into(), "logs".into(), "apm".into()],
+            token_url: Some("https://app.datadoghq.com/organization-settings/api-keys".into()),
+            token_help: Some("API key + Application key from Datadog settings".into()),
+        },
     ]
 }
 

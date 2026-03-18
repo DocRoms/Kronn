@@ -45,6 +45,18 @@ pub async fn discover_keys() -> Vec<RawDiscoveredKey> {
         }
     }
 
+    // Vibe: ~/.vibe/.env (MISTRAL_API_KEY)
+    if let Some(key) = read_vibe_key() {
+        if seen_values.insert(key.clone()) {
+            keys.push(RawDiscoveredKey {
+                provider: "mistral".into(),
+                source: "~/.vibe/.env".into(),
+                value: key,
+                suggested_name: name.clone(),
+            });
+        }
+    }
+
     // ── Environment variables ───────────────────────────────────────────
     let env_sources: &[(&str, &str, &str)] = &[
         ("ANTHROPIC_API_KEY", "anthropic", "env:ANTHROPIC_API_KEY"),
@@ -88,6 +100,22 @@ fn read_gemini_key() -> Option<String> {
     let key = parsed.get("apiKey")?.as_str()?;
     if key.is_empty() { return None; }
     Some(key.to_string())
+}
+
+/// Read the Mistral API key from ~/.vibe/.env
+fn read_vibe_key() -> Option<String> {
+    let path = home_dir()?.join(".vibe").join(".env");
+    let content = std::fs::read_to_string(&path).ok()?;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("MISTRAL_API_KEY=") {
+            let key = rest.trim_matches('\'').trim_matches('"').trim();
+            if !key.is_empty() {
+                return Some(key.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Resolve home directory.
@@ -168,8 +196,99 @@ mod tests {
     }
 
     #[test]
+    fn read_codex_key_parses_auth_json() {
+        let tmp = std::env::temp_dir().join("kronn-test-codex-key");
+        let _ = std::fs::create_dir_all(tmp.join(".codex"));
+        std::fs::write(
+            tmp.join(".codex/auth.json"),
+            r#"{"OPENAI_API_KEY":"sk-test-codex-key-456"}"#,
+        ).unwrap();
+
+        let old_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &tmp);
+        let key = read_codex_key();
+        if let Some(h) = old_home { std::env::set_var("HOME", h); }
+
+        assert_eq!(key, Some("sk-test-codex-key-456".to_string()));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn read_codex_key_ignores_empty_value() {
+        let tmp = std::env::temp_dir().join("kronn-test-codex-empty");
+        let _ = std::fs::create_dir_all(tmp.join(".codex"));
+        std::fs::write(
+            tmp.join(".codex/auth.json"),
+            r#"{"OPENAI_API_KEY":""}"#,
+        ).unwrap();
+
+        let old_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &tmp);
+        let key = read_codex_key();
+        if let Some(h) = old_home { std::env::set_var("HOME", h); }
+
+        assert_eq!(key, None, "Empty key should return None");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn read_gemini_key_returns_none_when_missing() {
         let _ = read_gemini_key();
+    }
+
+    #[test]
+    fn read_gemini_key_parses_settings_json() {
+        let tmp = std::env::temp_dir().join("kronn-test-gemini-key");
+        let _ = std::fs::create_dir_all(tmp.join(".gemini"));
+        std::fs::write(
+            tmp.join(".gemini/settings.json"),
+            r#"{"apiKey":"AIza-test-gemini-789","other":"stuff"}"#,
+        ).unwrap();
+
+        let old_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &tmp);
+        let key = read_gemini_key();
+        if let Some(h) = old_home { std::env::set_var("HOME", h); }
+
+        assert_eq!(key, Some("AIza-test-gemini-789".to_string()));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn read_vibe_key_strips_quotes() {
+        let tmp = std::env::temp_dir().join("kronn-test-vibe-quotes");
+        let _ = std::fs::create_dir_all(tmp.join(".vibe"));
+        // Double-quoted value
+        std::fs::write(tmp.join(".vibe/.env"), "MISTRAL_API_KEY=\"dbl-quoted-key\"\n").unwrap();
+
+        let old_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &tmp);
+        let key = read_vibe_key();
+        if let Some(h) = old_home { std::env::set_var("HOME", h); }
+
+        assert_eq!(key, Some("dbl-quoted-key".to_string()), "Double quotes should be stripped");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn read_vibe_key_parses_env_file() {
+        let tmp = std::env::temp_dir().join("kronn-test-vibe-key");
+        let _ = std::fs::create_dir_all(tmp.join(".vibe"));
+        std::fs::write(tmp.join(".vibe/.env"), "# comment\nMISTRAL_API_KEY='test_key_123'\nOTHER=val\n").unwrap();
+
+        // Temporarily override HOME
+        let old_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &tmp);
+        let key = read_vibe_key();
+        if let Some(h) = old_home { std::env::set_var("HOME", h); }
+
+        assert_eq!(key, Some("test_key_123".to_string()), "Should parse MISTRAL_API_KEY from .env with quotes stripped");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn read_vibe_key_returns_none_when_missing() {
+        let _ = read_vibe_key(); // Should not panic
     }
 
     #[tokio::test]
