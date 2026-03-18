@@ -432,6 +432,17 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                   {group.configs.length} {group.configs.length > 1 ? t('mcp.configPlural') : t('mcp.config')}
                   {!isExpanded && linkedCount > 0 && ` · ${linkedCount} ${linkedCount > 1 ? t('mcp.projectPlural') : t('mcp.project')}`}
                 </span>
+                {(() => {
+                  const serverIncomp = mcpOverview.incompatibilities.filter(i => i.server_id === group.serverId);
+                  return serverIncomp.length > 0 ? (
+                    <span
+                      title={serverIncomp.map(i => `⚠ ${i.agent}: ${i.reason}`).join('\n')}
+                      style={{ fontSize: 10, color: '#ff6b6b', background: 'rgba(255,107,107,0.1)', padding: '1px 6px', borderRadius: 4, fontWeight: 500 }}
+                    >
+                      ⚠ {serverIncomp.map(i => i.agent).join(', ')}
+                    </span>
+                  ) : null;
+                })()}
                 {group.configs.some(c => c.env_keys.length > 0) && (
                   <button
                     style={{ ...s.iconBtn, marginLeft: 4, color: 'rgba(255,255,255,0.3)' }}

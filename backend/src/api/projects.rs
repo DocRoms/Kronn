@@ -323,6 +323,7 @@ pub async fn bootstrap(
         profile_ids: vec![
             "architect".into(),
             "product-owner".into(),
+            "entrepreneur".into(),
         ],
         directive_ids: vec![],
         archived: false,

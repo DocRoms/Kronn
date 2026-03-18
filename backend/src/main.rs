@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use tokio::sync::{RwLock, Semaphore};
 
-use kronn::{build_router, core::config, db::Database, workflows::WorkflowEngine, AppState, AuditTracker, DEFAULT_MAX_CONCURRENT_AGENTS};
+use kronn::{build_router, core::{config, mcp_scanner}, db::Database, workflows::WorkflowEngine, AppState, AuditTracker, DEFAULT_MAX_CONCURRENT_AGENTS};
 
 // ─── Main ───────────────────────────────────────────────────────────────────
 
@@ -64,6 +64,49 @@ async fn main() -> anyhow::Result<()> {
         agent_semaphore: Arc::new(Semaphore::new(max_agents)),
         audit_tracker: Arc::new(std::sync::Mutex::new(AuditTracker::default())),
     };
+
+    // Auto-discover and import API keys from agent config files (~/.vibe/.env, ~/.codex/auth.json, etc.)
+    {
+        let discovered = kronn::core::key_discovery::discover_keys().await;
+        let mut config = state.config.write().await;
+        let mut imported = 0u32;
+        for dk in discovered {
+            if !config.tokens.keys.iter().any(|k| k.value == dk.value) {
+                let is_first = !config.tokens.keys.iter().any(|k| k.provider == dk.provider);
+                config.tokens.keys.push(kronn::models::ApiKey {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    name: dk.suggested_name.clone(),
+                    provider: dk.provider,
+                    value: dk.value,
+                    active: is_first,
+                });
+                imported += 1;
+            }
+        }
+        if imported > 0 {
+            let _ = config::save(&config).await;
+            tracing::info!("Auto-imported {} API key(s) from agent configs", imported);
+        }
+    }
+
+    // Sync all MCP configs to disk on startup (ensures all agents have up-to-date configs)
+    {
+        let db = state.db.clone();
+        let cfg = state.config.read().await;
+        if let Some(secret) = cfg.encryption_secret.clone() {
+            drop(cfg); // Release read lock before blocking
+            if let Err(e) = db.with_conn(move |conn| {
+                mcp_scanner::sync_all_projects(conn, &secret);
+                Ok(())
+            }).await {
+                tracing::warn!("MCP startup sync failed: {}", e);
+            } else {
+                tracing::info!("MCP configs synced to disk for all projects");
+            }
+        } else {
+            tracing::debug!("No encryption secret — skipping MCP startup sync");
+        }
+    }
 
     // Start workflow engine in background
     let engine = workflow_engine.clone();

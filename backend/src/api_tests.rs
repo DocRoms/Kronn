@@ -225,4 +225,883 @@ mod tests {
         let (status, _) = send(state, true, req).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "wrong token should return 401");
     }
+
+    // ─── Q3: Projects API integration tests ───────────────────────────────────
+
+    #[tokio::test]
+    async fn projects_list_empty() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("GET").uri("/api/projects")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["success"].as_bool().unwrap());
+        assert_eq!(body["data"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn projects_crud_lifecycle() {
+        let state = test_state();
+
+        // Create a project directly in DB (projects are created via scan, not POST)
+        state.db.with_conn(|conn| {
+            let now = chrono::Utc::now();
+            let project = crate::models::Project {
+                id: "test-proj".into(),
+                name: "Test Project".into(),
+                path: "/tmp/test-project".into(),
+                repo_url: Some("https://github.com/test/repo".into()),
+                token_override: None,
+                ai_config: crate::models::AiConfigStatus { detected: false, configs: vec![] },
+                audit_status: crate::models::AiAuditStatus::NoTemplate,
+                ai_todo_count: 0,
+                default_skill_ids: vec![],
+                default_profile_id: None,
+                created_at: now,
+                updated_at: now,
+            };
+            crate::db::projects::insert_project(conn, &project)?;
+            Ok(())
+        }).await.unwrap();
+
+        // GET /api/projects — should list it
+        let req = Request::builder()
+            .method("GET").uri("/api/projects")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        let projects = body["data"].as_array().unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0]["name"].as_str().unwrap(), "Test Project");
+
+        // GET /api/projects/:id — should return it
+        let req = Request::builder()
+            .method("GET").uri("/api/projects/test-proj")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["id"].as_str().unwrap(), "test-proj");
+
+        // DELETE /api/projects/:id
+        let req = Request::builder()
+            .method("DELETE").uri("/api/projects/test-proj")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["success"].as_bool().unwrap());
+
+        // GET /api/projects — should be empty now
+        let req = Request::builder()
+            .method("GET").uri("/api/projects")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn projects_get_nonexistent_returns_error() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("GET").uri("/api/projects/nonexistent-id")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK); // API returns 200 with success=false
+        assert!(!body["success"].as_bool().unwrap_or(true));
+    }
+
+    // ─── Q4: Config API integration tests ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn config_language_get_default() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("GET").uri("/api/config/language")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["success"].as_bool().unwrap());
+        // Default language is "fr" (defined in default_config)
+        let lang = body["data"].as_str().unwrap();
+        assert!(!lang.is_empty(), "Language should have a default value");
+    }
+
+    #[tokio::test]
+    async fn config_language_set_and_get() {
+        let state = test_state();
+
+        // Set language to "en"
+        let req = Request::builder()
+            .method("POST").uri("/api/config/language")
+            .header("Content-Type", "application/json")
+            .body(Body::from("\"en\"")).unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK, "set language: {body}");
+
+        // Get language — should be "en"
+        let req = Request::builder()
+            .method("GET").uri("/api/config/language")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"].as_str().unwrap(), "en");
+    }
+
+    // ─── Q5: MCP API integration tests ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn mcps_overview_returns_servers_and_configs() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("GET").uri("/api/mcps")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["success"].as_bool().unwrap());
+        // Overview should have servers and configs arrays
+        assert!(body["data"]["servers"].is_array(), "Overview should include servers");
+        assert!(body["data"]["configs"].is_array(), "Overview should include configs");
+        let servers = body["data"]["servers"].as_array().unwrap();
+        assert!(servers.is_empty(), "No servers in DB initially (registry is not auto-imported)");
+    }
+
+    #[tokio::test]
+    async fn mcps_registry_lists_builtin_servers() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("GET").uri("/api/mcps/registry")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["success"].as_bool().unwrap());
+        let registry = body["data"].as_array().unwrap();
+        assert!(registry.len() >= 30, "Registry should have at least 30 entries, got {}", registry.len());
+    }
+
+    // ─── Q6: Setup API integration tests ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn setup_status_returns_valid_response() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("GET").uri("/api/setup/status")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["success"].as_bool().unwrap());
+        assert!(body["data"]["agents_detected"].is_array(), "Setup status should include agents_detected");
+    }
+
+    // ─── Q7: Stats API ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn stats_token_usage_returns_ok() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("GET").uri("/api/stats/tokens")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["success"].as_bool().unwrap());
+    }
+
+    // ─── Q8: Discussions API integration tests ────────────────────────────────
+
+    #[tokio::test]
+    async fn discussions_list_empty() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("GET").uri("/api/discussions")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["success"].as_bool().unwrap());
+        assert_eq!(body["data"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn discussions_create_and_get() {
+        let state = test_state();
+
+        // Create discussion (will fail to run agent but should persist in DB)
+        let create_body = serde_json::json!({
+            "title": "Test Discussion",
+            "agent": "ClaudeCode",
+            "language": "fr",
+            "initial_prompt": "Hello, test prompt"
+        });
+
+        let req = Request::builder()
+            .method("POST").uri("/api/discussions")
+            .header("Content-Type", "application/json")
+            .body(Body::from(create_body.to_string())).unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        // Create returns SSE stream, status should be 200
+        assert_eq!(status, StatusCode::OK, "create discussion: {body}");
+
+        // Wait for background task to persist
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+
+        // List discussions — should have 1
+        let req = Request::builder()
+            .method("GET").uri("/api/discussions")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        let discussions = body["data"].as_array().unwrap();
+        assert_eq!(discussions.len(), 1, "Should have 1 discussion after create");
+        let disc_id = discussions[0]["id"].as_str().unwrap().to_string();
+        assert_eq!(discussions[0]["title"].as_str().unwrap(), "Test Discussion");
+        assert_eq!(discussions[0]["language"].as_str().unwrap(), "fr");
+
+        // Get by ID
+        let req = Request::builder()
+            .method("GET").uri(format!("/api/discussions/{}", disc_id))
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["id"].as_str().unwrap(), disc_id);
+        // Should have at least the initial user message
+        let messages = body["data"]["messages"].as_array().unwrap();
+        assert!(!messages.is_empty(), "Discussion should have at least 1 message");
+        assert_eq!(messages[0]["role"].as_str().unwrap(), "User");
+    }
+
+    #[tokio::test]
+    async fn discussions_update_title_and_archive() {
+        let state = test_state();
+
+        // Create via DB directly (faster, no SSE)
+        state.db.with_conn(|conn| {
+            let now = chrono::Utc::now();
+            let disc = crate::models::Discussion {
+                id: "disc-1".into(),
+                project_id: None,
+                title: "Original Title".into(),
+                agent: crate::models::AgentType::ClaudeCode,
+                language: "en".into(),
+                participants: vec![crate::models::AgentType::ClaudeCode],
+                message_count: 0,
+                messages: vec![],
+                skill_ids: vec![],
+                profile_ids: vec![],
+                directive_ids: vec![],
+                archived: false,
+                workspace_mode: "Direct".into(),
+                workspace_path: None,
+                worktree_branch: None,
+                tier: crate::models::ModelTier::Default,
+                summary_cache: None,
+                summary_up_to_msg_idx: None,
+                created_at: now,
+                updated_at: now,
+            };
+            crate::db::discussions::insert_discussion(conn, &disc)?;
+            Ok(())
+        }).await.unwrap();
+
+        // PATCH — update title
+        let update_body = serde_json::json!({ "title": "Updated Title" });
+        let req = Request::builder()
+            .method("PATCH").uri("/api/discussions/disc-1")
+            .header("Content-Type", "application/json")
+            .body(Body::from(update_body.to_string())).unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK, "update discussion: {body}");
+        assert!(body["success"].as_bool().unwrap());
+
+        // Verify title changed
+        let req = Request::builder()
+            .method("GET").uri("/api/discussions/disc-1")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["title"].as_str().unwrap(), "Updated Title");
+
+        // PATCH — archive
+        let archive_body = serde_json::json!({ "archived": true });
+        let req = Request::builder()
+            .method("PATCH").uri("/api/discussions/disc-1")
+            .header("Content-Type", "application/json")
+            .body(Body::from(archive_body.to_string())).unwrap();
+        let (status, _) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Verify archived
+        let req = Request::builder()
+            .method("GET").uri("/api/discussions/disc-1")
+            .body(Body::empty()).unwrap();
+        let (_, body) = send(state, false, req).await;
+        assert!(body["data"]["archived"].as_bool().unwrap());
+    }
+
+    #[tokio::test]
+    async fn discussions_delete() {
+        let state = test_state();
+
+        state.db.with_conn(|conn| {
+            let now = chrono::Utc::now();
+            let disc = crate::models::Discussion {
+                id: "disc-del".into(),
+                project_id: None,
+                title: "To Delete".into(),
+                agent: crate::models::AgentType::Vibe,
+                language: "fr".into(),
+                participants: vec![],
+                message_count: 0, messages: vec![],
+                skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
+                archived: false, workspace_mode: "Direct".into(),
+                workspace_path: None, worktree_branch: None,
+                tier: crate::models::ModelTier::Default,
+                summary_cache: None, summary_up_to_msg_idx: None,
+                created_at: now, updated_at: now,
+            };
+            crate::db::discussions::insert_discussion(conn, &disc)?;
+            Ok(())
+        }).await.unwrap();
+
+        // DELETE
+        let req = Request::builder()
+            .method("DELETE").uri("/api/discussions/disc-del")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["success"].as_bool().unwrap());
+
+        // Verify gone
+        let req = Request::builder()
+            .method("GET").uri("/api/discussions/disc-del")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body["success"].as_bool().unwrap_or(true), "Deleted discussion should return error");
+    }
+
+    #[tokio::test]
+    async fn discussions_create_validates_title_length() {
+        let state = test_state();
+
+        let long_title = "x".repeat(501);
+        let create_body = serde_json::json!({
+            "title": long_title,
+            "agent": "ClaudeCode",
+            "initial_prompt": "test"
+        });
+
+        let req = Request::builder()
+            .method("POST").uri("/api/discussions")
+            .header("Content-Type", "application/json")
+            .body(Body::from(create_body.to_string())).unwrap();
+        let (status, body) = send(state, false, req).await;
+        // Should reject with validation error
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body["success"].as_bool().unwrap_or(true),
+            "Title >500 chars should be rejected: {body}");
+    }
+
+    // ─── Q9: Agents API integration tests ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn agents_detect_returns_list() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("GET").uri("/api/agents")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["success"].as_bool().unwrap());
+        let agents = body["data"].as_array().unwrap();
+        // Should detect at least some agents (even if not installed)
+        assert!(!agents.is_empty(), "Agent detection should return at least one entry");
+        // Each agent should have required fields
+        for agent in agents {
+            assert!(agent["name"].is_string(), "Agent should have name");
+            assert!(agent["agent_type"].is_string(), "Agent should have agent_type");
+        }
+    }
+
+    #[tokio::test]
+    async fn agents_toggle_changes_state() {
+        let state = test_state();
+
+        // Toggle Vibe off
+        let req = Request::builder()
+            .method("POST").uri("/api/agents/toggle")
+            .header("Content-Type", "application/json")
+            .body(Body::from("\"Vibe\"")).unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK, "toggle agent: {body}");
+        assert!(body["success"].as_bool().unwrap());
+        let enabled = body["data"].as_bool().unwrap();
+
+        // Toggle again — should flip
+        let req = Request::builder()
+            .method("POST").uri("/api/agents/toggle")
+            .header("Content-Type", "application/json")
+            .body(Body::from("\"Vibe\"")).unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        let new_enabled = body["data"].as_bool().unwrap();
+        assert_ne!(enabled, new_enabled, "Toggle should flip the enabled state");
+    }
+
+    // ─── Q10: Skills API integration tests ────────────────────────────────────
+
+    #[tokio::test]
+    async fn skills_list_returns_builtins() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("GET").uri("/api/skills")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["success"].as_bool().unwrap());
+        let skills = body["data"].as_array().unwrap();
+        assert!(!skills.is_empty(), "Should have built-in skills");
+        // Verify structure
+        let first = &skills[0];
+        assert!(first["id"].is_string());
+        assert!(first["name"].is_string());
+    }
+
+    // ─── Q11: Profiles API integration tests ──────────────────────────────────
+
+    #[tokio::test]
+    async fn profiles_list_returns_builtins() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("GET").uri("/api/profiles")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["success"].as_bool().unwrap());
+        let profiles = body["data"].as_array().unwrap();
+        assert!(!profiles.is_empty(), "Should have built-in profiles");
+    }
+
+    // ─── Q12: Directives API integration tests ───────────────────────────────
+
+    #[tokio::test]
+    async fn directives_list_returns_builtins() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("GET").uri("/api/directives")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["success"].as_bool().unwrap());
+        let directives = body["data"].as_array().unwrap();
+        assert!(!directives.is_empty(), "Should have built-in directives");
+    }
+
+    // ─── Q13: Config API additional tests ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn config_server_get_and_set() {
+        let state = test_state();
+
+        // GET current server config
+        let req = Request::builder()
+            .method("GET").uri("/api/config/server")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["success"].as_bool().unwrap());
+
+        // POST new server config — enable auth
+        let new_config = serde_json::json!({
+            "auth_enabled": true,
+            "auth_token": null,
+            "max_concurrent_agents": 3
+        });
+        let req = Request::builder()
+            .method("POST").uri("/api/config/server")
+            .header("Content-Type", "application/json")
+            .body(Body::from(new_config.to_string())).unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK, "set server config: {body}");
+    }
+
+    #[tokio::test]
+    async fn config_scan_paths_get() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("GET").uri("/api/config/scan-paths")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["success"].as_bool().unwrap());
+    }
+
+    #[tokio::test]
+    async fn config_tokens_get() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("GET").uri("/api/config/tokens")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["success"].as_bool().unwrap());
+    }
+
+    #[tokio::test]
+    async fn config_db_info() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("GET").uri("/api/config/db-info")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["success"].as_bool().unwrap());
+    }
+
+    // ─── Q14: Discussion message operations ───────────────────────────────────
+
+    /// Helper: insert a discussion directly in DB for fast test setup
+    async fn insert_test_discussion(state: &AppState, id: &str, title: &str) {
+        state.db.with_conn({
+            let id = id.to_string();
+            let title = title.to_string();
+            move |conn| {
+                let now = chrono::Utc::now();
+                let disc = crate::models::Discussion {
+                    id: id.clone(),
+                    project_id: None,
+                    title,
+                    agent: crate::models::AgentType::ClaudeCode,
+                    language: "en".into(),
+                    participants: vec![crate::models::AgentType::ClaudeCode],
+                    message_count: 0, messages: vec![],
+                    skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
+                    archived: false, workspace_mode: "Direct".into(),
+                    workspace_path: None, worktree_branch: None,
+                    tier: crate::models::ModelTier::Default,
+                    summary_cache: None, summary_up_to_msg_idx: None,
+                    created_at: now, updated_at: now,
+                };
+                crate::db::discussions::insert_discussion(conn, &disc)?;
+                Ok(())
+            }
+        }).await.unwrap();
+    }
+
+    /// Helper: insert a message directly in DB
+    async fn insert_test_message(state: &AppState, disc_id: &str, role: &str, content: &str) {
+        state.db.with_conn({
+            let disc_id = disc_id.to_string();
+            let role = role.to_string();
+            let content = content.to_string();
+            move |conn| {
+                let msg = crate::models::DiscussionMessage {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    role: match role.as_str() {
+                        "User" => crate::models::MessageRole::User,
+                        "Agent" => crate::models::MessageRole::Agent,
+                        _ => crate::models::MessageRole::System,
+                    },
+                    content,
+                    agent_type: if role == "Agent" { Some(crate::models::AgentType::ClaudeCode) } else { None },
+                    timestamp: chrono::Utc::now(),
+                    tokens_used: 0,
+                    auth_mode: None,
+                    model_tier: None,
+                };
+                crate::db::discussions::insert_message(conn, &disc_id, &msg)?;
+                Ok(())
+            }
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn discussions_delete_last_agent_messages() {
+        let state = test_state();
+        insert_test_discussion(&state, "disc-msg", "Message Test").await;
+        insert_test_message(&state, "disc-msg", "User", "Hello").await;
+        insert_test_message(&state, "disc-msg", "Agent", "Agent reply").await;
+        insert_test_message(&state, "disc-msg", "Agent", "Agent follow up").await;
+
+        // DELETE last agent messages
+        let req = Request::builder()
+            .method("DELETE").uri("/api/discussions/disc-msg/messages/last")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK, "delete last agent messages: {body}");
+        assert!(body["success"].as_bool().unwrap());
+
+        // Verify: discussion should only have the user message now
+        let req = Request::builder()
+            .method("GET").uri("/api/discussions/disc-msg")
+            .body(Body::empty()).unwrap();
+        let (_, body) = send(state, false, req).await;
+        let messages = body["data"]["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1, "Only user message should remain");
+        assert_eq!(messages[0]["role"].as_str().unwrap(), "User");
+    }
+
+    #[tokio::test]
+    async fn discussions_edit_last_user_message() {
+        let state = test_state();
+        insert_test_discussion(&state, "disc-edit", "Edit Test").await;
+        insert_test_message(&state, "disc-edit", "User", "Original message").await;
+        insert_test_message(&state, "disc-edit", "Agent", "Agent reply").await;
+
+        // PATCH last user message
+        let edit_body = serde_json::json!({ "content": "Edited message" });
+        let req = Request::builder()
+            .method("PATCH").uri("/api/discussions/disc-edit/messages/last")
+            .header("Content-Type", "application/json")
+            .body(Body::from(edit_body.to_string())).unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK, "edit last user message: {body}");
+
+        // Verify: user message content updated, agent messages removed
+        let req = Request::builder()
+            .method("GET").uri("/api/discussions/disc-edit")
+            .body(Body::empty()).unwrap();
+        let (_, body) = send(state, false, req).await;
+        let messages = body["data"]["messages"].as_array().unwrap();
+        // After edit, agent messages should be deleted and user message updated
+        let user_msgs: Vec<_> = messages.iter()
+            .filter(|m| m["role"].as_str() == Some("User"))
+            .collect();
+        assert!(!user_msgs.is_empty(), "Should have at least one user message");
+        assert_eq!(user_msgs.last().unwrap()["content"].as_str().unwrap(), "Edited message");
+    }
+
+    #[tokio::test]
+    async fn discussions_update_skill_ids() {
+        let state = test_state();
+        insert_test_discussion(&state, "disc-skills", "Skills Test").await;
+
+        let update_body = serde_json::json!({
+            "skill_ids": ["skill-rust", "skill-testing"]
+        });
+        let req = Request::builder()
+            .method("PATCH").uri("/api/discussions/disc-skills")
+            .header("Content-Type", "application/json")
+            .body(Body::from(update_body.to_string())).unwrap();
+        let (status, _) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Verify
+        let req = Request::builder()
+            .method("GET").uri("/api/discussions/disc-skills")
+            .body(Body::empty()).unwrap();
+        let (_, body) = send(state, false, req).await;
+        let skill_ids = body["data"]["skill_ids"].as_array().unwrap();
+        assert_eq!(skill_ids.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn discussions_update_tier() {
+        let state = test_state();
+        insert_test_discussion(&state, "disc-tier", "Tier Test").await;
+
+        let update_body = serde_json::json!({ "tier": "economy" });
+        let req = Request::builder()
+            .method("PATCH").uri("/api/discussions/disc-tier")
+            .header("Content-Type", "application/json")
+            .body(Body::from(update_body.to_string())).unwrap();
+        let (status, _) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let req = Request::builder()
+            .method("GET").uri("/api/discussions/disc-tier")
+            .body(Body::empty()).unwrap();
+        let (_, body) = send(state, false, req).await;
+        assert_eq!(body["data"]["tier"].as_str().unwrap(), "economy");
+    }
+
+    // ─── Q15: Workflow CRUD API tests ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn workflows_list_empty() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("GET").uri("/api/workflows")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["success"].as_bool().unwrap());
+        assert_eq!(body["data"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn workflows_create_and_get() {
+        let state = test_state();
+
+        let create_body = serde_json::json!({
+            "name": "Nightly Audit",
+            "trigger": { "type": "Manual" },
+            "steps": [{
+                "name": "audit",
+                "agent": "ClaudeCode",
+                "prompt_template": "Run audit on project",
+                "mode": { "type": "Normal" }
+            }],
+            "actions": [],
+            "safety": {
+                "sandbox": false,
+                "max_files": null,
+                "max_lines": null,
+                "require_approval": false
+            }
+        });
+
+        let req = Request::builder()
+            .method("POST").uri("/api/workflows")
+            .header("Content-Type", "application/json")
+            .body(Body::from(create_body.to_string())).unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK, "create workflow: {body}");
+        let wf_id = body["data"]["id"].as_str().unwrap().to_string();
+
+        // GET by ID
+        let req = Request::builder()
+            .method("GET").uri(format!("/api/workflows/{}", wf_id))
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["name"].as_str().unwrap(), "Nightly Audit");
+        assert_eq!(body["data"]["steps"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn workflows_update_and_delete() {
+        let state = test_state();
+
+        // Create
+        let create_body = serde_json::json!({
+            "name": "To Update",
+            "trigger": { "type": "Manual" },
+            "steps": [{
+                "name": "s1",
+                "agent": "Vibe",
+                "prompt_template": "test",
+                "mode": { "type": "Normal" }
+            }],
+            "actions": [],
+            "safety": { "sandbox": false, "max_files": null, "max_lines": null, "require_approval": false }
+        });
+
+        let req = Request::builder()
+            .method("POST").uri("/api/workflows")
+            .header("Content-Type", "application/json")
+            .body(Body::from(create_body.to_string())).unwrap();
+        let (_, body) = send(state.clone(), false, req).await;
+        let wf_id = body["data"]["id"].as_str().unwrap().to_string();
+
+        // Update
+        let update_body = serde_json::json!({
+            "name": "Updated Name",
+            "trigger": { "type": "Manual" },
+            "steps": [{
+                "name": "s1-updated",
+                "agent": "ClaudeCode",
+                "prompt_template": "updated prompt",
+                "mode": { "type": "Normal" }
+            }],
+            "actions": [],
+            "safety": { "sandbox": false, "max_files": null, "max_lines": null, "require_approval": false }
+        });
+
+        let req = Request::builder()
+            .method("PUT").uri(format!("/api/workflows/{}", wf_id))
+            .header("Content-Type", "application/json")
+            .body(Body::from(update_body.to_string())).unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK, "update workflow: {body}");
+
+        // Verify updated
+        let req = Request::builder()
+            .method("GET").uri(format!("/api/workflows/{}", wf_id))
+            .body(Body::empty()).unwrap();
+        let (_, body) = send(state.clone(), false, req).await;
+        assert_eq!(body["data"]["name"].as_str().unwrap(), "Updated Name");
+
+        // Delete
+        let req = Request::builder()
+            .method("DELETE").uri(format!("/api/workflows/{}", wf_id))
+            .body(Body::empty()).unwrap();
+        let (status, _) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Verify gone
+        let req = Request::builder()
+            .method("GET").uri("/api/workflows")
+            .body(Body::empty()).unwrap();
+        let (_, body) = send(state, false, req).await;
+        assert_eq!(body["data"].as_array().unwrap().len(), 0);
+    }
+
+    // ─── Q16: Export/Import API ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn config_export_returns_data() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("GET").uri("/api/config/export")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["success"].as_bool().unwrap());
+        // Export should contain at least the data key
+        assert!(body["data"].is_object(), "Export should return an object");
+    }
+
+    // ─── Q17: Agent usage stats ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn stats_agent_usage_returns_ok() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("GET").uri("/api/stats/agent-usage")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["success"].as_bool().unwrap());
+    }
+
+    // ─── MCP overview includes incompatibilities ──────────────────────────────
+
+    #[tokio::test]
+    async fn mcp_overview_includes_incompatibilities_field() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("GET").uri("/api/mcps")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["success"].as_bool().unwrap());
+        // incompatibilities field should exist (may be empty if no gitlab server in test DB)
+        assert!(body["data"]["incompatibilities"].is_array(),
+            "McpOverview must include incompatibilities array");
+    }
+
+    // ─── Error hint detection ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn detect_error_hint_mcp_config() {
+        use crate::api::discussions::detect_agent_error_hint;
+        let hint = detect_agent_error_hint(
+            "Error: Invalid MCP configuration: MCP config file not found: /host-home/Repositories/test/"
+        );
+        assert!(hint.is_some(), "Should detect MCP config error");
+        assert!(hint.unwrap().contains("MCP"), "Hint should mention MCP");
+    }
+
+    #[tokio::test]
+    async fn detect_error_hint_auth() {
+        use crate::api::discussions::detect_agent_error_hint;
+        let hint = detect_agent_error_hint("authentication_error: invalid API key");
+        assert!(hint.is_some(), "Should detect auth error");
+    }
+
+    #[tokio::test]
+    async fn detect_error_hint_no_match() {
+        use crate::api::discussions::detect_agent_error_hint;
+        let hint = detect_agent_error_hint("Everything is fine, no errors here");
+        assert!(hint.is_none(), "Should not detect error in normal output");
+    }
 }

@@ -1181,6 +1181,21 @@ pub struct McpOverview {
     /// Set of "slug:projectId" pairs where the context file has been customized (not default template).
     #[serde(default)]
     pub customized_contexts: Vec<String>,
+    /// Known incompatibilities between MCP servers and agents.
+    #[serde(default)]
+    pub incompatibilities: Vec<McpIncompatibility>,
+}
+
+/// A known incompatibility between an MCP server and a specific agent.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct McpIncompatibility {
+    /// The MCP server ID (e.g. "mcp-gitlab", "detected:data-gouv-fr")
+    pub server_id: String,
+    /// The agent that is incompatible
+    pub agent: AgentType,
+    /// Human-readable explanation
+    pub reason: String,
 }
 
 #[derive(Debug, Deserialize, TS)]

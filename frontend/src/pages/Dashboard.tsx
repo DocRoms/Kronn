@@ -4,6 +4,7 @@ import { useApi } from '../hooks/useApi';
 import { useToast } from '../hooks/useToast';
 import type { Project, AgentDetection, AgentType, RemoteRepo, RepoSource } from '../types/generated';
 import { useT } from '../lib/I18nContext';
+import { getProjectGroup } from '../lib/constants';
 import { McpPage } from './McpPage';
 import { WorkflowsPage } from './WorkflowsPage';
 import { SettingsPage } from './SettingsPage';
@@ -146,7 +147,7 @@ export function Dashboard({ onReset }: DashboardProps) {
 
   const projects = projectList ?? [];
   const mcpRegistry = registry ?? [];
-  const mcpOverview = mcpOverviewData ?? { servers: [], configs: [], customized_contexts: [] };
+  const mcpOverview = mcpOverviewData ?? { servers: [], configs: [], customized_contexts: [], incompatibilities: [] };
   const agents = agentList ?? [];
   const allDiscussions = discussionList ?? [];
   const allSkills = skillList ?? [];
@@ -756,21 +757,13 @@ export function Dashboard({ onReset }: DashboardProps) {
             ? baseProjects.filter(p => p.name.toLowerCase().includes(searchLower) || p.path.toLowerCase().includes(searchLower))
             : baseProjects;
 
-          // Extract org/owner from repo_url for grouping
-          const getProjectGroup = (p: Project): string => {
-            if (!p.repo_url) return t('projects.group.local');
-            try {
-              const url = p.repo_url.replace('git@github.com:', 'https://github.com/')
-                .replace('git@gitlab.com:', 'https://gitlab.com/');
-              const parts = new URL(url).pathname.split('/').filter(Boolean);
-              return parts[0] || t('projects.group.other');
-            } catch { return t('projects.group.other'); }
-          };
+          // Extract org/owner from repo_url for grouping (shared utility)
+          const projGroup = (p: Project) => getProjectGroup(p, t('projects.group.local'), t('projects.group.other'));
 
           // Sort alphabetically within each group
           const sortedProjects = [...filteredProjects].sort((a, b) => {
-            const groupA = getProjectGroup(a);
-            const groupB = getProjectGroup(b);
+            const groupA = projGroup(a);
+            const groupB = projGroup(b);
             if (groupA !== groupB) return groupA.localeCompare(groupB);
             return a.name.localeCompare(b.name);
           });
@@ -778,7 +771,7 @@ export function Dashboard({ onReset }: DashboardProps) {
           // Group projects
           const groupedProjects: { group: string; projects: Project[] }[] = [];
           for (const p of sortedProjects) {
-            const group = getProjectGroup(p);
+            const group = projGroup(p);
             const last = groupedProjects[groupedProjects.length - 1];
             if (last && last.group === group) { last.projects.push(p); }
             else { groupedProjects.push({ group, projects: [p] }); }
@@ -834,8 +827,8 @@ export function Dashboard({ onReset }: DashboardProps) {
               const isOpen = expandedId === proj.id;
               const projHidden = isHiddenPath(proj.path);
               // Group header: show when first item or group changes
-              const currentGroup = getProjectGroup(proj);
-              const prevGroup = idx > 0 ? getProjectGroup(displayProjects[idx - 1]) : null;
+              const currentGroup = projGroup(proj);
+              const prevGroup = idx > 0 ? projGroup(displayProjects[idx - 1]) : null;
               const showGroupHeader = !projectSearch && groupedProjects.length > 1 && currentGroup !== prevGroup;
               const groupColor = currentGroup === t('projects.group.local') ? 'rgba(255,255,255,0.3)' : `hsl(${Math.abs([...currentGroup].reduce((h, c) => h * 31 + c.charCodeAt(0), 0)) % 360}, 60%, 65%)`;
               const projDiscussions = discussionsByProject[proj.id] ?? [];
@@ -1400,6 +1393,7 @@ export function Dashboard({ onReset }: DashboardProps) {
             initialActiveDiscussionId={activeDiscussionId}
             lastSeenMsgCount={lastSeenMsgCount}
             mcpConfigs={mcpOverview.configs}
+            mcpIncompatibilities={mcpOverview.incompatibilities}
           />
         )}
 

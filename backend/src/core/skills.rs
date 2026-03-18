@@ -24,11 +24,19 @@ const BUILTIN_SKILLS: &[BuiltinSkill] = &[
     BuiltinSkill { id: "python", content: include_str!("../skills/python.md") },
     BuiltinSkill { id: "go", content: include_str!("../skills/go.md") },
     BuiltinSkill { id: "php", content: include_str!("../skills/php.md") },
+    BuiltinSkill { id: "java", content: include_str!("../skills/java.md") },
+    BuiltinSkill { id: "kotlin", content: include_str!("../skills/kotlin.md") },
+    BuiltinSkill { id: "swift", content: include_str!("../skills/swift.md") },
+    BuiltinSkill { id: "csharp", content: include_str!("../skills/csharp.md") },
     // Domain
     BuiltinSkill { id: "security", content: include_str!("../skills/security.md") },
     BuiltinSkill { id: "devops", content: include_str!("../skills/devops.md") },
     BuiltinSkill { id: "data-engineering", content: include_str!("../skills/data-engineering.md") },
     BuiltinSkill { id: "database", content: include_str!("../skills/database.md") },
+    BuiltinSkill { id: "terraform", content: include_str!("../skills/terraform.md") },
+    BuiltinSkill { id: "testing", content: include_str!("../skills/testing.md") },
+    BuiltinSkill { id: "api-design", content: include_str!("../skills/api-design.md") },
+    BuiltinSkill { id: "mobile", content: include_str!("../skills/mobile.md") },
     // Business
     BuiltinSkill { id: "seo", content: include_str!("../skills/seo.md") },
     BuiltinSkill { id: "web-performance", content: include_str!("../skills/web-performance.md") },
@@ -235,7 +243,7 @@ mod tests {
     #[test]
     fn parse_builtin_skills() {
         let skills = list_all_skills();
-        assert!(skills.len() >= 14, "Expected at least 14 builtin skills, got {}", skills.len());
+        assert!(skills.len() >= 22, "Expected at least 22 builtin skills, got {}", skills.len());
 
         let rust = skills.iter().find(|s| s.id == "rust").unwrap();
         assert_eq!(rust.name, "Rust");
@@ -343,6 +351,24 @@ mod tests {
         let prompt = build_skills_prompt(&["rust".into()]);
         assert!(prompt.contains("Rust"));
         assert!(prompt.contains("=== Active Skills ==="));
+    }
+
+    #[test]
+    fn new_language_skills_exist() {
+        for id in ["java", "kotlin", "swift", "csharp"] {
+            let skill = get_skill(id);
+            assert!(skill.is_some(), "Language skill '{}' must exist", id);
+            assert_eq!(skill.unwrap().category, SkillCategory::Language);
+        }
+    }
+
+    #[test]
+    fn new_domain_skills_exist() {
+        for id in ["terraform", "testing", "api-design", "mobile"] {
+            let skill = get_skill(id);
+            assert!(skill.is_some(), "Domain skill '{}' must exist", id);
+            assert_eq!(skill.unwrap().category, SkillCategory::Domain);
+        }
     }
 
     #[test]

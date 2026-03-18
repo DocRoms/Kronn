@@ -33,8 +33,9 @@ pub async fn overview(
         let configs = db::mcps::list_configs_display(conn)?;
         let projects = db::projects::list_projects(conn)?;
         let customized_contexts = build_customized_contexts(&configs, &projects);
+        let incompatibilities = mcp_scanner::get_incompatibilities(&servers);
 
-        Ok(McpOverview { servers, configs, customized_contexts })
+        Ok(McpOverview { servers, configs, customized_contexts, incompatibilities })
     }).await {
         Ok(data) => Json(ApiResponse::ok(data)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -451,8 +452,9 @@ pub async fn refresh(
         let configs = db::mcps::list_configs_display(conn)?;
         let projects = db::projects::list_projects(conn)?;
         let customized_contexts = build_customized_contexts(&configs, &projects);
+        let incompatibilities = mcp_scanner::get_incompatibilities(&servers);
 
-        Ok(McpOverview { servers, configs, customized_contexts })
+        Ok(McpOverview { servers, configs, customized_contexts, incompatibilities })
     }).await;
 
     match result {

@@ -272,6 +272,13 @@ export interface McpOverview {
   servers: McpServer[];
   configs: McpConfigDisplay[];
   customized_contexts: string[];
+  incompatibilities: McpIncompatibility[];
+}
+
+export interface McpIncompatibility {
+  server_id: string;
+  agent: AgentType;
+  reason: string;
 }
 
 // Legacy types (kept for backward compatibility)

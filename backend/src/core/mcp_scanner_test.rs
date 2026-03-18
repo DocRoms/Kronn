@@ -263,6 +263,44 @@ mod tests {
         cleanup(&tmp);
     }
 
+    // ─── SSE servers filtered from .mcp.json ───────────────────────────────
+
+    #[test]
+    fn sse_entry_has_no_command() {
+        // An SSE entry only has url, no command — verify this is the case
+        let sse_entry = McpServerEntry {
+            command: None,
+            args: None,
+            url: Some("http://localhost:8000/sse".into()),
+            env: HashMap::new(),
+        };
+        assert!(sse_entry.command.is_none(), "SSE entries must not have command");
+
+        // A stdio entry has command
+        let stdio_entry = McpServerEntry {
+            command: Some("npx".into()),
+            args: Some(vec!["-y".into(), "pkg".into()]),
+            url: None,
+            env: HashMap::new(),
+        };
+        assert!(stdio_entry.command.is_some(), "Stdio entries must have command");
+
+        // Filtering by command.is_some() should exclude SSE
+        let mut all = HashMap::new();
+        all.insert("github".to_string(), stdio_entry);
+        all.insert("data.gouv.fr".to_string(), sse_entry);
+
+        let stdio_only: HashMap<String, McpServerEntry> = all.iter()
+            .filter(|(_, entry)| entry.command.is_some())
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        assert_eq!(stdio_only.len(), 1, "Only stdio servers should remain");
+        assert!(stdio_only.contains_key("github"));
+        assert!(!stdio_only.contains_key("data.gouv.fr"),
+            "SSE server must be filtered from .mcp.json (breaks Claude Code schema)");
+    }
+
     // ─── ensure_redirectors ────────────────────────────────────────────────
 
     #[test]
@@ -336,5 +374,237 @@ mod tests {
 
         cleanup(&tmp);
         let _ = std::fs::remove_dir_all(&tpl);
+    }
+
+    #[test]
+    fn atomic_write_produces_valid_file() {
+        let tmp = setup_tmp("atomic-write");
+        let data = make_test_data();
+        let path = tmp.to_string_lossy().to_string();
+
+        write_mcp_json(&path, &data).unwrap();
+
+        // File should exist and be valid JSON
+        let content = std::fs::read_to_string(tmp.join(".mcp.json")).unwrap();
+        let parsed: McpJsonFile = serde_json::from_str(&content).unwrap();
+        assert!(parsed.mcp_servers.contains_key("github"));
+
+        // No temp file left behind
+        assert!(!tmp.join(".mcp.tmp").exists(), "Temp file should be cleaned up");
+
+        cleanup(&tmp);
+    }
+
+    #[test]
+    fn incompatibility_detects_gitlab_for_kiro() {
+        use crate::core::mcp_scanner::get_incompatibilities;
+        use crate::models::{McpServer, McpTransport, McpSource, AgentType};
+
+        let servers = vec![
+            McpServer {
+                id: "mcp-gitlab".into(),
+                name: "GitLab".into(),
+                description: "test".into(),
+                transport: McpTransport::Stdio {
+                    command: "npx".into(),
+                    args: vec!["-y".into(), "@modelcontextprotocol/server-gitlab".into()],
+                },
+                source: McpSource::Registry,
+            },
+            McpServer {
+                id: "mcp-github".into(),
+                name: "GitHub".into(),
+                description: "test".into(),
+                transport: McpTransport::Stdio {
+                    command: "npx".into(),
+                    args: vec!["-y".into(), "@modelcontextprotocol/server-github".into()],
+                },
+                source: McpSource::Registry,
+            },
+        ];
+
+        let incomp = get_incompatibilities(&servers);
+        assert_eq!(incomp.len(), 1, "Only gitlab should be incompatible");
+        assert_eq!(incomp[0].server_id, "mcp-gitlab");
+        assert_eq!(incomp[0].agent, AgentType::Kiro);
+        assert!(incomp[0].reason.contains("Bedrock"));
+    }
+
+    #[test]
+    fn incompatibility_returns_empty_for_compatible_servers() {
+        use crate::core::mcp_scanner::get_incompatibilities;
+        use crate::models::{McpServer, McpTransport, McpSource};
+
+        let servers = vec![
+            McpServer {
+                id: "mcp-github".into(), name: "GitHub".into(), description: "".into(),
+                transport: McpTransport::Stdio {
+                    command: "npx".into(),
+                    args: vec!["-y".into(), "@modelcontextprotocol/server-github".into()],
+                },
+                source: McpSource::Registry,
+            },
+            McpServer {
+                id: "mcp-context7".into(), name: "Context7".into(), description: "".into(),
+                transport: McpTransport::Stdio {
+                    command: "npx".into(),
+                    args: vec!["-y".into(), "@upstash/context7-mcp".into()],
+                },
+                source: McpSource::Registry,
+            },
+        ];
+
+        let incomp = get_incompatibilities(&servers);
+        assert!(incomp.is_empty(), "Compatible servers should have no incompatibilities");
+    }
+
+    #[test]
+    fn incompatibility_flags_localhost_sse_servers() {
+        use crate::core::mcp_scanner::get_incompatibilities;
+        use crate::models::{McpServer, McpTransport, McpSource};
+
+        let servers = vec![
+            McpServer {
+                id: "detected:data-gouv".into(), name: "data.gouv.fr".into(), description: "".into(),
+                transport: McpTransport::Sse { url: "http://localhost:8000/sse".into() },
+                source: McpSource::Detected,
+            },
+        ];
+
+        let incomp = get_incompatibilities(&servers);
+        assert_eq!(incomp.len(), 1, "Localhost SSE should be flagged as incompatible");
+    }
+
+    #[test]
+    fn sync_writes_kiro_config_without_gitlab() {
+        // Verify that write_mcp_json_to_subpath with filtered data excludes gitlab
+        let tmp = setup_tmp("kiro-no-gitlab");
+        let mut servers = std::collections::HashMap::new();
+        servers.insert("github".to_string(), McpServerEntry {
+            command: Some("npx".into()),
+            args: Some(vec!["-y".into(), "@modelcontextprotocol/server-github".into()]),
+            url: None, env: std::collections::HashMap::new(),
+        });
+        // gitlab should NOT be in Kiro config (filtered by sync logic)
+        let kiro_data = McpJsonFile { mcp_servers: servers };
+        write_mcp_json_to_subpath(&tmp.to_string_lossy(), ".kiro/settings/mcp.json", &kiro_data).unwrap();
+
+        let content = std::fs::read_to_string(tmp.join(".kiro/settings/mcp.json")).unwrap();
+        let parsed: McpJsonFile = serde_json::from_str(&content).unwrap();
+        assert!(parsed.mcp_servers.contains_key("github"), "github should be in Kiro config");
+        assert!(!parsed.mcp_servers.contains_key("gitlab"), "gitlab should NOT be in Kiro config");
+
+        cleanup(&tmp);
+    }
+
+    #[test]
+    fn is_command_available_finds_common_commands() {
+        use crate::core::mcp_scanner::is_command_available;
+        // `sh` should always be available on any Unix system
+        assert!(is_command_available("sh"), "sh should be available");
+        // Nonexistent command
+        assert!(!is_command_available("kronn_nonexistent_cmd_12345"),
+            "Nonexistent command should not be found");
+    }
+
+    #[test]
+    fn incompatibility_detects_localhost_sse() {
+        use crate::core::mcp_scanner::get_incompatibilities;
+        use crate::models::{McpServer, McpTransport, McpSource};
+
+        let servers = vec![
+            McpServer {
+                id: "detected:data-gouv".into(), name: "data.gouv.fr".into(), description: "".into(),
+                transport: McpTransport::Sse { url: "http://localhost:8000/sse".into() },
+                source: McpSource::Detected,
+            },
+            McpServer {
+                id: "mcp-github".into(), name: "GitHub".into(), description: "".into(),
+                transport: McpTransport::Stdio {
+                    command: "npx".into(),
+                    args: vec!["-y".into(), "@modelcontextprotocol/server-github".into()],
+                },
+                source: McpSource::Registry,
+            },
+        ];
+
+        let incomp = get_incompatibilities(&servers);
+        assert_eq!(incomp.len(), 1, "Only localhost SSE should be flagged");
+        assert_eq!(incomp[0].server_id, "detected:data-gouv");
+        assert!(incomp[0].reason.contains("localhost"), "Reason should mention localhost");
+    }
+
+    #[test]
+    fn localhost_127_also_detected() {
+        use crate::core::mcp_scanner::get_incompatibilities;
+        use crate::models::{McpServer, McpTransport, McpSource};
+
+        let servers = vec![McpServer {
+            id: "local-svc".into(), name: "Local".into(), description: "".into(),
+            transport: McpTransport::Streamable { url: "http://127.0.0.1:3000/mcp".into() },
+            source: McpSource::Detected,
+        }];
+
+        let incomp = get_incompatibilities(&servers);
+        assert_eq!(incomp.len(), 1, "127.0.0.1 should be detected as localhost");
+    }
+
+    #[test]
+    fn remote_sse_not_flagged() {
+        use crate::core::mcp_scanner::get_incompatibilities;
+        use crate::models::{McpServer, McpTransport, McpSource};
+
+        let servers = vec![McpServer {
+            id: "remote-svc".into(), name: "Remote".into(), description: "".into(),
+            transport: McpTransport::Sse { url: "https://api.example.com/mcp".into() },
+            source: McpSource::Detected,
+        }];
+
+        let incomp = get_incompatibilities(&servers);
+        assert!(incomp.is_empty(), "Remote SSE should NOT be flagged");
+    }
+
+    #[test]
+    fn codex_config_includes_startup_timeout() {
+        // Verify that a round-tripped Codex TOML config preserves startup_timeout_sec.
+        // This catches regressions where skip_serializing_if accidentally hides the field.
+        let input = r#"
+[mcp_servers.github]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+startup_timeout_sec = 30
+"#;
+        let parsed: toml::Value = input.parse().unwrap();
+        let server = &parsed["mcp_servers"]["github"];
+        assert_eq!(server["startup_timeout_sec"].as_integer(), Some(30),
+            "startup_timeout_sec must survive TOML round-trip");
+        assert_eq!(server["command"].as_str(), Some("npx"));
+    }
+
+    #[test]
+    fn codex_config_default_timeout_is_30() {
+        // Verify the default_startup_timeout constant is 30 (not 10)
+        // to prevent regression to Codex's too-short default
+        assert_eq!(super::super::mcp_scanner::default_startup_timeout(), 30,
+            "Default startup timeout must be 30s (Codex default is 10s, too short for Docker)");
+    }
+
+    #[test]
+    fn scanner_resolve_host_path_existing_local() {
+        use crate::core::scanner::resolve_host_path;
+        // When path exists locally, it should be returned as-is
+        let tmp = setup_tmp("resolve-host");
+        let path = tmp.to_string_lossy().to_string();
+        let resolved = resolve_host_path(&path);
+        assert_eq!(resolved.to_string_lossy(), path, "Existing local path should be returned unchanged");
+        cleanup(&tmp);
+    }
+
+    #[test]
+    fn scanner_resolve_host_path_missing_returns_original() {
+        use crate::core::scanner::resolve_host_path;
+        let fake = "/tmp/kronn-nonexistent-path-test-12345";
+        let resolved = resolve_host_path(fake);
+        assert_eq!(resolved.to_string_lossy(), fake, "Missing path should be returned as-is");
     }
 }

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { config as configApi, agents as agentsApi, stats as statsApi, skills as skillsApi, profiles as profilesApi, projects as projectsApi, directives as directivesApi } from '../lib/api';
+import { config as configApi, agents as agentsApi, stats as statsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi } from '../lib/api';
 import { useApi } from '../hooks/useApi';
 import { useT } from '../lib/I18nContext';
 import { UI_LOCALES } from '../lib/i18n';
@@ -24,11 +24,20 @@ const LANGUAGES: { code: string; label: string; flag: string }[] = [
   { code: 'br', label: 'Brezhoneg', flag: 'BR' },
 ];
 
+/** Provider usage dashboard URLs per agent type */
+const AGENT_USAGE_URLS: Record<string, string> = {
+  ClaudeCode: 'https://claude.ai/settings/usage',
+  Codex: 'https://platform.openai.com/usage',
+  GeminiCli: 'https://aistudio.google.com/usage',
+  Vibe: 'https://console.mistral.ai/usage',
+  Kiro: '',
+};
+
 interface SettingsPageProps {
   agents: AgentDetection[];
   agentAccess: AgentsConfig | null;
   configLanguage: string | null;
-  projects: Project[];
+  projects?: Project[];
   refetchAgents: () => void;
   refetchAgentAccess: () => void;
   refetchLanguage: () => void;
@@ -42,7 +51,6 @@ export function SettingsPage({
   agents,
   agentAccess,
   configLanguage,
-  projects,
   refetchAgents,
   refetchAgentAccess,
   refetchLanguage,
@@ -73,8 +81,6 @@ export function SettingsPage({
   const [newSkillIcon, setNewSkillIcon] = useState('Star');
   const [newSkillCategory, setNewSkillCategory] = useState<'Language' | 'Domain' | 'Business'>('Language');
   const [newSkillContent, setNewSkillContent] = useState('');
-  const [projectSkillsExpanded, setProjectSkillsExpanded] = useState<string | null>(null);
-  const [projectSkillsSearch, setProjectSkillsSearch] = useState('');
   const [availableProfiles, setAvailableProfiles] = useState<AgentProfile[]>([]);
   const [showCreateProfile, setShowCreateProfile] = useState(false);
   const [newProfileName, setNewProfileName] = useState('');
@@ -84,8 +90,6 @@ export function SettingsPage({
   const [newProfileColor, setNewProfileColor] = useState('#a78bfa');
   const [newProfileCategory, setNewProfileCategory] = useState<'Technical' | 'Business' | 'Meta'>('Technical');
   const [newProfilePersona, setNewProfilePersona] = useState('');
-  const [projectProfileExpanded, setProjectProfileExpanded] = useState<string | null>(null);
-  const [projectProfileSearch, setProjectProfileSearch] = useState('');
   const [expandedProfileDesc, setExpandedProfileDesc] = useState<string | null>(null);
   const [editingPersonaId, setEditingPersonaId] = useState<string | null>(null);
   const [editingPersonaValue, setEditingPersonaValue] = useState('');
@@ -434,10 +438,11 @@ export function SettingsPage({
               GeminiCli: { flag: '--yolo', descKey: 'config.fullAccess' },
             };
             const perm = permFlag[agent.agent_type];
-            const tokenField: Record<string, { key: 'anthropic' | 'openai' | 'google'; hint: string; url: string }> = {
+            const tokenField: Record<string, { key: string; hint: string; url: string }> = {
               ClaudeCode: { key: 'anthropic', hint: 'ANTHROPIC_API_KEY', url: 'https://console.anthropic.com/settings/keys' },
               Codex: { key: 'openai', hint: 'OPENAI_API_KEY', url: 'https://platform.openai.com/api-keys' },
               GeminiCli: { key: 'google', hint: 'GEMINI_API_KEY', url: 'https://aistudio.google.com/apikey' },
+              Vibe: { key: 'mistral', hint: 'MISTRAL_API_KEY', url: 'https://console.mistral.ai/api-keys' },
             };
             const tf = tokenField[agent.agent_type];
             const isFullAccess = agent.agent_type === 'ClaudeCode'
@@ -868,6 +873,18 @@ export function SettingsPage({
                       {agentUsage.message_count} msg
                     </span>
                   </button>
+                  {AGENT_USAGE_URLS[agent.agent_type] && (
+                    <a
+                      href={AGENT_USAGE_URLS[agent.agent_type]}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ display: 'inline-flex', alignItems: 'center', marginLeft: 28, marginTop: 2, gap: 4, fontSize: 9, color: 'rgba(255,255,255,0.35)', textDecoration: 'none' }}
+                      title="Provider usage dashboard"
+                    >
+                      <ExternalLink size={9} />
+                      <span>Usage dashboard</span>
+                    </a>
+                  )}
                   {isExpanded && (
                     <div style={{ paddingLeft: 22, paddingBottom: 4 }}>
                       {agentUsage.by_project.length > 5 && (
@@ -1046,92 +1063,6 @@ export function SettingsPage({
             </div>
           )}
 
-          {/* Per-project default skills */}
-          {projects.length > 0 && availableSkills.length > 0 && (
-            <div style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid rgba(255,255,255,0.06)' }}>
-              <h3 style={{ fontSize: 12, fontWeight: 700, color: 'rgba(255,255,255,0.6)', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
-                <Layers size={12} /> {t('skills.projectDefaults')}
-              </h3>
-              <p style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', marginBottom: 12 }}>
-                {t('skills.projectDefaultsHint')}
-              </p>
-              {projects.length > 10 && (
-                <div style={{ marginBottom: 8 }}>
-                  <input
-                    type="text"
-                    placeholder={t('skills.searchProjects') || 'Search projects…'}
-                    value={projectSkillsSearch}
-                    onChange={e => setProjectSkillsSearch(e.target.value)}
-                    style={{
-                      width: '100%', padding: '6px 10px', borderRadius: 6, fontSize: 11,
-                      background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)',
-                      color: '#e8eaed', fontFamily: 'inherit',
-                    }}
-                  />
-                </div>
-              )}
-              <div style={{ maxHeight: 400, overflowY: 'auto' }}>
-              {projects.filter(p => !p.path.split('/').some(s => s.startsWith('.')) && (!projectSkillsSearch || p.name.toLowerCase().includes(projectSkillsSearch.toLowerCase()))).map(project => {
-                const isExpanded = projectSkillsExpanded === project.id;
-                const currentSkills = project.default_skill_ids ?? [];
-                return (
-                  <div key={project.id} style={{ marginBottom: 4 }}>
-                    <button
-                      style={{
-                        width: '100%', display: 'flex', alignItems: 'center', gap: 8,
-                        padding: '8px 10px', borderRadius: 6, border: 'none',
-                        background: isExpanded ? 'rgba(200,255,0,0.04)' : 'transparent',
-                        color: '#e8eaed', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left' as const,
-                      }}
-                      onClick={() => setProjectSkillsExpanded(isExpanded ? null : project.id)}
-                    >
-                      <ChevronRight size={10} style={{ transform: isExpanded ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s' }} />
-                      <span style={{ fontSize: 12, fontWeight: 500, flex: 1 }}>{project.name}</span>
-                      {currentSkills.length > 0 && (
-                        <span style={{ fontSize: 9, color: 'rgba(200,255,0,0.6)', fontWeight: 600 }}>
-                          {currentSkills.length} skill{currentSkills.length > 1 ? 's' : ''}
-                        </span>
-                      )}
-                    </button>
-                    {isExpanded && (
-                      <div style={{ padding: '8px 10px 8px 28px', display: 'flex', flexWrap: 'wrap', gap: 5 }}>
-                        {availableSkills.map(skill => {
-                          const selected = currentSkills.includes(skill.id);
-                          return (
-                            <button
-                              key={skill.id}
-                              type="button"
-                              onClick={async () => {
-                                const newIds = selected
-                                  ? currentSkills.filter(id => id !== skill.id)
-                                  : [...currentSkills, skill.id];
-                                try { await projectsApi.setDefaultSkills(project.id, newIds); } catch (err) { console.error(err); }
-                                refetchProjects();
-                              }}
-                              style={{
-                                padding: '3px 9px', borderRadius: 10, fontSize: 10, fontFamily: 'inherit',
-                                fontWeight: selected ? 600 : 400, cursor: 'pointer',
-                                border: selected ? '1px solid rgba(200,255,0,0.4)' : '1px solid rgba(255,255,255,0.08)',
-                                background: selected ? 'rgba(200,255,0,0.1)' : 'rgba(255,255,255,0.03)',
-                                color: selected ? '#c8ff00' : 'rgba(255,255,255,0.4)',
-                                display: 'flex', alignItems: 'center', gap: 3,
-                                transition: 'all 0.15s',
-                              }}
-                              title={skill.name}
-                            >
-                              {selected && <Check size={8} />}
-                              {skill.name}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-              </div>
-            </div>
-          )}
         </div>
       </div>
 
@@ -1365,107 +1296,6 @@ export function SettingsPage({
             </div>
           )}
 
-          {/* Per-project default profile */}
-          {projects.length > 0 && availableProfiles.length > 0 && (
-            <div style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid rgba(255,255,255,0.06)' }}>
-              <h3 style={{ fontSize: 12, fontWeight: 700, color: 'rgba(255,255,255,0.6)', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
-                <Layers size={12} /> {t('profiles.projectDefault')}
-              </h3>
-              <p style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', marginBottom: 12 }}>
-                {t('profiles.projectDefaultHint')}
-              </p>
-              {projects.length > 10 && (
-                <div style={{ marginBottom: 8 }}>
-                  <input
-                    type="text"
-                    placeholder={t('profiles.searchProjects') || 'Search projects…'}
-                    value={projectProfileSearch}
-                    onChange={e => setProjectProfileSearch(e.target.value)}
-                    style={{
-                      width: '100%', padding: '6px 10px', borderRadius: 6, fontSize: 11,
-                      background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)',
-                      color: '#e8eaed', fontFamily: 'inherit',
-                    }}
-                  />
-                </div>
-              )}
-              <div style={{ maxHeight: 400, overflowY: 'auto' }}>
-              {projects.filter(p => !p.path.split('/').some(s => s.startsWith('.')) && (!projectProfileSearch || p.name.toLowerCase().includes(projectProfileSearch.toLowerCase()))).map(project => {
-                const isExpanded = projectProfileExpanded === project.id;
-                const currentProfileId = (project as any).default_profile_id ?? null;
-                return (
-                  <div key={project.id} style={{ marginBottom: 4 }}>
-                    <button
-                      style={{
-                        width: '100%', display: 'flex', alignItems: 'center', gap: 8,
-                        padding: '8px 10px', borderRadius: 6, border: 'none',
-                        background: isExpanded ? 'rgba(139,92,246,0.04)' : 'transparent',
-                        color: '#e8eaed', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left' as const,
-                      }}
-                      onClick={() => setProjectProfileExpanded(isExpanded ? null : project.id)}
-                    >
-                      <ChevronRight size={10} style={{ transform: isExpanded ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s' }} />
-                      <span style={{ fontSize: 12, fontWeight: 500, flex: 1 }}>{project.name}</span>
-                      {currentProfileId && (
-                        <span style={{ fontSize: 9, color: 'rgba(139,92,246,0.6)', fontWeight: 600 }}>
-                          {availableProfiles.find(p => p.id === currentProfileId)?.name ?? currentProfileId}
-                        </span>
-                      )}
-                    </button>
-                    {isExpanded && (
-                      <div style={{ padding: '8px 10px 8px 28px', display: 'flex', flexWrap: 'wrap', gap: 5 }}>
-                        <button
-                          type="button"
-                          onClick={async () => {
-                            try { await projectsApi.setDefaultProfile(project.id, null); } catch (err) { console.error(err); }
-                            refetchProjects();
-                          }}
-                          style={{
-                            padding: '3px 9px', borderRadius: 10, fontSize: 10, fontFamily: 'inherit',
-                            fontWeight: !currentProfileId ? 600 : 400, cursor: 'pointer',
-                            border: !currentProfileId ? '1px solid rgba(139,92,246,0.4)' : '1px solid rgba(255,255,255,0.08)',
-                            background: !currentProfileId ? 'rgba(139,92,246,0.1)' : 'rgba(255,255,255,0.03)',
-                            color: !currentProfileId ? '#a78bfa' : 'rgba(255,255,255,0.4)',
-                            transition: 'all 0.15s',
-                          }}
-                        >
-                          {t('profiles.none')}
-                        </button>
-                        {availableProfiles.map(profile => {
-                          const selected = currentProfileId === profile.id;
-                          return (
-                            <button
-                              key={profile.id}
-                              type="button"
-                              onClick={async () => {
-                                const newId = selected ? null : profile.id;
-                                try { await projectsApi.setDefaultProfile(project.id, newId); } catch (err) { console.error(err); }
-                                refetchProjects();
-                              }}
-                              style={{
-                                padding: '3px 9px', borderRadius: 10, fontSize: 10, fontFamily: 'inherit',
-                                fontWeight: selected ? 600 : 400, cursor: 'pointer',
-                                border: selected ? '1px solid rgba(139,92,246,0.4)' : '1px solid rgba(255,255,255,0.08)',
-                                background: selected ? 'rgba(139,92,246,0.1)' : 'rgba(255,255,255,0.03)',
-                                color: selected ? '#a78bfa' : 'rgba(255,255,255,0.4)',
-                                display: 'flex', alignItems: 'center', gap: 3,
-                                transition: 'all 0.15s',
-                              }}
-                              title={profile.role}
-                            >
-                              {selected && <Check size={8} />}
-                              {profile.avatar} {profile.persona_name || profile.name}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-              </div>
-            </div>
-          )}
         </div>
       </div>
 

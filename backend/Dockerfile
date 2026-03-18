@@ -63,6 +63,7 @@ COPY --from=ghcr.io/astral-sh/uv:0.5.14 /uvx /usr/local/bin/uvx
 COPY --from=builder /usr/local/bin/kronn /usr/local/bin/kronn
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
+COPY scripts/ /app/scripts/
 
 # Data directory owned by kronn
 RUN mkdir -p /data && chown kronn:kronn /data

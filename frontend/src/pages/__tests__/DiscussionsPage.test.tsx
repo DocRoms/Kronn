@@ -495,4 +495,100 @@ describe('DiscussionsPage', () => {
     expect(body).toContain('Archives');
     expect(body).toContain('1');
   });
+
+  it('shows API mode warning banner for Vibe discussions', async () => {
+    const vibeDisc: Discussion = {
+      ...makeListDiscussion('vibe1', 1),
+      agent: 'Vibe',
+      participants: ['Vibe'],
+      messages: [
+        { id: 'm1', role: 'User', content: 'Hello Vibe', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(vibeDisc);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[{ ...makeListDiscussion('vibe1', 1), agent: 'Vibe', participants: ['Vibe'], messages: vibeDisc.messages }]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="vibe1"
+        {...liftedProps()}
+      />
+    );
+
+    const body = document.body.textContent!;
+    expect(body).toContain('Mode API');
+    expect(body).toContain('MCP');
+  });
+
+  it('persists sidebar collapse state to localStorage', async () => {
+    // Pre-set a collapsed state in localStorage
+    localStorage.setItem('kronn:discCollapsedGroups', JSON.stringify(['__global__']));
+
+    const fullDisc: Discussion = {
+      ...makeListDiscussion('d1', 1),
+      messages: [
+        { id: 'm1', role: 'User', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[{ ...makeListDiscussion('d1', 1), project_id: null, messages: fullDisc.messages }]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        {...liftedProps()}
+      />
+    );
+
+    // The localStorage value should be readable
+    const saved = localStorage.getItem('kronn:discCollapsedGroups');
+    expect(saved).toBeTruthy();
+    const parsed = JSON.parse(saved!);
+    expect(Array.isArray(parsed)).toBe(true);
+  });
+
+  it('groups project discussions by org when multiple orgs exist', async () => {
+    const proj1 = { id: 'p1', name: 'front_euronews', path: '/repos/front_euronews', repo_url: 'git@github.com:Euronews-tech/front_euronews.git', token_override: null, ai_config: { detected: false, configs: [] }, audit_status: 'NoTemplate' as any, ai_todo_count: 0, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' };
+    const proj2 = { id: 'p2', name: 'Kronn', path: '/repos/Kronn', repo_url: 'git@github.com:DocRoms/Kronn.git', token_override: null, ai_config: { detected: false, configs: [] }, audit_status: 'NoTemplate' as any, ai_todo_count: 0, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' };
+
+    const disc1 = { ...makeListDiscussion('d1', 1), project_id: 'p1', messages: [{ id: 'm1', role: 'User' as const, content: 'test', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null }] };
+    const disc2 = { ...makeListDiscussion('d2', 1), project_id: 'p2', messages: [{ id: 'm2', role: 'User' as const, content: 'test', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null }] };
+
+    vi.mocked(discussionsApi.get).mockResolvedValue(disc1);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[proj1, proj2]}
+        agents={[]}
+        allDiscussions={[disc1, disc2]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        {...liftedProps()}
+      />
+    );
+
+    const body = document.body.textContent!;
+    // Should show org group headers
+    expect(body).toContain('Euronews-tech');
+    expect(body).toContain('DocRoms');
+  });
 });

@@ -16,7 +16,13 @@ struct CodexMcpEntry {
     env: HashMap<String, String>,
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     enabled: bool,
+    /// Codex default is 10s which is too short when many MCPs start in parallel.
+    /// Always written explicitly so Codex reads it.
+    #[serde(default = "default_startup_timeout")]
+    startup_timeout_sec: u32,
 }
+
+pub(crate) fn default_startup_timeout() -> u32 { 30 }
 
 fn default_true() -> bool { true }
 fn is_true(v: &bool) -> bool { *v }
@@ -93,8 +99,22 @@ pub fn write_mcp_json_to_subpath(project_path: &str, subpath: &str, data: &McpJs
     }
     let content = serde_json::to_string_pretty(data)
         .map_err(|e| format!("JSON serialize error: {}", e))?;
-    std::fs::write(&file, content)
-        .map_err(|e| format!("Failed to write {}: {}", file.display(), e))
+    // Atomic write: write to temp file then rename, so agents never read partial JSON
+    atomic_write(&file, &content)
+}
+
+/// Write content to a file atomically: write to a temp sibling then rename.
+/// This prevents agents from reading a partially-written config file.
+fn atomic_write(target: &Path, content: &str) -> Result<(), String> {
+    let tmp = target.with_extension("tmp");
+    std::fs::write(&tmp, content)
+        .map_err(|e| format!("Failed to write temp {}: {}", tmp.display(), e))?;
+    std::fs::rename(&tmp, target)
+        .map_err(|e| {
+            // Clean up temp file on rename failure
+            let _ = std::fs::remove_file(&tmp);
+            format!("Failed to rename {} → {}: {}", tmp.display(), target.display(), e)
+        })
 }
 
 // ─── Sync DB → disk ──────────────────────────────────────────────────────
@@ -149,6 +169,14 @@ pub fn sync_project_mcps_to_disk(
 
         let entry = match &server.transport {
             McpTransport::Stdio { command, args } => {
+                // Validate that the MCP command is available in PATH
+                if !is_command_available(command) {
+                    tracing::warn!(
+                        "MCP server '{}' command '{}' not found in PATH — skipping",
+                        server.name, command
+                    );
+                    continue;
+                }
                 let final_args = config.args_override.clone()
                     .unwrap_or_else(|| args.clone());
                 McpServerEntry {
@@ -189,20 +217,70 @@ pub fn sync_project_mcps_to_disk(
         }
     } else {
         // ── Claude Code: .mcp.json ──
-        let data = McpJsonFile { mcp_servers };
-        write_mcp_json(&project.path, &data)?;
+        // Claude Code only supports stdio servers in .mcp.json.
+        // SSE/Streamable entries (with only "url", no "command") break the schema
+        // validation and cause Claude Code to reject the ENTIRE file → no MCPs at all.
+        let stdio_only: HashMap<String, McpServerEntry> = mcp_servers.iter()
+            .filter(|(_, entry)| entry.command.is_some())
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let claude_data = McpJsonFile { mcp_servers: stdio_only };
+        write_mcp_json(&project.path, &claude_data)?;
         ensure_gitignore(&project.path, ".mcp.json");
-        tracing::info!("Synced .mcp.json for {} ({} MCPs)", project.path, configs.len());
+        tracing::info!("Synced .mcp.json for {} ({} stdio MCPs)", project.path, claude_data.mcp_servers.len());
+
+        // Full data — but filter out localhost SSE/Streamable (unreachable in Docker)
+        let docker_safe: HashMap<String, McpServerEntry> = mcp_servers.into_iter()
+            .filter(|(_, entry)| {
+                if let Some(ref url) = entry.url {
+                    !(url.contains("localhost") || url.contains("127.0.0.1") || url.contains("[::1]"))
+                } else {
+                    true
+                }
+            })
+            .collect();
+        let data = McpJsonFile { mcp_servers: docker_safe };
 
         // ── Vibe: .vibe/config.toml ──
         sync_vibe_project_config(&project.path, &configs, &server_map, secret);
 
-        // ── Kiro: .kiro/settings/mcp.json (same JSON format as Claude) ──
-        if let Err(e) = write_mcp_json_to_subpath(&project.path, ".kiro/settings/mcp.json", &data) {
+        // ── Kiro: filter out incompatible servers ──
+        let kiro_servers: HashMap<String, McpServerEntry> = {
+            let mut filtered = data.mcp_servers.clone();
+            let to_remove: Vec<String> = filtered.keys()
+                .filter(|key| {
+                    // Find matching server in server_map by checking config labels/names
+                    configs.iter().any(|cfg| {
+                        if let Some(srv) = server_map.get(&cfg.server_id) {
+                            let cfg_key = if configs_per_server.get(&cfg.server_id).copied().unwrap_or(0) > 1 {
+                                &cfg.label
+                            } else {
+                                &srv.name.to_lowercase()
+                            };
+                            cfg_key == key.as_str() && check_incompatibility(srv, &AgentType::Kiro).is_some()
+                        } else {
+                            false
+                        }
+                    })
+                })
+                .cloned()
+                .collect();
+            for key in &to_remove {
+                tracing::info!("Excluding '{}' from Kiro config (incompatible)", key);
+                filtered.remove(key);
+            }
+            filtered
+        };
+        let kiro_data = McpJsonFile { mcp_servers: kiro_servers };
+
+        // ── Kiro: .kiro/settings/mcp.json ──
+        if let Err(e) = write_mcp_json_to_subpath(&project.path, ".kiro/settings/mcp.json", &kiro_data) {
             tracing::warn!("Failed to sync Kiro MCP config: {}", e);
         } else {
             ensure_gitignore(&project.path, ".kiro/settings/");
-            tracing::info!("Synced .kiro/settings/mcp.json for {}", project.path);
+            tracing::info!("Synced .kiro/settings/mcp.json for {} ({} servers, {} excluded)",
+                project.path, kiro_data.mcp_servers.len(),
+                data.mcp_servers.len() - kiro_data.mcp_servers.len());
         }
 
         // ── Gemini CLI: .gemini/settings.json (same JSON format as Claude) ──
@@ -213,8 +291,8 @@ pub fn sync_project_mcps_to_disk(
             tracing::info!("Synced .gemini/settings.json for {}", project.path);
         }
 
-        // ── Kiro (new format): .ai/mcp/mcp.json (same JSON format) ──
-        if let Err(e) = write_mcp_json_to_subpath(&project.path, ".ai/mcp/mcp.json", &data) {
+        // ── Kiro (new format): .ai/mcp/mcp.json ──
+        if let Err(e) = write_mcp_json_to_subpath(&project.path, ".ai/mcp/mcp.json", &kiro_data) {
             tracing::warn!("Failed to sync Kiro .ai/mcp config: {}", e);
         } else {
             ensure_gitignore(&project.path, ".ai/mcp/");
@@ -373,7 +451,7 @@ fn sync_vibe_project_config(
     match toml::to_string_pretty(&vibe_cfg) {
         Ok(content) => {
             let header = "# Vibe MCP config — auto-generated by Kronn\n# Do not edit manually; changes will be overwritten on next sync.\n\n";
-            if let Err(e) = std::fs::write(&vibe_config, format!("{}{}", header, content)) {
+            if let Err(e) = atomic_write(&vibe_config, &format!("{}{}", header, content)) {
                 tracing::warn!("Failed to write Vibe config {}: {}", vibe_config.display(), e);
             } else {
                 ensure_gitignore(project_path, ".vibe/");
@@ -451,6 +529,7 @@ fn sync_codex_global_config(
             args,
             env,
             enabled: true,
+            startup_timeout_sec: 30,
         });
     }
 
@@ -504,7 +583,7 @@ fn sync_codex_global_config(
 
     match toml::to_string_pretty(&doc) {
         Ok(content) => {
-            if let Err(e) = std::fs::write(&codex_config, content) {
+            if let Err(e) = atomic_write(&codex_config, &content) {
                 tracing::warn!("Failed to write Codex config: {}", e);
             } else {
                 tracing::info!("Synced Codex global config ({} MCP servers)", mcp_entries.len());
@@ -781,22 +860,107 @@ pub fn list_mcp_context_files(project_path: &str) -> Vec<(String, String)> {
     result
 }
 
-// ─── Path resolution ─────────────────────────────────────────────────────────
+// ─── Agent compatibility ─────────────────────────────────────────────────────
 
-/// Resolve a project path that might be a host path (when running in Docker).
-/// Inside Docker, host $HOME is mounted at /host-home.
-/// KRONN_HOST_HOME contains the actual host home path (e.g. /home/priol).
-pub fn resolve_host_path(path: &str) -> String {
-    if Path::new(path).exists() {
-        return path.to_string();
+use crate::models::{AgentType, McpIncompatibility};
+
+/// Known incompatibilities between MCP servers and specific agents.
+/// Servers listed here will be excluded from that agent's config file during sync.
+///
+/// Format: (npx_package_substring, agent, reason)
+/// Matching is done on the server's command args (npx package name).
+const KNOWN_INCOMPATIBILITIES: &[(&str, AgentType, &str)] = &[
+    // GitLab MCP server returns empty tool schemas (no `type`, no `properties`).
+    // AWS Bedrock (used by Kiro) rejects these as ValidationException.
+    // Claude Code / Codex / Gemini are more tolerant and accept partial schemas.
+    ("server-gitlab", AgentType::Kiro, "GitLab MCP returns empty tool schemas — incompatible with AWS Bedrock (ValidationException)"),
+];
+
+/// Check if a server is incompatible with a specific agent.
+/// Returns the reason string if incompatible, None otherwise.
+fn check_incompatibility(server: &crate::models::McpServer, agent: &AgentType) -> Option<&'static str> {
+    // Localhost SSE/Streamable servers are unreachable inside Docker → exclude from all agents
+    if is_localhost_remote(server) {
+        return Some("Localhost SSE/Streamable server — unreachable inside Docker");
     }
-    if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {
-        if let Some(relative) = path.strip_prefix(&host_home) {
-            let mapped = format!("/host-home{}", relative);
-            if Path::new(&mapped).exists() {
-                return mapped;
+
+    let args_str = match &server.transport {
+        McpTransport::Stdio { args, .. } => args.join(" "),
+        _ => String::new(),
+    };
+
+    for (pkg_substr, incomp_agent, reason) in KNOWN_INCOMPATIBILITIES {
+        if agent == incomp_agent && args_str.contains(pkg_substr) {
+            return Some(reason);
+        }
+    }
+    None
+}
+
+/// Check if a server uses a localhost URL (SSE/Streamable).
+/// These servers are local dev servers that can't be reached from inside Docker.
+fn is_localhost_remote(server: &crate::models::McpServer) -> bool {
+    match &server.transport {
+        McpTransport::Sse { url } | McpTransport::Streamable { url } => {
+            url.contains("localhost") || url.contains("127.0.0.1") || url.contains("[::1]")
+        }
+        McpTransport::Stdio { .. } => false,
+    }
+}
+
+/// Return all known incompatibilities for a set of servers.
+/// Used by the API to display warnings in the UI.
+pub fn get_incompatibilities(servers: &[crate::models::McpServer]) -> Vec<McpIncompatibility> {
+    let mut result = Vec::new();
+    for server in servers {
+        // Localhost SSE/Streamable → incompatible with all agents
+        if is_localhost_remote(server) {
+            result.push(McpIncompatibility {
+                server_id: server.id.clone(),
+                agent: AgentType::ClaudeCode, // Representative — affects all
+                reason: "Serveur SSE/Streamable localhost — inaccessible depuis Docker".to_string(),
+            });
+            continue;
+        }
+
+        // Agent-specific incompatibilities
+        let args_str = match &server.transport {
+            McpTransport::Stdio { args, .. } => args.join(" "),
+            _ => String::new(),
+        };
+        for (pkg_substr, agent, reason) in KNOWN_INCOMPATIBILITIES {
+            if args_str.contains(pkg_substr) {
+                result.push(McpIncompatibility {
+                    server_id: server.id.clone(),
+                    agent: agent.clone(),
+                    reason: reason.to_string(),
+                });
             }
         }
     }
-    path.to_string()
+    result
+}
+
+// ─── Command validation ─────────────────────────────────────────────────────
+
+/// Check if a command binary is available in PATH (or is an absolute path that exists).
+/// Used to warn about missing MCP server commands before writing configs.
+pub(crate) fn is_command_available(command: &str) -> bool {
+    // Absolute path — check directly
+    if command.starts_with('/') {
+        return Path::new(command).exists();
+    }
+    // npx/uvx are launchers that install on demand — always available if the binary exists
+    // For other commands, check PATH
+    std::env::var("PATH")
+        .unwrap_or_default()
+        .split(':')
+        .any(|dir| Path::new(dir).join(command).exists())
+}
+
+// ─── Path resolution ─────────────────────────────────────────────────────────
+
+/// Re-export from scanner — single source of truth for host path resolution.
+fn resolve_host_path(path: &str) -> String {
+    crate::core::scanner::resolve_host_path(path).to_string_lossy().to_string()
 }

@@ -60,6 +60,11 @@ const BUILTIN_PROFILES: &[BuiltinProfile] = &[
     // Meta
     BuiltinProfile { id: "devils-advocate", content: include_str!("../profiles/devils-advocate.md") },
     BuiltinProfile { id: "mentor", content: include_str!("../profiles/mentor.md") },
+    // Business
+    BuiltinProfile { id: "entrepreneur", content: include_str!("../profiles/entrepreneur.md") },
+    BuiltinProfile { id: "ux-designer", content: include_str!("../profiles/ux-designer.md") },
+    // Technical
+    BuiltinProfile { id: "game-developer", content: include_str!("../profiles/game-developer.md") },
 ];
 
 // ─── Frontmatter parsing ────────────────────────────────────────────────────
@@ -345,7 +350,7 @@ mod tests {
     #[test]
     fn parse_builtin_profiles() {
         let profiles = list_all_profiles();
-        assert!(profiles.len() >= 8, "Expected at least 8 builtin profiles, got {}", profiles.len());
+        assert!(profiles.len() >= 11, "Expected at least 11 builtin profiles, got {}", profiles.len());
 
         let architect = profiles.iter().find(|p| p.id == "architect").unwrap();
         assert_eq!(architect.name, "Architect");
@@ -397,6 +402,31 @@ mod tests {
         assert!(profiles.iter().any(|p| p.category == ProfileCategory::Technical));
         assert!(profiles.iter().any(|p| p.category == ProfileCategory::Business));
         assert!(profiles.iter().any(|p| p.category == ProfileCategory::Meta));
+    }
+
+    #[test]
+    fn new_profiles_exist() {
+        for (id, category) in [
+            ("entrepreneur", ProfileCategory::Business),
+            ("game-developer", ProfileCategory::Technical),
+            ("ux-designer", ProfileCategory::Business),
+        ] {
+            let profile = get_profile(id);
+            assert!(profile.is_some(), "Profile '{}' must exist", id);
+            let p = profile.unwrap();
+            assert_eq!(p.category, category, "Profile '{}' wrong category", id);
+            assert!(!p.persona_prompt.is_empty(), "Profile '{}' must have content", id);
+        }
+    }
+
+    #[test]
+    fn bootstrap_includes_entrepreneur() {
+        // The bootstrap discussion should include the entrepreneur profile.
+        // This is a documentation test — the actual code is in api/projects.rs
+        // but we verify the profile exists and is usable.
+        let profile = get_profile("entrepreneur");
+        assert!(profile.is_some(), "entrepreneur profile must exist for bootstrap");
+        assert_eq!(profile.unwrap().category, ProfileCategory::Business);
     }
 
     #[test]

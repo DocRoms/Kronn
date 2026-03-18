@@ -32,3 +32,6 @@ docker-compose.override.yml
 .kiro/settings/
 /.gemini/
 /.ai/mcp/
+.vibe/
+.gemini/
+.ai/mcp/

@@ -191,7 +191,7 @@ Note: the old "Agents" tab has been merged into Config. Nav order: Projets → D
 
 ### Project Bootstrap (create from scratch)
 
-`POST /api/projects/bootstrap` — creates a new project directory, initializes git, installs AI template, creates a bootstrap discussion with architect + product-owner profiles. The discussion prompt guides the AI through: Vision → Architecture → Structure → MVP → Action Plan. Frontend modal accessible via "New project" button in nav bar. Parent directory determined from existing projects' common parent or `KRONN_REPOS_DIR` env var.
+`POST /api/projects/bootstrap` — creates a new project directory, initializes git, installs AI template, creates a bootstrap discussion with architect + product-owner + entrepreneur profiles. The discussion prompt guides the AI through: Vision → Architecture → Structure → MVP → Action Plan. Frontend modal accessible via "New project" button in nav bar. Parent directory determined from existing projects' common parent or `KRONN_REPOS_DIR` env var.
 
 ### CI pipeline
 

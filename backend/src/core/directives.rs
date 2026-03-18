@@ -1,7 +1,7 @@
 //! Directives loader — reads builtin (embedded) and custom directives from disk.
 //!
 //! Directives represent HOW the agent should behave/format output (multi-select).
-//! Categories: Output, Language.
+//! Categories: Output (builtin), Language (custom only — language is managed via config).
 //!
 //! Builtin directives are embedded at compile time from `src/directives/*.md`.
 //! Custom directives live in `~/.config/kronn/directives/` as Markdown files with YAML frontmatter.
@@ -26,10 +26,6 @@ const BUILTIN_DIRECTIVES: &[BuiltinDirective] = &[
     BuiltinDirective { id: "step-by-step", content: include_str!("../directives/step-by-step.md") },
     BuiltinDirective { id: "verbose", content: include_str!("../directives/verbose.md") },
     BuiltinDirective { id: "diff-only", content: include_str!("../directives/diff-only.md") },
-    // Language
-    BuiltinDirective { id: "repondre-en-francais", content: include_str!("../directives/repondre-en-francais.md") },
-    BuiltinDirective { id: "reply-in-english", content: include_str!("../directives/reply-in-english.md") },
-    BuiltinDirective { id: "responder-en-espanol", content: include_str!("../directives/responder-en-espanol.md") },
 ];
 
 // ─── Frontmatter parsing ────────────────────────────────────────────────────
@@ -253,7 +249,7 @@ mod tests {
     #[test]
     fn parse_builtin_directives() {
         let directives = list_all_directives();
-        assert!(directives.len() >= 10, "Expected at least 10 builtin directives, got {}", directives.len());
+        assert!(directives.len() >= 7, "Expected at least 7 builtin directives, got {}", directives.len());
 
         let token_saver = directives.iter().find(|d| d.id == "token-saver").unwrap();
         assert_eq!(token_saver.name, "Token Saver");
@@ -295,10 +291,21 @@ mod tests {
     }
 
     #[test]
-    fn both_categories_represented() {
+    fn output_category_represented() {
         let directives = list_all_directives();
         assert!(directives.iter().any(|d| d.category == DirectiveCategory::Output), "No output directives");
-        assert!(directives.iter().any(|d| d.category == DirectiveCategory::Language), "No language directives");
+    }
+
+    #[test]
+    fn language_directives_removed() {
+        let directives = list_all_directives();
+        let ids: Vec<&str> = directives.iter().map(|d| d.id.as_str()).collect();
+        assert!(!ids.contains(&"repondre-en-francais"), "French language directive should be removed");
+        assert!(!ids.contains(&"reply-in-english"), "English language directive should be removed");
+        assert!(!ids.contains(&"responder-en-espanol"), "Spanish language directive should be removed");
+        // No builtin language directives should remain
+        assert!(!directives.iter().any(|d| d.category == DirectiveCategory::Language && d.is_builtin),
+            "No builtin language directives should exist");
     }
 
     #[test]
@@ -354,11 +361,6 @@ mod tests {
         assert!(!conflicts.is_empty(), "token-saver and verbose should conflict");
     }
 
-    #[test]
-    fn validate_no_conflicts_language_conflict() {
-        let conflicts = validate_no_conflicts(&["repondre-en-francais".into(), "reply-in-english".into()]);
-        assert!(!conflicts.is_empty(), "French and English directives should conflict");
-    }
 
     #[test]
     fn parse_frontmatter_valid() {
