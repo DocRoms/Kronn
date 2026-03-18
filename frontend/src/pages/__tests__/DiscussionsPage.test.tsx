@@ -109,7 +109,9 @@ describe('DiscussionsPage', () => {
         {...liftedProps()}
       />
     );
-    expect(document.body.textContent).toBeDefined();
+    // The "New" discussion button (disc.new = "Nouvelle" in French) should be rendered
+    const body = document.body.textContent ?? '';
+    expect(body).toContain('Nouvelle');
   });
 
   it('renders with agentAccess provided', async () => {
@@ -141,7 +143,9 @@ describe('DiscussionsPage', () => {
         {...liftedProps()}
       />
     );
-    expect(document.body.textContent).toBeDefined();
+    // The new-discussion button (disc.new = "Nouvelle" in FR, "New" in EN) is always rendered
+    const body = document.body.textContent ?? '';
+    expect(body).toContain('Nouvelle');
   });
 
   it('renders with prefill prop', async () => {
@@ -161,7 +165,9 @@ describe('DiscussionsPage', () => {
         {...liftedProps()}
       />
     );
-    expect(document.body.textContent).toBeDefined();
+    // The prefill prompt content should appear in the new-discussion form
+    const body = document.body.textContent ?? '';
+    expect(body).toContain('Hello');
   });
 
   it('sidebar shows message_count not messages.length', async () => {

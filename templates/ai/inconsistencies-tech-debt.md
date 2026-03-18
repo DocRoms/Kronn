@@ -1,5 +1,7 @@
 # Tech debt (index)
 
+> **TEMPLATE FILE.** Do not refactor items listed here without reading their detail file first.
+
 Track-only list. Prevents AI from doing large refactors without context.
 Details in `ai/tech-debt/TD-YYYYMMDD-slug.md` (use today's date for YYYYMMDD).
 

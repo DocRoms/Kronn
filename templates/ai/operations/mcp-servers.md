@@ -1,5 +1,7 @@
 # MCP Servers — Agent tools
 
+> **TEMPLATE FILE.** If servers below contain `{{...}}`, they are not configured yet.
+
 ## Available servers
 
 | Server | Package | Purpose | Credentials |

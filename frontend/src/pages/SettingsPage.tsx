@@ -74,6 +74,7 @@ export function SettingsPage({
   const [newSkillCategory, setNewSkillCategory] = useState<'Language' | 'Domain' | 'Business'>('Language');
   const [newSkillContent, setNewSkillContent] = useState('');
   const [projectSkillsExpanded, setProjectSkillsExpanded] = useState<string | null>(null);
+  const [projectSkillsSearch, setProjectSkillsSearch] = useState('');
   const [availableProfiles, setAvailableProfiles] = useState<AgentProfile[]>([]);
   const [showCreateProfile, setShowCreateProfile] = useState(false);
   const [newProfileName, setNewProfileName] = useState('');
@@ -84,6 +85,7 @@ export function SettingsPage({
   const [newProfileCategory, setNewProfileCategory] = useState<'Technical' | 'Business' | 'Meta'>('Technical');
   const [newProfilePersona, setNewProfilePersona] = useState('');
   const [projectProfileExpanded, setProjectProfileExpanded] = useState<string | null>(null);
+  const [projectProfileSearch, setProjectProfileSearch] = useState('');
   const [expandedProfileDesc, setExpandedProfileDesc] = useState<string | null>(null);
   const [editingPersonaId, setEditingPersonaId] = useState<string | null>(null);
   const [editingPersonaValue, setEditingPersonaValue] = useState('');
@@ -409,7 +411,7 @@ export function SettingsPage({
             >
               <FolderSearch size={10} /> {t('config.discoverKeys')}
             </button>
-            <button style={ss.iconBtn} onClick={() => refetchAgents()} title={t('config.refresh')}>
+            <button style={ss.iconBtn} onClick={() => refetchAgents()} title={t('config.refresh')} aria-label={t('config.refresh')}>
               <RefreshCw size={12} />
             </button>
           </div>
@@ -451,7 +453,12 @@ export function SettingsPage({
             return (
             <div key={agent.name} style={{ padding: '10px 0', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <div style={ss.dot((agent.installed || agent.runtime_available) && agent.enabled)} />
+                <div style={{ position: 'relative' as const }}>
+                  <div aria-hidden="true" style={ss.dot((agent.installed || agent.runtime_available) && agent.enabled)} />
+                  <span style={{ position: 'absolute', width: 1, height: 1, padding: 0, margin: -1, overflow: 'hidden', clip: 'rect(0,0,0,0)', whiteSpace: 'nowrap', border: 0 }}>
+                    {(agent.installed || agent.runtime_available) && agent.enabled ? t('config.enabled') : t('config.disabled')}
+                  </span>
+                </div>
                 <div style={{ flex: 1 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                     <span style={{ fontWeight: 600, fontSize: 12 }}>{agent.name}</span>
@@ -541,10 +548,20 @@ export function SettingsPage({
               {perm && (agent.installed || agent.runtime_available) && (
                 <div style={{ marginLeft: 22, marginTop: 8, padding: '8px 12px', borderRadius: 6, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>
                   <div
+                    role="switch"
+                    aria-checked={isFullAccess}
+                    tabIndex={0}
                     style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}
                     onClick={async () => {
                       try { await configApi.setAgentAccess({ agent: agent.agent_type, full_access: !isFullAccess }); } catch (err) { console.error(err); }
                       refetchAgentAccess();
+                    }}
+                    onKeyDown={async (e) => {
+                      if (e.key === ' ' || e.key === 'Enter') {
+                        e.preventDefault();
+                        try { await configApi.setAgentAccess({ agent: agent.agent_type, full_access: !isFullAccess }); } catch (err) { console.error(err); }
+                        refetchAgentAccess();
+                      }
                     }}
                   >
                     <div style={{
@@ -613,7 +630,7 @@ export function SettingsPage({
                       {k.active ? (
                         <Check size={9} style={{ color: 'rgba(52,211,153,0.7)', flexShrink: 0 }} />
                       ) : (
-                        <button style={{ ...ss.iconBtn, padding: 0 }} title={t('config.activateKey')}
+                        <button style={{ ...ss.iconBtn, padding: 0 }} title={t('config.activateKey')} aria-label={t('config.activateKey')}
                           onClick={async () => { try { await configApi.activateApiKey(k.id); } catch (err) { console.error(err); } refetchTokens(); }}>
                           <div style={{ width: 9, height: 9, borderRadius: '50%', border: '1px solid rgba(255,255,255,0.2)' }} />
                         </button>
@@ -629,7 +646,7 @@ export function SettingsPage({
                       }}>
                         {isVis ? k.masked_value : k.masked_value.replace(/[^.]/g, '\u2022')}
                       </span>
-                      <button style={{ ...ss.iconBtn, padding: 0 }} title={isVis ? 'Hide' : 'Show'}
+                      <button style={{ ...ss.iconBtn, padding: 0 }} title={isVis ? 'Hide' : 'Show'} aria-label={isVis ? 'Hide API key' : 'Show API key'}
                         onClick={() => setTokenVisible(prev => {
                           const next = new Set(prev);
                           if (next.has(k.id)) next.delete(k.id); else next.add(k.id);
@@ -637,7 +654,7 @@ export function SettingsPage({
                         })}>
                         {isVis ? <EyeOff size={9} style={{ color: '#c8ff00' }} /> : <Eye size={9} style={{ color: 'rgba(255,255,255,0.25)' }} />}
                       </button>
-                      <button style={{ ...ss.iconBtn, padding: 0 }} title={t('config.deleteKey')}
+                      <button style={{ ...ss.iconBtn, padding: 0 }} title={t('config.deleteKey')} aria-label={t('config.deleteKey')}
                         onClick={async () => {
                           if (confirm(t('config.deleteKeyConfirm').replace('{0}', k.name))) {
                             try { await configApi.deleteApiKey(k.id); } catch (err) { console.error(err); }
@@ -681,7 +698,7 @@ export function SettingsPage({
                         onChange={e => setNewKeyInputs(prev => ({ ...prev, [tf.key]: { ...newInput, value: e.target.value } }))}
                       />
                       {newInput.value && (
-                        <button style={{ ...ss.iconBtn, fontSize: 10, color: '#c8ff00' }}
+                        <button style={{ ...ss.iconBtn, fontSize: 10, color: '#c8ff00' }} aria-label="Save API key"
                           onClick={async () => {
                             try {
                               await configApi.saveApiKey({
@@ -706,7 +723,7 @@ export function SettingsPage({
                           <Save size={10} />
                         </button>
                       )}
-                      <button style={{ ...ss.iconBtn, padding: 0 }} onClick={() => setAddingKeyFor(null)}>
+                      <button style={{ ...ss.iconBtn, padding: 0 }} onClick={() => setAddingKeyFor(null)} aria-label="Cancel">
                         <X size={10} style={{ color: 'rgba(255,255,255,0.3)' }} />
                       </button>
                     </div>
@@ -775,7 +792,7 @@ export function SettingsPage({
                 const selectStyle = {
                   background: '#1a1d24', border: '1px solid rgba(255,255,255,0.12)',
                   borderRadius: 4, padding: '3px 6px', fontSize: 10, color: '#e8eaed',
-                  fontFamily: 'inherit', width: 150, outline: 'none', cursor: 'pointer' as const,
+                  fontFamily: 'inherit', width: 150, cursor: 'pointer' as const,
                   WebkitAppearance: 'none' as const, MozAppearance: 'none' as const,
                   appearance: 'none' as const,
                   backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23666'/%3E%3C/svg%3E")`,
@@ -836,20 +853,21 @@ export function SettingsPage({
                   : [];
                 return (
                 <div style={{ marginLeft: 22, marginTop: 6 }}>
-                  <div
-                    style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', padding: '4px 0' }}
+                  <button
+                    style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', padding: '4px 0', background: 'none', border: 'none', width: '100%', font: 'inherit', color: 'inherit', textAlign: 'left' as const }}
                     onClick={() => setUsageExpanded(isExpanded ? null : agent.agent_type)}
+                    aria-expanded={isExpanded}
                   >
-                    <ChevronRight size={10} style={{ color: 'rgba(255,255,255,0.25)', transform: isExpanded ? 'rotate(90deg)' : 'none', transition: 'transform .15s' }} />
-                    <Zap size={10} style={{ color: 'rgba(255,255,255,0.25)' }} />
-                    <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)' }}>{t('config.estimateTokenUsage')}</span>
+                    <ChevronRight size={10} style={{ color: 'rgba(255,255,255,0.55)', transform: isExpanded ? 'rotate(90deg)' : 'none', transition: 'transform .15s' }} />
+                    <Zap size={10} style={{ color: 'rgba(255,255,255,0.55)' }} />
+                    <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.6)' }}>{t('config.estimateTokenUsage')}</span>
                     <span style={{ fontSize: 10, color, marginLeft: 'auto' }}>
                       ~{agentUsage.total_tokens.toLocaleString()} tok
                     </span>
-                    <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.2)' }}>
+                    <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.55)' }}>
                       {agentUsage.message_count} msg
                     </span>
-                  </div>
+                  </button>
                   {isExpanded && (
                     <div style={{ paddingLeft: 22, paddingBottom: 4 }}>
                       {agentUsage.by_project.length > 5 && (
@@ -1037,7 +1055,23 @@ export function SettingsPage({
               <p style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', marginBottom: 12 }}>
                 {t('skills.projectDefaultsHint')}
               </p>
-              {projects.filter(p => !p.path.split('/').some(s => s.startsWith('.'))).map(project => {
+              {projects.length > 10 && (
+                <div style={{ marginBottom: 8 }}>
+                  <input
+                    type="text"
+                    placeholder={t('skills.searchProjects') || 'Search projects…'}
+                    value={projectSkillsSearch}
+                    onChange={e => setProjectSkillsSearch(e.target.value)}
+                    style={{
+                      width: '100%', padding: '6px 10px', borderRadius: 6, fontSize: 11,
+                      background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)',
+                      color: '#e8eaed', fontFamily: 'inherit',
+                    }}
+                  />
+                </div>
+              )}
+              <div style={{ maxHeight: 400, overflowY: 'auto' }}>
+              {projects.filter(p => !p.path.split('/').some(s => s.startsWith('.')) && (!projectSkillsSearch || p.name.toLowerCase().includes(projectSkillsSearch.toLowerCase()))).map(project => {
                 const isExpanded = projectSkillsExpanded === project.id;
                 const currentSkills = project.default_skill_ids ?? [];
                 return (
@@ -1095,6 +1129,7 @@ export function SettingsPage({
                   </div>
                 );
               })}
+              </div>
             </div>
           )}
         </div>
@@ -1132,7 +1167,7 @@ export function SettingsPage({
                           style={{
                             background: 'rgba(255,255,255,0.08)', border: `1px solid ${profile.color}60`, borderRadius: 4,
                             color: profile.color, fontWeight: 700, fontSize: 13, fontFamily: 'inherit',
-                            padding: '1px 6px', width: 70, outline: 'none',
+                            padding: '1px 6px', width: 70,
                           }}
                           value={editingPersonaValue}
                           onChange={e => setEditingPersonaValue(e.target.value)}
@@ -1339,7 +1374,23 @@ export function SettingsPage({
               <p style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', marginBottom: 12 }}>
                 {t('profiles.projectDefaultHint')}
               </p>
-              {projects.filter(p => !p.path.split('/').some(s => s.startsWith('.'))).map(project => {
+              {projects.length > 10 && (
+                <div style={{ marginBottom: 8 }}>
+                  <input
+                    type="text"
+                    placeholder={t('profiles.searchProjects') || 'Search projects…'}
+                    value={projectProfileSearch}
+                    onChange={e => setProjectProfileSearch(e.target.value)}
+                    style={{
+                      width: '100%', padding: '6px 10px', borderRadius: 6, fontSize: 11,
+                      background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)',
+                      color: '#e8eaed', fontFamily: 'inherit',
+                    }}
+                  />
+                </div>
+              )}
+              <div style={{ maxHeight: 400, overflowY: 'auto' }}>
+              {projects.filter(p => !p.path.split('/').some(s => s.startsWith('.')) && (!projectProfileSearch || p.name.toLowerCase().includes(projectProfileSearch.toLowerCase()))).map(project => {
                 const isExpanded = projectProfileExpanded === project.id;
                 const currentProfileId = (project as any).default_profile_id ?? null;
                 return (
@@ -1412,6 +1463,7 @@ export function SettingsPage({
                   </div>
                 );
               })}
+              </div>
             </div>
           )}
         </div>
@@ -1797,6 +1849,9 @@ export function SettingsPage({
           </div>
         </div>
       </div>
+      <div style={{ textAlign: 'center', padding: '20px 0 10px', color: 'rgba(255,255,255,0.3)', fontSize: 11 }}>
+        Kronn v0.1.0 — <a href="https://github.com/DocRoms/Kronn" target="_blank" rel="noopener noreferrer" style={{ color: 'rgba(200,255,0,0.5)', textDecoration: 'none' }}>Source code (AGPL-3.0)</a>
+      </div>
     </div>
   );
 }
@@ -1813,7 +1868,7 @@ const ss = {
   code: { fontSize: 11, fontFamily: 'JetBrains Mono, monospace', background: 'rgba(255,255,255,0.06)', padding: '2px 6px', borderRadius: 4 } as const,
   updateBadge: { fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 4, background: 'rgba(255,200,0,0.1)', color: '#ffc800', marginLeft: 6 } as const,
   installBtn: { padding: '6px 14px', background: 'rgba(200,255,0,0.1)', color: '#c8ff00', border: '1px solid rgba(200,255,0,0.2)', borderRadius: 6, fontSize: 12, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'inherit' } as const,
-  input: { width: '100%', padding: '8px 12px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 6, color: '#e8eaed', fontSize: 12, fontFamily: 'inherit', outline: 'none' } as const,
+  input: { width: '100%', padding: '8px 12px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 6, color: '#e8eaed', fontSize: 12, fontFamily: 'inherit' } as const,
   scanBtn: { padding: '7px 14px', borderRadius: 6, border: '1px solid rgba(200,255,0,0.2)', background: 'rgba(200,255,0,0.05)', color: '#c8ff00', cursor: 'pointer', fontSize: 12, fontFamily: 'inherit', fontWeight: 500, display: 'flex', alignItems: 'center', gap: 6 } as const,
   dangerBtn: { background: 'rgba(255,77,106,0.08)', border: '1px solid rgba(255,77,106,0.2)', borderRadius: 6, padding: '6px 14px', color: '#ff4d6a', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, fontFamily: 'inherit' } as const,
 };

@@ -93,7 +93,7 @@ Server (type)  →  Config (instance + secrets)  →  Project (N:N)
 
 Key capabilities:
 - **Auto-detection** from existing `.mcp.json` files across projects
-- **Disk sync for all agents** — `.mcp.json` (Claude Code), `.vibe/config.toml` (Vibe), `~/.codex/config.toml` (Codex) — secrets decrypted, `.gitignore` ensured
+- **Disk sync for all agents** — `.mcp.json` (Claude Code), `.kiro/settings/mcp.json` + `.ai/mcp/mcp.json` (Kiro), `.gemini/settings.json` (Gemini CLI), `.vibe/config.toml` (Vibe), `~/.codex/config.toml` (Codex) — secrets decrypted, `.gitignore` ensured
 - **Inline secret editing** with per-field visibility toggles and token generation links
 - **MCP context files** — per-MCP per-project instruction files (`ai/operations/mcp-servers/*.md`) auto-created and injected into agent prompts
 - **Global configs** — mark a config as global to deploy to all projects at once
@@ -359,9 +359,17 @@ installed = true
 
 GitHub Actions workflow triggered by adding the `ci-test` label to a PR:
 - **test-backend**: `cargo check` + `cargo clippy` + `cargo test`
-- **test-frontend**: `tsc --noEmit` + `pnpm test` (155+ tests, 15 suites)
+- **test-frontend**: `tsc --noEmit` + `pnpm test` (218 tests, 17 suites)
 - **test-shell**: `make test-shell` (186 bats tests, 8 suites)
 </details>
+
+## Security
+
+> **Kronn does not include TLS.** Do not expose port 3140 to the internet without a properly configured TLS reverse proxy in front (nginx, Caddy, Traefik…). API keys and secrets transit in cleartext over HTTP.
+
+> **Authentication is opt-in.** By default, all API routes are accessible without credentials. Enable Bearer token authentication in Settings to secure your instance. A warning banner is displayed in the dashboard when auth is disabled.
+
+The built-in mini terminal (Git panel) requires `full_access` to be enabled on at least one agent. This prevents accidental shell access on shared instances.
 
 ## Requirements
 

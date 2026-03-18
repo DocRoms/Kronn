@@ -24,3 +24,7 @@ mod scanner_test;
 #[cfg(test)]
 #[path = "mcp_scanner_test.rs"]
 mod mcp_scanner_test;
+
+#[cfg(test)]
+#[path = "template_homogeneity_test.rs"]
+mod template_homogeneity_test;

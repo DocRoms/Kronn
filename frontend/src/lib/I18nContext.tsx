@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useCallback, type ReactNode } from 'react';
+import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from 'react';
 import { type UILocale, getUILocale, setUILocale as persistLocale, t } from './i18n';
 
 interface I18nContextValue {
@@ -20,6 +20,10 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     persistLocale(l);
     setLocaleState(l);
   }, []);
+
+  useEffect(() => {
+    document.documentElement.lang = locale;
+  }, [locale]);
 
   const translate = useCallback((key: string, ...args: (string | number)[]) => {
     return t(locale, key, ...args);

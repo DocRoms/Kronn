@@ -1,42 +1,58 @@
 # Testing & quality
 
-**Rules:** Tests must pass after any change. Add/update tests when changing behavior. If no command output, ask user to paste it.
+> **TEMPLATE FILE.** Sections marked `{{...}}` must be filled by the AI audit.
+> If the test runner or commands are not filled, say `NOT_FOUND` — **never assume Jest, Mocha, or any specific runner**.
+
+> **Rule: every code change MUST include tests.** See `ai/index.md` § 4.
 
 ## Build checks
 
-| Check | Command | Blocking? | Notes |
-|-------|---------|-----------|-------|
-| {{CHECK_1}} | {{COMMAND}} | Yes/No | {{NOTES}} |
-| {{CHECK_2}} | {{COMMAND}} | Yes/No | {{NOTES}} |
-| {{CHECK_3}} | {{COMMAND}} | Yes/No | {{NOTES}} |
+<!-- Fill after audit: list all quality gates (lint, typecheck, test, build) -->
+{{BUILD_CHECKS}}
 
 ## Test infrastructure
 
-| Language | Runner | Config | Setup |
-|----------|--------|--------|-------|
-| {{LANG_1}} | {{RUNNER}} | {{CONFIG}} | {{SETUP}} |
-| {{LANG_2}} | {{RUNNER}} | {{CONFIG}} | {{SETUP}} |
+<!-- Fill after audit: test runner, config file, setup file, Node/runtime version -->
+{{TEST_INFRASTRUCTURE}}
 
 ## Test suites
 
-| Suite | Scope | Tests | Notes |
-|-------|-------|-------|-------|
-| {{SUITE_1}} | {{SCOPE}} | {{COUNT}} | {{NOTES}} |
-| {{SUITE_2}} | {{SCOPE}} | {{COUNT}} | {{NOTES}} |
+<!-- Fill after audit: list each test file/suite with scope and count -->
+{{TEST_SUITES}}
+
+## What to test (by change type)
+
+| Change type | Required tests | Where |
+|-------------|---------------|-------|
+| New API endpoint | Integration test (HTTP request → response) | API test file |
+| New function | Unit test in same file (`#[cfg(test)]` or `__tests__/`) | Same module |
+| Bug fix | Regression test (fails without fix, passes with) | Relevant test file |
+| Frontend component | Render + key user interactions | `__tests__/` |
+| Database migration | Verify migration applies + data integrity | DB test file |
+
+## Test quality checklist
+
+Before declaring a task done:
+- [ ] Tests cover the **happy path**
+- [ ] Tests cover at least one **error path** (invalid input, missing data)
+- [ ] Tests cover **edge cases** (empty, unicode, large input)
+- [ ] Assertions are **meaningful** (not just "renders" or "is defined")
+- [ ] Mocks match **real API shapes** (check generated types)
+- [ ] No **flaky** tests (no sleeps, no timing assumptions)
+- [ ] Full test suite passes
+- [ ] If a test is flaky, **fix the root cause** — do not add retries
 
 ## Coverage
 
-Current: {{COVERAGE_STATUS}} · Target: {{COVERAGE_TARGET}}
+<!-- Fill after audit -->
+{{COVERAGE}}
 
-## NOT tested
+## NOT tested (known gaps)
 
-- {{UNTESTED_1}}
-- {{UNTESTED_2}}
+<!-- Fill after audit: list areas with no test coverage -->
+{{UNTESTED}}
 
 ## Smoke checks (pre-commit)
 
-| # | Command | Verifies |
-|---|---------|----------|
-| 1 | {{COMMAND_1}} | {{WHAT_1}} |
-| 2 | {{COMMAND_2}} | {{WHAT_2}} |
-| 3 | {{COMMAND_3}} | {{WHAT_3}} |
+<!-- Fill after audit: quick commands to verify nothing is broken -->
+{{SMOKE_CHECKS}}

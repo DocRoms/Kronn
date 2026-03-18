@@ -1,6 +1,13 @@
 #!/bin/sh
 set -e
 
+# Symlink host home path → container home so agent configs with hardcoded
+# absolute host paths resolve correctly inside the container.
+# Example: Vibe's config.toml may have save_dir = "/home/<user>/.vibe/logs/session"
+if [ -n "$KRONN_HOST_HOME" ] && [ "$KRONN_HOST_HOME" != "$HOME" ] && [ ! -e "$KRONN_HOST_HOME" ]; then
+  ln -sf "$HOME" "$KRONN_HOST_HOME" 2>/dev/null || true
+fi
+
 # Add GitHub/GitLab SSH host keys to known_hosts (prevents "Host key verification failed")
 mkdir -p "${HOME}/.ssh"
 if [ ! -f "${HOME}/.ssh/known_hosts" ] || ! grep -q "github.com" "${HOME}/.ssh/known_hosts" 2>/dev/null; then

@@ -172,26 +172,33 @@ pub struct BinaryLocation {
 /// so we check for the entry's existence in the directory listing
 /// rather than following the symlink.
 pub fn find_binary(name: &str) -> Option<BinaryLocation> {
+    // Collect host-bin directories once (used to check if a PATH-resolved binary
+    // actually lives on a host mount and should be flagged as host_managed).
+    let host_dirs: Vec<std::path::PathBuf> = std::env::var("KRONN_HOST_BIN")
+        .ok()
+        .map(|v| std::env::split_paths(&v).collect())
+        .unwrap_or_default();
+
     // Standard PATH
     if let Ok(path) = which::which(name) {
-        return Some(BinaryLocation {
-            path: path.to_string_lossy().to_string(),
-            host_managed: false,
+        let resolved = path.to_string_lossy().to_string();
+        // If the binary resolved by `which` lives under a KRONN_HOST_BIN directory,
+        // it is host-managed (mounted from the host into the container).
+        let host_managed = host_dirs.iter().any(|dir| {
+            path.starts_with(dir)
         });
+        return Some(BinaryLocation { path: resolved, host_managed });
     }
 
-    // Host-mounted bin directories (KRONN_HOST_BIN=dir1:dir2:... or dir1;dir2;... on Windows)
-    if let Ok(host_bin) = std::env::var("KRONN_HOST_BIN") {
-        for dir in std::env::split_paths(&host_bin) {
-            let dir_path = dir.as_path();
-            if let Ok(entries) = std::fs::read_dir(dir_path) {
-                for entry in entries.flatten() {
-                    if entry.file_name() == name {
-                        return Some(BinaryLocation {
-                            path: entry.path().to_string_lossy().to_string(),
-                            host_managed: true,
-                        });
-                    }
+    // Host-mounted bin directories — fallback when `which` fails (e.g. broken symlinks)
+    for dir in &host_dirs {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                if entry.file_name() == name {
+                    return Some(BinaryLocation {
+                        path: entry.path().to_string_lossy().to_string(),
+                        host_managed: true,
+                    });
                 }
             }
         }

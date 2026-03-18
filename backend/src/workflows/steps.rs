@@ -270,3 +270,80 @@ fn condition_description(keyword: &str) -> &str {
         _ => "this condition is met",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{ConditionAction, StepConditionRule};
+
+    fn rule(contains: &str, action: ConditionAction) -> StepConditionRule {
+        StepConditionRule { contains: contains.to_string(), action }
+    }
+
+    #[test]
+    fn test_contains_stop() {
+        let rules = vec![rule("STOP_SIGNAL", ConditionAction::Stop)];
+        let output = "Some output\n[SIGNAL: STOP_SIGNAL]";
+        let action = evaluate_conditions(&rules, output);
+        assert!(matches!(action, Some(ConditionAction::Stop)));
+    }
+
+    #[test]
+    fn test_contains_skip() {
+        let rules = vec![rule("SKIP_SIGNAL", ConditionAction::Skip)];
+        let output = "Some output\n[SIGNAL: SKIP_SIGNAL]";
+        let action = evaluate_conditions(&rules, output);
+        assert!(matches!(action, Some(ConditionAction::Skip)));
+    }
+
+    #[test]
+    fn test_contains_goto() {
+        let rules = vec![rule("GO_NEXT", ConditionAction::Goto { step_name: "step_b".to_string() })];
+        let output = "Some output\n[SIGNAL: GO_NEXT]";
+        let action = evaluate_conditions(&rules, output);
+        assert!(matches!(action, Some(ConditionAction::Goto { step_name }) if step_name == "step_b"));
+    }
+
+    #[test]
+    fn test_no_match_returns_none() {
+        let rules = vec![rule("STOP_SIGNAL", ConditionAction::Stop)];
+        let output = "No matching signal here.\n[SIGNAL: CONTINUE]";
+        let action = evaluate_conditions(&rules, output);
+        assert!(action.is_none());
+    }
+
+    #[test]
+    fn test_empty_rules_returns_none() {
+        let rules: Vec<StepConditionRule> = vec![];
+        let output = "Any output with [SIGNAL: STOP_SIGNAL]";
+        let action = evaluate_conditions(&rules, output);
+        assert!(action.is_none());
+    }
+
+    #[test]
+    fn test_empty_contains_skipped() {
+        // A rule with an empty `contains` field must never match anything
+        let rules = vec![rule("", ConditionAction::Stop)];
+        let output = "Some output\n[SIGNAL: ]";
+        let action = evaluate_conditions(&rules, output);
+        assert!(action.is_none());
+    }
+
+    #[test]
+    fn test_signal_only_in_tail_matches() {
+        // Signal is in the last 5 lines — should match
+        let rules = vec![rule("STOP_SIGNAL", ConditionAction::Stop)];
+        let output = "line1\nline2\nline3\nline4\nline5\n[SIGNAL: STOP_SIGNAL]";
+        let action = evaluate_conditions(&rules, output);
+        assert!(matches!(action, Some(ConditionAction::Stop)));
+    }
+
+    #[test]
+    fn test_signal_deep_in_output_ignored() {
+        // Signal is far from the end (beyond last 5 lines) — should NOT match
+        let rules = vec![rule("STOP_SIGNAL", ConditionAction::Stop)];
+        let output = "[SIGNAL: STOP_SIGNAL]\nline2\nline3\nline4\nline5\nline6\nline7";
+        let action = evaluate_conditions(&rules, output);
+        assert!(action.is_none());
+    }
+}

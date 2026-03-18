@@ -27,9 +27,15 @@ fn enrich_audit_status(project: &mut Project) {
 pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<Vec<Project>>> {
     match state.db.with_conn(crate::db::projects::list_projects).await {
         Ok(mut projects) => {
-            for p in &mut projects {
-                enrich_audit_status(p);
-            }
+            let projects = tokio::task::spawn_blocking(move || {
+                for p in &mut projects {
+                    enrich_audit_status(p);
+                }
+                projects
+            }).await.unwrap_or_else(|e| {
+                tracing::error!("Failed to enrich audit status: {e}");
+                vec![]
+            });
             Json(ApiResponse::ok(projects))
         }
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -274,10 +280,12 @@ pub async fn bootstrap(
         if let Some(ref secret) = config.encryption_secret {
             let secret = secret.clone();
             let pid = project_id.clone();
-            let _ = state.db.with_conn(move |conn| {
+            if let Err(e) = state.db.with_conn(move |conn| {
                 crate::core::mcp_scanner::sync_affected_projects(conn, &[pid], &secret);
                 Ok::<_, anyhow::Error>(())
-            }).await;
+            }).await {
+                tracing::error!("Failed to sync MCP config for new project: {e}");
+            }
         }
     }
 
@@ -396,6 +404,124 @@ Commence maintenant par l'étape 1. Pose-moi des questions si la description man
     )
 }
 
+/// Inject a token into an HTTPS git URL for authenticated cloning.
+/// Returns the original URL unchanged if it's not HTTPS or no matching provider is found.
+fn inject_token_into_url(url: &str, provider: &str, token: &str) -> Option<String> {
+    if !url.starts_with("https://") {
+        return None;
+    }
+    match provider {
+        "github" if url.contains("github.com") => {
+            Some(url.replacen("https://github.com", &format!("https://x-access-token:{}@github.com", token), 1))
+        }
+        "gitlab" if url.contains("gitlab") => {
+            let real_token = token.split('|').next().unwrap_or(token);
+            url.find("://").map(|i| {
+                let after_scheme = &url[i + 3..];
+                format!("https://oauth2:{}@{}", real_token, after_scheme)
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Convert an HTTPS git URL to its SSH equivalent.
+fn https_to_ssh(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("https://")?;
+    let slash_pos = rest.find('/')?;
+    let host = &rest[..slash_pos];
+    let path = &rest[slash_pos + 1..];
+    Some(format!("git@{}:{}", host, path))
+}
+
+/// For HTTPS clone URLs, inject a Personal Access Token into the URL so that
+/// `git clone` works inside Docker where no interactive credential helper is
+/// available.  Falls back to converting HTTPS → SSH when keys are mounted.
+async fn inject_clone_auth(url: &str, state: &AppState) -> String {
+    if !url.starts_with("https://") {
+        return url.to_string();
+    }
+
+    let sources = find_all_provider_sources(state).await;
+
+    // Try to inject a token from configured MCP sources
+    for (source, token) in &sources {
+        if let Some(authed_url) = inject_token_into_url(url, &source.provider, token) {
+            return authed_url;
+        }
+    }
+
+    // No token found — try SSH fallback if SSH keys are available
+    if url.contains("github.com") || url.contains("gitlab.com") {
+        let ssh_dir = std::env::var("HOME").ok().map(|h| std::path::PathBuf::from(h).join(".ssh"));
+        let has_ssh_keys = ssh_dir
+            .map(|d| d.join("id_rsa").exists() || d.join("id_ed25519").exists())
+            .unwrap_or(false);
+        if has_ssh_keys {
+            if let Some(ssh_url) = https_to_ssh(url) {
+                return ssh_url;
+            }
+        }
+    }
+
+    url.to_string()
+}
+
+#[cfg(test)]
+mod clone_auth_tests {
+    use super::*;
+
+    #[test]
+    fn inject_github_token() {
+        let url = "https://github.com/org/repo.git";
+        let result = inject_token_into_url(url, "github", "ghp_abc123").unwrap();
+        assert_eq!(result, "https://x-access-token:ghp_abc123@github.com/org/repo.git");
+    }
+
+    #[test]
+    fn inject_gitlab_token() {
+        let url = "https://gitlab.com/org/repo.git";
+        let result = inject_token_into_url(url, "gitlab", "glpat-xyz|https://gitlab.com").unwrap();
+        assert_eq!(result, "https://oauth2:glpat-xyz@gitlab.com/org/repo.git");
+    }
+
+    #[test]
+    fn inject_gitlab_token_no_pipe() {
+        let url = "https://gitlab.example.com/org/repo.git";
+        let result = inject_token_into_url(url, "gitlab", "glpat-xyz").unwrap();
+        assert_eq!(result, "https://oauth2:glpat-xyz@gitlab.example.com/org/repo.git");
+    }
+
+    #[test]
+    fn inject_wrong_provider_returns_none() {
+        let url = "https://github.com/org/repo.git";
+        assert!(inject_token_into_url(url, "gitlab", "token").is_none());
+    }
+
+    #[test]
+    fn inject_ssh_url_returns_none() {
+        let url = "git@github.com:org/repo.git";
+        assert!(inject_token_into_url(url, "github", "token").is_none());
+    }
+
+    #[test]
+    fn https_to_ssh_github() {
+        let url = "https://github.com/org/repo.git";
+        assert_eq!(https_to_ssh(url).unwrap(), "git@github.com:org/repo.git");
+    }
+
+    #[test]
+    fn https_to_ssh_gitlab() {
+        let url = "https://gitlab.com/group/subgroup/repo.git";
+        assert_eq!(https_to_ssh(url).unwrap(), "git@gitlab.com:group/subgroup/repo.git");
+    }
+
+    #[test]
+    fn https_to_ssh_not_https() {
+        assert!(https_to_ssh("git@github.com:org/repo.git").is_none());
+    }
+}
+
 /// POST /api/projects/clone
 pub async fn clone_project(
     State(state): State<AppState>,
@@ -449,9 +575,11 @@ pub async fn clone_project(
         return Json(ApiResponse::err(format!("Directory already exists: {}", project_path)));
     }
 
-    // Git clone
-    let clone_url = url.clone();
+    // Git clone — inject auth token for HTTPS URLs when available
+    let clone_url = inject_clone_auth(&url, &state).await;
+    let original_url = url.clone();
     let clone_path = host_path.clone();
+    let clone_path2 = host_path.clone();
     let clone_result = tokio::task::spawn_blocking(move || {
         std::process::Command::new("git")
             .args(["clone", &clone_url, &clone_path.to_string_lossy()])
@@ -467,6 +595,15 @@ pub async fn clone_project(
         Err(e) => return Json(ApiResponse::err(format!("Task failed: {}", e))),
         _ => {} // success
     }
+
+    // Reset the remote URL to the original (without embedded token) so that
+    // secrets don't persist in .git/config and don't leak via git remote scans.
+    let _ = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("git")
+            .args(["remote", "set-url", "origin", &original_url])
+            .current_dir(&clone_path2)
+            .output()
+    }).await;
 
     // Create project in DB
     let project_id = Uuid::new_v4().to_string();
@@ -500,9 +637,11 @@ pub async fn clone_project(
     if !detected.is_empty() {
         let pid = project_id.clone();
         let skills = detected.clone();
-        let _ = state.db.with_conn(move |conn| {
+        if let Err(e) = state.db.with_conn(move |conn| {
             crate::db::projects::update_project_default_skills(conn, &pid, &skills)
-        }).await;
+        }).await {
+            tracing::error!("Failed to update project default skills: {e}");
+        }
     }
 
     Json(ApiResponse::ok(CloneProjectResponse {
@@ -1400,7 +1539,9 @@ pub async fn full_audit(
     let audit_tracker = state.audit_tracker.clone();
 
     // Clear any stale cancellation flag for this project
-    audit_tracker.lock().unwrap().cancelled.remove(&project_id);
+    if let Ok(mut tracker) = audit_tracker.lock() {
+        tracker.cancelled.remove(&project_id);
+    }
 
     let stream: SseStream = Box::pin(async_stream::try_stream! {
         // ── Phase 1: Install template if needed ──
@@ -1475,7 +1616,7 @@ pub async fn full_audit(
 
         for (step_num, (target_file, step_prompt)) in ANALYSIS_STEPS.iter().enumerate() {
             // Check for cancellation before each step
-            if audit_tracker.lock().unwrap().cancelled.contains(&project_id) {
+            if audit_tracker.lock().map(|t| t.cancelled.contains(&project_id)).unwrap_or(false) {
                 let cancelled = serde_json::json!({ "status": "cancelled" });
                 yield Event::default().event("cancelled").data(cancelled.to_string());
                 return;
@@ -1506,7 +1647,9 @@ pub async fn full_audit(
                 Ok(mut process) => {
                     // Register the child PID for cancellation
                     if let Some(pid) = process.child.id() {
-                        audit_tracker.lock().unwrap().running_pids.insert(project_id.clone(), pid);
+                        if let Ok(mut tracker) = audit_tracker.lock() {
+                            tracker.running_pids.insert(project_id.clone(), pid);
+                        }
                     }
 
                     while let Some(line) = process.next_line().await {
@@ -1517,10 +1660,12 @@ pub async fn full_audit(
                     process.fix_ownership();
 
                     // Unregister PID
-                    audit_tracker.lock().unwrap().running_pids.remove(&project_id);
+                    if let Ok(mut tracker) = audit_tracker.lock() {
+                        tracker.running_pids.remove(&project_id);
+                    }
 
                     // Check if cancelled during this step
-                    if audit_tracker.lock().unwrap().cancelled.contains(&project_id) {
+                    if audit_tracker.lock().map(|t| t.cancelled.contains(&project_id)).unwrap_or(false) {
                         let cancelled = serde_json::json!({ "status": "cancelled" });
                         yield Event::default().event("cancelled").data(cancelled.to_string());
                         return;
@@ -1798,7 +1943,9 @@ pub async fn cancel_audit(
 
     // 1. Signal cancellation and kill any running agent process
     {
-        let mut tracker = state.audit_tracker.lock().unwrap();
+        let Ok(mut tracker) = state.audit_tracker.lock() else {
+            return Json(ApiResponse::err("Internal error: audit tracker lock poisoned"));
+        };
         tracker.cancelled.insert(project_id.clone());
         if let Some(pid) = tracker.running_pids.remove(&project_id) {
             tracing::info!("Killing audit agent process (PID {}) for project {}", pid, project_id);
@@ -1852,13 +1999,15 @@ pub async fn cancel_audit(
 
     if let Err(e) = cleanup_result {
         // Clear cancellation flag before returning error
-        state.audit_tracker.lock().unwrap().cancelled.remove(&project_id);
+        if let Ok(mut tracker) = state.audit_tracker.lock() {
+            tracker.cancelled.remove(&project_id);
+        }
         return Json(ApiResponse::err(e));
     }
 
     // 3. Delete any validation discussion for this project
     let pid = project_id.clone();
-    let _ = state.db.with_conn(move |conn| {
+    if let Err(e) = state.db.with_conn(move |conn| {
         // Find and delete validation discussions for this project
         let discussions = crate::db::discussions::list_discussions(conn)?;
         for disc in discussions {
@@ -1868,10 +2017,14 @@ pub async fn cancel_audit(
             }
         }
         Ok(())
-    }).await;
+    }).await {
+        tracing::error!("Failed to delete validation discussions for project: {e}");
+    }
 
     // 4. Clear cancellation flag
-    state.audit_tracker.lock().unwrap().cancelled.remove(&project_id);
+    if let Ok(mut tracker) = state.audit_tracker.lock() {
+        tracker.cancelled.remove(&project_id);
+    }
 
     // Return updated status (should be NoTemplate now)
     let status = scanner::detect_audit_status(&project.path);
@@ -2721,6 +2874,14 @@ pub async fn project_exec(
     let cmd = req.command.trim().to_string();
     if cmd.is_empty() {
         return Json(ApiResponse::err("Empty command"));
+    }
+
+    // Require full_access on at least one agent (only enforced when agents are installed)
+    {
+        let config = state.config.read().await;
+        if config.agents.any_installed() && !config.agents.any_full_access() {
+            return Json(ApiResponse::err("Terminal requires full_access enabled on at least one agent"));
+        }
     }
 
     // Block dangerous commands

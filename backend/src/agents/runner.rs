@@ -139,7 +139,7 @@ pub struct AgentStartConfig<'a> {
 
 /// Resolve a ModelTier to a concrete --model flag value for a given agent.
 /// Returns None for Default tier or agents without --model support.
-fn resolve_model_flag(agent_type: &AgentType, tier: ModelTier, overrides: Option<&ModelTiersConfig>) -> Option<String> {
+pub(crate) fn resolve_model_flag(agent_type: &AgentType, tier: ModelTier, overrides: Option<&ModelTiersConfig>) -> Option<String> {
     // Check user overrides first (all tiers including Default)
     if let Some(cfg) = overrides {
         let agent_cfg = match agent_type {

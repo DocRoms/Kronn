@@ -244,7 +244,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
             <h3 style={{ fontSize: 14, fontWeight: 600, color: '#c8ff00', margin: 0 }}>
               {addMcpSelected ? t('mcp.configure', selectedDef?.name ?? addMcpLabel) : t('mcp.addTitle')}
             </h3>
-            <button style={s.iconBtn} onClick={() => { setShowAddMcp(false); setAddMcpSelected(null); }}>
+            <button style={s.iconBtn} onClick={() => { setShowAddMcp(false); setAddMcpSelected(null); }} aria-label="Close">
               <X size={14} />
             </button>
           </div>
@@ -402,6 +402,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
             <button
               style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: 'rgba(255,255,255,0.3)', padding: 2 }}
               onClick={() => setMcpSearch('')}
+              aria-label="Clear search"
             >
               <X size={12} />
             </button>
@@ -417,9 +418,10 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
             const linkedCount = group.configs.reduce((sum, c) => sum + (c.is_global ? projects.length : c.project_ids.length), 0);
             return (
             <div key={serverName} style={{ marginBottom: 12 }}>
-              <div
-                style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: isExpanded ? 8 : 0, cursor: 'pointer', padding: '4px 0' }}
+              <button
+                style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: isExpanded ? 8 : 0, cursor: 'pointer', padding: '4px 0', background: 'none', border: 'none', width: '100%', font: 'inherit', color: 'inherit', textAlign: 'left' as const }}
                 onClick={() => toggleServer(serverName)}
+                aria-expanded={isExpanded}
               >
                 <ChevronRight size={13} style={{ color: '#c8ff00', transform: isExpanded ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s', flexShrink: 0 }} />
                 <Server size={13} style={{ color: '#c8ff00' }} />
@@ -435,11 +437,12 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                     style={{ ...s.iconBtn, marginLeft: 4, color: 'rgba(255,255,255,0.3)' }}
                     onClick={(e) => { e.stopPropagation(); handleAddDuplicateConfig(group.serverId, serverName); }}
                     title={t('mcp.addAnother', serverName)}
+                    aria-label={t('mcp.addAnother', serverName)}
                   >
                     <Plus size={12} />
                   </button>
                 )}
-              </div>
+              </button>
 
               {isExpanded && group.configs.map(cfg => {
                 const isEditingLabel = editingLabelId === cfg.id;
@@ -490,6 +493,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                                 style={{ ...s.iconBtn, marginLeft: 4 }}
                                 onClick={() => handleStartEditSecrets(cfg.id)}
                                 title={editingEnvId === cfg.id ? t('mcp.close') : t('mcp.editKeys')}
+                                aria-label={editingEnvId === cfg.id ? t('mcp.close') : t('mcp.editKeys')}
                               >
                                 <Pencil size={11} style={{ color: editingEnvId === cfg.id ? '#c8ff00' : 'rgba(255,255,255,0.3)' }} />
                               </button>
@@ -527,6 +531,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                                         style={{ ...s.iconBtn, padding: '4px 6px', flexShrink: 0 }}
                                         onClick={() => toggleFieldVisibility(k)}
                                         title={visibleFields.has(k) ? t('mcp.hide') : t('mcp.show')}
+                                        aria-label={visibleFields.has(k) ? t('mcp.hide') : t('mcp.show')}
                                       >
                                         <Eye size={11} style={{ color: visibleFields.has(k) ? '#c8ff00' : 'rgba(255,255,255,0.25)' }} />
                                       </button>
@@ -594,6 +599,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                                           style={{ ...s.iconBtn, padding: '3px 5px', marginLeft: -1, borderLeft: 'none', borderTopLeftRadius: 0, borderBottomLeftRadius: 0 }}
                                           onClick={() => handleOpenContext(proj.id, proj.name, cfg.label)}
                                           title={`${t('mcp.editContext', cfg.label, proj.name)}${isCustomized ? ' ' + t('mcp.customized') : ' ' + t('mcp.default')}`}
+                                          aria-label={`${t('mcp.editContext', cfg.label, proj.name)}`}
                                         >
                                           <FileText size={10} style={{ color: isCustomized ? '#c8ff00' : 'rgba(255,255,255,0.2)' }} />
                                         </button>
@@ -628,6 +634,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                         style={{ ...s.iconBtn, color: '#ff4d6a' }}
                         onClick={() => handleDeleteMcpConfig(cfg.id)}
                         title={t('mcp.deleteConfig')}
+                        aria-label={t('mcp.deleteConfig')}
                       >
                         <Trash2 size={12} />
                       </button>
@@ -655,14 +662,21 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
           background: 'rgba(0,0,0,0.7)', zIndex: 1000,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
         }} onClick={() => setContextEditor(null)}>
-          <div style={{
-            background: '#12151c', border: '1px solid rgba(200,255,0,0.15)',
-            borderRadius: 12, padding: 24, width: '90%', maxWidth: 700, maxHeight: '80vh',
-            display: 'flex', flexDirection: 'column', gap: 12,
-          }} onClick={e => e.stopPropagation()}>
+          <div
+            style={{
+              background: '#12151c', border: '1px solid rgba(200,255,0,0.15)',
+              borderRadius: 12, padding: 24, width: '90%', maxWidth: 700, maxHeight: '80vh',
+              display: 'flex', flexDirection: 'column', gap: 12,
+            }}
+            onClick={e => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="context-editor-title"
+            onKeyDown={e => { if (e.key === 'Escape') setContextEditor(null); }}
+          >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div>
-                <h3 style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>
+                <h3 id="context-editor-title" style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>
                   <FileText size={14} style={{ marginRight: 6, color: '#c8ff00' }} />
                   {t('mcp.contextTitle', contextEditor.slug.replace(/-/g, ' '))}
                 </h3>
@@ -670,7 +684,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                   {t('mcp.contextInfo', contextEditor.projectName, contextEditor.slug)}
                 </p>
               </div>
-              <button style={s.iconBtn} onClick={() => setContextEditor(null)}><X size={14} /></button>
+              <button style={s.iconBtn} onClick={() => setContextEditor(null)} aria-label="Close"><X size={14} /></button>
             </div>
 
             <textarea
@@ -708,7 +722,7 @@ const s = {
   meta: { color: 'rgba(255,255,255,0.4)', fontSize: 12, marginTop: 4 } as const,
   scanBtn: { padding: '7px 14px', borderRadius: 6, border: '1px solid rgba(200,255,0,0.2)', background: 'rgba(200,255,0,0.05)', color: '#c8ff00', cursor: 'pointer', fontSize: 12, fontFamily: 'inherit', fontWeight: 500, display: 'flex', alignItems: 'center', gap: 6 } as const,
   card: { background: '#12151c', border: '1px solid rgba(255,255,255,0.07)', borderRadius: 10, padding: '16px 20px' } as const,
-  input: { width: '100%', padding: '8px 12px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 6, color: '#e8eaed', fontSize: 12, fontFamily: 'inherit', outline: 'none' } as const,
+  input: { width: '100%', padding: '8px 12px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 6, color: '#e8eaed', fontSize: 12, fontFamily: 'inherit' } as const,
   iconBtn: { background: 'none', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 4, padding: '4px 8px', color: 'rgba(255,255,255,0.5)', cursor: 'pointer', display: 'flex', alignItems: 'center', fontSize: 11 } as const,
   sectionLabel: { fontSize: 11, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', margin: 0 },
   mcpCard: { display: 'flex', alignItems: 'flex-start', gap: 12, padding: '14px 16px', borderRadius: 8, background: 'rgba(255,255,255,0.03)', marginBottom: 8, border: '1px solid rgba(255,255,255,0.06)' } as const,

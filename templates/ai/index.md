@@ -1,11 +1,14 @@
 # AI context — Entry point
 
+> **TEMPLATE FILE.** Every `{{...}}` MUST be filled by the AI audit before use.
+> If you see an unfilled `{{...}}`, say `NOT_FOUND` and ask the user — **never guess or invent values**.
+
 **Project:** {{PROJECT_NAME}} — {{STACK_SUMMARY}}.
 
-> **Rules:** All `ai/` files in English. Never hallucinate — check docs, then ask user. Update `ai/` after learning something new.
-> **MCP:** If `ai/operations/mcp-servers/<name>.md` exists for an MCP you're about to use, read it first.
+**Working language:** {{PROJECT_LANGUAGE}} [ex: "French", "English" — language of code comments, commit messages, variable names; distinct from ai/ file language (always English) and agent response language (config.toml)]
 
-**Unknown term?** → `ai/glossary.md`.
+> **Rules:** All `ai/` files in English. Never hallucinate — check docs, then ask user. Update `ai/` after learning something new.
+> **MCP:** Before calling any MCP tool, read `ai/operations/mcp-servers/<name>.md` if it exists.
 
 ---
 
@@ -17,11 +20,10 @@
 
 | Task | Files |
 |------|-------|
-| {{TASK_EXAMPLE_1}} | `ai/repo-map.md`, `ai/coding-rules.md` |
-| {{TASK_EXAMPLE_2}} | `ai/testing-quality.md` |
-| {{TASK_EXAMPLE_3}} | `ai/architecture/overview.md`, `ai/repo-map.md` |
-| {{TASK_EXAMPLE_4}} | `ai/operations/debug-operations.md` |
-| {{TASK_EXAMPLE_5}} | `ai/glossary.md`, `ai/architecture/overview.md` |
+| [ex: "Backend API changes"] {{TASK_1}} | `ai/repo-map.md`, `ai/coding-rules.md` |
+| [ex: "Fix a test"] {{TASK_2}} | `ai/testing-quality.md` |
+| [ex: "New feature"] {{TASK_3}} | `ai/architecture/overview.md`, `ai/repo-map.md` |
+| [ex: "Debug / deploy"] {{TASK_4}} | `ai/operations/debug-operations.md` |
 
 **Tier 2 — Max 3 files if above doesn't cover:**
 
@@ -31,39 +33,44 @@
 | Testing | `ai/testing-quality.md` |
 | Coding rules | `ai/coding-rules.md` |
 | Known issues | `ai/inconsistencies-tech-debt.md` |
-| MCP setup | `ai/operations/mcp-servers.md` |
+| Architecture decisions | `ai/decisions.md` |
 | Glossary | `ai/glossary.md` |
 
 **Tier 3:** Only if Tier 1+2 insufficient. State which file and why. Never load all files.
 
 ---
 
-## 2. Prerequisites
+## 2. DO NOT (critical)
 
-| Prerequisite | Command / Version | Notes |
-|-------------|-------------------|-------|
-| {{PREREQ_1}} | {{COMMAND_OR_VERSION}} | {{NOTES}} |
-| {{PREREQ_2}} | {{COMMAND_OR_VERSION}} | {{NOTES}} |
+- {{DO_NOT_1}}
+- {{DO_NOT_2}}
+- **Guess** when info is missing — say `NOT_FOUND` and ask the user.
+- **Invent file paths** — if you don't know where code goes, check `ai/repo-map.md` or ask.
+- **Guess tool versions** — if prerequisites are not filled below, ask. Do not assume "Node 18" or "Python 3.10".
+- **Guess languages or frameworks** — check § 6 Stack. Do not assume Express, Django, or Next.js.
+- **Edit auto-generated files** — if a file is marked as generated (e.g., types exported from another language), never edit it by hand.
+- **Load all Tier 2 files at once** — max 3, pick what you need.
+- **Modify business code** when the task is only about AI context — edit `ai/` only.
+- **Skip tests** — every code change requires tests. See § 4.
 
 ---
 
-## 3. DO NOT
+## 3. Prerequisites
 
-- Guess when info is missing — ask the user.
-- Load all Tier 2 files at once — max 3.
-- Modify business code for AI context tasks — edit `ai/` only.
-- {{DO_NOT_1}}
-- {{DO_NOT_2}}
-- {{DO_NOT_3}}
+<!-- Fill after audit. If empty, ask the user for build/run commands. -->
+{{PREREQUISITES}}
 
 ---
 
 ## 4. Constraints
 
-- Quality: follow code style, add/update tests when changing behavior.
 - If no command output: ask user to paste it.
 - {{WORKFLOW_CONSTRAINT_1}}
 - {{WORKFLOW_CONSTRAINT_2}}
+
+### Testing rule (mandatory)
+
+**Every code change MUST include tests.** No exceptions. Details and checklist: `ai/testing-quality.md`.
 
 ---
 
@@ -72,57 +79,43 @@
 | What | File(s) |
 |------|---------|
 | AI context | `ai/` |
-| {{SOURCE_1}} | {{FILE_PATH}} |
-| {{SOURCE_2}} | {{FILE_PATH}} |
+<!-- Fill after audit: data models, API routes, DB schema, config files -->
+{{SOURCES}}
 
 ---
 
-## 6. Code placement
+## 6. Stack
 
-Use `ai/repo-map.md`. New code goes:
-
-| Type | Location |
-|------|----------|
-| {{CODE_TYPE_1}} | {{LOCATION_1}} |
-| {{CODE_TYPE_2}} | {{LOCATION_2}} |
-| {{CODE_TYPE_3}} | {{LOCATION_3}} |
+<!-- Fill after audit. DO NOT guess the stack — ask the user if empty. -->
+{{STACK}}
 
 ---
 
-## 7. Code generation
+## 7. Code placement
+
+New code placement: see `ai/repo-map.md`.
+
+---
+
+## 8. Code generation
 
 - Search repo for similar implementations first.
-- Use `ai/repo-map.md` for placement.
-- Missing/ambiguous info → ask, don't guess.
-- Large refactor needed → add to `ai/inconsistencies-tech-debt.md`.
+- Use `ai/repo-map.md` for file placement.
+- Missing/ambiguous info → say `NOT_FOUND`, ask. Never guess.
+- Large refactor needed → add entry to `ai/inconsistencies-tech-debt.md`.
+- **Write tests for every change** — see § 4. No exceptions.
 - After task: update `ai/` if you learned something non-obvious.
-
----
-
-## 8. Stack
-
-| Technology | Version | Role |
-|-----------|---------|------|
-| {{TECH_1}} | {{VERSION}} | {{ROLE}} |
-| {{TECH_2}} | {{VERSION}} | {{ROLE}} |
-| {{TECH_3}} | {{VERSION}} | {{ROLE}} |
 
 ---
 
 ## 9. Multi-agent config
 
-Redirectors: `CLAUDE.md`, `GEMINI.md`, `AGENTS.md`, `.kiro/steering/instructions.md`, `.cursorrules`, `.github/copilot-instructions.md`, `.windsurfrules`, `.clinerules`. All content lives in `ai/` — redirectors never need changes.
+Redirectors: `CLAUDE.md`, `GEMINI.md`, `AGENTS.md`, `.kiro/steering/instructions.md`, `.vibe/instructions.md`, `.cursorrules`, `.cursor/rules/repo-instructions.mdc`, `.github/copilot-instructions.md`, `.windsurfrules`, `.clinerules`.
+
+**Maintenance rule**: all content lives in `ai/`. Redirectors contain a summary of critical rules + pointer to `ai/index.md` as source of truth.
 
 ---
 
-## 10. AI Exchanges
-
-- hasActualConversation: OFF
-- currentConversation: none
-- Template: `ai/templates/exchanges.md`
-
----
-
-## 11. Last updated
+## 10. Last updated
 
 AI context last reviewed: **{{DATE}}**.

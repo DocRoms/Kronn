@@ -1,20 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
-import { Component } from 'react';
-import type { ReactNode, ErrorInfo } from 'react';
-
-/** Minimal ErrorBoundary matching the one in App.tsx */
-class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
-  state: { error: Error | null } = { error: null };
-  static getDerivedStateFromError(error: Error) { return { error }; }
-  componentDidCatch(_error: Error, _info: ErrorInfo) {}
-  render() {
-    if (this.state.error) {
-      return <div data-testid="error-ui">{this.state.error.message}</div>;
-    }
-    return this.props.children;
-  }
-}
+import { ErrorBoundary } from '../components/ErrorBoundary';
 
 function BrokenComponent(): never {
   throw new Error('Test explosion');
@@ -30,7 +16,7 @@ describe('ErrorBoundary', () => {
       </ErrorBoundary>
     );
 
-    expect(screen.getByTestId('error-ui')).toBeDefined();
+    expect(screen.getByText('Something went wrong.')).toBeDefined();
     expect(screen.getByText('Test explosion')).toBeDefined();
 
     spy.mockRestore();
@@ -44,6 +30,6 @@ describe('ErrorBoundary', () => {
     );
 
     expect(screen.getByTestId('happy-child')).toBeDefined();
-    expect(screen.queryByTestId('error-ui')).toBeNull();
+    expect(screen.queryByText('Something went wrong.')).toBeNull();
   });
 });

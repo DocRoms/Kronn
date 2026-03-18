@@ -129,4 +129,32 @@ mod tests {
         ctx.set("name", "test");
         assert_eq!(ctx.render("{{ name }}").unwrap(), "test");
     }
+
+    #[test]
+    fn test_issue_body() {
+        let mut ctx = TemplateContext::new();
+        ctx.set_issue("Title", "Detailed body text", "7", "https://gh/7", &[]);
+        assert_eq!(ctx.render("{{issue.body}}").unwrap(), "Detailed body text");
+    }
+
+    #[test]
+    fn test_unclosed_template_no_panic() {
+        let ctx = TemplateContext::new();
+        // Must not panic; returns what was consumed before EOF
+        let result = ctx.render("prefix {{unclosed").unwrap();
+        assert!(result.starts_with("prefix {{"));
+    }
+
+    #[test]
+    fn test_empty_template_string() {
+        let ctx = TemplateContext::new();
+        assert_eq!(ctx.render("").unwrap(), "");
+    }
+
+    #[test]
+    fn test_passthrough_no_variables() {
+        let ctx = TemplateContext::new();
+        let s = "Hello world, no braces here!";
+        assert_eq!(ctx.render(s).unwrap(), s);
+    }
 }

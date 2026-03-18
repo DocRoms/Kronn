@@ -266,6 +266,36 @@ mod tests {
     }
 
     #[test]
+    fn test_slugify_already_slugified() {
+        assert_eq!(slugify("my-branch"), "my-branch");
+        assert_eq!(slugify("feat-add-thing"), "feat-add-thing");
+    }
+
+    #[test]
+    fn test_slugify_special_chars() {
+        // Slashes, @, ! become dashes, then consecutive dashes collapse
+        assert_eq!(slugify("feat/add-@thing!"), "feat-add-thing");
+    }
+
+    #[test]
+    fn test_slugify_unicode() {
+        // Non-alphanumeric unicode chars (accented letters are alphanumeric in Rust)
+        // 'é' is alphanumeric → kept as-is; let's verify it doesn't panic
+        let result = slugify("café");
+        // "café" lowercased is "café", all chars alphanumeric → no dashes → "café"
+        assert_eq!(result, "café");
+
+        // Non-alphanumeric unicode punctuation gets replaced
+        let result2 = slugify("hello•world");
+        assert_eq!(result2, "hello-world");
+    }
+
+    #[test]
+    fn test_slugify_empty_string() {
+        assert_eq!(slugify(""), "");
+    }
+
+    #[test]
     fn test_worktree_base_dir() {
         // Without env var, defaults to /data/workspaces
         std::env::remove_var("KRONN_DATA_DIR");

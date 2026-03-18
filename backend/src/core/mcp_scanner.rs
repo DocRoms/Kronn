@@ -82,7 +82,7 @@ pub fn write_mcp_json(project_path: &str, data: &McpJsonFile) -> Result<(), Stri
 
 /// Write a McpJsonFile to an arbitrary subpath within a project directory.
 /// Creates parent directories if needed. Used for Claude (.mcp.json),
-/// Kiro (.kiro/settings/mcp.json), and Gemini (.gemini/settings.json).
+/// Kiro (.kiro/settings/mcp.json + .ai/mcp/mcp.json), and Gemini (.gemini/settings.json).
 pub fn write_mcp_json_to_subpath(project_path: &str, subpath: &str, data: &McpJsonFile) -> Result<(), String> {
     let resolved = resolve_host_path(project_path);
     let file = Path::new(&resolved).join(subpath);
@@ -180,7 +180,7 @@ pub fn sync_project_mcps_to_disk(
     if mcp_servers.is_empty() {
         // Remove config files if no MCPs
         let resolved = resolve_host_path(&project.path);
-        for filename in &[".mcp.json", ".vibe/config.toml", ".kiro/settings/mcp.json", ".gemini/settings.json"] {
+        for filename in &[".mcp.json", ".vibe/config.toml", ".kiro/settings/mcp.json", ".gemini/settings.json", ".ai/mcp/mcp.json"] {
             let file = std::path::Path::new(&resolved).join(filename);
             if file.exists() {
                 let _ = std::fs::remove_file(&file);
@@ -211,6 +211,14 @@ pub fn sync_project_mcps_to_disk(
         } else {
             ensure_gitignore(&project.path, ".gemini/");
             tracing::info!("Synced .gemini/settings.json for {}", project.path);
+        }
+
+        // ── Kiro (new format): .ai/mcp/mcp.json (same JSON format) ──
+        if let Err(e) = write_mcp_json_to_subpath(&project.path, ".ai/mcp/mcp.json", &data) {
+            tracing::warn!("Failed to sync Kiro .ai/mcp config: {}", e);
+        } else {
+            ensure_gitignore(&project.path, ".ai/mcp/");
+            tracing::info!("Synced .ai/mcp/mcp.json for {}", project.path);
         }
 
         // MCP context files are only created when the user explicitly writes

@@ -28,6 +28,7 @@ pub fn run(conn: &Connection) -> Result<()> {
         ("014_summary_cache", include_str!("sql/014_summary_cache.sql")),
         ("015_model_tier", include_str!("sql/015_model_tier.sql")),
         ("016_message_model_tier", include_str!("sql/016_message_model_tier.sql")),
+        ("017_message_count", include_str!("sql/017_message_count.sql")),
     ];
 
     for (name, sql) in migrations {

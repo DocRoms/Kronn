@@ -4,7 +4,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
       args:
-        CARGO_PROFILE: ${CARGO_PROFILE:-release}
+        CARGO_PROFILE: ${CARGO_PROFILE:-fast}
         APP_UID: ${KRONN_HOST_UID:-1000}
         APP_GID: ${KRONN_HOST_GID:-1000}
     group_add:

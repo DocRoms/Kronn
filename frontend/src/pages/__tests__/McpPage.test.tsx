@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
 
@@ -22,7 +22,16 @@ vi.mock('../../lib/api', () => ({
 import { McpPage } from '../McpPage';
 import type { McpOverview, McpConfigDisplay, McpServer, McpDefinition, Project } from '../../types/generated';
 
-afterEach(cleanup);
+// Use fake timers to prevent the setTimeout in handleAddDuplicateConfig (50ms
+// scroll animation) from leaking across tests and causing timeout issues.
+beforeEach(() => {
+  vi.useFakeTimers();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+  cleanup();
+});
 
 const noop = () => {};
 

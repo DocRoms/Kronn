@@ -56,10 +56,9 @@ RUN ARCH=$(dpkg --print-architecture) && \
     curl -fsSL "https://gitlab.com/gitlab-org/cli/-/releases/v1.52.0/downloads/glab_1.52.0_linux_${ARCH}.deb" -o /tmp/glab.deb && \
     dpkg -i /tmp/glab.deb && rm /tmp/glab.deb
 
-# Install uv as root, then make available to kronn user
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
-    && cp /root/.local/bin/uv /usr/local/bin/uv \
-    && cp /root/.local/bin/uvx /usr/local/bin/uvx
+# Install uv (pinned version) as root, then make available to kronn user
+COPY --from=ghcr.io/astral-sh/uv:0.5.14 /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.5.14 /uvx /usr/local/bin/uvx
 
 COPY --from=builder /usr/local/bin/kronn /usr/local/bin/kronn
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
@@ -72,6 +71,12 @@ RUN mkdir -p /data && chown kronn:kronn /data
 RUN mkdir -p /home/kronn/.local/bin /home/kronn/.local/share/uv \
     /home/kronn/.npm /home/kronn/.cache/uv \
     && chown -R kronn:kronn /home/kronn/.local /home/kronn/.npm /home/kronn/.cache
+
+# Allow kronn user to create symlinks in /home (for host-path compatibility).
+# Agent configs mounted from the host may contain absolute host paths
+# (e.g. Vibe's save_dir = "/home/<user>/.vibe/logs"). The entrypoint creates
+# a symlink $KRONN_HOST_HOME → /home/kronn so these paths resolve correctly.
+RUN chmod 777 /home
 
 ENV KRONN_DATA_DIR=/data
 ENV PATH="/home/kronn/.local/bin:/usr/local/bin:${PATH}"

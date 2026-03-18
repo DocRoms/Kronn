@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo, memo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { discussions as discussionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi } from '../lib/api';
@@ -32,11 +32,11 @@ const ALL_AGENT_MENTIONS: { trigger: string; type: AgentType; label: string }[] 
 
 const SWIPE_THRESHOLD = 80;
 
-function SwipeableDiscItem({ disc, isActive, lastSeenCount, sendingMap, onSelect, onArchive, onDelete, t, archiveLabel }: {
+const SwipeableDiscItem = memo(function SwipeableDiscItem({ disc, isActive, lastSeenCount, isSending, onSelect, onArchive, onDelete, t, archiveLabel }: {
   disc: Discussion;
   isActive: boolean;
   lastSeenCount: number;
-  sendingMap: Record<string, boolean>;
+  isSending: boolean;
   onSelect: () => void;
   onArchive: () => void;
   onDelete: () => void;
@@ -129,7 +129,7 @@ function SwipeableDiscItem({ disc, isActive, lastSeenCount, sendingMap, onSelect
             )}
           </div>
           <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', marginTop: 2, display: 'flex', alignItems: 'center', gap: 4 }}>
-            {sendingMap[disc.id] && <Loader2 size={8} style={{ animation: 'spin 1s linear infinite', color: '#c8ff00' }} />}
+            {isSending && <Loader2 size={8} style={{ animation: 'spin 1s linear infinite', color: '#c8ff00' }} />}
             {(disc.participants?.length ?? 0) > 1 && (
               <Users size={8} style={{ color: '#8b5cf6' }} />
             )}
@@ -139,7 +139,7 @@ function SwipeableDiscItem({ disc, isActive, lastSeenCount, sendingMap, onSelect
       </div>
     </div>
   );
-}
+});
 
 export interface DiscussionsPageProps {
   projects: Project[];
@@ -248,9 +248,34 @@ export function DiscussionsPage({
   const [newDiscTier, setNewDiscTier] = useState<'economy' | 'default' | 'reasoning'>('default');
   const [newDiscBranchName, setNewDiscBranchName] = useState('');
   const [newDiscBaseBranch, setNewDiscBaseBranch] = useState('main');
+  const [expandedSummaryMsgId, setExpandedSummaryMsgId] = useState<string | null>(null);
 
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // Batched streaming: accumulate chunks in a ref, flush to state via rAF
+  const streamBufferRef = useRef<Record<string, string>>({});
+  const rafIdRef = useRef<number | null>(null);
+  const flushStreamBuffer = useCallback(() => {
+    rafIdRef.current = null;
+    const buf = streamBufferRef.current;
+    if (Object.keys(buf).length === 0) return;
+    const snapshot = { ...buf };
+    streamBufferRef.current = {};
+    setStreamingMap(prev => {
+      const next = { ...prev };
+      for (const [k, v] of Object.entries(snapshot)) {
+        next[k] = (next[k] ?? '') + v;
+      }
+      return next;
+    });
+  }, [setStreamingMap]);
+  const appendStreamChunk = useCallback((discId: string, text: string) => {
+    streamBufferRef.current[discId] = (streamBufferRef.current[discId] ?? '') + text;
+    if (rafIdRef.current === null) {
+      rafIdRef.current = requestAnimationFrame(flushStreamBuffer);
+    }
+  }, [flushStreamBuffer]);
 
   // Cache of fully-loaded discussions (with messages)
   const [loadedDiscussions, setLoadedDiscussions] = useState<Record<string, Discussion>>({});
@@ -409,7 +434,7 @@ export function DiscussionsPage({
       if (controller.signal.aborted) return;
       await discussionsApi.runAgent(
         discId,
-        (text) => setStreamingMap(prev => ({ ...prev, [discId]: (prev[discId] ?? '') + text })),
+        (text) => appendStreamChunk(discId, text),
         () => cleanupStream(discId),
         (error) => { console.error('Agent error:', error); toast(String(error), 'error'); cleanupStream(discId); },
         controller.signal,
@@ -464,7 +489,7 @@ export function DiscussionsPage({
     setStreamingMap(prev => ({ ...prev, [discId]: '' }));
     await discussionsApi.runAgent(
       discId,
-      (text) => setStreamingMap(prev => ({ ...prev, [discId]: (prev[discId] ?? '') + text })),
+      (text) => appendStreamChunk(discId, text),
       () => cleanupStream(discId),
       (error) => { console.error('Agent error:', error); toast(String(error), 'error'); cleanupStream(discId); },
       controller.signal,
@@ -517,7 +542,7 @@ export function DiscussionsPage({
     await discussionsApi.sendMessageStream(
       discId,
       { content: msg, target_agent: targetAgent },
-      (text) => setStreamingMap(prev => ({ ...prev, [discId]: (prev[discId] ?? '') + text })),
+      (text) => appendStreamChunk(discId, text),
       () => cleanupStream(discId),
       (error) => { console.error('Agent error:', error); toast(String(error), 'error'); cleanupStream(discId); },
       controller.signal,
@@ -550,7 +575,7 @@ export function DiscussionsPage({
     setStreamingMap(prev => ({ ...prev, [discId]: '' }));
     await discussionsApi.runAgent(
       discId,
-      (text) => setStreamingMap(prev => ({ ...prev, [discId]: (prev[discId] ?? '') + text })),
+      (text) => appendStreamChunk(discId, text),
       () => cleanupStream(discId),
       (error) => { console.error('Agent error:', error); toast(String(error), 'error'); cleanupStream(discId); },
       controller.signal,
@@ -572,7 +597,7 @@ export function DiscussionsPage({
     setStreamingMap(prev => ({ ...prev, [discId]: '' }));
     await discussionsApi.runAgent(
       discId,
-      (text) => setStreamingMap(prev => ({ ...prev, [discId]: (prev[discId] ?? '') + text })),
+      (text) => appendStreamChunk(discId, text),
       () => cleanupStream(discId),
       (error) => { console.error('Agent error:', error); toast(String(error), 'error'); cleanupStream(discId); },
       controller.signal,
@@ -678,21 +703,22 @@ export function DiscussionsPage({
             const isCollapsed = collapsedDiscGroups.has('__global__');
             return (
               <div>
-                <div
-                  style={{ ...ds.projectGroup, borderTop: 'none', cursor: 'pointer', userSelect: 'none' as const }}
+                <button
+                  style={{ ...ds.projectGroup, borderTop: 'none', cursor: 'pointer', userSelect: 'none' as const, background: 'none', border: 'none', width: '100%', font: 'inherit', color: 'inherit', textAlign: 'left' as const }}
                   onClick={() => setCollapsedDiscGroups(prev => { const n = new Set(prev); isCollapsed ? n.delete('__global__') : n.add('__global__'); return n; })}
+                  aria-expanded={!isCollapsed}
                 >
                   <ChevronRight size={10} style={{ transform: isCollapsed ? 'none' : 'rotate(90deg)', transition: 'transform 0.15s' }} />
                   <MessageSquare size={10} /> {t('disc.general')}
                   <span style={{ fontWeight: 400, opacity: 0.5, marginLeft: 'auto' }}>{globalDiscs.length}</span>
-                </div>
+                </button>
                 {!isCollapsed && globalDiscs.sort((a, b) => b.updated_at.localeCompare(a.updated_at)).map(disc => (
                   <SwipeableDiscItem
                     key={disc.id}
                     disc={disc}
                     isActive={disc.id === activeDiscussionId}
                     lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
-                    sendingMap={sendingMap}
+                    isSending={!!sendingMap[disc.id]}
                     onSelect={() => { setActiveDiscussionId(disc.id); markDiscussionSeen(disc.id, disc.message_count ?? disc.messages.length); }}
                     onArchive={async () => {
                       await discussionsApi.update(disc.id, { archived: true });
@@ -718,21 +744,22 @@ export function DiscussionsPage({
             const isCollapsed = collapsedDiscGroups.has(proj.id);
             return (
               <div key={proj.id}>
-                <div
-                  style={{ ...ds.projectGroup, cursor: 'pointer', userSelect: 'none' as const }}
+                <button
+                  style={{ ...ds.projectGroup, cursor: 'pointer', userSelect: 'none' as const, background: 'none', border: 'none', width: '100%', font: 'inherit', color: 'inherit', textAlign: 'left' as const }}
                   onClick={() => setCollapsedDiscGroups(prev => { const n = new Set(prev); isCollapsed ? n.delete(proj.id) : n.add(proj.id); return n; })}
+                  aria-expanded={!isCollapsed}
                 >
                   <ChevronRight size={10} style={{ transform: isCollapsed ? 'none' : 'rotate(90deg)', transition: 'transform 0.15s' }} />
                   <Folder size={10} /> {proj.name}
                   <span style={{ fontWeight: 400, opacity: 0.5, marginLeft: 'auto' }}>{projDiscs.length}</span>
-                </div>
+                </button>
                 {!isCollapsed && projDiscs.sort((a, b) => b.updated_at.localeCompare(a.updated_at)).map(disc => (
                   <SwipeableDiscItem
                     key={disc.id}
                     disc={disc}
                     isActive={disc.id === activeDiscussionId}
                     lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
-                    sendingMap={sendingMap}
+                    isSending={!!sendingMap[disc.id]}
                     onSelect={() => { setActiveDiscussionId(disc.id); markDiscussionSeen(disc.id, disc.message_count ?? disc.messages.length); }}
                     onArchive={async () => {
                       await discussionsApi.update(disc.id, { archived: true });
@@ -760,21 +787,22 @@ export function DiscussionsPage({
           {/* Archives section */}
           {archivedDiscussions.length > 0 && (
             <div>
-              <div
-                style={{ ...ds.projectGroup, cursor: 'pointer', userSelect: 'none' as const, color: 'rgba(255,255,255,0.25)' }}
+              <button
+                style={{ ...ds.projectGroup, cursor: 'pointer', userSelect: 'none' as const, color: 'rgba(255,255,255,0.55)', background: 'none', border: 'none', width: '100%', font: 'inherit', textAlign: 'left' as const }}
                 onClick={() => setShowArchives(!showArchives)}
+                aria-expanded={showArchives}
               >
                 <ChevronRight size={10} style={{ transform: showArchives ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s' }} />
                 <Archive size={10} /> {t('disc.archived')}
                 <span style={{ fontWeight: 400, opacity: 0.5, marginLeft: 'auto' }}>{archivedDiscussions.length}</span>
-              </div>
+              </button>
               {showArchives && archivedDiscussions.sort((a, b) => b.updated_at.localeCompare(a.updated_at)).map(disc => (
                 <SwipeableDiscItem
                   key={disc.id}
                   disc={disc}
                   isActive={disc.id === activeDiscussionId}
                   lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
-                  sendingMap={sendingMap}
+                  isSending={!!sendingMap[disc.id]}
                   onSelect={() => { setActiveDiscussionId(disc.id); markDiscussionSeen(disc.id, disc.message_count ?? disc.messages.length); }}
                   onArchive={async () => {
                     // Swipe right on archived = unarchive
@@ -806,7 +834,7 @@ export function DiscussionsPage({
             >
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
                 <span style={{ fontWeight: 700, fontSize: 15, color: '#e8eaed' }}>{t('disc.newTitle')}</span>
-                <button style={ls.iconBtn} onClick={() => { setShowNewDiscussion(false); setNewDiscPrefilled(false); setNewDiscWorkspaceMode('Direct'); setNewDiscBranchName(''); setNewDiscBaseBranch('main'); }}><X size={14} /></button>
+                <button style={ls.iconBtn} onClick={() => { setShowNewDiscussion(false); setNewDiscPrefilled(false); setNewDiscWorkspaceMode('Direct'); setNewDiscBranchName(''); setNewDiscBaseBranch('main'); }} aria-label="Close"><X size={14} /></button>
               </div>
 
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
@@ -1169,7 +1197,7 @@ export function DiscussionsPage({
                       style={{
                         background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(200,255,0,0.3)',
                         borderRadius: 4, padding: '2px 6px', color: '#e8eaed', fontSize: 14,
-                        fontWeight: 600, fontFamily: 'inherit', outline: 'none', width: 260,
+                        fontWeight: 600, fontFamily: 'inherit', width: 260,
                       }}
                       value={editingTitleText}
                       onChange={e => setEditingTitleText(e.target.value)}
@@ -1226,12 +1254,13 @@ export function DiscussionsPage({
                       }
                     }}
                     title={t('disc.editTitle')}
+                    aria-label={t('disc.editTitle')}
                   >
                     <Pencil size={10} />
                   </button>
                   )}
                 </div>
-                <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', marginTop: 2, display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
+                <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 2, display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
                   <span>{activeDiscussion.project_id ? (projects.find(p => p.id === activeDiscussion.project_id)?.name ?? '?') : t('disc.general')} · {activeDiscussion.agent}</span>
                   {activeDiscussion.workspace_mode === 'Isolated' && (
                     <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 6, background: 'rgba(96,165,250,0.1)', color: '#60a5fa', border: '1px solid rgba(96,165,250,0.2)', display: 'inline-flex', alignItems: 'center', gap: 3 }}>
@@ -1297,6 +1326,7 @@ export function DiscussionsPage({
                     style={{ ...ls.iconBtn, color: showMcpPopover ? '#00d4ff' : 'rgba(255,255,255,0.4)' }}
                     onClick={() => { setShowMcpPopover(prev => !prev); setShowProfileEditor(false); }}
                     title={t('disc.mcps')}
+                    aria-label={t('disc.mcps')}
                   >
                     <Server size={13} />
                   </button>
@@ -1333,6 +1363,7 @@ export function DiscussionsPage({
                     style={{ ...ls.iconBtn, color: showProfileEditor ? '#a78bfa' : 'rgba(255,255,255,0.4)' }}
                     onClick={() => { setShowProfileEditor(prev => !prev); setShowMcpPopover(false); }}
                     title={t('disc.editConfig')}
+                    aria-label={t('disc.editConfig')}
                   >
                     <Settings size={13} />
                   </button>
@@ -1348,7 +1379,7 @@ export function DiscussionsPage({
                         <select
                           style={{
                             width: '100%', padding: '4px 6px', borderRadius: 6, fontSize: 11, fontFamily: 'inherit',
-                            background: '#1a1d26', border: '1px solid rgba(255,255,255,0.1)', color: '#e8eaed', outline: 'none',
+                            background: '#1a1d26', border: '1px solid rgba(255,255,255,0.1)', color: '#e8eaed',
                           }}
                           value={activeDiscussion.project_id ?? ''}
                           onChange={async (e) => {
@@ -1510,6 +1541,7 @@ export function DiscussionsPage({
                     style={{ ...ls.iconBtn, color: showGitPanel ? '#c8ff00' : 'rgba(255,255,255,0.4)' }}
                     onClick={() => setShowGitPanel(prev => !prev)}
                     title={t('git.filesBtn')}
+                    aria-label={t('git.filesBtn')}
                   >
                     <GitBranch size={13} />
                   </button>
@@ -1522,6 +1554,7 @@ export function DiscussionsPage({
                     setActiveDiscussionId(null);
                     refetchDiscussions();
                   }}
+                  aria-label="Delete discussion"
                 >
                   <Trash2 size={12} />
                 </button>
@@ -1546,17 +1579,26 @@ export function DiscussionsPage({
 
             {/* Messages */}
             <div style={ds.messages}>
-              {activeDiscussion.messages.map((msg, idx) => {
+              {(() => {
                 const msgs = activeDiscussion.messages;
-                const isLastUser = msg.role === 'User' && !msgs.slice(idx + 1).some(m => m.role === 'User');
-                const isLastAgent = msg.role === 'Agent' && idx === msgs.length - 1;
+                // Pre-compute last user/agent indices in O(n) instead of O(n²)
+                let lastUserIdx = -1;
+                for (let i = msgs.length - 1; i >= 0; i--) { if (msgs[i].role === 'User') { lastUserIdx = i; break; } }
+                const lastAgentIdx = msgs.length - 1;
+                return msgs.map((msg, idx) => {
+                const isLastUser = msg.role === 'User' && idx === lastUserIdx;
+                const isLastAgent = msg.role === 'Agent' && idx === lastAgentIdx;
                 const isEditing = editingMsgId === msg.id;
 
                 return (
                 <div key={msg.id} style={ds.msgRow(msg.role === 'User')}>
                   <div style={{
                     ...ds.msgBubble(msg.role === 'User'),
-                    ...(msg.role === 'System' ? { borderColor: 'rgba(255,77,106,0.3)', background: 'rgba(255,77,106,0.06)' } : {}),
+                    ...(msg.role === 'System'
+                      ? msg.content.startsWith('summary cached')
+                        ? { borderColor: 'rgba(52,211,153,0.3)', background: 'rgba(52,211,153,0.06)' }
+                        : { borderColor: 'rgba(255,77,106,0.3)', background: 'rgba(255,77,106,0.06)' }
+                      : {}),
                   }}>
                     {msg.role === 'Agent' && (
                       <div style={{ ...ds.msgAgent, color: agentColor(msg.agent_type ?? activeDiscussion.agent) }}>
@@ -1564,8 +1606,32 @@ export function DiscussionsPage({
                       </div>
                     )}
                     {msg.role === 'System' && (
-                      <div style={{ ...ds.msgAgent, color: '#ff4d6a' }}>
-                        <AlertTriangle size={10} /> {t('disc.system')}
+                      <div style={{ ...ds.msgAgent, color: msg.content.startsWith('summary cached') ? '#34d399' : '#ff4d6a' }}>
+                        {msg.content.startsWith('summary cached') ? <Zap size={10} /> : <AlertTriangle size={10} />}
+                        {' '}{msg.content.startsWith('summary cached') ? t('disc.summaryCached') : t('disc.system')}
+                        {msg.content.startsWith('summary cached') && activeDiscussion.summary_cache && (
+                          <button
+                            aria-label={t('disc.viewSummary')}
+                            style={{
+                              background: 'none', border: 'none', cursor: 'pointer',
+                              color: 'rgba(52,211,153,0.6)', fontSize: 10, fontFamily: 'inherit',
+                              marginLeft: 6, textDecoration: 'underline',
+                            }}
+                            onClick={() => setExpandedSummaryMsgId(prev => prev === msg.id ? null : msg.id)}
+                          >
+                            {expandedSummaryMsgId === msg.id ? t('disc.hideSummary') : t('disc.viewSummary')}
+                          </button>
+                        )}
+                      </div>
+                    )}
+                    {msg.role === 'System' && msg.content.startsWith('summary cached') && expandedSummaryMsgId === msg.id && activeDiscussion.summary_cache && (
+                      <div style={{
+                        marginTop: 6, padding: '8px 10px', borderRadius: 6,
+                        background: 'rgba(52,211,153,0.04)', border: '1px solid rgba(52,211,153,0.15)',
+                        fontSize: 11, color: 'rgba(255,255,255,0.7)', lineHeight: 1.5,
+                        whiteSpace: 'pre-wrap',
+                      }}>
+                        {activeDiscussion.summary_cache}
                       </div>
                     )}
                     {isEditing ? (
@@ -1658,6 +1724,7 @@ export function DiscussionsPage({
                                 style={{ ...ls.iconBtn, padding: '2px 6px', fontSize: 10, color: 'rgba(255,255,255,0.3)' }}
                                 onClick={() => { setEditingMsgId(msg.id); setEditingText(msg.content); }}
                                 title={t('disc.editResend')}
+                                aria-label={t('disc.editResend')}
                               >
                                 <Pencil size={10} />
                               </button>
@@ -1667,6 +1734,7 @@ export function DiscussionsPage({
                                 style={{ ...ls.iconBtn, padding: '2px 6px', fontSize: 10, color: 'rgba(255,255,255,0.3)' }}
                                 onClick={handleRetry}
                                 title={t('disc.retryResponse')}
+                                aria-label={t('disc.retryResponse')}
                               >
                                 <RotateCcw size={10} />
                               </button>
@@ -1678,11 +1746,12 @@ export function DiscussionsPage({
                   </div>
                 </div>
                 );
-              })}
+              });
+              })()}
 
               {/* Streaming: single agent mode */}
               {sending && !orchState[activeDiscussion.id]?.active && (
-                <div style={ds.msgRow(false)}>
+                <div style={ds.msgRow(false)} aria-live="polite">
                   <div style={ds.msgBubble(false)}>
                     <div style={{ ...ds.msgAgent, color: agentColor(activeDiscussion.agent) }}>
                       <Cpu size={10} /> {activeDiscussion.agent}
@@ -1691,7 +1760,7 @@ export function DiscussionsPage({
                     {streamingText ? (
                       <MarkdownContent content={streamingText} />
                     ) : (
-                      <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.3)', fontStyle: 'italic' }}>
+                      <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)', fontStyle: 'italic' }} aria-live="assertive">
                         {t('disc.running')}
                       </div>
                     )}
@@ -1919,6 +1988,7 @@ export function DiscussionsPage({
                   }}
                   disabled={sending}
                   title={t('debate.title')}
+                  aria-label={t('debate.title')}
                 >
                   <Users size={16} />
                 </button>
@@ -2093,6 +2163,7 @@ export function DiscussionsPage({
                   }}
                   onClick={handleStop}
                   title={t('disc.stopThinking')}
+                  aria-label={t('disc.stopThinking')}
                 >
                   <StopCircle size={16} />
                 </button>
@@ -2101,6 +2172,7 @@ export function DiscussionsPage({
                   style={ds.sendBtn}
                   onClick={handleSendMessage}
                   disabled={!chatInput.trim()}
+                  aria-label="Send message"
                 >
                   <Send size={16} />
                 </button>
@@ -2115,6 +2187,7 @@ export function DiscussionsPage({
                 projectId={activeDiscussion.project_id}
                 discussionId={activeDiscussion.workspace_mode === 'Isolated' ? activeDiscussion.id : undefined}
                 onClose={() => setShowGitPanel(false)}
+                terminalEnabled={agentAccess ? Object.values(agentAccess).some((v: any) => v?.full_access) : false}
               />
             )}
 
@@ -2153,38 +2226,39 @@ const mdStyles: Record<string, React.CSSProperties> = {
   strong: { fontWeight: 700, color: '#f0f0f0' },
 };
 
-const MarkdownContent = ({ content }: { content: string }) => (
+const mdComponents = {
+  p: ({ children }: any) => <p style={mdStyles.p}>{children}</p>,
+  h1: ({ children }: any) => <h1 style={mdStyles.h1}>{children}</h1>,
+  h2: ({ children }: any) => <h2 style={mdStyles.h2}>{children}</h2>,
+  h3: ({ children }: any) => <h3 style={mdStyles.h3}>{children}</h3>,
+  ul: ({ children }: any) => <ul style={mdStyles.ul}>{children}</ul>,
+  ol: ({ children }: any) => <ol style={mdStyles.ol}>{children}</ol>,
+  li: ({ children }: any) => <li style={mdStyles.li}>{children}</li>,
+  code: ({ className, children }: any) => {
+    const isBlock = className?.includes('language-');
+    return isBlock
+      ? <code style={mdStyles.preCode}>{children}</code>
+      : <code style={mdStyles.code}>{children}</code>;
+  },
+  pre: ({ children }: any) => <pre style={mdStyles.pre}>{children}</pre>,
+  table: ({ children }: any) => <table style={mdStyles.table}>{children}</table>,
+  th: ({ children }: any) => <th style={mdStyles.th}>{children}</th>,
+  td: ({ children }: any) => <td style={mdStyles.td}>{children}</td>,
+  blockquote: ({ children }: any) => <blockquote style={mdStyles.blockquote}>{children}</blockquote>,
+  hr: () => <hr style={mdStyles.hr} />,
+  a: ({ href, children }: any) => <a href={href} style={mdStyles.a} target="_blank" rel="noopener noreferrer">{children}</a>,
+  strong: ({ children }: any) => <strong style={mdStyles.strong}>{children}</strong>,
+};
+
+const remarkPluginsList = [remarkGfm];
+
+const MarkdownContent = memo(({ content }: { content: string }) => (
   <div style={{ fontSize: 13, lineHeight: 1.55 }}>
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      components={{
-        p: ({ children }) => <p style={mdStyles.p}>{children}</p>,
-        h1: ({ children }) => <h1 style={mdStyles.h1}>{children}</h1>,
-        h2: ({ children }) => <h2 style={mdStyles.h2}>{children}</h2>,
-        h3: ({ children }) => <h3 style={mdStyles.h3}>{children}</h3>,
-        ul: ({ children }) => <ul style={mdStyles.ul}>{children}</ul>,
-        ol: ({ children }) => <ol style={mdStyles.ol}>{children}</ol>,
-        li: ({ children }) => <li style={mdStyles.li}>{children}</li>,
-        code: ({ className, children }) => {
-          const isBlock = className?.includes('language-');
-          return isBlock
-            ? <code style={mdStyles.preCode}>{children}</code>
-            : <code style={mdStyles.code}>{children}</code>;
-        },
-        pre: ({ children }) => <pre style={mdStyles.pre}>{children}</pre>,
-        table: ({ children }) => <table style={mdStyles.table}>{children}</table>,
-        th: ({ children }) => <th style={mdStyles.th}>{children}</th>,
-        td: ({ children }) => <td style={mdStyles.td}>{children}</td>,
-        blockquote: ({ children }) => <blockquote style={mdStyles.blockquote}>{children}</blockquote>,
-        hr: () => <hr style={mdStyles.hr} />,
-        a: ({ href, children }) => <a href={href} style={mdStyles.a} target="_blank" rel="noopener noreferrer">{children}</a>,
-        strong: ({ children }) => <strong style={mdStyles.strong}>{children}</strong>,
-      }}
-    >
+    <ReactMarkdown remarkPlugins={remarkPluginsList} components={mdComponents}>
       {content}
     </ReactMarkdown>
   </div>
-);
+));
 
 // ─── Local styles (from Dashboard s.*) ───────────────────────────────────────
 
@@ -2223,16 +2297,16 @@ const ds = {
     color: '#e8eaed',
   }),
   msgAgent: { display: 'flex', alignItems: 'center', gap: 4, fontSize: 10, fontWeight: 600, color: 'rgba(139,92,246,0.7)', marginBottom: 4 } as const,
-  msgTime: { fontSize: 10, color: 'rgba(255,255,255,0.2)', marginTop: 4, textAlign: 'right' as const },
+  msgTime: { fontSize: 10, color: 'rgba(255,255,255,0.55)', marginTop: 4, textAlign: 'right' as const },
   inputBar: { display: 'flex', gap: 8, padding: '12px 20px', borderTop: '1px solid rgba(255,255,255,0.07)', background: '#12151c', flexShrink: 0 } as const,
-  chatInput: { width: '100%', padding: '10px 14px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, color: '#e8eaed', fontSize: 13, fontFamily: 'inherit', outline: 'none' } as const,
+  chatInput: { width: '100%', padding: '10px 14px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, color: '#e8eaed', fontSize: 13, fontFamily: 'inherit' } as const,
   sendBtn: { padding: '10px 16px', borderRadius: 8, border: '1px solid rgba(200,255,0,0.2)', background: 'rgba(200,255,0,0.1)', color: '#c8ff00', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' } as const,
   newDiscOverlay: { display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 1 } as const,
   newDiscCard: { width: 420, maxHeight: 'calc(100vh - 120px)', overflowY: 'auto', padding: 24, borderRadius: 12, background: '#12151c', border: '1px solid rgba(255,255,255,0.1)' } as const,
   label: { display: 'block', fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', marginBottom: 4, marginTop: 8 } as const,
   selectStyled: {
     width: '100%', padding: '9px 12px', background: '#1a1d26', border: '1px solid rgba(255,255,255,0.12)',
-    borderRadius: 8, color: '#e8eaed', fontSize: 13, fontFamily: 'inherit', outline: 'none',
+    borderRadius: 8, color: '#e8eaed', fontSize: 13, fontFamily: 'inherit',
     cursor: 'pointer', appearance: 'none' as const,
     backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E")`,
     backgroundRepeat: 'no-repeat', backgroundPosition: 'right 10px center',
@@ -2240,12 +2314,12 @@ const ds = {
   } as const,
   inputStyled: {
     width: '100%', padding: '9px 12px', background: '#1a1d26', border: '1px solid rgba(255,255,255,0.12)',
-    borderRadius: 8, color: '#e8eaed', fontSize: 13, fontFamily: 'inherit', outline: 'none',
+    borderRadius: 8, color: '#e8eaed', fontSize: 13, fontFamily: 'inherit',
     boxSizing: 'border-box' as const,
   } as const,
   textareaStyled: {
     width: '100%', padding: '10px 12px', background: '#1a1d26', border: '1px solid rgba(255,255,255,0.12)',
-    borderRadius: 8, color: '#e8eaed', fontSize: 13, fontFamily: 'inherit', outline: 'none',
+    borderRadius: 8, color: '#e8eaed', fontSize: 13, fontFamily: 'inherit',
     resize: 'vertical' as const, boxSizing: 'border-box' as const, lineHeight: 1.5,
   } as const,
 };
