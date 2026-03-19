@@ -4,7 +4,7 @@ persona_name: Sam
 role: QA Engineer
 avatar: 🔍
 color: "#ef4444"
-category: business
+category: technical
 builtin: true
 default_engine: claude-code
 ---

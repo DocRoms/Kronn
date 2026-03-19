@@ -355,16 +355,95 @@ pub async fn bootstrap(
 
 /// Build the bootstrap discussion prompt
 fn build_bootstrap_prompt(language: &str, project_name: &str, description: &str) -> String {
-    let lang_instruction = match language {
-        "fr" => "Réponds en français.",
-        "es" => "Responde en español.",
-        _ => "Respond in English.",
-    };
+    match language {
+        "en" => format!(
+r#"# Bootstrap for project "{project_name}"
 
-    format!(
+Respond in English.
+
+## Project description
+{description}
+
+## Your mission
+You are a software architect and product owner. Help me build this project from scratch, step by step.
+
+Start by analyzing the description above, then guide me through the following steps:
+
+### 1. Vision & Goals
+- Restate the project vision in 2-3 clear sentences
+- Identify target users
+- List the 3-5 main goals
+
+### 2. Technical architecture
+- Propose a suitable tech stack (frontend, backend, DB, infra)
+- Justify each choice
+- Draw the architecture in ASCII if relevant
+
+### 3. Project structure
+- Propose a file/folder tree
+- Explain naming conventions
+
+### 4. MVP — Priority features
+- List the features for a functional MVP
+- Prioritize them (P0 = essential, P1 = important, P2 = nice-to-have)
+- Estimate relative complexity for each feature
+
+### 5. Action plan
+- Propose a sequential development plan
+- Identify dependencies between features
+- Suggest the first files to create
+
+### 6. Finalization
+- When you have completed all steps, write exactly `KRONN:BOOTSTRAP_COMPLETE` in your final message.
+
+Start now with step 1. Ask me questions if the description lacks details."#
+        ),
+        "es" => format!(
+r#"# Bootstrap del proyecto "{project_name}"
+
+Responde en español.
+
+## Descripción del proyecto
+{description}
+
+## Tu misión
+Eres un arquitecto de software y product owner. Ayúdame a construir este proyecto desde cero, paso a paso.
+
+Comienza analizando la descripción anterior y luego guíame a través de los siguientes pasos:
+
+### 1. Visión y objetivos
+- Reformula la visión del proyecto en 2-3 frases claras
+- Identifica los usuarios objetivo
+- Lista los 3-5 objetivos principales
+
+### 2. Arquitectura técnica
+- Propón un stack técnico adecuado (frontend, backend, DB, infra)
+- Justifica cada elección
+- Dibuja la arquitectura en ASCII si es pertinente
+
+### 3. Estructura del proyecto
+- Propón un árbol de archivos/carpetas
+- Explica las convenciones de nombres
+
+### 4. MVP — Features prioritarias
+- Lista las features para un MVP funcional
+- Priorízalas (P0 = indispensable, P1 = importante, P2 = nice-to-have)
+- Estima la complejidad relativa de cada feature
+
+### 5. Plan de acción
+- Propón un plan de desarrollo secuencial
+- Identifica las dependencias entre features
+- Sugiere los primeros archivos a crear
+
+### 6. Finalización
+- Cuando hayas terminado todos los pasos, escribe exactamente `KRONN:BOOTSTRAP_COMPLETE` en tu último mensaje.
+
+Comienza ahora por el paso 1. Hazme preguntas si la descripción carece de detalles."#
+        ),
+        _ => format!(
 r#"# Bootstrap du projet "{project_name}"
 
-{lang_instruction}
+Réponds en français.
 
 ## Description du projet
 {description}
@@ -402,7 +481,8 @@ Commence par analyser la description ci-dessus, puis guide-moi à travers les é
 - Quand tu as terminé toutes les étapes, écris exactement `KRONN:BOOTSTRAP_COMPLETE` dans ton dernier message.
 
 Commence maintenant par l'étape 1. Pose-moi des questions si la description manque de détails."#
-    )
+        ),
+    }
 }
 
 /// Inject a token into an HTTPS git URL for authenticated cloning.
@@ -925,7 +1005,8 @@ Rules: Write in English. Be factual and concise — this is AI context for codin
 - If a section does not apply to this project, replace placeholders with 'N/A — not used in this project.' Do not delete the section.\n\
 - Write plain facts, not opinions or recommendations. No debate, no trade-offs analysis.\n\
 - Each section should be self-contained: another AI agent reading just that section should get the full picture.\n\
-- Add or remove table rows as needed to match the project. Write fewer entries rather than inventing content to fill slots.";
+- Add or remove table rows as needed to match the project. Write fewer entries rather than inventing content to fill slots.\n\
+This is an autonomous (non-interactive) pass. Do NOT ask questions — mark unknowns with `<!-- TODO: verify -->` and move on.";
 
 const ANALYSIS_STEPS: &[(&str, &str)] = &[
     // Step 1: Project analysis + index
@@ -1047,7 +1128,9 @@ Detail file format:\n\
 - **Impact**: what goes wrong if not fixed\n\
 - **Where (pointers)**: file paths with line numbers\n\
 - **Suggested direction**: non-binding fix suggestion\n\
-- **Next step**: create ticket"),
+- **Next step**: create ticket\n\n\
+Also fill `ai/decisions.md` with intentional architectural choices observed in the code that might look unusual \
+to a newcomer (e.g., why a certain pattern was chosen over a simpler one)."),
 
     // Step 10: Final review
     ("REVIEW", "\
@@ -1366,12 +1449,15 @@ fn build_validation_prompt(language: &str, info: &AuditInfo, has_issue_tracker_m
             let mut s = String::from(concat!(
                 "Validate the AI context (ai/ folder). Follow this 4-phase protocol. ",
                 "Do NOT emit KRONN:VALIDATION_COMPLETE until ALL phases are done.\n\n",
+                "**CRITICAL RULE: You are a DOCUMENTATION auditor, not a code fixer. ",
+                "NEVER modify source code, Makefile, configs, or any file outside `ai/`. ",
+                "Your ONLY job is to make `ai/` files accurate and complete.**\n\n",
                 "## Phase 1 — Auto-fix (autonomous)\n",
-                "Read source code. Fix autonomously: orphan TODO markers, empty/skeleton files inferable from code, outdated info. ",
-                "Update ai/ files directly. Report fixes.\n\n",
+                "Read source code to understand the project. Fix ONLY `ai/` files: orphan TODO markers, empty/skeleton files inferable from code, outdated info. ",
+                "Update `ai/` files directly. Report fixes. Do NOT touch source code.\n\n",
                 "## Phase 2 — Ambiguity questions (interactive)\n",
-                "Ask remaining ambiguities **one by one**. After each answer, update ai/ files immediately. ",
-                "Follow-up on new unknowns. Do not skip to Phase 3 until resolved.\n",
+                "Ask remaining ambiguities **one by one**. After each answer, update the relevant `ai/` file (repo-map, coding-rules, architecture, etc.). ",
+                "If the user reports a code issue, document it in `ai/inconsistencies-tech-debt.md` — do NOT fix the code yourself.\n",
                 "If user answers 'I don't know' or 'skip', mark as `<!-- TODO: unknown -->` and move on.\n",
                 "Phase 2 ends when all TODOs are addressed or explicitly skipped.\n\n",
                 "## Phase 3 — Tech debt review (interactive)\n",
@@ -1384,12 +1470,12 @@ fn build_validation_prompt(language: &str, info: &AuditInfo, has_issue_tracker_m
                 s.push_str("Also ask: create a ticket? (issue tracker available via MCP)\n");
             }
             s.push_str(concat!(
-                "Do not batch-confirm. Update/remove entries per feedback.\n",
+                "Do not batch-confirm. Update/remove `ai/` entries per feedback. Do NOT fix code — only update documentation.\n",
                 "Also ask: did the audit miss anything obvious? (security, performance, compliance)\n\n",
                 "## Phase 4 — Doc challenge (interactive)\n",
-                "Ask 2-3 practical onboarding questions that must be answerable from ai/ files alone. ",
+                "Ask 2-3 practical onboarding questions that must be answerable from `ai/` files alone. ",
                 "Examples: 'How would a new dev add a new API endpoint?', 'What command runs all tests?', 'Where is the DB schema?'. ",
-                "Check if ai/ docs answer them correctly. Fix gaps.\n\n",
+                "Check if `ai/` docs answer them correctly. Fix gaps in `ai/` files.\n\n",
                 "## Completion\n",
                 "All phases done → end with exact phrase: \"KRONN:VALIDATION_COMPLETE\". Never emit early.",
             ));
@@ -1399,12 +1485,15 @@ fn build_validation_prompt(language: &str, info: &AuditInfo, has_issue_tracker_m
             let mut s = String::from(concat!(
                 "Valida el contexto AI (carpeta ai/). Sigue este protocolo de 4 fases. ",
                 "NO emitas KRONN:VALIDATION_COMPLETE hasta completar TODAS las fases.\n\n",
+                "**REGLA CRITICA: Eres un auditor de DOCUMENTACION, no un corrector de codigo. ",
+                "NUNCA modifiques codigo fuente, Makefile, configs, ni ningun archivo fuera de `ai/`. ",
+                "Tu UNICO trabajo: hacer los archivos `ai/` precisos y completos.**\n\n",
                 "## Fase 1 — Auto-correccion (autonoma)\n",
-                "Lee el codigo. Corrige: TODOs huerfanos, archivos esqueleto inferibles del codigo, info obsoleta. ",
-                "Actualiza ai/ directamente. Reporta.\n\n",
+                "Lee el codigo para entender el proyecto. Corrige SOLO archivos `ai/`: TODOs huerfanos, archivos esqueleto inferibles del codigo, info obsoleta. ",
+                "Actualiza `ai/` directamente. Reporta. NO toques el codigo fuente.\n\n",
                 "## Fase 2 — Preguntas (interactiva)\n",
-                "Pregunta ambiguedades **una por una**. Tras cada respuesta, actualiza ai/ antes de seguir. ",
-                "No pases a Fase 3 sin resolver todo.\n",
+                "Pregunta ambiguedades **una por una**. Tras cada respuesta, actualiza el archivo `ai/` correspondiente (repo-map, coding-rules, architecture, etc.). ",
+                "Si el usuario reporta un problema de codigo, documentalo en `ai/inconsistencies-tech-debt.md` — NO corrijas el codigo tu mismo.\n",
                 "Si el usuario responde 'no se' o 'saltar', marca como `<!-- TODO: unknown -->` y continua.\n\n",
                 "## Fase 3 — Deuda tecnica (interactiva)\n",
                 "Para cada entrada en `ai/inconsistencies-tech-debt.md`:\n",
@@ -1416,11 +1505,11 @@ fn build_validation_prompt(language: &str, info: &AuditInfo, has_issue_tracker_m
                 s.push_str("Tambien: ¿crear ticket? (gestor de issues disponible via MCP)\n");
             }
             s.push_str(concat!(
-                "No confirmar en lote. Actualiza/elimina segun feedback.\n",
+                "No confirmar en lote. Actualiza/elimina entradas `ai/` segun feedback. NO corrijas codigo — solo documenta.\n",
                 "Tambien pregunta: ¿la auditoria omitio algo obvio? (seguridad, rendimiento, cumplimiento)\n\n",
                 "## Fase 4 — Challenge doc (interactiva)\n",
-                "Haz 2-3 preguntas practicas de onboarding que deben ser respondibles solo con los archivos ai/. ",
-                "Ejemplos: '¿Como agregar un endpoint?', '¿Que comando ejecuta los tests?'. Corrige gaps.\n\n",
+                "Haz 2-3 preguntas practicas de onboarding que deben ser respondibles solo con los archivos `ai/`. ",
+                "Ejemplos: '¿Como agregar un endpoint?', '¿Que comando ejecuta los tests?'. Corrige gaps en archivos `ai/`.\n\n",
                 "## Fin\n",
                 "Todas las fases completas → termina con: \"KRONN:VALIDATION_COMPLETE\". Nunca antes.",
             ));
@@ -1430,12 +1519,15 @@ fn build_validation_prompt(language: &str, info: &AuditInfo, has_issue_tracker_m
             let mut s = String::from(concat!(
                 "Valide le contexte AI (dossier ai/). Suis ce protocole en 4 phases. ",
                 "NE PAS emettre KRONN:VALIDATION_COMPLETE avant la fin des 4 phases.\n\n",
+                "**REGLE CRITIQUE : Tu es un auditeur de DOCUMENTATION, pas un correcteur de code. ",
+                "NE MODIFIE JAMAIS le code source, Makefile, configs, ou tout fichier hors de `ai/`. ",
+                "Ton SEUL travail : rendre les fichiers `ai/` precis et complets.**\n\n",
                 "## Phase 1 — Auto-correction (autonome)\n",
-                "Lis le code source. Corrige : TODOs orphelins, fichiers squelettes inferables du code, infos obsoletes. ",
-                "Mets a jour ai/ directement. Rapporte les corrections.\n\n",
+                "Lis le code source pour comprendre le projet. Corrige UNIQUEMENT les fichiers `ai/` : TODOs orphelins, fichiers squelettes inferables du code, infos obsoletes. ",
+                "Mets a jour `ai/` directement. Rapporte les corrections. NE touche PAS au code source.\n\n",
                 "## Phase 2 — Questions (interactif)\n",
-                "Pose les ambiguites **une par une**. Apres chaque reponse, mets a jour ai/ avant la question suivante. ",
-                "Ne passe pas a la Phase 3 sans tout resoudre.\n",
+                "Pose les ambiguites **une par une**. Apres chaque reponse, mets a jour le fichier `ai/` concerne (repo-map, coding-rules, architecture, etc.). ",
+                "Si l'utilisateur signale un probleme de code, documente-le dans `ai/inconsistencies-tech-debt.md` — NE corrige PAS le code toi-meme.\n",
                 "Si l'utilisateur repond 'je ne sais pas' ou 'passer', marque `<!-- TODO: unknown -->` et continue.\n\n",
                 "## Phase 3 — Dette technique (interactif)\n",
                 "Pour chaque entree dans `ai/inconsistencies-tech-debt.md` :\n",
@@ -1447,11 +1539,11 @@ fn build_validation_prompt(language: &str, info: &AuditInfo, has_issue_tracker_m
                 s.push_str("Aussi : creer un ticket ? (gestionnaire d'issues dispo via MCP)\n");
             }
             s.push_str(concat!(
-                "Pas de confirmation en lot. Mets a jour/supprime selon feedback.\n",
+                "Pas de confirmation en lot. Mets a jour/supprime les entrees `ai/` selon feedback. NE corrige PAS le code — documente seulement.\n",
                 "Demande aussi : l'audit a-t-il rate quelque chose d'evident ? (securite, performance, conformite)\n\n",
                 "## Phase 4 — Challenge doc (interactif)\n",
-                "Pose 2-3 questions pratiques d'onboarding qui doivent etre couvertes par les fichiers ai/ seuls. ",
-                "Exemples : 'Comment ajouter un endpoint ?', 'Quelle commande lance les tests ?'. Corrige les lacunes.\n\n",
+                "Pose 2-3 questions pratiques d'onboarding qui doivent etre couvertes par les fichiers `ai/` seuls. ",
+                "Exemples : 'Comment ajouter un endpoint ?', 'Quelle commande lance les tests ?'. Corrige les lacunes dans les fichiers `ai/`.\n\n",
                 "## Fin\n",
                 "Toutes les phases terminees → termine par : \"KRONN:VALIDATION_COMPLETE\". Jamais avant.",
             ));
@@ -2961,4 +3053,57 @@ pub async fn pr_template(
         "template": template,
         "source": source,
     })))
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+
+    #[test]
+    fn bootstrap_prompt_is_localized() {
+        let fr = build_bootstrap_prompt("fr", "TestProj", "A test project");
+        let en = build_bootstrap_prompt("en", "TestProj", "A test project");
+        let es = build_bootstrap_prompt("es", "TestProj", "A test project");
+        // All should contain the project name
+        assert!(fr.contains("TestProj"));
+        assert!(en.contains("TestProj"));
+        assert!(es.contains("TestProj"));
+        // They should be different from each other
+        assert_ne!(fr, en, "FR and EN bootstrap prompts must differ");
+        assert_ne!(en, es, "EN and ES bootstrap prompts must differ");
+    }
+
+    #[test]
+    fn bootstrap_prompt_contains_completion_signal() {
+        for lang in ["fr", "en", "es"] {
+            let prompt = build_bootstrap_prompt(lang, "P", "d");
+            assert!(prompt.contains("KRONN:BOOTSTRAP_COMPLETE"),
+                "Bootstrap prompt ({}) must contain completion signal", lang);
+        }
+    }
+
+    #[test]
+    fn preamble_says_autonomous() {
+        assert!(PROMPT_PREAMBLE.contains("autonomous") || PROMPT_PREAMBLE.contains("non-interactive"),
+            "PREAMBLE must instruct the agent not to ask questions");
+        assert!(PROMPT_PREAMBLE.contains("Do NOT ask questions") || PROMPT_PREAMBLE.contains("Do not ask"),
+            "PREAMBLE must explicitly forbid questions");
+    }
+
+    #[test]
+    fn analysis_steps_include_decisions_md() {
+        let has_decisions = ANALYSIS_STEPS.iter().any(|(_, prompt)| prompt.contains("decisions.md"));
+        assert!(has_decisions, "At least one audit step must fill decisions.md");
+    }
+
+    #[test]
+    fn validation_prompt_forbids_code_modification() {
+        for lang in ["fr", "en", "es"] {
+            let info = AuditInfo { files: vec![], todos: vec![], tech_debt_items: vec![] };
+            let prompt = build_validation_prompt(lang, &info, false);
+            let lower = prompt.to_lowercase();
+            assert!(lower.contains("never modify") || lower.contains("ne modifie jamais") || lower.contains("nunca modifiques"),
+                "Validation prompt ({}) must forbid code modification", lang);
+        }
+    }
 }
