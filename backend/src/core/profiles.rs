@@ -227,7 +227,7 @@ pub fn build_profiles_prompt(profile_ids: &[String]) -> String {
     prompt.push_str("   - Use a natural, conversational tone (not bullet points)\n");
     prompt.push_str("   - Be concise (3-6 sentences per profile)\n\n");
     prompt.push_str("2. After ALL profiles have spoken, add a synthesis:\n");
-    prompt.push_str("   **🔗 Synthèse** : [balanced summary of agreements, disagreements, and final recommendation]\n\n");
+    prompt.push_str("   **Synthesis** : [balanced summary of agreements, disagreements, and final recommendation]\n\n");
     prompt.push_str("IMPORTANT:\n");
     prompt.push_str("- Each profile is a DISTINCT voice. Do NOT merge perspectives.\n");
     prompt.push_str("- Use the blockquote format (>) for each profile response.\n");
@@ -427,6 +427,38 @@ mod tests {
         let profile = get_profile("entrepreneur");
         assert!(profile.is_some(), "entrepreneur profile must exist for bootstrap");
         assert_eq!(profile.unwrap().category, ProfileCategory::Business);
+    }
+
+    #[test]
+    fn entrepreneur_has_unique_persona_and_engine() {
+        let p = get_profile("entrepreneur").expect("entrepreneur must exist");
+        assert_eq!(p.persona_name, "Lea", "Entrepreneur persona should be Lea (not Max)");
+        assert!(p.default_engine.is_some(), "Entrepreneur must have default_engine");
+        // No other profile should share the name "Lea"
+        let all = list_all_profiles();
+        let lea_count = all.iter().filter(|p| p.persona_name == "Lea").count();
+        assert_eq!(lea_count, 1, "Only entrepreneur should be named Lea");
+    }
+
+    #[test]
+    fn game_developer_has_default_engine() {
+        let p = get_profile("game-developer").expect("game-developer must exist");
+        assert!(p.default_engine.is_some(), "Game Developer must have default_engine");
+    }
+
+    #[test]
+    fn qa_engineer_is_technical_category() {
+        let p = get_profile("qa-engineer").expect("qa-engineer must exist");
+        assert_eq!(p.category, ProfileCategory::Technical,
+            "QA Engineer should be Technical, not Business");
+    }
+
+    #[test]
+    fn multi_profile_synthesis_label_is_english() {
+        // The synthesis label should be language-neutral (English)
+        let prompt = build_profiles_prompt(&["architect".into(), "tech-lead".into()]);
+        assert!(prompt.contains("Synthesis"), "Multi-profile prompt should use 'Synthesis' (English)");
+        assert!(!prompt.contains("Synthese"), "Should NOT use French 'Synthese'");
     }
 
     #[test]

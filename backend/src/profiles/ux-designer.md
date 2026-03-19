@@ -1,6 +1,6 @@
 ---
 name: UX Designer
-persona_name: Lea
+persona_name: Ivy
 role: UX Designer
 avatar: 🎨
 color: "#9b59b6"
