@@ -180,6 +180,26 @@ export interface DiscoverReposResponse {
   available_sources: RepoSource[];
 }
 
+// ─── Drift Detection ─────────────────────────────────────────────────────────
+
+export interface DriftCheckResponse {
+  audit_date: string | null;
+  stale_sections: DriftSection[];
+  fresh_sections: string[];
+  total_sections: number;
+}
+
+export interface DriftSection {
+  ai_file: string;
+  audit_step: number;
+  changed_sources: string[];
+}
+
+export interface PartialAuditRequest {
+  agent: AgentType;
+  steps: number[];
+}
+
 // ─── Projects ───────────────────────────────────────────────────────────────
 
 export interface Project {
@@ -192,6 +212,7 @@ export interface Project {
   audit_status: AiAuditStatus;
   ai_todo_count: number;
   default_skill_ids?: string[];
+  briefing_notes?: string | null;
   created_at: string; // ISO 8601
   updated_at: string;
 }

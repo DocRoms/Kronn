@@ -185,13 +185,17 @@ Dashboard tabs (current / planned):
 | Discussions | Done | Single/multi-agent chat, @mentions, orchestration, global discussions, archive/unarchive (swipe gestures), inline title editing, disabled agent detection |
 | MCPs | Done | MCP registry and management |
 | Workflows | Done | Workflow list (grouped by project), creation wizard (5-step: infos → trigger → steps → config → resume), detail + runs with live SSE progress, manual trigger, run deletion (individual + bulk). MCP tools auto-injected into agent prompts. Symphony import planned. |
-| Config | Done | Multi-key API management, token usage tracking, language, agent detection + permissions, Skills/Profiles/Directives CRUD with live cards, DB management (export/import) |
+| Config | Done | Multi-key API management (incl. Mistral/Vibe API keys), token usage tracking, language, agent detection + permissions, agent usage dashboard links, Directives CRUD with live cards, DB management (export/import). Skills/Profiles are now managed per-project on the Project page. |
 
 Note: the old "Agents" tab has been merged into Config. Nav order: Projets → Discussions → MCPs → Workflows → Config.
 
 ### Project Bootstrap (create from scratch)
 
-`POST /api/projects/bootstrap` — creates a new project directory, initializes git, installs AI template, creates a bootstrap discussion with architect + product-owner + entrepreneur profiles. The discussion prompt guides the AI through: Vision → Architecture → Structure → MVP → Action Plan. Frontend modal accessible via "New project" button in nav bar. Parent directory determined from existing projects' common parent or `KRONN_REPOS_DIR` env var.
+`POST /api/projects/bootstrap` — creates a new project directory, initializes git, installs AI template, creates a bootstrap discussion with architect + product-owner + entrepreneur profiles (3 profiles). The discussion prompt guides the AI through: Vision → Architecture → Structure → MVP → Action Plan. Frontend modal accessible via "New project" button in nav bar. Parent directory determined from existing projects' common parent or `KRONN_REPOS_DIR` env var.
+
+### Pre-audit briefing (optional)
+
+`POST /api/projects/:id/start-briefing` — creates a briefing discussion where the AI asks 5 quick questions (project purpose, stack, team, conventions, watch points). The agent writes `ai/briefing.md` and emits `KRONN:BRIEFING_COMPLETE`. The briefing content is injected into each audit step via `PROMPT_PREAMBLE`. Agents without filesystem access (Vibe) are excluded from briefing/audit.
 
 ### CI pipeline
 
@@ -215,9 +219,13 @@ Projects display 3 badges next to the title: `[FileCode] AI context`, `[Cpu] AI 
 - **Template install**: copies `ai/` skeleton + redirector files (CLAUDE.md, .cursorrules, etc.) + injects bootstrap prompt
 - **AI audit**: 10-step SSE streaming, ~20 min. **Token cost: ~50K–150K tokens per audit** (depends on project size and agent model). With Claude Sonnet API pricing, expect ~$0.50–$2.00 per audit. Fills all `ai/` files.
 - **Validation**: opens a prefilled discussion (locked title/prompt) where the AI asks questions about ambiguities. AI updates `ai/` files after each answer. Project page shows "validation en cours" + link to discussion (no validate button on project page).
-- When the AI finishes all questions, it includes `KRONN:VALIDATION_COMPLETE` in its last message. This triggers a green banner in the discussion with a "Marquer l'audit comme valide" button.
+- When the AI finishes all questions, it includes `KRONN:VALIDATION_COMPLETE` in its last message. This triggers a green banner in the discussion with a "Marquer l'audit comme valide" button. Similarly, `KRONN:BRIEFING_COMPLETE` signals the end of a pre-audit briefing discussion.
 - **Mark as validated**: injects `<!-- KRONN:VALIDATED:date -->` marker into `ai/index.md`.
 - AI config file badges (CLAUDE.md, .cursorrules, etc.) shown on a second line below the status badges.
+
+### Audit drift detection
+
+`GET /api/projects/:id/drift` — compares source file checksums against `ai/checksums.json` (generated during audit). Returns stale sections without consuming tokens. `POST /api/projects/:id/partial-audit` re-runs only stale steps (~3-5K tokens vs ~20K for full audit). UI shows an amber badge on stale projects with a "Mettre à jour" button.
 
 ---
 
@@ -231,4 +239,4 @@ Redirectors to this file: `CLAUDE.md`, `GEMINI.md`, `AGENTS.md`, `.kiro/steering
 
 ## 11. Last updated
 
-AI context last reviewed: **2026-03-14**.
+AI context last reviewed: **2026-03-20**.

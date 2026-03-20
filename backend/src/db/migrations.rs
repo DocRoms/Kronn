@@ -29,6 +29,8 @@ pub fn run(conn: &Connection) -> Result<()> {
         ("015_model_tier", include_str!("sql/015_model_tier.sql")),
         ("016_message_model_tier", include_str!("sql/016_message_model_tier.sql")),
         ("017_message_count", include_str!("sql/017_message_count.sql")),
+        ("018_briefing_notes", include_str!("sql/018_briefing_notes.sql")),
+        ("019_pin_first_message", include_str!("sql/019_pin_first_message.sql")),
     ];
 
     for (name, sql) in migrations {

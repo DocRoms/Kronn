@@ -260,7 +260,13 @@ pub fn detect_audit_status(project_path: &str) -> crate::models::AiAuditStatus {
         }
     };
 
-    if content.contains("KRONN:BOOTSTRAP:START") || content.contains("KRONN:BOOTSTRAP:END") || content.contains("{{") {
+    if content.contains("KRONN:BOOTSTRAP:START") || content.contains("KRONN:BOOTSTRAP:END") {
+        return AiAuditStatus::TemplateInstalled;
+    }
+    // Check for unfilled placeholders like {{PROJECT_NAME}}, but ignore instructional
+    // text that mentions {{...}} as an example (e.g., "If you see an unfilled {{...}}")
+    if regex_lite::Regex::new(r"\{\{[A-Z_]+\}\}").ok()
+        .map(|re| re.is_match(&content)).unwrap_or(false) {
         return AiAuditStatus::TemplateInstalled;
     }
 

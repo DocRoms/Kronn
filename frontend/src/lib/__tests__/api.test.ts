@@ -63,6 +63,18 @@ describe('api module', () => {
       expect(api.directives).toBeDefined();
     });
 
+    it('projects has briefing methods', async () => {
+      const { projects } = await getApi();
+      expect(typeof (projects as Record<string, unknown>)['startBriefing']).toBe('function');
+      expect(typeof (projects as Record<string, unknown>)['getBriefing']).toBe('function');
+      expect(typeof (projects as Record<string, unknown>)['setBriefing']).toBe('function');
+    });
+
+    it('projects has checkDrift method', async () => {
+      const { projects } = await getApi();
+      expect(typeof (projects as Record<string, unknown>)['checkDrift']).toBe('function');
+    });
+
     it('projects has expected methods', async () => {
       const { projects } = await getApi();
       const expected = [

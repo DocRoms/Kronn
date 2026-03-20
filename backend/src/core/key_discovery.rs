@@ -192,6 +192,7 @@ mod tests {
 
     #[test]
     fn read_codex_key_returns_none_when_missing() {
+        // Smoke test: verify no panic when file doesn't exist
         let _ = read_codex_key();
     }
 
@@ -233,6 +234,7 @@ mod tests {
 
     #[test]
     fn read_gemini_key_returns_none_when_missing() {
+        // Smoke test: verify no panic when file doesn't exist
         let _ = read_gemini_key();
     }
 

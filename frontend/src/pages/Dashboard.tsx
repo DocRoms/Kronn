@@ -2,7 +2,7 @@ import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { projects as projectsApi, mcps as mcpsApi, agents as agentsApi, discussions as discussionsApi, workflows as workflowsApi, config as configApi, skills as skillsApi } from '../lib/api';
 import { useApi } from '../hooks/useApi';
 import { useToast } from '../hooks/useToast';
-import type { Project, AgentDetection, AgentType, RemoteRepo, RepoSource } from '../types/generated';
+import type { Project, AgentDetection, AgentType, RemoteRepo, RepoSource, DriftCheckResponse } from '../types/generated';
 import { useT } from '../lib/I18nContext';
 import { getProjectGroup } from '../lib/constants';
 import { McpPage } from './McpPage';
@@ -16,7 +16,7 @@ import {
   Plus, Trash2, Search, Zap, Settings, Eye,
   Loader2,
   MessageSquare, X, AlertTriangle,
-  Play, FileCode, ShieldCheck, StopCircle, BookOpen, Rocket, Check,
+  Play, FileCode, ShieldCheck, StopCircle, BookOpen, Rocket, Check, RefreshCw,
 } from 'lucide-react';
 
 type Page = 'projects' | 'mcps' | 'workflows' | 'discussions' | 'settings';
@@ -36,18 +36,11 @@ const STATUS_COLORS: Record<string, string> = {
 
 /** Agent is usable: locally installed OR available via npx/uvx runtime fallback */
 const isUsable = (a: AgentDetection) => (a.installed || a.runtime_available) && a.enabled;
+/** Agents that can run audits/briefings (need filesystem access + CLI mode). Excludes Vibe (API-only). */
+const canAudit = (a: AgentDetection) => isUsable(a) && a.agent_type !== 'Vibe';
 
 const isValidationDisc = (title: string) => title === 'Validation audit AI';
 
-const AI_CONFIG_LABELS: Record<string, string> = {
-  ClaudeMd: 'CLAUDE.md',
-  ClauseDir: '.claude/',
-  AiDir: '.ai/',
-  CursorRules: '.cursorrules',
-  ContinueDev: '.continue/',
-  McpJson: '.mcp.json',
-  Custom: 'custom',
-};
 
 // Sort score for project readiness
 export function Dashboard({ onReset }: DashboardProps) {
@@ -96,6 +89,9 @@ export function Dashboard({ onReset }: DashboardProps) {
     currentFile: string;
   }>>({});
   const auditAbortControllers = useRef<Record<string, AbortController>>({});
+
+  // ─── Drift detection state ──────────
+  const [driftByProject, setDriftByProject] = useState<Record<string, DriftCheckResponse>>({});
 
   // ─── Lifted discussion streaming state (survives page changes) ──────────
   const [sendingMap, setSendingMap] = useState<Record<string, boolean>>({});
@@ -146,6 +142,18 @@ export function Dashboard({ onReset }: DashboardProps) {
   }, [refetchWorkflows, page, runningWorkflows]);
 
   const projects = projectList ?? [];
+
+  // ─── Drift detection fetch ──────────
+  useEffect(() => {
+    for (const proj of projects) {
+      if (proj.audit_status === 'Audited' || proj.audit_status === 'Validated') {
+        projectsApi.checkDrift(proj.id).then(drift => {
+          if (drift) setDriftByProject(prev => ({ ...prev, [proj.id]: drift }));
+        }).catch(() => {});
+      }
+    }
+  }, [projects]);
+
   const mcpRegistry = registry ?? [];
   const mcpOverview = mcpOverviewData ?? { servers: [], configs: [], customized_contexts: [], incompatibilities: [] };
   const agents = agentList ?? [];
@@ -223,7 +231,7 @@ export function Dashboard({ onReset }: DashboardProps) {
       [projectId]: { active: true, step: 0, totalSteps: 10, currentFile: t('audit.templateStep') }
     }));
     try {
-      const auditAgent = auditAgentChoice[projectId] ?? agents.filter(isUsable)[0]?.agent_type ?? 'ClaudeCode';
+      const auditAgent = auditAgentChoice[projectId] ?? agents.filter(canAudit)[0]?.agent_type ?? 'ClaudeCode';
       await projectsApi.fullAuditStream(projectId, { agent: auditAgent }, {
         onTemplateInstalled: () => { /* template phase done */ },
         onStepStart: (step, total, file) => {
@@ -265,6 +273,56 @@ export function Dashboard({ onReset }: DashboardProps) {
     }
   };
 
+  const startPartialAudit = async (projectId: string, drift: DriftCheckResponse) => {
+    const steps = drift.stale_sections.map(s => s.audit_step);
+    const controller = new AbortController();
+    auditAbortControllers.current[projectId] = controller;
+
+    const auditAgent = auditAgentChoice[projectId] ?? agents.filter(canAudit)[0]?.agent_type ?? 'ClaudeCode';
+
+    setAuditState(prev => ({
+      ...prev,
+      [projectId]: { active: true, step: 0, totalSteps: steps.length, currentFile: '' }
+    }));
+
+    try {
+      await projectsApi.partialAuditStream(projectId, { agent: auditAgent, steps }, {
+        onStepStart: (step, total, file) => {
+          setAuditState(prev => ({
+            ...prev,
+            [projectId]: { active: true, step, totalSteps: total, currentFile: file }
+          }));
+        },
+        onChunk: () => {},
+        onStepDone: () => {},
+        onDone: () => {
+          setAuditState(prev => ({
+            ...prev,
+            [projectId]: { ...prev[projectId], active: false }
+          }));
+          refetch();
+          // Refetch drift to update the badge
+          projectsApi.checkDrift(projectId).then(d => {
+            if (d) setDriftByProject(prev => ({ ...prev, [projectId]: d }));
+          }).catch(() => {});
+          toast(t('audit.updateStale', String(steps.length)), 'success');
+        },
+        onError: (error) => {
+          console.error('Partial audit error:', error);
+        },
+      }, controller.signal);
+    } catch (e) {
+      if (e instanceof DOMException && e.name === 'AbortError') return;
+      console.error('Partial audit failed:', e);
+      setAuditState(prev => ({
+        ...prev,
+        [projectId]: { ...prev[projectId], active: false }
+      }));
+    } finally {
+      delete auditAbortControllers.current[projectId];
+    }
+  };
+
   // Bootstrap new project state
   const [showBootstrap, setShowBootstrap] = useState(false);
   const [bootstrapName, setBootstrapName] = useState('');
@@ -287,7 +345,7 @@ export function Dashboard({ onReset }: DashboardProps) {
 
   const handleBootstrap = async () => {
     if (!bootstrapName.trim() || !bootstrapDesc.trim()) return;
-    const agent = agents.find(a => isUsable(a))?.agent_type;
+    const agent = agents.find(a => canAudit(a))?.agent_type;
     if (!agent) { toast('No usable agent found', 'error'); return; }
     setBootstrapLoading(true);
     try {
@@ -310,7 +368,7 @@ export function Dashboard({ onReset }: DashboardProps) {
 
   const handleClone = async () => {
     if (!cloneUrl.trim()) return;
-    const agent = agents.find(a => isUsable(a))?.agent_type;
+    const agent = agents.find(a => canAudit(a))?.agent_type;
     if (!agent) { toast('No usable agent found', 'error'); return; }
     setCloneLoading(true);
     try {
@@ -836,6 +894,13 @@ export function Dashboard({ onReset }: DashboardProps) {
               const validationInProgress = !!validationDisc && proj.audit_status === 'Audited';
               const bootstrapDisc = projDiscussions.find(d => d.title.startsWith('Bootstrap: '));
               const bootstrapInProgress = !!bootstrapDisc && proj.audit_status === 'TemplateInstalled';
+              const briefingDisc = projDiscussions.find(d => d.title.startsWith('Briefing'));
+              // Briefing is "done" if: briefing_notes saved in DB AND template is installed (not reset),
+              // or audit already past template stage
+              const briefingDone = proj.audit_status !== 'NoTemplate' && (
+                !!proj.briefing_notes ||
+                proj.audit_status === 'Audited' || proj.audit_status === 'Validated'
+              );
               const groupProjectCount = groupedProjects.find(g => g.group === currentGroup)?.projects.length ?? 0;
               return (
                 <div key={proj.id}>
@@ -868,7 +933,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                   );
                 })()}
                 {collapsedGroups.has(currentGroup) ? null : (
-                <div style={{ ...s.card(isOpen), opacity: projHidden ? 0.5 : 1 }}>
+                <div id={`project-${proj.id}`} style={{ ...s.card(isOpen), opacity: projHidden ? 0.5 : 1 }}>
                   <button style={s.cardHeader} onClick={() => setExpandedId(isOpen ? null : proj.id)} aria-expanded={isOpen}>
                     <ChevronRight size={14} style={{ color: '#c8ff00', transform: isOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s' }} />
                     <div style={{ flex: 1 }}>
@@ -902,15 +967,47 @@ export function Dashboard({ onReset }: DashboardProps) {
                         ) : (proj.audit_status === 'Audited' || proj.audit_status === 'TemplateInstalled') ? (
                           <span style={s.badgeGray}><ShieldCheck size={9} /> Validated</span>
                         ) : null}
+                        {/* Drift badge */}
+                        {driftByProject[proj.id]?.stale_sections?.length > 0 && (
+                          <span style={{
+                            display: 'inline-flex', alignItems: 'center', gap: 3,
+                            padding: '2px 7px', borderRadius: 4, fontSize: 10, fontWeight: 600,
+                            background: 'rgba(255,180,0,0.1)', color: '#f0a020',
+                            border: '1px solid rgba(255,180,0,0.15)',
+                            cursor: 'pointer',
+                          }}
+                          title={driftByProject[proj.id].stale_sections.map(s => s.ai_file).join(', ')}
+                          >
+                            <AlertTriangle size={9} />
+                            {t('audit.staleSections', String(driftByProject[proj.id].stale_sections.length))}
+                          </span>
+                        )}
+                        {driftByProject[proj.id]?.stale_sections?.length > 0 && (
+                          <button
+                            style={{
+                              padding: '2px 8px', borderRadius: 4, fontSize: 10, fontWeight: 500,
+                              background: 'rgba(255,180,0,0.1)', color: '#f0a020',
+                              border: '1px solid rgba(255,180,0,0.2)', cursor: 'pointer',
+                              display: 'inline-flex', alignItems: 'center', gap: 3,
+                            }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              startPartialAudit(proj.id, driftByProject[proj.id]);
+                            }}
+                            disabled={!!auditState[proj.id]?.active}
+                            title={t('audit.updateStale', String(driftByProject[proj.id].stale_sections.length))}
+                          >
+                            <RefreshCw size={9} />
+                            {t('audit.updateStale', String(driftByProject[proj.id].stale_sections.length))}
+                          </button>
+                        )}
+                        {/* Audit date */}
+                        {driftByProject[proj.id]?.audit_date && (
+                          <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.25)' }}>
+                            {t('audit.auditDate', new Date(driftByProject[proj.id].audit_date!).toLocaleDateString())}
+                          </span>
+                        )}
                       </div>
-                      {/* AI config files on second line */}
-                      {proj.ai_config.configs.length > 0 && (
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 4, flexWrap: 'wrap' }}>
-                          {proj.ai_config.configs.map(c => (
-                            <span key={c} style={s.aiBadge}>{AI_CONFIG_LABELS[c] ?? c}</span>
-                          ))}
-                        </div>
-                      )}
                       <div style={s.projPath}>{proj.path}</div>
                     </div>
                     <div style={s.projMeta}>
@@ -1118,26 +1215,63 @@ export function Dashboard({ onReset }: DashboardProps) {
                                 <p style={{ fontSize: 11, color: 'rgba(255,200,0,0.7)', margin: '0 0 8px', display: 'flex', alignItems: 'center', gap: 4 }}>
                                   <AlertTriangle size={11} /> {proj.audit_status === 'NoTemplate' ? t('audit.noTemplate') : t('audit.description')}
                                 </p>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                                  {briefingDisc && !briefingDone ? (
+                                    <button
+                                      style={{ ...s.iconBtn, fontSize: 11, gap: 4, color: '#60a5fa', borderColor: 'rgba(96,165,250,0.2)' }}
+                                      onClick={() => { setOpenDiscussionId(briefingDisc.id); setPage('discussions'); }}
+                                    >
+                                      <MessageSquare size={12} /> {t('audit.resumeBriefing')}
+                                    </button>
+                                  ) : !briefingDone ? (
+                                    <button
+                                      style={{ ...s.iconBtn, fontSize: 11, gap: 4, color: '#60a5fa', borderColor: 'rgba(96,165,250,0.2)' }}
+                                      onClick={async () => {
+                                        const agent = auditAgentChoice[proj.id] ?? agents.filter(canAudit)[0]?.agent_type ?? 'ClaudeCode';
+                                        try {
+                                          const { discussion_id } = await projectsApi.startBriefing(proj.id, agent);
+                                          refetchDiscussions();
+                                          setAutoRunDiscussionId(discussion_id);
+                                          setPage('discussions');
+                                        } catch (err) {
+                                          toast(String(err), 'error');
+                                        }
+                                      }}
+                                      disabled={agents.filter(canAudit).length === 0}
+                                    >
+                                      <MessageSquare size={12} /> {t('audit.startBriefing')}
+                                    </button>
+                                  ) : (
+                                    <span style={{ fontSize: 10, color: 'rgba(96,165,250,0.6)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                                      <Check size={10} /> {t('audit.briefingDone')}
+                                    </span>
+                                  )}
+                                  {!briefingDone && (
+                                    <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)' }}>
+                                      {t('audit.briefingDesc')}
+                                    </span>
+                                  )}
+                                </div>
                                 <p style={{ fontSize: 10, color: 'rgba(255,255,255,0.55)', margin: '0 0 8px' }}>
                                   {t('audit.fullAuditDesc')}
                                 </p>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                                   <select
                                     style={{ ...auditSelectStyle, width: 'auto', minWidth: 140, fontSize: 12, padding: '6px 32px 6px 10px' }}
-                                    value={auditAgentChoice[proj.id] ?? agents.filter(isUsable)[0]?.agent_type ?? 'ClaudeCode'}
+                                    value={auditAgentChoice[proj.id] ?? agents.filter(canAudit)[0]?.agent_type ?? 'ClaudeCode'}
                                     onChange={e => setAuditAgentChoice(prev => ({ ...prev, [proj.id]: e.target.value as AgentType }))}
                                   >
-                                    {agents.filter(isUsable).map(a => (
+                                    {agents.filter(canAudit).map(a => (
                                       <option key={a.agent_type} value={a.agent_type}>{a.name}</option>
                                     ))}
-                                    {agents.filter(isUsable).length === 0 && (
+                                    {agents.filter(canAudit).length === 0 && (
                                       <option value="" disabled>{t('disc.noAgent')}</option>
                                     )}
                                   </select>
                                   <button
                                     style={{ ...s.iconBtn, fontSize: 11, gap: 4, color: '#c8ff00', borderColor: 'rgba(200,255,0,0.2)' }}
                                     onClick={() => handleFullAudit(proj.id)}
-                                    disabled={agents.filter(isUsable).length === 0}
+                                    disabled={agents.filter(canAudit).length === 0}
                                   >
                                     <Play size={12} /> {t('audit.startFullAudit')}
                                   </button>
@@ -1194,20 +1328,20 @@ export function Dashboard({ onReset }: DashboardProps) {
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                                   <select
                                     style={{ ...auditSelectStyle, width: 'auto', minWidth: 140, fontSize: 12, padding: '6px 32px 6px 10px' }}
-                                    value={auditAgentChoice[proj.id] ?? agents.filter(isUsable)[0]?.agent_type ?? 'ClaudeCode'}
+                                    value={auditAgentChoice[proj.id] ?? agents.filter(canAudit)[0]?.agent_type ?? 'ClaudeCode'}
                                     onChange={e => setAuditAgentChoice(prev => ({ ...prev, [proj.id]: e.target.value as AgentType }))}
                                   >
-                                    {agents.filter(isUsable).map(a => (
+                                    {agents.filter(canAudit).map(a => (
                                       <option key={a.agent_type} value={a.agent_type}>{a.name}</option>
                                     ))}
-                                    {agents.filter(isUsable).length === 0 && (
+                                    {agents.filter(canAudit).length === 0 && (
                                       <option value="" disabled>{t('disc.noAgent')}</option>
                                     )}
                                   </select>
                                   <button
                                     style={{ ...s.iconBtn, fontSize: 11, gap: 4, color: '#c8ff00', borderColor: 'rgba(200,255,0,0.2)' }}
                                     onClick={() => handleFullAudit(proj.id)}
-                                    disabled={agents.filter(isUsable).length === 0}
+                                    disabled={agents.filter(canAudit).length === 0}
                                   >
                                     <Play size={12} /> {t('audit.startFullAudit')}
                                   </button>
@@ -1374,7 +1508,16 @@ export function Dashboard({ onReset }: DashboardProps) {
             agentAccess={agentAccess ?? null}
             refetchDiscussions={refetchDiscussions}
             refetchProjects={refetch}
-            onNavigate={(p) => setPage(p as Page)}
+            onNavigate={(p, opts) => {
+              setPage(p as Page);
+              if (opts?.projectId) {
+                setExpandedId(opts.projectId);
+                setOpenSections(prev => ({ ...prev, [opts.projectId!]: 'aiContext' }));
+                setTimeout(() => {
+                  document.getElementById(`project-${opts.projectId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }, 100);
+              }
+            }}
             prefill={discPrefill}
             onPrefillConsumed={handlePrefillConsumed}
             autoRunDiscussionId={autoRunDiscussionId}
@@ -1458,7 +1601,6 @@ const s = {
   row: { display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', borderRadius: 6, background: 'rgba(255,255,255,0.02)', marginBottom: 4 } as const,
   dot: (on: boolean) => ({ width: 7, height: 7, borderRadius: '50%', background: on ? '#34d399' : 'rgba(255,255,255,0.15)', boxShadow: on ? '0 0 6px rgba(52,211,153,0.4)' : 'none', flexShrink: 0 } as const),
   badge: { display: 'inline-block', padding: '2px 8px', borderRadius: 4, fontSize: 10, background: 'rgba(255,255,255,0.06)', color: 'rgba(255,255,255,0.5)' } as const,
-  aiBadge: { display: 'inline-block', padding: '2px 7px', borderRadius: 4, fontSize: 10, fontWeight: 600, background: 'rgba(52,211,153,0.1)', color: 'rgba(52,211,153,0.7)', border: '1px solid rgba(52,211,153,0.15)' } as const,
   badgeGreen: { display: 'inline-flex', alignItems: 'center', gap: 3, padding: '2px 7px', borderRadius: 4, fontSize: 10, fontWeight: 600, background: 'rgba(200,255,0,0.1)', color: 'rgba(200,255,0,0.7)', border: '1px solid rgba(200,255,0,0.15)' } as const,
   badgeOrange: { display: 'inline-flex', alignItems: 'center', gap: 3, padding: '2px 7px', borderRadius: 4, fontSize: 10, fontWeight: 600, background: 'rgba(255,200,0,0.08)', color: 'rgba(255,200,0,0.6)', border: '1px solid rgba(255,200,0,0.12)' } as const,
   badgeGray: { display: 'inline-flex', alignItems: 'center', gap: 3, padding: '2px 7px', borderRadius: 4, fontSize: 10, fontWeight: 600, background: 'rgba(255,255,255,0.03)', color: 'rgba(255,255,255,0.55)', border: '1px solid rgba(255,255,255,0.05)' } as const,

@@ -24,6 +24,7 @@ fn sample_project(id: &str, name: &str) -> Project {
         ai_todo_count: 0,
         default_skill_ids: vec![],
         default_profile_id: None,
+        briefing_notes: None,
         created_at: now,
         updated_at: now,
     }
@@ -48,6 +49,7 @@ fn sample_discussion(id: &str, project_id: Option<&str>) -> Discussion {
         workspace_path: None,
         worktree_branch: None,
         tier: ModelTier::Default,
+        pin_first_message: false,
         summary_cache: None,
         summary_up_to_msg_idx: None,
         created_at: now,
@@ -246,6 +248,75 @@ fn projects_update_nonexistent_returns_false() {
     let conn = test_db();
     let updated = crate::db::projects::update_project_default_skills(&conn, "nonexistent", &["s1".into()]).unwrap();
     assert!(!updated, "Updating nonexistent project should return false");
+}
+
+#[test]
+fn projects_briefing_notes_set_and_get() {
+    let conn = test_db();
+    crate::db::projects::insert_project(&conn, &sample_project("p1", "A")).unwrap();
+
+    // Initially None
+    let notes = crate::db::projects::get_project_briefing_notes(&conn, "p1").unwrap();
+    assert!(notes.is_none(), "Briefing notes should be None initially");
+
+    // Set notes
+    let updated = crate::db::projects::update_project_briefing_notes(
+        &conn, "p1", Some("This is a React app with a REST API backend")
+    ).unwrap();
+    assert!(updated);
+
+    let notes = crate::db::projects::get_project_briefing_notes(&conn, "p1").unwrap();
+    assert_eq!(notes.as_deref(), Some("This is a React app with a REST API backend"));
+
+    // Verify it's also returned in get_project
+    let project = crate::db::projects::get_project(&conn, "p1").unwrap().unwrap();
+    assert_eq!(project.briefing_notes.as_deref(), Some("This is a React app with a REST API backend"));
+}
+
+#[test]
+fn projects_briefing_notes_clear() {
+    let conn = test_db();
+    crate::db::projects::insert_project(&conn, &sample_project("p1", "A")).unwrap();
+
+    // Set then clear
+    crate::db::projects::update_project_briefing_notes(&conn, "p1", Some("Some notes")).unwrap();
+    crate::db::projects::update_project_briefing_notes(&conn, "p1", None).unwrap();
+
+    let notes = crate::db::projects::get_project_briefing_notes(&conn, "p1").unwrap();
+    assert!(notes.is_none(), "Briefing notes should be clearable to None");
+}
+
+#[test]
+fn projects_briefing_notes_nonexistent_project() {
+    let conn = test_db();
+    let updated = crate::db::projects::update_project_briefing_notes(&conn, "nonexistent", Some("notes")).unwrap();
+    assert!(!updated, "Updating briefing notes for nonexistent project should return false");
+}
+
+#[test]
+fn projects_briefing_notes_persisted_in_insert() {
+    let conn = test_db();
+    let mut p = sample_project("p1", "WithNotes");
+    p.briefing_notes = Some("Pre-filled briefing".into());
+    crate::db::projects::insert_project(&conn, &p).unwrap();
+
+    let loaded = crate::db::projects::get_project(&conn, "p1").unwrap().unwrap();
+    assert_eq!(loaded.briefing_notes.as_deref(), Some("Pre-filled briefing"));
+}
+
+#[test]
+fn projects_briefing_notes_in_list() {
+    let conn = test_db();
+    let mut p = sample_project("p1", "A");
+    p.briefing_notes = Some("Project A notes".into());
+    crate::db::projects::insert_project(&conn, &p).unwrap();
+    crate::db::projects::insert_project(&conn, &sample_project("p2", "B")).unwrap();
+
+    let projects = crate::db::projects::list_projects(&conn).unwrap();
+    let a = projects.iter().find(|p| p.id == "p1").unwrap();
+    let b = projects.iter().find(|p| p.id == "p2").unwrap();
+    assert_eq!(a.briefing_notes.as_deref(), Some("Project A notes"));
+    assert!(b.briefing_notes.is_none());
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

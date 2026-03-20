@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, screen, act, cleanup } from '@testing-library/react';
+import { render, screen, act, cleanup, fireEvent } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
 
 // Mock API
@@ -250,5 +250,24 @@ describe('SettingsPage', () => {
     await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
     const links = document.querySelectorAll('a[href="https://claude.ai/settings/usage"]');
     expect(links.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('shows add key form when clicking Ajouter une cle', async () => {
+    // ClaudeCode has a token field (anthropic), so the "Ajouter une cle" button should appear
+    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
+
+    // The "Ajouter une cle" button should be visible for ClaudeCode
+    const addKeyBtn = screen.getByText('Ajouter une cle');
+    expect(addKeyBtn).toBeTruthy();
+
+    // Click it to show the add key form
+    await act(async () => { fireEvent.click(addKeyBtn); });
+
+    // After clicking, the input fields for name and key should appear
+    const nameInput = document.querySelector('input[placeholder="Nom de la cle"]') as HTMLInputElement;
+    expect(nameInput).toBeTruthy();
+
+    const keyInput = document.querySelector('input[type="password"]') as HTMLInputElement;
+    expect(keyInput).toBeTruthy();
   });
 });

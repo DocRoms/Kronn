@@ -316,6 +316,8 @@ pub struct Project {
     pub default_skill_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_profile_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub briefing_notes: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -1031,6 +1033,10 @@ pub struct Discussion {
     /// Model capability tier for this discussion.
     #[serde(default)]
     pub tier: ModelTier,
+    /// Pin the first message (protocol prompt) — always include it in agent prompts, never summarize it.
+    /// Used for validation, bootstrap, and briefing discussions.
+    #[serde(default)]
+    pub pin_first_message: bool,
     /// Cached summary of older messages (eco-design: avoids re-sending full history).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary_cache: Option<String>,
@@ -1196,6 +1202,46 @@ pub struct McpIncompatibility {
     pub agent: AgentType,
     /// Human-readable explanation
     pub reason: String,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Audit Drift Detection
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DriftCheckResponse {
+    pub audit_date: Option<String>,
+    pub stale_sections: Vec<DriftSection>,
+    pub fresh_sections: Vec<String>,
+    pub total_sections: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DriftSection {
+    pub ai_file: String,
+    pub audit_step: usize,
+    pub changed_sources: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct PartialAuditRequest {
+    pub agent: AgentType,
+    pub steps: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct StartBriefingResponse {
+    pub discussion_id: String,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct SetBriefingRequest {
+    pub notes: Option<String>,
 }
 
 #[derive(Debug, Deserialize, TS)]
