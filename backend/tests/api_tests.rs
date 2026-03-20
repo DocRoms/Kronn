@@ -1021,6 +1021,7 @@ async fn bootstrap_find_common_parent_logic() {
             ai_todo_count: 0,
             default_skill_ids: vec![],
             default_profile_id: None,
+            briefing_notes: None,
             created_at: now,
             updated_at: now,
         };
@@ -1481,6 +1482,7 @@ async fn exec_returns_expected_fields() {
         ai_todo_count: 0,
         default_skill_ids: vec![],
         default_profile_id: None,
+        briefing_notes: None,
         created_at: now,
         updated_at: now,
     };

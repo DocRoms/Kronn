@@ -10,6 +10,8 @@ import type {
   ProfileCategory,
   DirectiveCategory,
   MessageRole,
+  DriftCheckResponse,
+  DriftSection,
 } from '../../types/generated';
 
 /**
@@ -78,5 +80,28 @@ describe('generated types — discriminated unions', () => {
     expect(skip.type).toBe('Skip');
     expect(goto.type).toBe('Goto');
     expect(goto.step_name).toBe('cleanup');
+  });
+});
+
+describe('generated types — drift detection', () => {
+  it('DriftCheckResponse has required fields', () => {
+    const staleSection: DriftSection = {
+      ai_file: 'ai/index.md',
+      audit_step: 1,
+      changed_sources: ['src/main.rs'],
+    };
+    const response: DriftCheckResponse = {
+      audit_date: '2026-03-20T10:00:00Z',
+      stale_sections: [staleSection],
+      fresh_sections: ['ai/glossary.md'],
+      total_sections: 2,
+    };
+    expect(response.audit_date).toBe('2026-03-20T10:00:00Z');
+    expect(response.stale_sections).toHaveLength(1);
+    expect(response.stale_sections[0].ai_file).toBe('ai/index.md');
+    expect(response.stale_sections[0].audit_step).toBe(1);
+    expect(response.stale_sections[0].changed_sources).toContain('src/main.rs');
+    expect(response.fresh_sections).toContain('ai/glossary.md');
+    expect(response.total_sections).toBe(2);
   });
 });

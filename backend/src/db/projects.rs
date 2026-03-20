@@ -9,7 +9,8 @@ use crate::models::*;
 pub fn list_projects(conn: &Connection) -> Result<Vec<Project>> {
     let mut stmt = conn.prepare(
         "SELECT id, name, path, repo_url, token_override_json, ai_config_json,
-                created_at, updated_at, default_skill_ids_json, default_profile_id
+                created_at, updated_at, default_skill_ids_json, default_profile_id,
+                briefing_notes
          FROM projects ORDER BY name"
     )?;
 
@@ -32,6 +33,7 @@ pub fn list_projects(conn: &Connection) -> Result<Vec<Project>> {
             ai_todo_count: 0,  // enriched by API layer
             default_skill_ids: serde_json::from_str(&skill_ids_str).unwrap_or_default(),
             default_profile_id: row.get(9)?,
+            briefing_notes: row.get(10)?,
             created_at: parse_dt(row.get::<_, String>(6)?),
             updated_at: parse_dt(row.get::<_, String>(7)?),
         }))
@@ -45,7 +47,8 @@ pub fn list_projects(conn: &Connection) -> Result<Vec<Project>> {
 pub fn get_project(conn: &Connection, id: &str) -> Result<Option<Project>> {
     let mut stmt = conn.prepare(
         "SELECT id, name, path, repo_url, token_override_json, ai_config_json,
-                created_at, updated_at, default_skill_ids_json, default_profile_id
+                created_at, updated_at, default_skill_ids_json, default_profile_id,
+                briefing_notes
          FROM projects WHERE id = ?1"
     )?;
 
@@ -67,6 +70,7 @@ pub fn get_project(conn: &Connection, id: &str) -> Result<Option<Project>> {
             ai_todo_count: 0,
             default_skill_ids: serde_json::from_str(&skill_ids_str).unwrap_or_default(),
             default_profile_id: row.get(9)?,
+            briefing_notes: row.get(10)?,
             created_at: parse_dt(row.get::<_, String>(6)?),
             updated_at: parse_dt(row.get::<_, String>(7)?),
         })
@@ -90,8 +94,8 @@ pub fn get_project_names(conn: &Connection) -> Result<std::collections::HashMap<
 
 pub fn insert_project(conn: &Connection, project: &Project) -> Result<()> {
     conn.execute(
-        "INSERT INTO projects (id, name, path, repo_url, token_override_json, ai_config_json, created_at, updated_at, default_skill_ids_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT INTO projects (id, name, path, repo_url, token_override_json, ai_config_json, created_at, updated_at, default_skill_ids_json, briefing_notes)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             project.id,
             project.name,
@@ -102,9 +106,27 @@ pub fn insert_project(conn: &Connection, project: &Project) -> Result<()> {
             project.created_at.to_rfc3339(),
             project.updated_at.to_rfc3339(),
             serde_json::to_string(&project.default_skill_ids)?,
+            project.briefing_notes,
         ],
     )?;
     Ok(())
+}
+
+pub fn update_project_briefing_notes(conn: &Connection, id: &str, notes: Option<&str>) -> Result<bool> {
+    let affected = conn.execute(
+        "UPDATE projects SET briefing_notes = ?1, updated_at = ?2 WHERE id = ?3",
+        params![notes, Utc::now().to_rfc3339(), id],
+    )?;
+    Ok(affected > 0)
+}
+
+pub fn get_project_briefing_notes(conn: &Connection, id: &str) -> Result<Option<String>> {
+    let notes = conn.query_row(
+        "SELECT briefing_notes FROM projects WHERE id = ?1",
+        params![id],
+        |row| row.get(0),
+    ).ok().flatten();
+    Ok(notes)
 }
 
 pub fn delete_project(conn: &Connection, id: &str) -> Result<bool> {

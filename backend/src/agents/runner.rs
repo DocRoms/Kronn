@@ -533,7 +533,10 @@ fn agent_command(agent_type: &AgentType, prompt: &str, full_access: bool, mcp_co
             )
         },
         AgentType::GeminiCli => {
-            let mut args: Vec<String> = vec!["-p".into()];
+            // Gemini CLI requires -p <prompt> as the LAST args.
+            // Options (--model, --yolo) must come BEFORE -p, otherwise
+            // Gemini interprets them as the prompt value and fails.
+            let mut args: Vec<String> = Vec::new();
             if let Some(model) = model_flag {
                 args.push("--model".into());
                 args.push(model.into());
@@ -547,6 +550,7 @@ fn agent_command(agent_type: &AgentType, prompt: &str, full_access: bool, mcp_co
             } else {
                 format!("{}\n\n{}", mcp_context, prompt)
             };
+            args.push("-p".into());
             args.push(full_prompt);
             (
                 "gemini",

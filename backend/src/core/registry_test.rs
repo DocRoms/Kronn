@@ -106,6 +106,17 @@ mod tests {
         }
     }
 
+    #[test]
+    fn all_registry_mcps_have_complete_data() {
+        let reg = builtin_registry();
+        for m in &reg {
+            assert!(!m.id.is_empty(), "MCP has empty id");
+            assert!(!m.name.is_empty(), "MCP {} has empty name", m.id);
+            assert!(!m.description.is_empty(), "MCP {} has empty description", m.id);
+            assert!(!m.tags.is_empty(), "MCP {} has no tags", m.id);
+        }
+    }
+
     // ─── Key MCPs presence ──────────────────────────────────────────────────────
 
     #[test]

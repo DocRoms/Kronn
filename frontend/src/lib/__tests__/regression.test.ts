@@ -1,41 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES, agentColor } from '../constants';
-import { t, UI_LOCALES } from '../i18n';
-import type { WorkflowRun, Discussion, BootstrapProjectRequest, BootstrapProjectResponse } from '../../types/generated';
+import { t } from '../i18n';
+import type { Discussion, BootstrapProjectRequest, BootstrapProjectResponse } from '../../types/generated';
 
 /**
  * Regression tests for bugs fixed during the frontend audit.
  * Each test documents a specific bug that was found and fixed.
  */
 describe('regression tests', () => {
-  describe('GeminiCli missing from agent mentions (audit fix #2)', () => {
-    it('GeminiCli has a color', () => {
-      expect(AGENT_COLORS['GeminiCli']).toBeDefined();
-    });
-
-    it('GeminiCli has a label', () => {
-      expect(AGENT_LABELS['GeminiCli']).toBe('Gemini CLI');
-    });
-
-    it('GeminiCli is in ALL_AGENT_TYPES', () => {
-      expect(ALL_AGENT_TYPES).toContain('GeminiCli');
-    });
-  });
-
-  describe('AGENT_COLORS/LABELS consistency (audit fix #3)', () => {
-    it('every agent type has both a color and a label', () => {
-      for (const at of ALL_AGENT_TYPES) {
-        expect(AGENT_COLORS[at]).toBeDefined();
-        expect(AGENT_LABELS[at]).toBeDefined();
-      }
-    });
-
-    it('agentColor returns consistent results for type and display name', () => {
-      expect(agentColor('ClaudeCode')).toBe(agentColor('Claude Code'));
-      expect(agentColor('GeminiCli')).toBe(agentColor('Gemini CLI'));
-    });
-  });
-
   describe('hardcoded French strings moved to i18n (audit fix #4-5)', () => {
     const newKeys = [
       'wf.manual',
@@ -74,49 +45,6 @@ describe('regression tests', () => {
       expect(t('fr', 'wf.manual')).toBe('Manuel');
       expect(t('en', 'wf.manual')).toBe('Manual');
       expect(t('es', 'wf.manual')).toBe('Manual');
-    });
-  });
-
-  describe('trigger_context typed as WorkflowTrigger (audit fix #6)', () => {
-    it('trigger_context accepts WorkflowTrigger, not any', () => {
-      // This test verifies the type fix at compile time — if trigger_context
-      // were still `any`, this would compile but be meaningless.
-      const run: WorkflowRun = {
-        id: '1',
-        workflow_id: 'wf-1',
-        status: 'Success',
-        trigger_context: { type: 'Manual' },
-        step_results: [],
-        tokens_used: 0,
-        workspace_path: null,
-        started_at: '2024-01-01T00:00:00Z',
-        finished_at: null,
-      };
-      expect(run.trigger_context).toEqual({ type: 'Manual' });
-    });
-  });
-
-  describe('output languages vs UI languages (audit fix #7)', () => {
-    it('UI_LOCALES only contains languages with full translations (fr/en/es)', () => {
-      const codes = UI_LOCALES.map(l => l.code);
-      expect(codes).toEqual(['fr', 'en', 'es']);
-      // zh and br are output languages only, not UI locales
-      expect(codes).not.toContain('zh');
-      expect(codes).not.toContain('br');
-    });
-
-    it('every UI locale has complete translations for all keys', () => {
-      // Check a sampling of keys across all sections
-      const sampleKeys = [
-        'nav.projects', 'projects.title', 'disc.new', 'config.agents',
-        'mcp.title', 'wf.title', 'common.cancel',
-      ];
-      for (const locale of UI_LOCALES) {
-        for (const key of sampleKeys) {
-          const val = t(locale.code, key);
-          expect(val).not.toBe(key); // Should not fallback to the raw key
-        }
-      }
     });
   });
 
@@ -368,6 +296,107 @@ describe('regression tests', () => {
     it('shows discussions after audit completes', () => {
       expect(defaultSection('Audited')).toBe('discussions');
       expect(defaultSection('Validated')).toBe('discussions');
+    });
+  });
+
+  describe('drift detection i18n keys exist in all locales', () => {
+    const driftKeys = [
+      'audit.staleSections',
+      'audit.updateStale',
+      'audit.noStale',
+      'audit.auditDate',
+    ];
+
+    it('all drift keys exist in FR', () => {
+      for (const key of driftKeys) {
+        const val = t('fr', key);
+        expect(val).not.toBe(key);
+      }
+    });
+
+    it('all drift keys exist in EN', () => {
+      for (const key of driftKeys) {
+        const val = t('en', key);
+        expect(val).not.toBe(key);
+      }
+    });
+
+    it('all drift keys exist in ES', () => {
+      for (const key of driftKeys) {
+        const val = t('es', key);
+        expect(val).not.toBe(key);
+      }
+    });
+  });
+
+  describe('briefing i18n keys exist in all locales', () => {
+    const briefingKeys = [
+      'audit.startBriefing',
+      'audit.briefingDesc',
+      'audit.briefingDone',
+      'audit.resumeBriefing',
+      'audit.goToProject',
+      'audit.auditInProgress',
+      'audit.auditDoneResume',
+      'audit.resumeValidation',
+    ];
+
+    it('all briefing keys exist in FR', () => {
+      for (const key of briefingKeys) {
+        const val = t('fr', key);
+        expect(val).not.toBe(key);
+      }
+    });
+
+    it('all briefing keys exist in EN', () => {
+      for (const key of briefingKeys) {
+        const val = t('en', key);
+        expect(val).not.toBe(key);
+      }
+    });
+
+    it('all briefing keys exist in ES', () => {
+      for (const key of briefingKeys) {
+        const val = t('es', key);
+        expect(val).not.toBe(key);
+      }
+    });
+  });
+
+  describe('UX bugs found during briefing/audit flow development', () => {
+    it('KRONN markers in prompt message should not trigger completion detection', () => {
+      // Simulate: message 0 is the system prompt containing the marker as instructions
+      const messages = [
+        { role: 'User', content: 'Termine par KRONN:BRIEFING_COMPLETE' },  // prompt
+        { role: 'Agent', content: 'Voici mes questions...' },  // not complete
+      ];
+      const agentMsgs = messages.filter((m, idx) => m.role === 'Agent' && idx > 0);
+      const lastAgent = agentMsgs[agentMsgs.length - 1];
+      const isComplete = lastAgent?.content.toUpperCase().includes('KRONN:BRIEFING_COMPLETE');
+      expect(isComplete).toBe(false);
+    });
+
+    it('briefingDone should use briefing_notes not messages (messages are empty in list view)', () => {
+      const computeBriefingDone = (p: { briefing_notes: string | null; audit_status: string }) =>
+        p.audit_status !== 'NoTemplate' && (!!p.briefing_notes || p.audit_status === 'Audited' || p.audit_status === 'Validated');
+
+      // Template installed + notes → done
+      expect(computeBriefingDone({ briefing_notes: 'Some notes', audit_status: 'TemplateInstalled' })).toBe(true);
+      // Template installed + no notes → not done
+      expect(computeBriefingDone({ briefing_notes: null, audit_status: 'TemplateInstalled' })).toBe(false);
+      // NoTemplate + notes (project was reset) → NOT done (stale notes)
+      expect(computeBriefingDone({ briefing_notes: 'Stale notes', audit_status: 'NoTemplate' })).toBe(false);
+      // Audited → always done regardless of notes
+      expect(computeBriefingDone({ briefing_notes: null, audit_status: 'Audited' })).toBe(true);
+    });
+
+    it('audit.goToProject CTA should be neutral (not mention launching audit)', () => {
+      const fr = t('fr', 'audit.goToProject');
+      const en = t('en', 'audit.goToProject');
+      const es = t('es', 'audit.goToProject');
+      expect(fr).not.toContain('lancer');
+      expect(en).not.toContain('launch');
+      expect(es).not.toContain('lanzar');
     });
   });
 

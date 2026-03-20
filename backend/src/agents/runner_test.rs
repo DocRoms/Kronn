@@ -198,6 +198,11 @@ mod tests {
         );
         assert!(args.contains(&"--yolo".to_string()),
             "Gemini CLI with full_access should include --yolo");
+        // --yolo must come BEFORE -p (Gemini requires -p <prompt> as last args)
+        let yolo_idx = args.iter().position(|a| a == "--yolo").unwrap();
+        let p_idx = args.iter().position(|a| a == "-p").unwrap();
+        assert!(yolo_idx < p_idx,
+            "--yolo ({}) must come before -p ({}) to avoid arg parsing issues", yolo_idx, p_idx);
     }
 
     // ─── agent_command: MCP/skills context injection ───────────────────────────
@@ -375,7 +380,9 @@ mod tests {
         assert_eq!(npx, Some("@google/gemini-cli"));
         assert_eq!(env_key, "GEMINI_API_KEY");
         assert!(matches!(output_mode, OutputMode::Text));
-        assert_eq!(args[0], "-p", "First arg must be -p flag");
+        // -p must be just before the prompt (last two args), not first
+        let p_idx = args.iter().position(|a| a == "-p").expect("-p flag must exist");
+        assert_eq!(p_idx, args.len() - 2, "-p must be second-to-last arg (before prompt)");
         assert_eq!(args.last().unwrap(), "explain this");
     }
 

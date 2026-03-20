@@ -65,6 +65,23 @@ mod tests {
     }
 
     #[test]
+    fn detect_audit_status_instructional_braces_not_placeholder() {
+        // Text that mentions {{...}} as an instruction (not a real placeholder) should NOT
+        // cause the status to remain TemplateInstalled
+        let tmp = std::env::temp_dir().join("kronn-test-audit-instr-braces");
+        let ai_dir = tmp.join("ai");
+        let _ = std::fs::create_dir_all(&ai_dir);
+        std::fs::write(ai_dir.join("index.md"),
+            "# My Project\nIf you see an unfilled `{{...}}`, say NOT_FOUND.\n"
+        ).unwrap();
+        let status = detect_audit_status(&tmp.to_string_lossy());
+        // Should be Audited (not TemplateInstalled), because {{...}} is instructional text
+        assert!(matches!(status, crate::models::AiAuditStatus::Audited),
+            "Instructional {{...}} should not trigger TemplateInstalled, got {:?}", status);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn detect_audit_status_validated() {
         let tmp = std::env::temp_dir().join("kronn-test-audit-validated");
         let ai_dir = tmp.join("ai");

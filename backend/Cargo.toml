@@ -43,6 +43,7 @@ async-stream = "0.3"
 
 # Crypto
 aes-gcm = "0.10"
+sha2 = "0.10"
 base64 = "0.22"
 rand = "0.8"
 

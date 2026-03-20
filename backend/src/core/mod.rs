@@ -1,3 +1,4 @@
+pub mod checksums;
 pub mod config;
 pub mod crypto;
 pub mod directives;

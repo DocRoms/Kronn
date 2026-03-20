@@ -11,7 +11,7 @@ import {
   Folder, ChevronRight, Cpu, GitBranch, Server,
   Plus, Trash2, Loader2,
   MessageSquare, Send, X, Key, AlertTriangle, Users,
-  StopCircle, RotateCcw, Pencil, ShieldCheck, Check, Archive, Zap, UserCircle, FileText, Settings, Rocket,
+  StopCircle, RotateCcw, Pencil, ShieldCheck, Check, Archive, Zap, UserCircle, FileText, Settings, Rocket, Play,
 } from 'lucide-react';
 
 const isHiddenPath = (path: string) => path.split('/').some(s => s.startsWith('.'));
@@ -21,6 +21,7 @@ const isUsable = (a: AgentDetection) => (a.installed || a.runtime_available) && 
 
 const isValidationDisc = (title: string) => title === 'Validation audit AI';
 const isBootstrapDisc = (title: string) => title.startsWith('Bootstrap: ');
+const isBriefingDisc = (title: string) => title.startsWith('Briefing');
 
 const ALL_AGENT_MENTIONS: { trigger: string; type: AgentType; label: string }[] = [
   { trigger: '@claude', type: 'ClaudeCode', label: 'Claude Code' },
@@ -118,6 +119,7 @@ const SwipeableDiscItem = memo(function SwipeableDiscItem({ disc, isActive, last
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 12, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 4 }}>
             {isValidationDisc(disc.title) && <ShieldCheck size={10} style={{ color: '#c8ff00', flexShrink: 0 }} />}
+            {isBriefingDisc(disc.title) && <Zap size={10} style={{ color: '#60a5fa', flexShrink: 0 }} />}
             {isBootstrapDisc(disc.title) && <Rocket size={10} style={{ color: '#c8ff00', flexShrink: 0 }} />}
             {disc.workspace_mode === 'Isolated' && <GitBranch size={10} style={{ color: '#60a5fa', flexShrink: 0 }} />}
             {disc.title}
@@ -149,7 +151,7 @@ export interface DiscussionsPageProps {
   agentAccess: AgentsConfig | null;
   refetchDiscussions: () => void;
   refetchProjects: () => void;
-  onNavigate: (page: string) => void;
+  onNavigate: (page: string, opts?: { projectId?: string }) => void;
   prefill?: { projectId: string; title: string; prompt: string; locked?: boolean } | null;
   initialActiveDiscussionId?: string | null;
   onPrefillConsumed?: () => void;
@@ -419,12 +421,55 @@ export function DiscussionsPage({
   const cleanupStream = useCallback((discId: string) => {
     cleanupStreamBase(discId);
     refetchDiscussions();
+    refetchProjects(); // Refresh project audit_status for CTA updates
     reloadDiscussion(discId);
-  }, [cleanupStreamBase, refetchDiscussions, reloadDiscussion]);
+  }, [cleanupStreamBase, refetchDiscussions, refetchProjects, reloadDiscussion]);
+
+  // Refetch projects when viewing a briefing/validation discussion to get fresh audit_status
+  useEffect(() => {
+    if (!activeDiscussionId) return;
+    const disc = allDiscussions.find(d => d.id === activeDiscussionId);
+    if (disc && (isBriefingDisc(disc.title) || disc.title === 'Validation audit AI')) {
+      refetchProjects();
+    }
+  }, [activeDiscussionId, allDiscussions, refetchProjects]);
 
   // Handle auto-run: open existing discussion and trigger agent (e.g. after full audit)
   // Uses a ref to track the pending run so that re-renders (from onAutoRunConsumed/refetch)
   // don't cancel the timeout via effect cleanup.
+  // Ensure the sidebar groups containing a discussion are expanded when navigating to it
+  const ensureDiscussionVisible = useCallback((discId: string) => {
+    const disc = allDiscussions.find(d => d.id === discId);
+    if (!disc) return;
+    setCollapsedDiscGroups(prev => {
+      const next = new Set(prev);
+      let changed = false;
+      // Uncollapse the project group
+      if (disc.project_id) {
+        if (next.has(disc.project_id)) { next.delete(disc.project_id); changed = true; }
+        // Uncollapse the org group
+        const proj = projects.find(p => p.id === disc.project_id);
+        if (proj) {
+          const org = getProjectGroup(proj, t('disc.local'), t('disc.local'));
+          const orgKey = `org::${org}`;
+          if (next.has(orgKey)) { next.delete(orgKey); changed = true; }
+        }
+      } else {
+        // Global discussion
+        if (next.has('__global__')) { next.delete('__global__'); changed = true; }
+      }
+      return changed ? next : prev;
+    });
+  }, [allDiscussions, projects, t]);
+
+  // On mount, ensure the initially active discussion is visible in the sidebar
+  useEffect(() => {
+    if (initialActiveDiscussionId) {
+      ensureDiscussionVisible(initialActiveDiscussionId);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const pendingAutoRun = useRef<string | null>(null);
   useEffect(() => {
     if (!autoRunDiscussionId || pendingAutoRun.current === autoRunDiscussionId) return;
@@ -432,8 +477,9 @@ export function DiscussionsPage({
     pendingAutoRun.current = discId;
     onAutoRunConsumed?.();
 
-    // Select the discussion and show loader immediately
+    // Select the discussion, uncollapse its group, and show loader immediately
     setActiveDiscussionId(discId);
+    ensureDiscussionVisible(discId);
     setSendingMap(prev => ({ ...prev, [discId]: true }));
     setStreamingMap(prev => ({ ...prev, [discId]: '' }));
     refetchDiscussions();
@@ -459,6 +505,7 @@ export function DiscussionsPage({
   useEffect(() => {
     if (!openDiscussionId) return;
     setActiveDiscussionId(openDiscussionId);
+    ensureDiscussionVisible(openDiscussionId);
     onOpenDiscConsumed?.();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openDiscussionId]);
@@ -1249,8 +1296,9 @@ export function DiscussionsPage({
               <div style={{ flex: 1 }}>
                 <div style={{ fontWeight: 600, fontSize: 14, display: 'flex', alignItems: 'center', gap: 6 }}>
                   {isValidationDisc(activeDiscussion.title) && <ShieldCheck size={14} style={{ color: '#c8ff00', flexShrink: 0 }} />}
+                  {isBriefingDisc(activeDiscussion.title) && <Zap size={14} style={{ color: '#60a5fa', flexShrink: 0 }} />}
                   {isBootstrapDisc(activeDiscussion.title) && <Rocket size={14} style={{ color: '#c8ff00', flexShrink: 0 }} />}
-                  {editingTitleId === activeDiscussion.id && !isValidationDisc(activeDiscussion.title) && !isBootstrapDisc(activeDiscussion.title) ? (
+                  {editingTitleId === activeDiscussion.id && !isValidationDisc(activeDiscussion.title) && !isBootstrapDisc(activeDiscussion.title) && !isBriefingDisc(activeDiscussion.title) ? (
                     <input
                       autoFocus
                       style={{
@@ -1290,18 +1338,18 @@ export function DiscussionsPage({
                     />
                   ) : (
                     <span
-                      style={{ cursor: (isValidationDisc(activeDiscussion.title) || isBootstrapDisc(activeDiscussion.title)) ? 'default' : 'pointer' }}
+                      style={{ cursor: (isValidationDisc(activeDiscussion.title) || isBootstrapDisc(activeDiscussion.title) || isBriefingDisc(activeDiscussion.title)) ? 'default' : 'pointer' }}
                       onDoubleClick={() => {
-                        if (isValidationDisc(activeDiscussion.title) || isBootstrapDisc(activeDiscussion.title)) return;
+                        if (isValidationDisc(activeDiscussion.title) || isBootstrapDisc(activeDiscussion.title) || isBriefingDisc(activeDiscussion.title)) return;
                         setEditingTitleId(activeDiscussion.id);
                         setEditingTitleText(activeDiscussion.title);
                       }}
-                      title={(isValidationDisc(activeDiscussion.title) || isBootstrapDisc(activeDiscussion.title)) ? undefined : t('disc.editTitle')}
+                      title={(isValidationDisc(activeDiscussion.title) || isBootstrapDisc(activeDiscussion.title) || isBriefingDisc(activeDiscussion.title)) ? undefined : t('disc.editTitle')}
                     >
                       {activeDiscussion.title}
                     </span>
                   )}
-                  {!isValidationDisc(activeDiscussion.title) && !isBootstrapDisc(activeDiscussion.title) && (
+                  {!isValidationDisc(activeDiscussion.title) && !isBootstrapDisc(activeDiscussion.title) && !isBriefingDisc(activeDiscussion.title) && (
                   <button
                     style={{ ...ls.iconBtn, padding: '2px 4px', border: 'none', background: 'none', color: 'rgba(255,255,255,0.2)' }}
                     onClick={() => {
@@ -1679,7 +1727,14 @@ export function DiscussionsPage({
                 let lastUserIdx = -1;
                 for (let i = msgs.length - 1; i >= 0; i--) { if (msgs[i].role === 'User') { lastUserIdx = i; break; } }
                 const lastAgentIdx = msgs.length - 1;
+                // Hide the initial system prompt for automated discussions (briefing, validation, bootstrap)
+                const isAutoPrompt = (idx: number) => idx === 0 && msgs[0]?.role === 'User' && (
+                  activeDiscussion.title.startsWith('Briefing') ||
+                  activeDiscussion.title.startsWith('Validation audit') ||
+                  activeDiscussion.title.startsWith('Bootstrap:')
+                );
                 return msgs.map((msg, idx) => {
+                if (isAutoPrompt(idx)) return null;
                 const isLastUser = msg.role === 'User' && idx === lastUserIdx;
                 const isLastAgent = msg.role === 'Agent' && idx === lastAgentIdx;
                 const isEditing = editingMsgId === msg.id;
@@ -1759,7 +1814,7 @@ export function DiscussionsPage({
                         </div>
                       </div>
                     ) : (
-                      <MarkdownContent content={msg.content} />
+                      <MarkdownContent content={msg.content.replace(/KRONN:(BRIEFING_COMPLETE|VALIDATION_COMPLETE|BOOTSTRAP_COMPLETE)/gi, '').trim()} />
                     )}
                     {/api.?key|invalid.*key|key.*not.*config|authenticat|unauthori|login|sign.?in/i.test(msg.content) && (
                       <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
@@ -1897,12 +1952,77 @@ export function DiscussionsPage({
                 );
               })()}
 
+              {/* Briefing complete banner — CTA adapts to project audit state */}
+              {(() => {
+                if (!isBriefingDisc(activeDiscussion.title) || !activeDiscussion.project_id) return null;
+                // Check ONLY agent messages (not the prompt at index 0 which contains the marker text as instructions)
+                const agentMsgs = activeDiscussion.messages.filter((m, idx) => m.role === 'Agent' && idx > 0);
+                const lastAgentMsg = agentMsgs.length > 0 ? agentMsgs[agentMsgs.length - 1] : null;
+                const isComplete = lastAgentMsg && lastAgentMsg.content.toUpperCase().includes('KRONN:BRIEFING_COMPLETE');
+                if (!isComplete) return null;
+
+                const proj = projects.find(p => p.id === activeDiscussion.project_id);
+                const projDiscs = allDiscussions.filter(d => d.project_id === activeDiscussion.project_id && d.id !== activeDiscussion.id);
+                const validationDisc = projDiscs.find(d => d.title === 'Validation audit AI');
+                const auditDone = proj && (proj.audit_status === 'Audited' || proj.audit_status === 'Validated');
+
+                // State 3: Audit done + validation discussion exists → go to validation
+                if (auditDone && validationDisc) {
+                  return (
+                    <div style={{ margin: '12px 16px', padding: '12px 16px', borderRadius: 10, background: 'rgba(200,255,0,0.06)', border: '1px solid rgba(200,255,0,0.15)' }}>
+                      <p style={{ fontSize: 12, color: 'rgba(200,255,0,0.8)', margin: '0 0 8px', display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <ShieldCheck size={14} /> {t('audit.auditDoneResume')}
+                      </p>
+                      <button
+                        style={{ padding: '8px 16px', borderRadius: 8, border: 'none', background: '#c8ff00', color: '#0a0c10', fontWeight: 700, fontSize: 12, fontFamily: 'inherit', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}
+                        onClick={() => { setActiveDiscussionId(validationDisc.id); }}
+                      >
+                        <MessageSquare size={12} /> {t('audit.resumeValidation')}
+                      </button>
+                    </div>
+                  );
+                }
+
+                // State 2: Audit done but no validation yet (just finished, validation being created)
+                if (auditDone && !validationDisc) {
+                  return (
+                    <div style={{ margin: '12px 16px', padding: '12px 16px', borderRadius: 10, background: 'rgba(255,180,0,0.06)', border: '1px solid rgba(255,180,0,0.15)' }}>
+                      <p style={{ fontSize: 12, color: 'rgba(255,180,0,0.8)', margin: '0 0 8px', display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> {t('audit.auditInProgress')}
+                      </p>
+                      <button
+                        style={{ padding: '8px 16px', borderRadius: 8, border: 'none', background: 'rgba(255,180,0,0.2)', color: '#f0a020', fontWeight: 700, fontSize: 12, fontFamily: 'inherit', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}
+                        onClick={() => { onNavigate('projects', { projectId: activeDiscussion.project_id! }); }}
+                      >
+                        <Play size={12} /> {t('audit.goToProject')}
+                      </button>
+                    </div>
+                  );
+                }
+
+                // State 1: Briefing done, no audit yet → go launch audit
+                return (
+                  <div style={{ margin: '12px 16px', padding: '12px 16px', borderRadius: 10, background: 'rgba(96,165,250,0.06)', border: '1px solid rgba(96,165,250,0.15)' }}>
+                    <p style={{ fontSize: 12, color: 'rgba(96,165,250,0.8)', margin: '0 0 8px', display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <Check size={14} /> {t('audit.briefingDone')}
+                    </p>
+                    <button
+                      style={{ padding: '8px 16px', borderRadius: 8, border: 'none', background: '#60a5fa', color: '#0a0c10', fontWeight: 700, fontSize: 12, fontFamily: 'inherit', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}
+                      onClick={() => { onNavigate('projects', { projectId: activeDiscussion.project_id! }); }}
+                    >
+                      <Play size={12} /> {t('audit.goToProject')}
+                    </button>
+                  </div>
+                );
+              })()}
+
               {/* Validation complete banner */}
               {(() => {
                 if (activeDiscussion.title !== 'Validation audit AI' || !activeDiscussion.project_id) return null;
                 const proj = projects.find(p => p.id === activeDiscussion.project_id);
                 if (!proj || proj.audit_status !== 'Audited') return null;
-                const lastAgentMsg = [...activeDiscussion.messages].reverse().find(m => m.role === 'Agent');
+                const valAgentMsgs = activeDiscussion.messages.filter((m, idx) => m.role === 'Agent' && idx > 0);
+                const lastAgentMsg = valAgentMsgs.length > 0 ? valAgentMsgs[valAgentMsgs.length - 1] : null;
                 const isComplete = lastAgentMsg && lastAgentMsg.content.toUpperCase().includes('KRONN:VALIDATION_COMPLETE');
                 if (!isComplete) return null;
                 return (
@@ -1934,7 +2054,8 @@ export function DiscussionsPage({
                 if (!isBootstrapDisc(activeDiscussion.title) || !activeDiscussion.project_id) return null;
                 const proj = projects.find(p => p.id === activeDiscussion.project_id);
                 if (!proj || proj.audit_status !== 'TemplateInstalled') return null;
-                const lastAgentMsg = [...activeDiscussion.messages].reverse().find(m => m.role === 'Agent');
+                const bootAgentMsgs = activeDiscussion.messages.filter((m, idx) => m.role === 'Agent' && idx > 0);
+                const lastAgentMsg = bootAgentMsgs.length > 0 ? bootAgentMsgs[bootAgentMsgs.length - 1] : null;
                 const isComplete = lastAgentMsg && lastAgentMsg.content.toUpperCase().includes('KRONN:BOOTSTRAP_COMPLETE');
                 if (!isComplete) return null;
                 return (

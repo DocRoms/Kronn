@@ -52,6 +52,7 @@ import type {
   AiSearchResult,
   ModelTier,
   ModelTiersConfig,
+  DriftCheckResponse,
 } from '../types/generated';
 import type { DiscoverKeysResponse } from '../types/extensions';
 
@@ -171,6 +172,10 @@ export const projects = {
   validateAudit: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/validate-audit`),
   markBootstrapped: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/mark-bootstrapped`),
   cancelAudit: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/cancel-audit`),
+  checkDrift: (id: string) => api<DriftCheckResponse>('GET', `/projects/${id}/drift`),
+  getBriefing: (id: string) => api<string | null>('GET', `/projects/${id}/briefing`),
+  setBriefing: (id: string, notes: string | null) => api<void>('PUT', `/projects/${id}/briefing`, { notes }),
+  startBriefing: (id: string, agent: string) => api<{ discussion_id: string }>('POST', `/projects/${id}/start-briefing`, { agent }),
   setDefaultSkills: (id: string, skillIds: string[]) => api<boolean>('PUT', `/projects/${id}/default-skills`, skillIds),
   setDefaultProfile: (id: string, profileId: string | null) => api<boolean>('PUT', `/projects/${id}/default-profile`, { profile_id: profileId }),
   listAiFiles: (id: string) => api<AiFileNode[]>('GET', `/projects/${id}/ai-files`),
@@ -202,6 +207,78 @@ export const projects = {
     const done = () => { if (!finished) { finished = true; handlers.onDone(); } };
 
     const res = await fetch(`/api/projects/${id}/ai-audit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify(req),
+      signal,
+    }).catch(e => {
+      if (e.name === 'AbortError') { done(); return null; }
+      throw e;
+    });
+    if (!res) return;
+
+    if (!res.ok || !res.body) {
+      handlers.onError(`HTTP ${res.status}`);
+      return;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    try {
+      while (true) {
+        const { done: streamDone, value } = await reader.read();
+        if (streamDone) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+
+        let eventType = '';
+        for (const line of lines) {
+          if (line.startsWith('event:')) {
+            eventType = line.slice(6).trim();
+          } else if (line.startsWith('data:')) {
+            const data = line.slice(5).trim();
+            try {
+              const p = JSON.parse(data);
+              switch (eventType) {
+                case 'step_start': handlers.onStepStart(p.step, p.total, p.file); break;
+                case 'chunk': handlers.onChunk(p.text, p.step); break;
+                case 'step_done': handlers.onStepDone(p.step, p.success); break;
+                case 'step_error': handlers.onError(p.error ?? 'Step error'); break;
+                case 'done': done(); break;
+                case 'error': handlers.onError(p.error ?? 'Unknown error'); break;
+              }
+            } catch { /* ignore non-JSON */ }
+          }
+        }
+      }
+    } catch (e: unknown) {
+      if (e instanceof DOMException && e.name === 'AbortError') { done(); return; }
+      throw e;
+    }
+
+    done();
+  },
+  /** Stream a partial re-audit for stale sections via SSE */
+  partialAuditStream: async (
+    id: string,
+    req: { agent: AgentType; steps: number[] },
+    handlers: {
+      onStepStart: (step: number, total: number, file: string) => void;
+      onChunk: (text: string, step: number) => void;
+      onStepDone: (step: number, success: boolean) => void;
+      onDone: () => void;
+      onError: (error: string) => void;
+    },
+    signal?: AbortSignal,
+  ) => {
+    let finished = false;
+    const done = () => { if (!finished) { finished = true; handlers.onDone(); } };
+
+    const res = await fetch(`/api/projects/${id}/partial-audit`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify(req),

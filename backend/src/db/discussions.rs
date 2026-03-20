@@ -13,7 +13,8 @@ pub fn list_discussions(conn: &Connection) -> Result<Vec<Discussion>> {
                 d.message_count,
                 d.profile_ids_json, d.directive_ids_json,
                 d.workspace_mode, d.workspace_path, d.worktree_branch,
-                d.summary_cache, d.summary_up_to_msg_idx, d.model_tier
+                d.summary_cache, d.summary_up_to_msg_idx, d.model_tier,
+                d.pin_first_message
          FROM discussions d ORDER BY d.updated_at DESC"
     )?;
 
@@ -41,6 +42,7 @@ pub fn list_discussions(conn: &Connection) -> Result<Vec<Discussion>> {
             workspace_path: row.get::<_, Option<String>>(14).unwrap_or(None),
             worktree_branch: row.get::<_, Option<String>>(15).unwrap_or(None),
             tier: parse_model_tier(&row.get::<_, String>(18).unwrap_or_else(|_| "default".into())),
+            pin_first_message: row.get::<_, i32>(19).unwrap_or(0) != 0,
             summary_cache: row.get::<_, Option<String>>(16).unwrap_or(None),
             summary_up_to_msg_idx: row.get::<_, Option<u32>>(17).unwrap_or(None),
             created_at: parse_dt(row.get::<_, String>(6)?),
@@ -77,7 +79,7 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
         "SELECT id, project_id, title, agent, language, participants_json,
                 created_at, updated_at, archived, skill_ids_json, profile_ids_json, directive_ids_json,
                 workspace_mode, workspace_path, worktree_branch,
-                summary_cache, summary_up_to_msg_idx, model_tier
+                summary_cache, summary_up_to_msg_idx, model_tier, pin_first_message
          FROM discussions WHERE id = ?1"
     )?;
 
@@ -105,6 +107,7 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
             workspace_path: row.get::<_, Option<String>>(13).unwrap_or(None),
             worktree_branch: row.get::<_, Option<String>>(14).unwrap_or(None),
             tier: parse_model_tier(&row.get::<_, String>(17).unwrap_or_else(|_| "default".into())),
+            pin_first_message: row.get::<_, i32>(18).unwrap_or(0) != 0,
             summary_cache: row.get::<_, Option<String>>(15).unwrap_or(None),
             summary_up_to_msg_idx: row.get::<_, Option<u32>>(16).unwrap_or(None),
             created_at: parse_dt(row.get::<_, String>(6)?),
@@ -123,8 +126,8 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
 
 pub fn insert_discussion(conn: &Connection, disc: &Discussion) -> Result<()> {
     conn.execute(
-        "INSERT INTO discussions (id, project_id, title, agent, language, participants_json, created_at, updated_at, archived, skill_ids_json, profile_ids_json, directive_ids_json, workspace_mode, workspace_path, worktree_branch, model_tier)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+        "INSERT INTO discussions (id, project_id, title, agent, language, participants_json, created_at, updated_at, archived, skill_ids_json, profile_ids_json, directive_ids_json, workspace_mode, workspace_path, worktree_branch, model_tier, pin_first_message)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             disc.id,
             disc.project_id,
@@ -142,6 +145,7 @@ pub fn insert_discussion(conn: &Connection, disc: &Discussion) -> Result<()> {
             disc.workspace_path,
             disc.worktree_branch,
             format_model_tier(&disc.tier),
+            disc.pin_first_message as i32,
         ],
     )?;
     Ok(())

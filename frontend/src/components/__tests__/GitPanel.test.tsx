@@ -56,8 +56,8 @@ describe('GitPanel', () => {
 
   it('renders loading state initially', () => {
     render(<GitPanel projectId="p1" onClose={onClose} />);
-    // Should show some loading indicator while fetching
-    expect(document.querySelector('.git-panel, [class*="panel"]')).toBeDefined();
+    // The panel header with git.title should be rendered immediately
+    expect(screen.getByText('git.title')).toBeDefined();
   });
 
   it('renders branch name after loading', async () => {
@@ -116,14 +116,13 @@ describe('GitPanel', () => {
     const commitBtn = screen.getAllByRole('button').find(b =>
       b.textContent?.toLowerCase().includes('commit')
     );
-    if (commitBtn) {
-      fireEvent.click(commitBtn);
-      // Should show checkboxes for file selection
-      await waitFor(() => {
-        const checkboxes = screen.getAllByRole('checkbox');
-        expect(checkboxes.length).toBeGreaterThan(0);
-      });
-    }
+    expect(commitBtn).toBeTruthy();
+    fireEvent.click(commitBtn!);
+    // Should show checkboxes for file selection
+    await waitFor(() => {
+      const checkboxes = screen.getAllByRole('checkbox');
+      expect(checkboxes.length).toBeGreaterThan(0);
+    });
   });
 
   it('does not show terminal by default', async () => {

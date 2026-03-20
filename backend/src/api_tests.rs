@@ -258,6 +258,7 @@ mod tests {
                 ai_todo_count: 0,
                 default_skill_ids: vec![],
                 default_profile_id: None,
+                briefing_notes: None,
                 created_at: now,
                 updated_at: now,
             };
@@ -492,6 +493,7 @@ mod tests {
                 workspace_path: None,
                 worktree_branch: None,
                 tier: crate::models::ModelTier::Default,
+                pin_first_message: false,
                 summary_cache: None,
                 summary_up_to_msg_idx: None,
                 created_at: now,
@@ -537,6 +539,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn discussions_create_with_profile_and_directive_ids() {
+        let state = test_state();
+
+        // Create discussion with profile_ids and directive_ids
+        let create_body = serde_json::json!({
+            "title": "Discussion with extras",
+            "agent": "ClaudeCode",
+            "language": "en",
+            "initial_prompt": "Hello with profiles",
+            "profile_ids": ["profile-dev", "profile-reviewer"],
+            "directive_ids": ["directive-eco", "directive-security"]
+        });
+
+        let req = Request::builder()
+            .method("POST").uri("/api/discussions")
+            .header("Content-Type", "application/json")
+            .body(Body::from(create_body.to_string())).unwrap();
+        let (status, _) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK, "create discussion with profiles/directives");
+
+        // Wait for background persistence
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+
+        // List and verify stored profile_ids / directive_ids
+        let req = Request::builder()
+            .method("GET").uri("/api/discussions")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        let discussions = body["data"].as_array().unwrap();
+        assert_eq!(discussions.len(), 1);
+        let disc = &discussions[0];
+        let profile_ids = disc["profile_ids"].as_array().unwrap();
+        let directive_ids = disc["directive_ids"].as_array().unwrap();
+        assert_eq!(profile_ids.len(), 2, "Should store 2 profile_ids");
+        assert_eq!(directive_ids.len(), 2, "Should store 2 directive_ids");
+        assert!(profile_ids.iter().any(|v| v.as_str() == Some("profile-dev")));
+        assert!(directive_ids.iter().any(|v| v.as_str() == Some("directive-eco")));
+    }
+
+    #[tokio::test]
+    async fn discussions_patch_title() {
+        let state = test_state();
+        insert_test_discussion(&state, "disc-patch-title", "Old Title").await;
+
+        let update_body = serde_json::json!({ "title": "New Title" });
+        let req = Request::builder()
+            .method("PATCH").uri("/api/discussions/disc-patch-title")
+            .header("Content-Type", "application/json")
+            .body(Body::from(update_body.to_string())).unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK, "PATCH title: {body}");
+        assert!(body["success"].as_bool().unwrap());
+
+        // Verify title changed
+        let req = Request::builder()
+            .method("GET").uri("/api/discussions/disc-patch-title")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["title"].as_str().unwrap(), "New Title");
+    }
+
+    #[tokio::test]
     async fn discussions_delete() {
         let state = test_state();
 
@@ -554,6 +620,7 @@ mod tests {
                 archived: false, workspace_mode: "Direct".into(),
                 workspace_path: None, worktree_branch: None,
                 tier: crate::models::ModelTier::Default,
+                pin_first_message: false,
                 summary_cache: None, summary_up_to_msg_idx: None,
                 created_at: now, updated_at: now,
             };
@@ -777,6 +844,7 @@ mod tests {
                     archived: false, workspace_mode: "Direct".into(),
                     workspace_path: None, worktree_branch: None,
                     tier: crate::models::ModelTier::Default,
+                    pin_first_message: false,
                     summary_cache: None, summary_up_to_msg_idx: None,
                     created_at: now, updated_at: now,
                 };
@@ -1035,6 +1103,21 @@ mod tests {
         assert_eq!(body["data"].as_array().unwrap().len(), 0);
     }
 
+    // ─── Q15b: Config model-tiers API ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn config_model_tiers_returns_config() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("GET").uri("/api/config/model-tiers")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["success"].as_bool().unwrap());
+        // model-tiers should return an object with tier configuration
+        assert!(body["data"].is_object(), "model-tiers should return a config object");
+    }
+
     // ─── Q16: Export/Import API ───────────────────────────────────────────────
 
     #[tokio::test]
@@ -1103,5 +1186,360 @@ mod tests {
         use crate::api::discussions::detect_agent_error_hint;
         let hint = detect_agent_error_hint("Everything is fine, no errors here");
         assert!(hint.is_none(), "Should not detect error in normal output");
+    }
+
+    // ─── Drift detection API tests ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn drift_check_no_project() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("GET").uri("/api/projects/nonexistent/drift")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK); // API returns 200 with success=false
+        assert!(!body["success"].as_bool().unwrap_or(true),
+            "Drift check on nonexistent project should return error: {body}");
+    }
+
+    #[tokio::test]
+    async fn drift_check_route_exists() {
+        let state = test_state();
+
+        // Insert a project with a real path so check_drift can run
+        state.db.with_conn(|conn| {
+            let now = chrono::Utc::now();
+            let project = crate::models::Project {
+                id: "drift-proj".into(),
+                name: "Drift Test Project".into(),
+                path: "/tmp/kronn-drift-test".into(),
+                repo_url: None,
+                token_override: None,
+                ai_config: crate::models::AiConfigStatus { detected: false, configs: vec![] },
+                audit_status: crate::models::AiAuditStatus::NoTemplate,
+                ai_todo_count: 0,
+                default_skill_ids: vec![],
+                default_profile_id: None,
+                briefing_notes: None,
+                created_at: now,
+                updated_at: now,
+            };
+            crate::db::projects::insert_project(conn, &project)?;
+            Ok(())
+        }).await.unwrap();
+
+        // Ensure the path exists (even if empty)
+        std::fs::create_dir_all("/tmp/kronn-drift-test").ok();
+
+        let req = Request::builder()
+            .method("GET").uri("/api/projects/drift-proj/drift")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK, "drift check route should return 200: {body}");
+        assert!(body["success"].as_bool().unwrap_or(false),
+            "drift check should succeed (empty drift): {body}");
+    }
+
+    #[tokio::test]
+    async fn partial_audit_invalid_steps() {
+        let state = test_state();
+
+        // Insert a project
+        state.db.with_conn(|conn| {
+            let now = chrono::Utc::now();
+            let project = crate::models::Project {
+                id: "partial-proj".into(),
+                name: "Partial Audit Test".into(),
+                path: "/tmp/kronn-partial-test".into(),
+                repo_url: None,
+                token_override: None,
+                ai_config: crate::models::AiConfigStatus { detected: false, configs: vec![] },
+                audit_status: crate::models::AiAuditStatus::NoTemplate,
+                ai_todo_count: 0,
+                default_skill_ids: vec![],
+                default_profile_id: None,
+                briefing_notes: None,
+                created_at: now,
+                updated_at: now,
+            };
+            crate::db::projects::insert_project(conn, &project)?;
+            Ok(())
+        }).await.unwrap();
+
+        std::fs::create_dir_all("/tmp/kronn-partial-test").ok();
+
+        // POST with invalid step number (99)
+        let body_json = serde_json::json!({
+            "agent": "ClaudeCode",
+            "steps": [99]
+        });
+        let req = Request::builder()
+            .method("POST").uri("/api/projects/partial-proj/partial-audit")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body_json.to_string())).unwrap();
+
+        let app = build_router_with_auth(state, false);
+        let resp = app.oneshot(req).await.expect("oneshot failed");
+        assert_eq!(resp.status(), StatusCode::OK, "SSE endpoint returns 200");
+
+        // Consume SSE body and check for error event about invalid step
+        let bytes = resp.into_body().collect().await.expect("body collect").to_bytes();
+        let body_str = String::from_utf8_lossy(&bytes);
+        assert!(body_str.contains("Invalid step"),
+            "Should contain error about invalid step: {body_str}");
+    }
+
+    #[tokio::test]
+    async fn partial_audit_route_exists() {
+        let state = test_state();
+
+        // Insert a project
+        state.db.with_conn(|conn| {
+            let now = chrono::Utc::now();
+            let project = crate::models::Project {
+                id: "partial-ok-proj".into(),
+                name: "Partial OK Test".into(),
+                path: "/tmp/kronn-partial-ok-test".into(),
+                repo_url: None,
+                token_override: None,
+                ai_config: crate::models::AiConfigStatus { detected: false, configs: vec![] },
+                audit_status: crate::models::AiAuditStatus::NoTemplate,
+                ai_todo_count: 0,
+                default_skill_ids: vec![],
+                default_profile_id: None,
+                briefing_notes: None,
+                created_at: now,
+                updated_at: now,
+            };
+            crate::db::projects::insert_project(conn, &project)?;
+            Ok(())
+        }).await.unwrap();
+
+        std::fs::create_dir_all("/tmp/kronn-partial-ok-test").ok();
+
+        // POST with valid step number (1)
+        let body_json = serde_json::json!({
+            "agent": "ClaudeCode",
+            "steps": [1]
+        });
+        let req = Request::builder()
+            .method("POST").uri("/api/projects/partial-ok-proj/partial-audit")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body_json.to_string())).unwrap();
+
+        let app = build_router_with_auth(state, false);
+        let resp = app.oneshot(req).await.expect("oneshot failed");
+        // SSE always returns 200
+        assert_eq!(resp.status(), StatusCode::OK, "partial-audit route should return 200 (SSE)");
+    }
+
+    #[tokio::test]
+    async fn briefing_get_set() {
+        let state = test_state();
+
+        // Create a project
+        state.db.with_conn(|conn| {
+            let now = chrono::Utc::now();
+            let project = crate::models::Project {
+                id: "briefing-proj".into(),
+                name: "Briefing Test".into(),
+                path: "/tmp/briefing-test".into(),
+                repo_url: None,
+                token_override: None,
+                ai_config: crate::models::AiConfigStatus { detected: false, configs: vec![] },
+                audit_status: crate::models::AiAuditStatus::NoTemplate,
+                ai_todo_count: 0,
+                default_skill_ids: vec![],
+                default_profile_id: None,
+                briefing_notes: None,
+                created_at: now,
+                updated_at: now,
+            };
+            crate::db::projects::insert_project(conn, &project)?;
+            Ok(())
+        }).await.unwrap();
+
+        // GET briefing — should be null initially
+        let req = Request::builder()
+            .method("GET").uri("/api/projects/briefing-proj/briefing")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["success"].as_bool().unwrap_or(false));
+        assert!(body["data"].is_null(), "Briefing should be null initially: {body}");
+
+        // PUT briefing — set notes
+        let req = Request::builder()
+            .method("PUT").uri("/api/projects/briefing-proj/briefing")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"notes":"This is a Node.js monorepo with React frontend"}"#)).unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["success"].as_bool().unwrap_or(false), "Set briefing should succeed: {body}");
+
+        // GET briefing — should return the notes
+        let req = Request::builder()
+            .method("GET").uri("/api/projects/briefing-proj/briefing")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"].as_str().unwrap(), "This is a Node.js monorepo with React frontend");
+
+        // PUT briefing — clear notes
+        let req = Request::builder()
+            .method("PUT").uri("/api/projects/briefing-proj/briefing")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"notes":null}"#)).unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["success"].as_bool().unwrap_or(false));
+
+        // GET briefing — should be null again
+        let req = Request::builder()
+            .method("GET").uri("/api/projects/briefing-proj/briefing")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["data"].is_null(), "Briefing should be null after clearing: {body}");
+    }
+
+    #[tokio::test]
+    async fn briefing_nonexistent_project() {
+        let state = test_state();
+
+        // GET briefing for nonexistent project — should return null (no project row found)
+        let req = Request::builder()
+            .method("GET").uri("/api/projects/nonexistent/briefing")
+            .body(Body::empty()).unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["data"].is_null(), "Briefing for nonexistent project should be null");
+
+        // PUT briefing for nonexistent project — should fail
+        let req = Request::builder()
+            .method("PUT").uri("/api/projects/nonexistent/briefing")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"notes":"test"}"#)).unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body["success"].as_bool().unwrap_or(true), "Set briefing on nonexistent project should fail: {body}");
+    }
+
+    // ─── Start briefing tests ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn start_briefing_route_exists() {
+        let state = test_state();
+
+        // Create a project in DB
+        state.db.with_conn(|conn| {
+            let now = chrono::Utc::now();
+            let project = crate::models::Project {
+                id: "briefing-start-proj".into(),
+                name: "Start Briefing Test".into(),
+                path: "/tmp/kronn-start-briefing-test".into(),
+                repo_url: None,
+                token_override: None,
+                ai_config: crate::models::AiConfigStatus { detected: false, configs: vec![] },
+                audit_status: crate::models::AiAuditStatus::NoTemplate,
+                ai_todo_count: 0,
+                default_skill_ids: vec![],
+                default_profile_id: None,
+                briefing_notes: None,
+                created_at: now,
+                updated_at: now,
+            };
+            crate::db::projects::insert_project(conn, &project)?;
+            Ok(())
+        }).await.unwrap();
+
+        let body_json = serde_json::json!({ "agent": "ClaudeCode" });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/projects/briefing-start-proj/start-briefing")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body_json.to_string()))
+            .unwrap();
+
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK, "start-briefing should return 200: {body}");
+        assert!(body["success"].as_bool().unwrap_or(false), "start-briefing should succeed: {body}");
+        assert!(body["data"]["discussion_id"].is_string(), "Response should contain discussion_id: {body}");
+        let disc_id = body["data"]["discussion_id"].as_str().unwrap();
+        assert!(!disc_id.is_empty(), "discussion_id should not be empty");
+    }
+
+    /// Discussions created for validation/bootstrap/briefing should have pin_first_message=true.
+    /// This test verifies that a discussion with pin_first_message=true roundtrips correctly
+    /// through DB insert and retrieval via the GET API.
+    #[tokio::test]
+    async fn validation_discussion_has_pin_first_message() {
+        let state = test_state();
+
+        // Insert a discussion with pin_first_message=true (simulating what validation creates)
+        state.db.with_conn(|conn| {
+            let now = chrono::Utc::now();
+            let disc = crate::models::Discussion {
+                id: "disc-pin".into(),
+                project_id: None,
+                title: "Validation audit AI".into(),
+                agent: crate::models::AgentType::ClaudeCode,
+                language: "en".into(),
+                participants: vec![crate::models::AgentType::ClaudeCode],
+                message_count: 0, messages: vec![],
+                skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
+                archived: false, workspace_mode: "Direct".into(),
+                workspace_path: None, worktree_branch: None,
+                tier: crate::models::ModelTier::Default,
+                pin_first_message: true,
+                summary_cache: None, summary_up_to_msg_idx: None,
+                created_at: now, updated_at: now,
+            };
+            crate::db::discussions::insert_discussion(conn, &disc)?;
+            Ok(())
+        }).await.unwrap();
+
+        // GET the discussion and verify pin_first_message is true
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/discussions/disc-pin")
+            .body(Body::empty())
+            .unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["success"].as_bool().unwrap(), "GET disc-pin must succeed: {body}");
+        assert_eq!(body["data"]["pin_first_message"], true,
+            "pin_first_message must be true for validation discussions: {body}");
+
+        // Also verify via list endpoint
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/discussions")
+            .body(Body::empty())
+            .unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        let discs = body["data"].as_array().unwrap();
+        let pin_disc = discs.iter().find(|d| d["id"] == "disc-pin").unwrap();
+        assert_eq!(pin_disc["pin_first_message"], true,
+            "pin_first_message must be true in list view too: {pin_disc}");
+    }
+
+    #[tokio::test]
+    async fn start_briefing_nonexistent_project() {
+        let state = test_state();
+
+        let body_json = serde_json::json!({ "agent": "ClaudeCode" });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/projects/nonexistent/start-briefing")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body_json.to_string()))
+            .unwrap();
+
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK, "start-briefing on nonexistent project: {body}");
+        assert!(!body["success"].as_bool().unwrap_or(true),
+            "start-briefing on nonexistent project should return error: {body}");
     }
 }

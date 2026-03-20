@@ -1,0 +1,1 @@
+ALTER TABLE projects ADD COLUMN briefing_notes TEXT DEFAULT NULL;
