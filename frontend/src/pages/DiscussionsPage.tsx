@@ -425,6 +425,39 @@ export function DiscussionsPage({
   // Handle auto-run: open existing discussion and trigger agent (e.g. after full audit)
   // Uses a ref to track the pending run so that re-renders (from onAutoRunConsumed/refetch)
   // don't cancel the timeout via effect cleanup.
+  // Ensure the sidebar groups containing a discussion are expanded when navigating to it
+  const ensureDiscussionVisible = useCallback((discId: string) => {
+    const disc = allDiscussions.find(d => d.id === discId);
+    if (!disc) return;
+    setCollapsedDiscGroups(prev => {
+      const next = new Set(prev);
+      let changed = false;
+      // Uncollapse the project group
+      if (disc.project_id) {
+        if (next.has(disc.project_id)) { next.delete(disc.project_id); changed = true; }
+        // Uncollapse the org group
+        const proj = projects.find(p => p.id === disc.project_id);
+        if (proj) {
+          const org = getProjectGroup(proj, t('disc.local'), t('disc.local'));
+          const orgKey = `org::${org}`;
+          if (next.has(orgKey)) { next.delete(orgKey); changed = true; }
+        }
+      } else {
+        // Global discussion
+        if (next.has('__global__')) { next.delete('__global__'); changed = true; }
+      }
+      return changed ? next : prev;
+    });
+  }, [allDiscussions, projects, t]);
+
+  // On mount, ensure the initially active discussion is visible in the sidebar
+  useEffect(() => {
+    if (initialActiveDiscussionId) {
+      ensureDiscussionVisible(initialActiveDiscussionId);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const pendingAutoRun = useRef<string | null>(null);
   useEffect(() => {
     if (!autoRunDiscussionId || pendingAutoRun.current === autoRunDiscussionId) return;
@@ -432,8 +465,9 @@ export function DiscussionsPage({
     pendingAutoRun.current = discId;
     onAutoRunConsumed?.();
 
-    // Select the discussion and show loader immediately
+    // Select the discussion, uncollapse its group, and show loader immediately
     setActiveDiscussionId(discId);
+    ensureDiscussionVisible(discId);
     setSendingMap(prev => ({ ...prev, [discId]: true }));
     setStreamingMap(prev => ({ ...prev, [discId]: '' }));
     refetchDiscussions();
@@ -459,6 +493,7 @@ export function DiscussionsPage({
   useEffect(() => {
     if (!openDiscussionId) return;
     setActiveDiscussionId(openDiscussionId);
+    ensureDiscussionVisible(openDiscussionId);
     onOpenDiscConsumed?.();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openDiscussionId]);

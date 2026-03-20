@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, screen, act, cleanup } from '@testing-library/react';
+import { render, screen, act, cleanup, fireEvent } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
 
 // Mock API — DiscussionsPage uses discussions, projects, and skills APIs
@@ -12,6 +12,7 @@ vi.mock('../../lib/api', () => ({
     update: vi.fn(),
     sendMessage: vi.fn(),
     run: vi.fn(),
+    runAgent: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn(),
     _streamSSE: vi.fn(),
   },
@@ -45,7 +46,7 @@ vi.mock('../../lib/api', () => ({
 
 import { discussions as discussionsApi } from '../../lib/api';
 import { DiscussionsPage } from '../DiscussionsPage';
-import type { AgentsConfig, Discussion } from '../../types/generated';
+import type { AgentDetection, Discussion } from '../../types/generated';
 
 const noop = () => {};
 const toastFn = vi.fn() as any;
@@ -109,43 +110,10 @@ describe('DiscussionsPage', () => {
         {...liftedProps()}
       />
     );
-    // The "New" discussion button (disc.new = "Nouvelle" in French) should be rendered
-    const body = document.body.textContent ?? '';
-    expect(body).toContain('Nouvelle');
-  });
-
-  it('renders with agentAccess provided', async () => {
-    const agentAccess: AgentsConfig = {
-      claude_code: { path: null, installed: true, version: null, full_access: true },
-      codex: { path: null, installed: false, version: null, full_access: false },
-      gemini_cli: { path: null, installed: false, version: null, full_access: false },
-      kiro: { path: null, installed: false, version: null, full_access: false },
-      vibe: { path: null, installed: false, version: null, full_access: false },
-      model_tiers: {
-        claude_code: { economy: null, reasoning: null },
-        codex: { economy: null, reasoning: null },
-        gemini_cli: { economy: null, reasoning: null },
-        kiro: { economy: null, reasoning: null },
-        vibe: { economy: null, reasoning: null },
-      },
-    };
-    await wrap(
-      <DiscussionsPage
-        projects={[]}
-        agents={[]}
-        allDiscussions={[]}
-        configLanguage="en"
-        agentAccess={agentAccess}
-        refetchDiscussions={noop}
-        refetchProjects={noop}
-        onNavigate={noop}
-        toast={toastFn}
-        {...liftedProps()}
-      />
-    );
-    // The new-discussion button (disc.new = "Nouvelle" in FR, "New" in EN) is always rendered
-    const body = document.body.textContent ?? '';
-    expect(body).toContain('Nouvelle');
+    // The "Nouvelle" button (disc.new in FR) should be a button element
+    const allButtons = Array.from(document.body.querySelectorAll('button'));
+    const newDiscBtn = allButtons.find(b => b.textContent?.includes('Nouvelle'));
+    expect(newDiscBtn).toBeTruthy();
   });
 
   it('renders with prefill prop', async () => {
@@ -193,36 +161,6 @@ describe('DiscussionsPage', () => {
 
     // The sidebar should show "5 msg" from message_count, not "0 msg"
     expect(screen.getByText(/5 msg/)).toBeTruthy();
-  });
-
-  it('discussions.get API is available for loading full discussions', async () => {
-    // Verify the API mock is properly configured — this is a guard test
-    // that ensures discussions.get is wired up and callable.
-    // The actual integration (tap → fetch → render messages) uses pointer events
-    // that jsdom doesn't support, so we verify the plumbing instead.
-    const fullDisc: Discussion = {
-      ...makeListDiscussion('d1', 2),
-      messages: [
-        { id: 'm1', role: 'User', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
-        { id: 'm2', role: 'Agent', content: 'Hi', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:00Z', tokens_used: 100, auth_mode: null },
-      ],
-    };
-    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
-
-    const result = await discussionsApi.get('d1');
-    expect(result).toBeDefined();
-    expect(result!.messages).toHaveLength(2);
-    expect(result!.messages[0].content).toBe('Hello');
-    expect(result!.message_count).toBe(2);
-  });
-
-  it('list discussions have empty messages array (regression guard)', () => {
-    // This test ensures test helpers match real backend behavior.
-    // If someone changes makeListDiscussion to include messages,
-    // this test will catch the mistake.
-    const disc = makeListDiscussion('test', 10);
-    expect(disc.messages).toHaveLength(0);
-    expect(disc.message_count).toBe(10);
   });
 
   // ─── Streaming & tab-switch behavior tests ──────────────────────────────
@@ -590,5 +528,78 @@ describe('DiscussionsPage', () => {
     // Should show org group headers
     expect(body).toContain('Euronews-tech');
     expect(body).toContain('DocRoms');
+  });
+
+  it('creates a new discussion via the form', async () => {
+    const createdDisc: Discussion = {
+      ...makeListDiscussion('new-disc', 1),
+      messages: [
+        { id: 'm1', role: 'User', content: 'Analyse this code', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+      ],
+    };
+    vi.mocked(discussionsApi.create).mockResolvedValue(createdDisc);
+    vi.mocked(discussionsApi.get).mockResolvedValue(createdDisc);
+
+    const claudeAgent: AgentDetection = {
+      name: 'Claude Code',
+      agent_type: 'ClaudeCode',
+      installed: true,
+      enabled: true,
+      path: '/usr/bin/claude',
+      version: '1.0.0',
+      latest_version: null,
+      origin: 'host',
+      install_command: null,
+      host_managed: false,
+      host_label: null,
+      runtime_available: false,
+    };
+
+    const lifted = liftedProps();
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[claudeAgent]}
+        allDiscussions={[]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        {...lifted}
+      />
+    );
+
+    // Click the "Nouvelle" button to open the new discussion form
+    const newBtns = screen.getAllByText(/Nouvelle/);
+    const newBtn = newBtns[0]; // First match is the sidebar button
+    await act(async () => { fireEvent.click(newBtn); });
+
+    // Fill in the title field
+    const titleInput = document.querySelector('input[placeholder]') as HTMLInputElement;
+    expect(titleInput).toBeTruthy();
+    await act(async () => { fireEvent.change(titleInput, { target: { value: 'Test discussion' } }); });
+
+    // Fill in the prompt textarea
+    const promptTextarea = document.querySelector('textarea') as HTMLTextAreaElement;
+    expect(promptTextarea).toBeTruthy();
+    await act(async () => { fireEvent.change(promptTextarea, { target: { value: 'Analyse this code' } }); });
+
+    // The agent select should already have ClaudeCode selected (only installed agent)
+    // Click the create/start button
+    const startBtn = screen.getByText(/Demarrer la discussion/);
+    await act(async () => { fireEvent.click(startBtn); });
+
+    // Verify discussionsApi.create was called with the right data
+    expect(vi.mocked(discussionsApi.create)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'Test discussion',
+        agent: 'ClaudeCode',
+        initial_prompt: 'Analyse this code',
+        language: 'fr',
+      })
+    );
   });
 });

@@ -77,9 +77,9 @@ describe('McpPage', () => {
   it('renders empty state when no configs exist', () => {
     const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [] };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
-    // Empty state message should be visible
+    // Empty state message (mcp.empty in FR: "Aucun MCP configure...") should be visible
     const body = document.body.textContent!;
-    expect(body.length).toBeGreaterThan(0);
+    expect(body).toContain('Aucun MCP');
   });
 
   it('renders server names as group headers', () => {
@@ -180,5 +180,26 @@ describe('McpPage', () => {
     fireEvent.click(screen.getByText('GitHub'));
 
     expect(container.textContent).toContain('my-app');
+  });
+
+  it('expands server group on click', () => {
+    const servers = [makeServer('context7', 'Context7')];
+    const configs = [
+      makeConfig('c1', 'context7', 'Context7', { label: 'Context7 Main' }),
+      makeConfig('c2', 'context7', 'Context7', { label: 'Context7 Dev', env_keys: ['CONTEXT7_KEY'] }),
+    ];
+    const overview: McpOverview = { servers, configs, customized_contexts: [], incompatibilities: [] };
+    const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+
+    // Before clicking, config labels should not be visible (group is collapsed)
+    expect(container.textContent).not.toContain('Context7 Main');
+    expect(container.textContent).not.toContain('Context7 Dev');
+
+    // Click the server group header to expand it
+    fireEvent.click(screen.getByText('Context7'));
+
+    // After clicking, config labels should be visible
+    expect(container.textContent).toContain('Context7 Main');
+    expect(container.textContent).toContain('Context7 Dev');
   });
 });

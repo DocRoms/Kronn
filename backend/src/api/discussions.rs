@@ -2907,6 +2907,82 @@ mod tests {
         }
     }
 
+    /// When summary_cache is set, the summary text appears in the prompt
+    /// and old messages covered by the summary are skipped.
+    #[test]
+    fn build_agent_prompt_with_summary_cache() {
+        let mut messages = Vec::new();
+        // 6 old messages covered by summary (non-System indices 0..5)
+        for i in 0..3usize {
+            messages.push(make_msg(MessageRole::User, &format!("old-user-{}", i)));
+            messages.push(make_msg(MessageRole::Agent, &format!("old-agent-{}", i)));
+        }
+        // 2 recent messages NOT covered (non-System indices 6..7)
+        messages.push(make_msg(MessageRole::User, "recent-question"));
+        messages.push(make_msg(MessageRole::Agent, "recent-answer"));
+        // Final user message (non-System index 8)
+        messages.push(make_msg(MessageRole::User, "latest-user-msg"));
+
+        let mut disc = make_discussion(messages);
+        disc.summary_cache = Some("Summarized: discussed old topics".to_string());
+        disc.summary_up_to_msg_idx = Some(6); // covers indices 0..5
+
+        let prompt = build_agent_prompt(&disc, &AgentType::ClaudeCode, 0);
+
+        // Summary must appear
+        assert!(prompt.contains("Summarized: discussed old topics"),
+            "Summary cache text must appear in the prompt");
+        assert!(prompt.contains("Summary of earlier conversation"),
+            "Summary block header must be present");
+
+        // Old messages must be skipped
+        for i in 0..3usize {
+            assert!(!prompt.contains(&format!("old-user-{}", i)),
+                "Old user message {} must be skipped (covered by summary)", i);
+            assert!(!prompt.contains(&format!("old-agent-{}", i)),
+                "Old agent message {} must be skipped (covered by summary)", i);
+        }
+
+        // Recent messages must appear
+        assert!(prompt.contains("recent-question"), "Recent uncovered messages must appear");
+        assert!(prompt.contains("latest-user-msg"), "Latest user message must appear");
+    }
+
+    /// A large conversation gets truncated to fit the agent's budget.
+    /// When extra_context_len eats into the budget, older messages are dropped.
+    #[test]
+    fn build_agent_prompt_respects_budget() {
+        // Create a conversation with many large messages
+        let big_content = "A".repeat(5000); // 5000 chars per message
+        let mut messages = Vec::new();
+        for _ in 0..20usize {
+            messages.push(make_msg(MessageRole::User, &big_content));
+            messages.push(make_msg(MessageRole::Agent, &big_content));
+        }
+        messages.push(make_msg(MessageRole::User, "final-question-marker"));
+
+        let disc = make_discussion(messages);
+
+        // Pass a large extra_context_len to severely limit the budget
+        let budget = agent_prompt_budget(&AgentType::ClaudeCode);
+        let extra = budget.saturating_sub(15_000); // leave only ~15K chars for the prompt
+        let prompt = build_agent_prompt(&disc, &AgentType::ClaudeCode, extra);
+
+        // The prompt must contain the latest user message (always included)
+        assert!(prompt.contains("final-question-marker"),
+            "Latest user message must always be included regardless of budget");
+
+        // The prompt must be smaller than the remaining budget (with some margin for overhead)
+        assert!(prompt.len() <= 20_000,
+            "Prompt length ({}) should be within the remaining budget", prompt.len());
+
+        // Not all 40 messages can fit in ~15K chars (each is 5000+ chars)
+        // so some must have been truncated
+        let big_count = prompt.matches(&big_content).count();
+        assert!(big_count < 40,
+            "Budget truncation should drop some messages: found {} of 40", big_count);
+    }
+
     // ─── smart_truncate tests ───────────────────────────────────────────────
 
     #[test]

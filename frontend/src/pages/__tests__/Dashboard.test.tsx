@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, screen, act, cleanup } from '@testing-library/react';
+import { render, screen, act, cleanup, fireEvent } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
 
 // Mock ALL API modules used by Dashboard and its children
@@ -154,6 +154,9 @@ describe('Dashboard — project list', () => {
       makeProject('p2', 'backend', 'acme'),
       makeProject('p3', 'solo-project'),
     ];
+    // Give repo_url to acme projects so getProjectGroup extracts org name
+    projects[0].repo_url = 'git@github.com:acme/frontend.git';
+    projects[1].repo_url = 'git@github.com:acme/backend.git';
     vi.mocked(projectsApi.list).mockResolvedValue(projects);
     vi.mocked(discussionsApi.list).mockResolvedValue([]);
 
@@ -164,21 +167,38 @@ describe('Dashboard — project list', () => {
     expect(body).toContain('frontend');
     expect(body).toContain('backend');
     expect(body).toContain('solo-project');
+    // Org group header should appear for the acme group
+    expect(body).toContain('acme');
   });
 
   it('renders search input that filters projects', async () => {
     const projects = [
       makeProject('p1', 'react-app'),
       makeProject('p2', 'rust-api'),
+      makeProject('p3', 'vue-dashboard'),
+      makeProject('p4', 'go-service'),
     ];
     vi.mocked(projectsApi.list).mockResolvedValue(projects);
     vi.mocked(discussionsApi.list).mockResolvedValue([]);
 
     await wrap(<Dashboard onReset={vi.fn()} />);
 
-    const body = document.body.textContent!;
-    expect(body).toContain('react-app');
-    expect(body).toContain('rust-api');
+    // All projects visible initially
+    expect(document.body.textContent!).toContain('react-app');
+    expect(document.body.textContent!).toContain('rust-api');
+
+    // Type in search to filter
+    const searchInput = document.body.querySelector('input[placeholder]') as HTMLInputElement;
+    expect(searchInput).toBeTruthy();
+    await act(async () => {
+      fireEvent.change(searchInput, { target: { value: 'react' } });
+    });
+
+    // Only matching project should remain visible
+    expect(document.body.textContent!).toContain('react-app');
+    expect(document.body.textContent!).not.toContain('rust-api');
+    expect(document.body.textContent!).not.toContain('vue-dashboard');
+    expect(document.body.textContent!).not.toContain('go-service');
   });
 
   it('renders "New project" button in nav bar', async () => {

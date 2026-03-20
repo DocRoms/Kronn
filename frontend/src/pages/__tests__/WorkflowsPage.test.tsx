@@ -79,13 +79,15 @@ const wrap = async (ui: React.ReactElement) => {
 };
 
 describe('WorkflowsPage', () => {
-  it('renders without agentAccess (undefined)', async () => {
-    await wrap(<WorkflowsPage projects={[]} />);
+  it('renders with various agentAccess configs and shows create button', async () => {
+    // Without agentAccess
+    const { unmount: u1 } = await wrap(<WorkflowsPage projects={[]} />);
     expect(screen.getByText('Workflows')).toBeDefined();
-  });
+    expect(screen.getByText('Nouveau workflow')).toBeDefined();
+    u1();
 
-  it('renders with restricted agentAccess without errors', async () => {
-    await wrap(
+    // With restricted agentAccess
+    const { unmount: u2 } = await wrap(
       <WorkflowsPage
         projects={[]}
         installedAgentTypes={['ClaudeCode', 'Codex']}
@@ -93,9 +95,10 @@ describe('WorkflowsPage', () => {
       />
     );
     expect(screen.getByText('Workflows')).toBeDefined();
-  });
+    expect(screen.getByText('Nouveau workflow')).toBeDefined();
+    u2();
 
-  it('renders with full access agentAccess without errors', async () => {
+    // With full access agentAccess
     await wrap(
       <WorkflowsPage
         projects={[]}
@@ -104,6 +107,7 @@ describe('WorkflowsPage', () => {
       />
     );
     expect(screen.getByText('Workflows')).toBeDefined();
+    expect(screen.getByText('Nouveau workflow')).toBeDefined();
   });
 
   // ─── Workflow edit preserves existing steps ───────────────────────────────
@@ -213,5 +217,52 @@ describe('WorkflowsPage', () => {
     const nextBtns = screen.getAllByText(/Suivant/);
     const nextBtn = nextBtns[nextBtns.length - 1];
     expect(nextBtn.closest('button')!.disabled).toBe(true);
+  });
+
+  it('creates a workflow through the wizard', async () => {
+    await wrap(
+      <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />
+    );
+
+    // Click "Nouveau workflow" to open wizard
+    const newBtn = screen.getByText(/Nouveau workflow/);
+    await act(async () => { fireEvent.click(newBtn); });
+
+    // Step 0: fill the workflow name
+    const nameInput = screen.getByPlaceholderText('ex: Auto-fix 5xx errors');
+    await act(async () => { fireEvent.change(nameInput, { target: { value: 'My CI Workflow' } }); });
+
+    // The "Suivant" button should now be enabled
+    let nextBtns = screen.getAllByText(/Suivant/);
+    let nextBtn = nextBtns[nextBtns.length - 1];
+    expect(nextBtn.closest('button')!.disabled).toBe(false);
+
+    // Navigate to step 1 (trigger)
+    await act(async () => { fireEvent.click(nextBtn); });
+
+    // Step 1 should show trigger options — verify "Manual" is visible
+    expect(document.body.textContent).toContain('Manual');
+
+    // Navigate to step 2 (steps)
+    nextBtns = screen.getAllByText(/Suivant/);
+    nextBtn = nextBtns[nextBtns.length - 1];
+    await act(async () => { fireEvent.click(nextBtn); });
+
+    // Step 2 should show step configuration — verify the step name input exists
+    const stepNameInputs = document.querySelectorAll('input[placeholder]');
+    expect(stepNameInputs.length).toBeGreaterThan(0);
+
+    // Navigate to step 3 (config)
+    nextBtns = screen.getAllByText(/Suivant/);
+    nextBtn = nextBtns[nextBtns.length - 1];
+    await act(async () => { fireEvent.click(nextBtn); });
+
+    // Navigate to step 4 (summary)
+    nextBtns = screen.getAllByText(/Suivant/);
+    nextBtn = nextBtns[nextBtns.length - 1];
+    await act(async () => { fireEvent.click(nextBtn); });
+
+    // Summary step should show the workflow name we entered
+    expect(document.body.textContent).toContain('My CI Workflow');
   });
 });
