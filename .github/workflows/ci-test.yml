@@ -33,9 +33,8 @@ jobs:
 
       - name: cargo clippy
         run: cargo clippy --all-targets -- -D warnings
-        env:
-          SCCACHE_GHA_ENABLED: "true"
-          RUSTC_WRAPPER: "sccache"
+        # No sccache for clippy — cached artifacts can replay stale lint warnings
+        # even when the source has changed (sccache hashes deps/flags, not source content)
 
       - name: cargo test
         run: cargo test

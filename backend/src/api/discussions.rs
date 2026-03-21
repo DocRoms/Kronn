@@ -3115,7 +3115,7 @@ mod tests {
     fn pinned_message_excluded_from_summary_input() {
         // This test verifies the skip logic used in maybe_generate_summary.
         // We simulate the same filtering that maybe_generate_summary does.
-        let messages = vec![
+        let messages = [
             make_msg(MessageRole::User, "PINNED_PROTOCOL_MSG"),
             make_msg(MessageRole::User, "normal-msg-1"),
             make_msg(MessageRole::Agent, "normal-reply-1"),
