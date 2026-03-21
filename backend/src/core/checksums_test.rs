@@ -226,7 +226,8 @@ fn compute_step_checksums_ignores_missing_files() {
 
 #[test]
 fn compute_step_checksums_handles_git_head() {
-    let kronn_root = PathBuf::from("/home/priol/Repositories/Kronn");
+    // Use the Kronn repo root (works both locally and in CI)
+    let kronn_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
     let checksums = compute_step_checksums(&kronn_root, &["__GIT_HEAD__"]);
     assert!(
         checksums.contains_key("__GIT_HEAD__"),
@@ -239,7 +240,7 @@ fn compute_step_checksums_handles_git_head() {
 
 #[test]
 fn compute_step_checksums_handles_git_ls_files() {
-    let kronn_root = PathBuf::from("/home/priol/Repositories/Kronn");
+    let kronn_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
     let checksums = compute_step_checksums(&kronn_root, &["__GIT_LS_FILES__"]);
     assert!(
         !checksums.is_empty(),
