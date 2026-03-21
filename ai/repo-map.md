@@ -98,9 +98,9 @@ Kronn/
 │       ├── main.tsx            # React DOM entry
 │       ├── App.tsx             # Router (setup wizard vs dashboard) + ErrorBoundary + React.lazy code splitting
 │       ├── pages/
-│       │   ├── Dashboard.tsx   # Main UI shell (~750 lines) — projects tab (collapsible sections, bootstrap modal), nav bar, routes to sub-pages
-│       │   ├── SettingsPage.tsx # Settings (~670 lines) — language, agents config, tokens, usage stats, DB management
-│       │   ├── DiscussionsPage.tsx # Discussions (~1420 lines) — sidebar, chat, streaming, debate, archive, swipe gestures, title editing
+│       │   ├── Dashboard.tsx   # Main UI shell (~1625 lines) — projects tab (collapsible sections, bootstrap modal), nav bar, routes to sub-pages
+│       │   ├── SettingsPage.tsx # Settings (~1830 lines) — language, voice (TTS/STT model selection), agents config, tokens, usage stats, DB management
+│       │   ├── DiscussionsPage.tsx # Discussions (~2900 lines) — sidebar, chat, streaming, debate, archive, swipe gestures, TTS/STT, voice conversation mode
 │       │   ├── McpPage.tsx     # MCP management (registry, configs, inline secret editing with per-field visibility, context files, project toggles)
 │       │   ├── WorkflowsPage.tsx # Workflow management (~1700 lines, list, wizard, detail, runs, access warnings)
 │       │   └── SetupWizard.tsx # First-run setup flow
@@ -111,7 +111,14 @@ Kronn/
 │       │   ├── api.ts          # API client (typed wrappers + SSE streaming helpers)
 │       │   ├── i18n.ts         # Lightweight i18n system (fr/en/es). Translation dictionaries + locale persistence (localStorage)
 │       │   ├── I18nContext.tsx  # React context provider for UI locale (useT() hook)
-│       │   └── constants.ts    # Shared constants: AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES, agentColor()
+│       │   ├── constants.ts    # Shared constants: AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES, agentColor()
+│       │   ├── tts-engine.ts   # TTS playback engine: pause/resume/stop, sentence pipelining, SpeechSynthesis fallback
+│       │   ├── tts-utils.ts    # Markdown→speech text cleaning + sentence splitting
+│       │   ├── tts-models.ts   # Piper voice definitions (9 voices, 3 langs) + localStorage persistence
+│       │   ├── tts-worker.ts   # Web Worker: Piper WASM inference (@diffusionstudio/vits-web)
+│       │   ├── stt-engine.ts   # STT recording: audio resampling 16kHz, Whisper worker communication
+│       │   ├── stt-models.ts   # Whisper model definitions (tiny/base/small) + localStorage persistence
+│       │   └── stt-worker.ts   # Web Worker: Whisper WASM inference (@huggingface/transformers)
 │       ├── types/
 │       │   └── generated.ts    # Auto-generated from Rust models (DO NOT EDIT)
 │       ├── test/
@@ -161,10 +168,11 @@ Kronn/
 ## Notes
 - `README.md` is not guaranteed to be up-to-date; prefer actual config files as source of truth.
 - `frontend/src/types/generated.ts` is auto-generated — never edit manually.
-- Dashboard.tsx (~750 lines) is the main UI shell with projects tab (collapsible accordion sections, bootstrap modal), nav bar. Extracted: SettingsPage.tsx (~670 lines), DiscussionsPage.tsx (~1420 lines), McpPage.tsx (~715 lines), WorkflowsPage.tsx (~1700 lines).
-- DiscussionsPage includes: SwipeableDiscItem (swipe-to-archive/delete), inline title editing, disabled agent detection, multi-line textarea, archive section.
+- Dashboard.tsx (~1625 lines) is the main UI shell with projects tab (collapsible accordion sections, bootstrap modal), nav bar. Extracted: SettingsPage.tsx (~1830 lines), DiscussionsPage.tsx (~2900 lines), McpPage.tsx (~715 lines), WorkflowsPage.tsx (~1700 lines).
+- DiscussionsPage includes: SwipeableDiscItem (swipe-to-archive/delete), inline title editing, disabled agent detection, multi-line textarea, archive section, TTS/STT integration, voice conversation mode.
+- TTS/STT logic extracted into `lib/tts-*.ts` and `lib/stt-*.ts` modules (7 files, ~400 lines total). Web Workers for WASM inference run off the main thread.
 - Shared constants (AGENT_COLORS, AGENT_LABELS) extracted to `lib/constants.ts` — imported by Dashboard and WorkflowsPage.
-- Frontend tests in `__tests__/` directories alongside source (15 suites, 155+ tests). See `ai/testing-quality.md`.
+- Frontend tests in `__tests__/` directories alongside source (22 suites, 298 tests). See `ai/testing-quality.md`.
 - Shell tests in `tests/bats/` (8 suites, 186 tests via bats-core). See `ai/testing-quality.md`.
 - CI pipeline: `.github/workflows/ci-test.yml` triggered on push to main + all PRs (backend clippy/test + frontend tsc/test + shell bats + security scan).
 - `templates/` directory contains the AI context template files (ai/ skeleton, CLAUDE.md, .cursorrules, etc.) mounted at `/app/templates:ro` in Docker.

@@ -11,8 +11,10 @@ import {
   HardDrive, Plus, Trash2, Download, Upload, Check,
   Loader2, RefreshCw, X, Eye, EyeOff, Play, StopCircle,
   ExternalLink, ChevronRight, Layers, FolderSearch, Filter, UserCircle, FileText,
-  Shield, Globe, Copy, Server,
+  Shield, Globe, Copy, Server, Mic, Volume2,
 } from 'lucide-react';
+import { STT_MODELS, getSttModelId, setSttModelId } from '../lib/stt-models';
+import { TTS_VOICES, getTtsVoiceId, setTtsVoiceId } from '../lib/tts-models';
 import { setAuthToken } from '../lib/api';
 
 /** Output languages for agents (sent to backend, not related to UI i18n) */
@@ -62,6 +64,7 @@ export function SettingsPage({
   const { t, locale, setLocale } = useT();
 
   // Internal state
+  const [, setForceRender] = useState(0);
   const [installing, setInstalling] = useState<string | null>(null);
   const [newKeyInputs, setNewKeyInputs] = useState<Record<string, { name: string; value: string }>>({});
   const [addingKeyFor, setAddingKeyFor] = useState<string | null>(null);
@@ -159,8 +162,31 @@ export function SettingsPage({
       <h1 style={ss.h1}>Configuration</h1>
       <p style={{ ...ss.meta, marginBottom: 20 }}>{t('config.subtitle')}</p>
 
+      {/* Section navigation */}
+      <div style={{ position: 'sticky', top: 0, zIndex: 10, background: '#0a0c10', padding: '10px 0 8px', marginBottom: 12, display: 'flex', gap: 6, overflowX: 'auto', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+        {[
+          { id: 'settings-languages', label: 'Languages' },
+          { id: 'settings-voice', label: 'Voice' },
+          { id: 'settings-scan', label: 'Scan' },
+          { id: 'settings-agents', label: 'Agents' },
+          { id: 'settings-skills', label: 'Skills' },
+          { id: 'settings-profiles', label: 'Profiles' },
+          { id: 'settings-directives', label: 'Directives' },
+          { id: 'settings-server', label: 'Server' },
+          { id: 'settings-database', label: 'Database' },
+        ].map(s => (
+          <button
+            key={s.id}
+            style={{ padding: '5px 12px', borderRadius: 20, border: '1px solid rgba(255,255,255,0.08)', background: 'transparent', color: 'rgba(255,255,255,0.45)', cursor: 'pointer', fontSize: 11, fontFamily: 'inherit', whiteSpace: 'nowrap' }}
+            onClick={() => document.getElementById(s.id)?.scrollIntoView({ behavior: 'smooth' })}
+          >
+            {s.label}
+          </button>
+        ))}
+      </div>
+
       {/* UI Language */}
-      <div style={ss.card(false)}>
+      <div id="settings-languages" style={ss.card(false)}>
         <div style={{ padding: '16px 20px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
             <MessageSquare size={14} style={{ color: '#c8ff00' }} />
@@ -222,8 +248,108 @@ export function SettingsPage({
         </div>
       </div>
 
+      {/* Voice (STT model selection) */}
+      <div id="settings-voice" style={ss.card(false)}>
+        <div style={{ padding: '16px 20px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
+            <Mic size={14} style={{ color: '#c8ff00' }} />
+            <span style={{ fontWeight: 600, fontSize: 14 }}>Voice</span>
+          </div>
+
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+              <Mic size={12} style={{ color: 'rgba(255,255,255,0.4)' }} />
+              <span style={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.6)' }}>Speech-to-Text (Whisper)</span>
+            </div>
+            <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', marginBottom: 10, lineHeight: 1.4 }}>
+              100% local via Whisper WASM. Le modèle est téléchargé au premier usage puis caché dans le navigateur.
+            </p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {STT_MODELS.map(m => {
+                const active = getSttModelId() === m.id;
+                return (
+                  <button
+                    key={m.id}
+                    onClick={() => { setSttModelId(m.id); /* force re-render */ setForceRender(x => x + 1); }}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px',
+                      borderRadius: 8, cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit',
+                      background: active ? 'rgba(200,255,0,0.06)' : 'rgba(255,255,255,0.02)',
+                      border: active ? '1px solid rgba(200,255,0,0.2)' : '1px solid rgba(255,255,255,0.06)',
+                      transition: 'border-color 0.15s, background 0.15s',
+                    }}
+                  >
+                    <div style={{
+                      width: 16, height: 16, borderRadius: '50%', flexShrink: 0,
+                      border: active ? '5px solid #c8ff00' : '2px solid rgba(255,255,255,0.2)',
+                      background: active ? '#c8ff00' : 'transparent',
+                      transition: 'all 0.15s',
+                    }} />
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: active ? '#e8eaed' : 'rgba(255,255,255,0.6)' }}>
+                        {m.label}
+                        <span style={{ fontSize: 10, fontWeight: 400, color: 'rgba(255,255,255,0.3)', marginLeft: 8 }}>{m.size}</span>
+                      </div>
+                      <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', marginTop: 2 }}>{m.description}</div>
+                    </div>
+                    {active && <Check size={14} style={{ color: '#c8ff00', flexShrink: 0 }} />}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+              <Volume2 size={12} style={{ color: 'rgba(255,255,255,0.4)' }} />
+              <span style={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.6)' }}>Text-to-Speech (Piper)</span>
+            </div>
+            <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', marginBottom: 12, lineHeight: 1.4 }}>
+              100% local via Piper WASM. Activable via le bouton volume dans les discussions.
+              Le modèle est téléchargé au premier usage (~50 MB) puis caché dans le navigateur.
+            </p>
+            {Object.entries(TTS_VOICES).map(([lang, lv]) => (
+              <div key={lang} style={{ marginBottom: 12 }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.45)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                  {lv.label}
+                </div>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  {lv.voices.map(v => {
+                    const active = getTtsVoiceId(lang) === v.id;
+                    return (
+                      <button
+                        key={v.id}
+                        onClick={() => { setTtsVoiceId(lang, v.id); setForceRender(x => x + 1); }}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px',
+                          borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', fontSize: 12,
+                          background: active ? 'rgba(200,255,0,0.06)' : 'rgba(255,255,255,0.02)',
+                          border: active ? '1px solid rgba(200,255,0,0.2)' : '1px solid rgba(255,255,255,0.06)',
+                          color: active ? '#e8eaed' : 'rgba(255,255,255,0.5)',
+                          transition: 'border-color 0.15s, background 0.15s',
+                        }}
+                      >
+                        <span style={{
+                          fontSize: 9, fontWeight: 700, padding: '1px 4px', borderRadius: 3,
+                          background: v.gender === 'F' ? 'rgba(236,72,153,0.15)' : 'rgba(59,130,246,0.15)',
+                          color: v.gender === 'F' ? '#ec4899' : '#3b82f6',
+                        }}>
+                          {v.gender === 'F' ? 'F' : 'M'}
+                        </span>
+                        {v.label}
+                        {active && <Check size={12} style={{ color: '#c8ff00' }} />}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
       {/* Scan (depth + paths + ignore) */}
-      <div style={ss.card(false)}>
+      <div id="settings-scan" style={ss.card(false)}>
         <div style={{ padding: '16px 20px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
             <FolderSearch size={14} style={{ color: '#c8ff00' }} />
@@ -238,7 +364,7 @@ export function SettingsPage({
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
               <Layers size={12} style={{ color: 'rgba(255,255,255,0.4)' }} />
               <span style={{ fontWeight: 600, fontSize: 12, color: 'rgba(255,255,255,0.6)' }}>{t('config.scanDepth')}</span>
-              <span style={{ fontSize: 12, color: '#c8ff00', marginLeft: 'auto', fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
+              <span style={{ fontSize: 12, fontWeight: 600, color: '#c8ff00', minWidth: 24, textAlign: 'center' as const, marginLeft: 'auto' }}>
                 {scanDepth}
               </span>
             </div>
@@ -388,7 +514,7 @@ export function SettingsPage({
       </div>
 
       {/* Agents */}
-      <div style={ss.card(false)}>
+      <div id="settings-agents" style={ss.card(false)}>
         <div style={{ padding: '16px 20px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
             <Cpu size={14} style={{ color: '#c8ff00' }} />
@@ -926,9 +1052,9 @@ export function SettingsPage({
       </div>
 
       {/* Skills */}
-      <div style={ss.card(false)}>
+      <div id="settings-skills" style={ss.card(false)}>
         <div style={{ padding: '16px 20px' }}>
-          <h2 style={{ fontSize: 14, fontWeight: 700, color: '#e8eaed', marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <h2 style={{ fontSize: 14, fontWeight: 700, color: '#e8eaed', marginBottom: 16, display: 'flex', alignItems: 'center', gap: 12 }}>
             <Zap size={16} style={{ color: '#c8ff00' }} /> {t('skills.title')}
           </h2>
 
@@ -998,11 +1124,11 @@ export function SettingsPage({
             <div style={{ padding: 16, borderRadius: 8, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.1)' }}>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
                 <div>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('skills.name')}</label>
+                  <label style={ss.formLabel}>{t('skills.name')}</label>
                   <input style={ss.input} value={newSkillName} onChange={e => setNewSkillName(e.target.value)} placeholder="My Skill" />
                 </div>
                 <div>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('skills.category')}</label>
+                  <label style={ss.formLabel}>{t('skills.category')}</label>
                   <select
                     style={{ ...ss.input, cursor: 'pointer' }}
                     value={newSkillCategory}
@@ -1015,15 +1141,15 @@ export function SettingsPage({
                 </div>
               </div>
               <div style={{ marginBottom: 10 }}>
-                <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('skills.description')}</label>
+                <label style={ss.formLabel}>{t('skills.description')}</label>
                 <input style={ss.input} value={newSkillDesc} onChange={e => setNewSkillDesc(e.target.value)} placeholder={t('skills.descriptionPlaceholder')} />
               </div>
               <div style={{ marginBottom: 10 }}>
-                <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('skills.icon')}</label>
+                <label style={ss.formLabel}>{t('skills.icon')}</label>
                 <input style={ss.input} value={newSkillIcon} onChange={e => setNewSkillIcon(e.target.value)} placeholder="Star, Code, Shield..." />
               </div>
               <div style={{ marginBottom: 10 }}>
-                <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('skills.content')}</label>
+                <label style={ss.formLabel}>{t('skills.content')}</label>
                 <textarea
                   style={{ ...ss.input, minHeight: 120, resize: 'vertical' as const, fontFamily: 'monospace', fontSize: 12, lineHeight: 1.5 }}
                   value={newSkillContent}
@@ -1067,9 +1193,9 @@ export function SettingsPage({
       </div>
 
       {/* Agent Profiles */}
-      <div style={ss.card(false)}>
+      <div id="settings-profiles" style={ss.card(false)}>
         <div style={{ padding: '16px 20px' }}>
-          <h2 style={{ fontSize: 14, fontWeight: 700, color: '#e8eaed', marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <h2 style={{ fontSize: 14, fontWeight: 700, color: '#e8eaed', marginBottom: 16, display: 'flex', alignItems: 'center', gap: 12 }}>
             <UserCircle size={16} style={{ color: '#a78bfa' }} /> {t('profiles.title')}
           </h2>
 
@@ -1216,21 +1342,21 @@ export function SettingsPage({
             <div style={{ padding: 16, borderRadius: 8, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.1)' }}>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
                 <div>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('profiles.name')}</label>
+                  <label style={ss.formLabel}>{t('profiles.name')}</label>
                   <input style={ss.input} value={newProfileName} onChange={e => setNewProfileName(e.target.value)} placeholder="Architect, QA Lead..." />
                 </div>
                 <div>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('profiles.personaName')}</label>
+                  <label style={ss.formLabel}>{t('profiles.personaName')}</label>
                   <input style={ss.input} value={newProfilePersonaName} onChange={e => setNewProfilePersonaName(e.target.value)} placeholder="Leo, Mia, Sam..." />
                 </div>
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
                 <div>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('profiles.role')}</label>
+                  <label style={ss.formLabel}>{t('profiles.role')}</label>
                   <input style={ss.input} value={newProfileRole} onChange={e => setNewProfileRole(e.target.value)} placeholder="Software Architect, QA Engineer..." />
                 </div>
                 <div>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('profiles.category')}</label>
+                  <label style={ss.formLabel}>{t('profiles.category')}</label>
                   <select
                     style={{ ...ss.input, cursor: 'pointer' }}
                     value={newProfileCategory}
@@ -1244,17 +1370,17 @@ export function SettingsPage({
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: '60px 1fr 80px', gap: 10, marginBottom: 10 }}>
                 <div>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('profiles.avatar')}</label>
+                  <label style={ss.formLabel}>{t('profiles.avatar')}</label>
                   <input style={{ ...ss.input, textAlign: 'center' as const, fontSize: 20, padding: '4px' }} value={newProfileAvatar} onChange={e => setNewProfileAvatar(e.target.value)} placeholder="🤖" />
                 </div>
                 <div />
                 <div>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('profiles.color')}</label>
+                  <label style={ss.formLabel}>{t('profiles.color')}</label>
                   <input style={{ ...ss.input, width: '100%', height: 34, padding: 2, cursor: 'pointer' }} type="color" value={newProfileColor} onChange={e => setNewProfileColor(e.target.value)} />
                 </div>
               </div>
               <div style={{ marginBottom: 10 }}>
-                <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('profiles.persona')}</label>
+                <label style={ss.formLabel}>{t('profiles.persona')}</label>
                 <textarea
                   style={{ ...ss.input, minHeight: 120, resize: 'vertical' as const, fontFamily: 'monospace', fontSize: 12, lineHeight: 1.5 }}
                   value={newProfilePersona}
@@ -1300,9 +1426,9 @@ export function SettingsPage({
       </div>
 
       {/* ── Directives (HOW) ── */}
-      <div style={ss.card(false)}>
+      <div id="settings-directives" style={ss.card(false)}>
         <div style={{ padding: '16px 20px' }}>
-          <h2 style={{ fontSize: 14, fontWeight: 700, color: '#e8eaed', marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <h2 style={{ fontSize: 14, fontWeight: 700, color: '#e8eaed', marginBottom: 16, display: 'flex', alignItems: 'center', gap: 12 }}>
             <FileText size={16} style={{ color: '#f59e0b' }} /> {t('directives.title')}
           </h2>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 16, maxHeight: 400, overflowY: 'auto', overflowX: 'hidden' }}>
@@ -1379,11 +1505,11 @@ export function SettingsPage({
             <div style={{ padding: 16, borderRadius: 8, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.1)' }}>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
                 <div>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('directives.name')}</label>
+                  <label style={ss.formLabel}>{t('directives.name')}</label>
                   <input style={ss.input} value={newDirectiveName} onChange={e => setNewDirectiveName(e.target.value)} placeholder="My Directive" />
                 </div>
                 <div>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('directives.category')}</label>
+                  <label style={ss.formLabel}>{t('directives.category')}</label>
                   <select
                     style={{ ...ss.input, cursor: 'pointer' }}
                     value={newDirectiveCategory}
@@ -1395,21 +1521,21 @@ export function SettingsPage({
                 </div>
               </div>
               <div style={{ marginBottom: 10 }}>
-                <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('directives.description')}</label>
+                <label style={ss.formLabel}>{t('directives.description')}</label>
                 <input style={ss.input} value={newDirectiveDesc} onChange={e => setNewDirectiveDesc(e.target.value)} placeholder={t('directives.descriptionPlaceholder')} />
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
                 <div>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('directives.icon')}</label>
+                  <label style={ss.formLabel}>{t('directives.icon')}</label>
                   <input style={ss.input} value={newDirectiveIcon} onChange={e => setNewDirectiveIcon(e.target.value)} placeholder="📋, 🔇, 📊..." />
                 </div>
                 <div>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('directives.conflicts')}</label>
+                  <label style={ss.formLabel}>{t('directives.conflicts')}</label>
                   <input style={ss.input} value={newDirectiveConflicts} onChange={e => setNewDirectiveConflicts(e.target.value)} placeholder="token-saver, verbose..." />
                 </div>
               </div>
               <div style={{ marginBottom: 10 }}>
-                <label style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 }}>{t('directives.content')}</label>
+                <label style={ss.formLabel}>{t('directives.content')}</label>
                 <textarea
                   style={{ ...ss.input, minHeight: 120, resize: 'vertical' as const, fontFamily: 'monospace', fontSize: 12, lineHeight: 1.5 }}
                   value={newDirectiveContent}
@@ -1454,7 +1580,7 @@ export function SettingsPage({
       </div>
 
       {/* Server & Security */}
-      <div style={ss.card(false)}>
+      <div id="settings-server" style={ss.card(false)}>
         <div style={{ padding: '16px 20px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
             <Server size={14} style={{ color: '#c8ff00' }} />
@@ -1554,20 +1680,22 @@ export function SettingsPage({
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
               <Cpu size={12} style={{ color: 'rgba(255,255,255,0.5)' }} />
               <span style={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.6)' }}>{t('config.maxAgents')}</span>
-              <span style={{ fontSize: 11, fontWeight: 700, color: '#c8ff00', marginLeft: 4 }}>{serverMaxAgents}</span>
             </div>
-            <input
-              type="range"
-              min={1}
-              max={20}
-              value={serverMaxAgents}
-              onChange={async e => {
-                const v = Number(e.target.value);
-                setServerMaxAgents(v);
-                try { await configApi.setServerConfig({ max_concurrent_agents: v }); } catch {}
-              }}
-              style={{ width: '100%', accentColor: '#c8ff00' }}
-            />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <input
+                type="range"
+                min={1}
+                max={20}
+                value={serverMaxAgents}
+                onChange={async e => {
+                  const v = Number(e.target.value);
+                  setServerMaxAgents(v);
+                  try { await configApi.setServerConfig({ max_concurrent_agents: v }); } catch {}
+                }}
+                style={{ flex: 1, accentColor: '#c8ff00', cursor: 'pointer' }}
+              />
+              <span style={{ fontSize: 12, fontWeight: 600, color: '#c8ff00', minWidth: 24, textAlign: 'center' }}>{serverMaxAgents}</span>
+            </div>
             <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', marginTop: 4 }}>
               {t('config.maxAgentsHint')}
             </div>
@@ -1576,7 +1704,7 @@ export function SettingsPage({
       </div>
 
       {/* Database */}
-      <div style={ss.card(false)}>
+      <div id="settings-database" style={ss.card(false)}>
         <div style={{ padding: '16px 20px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
             <HardDrive size={14} style={{ color: '#c8ff00' }} />
@@ -1591,7 +1719,7 @@ export function SettingsPage({
           </div>
 
           {dbInfo && (
-            <div style={{ display: 'flex', gap: 16, marginBottom: 16 }}>
+            <div style={{ display: 'flex', gap: 16, marginBottom: 16, flexWrap: 'wrap' }}>
               {[
                 { label: t('config.dbProjects'), value: dbInfo.project_count },
                 { label: t('config.dbDiscussions'), value: dbInfo.discussion_count },
@@ -1691,14 +1819,15 @@ export function SettingsPage({
 const ss = {
   h1: { fontSize: 20, fontWeight: 700, letterSpacing: '-0.02em' } as const,
   meta: { color: 'rgba(255,255,255,0.4)', fontSize: 12, marginTop: 4 } as const,
-  card: (active: boolean) => ({ background: '#12151c', border: `1px solid ${active ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.07)'}`, borderRadius: 10, marginBottom: 12, transition: 'border-color 0.2s' } as const),
+  formLabel: { fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: 4 } as const,
+  card: (active: boolean) => ({ background: '#12151c', border: `1px solid ${active ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.07)'}`, borderRadius: 10, marginBottom: 10, transition: 'border-color 0.2s, box-shadow 0.2s' } as const),
   iconBtn: { background: 'none', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 4, padding: '4px 8px', color: 'rgba(255,255,255,0.5)', cursor: 'pointer', display: 'flex', alignItems: 'center', fontSize: 11 } as const,
   dot: (on: boolean) => ({ width: 7, height: 7, borderRadius: '50%', background: on ? '#34d399' : 'rgba(255,255,255,0.15)', boxShadow: on ? '0 0 6px rgba(52,211,153,0.4)' : 'none', flexShrink: 0 } as const),
   originBadge: { fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 4, background: 'rgba(100,180,255,0.1)', color: 'rgba(100,180,255,0.7)', border: '1px solid rgba(100,180,255,0.15)' } as const,
   code: { fontSize: 11, fontFamily: 'JetBrains Mono, monospace', background: 'rgba(255,255,255,0.06)', padding: '2px 6px', borderRadius: 4 } as const,
   updateBadge: { fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 4, background: 'rgba(255,200,0,0.1)', color: '#ffc800', marginLeft: 6 } as const,
   installBtn: { padding: '6px 14px', background: 'rgba(200,255,0,0.1)', color: '#c8ff00', border: '1px solid rgba(200,255,0,0.2)', borderRadius: 6, fontSize: 12, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'inherit' } as const,
-  input: { width: '100%', padding: '8px 12px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 6, color: '#e8eaed', fontSize: 12, fontFamily: 'inherit' } as const,
+  input: { width: '100%', padding: '8px 12px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 6, color: '#e8eaed', fontSize: 12, fontFamily: 'inherit', outline: 'none' } as const,
   scanBtn: { padding: '7px 14px', borderRadius: 6, border: '1px solid rgba(200,255,0,0.2)', background: 'rgba(200,255,0,0.05)', color: '#c8ff00', cursor: 'pointer', fontSize: 12, fontFamily: 'inherit', fontWeight: 500, display: 'flex', alignItems: 'center', gap: 6 } as const,
   dangerBtn: { background: 'rgba(255,77,106,0.08)', border: '1px solid rgba(255,77,106,0.2)', borderRadius: 6, padding: '6px 14px', color: '#ff4d6a', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, fontFamily: 'inherit' } as const,
 };
