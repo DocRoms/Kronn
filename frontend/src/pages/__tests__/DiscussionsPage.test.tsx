@@ -2,6 +2,26 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, act, cleanup, fireEvent } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
 
+// Mock SpeechSynthesis API
+const mockCancel = vi.fn();
+const mockSpeak = vi.fn();
+const mockGetVoices = vi.fn().mockReturnValue([]);
+Object.defineProperty(window, 'speechSynthesis', {
+  value: { cancel: mockCancel, speak: mockSpeak, getVoices: mockGetVoices, speaking: false },
+  writable: true,
+  configurable: true,
+});
+
+// Mock SpeechSynthesisUtterance (not available in jsdom)
+class MockUtterance {
+  text: string;
+  lang = '';
+  rate = 1;
+  voice: any = null;
+  constructor(text: string) { this.text = text; }
+}
+(globalThis as any).SpeechSynthesisUtterance = MockUtterance;
+
 // Mock API — DiscussionsPage uses discussions, projects, and skills APIs
 vi.mock('../../lib/api', () => ({
   discussions: {
@@ -11,6 +31,7 @@ vi.mock('../../lib/api', () => ({
     delete: vi.fn(),
     update: vi.fn(),
     sendMessage: vi.fn(),
+    sendMessageStream: vi.fn().mockResolvedValue(undefined),
     run: vi.fn(),
     runAgent: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn(),
@@ -528,6 +549,212 @@ describe('DiscussionsPage', () => {
     // Should show org group headers
     expect(body).toContain('Euronews-tech');
     expect(body).toContain('DocRoms');
+  });
+
+  // ─── TTS feature tests ──────────────────────────────────────────────────
+
+  it('renders TTS toggle button in chat input area', async () => {
+    const fullDisc: Discussion = {
+      ...makeListDiscussion('d1', 1),
+      messages: [
+        { id: 'm1', role: 'User', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[{ ...makeListDiscussion('d1', 1), messages: fullDisc.messages }]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d1"
+        {...liftedProps()}
+      />
+    );
+
+    // TTS toggle button should exist with the "Activer" title (disabled by default)
+    const ttsBtn = document.querySelector('button[title="Activer la lecture vocale"]');
+    expect(ttsBtn).toBeTruthy();
+  });
+
+  it('persists TTS preference to localStorage when toggled', async () => {
+    localStorage.removeItem('kronn:ttsEnabled');
+
+    const fullDisc: Discussion = {
+      ...makeListDiscussion('d1', 1),
+      messages: [
+        { id: 'm1', role: 'User', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[{ ...makeListDiscussion('d1', 1), messages: fullDisc.messages }]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d1"
+        {...liftedProps()}
+      />
+    );
+
+    // Initially TTS is off
+    expect(localStorage.getItem('kronn:ttsEnabled')).toBe('false');
+
+    // Click the TTS toggle button
+    const ttsBtn = document.querySelector('button[title="Activer la lecture vocale"]') as HTMLButtonElement;
+    await act(async () => { fireEvent.click(ttsBtn); });
+
+    // After toggle, it should be persisted as 'true'
+    expect(localStorage.getItem('kronn:ttsEnabled')).toBe('true');
+
+    // Button title should now say "Désactiver"
+    const ttsBtnAfter = document.querySelector('button[title="Désactiver la lecture vocale"]');
+    expect(ttsBtnAfter).toBeTruthy();
+  });
+
+  it('shows TTS play button on agent messages', async () => {
+    const fullDisc: Discussion = {
+      ...makeListDiscussion('d1', 2),
+      messages: [
+        { id: 'm1', role: 'User', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm2', role: 'Agent', content: 'Bonjour!', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:01Z', tokens_used: 50, auth_mode: null },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[{ ...makeListDiscussion('d1', 2), messages: fullDisc.messages }]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d1"
+        {...liftedProps()}
+      />
+    );
+
+    // Per-message TTS play button should be present on agent messages
+    const ttsPlayBtn = document.querySelector('button[title="Lire à voix haute"]');
+    expect(ttsPlayBtn).toBeTruthy();
+  });
+
+  it('calls speechSynthesis.speak when per-message TTS button is clicked', async () => {
+    mockSpeak.mockClear();
+    mockCancel.mockClear();
+
+    const fullDisc: Discussion = {
+      ...makeListDiscussion('d1', 2),
+      messages: [
+        { id: 'm1', role: 'User', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm2', role: 'Agent', content: 'Bonjour le monde!', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:01Z', tokens_used: 50, auth_mode: null },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[{ ...makeListDiscussion('d1', 2), messages: fullDisc.messages }]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d1"
+        {...liftedProps()}
+      />
+    );
+
+    const ttsPlayBtn = document.querySelector('button[title="Lire à voix haute"]') as HTMLButtonElement;
+    await act(async () => { fireEvent.click(ttsPlayBtn); });
+
+    // speechSynthesis.cancel should be called first (to stop any ongoing speech)
+    expect(mockCancel).toHaveBeenCalled();
+    // speechSynthesis.speak should be called with an utterance
+    expect(mockSpeak).toHaveBeenCalledWith(expect.any(SpeechSynthesisUtterance));
+  });
+
+  it('cancels speech when sending a new message', async () => {
+    mockCancel.mockClear();
+
+    const claudeAgent: AgentDetection = {
+      name: 'Claude Code',
+      agent_type: 'ClaudeCode',
+      installed: true,
+      enabled: true,
+      path: '/usr/bin/claude',
+      version: '1.0.0',
+      latest_version: null,
+      origin: 'host',
+      install_command: null,
+      host_managed: false,
+      host_label: null,
+      runtime_available: false,
+    };
+
+    const fullDisc: Discussion = {
+      ...makeListDiscussion('d1', 1),
+      messages: [
+        { id: 'm1', role: 'User', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+    // Mock sendMessageStream: capture the onSent callback and call it, then resolve
+    vi.mocked(discussionsApi.sendMessageStream).mockImplementation(
+      async (_discId: any, _payload: any, _onText: any, onDone: any, _onError: any, _signal: any, onSent: any) => {
+        if (onSent) onSent();
+        if (onDone) onDone();
+      },
+    );
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[claudeAgent]}
+        allDiscussions={[{ ...makeListDiscussion('d1', 1), messages: fullDisc.messages }]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d1"
+        {...liftedProps()}
+      />
+    );
+
+    // Type a message in the chat input
+    const chatInput = document.querySelector('textarea') as HTMLTextAreaElement;
+    expect(chatInput).toBeTruthy();
+    await act(async () => { fireEvent.change(chatInput, { target: { value: 'New message' } }); });
+
+    // Click send button
+    const sendBtn = document.querySelector('button[aria-label="Send message"]') as HTMLButtonElement;
+    expect(sendBtn).toBeTruthy();
+    await act(async () => { fireEvent.click(sendBtn); });
+
+    // speechSynthesis.cancel should have been called when sending the message
+    expect(mockCancel).toHaveBeenCalled();
   });
 
   it('creates a new discussion via the form', async () => {

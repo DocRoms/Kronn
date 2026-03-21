@@ -1,0 +1,7 @@
+# Fix GitHub language detection (Linguist)
+# TSX files are TypeScript, not HTML
+*.tsx linguist-language=TypeScript
+
+# Generated files — exclude from language stats
+frontend/src/types/generated.ts linguist-generated=true
+backend/bindings/*.ts linguist-generated=true

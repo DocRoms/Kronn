@@ -78,6 +78,7 @@ function LoadingScreen() {
         Entering the grid...
       </span>
       <style>{`@keyframes spin { to { transform: rotate(360deg) } }
+@keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.3 } }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;

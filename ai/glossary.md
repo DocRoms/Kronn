@@ -163,13 +163,33 @@ Project-specific terms. For deep dives, follow the linked `ai/architecture/` fil
 
 **runtime_available** — Boolean on `AgentDetection`. True when the agent is runnable via npx/uvx fallback even without a local binary. Probed with a 15s timeout, cached for 5 minutes. Frontend helper: `isUsable(agent) = (installed || runtime_available) && enabled`.
 
+## Voice (TTS / STT)
+
+**TTS (Text-to-Speech)** — 100% local speech synthesis via Piper WASM (`@diffusionstudio/vits-web`). Converts agent markdown responses to natural speech. Sentence-by-sentence pipelining: synthesizes sentence N+1 while sentence N plays. Supports pause/resume. 9 voices across FR/EN/ES (male and female). Voice selection persisted per-language in localStorage. Falls back to browser SpeechSynthesis if WASM fails.
+
+**STT (Speech-to-Text)** — 100% local speech recognition via Whisper WASM (`@huggingface/transformers`). Records microphone via MediaRecorder API, resamples to mono 16kHz Float32, transcribes via Web Worker. Three model sizes configurable in Settings: Tiny (~40MB), Base (~140MB), Small (~460MB). Model downloaded on first use, cached in IndexedDB.
+
+**Voice conversation mode** — Hands-free auto-cycle: user speaks → stop recording → auto-send → agent responds → TTS reads response → countdown 3-2-1 → mic auto-starts → repeat. Toggled via phone icon in composer toolbar. Cancellable at any point.
+
+**TTS engine** — Module `lib/tts-engine.ts`. Manages generation-based cancellation (ttsGeneration counter), pause/resume state, sentence pipelining, and SpeechSynthesis fallback. Exported: `speakText()`, `stopTts()`, `pauseTts()`, `resumeTts()`, `isTtsPaused()`.
+
+**STT engine** — Module `lib/stt-engine.ts`. Exports `audioBufferToFloat32()` (mono downmix + 16kHz resampling) and `transcribeAudio()` (worker communication with timeout).
+
+**stripMarkdown()** — `lib/tts-utils.ts`. Converts markdown to natural speech text: headings get periods, bullet items get commas, numbered items get periods, code blocks removed, URLs → "lien", file paths → filename only, snake_case/camelCase → spaced words. Preserves meaning.
+
+**splitSentences()** — `lib/tts-utils.ts`. Splits text on `.!?:;` for sentence-by-sentence TTS pipelining. Merges fragments < 10 chars with previous sentence.
+
+**Piper voices** — Defined in `lib/tts-models.ts`. FR: UPMC (M), Siwis (F), Tom (M). EN: HFC Female (F), HFC Male (M), Lessac (F). ES: Sharvard (M), DaveFX (M), Ald MX (F). Selection stored in `localStorage('kronn:ttsVoice:<lang>')`.
+
+**Whisper models** — Defined in `lib/stt-models.ts`. IDs: `onnx-community/whisper-tiny`, `whisper-base`, `whisper-small`. Selection stored in `localStorage('kronn:sttModel')`. Default: tiny.
+
 ## UI
 
-**Dashboard** — Main UI shell (~750 lines, `Dashboard.tsx`) with tabs: Projets, Discussions, MCPs, Workflows, Config. Each tab delegates to a sub-page. Project cards have collapsible accordion sections (Discussions, Doc AI, MCPs, Workflows, Skills, AI Context) with smart defaults based on audit status. Bootstrap modal for creating new projects from scratch.
+**Dashboard** — Main UI shell (~1625 lines, `Dashboard.tsx`) with tabs: Projets, Discussions, MCPs, Workflows, Config. Each tab delegates to a sub-page. Project cards have collapsible accordion sections (Discussions, Doc AI, MCPs, Workflows, Skills, AI Context) with smart defaults based on audit status. Bootstrap modal for creating new projects from scratch.
 
-**SettingsPage** — Extracted settings page (~670 lines, `SettingsPage.tsx`): UI/output language, agents config, multi-key token management, usage stats, DB management.
+**SettingsPage** — Settings page (~1830 lines, `SettingsPage.tsx`): UI/output language, voice (STT model + TTS voice selection), agents config, multi-key token management, usage stats, DB management. Sticky section navigation with anchor pills.
 
-**DiscussionsPage** — Extracted discussions page (~1420 lines, `DiscussionsPage.tsx`): sidebar, chat, streaming, debate, archive/unarchive (swipe gestures), inline title editing, disabled agent detection.
+**DiscussionsPage** — Discussions page (~2900 lines, `DiscussionsPage.tsx`): sidebar, chat, streaming, debate, archive/unarchive (swipe gestures), inline title editing, disabled agent detection, TTS playback (per-message pause/resume), STT dictation (mic button), voice conversation mode (auto-cycle).
 
 **SwipeableDiscItem** — Component in DiscussionsPage for swipe-to-archive (right, blue) / swipe-to-delete (left, red) gestures on sidebar discussion items. Uses pointer events with 80px threshold.
 

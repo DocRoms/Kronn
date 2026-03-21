@@ -864,7 +864,7 @@ export function Dashboard({ onReset }: DashboardProps) {
               <div style={{ position: 'relative', marginBottom: 12 }}>
                 <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'rgba(255,255,255,0.25)', pointerEvents: 'none' }} />
                 <input
-                  style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 6, padding: '8px 12px 8px 32px', color: '#e8eaed', fontSize: 12, fontFamily: 'inherit', width: '100%' }}
+                  style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 6, padding: '8px 12px 8px 32px', color: '#e8eaed', fontSize: 12, fontFamily: 'inherit', width: '100%', boxSizing: 'border-box' as const }}
                   placeholder={t('projects.search')}
                   value={projectSearch}
                   onChange={(e) => setProjectSearch(e.target.value)}
@@ -920,9 +920,9 @@ export function Dashboard({ onReset }: DashboardProps) {
                     })}
                     aria-expanded={!isCollapsed}
                   >
-                    <ChevronDown size={12} style={{ color: groupColor, transform: isCollapsed ? 'rotate(-90deg)' : 'none', transition: 'transform 0.15s', flexShrink: 0 }} />
+                    <ChevronDown size={14} style={{ color: groupColor, transform: isCollapsed ? 'rotate(-90deg)' : 'none', transition: 'transform 0.15s', flexShrink: 0 }} />
                     <div style={{ width: 3, height: 14, borderRadius: 2, background: groupColor }} />
-                    <span style={{ fontSize: 11, fontWeight: 700, color: groupColor, letterSpacing: '0.03em' }}>
+                    <span style={{ fontSize: 11, fontWeight: 800, color: groupColor, letterSpacing: '0.03em' }}>
                       {currentGroup}
                     </span>
                     <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.55)' }}>
@@ -933,7 +933,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                   );
                 })()}
                 {collapsedGroups.has(currentGroup) ? null : (
-                <div id={`project-${proj.id}`} style={{ ...s.card(isOpen), opacity: projHidden ? 0.5 : 1 }}>
+                <div id={`project-${proj.id}`} style={{ ...s.card(isOpen || !!auditState[proj.id]?.active), opacity: projHidden ? 0.5 : 1 }}>
                   <button style={s.cardHeader} onClick={() => setExpandedId(isOpen ? null : proj.id)} aria-expanded={isOpen}>
                     <ChevronRight size={14} style={{ color: '#c8ff00', transform: isOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s' }} />
                     <div style={{ flex: 1 }}>
@@ -1578,21 +1578,21 @@ const s = {
   nav: { display: 'flex', alignItems: 'center', gap: 4, padding: '10px 16px', borderBottom: '1px solid rgba(255,255,255,0.07)', background: '#12151c', position: 'sticky' as const, top: 0, zIndex: 50 },
   navBrand: { display: 'flex', alignItems: 'center', gap: 8, marginRight: 20 } as const,
   navTitle: { fontWeight: 700, fontSize: 14, letterSpacing: '-0.02em' } as const,
-  navBtn: (active: boolean) => ({ padding: '7px 14px', borderRadius: 6, border: 'none', background: active ? 'rgba(200,255,0,0.1)' : 'transparent', color: active ? '#c8ff00' : 'rgba(255,255,255,0.45)', cursor: 'pointer', fontSize: 12, fontFamily: 'inherit', fontWeight: active ? 600 : 400, display: 'flex', alignItems: 'center', gap: 6 } as const),
-  scanBtn: { padding: '7px 14px', borderRadius: 6, border: '1px solid rgba(200,255,0,0.2)', background: 'rgba(200,255,0,0.05)', color: '#c8ff00', cursor: 'pointer', fontSize: 12, fontFamily: 'inherit', fontWeight: 500, display: 'flex', alignItems: 'center', gap: 6 } as const,
-  main: { maxWidth: 1000, margin: '0 auto', padding: '24px 20px' } as const,
+  navBtn: (active: boolean) => ({ padding: '7px 14px', borderRadius: 6, border: 'none', background: active ? 'rgba(200,255,0,0.1)' : 'transparent', color: active ? '#c8ff00' : 'rgba(255,255,255,0.5)', cursor: 'pointer', fontSize: 12, fontFamily: 'inherit', fontWeight: active ? 600 : 400, display: 'flex', alignItems: 'center', gap: 6, transition: 'background 0.15s, color 0.15s' } as const),
+  scanBtn: { padding: '7px 14px', borderRadius: 6, border: '1px solid rgba(200,255,0,0.25)', background: 'rgba(200,255,0,0.05)', color: '#c8ff00', cursor: 'pointer', fontSize: 12, fontFamily: 'inherit', fontWeight: 500, display: 'flex', alignItems: 'center', gap: 6, transition: 'background 0.15s, border-color 0.15s' } as const,
+  main: { maxWidth: 1000, margin: '0 auto', padding: '20px 16px' } as const,
   mainFull: { margin: 0, padding: '24px 20px', flex: 1 } as const,
   pageHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 } as const,
   h1: { fontSize: 20, fontWeight: 700, letterSpacing: '-0.02em' } as const,
   meta: { color: 'rgba(255,255,255,0.4)', fontSize: 12, marginTop: 4 } as const,
-  card: (active: boolean) => ({ background: '#12151c', border: `1px solid ${active ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.07)'}`, borderRadius: 10, marginBottom: 12, transition: 'border-color 0.2s' } as const),
-  cardHeader: { display: 'flex', alignItems: 'center', gap: 12, padding: '16px 20px', cursor: 'pointer', background: 'none', border: 'none', width: '100%', font: 'inherit', color: 'inherit', textAlign: 'left' as const } as const,
+  card: (active: boolean) => ({ background: '#12151c', border: `1px solid ${active ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.07)'}`, borderRadius: 10, marginBottom: 10, transition: 'border-color 0.2s' } as const),
+  cardHeader: { display: 'flex', alignItems: 'center', gap: 12, padding: '16px 20px', cursor: 'pointer', background: 'none', border: 'none', width: '100%', font: 'inherit', color: 'inherit', textAlign: 'left' as const, borderRadius: 10, transition: 'background 0.15s' } as const,
   cardBody: { padding: '0 20px 20px', borderTop: '1px solid rgba(255,255,255,0.05)' } as const,
   projName: { fontWeight: 600, fontSize: 14 } as const,
   projPath: { fontSize: 11, color: 'rgba(255,255,255,0.55)', fontFamily: 'JetBrains Mono, monospace', marginTop: 2 } as const,
   projMeta: { display: 'flex', gap: 14, fontSize: 11, color: 'rgba(255,255,255,0.4)', flexShrink: 0 } as const,
   metaItem: { display: 'flex', alignItems: 'center', gap: 4 } as const,
-  section: { marginTop: 16 } as const,
+  section: { marginTop: 14 } as const,
   sectionHeader: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, color: 'rgba(255,255,255,0.6)', fontSize: 12 } as const,
   collapsibleHeader: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, color: 'rgba(255,255,255,0.6)', fontSize: 12, cursor: 'pointer', userSelect: 'none' as const, padding: '4px 0', borderRadius: 4, background: 'none', border: 'none', width: '100%', font: 'inherit', textAlign: 'left' as const } as const,
   sectionTitle: { fontWeight: 600 } as const,
@@ -1602,12 +1602,12 @@ const s = {
   dot: (on: boolean) => ({ width: 7, height: 7, borderRadius: '50%', background: on ? '#34d399' : 'rgba(255,255,255,0.15)', boxShadow: on ? '0 0 6px rgba(52,211,153,0.4)' : 'none', flexShrink: 0 } as const),
   badge: { display: 'inline-block', padding: '2px 8px', borderRadius: 4, fontSize: 10, background: 'rgba(255,255,255,0.06)', color: 'rgba(255,255,255,0.5)' } as const,
   badgeGreen: { display: 'inline-flex', alignItems: 'center', gap: 3, padding: '2px 7px', borderRadius: 4, fontSize: 10, fontWeight: 600, background: 'rgba(200,255,0,0.1)', color: 'rgba(200,255,0,0.7)', border: '1px solid rgba(200,255,0,0.15)' } as const,
-  badgeOrange: { display: 'inline-flex', alignItems: 'center', gap: 3, padding: '2px 7px', borderRadius: 4, fontSize: 10, fontWeight: 600, background: 'rgba(255,200,0,0.08)', color: 'rgba(255,200,0,0.6)', border: '1px solid rgba(255,200,0,0.12)' } as const,
+  badgeOrange: { display: 'inline-flex', alignItems: 'center', gap: 3, padding: '2px 7px', borderRadius: 4, fontSize: 10, fontWeight: 600, background: 'rgba(255,200,0,0.08)', color: '#f59e0b', border: '1px solid rgba(245,158,11,0.2)' } as const,
   badgeGray: { display: 'inline-flex', alignItems: 'center', gap: 3, padding: '2px 7px', borderRadius: 4, fontSize: 10, fontWeight: 600, background: 'rgba(255,255,255,0.03)', color: 'rgba(255,255,255,0.55)', border: '1px solid rgba(255,255,255,0.05)' } as const,
   agentBadge: { display: 'inline-flex', alignItems: 'center', gap: 3, padding: '2px 7px', borderRadius: 4, fontSize: 10, fontWeight: 600, background: 'rgba(139,92,246,0.1)', color: 'rgba(139,92,246,0.7)', border: '1px solid rgba(139,92,246,0.15)' } as const,
-  iconBtn: { background: 'none', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 4, padding: '4px 8px', color: 'rgba(255,255,255,0.5)', cursor: 'pointer', display: 'flex', alignItems: 'center', fontSize: 11 } as const,
+  iconBtn: { background: 'none', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 4, padding: '4px 8px', color: 'rgba(255,255,255,0.55)', cursor: 'pointer', display: 'flex', alignItems: 'center', fontSize: 11, transition: 'background 0.15s, border-color 0.15s' } as const,
   dangerBtn: { background: 'rgba(255,77,106,0.08)', border: '1px solid rgba(255,77,106,0.2)', borderRadius: 6, padding: '6px 14px', color: '#ff4d6a', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, fontFamily: 'inherit' } as const,
-  installBtn: { padding: '6px 14px', background: 'rgba(200,255,0,0.1)', color: '#c8ff00', border: '1px solid rgba(200,255,0,0.2)', borderRadius: 6, fontSize: 12, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'inherit' } as const,
+  installBtn: { padding: '6px 14px', background: 'rgba(200,255,0,0.1)', color: '#c8ff00', border: '1px solid rgba(200,255,0,0.2)', borderRadius: 6, fontSize: 12, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'inherit', transition: 'background 0.15s, border-color 0.15s' } as const,
   input: { width: '100%', padding: '8px 12px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 6, color: '#e8eaed', fontSize: 12, fontFamily: 'inherit' } as const,
   mcpDropdown: { marginTop: 4, borderRadius: 8, border: '1px solid rgba(255,255,255,0.08)', background: '#181c26', overflow: 'hidden' } as const,
   mcpOption: { display: 'flex', alignItems: 'center', gap: 8, padding: '10px 12px', cursor: 'pointer', fontSize: 12, borderBottom: '1px solid rgba(255,255,255,0.04)' } as const,

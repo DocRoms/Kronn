@@ -11,7 +11,8 @@ import {
   Folder, ChevronRight, Cpu, GitBranch, Server,
   Plus, Trash2, Loader2,
   MessageSquare, Send, X, Key, AlertTriangle, Users,
-  StopCircle, RotateCcw, Pencil, ShieldCheck, Check, Archive, Zap, UserCircle, FileText, Settings, Rocket, Play,
+  StopCircle, RotateCcw, Pencil, ShieldCheck, Check, Archive, Zap, UserCircle, FileText, Settings, Rocket, Play, Pause,
+  Volume2, VolumeX, Mic, MicOff, Phone, PhoneOff,
 } from 'lucide-react';
 
 const isHiddenPath = (path: string) => path.split('/').some(s => s.startsWith('.'));
@@ -177,6 +178,32 @@ export interface DiscussionsPageProps {
   mcpIncompatibilities?: McpIncompatibility[];
 }
 
+// ─── TTS / STT imports ──
+import { speakText, stopTts, pauseTts, resumeTts, isTtsPaused } from '../lib/tts-engine';
+import { audioBufferToFloat32, transcribeAudio } from '../lib/stt-engine';
+
+let ttsWorker: Worker | null = null;
+function getTtsWorker(): Worker {
+  if (!ttsWorker) {
+    ttsWorker = new Worker(
+      new URL('../lib/tts-worker.ts', import.meta.url),
+      { type: 'module' }
+    );
+  }
+  return ttsWorker;
+}
+
+let sttWorker: Worker | null = null;
+function getSttWorker(): Worker {
+  if (!sttWorker) {
+    sttWorker = new Worker(
+      new URL('../lib/stt-worker.ts', import.meta.url),
+      { type: 'module' }
+    );
+  }
+  return sttWorker;
+}
+
 export function DiscussionsPage({
   projects,
   agents,
@@ -258,6 +285,19 @@ export function DiscussionsPage({
   const [newDiscBranchName, setNewDiscBranchName] = useState('');
   const [newDiscBaseBranch, setNewDiscBaseBranch] = useState('main');
   const [expandedSummaryMsgId, setExpandedSummaryMsgId] = useState<string | null>(null);
+  const [ttsEnabled, setTtsEnabled] = useState<boolean>(() => {
+    try { return localStorage.getItem('kronn:ttsEnabled') === 'true'; } catch { return false; }
+  });
+  const [ttsState, setTtsState] = useState<'idle' | 'loading' | 'playing' | 'paused'>('idle');
+  const [ttsPlayingMsgId, setTtsPlayingMsgId] = useState<string | null>(null);
+  const [sttState, setSttState] = useState<'idle' | 'recording' | 'transcribing'>('idle');
+  const [voiceMode, setVoiceMode] = useState(false);
+  const [voiceCountdown, setVoiceCountdown] = useState<number | null>(null);
+  const voiceCountdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const voiceAutoSendRef = useRef(false);
+  const handleSendMessageRef = useRef<(() => void) | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
 
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -266,6 +306,18 @@ export function DiscussionsPage({
   useEffect(() => {
     localStorage.setItem('kronn:discCollapsedGroups', JSON.stringify([...collapsedDiscGroups]));
   }, [collapsedDiscGroups]);
+
+  // Persist TTS preference
+  useEffect(() => {
+    localStorage.setItem('kronn:ttsEnabled', String(ttsEnabled));
+  }, [ttsEnabled]);
+
+  // Stop TTS when switching conversations
+  useEffect(() => {
+    stopTts();
+    setTtsState('idle');
+    setTtsPlayingMsgId(null);
+  }, [activeDiscussionId]);
 
   // Batched streaming: accumulate chunks in a ref, flush to state via rAF
   const streamBufferRef = useRef<Record<string, string>>({});
@@ -323,6 +375,35 @@ export function DiscussionsPage({
 
   const sending = activeDiscussionId ? !!sendingMap[activeDiscussionId] : false;
   const streamingText = activeDiscussionId ? (streamingMap[activeDiscussionId] ?? '') : '';
+
+  // Auto-read new agent responses when TTS is enabled
+  const prevMsgCountRef = useRef(-1);
+  useEffect(() => {
+    if (!activeDiscussion) { prevMsgCountRef.current = -1; return; }
+    const msgs = activeDiscussion.messages;
+    // Skip the first render (initialize the ref) — only speak on subsequent updates
+    if (prevMsgCountRef.current < 0) {
+      prevMsgCountRef.current = msgs.length;
+      return;
+    }
+    if ((ttsEnabled || voiceMode) && msgs.length > prevMsgCountRef.current) {
+      const newMsgs = msgs.slice(prevMsgCountRef.current);
+      const lastAgent = [...newMsgs].reverse().find(m => m.role === 'Agent');
+      if (lastAgent && !sending) {
+        const autoId = lastAgent.id;
+        setTtsPlayingMsgId(autoId);
+        setTtsState('loading');
+        speakText(getTtsWorker, lastAgent.content, activeDiscussion?.language || 'fr', () => setTtsState('playing'))
+          .finally(() => {
+            setTtsPlayingMsgId(cur => {
+              if (cur === autoId && !isTtsPaused()) { setTtsState('idle'); return null; }
+              return cur;
+            });
+          });
+      }
+    }
+    prevMsgCountRef.current = msgs.length;
+  }, [activeDiscussion?.messages.length, ttsEnabled, sending]);
 
   const AGENT_MENTIONS = useMemo(() => {
     const activeAgentTypes = new Set(agents.filter(isUsable).map(a => a.agent_type));
@@ -564,8 +645,144 @@ export function DiscussionsPage({
     return {};
   };
 
+  // Keyboard shortcut: Enter or Space stops recording
+  useEffect(() => {
+    if (sttState !== 'recording') return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        e.stopPropagation();
+        mediaRecorderRef.current?.stop();
+      }
+    };
+    window.addEventListener('keydown', onKey, true); // capture phase
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [sttState]);
+
+  const handleMicToggle = useCallback(async () => {
+    if (sttState === 'recording') {
+      // Stop recording → triggers ondataavailable → onstop
+      mediaRecorderRef.current?.stop();
+      return;
+    }
+    if (sttState === 'transcribing') return; // wait for current transcription
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
+      mediaRecorderRef.current = recorder;
+      audioChunksRef.current = [];
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+
+      recorder.onstop = async () => {
+        // Stop mic access
+        stream.getTracks().forEach(t => t.stop());
+        setSttState('transcribing');
+
+        try {
+          // Decode recorded audio to Float32Array at 16kHz
+          const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+          const arrayBuf = await blob.arrayBuffer();
+          const audioCtx = new AudioContext({ sampleRate: 16000 });
+          const decoded = await audioCtx.decodeAudioData(arrayBuf);
+          await audioCtx.close();
+          const float32 = audioBufferToFloat32(decoded);
+
+          const lang = activeDiscussion?.language || 'fr';
+          const text = await transcribeAudio(getSttWorker(), float32, lang);
+
+          if (text) {
+            // In voice mode, set the text and flag auto-send
+            if (voiceMode) {
+              voiceAutoSendRef.current = true;
+            }
+            setChatInput(prev => prev ? prev + ' ' + text : text);
+            setTimeout(() => {
+              if (chatInputRef.current) {
+                chatInputRef.current.focus();
+                chatInputRef.current.style.height = 'auto';
+                chatInputRef.current.style.height = Math.min(chatInputRef.current.scrollHeight, 160) + 'px';
+              }
+            }, 0);
+          }
+        } catch (err) {
+          console.error('STT transcription failed:', err);
+        }
+        setSttState('idle');
+      };
+
+      recorder.start();
+      setSttState('recording');
+    } catch (err) {
+      console.error('Microphone access denied:', err);
+      setSttState('idle');
+    }
+  }, [sttState, activeDiscussion?.language, voiceMode]);
+
+  // Voice mode: auto-send after STT transcription fills chatInput
+  useEffect(() => {
+    if (voiceAutoSendRef.current && chatInput.trim() && sttState === 'idle' && !sending) {
+      voiceAutoSendRef.current = false;
+      // Defer to next tick so chatInput state is committed
+      setTimeout(() => handleSendMessageRef.current?.(), 0);
+    }
+  }, [chatInput, sttState, sending]);
+
+  // Voice mode: after TTS finishes reading agent response → start countdown → auto-record
+  const prevTtsStateRef = useRef(ttsState);
+  useEffect(() => {
+    const wasPlaying = prevTtsStateRef.current === 'playing' || prevTtsStateRef.current === 'loading';
+    prevTtsStateRef.current = ttsState;
+
+    // Only trigger when ttsState transitions to 'idle' FROM playing/loading
+    if (!wasPlaying || ttsState !== 'idle') return;
+    if (!voiceMode || sending || sttState !== 'idle') return;
+    if (voiceCountdown !== null) return;
+
+    // Start countdown 3→2→1→record
+    setVoiceCountdown(3);
+    const interval = setInterval(() => {
+      setVoiceCountdown(prev => {
+        if (prev === null || prev <= 1) {
+          clearInterval(interval);
+          voiceCountdownRef.current = null;
+          return null;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    voiceCountdownRef.current = interval;
+  }, [voiceMode, ttsState, sending, sttState]);
+
+  // When countdown reaches null (finished) → start recording
+  const prevCountdownRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (prevCountdownRef.current !== null && prevCountdownRef.current > 0 && voiceCountdown === null && voiceMode) {
+      handleMicToggle();
+    }
+    prevCountdownRef.current = voiceCountdown;
+  }, [voiceCountdown, voiceMode, handleMicToggle]);
+
+  // Cancel countdown when voice mode is turned off or conversation changes
+  useEffect(() => {
+    if (!voiceMode) {
+      if (voiceCountdownRef.current) { clearInterval(voiceCountdownRef.current); voiceCountdownRef.current = null; }
+      setVoiceCountdown(null);
+    }
+  }, [voiceMode]);
+
+  useEffect(() => {
+    if (voiceCountdownRef.current) { clearInterval(voiceCountdownRef.current); voiceCountdownRef.current = null; }
+    setVoiceCountdown(null);
+    setVoiceMode(false);
+  }, [activeDiscussionId]);
+
   const handleSendMessage = async () => {
     if (!activeDiscussionId || !chatInput.trim() || sending) return;
+    stopTts();
     const discId = activeDiscussionId;
     const msg = chatInput.trim();
     const { targetAgent } = parseMention(msg);
@@ -640,6 +857,8 @@ export function DiscussionsPage({
       controller.signal,
     );
   };
+
+  handleSendMessageRef.current = handleSendMessage;
 
   const handleEditMessage = async () => {
     if (!activeDiscussionId || !editingMsgId || !editingText.trim() || sending) return;
@@ -1816,6 +2035,52 @@ export function DiscussionsPage({
                     ) : (
                       <MarkdownContent content={msg.content.replace(/KRONN:(BRIEFING_COMPLETE|VALIDATION_COMPLETE|BOOTSTRAP_COMPLETE)/gi, '').trim()} />
                     )}
+                    {msg.role === 'Agent' && (
+                      <button
+                        style={{
+                          background: 'none', border: 'none', borderRadius: 4,
+                          padding: '2px 6px', cursor: 'pointer',
+                          color: 'rgba(255,255,255,0.25)', fontSize: 10,
+                          display: 'inline-flex', alignItems: 'center', gap: 3,
+                          marginTop: 4,
+                        }}
+                        onClick={async () => {
+                          const isThisMsg = ttsPlayingMsgId === msg.id;
+                          if (isThisMsg && ttsState === 'paused') {
+                            resumeTts();
+                            setTtsState('playing');
+                          } else if (isThisMsg && (ttsState === 'playing' || ttsState === 'loading')) {
+                            pauseTts();
+                            setTtsState('paused');
+                          } else {
+                            // New message (or different message) → stop previous, start this one
+                            const myId = msg.id;
+                            setTtsPlayingMsgId(myId);
+                            setTtsState('loading');
+                            setTtsEnabled(true);
+                            await speakText(getTtsWorker, msg.content, activeDiscussion.language || 'fr', () => setTtsState('playing'));
+                            // Only reset if we're still the active message (not replaced by another click)
+                            setTtsPlayingMsgId(cur => {
+                              if (cur === myId && !isTtsPaused()) { setTtsState('idle'); return null; }
+                              return cur;
+                            });
+                          }
+                        }}
+                        title={
+                          ttsPlayingMsgId === msg.id
+                            ? ttsState === 'loading' ? 'Chargement...' : ttsState === 'playing' ? 'Pause' : ttsState === 'paused' ? 'Reprendre' : 'Lire à voix haute'
+                            : 'Lire à voix haute'
+                        }
+                      >
+                        {ttsPlayingMsgId === msg.id && ttsState === 'loading'
+                          ? <><Loader2 size={9} style={{ animation: 'spin 1s linear infinite' }} /> TTS</>
+                          : ttsPlayingMsgId === msg.id && ttsState === 'playing'
+                          ? <><Pause size={9} /> Pause</>
+                          : ttsPlayingMsgId === msg.id && ttsState === 'paused'
+                          ? <><Play size={9} /> Reprendre</>
+                          : <><Play size={9} /> TTS</>}
+                      </button>
+                    )}
                     {/api.?key|invalid.*key|key.*not.*config|authenticat|unauthori|login|sign.?in/i.test(msg.content) && (
                       <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
                         <button
@@ -2103,52 +2368,86 @@ export function DiscussionsPage({
               </div>
             )}
 
-            {/* Input */}
+            {/* Input — unified composer */}
             <div style={{
-              ...ds.inputBar,
+              padding: '10px 16px 12px', borderTop: '1px solid rgba(255,255,255,0.07)',
+              background: '#12151c', flexShrink: 0,
               ...(activeAgentDisabled ? { opacity: 0.4, pointerEvents: 'none' as const } : {}),
             }}>
-              <div style={{ flex: 1, position: 'relative' }}>
-                <textarea
-                  ref={chatInputRef}
-                  style={{ ...ds.chatInput, resize: 'none', minHeight: 42, maxHeight: 160, lineHeight: 1.4 }}
-                  rows={1}
-                  placeholder={activeDiscussion && (activeDiscussion.participants?.length ?? 0) > 1 && AGENT_MENTIONS.length > 0
-                    ? t('disc.mentionHint', AGENT_MENTIONS.map(m => m.trigger).join(', '))
-                    : t('disc.messagePlaceholder')}
-                  value={chatInput}
-                  onChange={e => {
-                    const val = e.target.value;
-                    setChatInput(val);
-                    // Auto-resize textarea
-                    e.target.style.height = 'auto';
-                    e.target.style.height = Math.min(e.target.scrollHeight, 160) + 'px';
-                    // Detect @mention at start
-                    const atMatch = val.match(/^@(\w*)$/);
-                    if (atMatch) {
-                      setMentionQuery(atMatch[1].toLowerCase());
-                      setMentionIndex(0);
-                    } else {
-                      setMentionQuery(null);
-                    }
-                  }}
-                  onKeyDown={e => {
-                    if (mentionQuery !== null) {
-                      const filtered = AGENT_MENTIONS.filter(m => m.trigger.slice(1).startsWith(mentionQuery ?? ''));
-                      if (e.key === 'ArrowDown') { e.preventDefault(); setMentionIndex(i => Math.min(i + 1, filtered.length - 1)); return; }
-                      if (e.key === 'ArrowUp') { e.preventDefault(); setMentionIndex(i => Math.max(i - 1, 0)); return; }
-                      if ((e.key === 'Tab' || e.key === 'Enter') && filtered.length > 0) {
-                        e.preventDefault();
-                        setChatInput(filtered[mentionIndex].trigger + ' ');
-                        setMentionQuery(null);
-                        return;
-                      }
-                      if (e.key === 'Escape') { setMentionQuery(null); return; }
-                    }
-                    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendMessage(); }
-                  }}
-                  disabled={sending || activeAgentDisabled}
-                />
+              {/* Voice mode countdown banner */}
+              {voiceCountdown !== null && (
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px',
+                  marginBottom: 8, borderRadius: 8,
+                  background: 'rgba(200,255,0,0.06)', border: '1px solid rgba(200,255,0,0.15)',
+                }}>
+                  <span style={{
+                    fontSize: 20, fontWeight: 800, color: '#c8ff00',
+                    fontVariantNumeric: 'tabular-nums', minWidth: 24, textAlign: 'center',
+                  }}>{voiceCountdown}</span>
+                  <span style={{ fontSize: 12, color: 'rgba(200,255,0,0.6)', flex: 1 }}>Reprise de l'écoute...</span>
+                  <button
+                    onClick={() => {
+                      if (voiceCountdownRef.current) { clearInterval(voiceCountdownRef.current); voiceCountdownRef.current = null; }
+                      setVoiceCountdown(null);
+                      setVoiceMode(false);
+                    }}
+                    style={{
+                      background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)',
+                      borderRadius: 6, padding: '3px 10px', cursor: 'pointer',
+                      color: 'rgba(255,255,255,0.5)', fontSize: 11, fontFamily: 'inherit',
+                    }}
+                  >
+                    Annuler
+                  </button>
+                </div>
+              )}
+              {/* Recording indicator banner */}
+              {sttState === 'recording' && (
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 8, padding: '6px 12px',
+                  marginBottom: 8, borderRadius: 8,
+                  background: 'rgba(255,77,106,0.08)', border: '1px solid rgba(255,77,106,0.2)',
+                }}>
+                  <span style={{
+                    width: 8, height: 8, borderRadius: '50%', background: '#ff4d6a',
+                    animation: 'pulse 1.5s ease-in-out infinite',
+                  }} />
+                  <span style={{ fontSize: 12, color: '#ff8a9e', flex: 1 }}>Enregistrement en cours...</span>
+                  <button
+                    onClick={handleMicToggle}
+                    style={{
+                      background: 'rgba(255,77,106,0.15)', border: '1px solid rgba(255,77,106,0.3)',
+                      borderRadius: 6, padding: '4px 10px', cursor: 'pointer',
+                      color: '#ff4d6a', fontSize: 11, fontFamily: 'inherit', fontWeight: 600,
+                      display: 'flex', alignItems: 'center', gap: 4,
+                    }}
+                  >
+                    <StopCircle size={10} /> Stop
+                  </button>
+                </div>
+              )}
+              {sttState === 'transcribing' && (
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 8, padding: '6px 12px',
+                  marginBottom: 8, borderRadius: 8,
+                  background: 'rgba(200,255,0,0.04)', border: '1px solid rgba(200,255,0,0.1)',
+                }}>
+                  <Loader2 size={12} style={{ color: '#c8ff00', animation: 'spin 1s linear infinite' }} />
+                  <span style={{ fontSize: 12, color: 'rgba(200,255,0,0.7)' }}>Transcription en cours...</span>
+                </div>
+              )}
+
+              {/* Composer container */}
+              <div style={{
+                position: 'relative',
+                background: 'rgba(255,255,255,0.03)',
+                border: sttState === 'recording'
+                  ? '1px solid rgba(255,77,106,0.3)'
+                  : '1px solid rgba(255,255,255,0.08)',
+                borderRadius: 12,
+                transition: 'border-color 0.2s',
+              }}>
                 {/* @mention autocomplete dropdown */}
                 {mentionQuery !== null && (() => {
                   const filtered = AGENT_MENTIONS.filter(m => m.trigger.slice(1).startsWith(mentionQuery ?? ''));
@@ -2158,7 +2457,7 @@ export function DiscussionsPage({
                       position: 'absolute', bottom: '100%', left: 0, marginBottom: 4,
                       background: '#1a1d26', border: '1px solid rgba(200,255,0,0.2)',
                       borderRadius: 8, overflow: 'hidden', boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
-                      minWidth: 180,
+                      minWidth: 180, zIndex: 10,
                     }}>
                       {filtered.map((m, i) => (
                         <button
@@ -2185,213 +2484,344 @@ export function DiscussionsPage({
                     </div>
                   );
                 })()}
-              </div>
-              {/* Debate button */}
-              <div style={{ position: 'relative' }}>
-                <button
+
+                {/* Textarea */}
+                <textarea
+                  ref={chatInputRef}
                   style={{
-                    ...ds.sendBtn,
-                    background: showDebatePopover ? 'rgba(139,92,246,0.2)' : 'rgba(139,92,246,0.08)',
-                    border: '1px solid rgba(139,92,246,0.3)',
-                    color: '#8b5cf6',
+                    width: '100%', padding: '12px 14px 4px', background: 'transparent',
+                    border: 'none', borderRadius: '12px 12px 0 0', color: '#e8eaed',
+                    fontSize: 13, fontFamily: 'inherit', resize: 'none',
+                    minHeight: 42, maxHeight: 160, lineHeight: 1.4,
+                    outline: 'none',
                   }}
-                  onClick={() => {
-                    if (!showDebatePopover) {
-                      setDebateAgents(installedAgents.map(a => a.agent_type));
+                  rows={1}
+                  placeholder={activeDiscussion && (activeDiscussion.participants?.length ?? 0) > 1 && AGENT_MENTIONS.length > 0
+                    ? t('disc.mentionHint', AGENT_MENTIONS.map(m => m.trigger).join(', '))
+                    : t('disc.messagePlaceholder')}
+                  value={chatInput}
+                  onChange={e => {
+                    const val = e.target.value;
+                    setChatInput(val);
+                    e.target.style.height = 'auto';
+                    e.target.style.height = Math.min(e.target.scrollHeight, 160) + 'px';
+                    const atMatch = val.match(/^@(\w*)$/);
+                    if (atMatch) {
+                      setMentionQuery(atMatch[1].toLowerCase());
+                      setMentionIndex(0);
+                    } else {
+                      setMentionQuery(null);
                     }
-                    setShowDebatePopover(!showDebatePopover);
                   }}
-                  disabled={sending}
-                  title={t('debate.title')}
-                  aria-label={t('debate.title')}
-                >
-                  <Users size={16} />
-                </button>
-                {showDebatePopover && (
-                  <div style={{
-                    position: 'absolute', bottom: '100%', right: 0, marginBottom: 8,
-                    width: 260, padding: 14, borderRadius: 10,
-                    background: '#1a1d26', border: '1px solid rgba(139,92,246,0.2)',
-                    boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
-                  }}>
-                    <div style={{ fontSize: 12, fontWeight: 700, color: '#8b5cf6', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <Users size={12} /> {t('debate.header')}
-                    </div>
-                    <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginBottom: 10, lineHeight: 1.4 }}>
-                      {t('debate.instructions')}
-                    </p>
-                    {installedAgents.map(a => {
-                      const isPrincipal = a.agent_type === activeDiscussion?.agent;
-                      const checked = debateAgents.includes(a.agent_type);
-                      return (
-                        <label key={a.name} style={{
-                          display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0',
-                          cursor: isPrincipal ? 'default' : 'pointer', fontSize: 12,
-                          color: checked ? '#e8eaed' : 'rgba(255,255,255,0.4)',
+                  onKeyDown={e => {
+                    if (mentionQuery !== null) {
+                      const filtered = AGENT_MENTIONS.filter(m => m.trigger.slice(1).startsWith(mentionQuery ?? ''));
+                      if (e.key === 'ArrowDown') { e.preventDefault(); setMentionIndex(i => Math.min(i + 1, filtered.length - 1)); return; }
+                      if (e.key === 'ArrowUp') { e.preventDefault(); setMentionIndex(i => Math.max(i - 1, 0)); return; }
+                      if ((e.key === 'Tab' || e.key === 'Enter') && filtered.length > 0) {
+                        e.preventDefault();
+                        setChatInput(filtered[mentionIndex].trigger + ' ');
+                        setMentionQuery(null);
+                        return;
+                      }
+                      if (e.key === 'Escape') { setMentionQuery(null); return; }
+                    }
+                    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendMessage(); }
+                  }}
+                  disabled={sending || activeAgentDisabled}
+                />
+
+                {/* Bottom toolbar inside composer */}
+                <div style={{
+                  display: 'flex', alignItems: 'center', padding: '4px 8px 8px',
+                  gap: 2,
+                }}>
+                  {/* Left: secondary actions */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                    {/* Mic / STT */}
+                    <button
+                      onClick={handleMicToggle}
+                      disabled={sending || sttState === 'transcribing'}
+                      title={sttState === 'recording' ? 'Arrêter' : 'Dicter'}
+                      style={{
+                        background: sttState === 'recording' ? 'rgba(255,77,106,0.15)' : 'transparent',
+                        border: 'none', borderRadius: 6, padding: '6px 7px', cursor: 'pointer',
+                        color: sttState === 'recording' ? '#ff4d6a' : 'rgba(255,255,255,0.3)',
+                        display: 'flex', alignItems: 'center',
+                        transition: 'color 0.15s, background 0.15s',
+                      }}
+                    >
+                      {sttState === 'recording' ? <MicOff size={15} /> : <Mic size={15} />}
+                    </button>
+
+                    {/* Voice conversation mode */}
+                    <button
+                      onClick={() => {
+                        const next = !voiceMode;
+                        setVoiceMode(next);
+                        if (next) {
+                          setTtsEnabled(true);
+                        } else {
+                          if (voiceCountdownRef.current) { clearInterval(voiceCountdownRef.current); voiceCountdownRef.current = null; }
+                          setVoiceCountdown(null);
+                        }
+                      }}
+                      title={voiceMode ? 'Désactiver le mode conversation' : 'Mode conversation vocale'}
+                      style={{
+                        background: voiceMode ? 'rgba(200,255,0,0.12)' : 'transparent',
+                        border: 'none', borderRadius: 6, padding: '6px 7px', cursor: 'pointer',
+                        color: voiceMode ? '#c8ff00' : 'rgba(255,255,255,0.3)',
+                        display: 'flex', alignItems: 'center',
+                        transition: 'color 0.15s, background 0.15s',
+                      }}
+                    >
+                      {voiceMode ? <Phone size={15} /> : <PhoneOff size={15} />}
+                    </button>
+
+                    {/* TTS toggle */}
+                    <button
+                      onClick={() => {
+                        setTtsEnabled(prev => {
+                          if (prev) { stopTts(); setTtsState('idle'); setTtsPlayingMsgId(null); }
+                          return !prev;
+                        });
+                      }}
+                      title={ttsEnabled ? 'Désactiver la lecture vocale' : 'Activer la lecture vocale'}
+                      style={{
+                        background: 'transparent', border: 'none', borderRadius: 6,
+                        padding: '6px 7px', cursor: 'pointer',
+                        color: ttsEnabled ? '#c8ff00' : 'rgba(255,255,255,0.3)',
+                        display: 'flex', alignItems: 'center',
+                        transition: 'color 0.15s',
+                      }}
+                    >
+                      {ttsEnabled ? <Volume2 size={15} /> : <VolumeX size={15} />}
+                    </button>
+
+                    {/* Debate / multi-agent */}
+                    <div style={{ position: 'relative' }}>
+                      <button
+                        onClick={() => {
+                          if (!showDebatePopover) {
+                            setDebateAgents(installedAgents.map(a => a.agent_type));
+                          }
+                          setShowDebatePopover(!showDebatePopover);
+                        }}
+                        disabled={sending}
+                        title={t('debate.title')}
+                        style={{
+                          background: showDebatePopover ? 'rgba(139,92,246,0.12)' : 'transparent',
+                          border: 'none', borderRadius: 6, padding: '6px 7px', cursor: 'pointer',
+                          color: showDebatePopover ? '#8b5cf6' : 'rgba(255,255,255,0.3)',
+                          display: 'flex', alignItems: 'center',
+                          transition: 'color 0.15s, background 0.15s',
+                        }}
+                      >
+                        <Users size={15} />
+                      </button>
+                      {showDebatePopover && (
+                        <div style={{
+                          position: 'absolute', bottom: '100%', left: 0, marginBottom: 8,
+                          width: 260, padding: 14, borderRadius: 10,
+                          background: '#1a1d26', border: '1px solid rgba(139,92,246,0.2)',
+                          boxShadow: '0 8px 32px rgba(0,0,0,0.5)', zIndex: 10,
                         }}>
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            disabled={isPrincipal}
-                            onChange={() => {
-                              if (isPrincipal) return;
-                              setDebateAgents(prev =>
-                                prev.includes(a.agent_type)
-                                  ? prev.filter(t => t !== a.agent_type)
-                                  : [...prev, a.agent_type]
-                              );
-                            }}
-                            style={{ accentColor: '#8b5cf6' }}
-                          />
-                          <Cpu size={11} style={{ color: isPrincipal ? '#c8ff00' : '#8b5cf6' }} />
-                          {a.name}
-                          {isPrincipal && (
-                            <span style={{ fontSize: 9, color: '#c8ff00', marginLeft: 'auto' }}>{t('debate.main')}</span>
-                          )}
-                        </label>
-                      );
-                    })}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10 }}>
-                      <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>{t('debate.rounds')}</span>
-                      {[1, 2, 3].map(n => (
-                        <button
-                          key={n}
-                          style={{
-                            width: 28, height: 28, borderRadius: 6, border: 'none', fontFamily: 'inherit',
-                            fontSize: 12, fontWeight: 700, cursor: 'pointer',
-                            background: debateRounds === n ? '#8b5cf6' : 'rgba(255,255,255,0.06)',
-                            color: debateRounds === n ? '#fff' : 'rgba(255,255,255,0.4)',
-                          }}
-                          onClick={() => setDebateRounds(n)}
-                        >
-                          {n}
-                        </button>
-                      ))}
-                    </div>
-                    {/* Recommended skills for debate */}
-                    {(() => {
-                      const DEBATE_SKILL_IDS = ['token-saver', 'devils-advocate'];
-                      const discSkillIds = activeDiscussion?.skill_ids ?? [];
-                      const relevantIds = [...new Set([...DEBATE_SKILL_IDS, ...discSkillIds])];
-                      const relevantSkills = relevantIds
-                        .map(id => availableSkills.find(s => s.id === id))
-                        .filter((s): s is Skill => !!s);
-                      if (relevantSkills.length === 0) return null;
-                      return (
-                        <div style={{ marginTop: 10, borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: 8 }}>
-                          <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 }}>
-                            <Zap size={10} /> Skills
+                          <div style={{ fontSize: 12, fontWeight: 700, color: '#8b5cf6', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
+                            <Users size={12} /> {t('debate.header')}
                           </div>
-                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                            {relevantSkills.map(skill => {
-                              const active = debateSkillIds.includes(skill.id);
-                              return (
-                                <button
-                                  key={skill.id}
-                                  title={skill.description || skill.name}
-                                  onClick={() => setDebateSkillIds(prev =>
-                                    prev.includes(skill.id)
-                                      ? prev.filter(id => id !== skill.id)
-                                      : [...prev, skill.id]
-                                  )}
-                                  style={{
-                                    padding: '3px 8px', borderRadius: 6, fontFamily: 'inherit',
-                                    fontSize: 10, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4,
-                                    background: active ? 'rgba(200,255,0,0.12)' : 'rgba(255,255,255,0.04)',
-                                    color: active ? '#c8ff00' : 'rgba(255,255,255,0.3)',
-                                    border: active ? '1px solid rgba(200,255,0,0.2)' : '1px solid rgba(255,255,255,0.06)',
-                                  }}
-                                >
-                                  {active && <Check size={8} />}
-                                  {skill.name}
-                                </button>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      );
-                    })()}
-                    {/* Directives for debate */}
-                    {availableDirectives.length > 0 && (
-                      <div style={{ marginTop: 10, borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: 8 }}>
-                        <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 }}>
-                          <FileText size={10} /> {t('directives.title')}
-                        </div>
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                          {availableDirectives.map(directive => {
-                            const active = debateDirectiveIds.includes(directive.id);
+                          <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginBottom: 10, lineHeight: 1.4 }}>
+                            {t('debate.instructions')}
+                          </p>
+                          {installedAgents.map(a => {
+                            const isPrincipal = a.agent_type === activeDiscussion?.agent;
+                            const checked = debateAgents.includes(a.agent_type);
                             return (
-                              <button
-                                key={directive.id}
-                                title={directive.description || directive.name}
-                                onClick={() => setDebateDirectiveIds(prev =>
-                                  prev.includes(directive.id)
-                                    ? prev.filter(id => id !== directive.id)
-                                    : [...prev, directive.id]
+                              <label key={a.name} style={{
+                                display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0',
+                                cursor: isPrincipal ? 'default' : 'pointer', fontSize: 12,
+                                color: checked ? '#e8eaed' : 'rgba(255,255,255,0.4)',
+                              }}>
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  disabled={isPrincipal}
+                                  onChange={() => {
+                                    if (isPrincipal) return;
+                                    setDebateAgents(prev =>
+                                      prev.includes(a.agent_type)
+                                        ? prev.filter(t => t !== a.agent_type)
+                                        : [...prev, a.agent_type]
+                                    );
+                                  }}
+                                  style={{ accentColor: '#8b5cf6' }}
+                                />
+                                <Cpu size={11} style={{ color: isPrincipal ? '#c8ff00' : '#8b5cf6' }} />
+                                {a.name}
+                                {isPrincipal && (
+                                  <span style={{ fontSize: 9, color: '#c8ff00', marginLeft: 'auto' }}>{t('debate.main')}</span>
                                 )}
-                                style={{
-                                  padding: '3px 8px', borderRadius: 6, fontFamily: 'inherit',
-                                  fontSize: 10, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4,
-                                  background: active ? 'rgba(245,158,11,0.12)' : 'rgba(255,255,255,0.04)',
-                                  color: active ? '#fbbf24' : 'rgba(255,255,255,0.3)',
-                                  border: active ? '1px solid rgba(245,158,11,0.2)' : '1px solid rgba(255,255,255,0.06)',
-                                }}
-                              >
-                                {active && <Check size={8} />}
-                                {directive.icon} {directive.name}
-                              </button>
+                              </label>
                             );
                           })}
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10 }}>
+                            <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>{t('debate.rounds')}</span>
+                            {[1, 2, 3].map(n => (
+                              <button
+                                key={n}
+                                style={{
+                                  width: 28, height: 28, borderRadius: 6, border: 'none', fontFamily: 'inherit',
+                                  fontSize: 12, fontWeight: 700, cursor: 'pointer',
+                                  background: debateRounds === n ? '#8b5cf6' : 'rgba(255,255,255,0.06)',
+                                  color: debateRounds === n ? '#fff' : 'rgba(255,255,255,0.4)',
+                                }}
+                                onClick={() => setDebateRounds(n)}
+                              >
+                                {n}
+                              </button>
+                            ))}
+                          </div>
+                          {/* Recommended skills for debate */}
+                          {(() => {
+                            const DEBATE_SKILL_IDS = ['token-saver', 'devils-advocate'];
+                            const discSkillIds = activeDiscussion?.skill_ids ?? [];
+                            const relevantIds = [...new Set([...DEBATE_SKILL_IDS, ...discSkillIds])];
+                            const relevantSkills = relevantIds
+                              .map(id => availableSkills.find(s => s.id === id))
+                              .filter((s): s is Skill => !!s);
+                            if (relevantSkills.length === 0) return null;
+                            return (
+                              <div style={{ marginTop: 10, borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: 8 }}>
+                                <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 }}>
+                                  <Zap size={10} /> Skills
+                                </div>
+                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                                  {relevantSkills.map(skill => {
+                                    const active = debateSkillIds.includes(skill.id);
+                                    return (
+                                      <button
+                                        key={skill.id}
+                                        title={skill.description || skill.name}
+                                        onClick={() => setDebateSkillIds(prev =>
+                                          prev.includes(skill.id)
+                                            ? prev.filter(id => id !== skill.id)
+                                            : [...prev, skill.id]
+                                        )}
+                                        style={{
+                                          padding: '3px 8px', borderRadius: 6, fontFamily: 'inherit',
+                                          fontSize: 10, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4,
+                                          background: active ? 'rgba(200,255,0,0.12)' : 'rgba(255,255,255,0.04)',
+                                          color: active ? '#c8ff00' : 'rgba(255,255,255,0.3)',
+                                          border: active ? '1px solid rgba(200,255,0,0.2)' : '1px solid rgba(255,255,255,0.06)',
+                                        }}
+                                      >
+                                        {active && <Check size={8} />}
+                                        {skill.name}
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            );
+                          })()}
+                          {/* Directives for debate */}
+                          {availableDirectives.length > 0 && (
+                            <div style={{ marginTop: 10, borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: 8 }}>
+                              <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 }}>
+                                <FileText size={10} /> {t('directives.title')}
+                              </div>
+                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                                {availableDirectives.map(directive => {
+                                  const active = debateDirectiveIds.includes(directive.id);
+                                  return (
+                                    <button
+                                      key={directive.id}
+                                      title={directive.description || directive.name}
+                                      onClick={() => setDebateDirectiveIds(prev =>
+                                        prev.includes(directive.id)
+                                          ? prev.filter(id => id !== directive.id)
+                                          : [...prev, directive.id]
+                                      )}
+                                      style={{
+                                        padding: '3px 8px', borderRadius: 6, fontFamily: 'inherit',
+                                        fontSize: 10, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4,
+                                        background: active ? 'rgba(245,158,11,0.12)' : 'rgba(255,255,255,0.04)',
+                                        color: active ? '#fbbf24' : 'rgba(255,255,255,0.3)',
+                                        border: active ? '1px solid rgba(245,158,11,0.2)' : '1px solid rgba(255,255,255,0.06)',
+                                      }}
+                                    >
+                                      {active && <Check size={8} />}
+                                      {directive.icon} {directive.name}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          )}
+                          {debateAgents.some(a => isAgentRestricted(a)) && (
+                            <div style={{ marginTop: 8, padding: '6px 8px', borderRadius: 6, background: 'rgba(255,200,0,0.06)', border: '1px solid rgba(255,200,0,0.12)', display: 'flex', alignItems: 'center', gap: 5 }}>
+                              <AlertTriangle size={10} style={{ color: '#ffb400', flexShrink: 0 }} />
+                              <span style={{ fontSize: 9, color: 'rgba(255,200,0,0.7)', lineHeight: 1.3 }}>
+                                {t('config.restrictedDebate')}
+                              </span>
+                            </div>
+                          )}
+                          <button
+                            style={{
+                              marginTop: 8, width: '100%', padding: '8px 12px', borderRadius: 6,
+                              border: 'none', fontFamily: 'inherit', fontSize: 12, fontWeight: 700, cursor: 'pointer',
+                              background: debateAgents.length >= 2 ? '#8b5cf6' : 'rgba(255,255,255,0.06)',
+                              color: debateAgents.length >= 2 ? '#fff' : 'rgba(255,255,255,0.25)',
+                            }}
+                            disabled={debateAgents.length < 2}
+                            onClick={handleOrchestrate}
+                          >
+                            {t('debate.launch', debateAgents.length)}
+                          </button>
                         </div>
-                      </div>
-                    )}
-                    {debateAgents.some(a => isAgentRestricted(a)) && (
-                      <div style={{ marginTop: 8, padding: '6px 8px', borderRadius: 6, background: 'rgba(255,200,0,0.06)', border: '1px solid rgba(255,200,0,0.12)', display: 'flex', alignItems: 'center', gap: 5 }}>
-                        <AlertTriangle size={10} style={{ color: '#ffb400', flexShrink: 0 }} />
-                        <span style={{ fontSize: 9, color: 'rgba(255,200,0,0.7)', lineHeight: 1.3 }}>
-                          {t('config.restrictedDebate')}
-                        </span>
-                      </div>
-                    )}
-                    <button
-                      style={{
-                        marginTop: 8, width: '100%', padding: '8px 12px', borderRadius: 6,
-                        border: 'none', fontFamily: 'inherit', fontSize: 12, fontWeight: 700, cursor: 'pointer',
-                        background: debateAgents.length >= 2 ? '#8b5cf6' : 'rgba(255,255,255,0.06)',
-                        color: debateAgents.length >= 2 ? '#fff' : 'rgba(255,255,255,0.25)',
-                      }}
-                      disabled={debateAgents.length < 2}
-                      onClick={handleOrchestrate}
-                    >
-                      {t('debate.launch', debateAgents.length)}
-                    </button>
+                      )}
+                    </div>
                   </div>
-                )}
+
+                  {/* Spacer */}
+                  <div style={{ flex: 1 }} />
+
+                  {/* Right: shortcut hint + primary action */}
+                  <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.15)', marginRight: 4, userSelect: 'none' }}>
+                    {sending ? '' : 'Enter'}
+                  </span>
+
+                  {sending ? (
+                    <button
+                      onClick={handleStop}
+                      title={t('disc.stopThinking')}
+                      aria-label={t('disc.stopThinking')}
+                      style={{
+                        background: 'rgba(255,77,106,0.15)', border: '1px solid rgba(255,77,106,0.3)',
+                        borderRadius: 8, padding: '6px 10px', cursor: 'pointer',
+                        color: '#ff4d6a', display: 'flex', alignItems: 'center',
+                      }}
+                    >
+                      <StopCircle size={16} />
+                    </button>
+                  ) : (
+                    <button
+                      onClick={handleSendMessage}
+                      disabled={!chatInput.trim()}
+                      aria-label="Send message"
+                      style={{
+                        background: chatInput.trim() ? 'rgba(200,255,0,0.15)' : 'transparent',
+                        border: chatInput.trim() ? '1px solid rgba(200,255,0,0.25)' : '1px solid rgba(255,255,255,0.06)',
+                        borderRadius: 8, padding: '6px 10px', cursor: chatInput.trim() ? 'pointer' : 'default',
+                        color: chatInput.trim() ? '#c8ff00' : 'rgba(255,255,255,0.15)',
+                        display: 'flex', alignItems: 'center',
+                        transition: 'all 0.15s',
+                      }}
+                    >
+                      <Send size={16} />
+                    </button>
+                  )}
+                </div>
               </div>
-              {sending ? (
-                <button
-                  style={{
-                    ...ds.sendBtn,
-                    background: 'rgba(255,77,106,0.15)',
-                    border: '1px solid rgba(255,77,106,0.4)',
-                    color: '#ff4d6a',
-                  }}
-                  onClick={handleStop}
-                  title={t('disc.stopThinking')}
-                  aria-label={t('disc.stopThinking')}
-                >
-                  <StopCircle size={16} />
-                </button>
-              ) : (
-                <button
-                  style={ds.sendBtn}
-                  onClick={handleSendMessage}
-                  disabled={!chatInput.trim()}
-                  aria-label="Send message"
-                >
-                  <Send size={16} />
-                </button>
-              )}
             </div>
 
             </div>{/* end messages column */}

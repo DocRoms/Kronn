@@ -166,6 +166,24 @@ Optional **pre-audit briefing**: 5 quick questions about purpose, stack, team, c
 
 ![AI audit pipeline in progress](docs/screenshots/audit.png)
 
+### 🎙️ Voice — TTS & STT (100% Local)
+
+Talk to your agents. Literally. No cloud, no API, no data leaves your machine.
+
+**Speech-to-Text (STT)** — Whisper WASM via `@huggingface/transformers`. Click the mic, speak, click stop (or press Enter/Space). Your speech is transcribed locally and appears in the textarea. Three model sizes: Tiny (~40MB), Base (~140MB), Small (~460MB) — configurable in Settings.
+
+**Text-to-Speech (TTS)** — Piper WASM via `@diffusionstudio/vits-web`. Agent responses are read aloud with natural voices. Sentence-by-sentence pipelining (next sentence synthesizes while current one plays). Pause/resume per message. 9 voices across 3 languages, male and female:
+
+| Language | Voices |
+|----------|--------|
+| Français | UPMC (M), Siwis (F), Tom (M) |
+| English | HFC Female (F), HFC Male (M), Lessac (F) |
+| Español | Sharvard (M), DaveFX (M), Ald MX (F) |
+
+**Voice Conversation Mode** — hands-free loop: speak → auto-send → agent responds → TTS reads → countdown 3-2-1 → mic auto-starts → repeat. Toggle with the phone icon in the composer toolbar.
+
+All models are downloaded on first use and cached in the browser (IndexedDB / OPFS). Configurable in Settings > Voice.
+
 ### 🛡️ Drift Detection & Partial Re-audit
 
 After an audit, Kronn tracks source file checksums in `ai/checksums.json`. The drift endpoint compares current files against stored checksums and reports stale sections — **without consuming tokens**. A partial re-audit re-runs only the stale steps (~3-5K tokens vs ~20K for a full audit). Stale projects show an amber badge with an update button.
@@ -289,7 +307,7 @@ scan_depth = 4
 
 GitHub Actions triggered by `ci-test` label on PRs:
 - **test-backend**: `cargo check` + `cargo clippy` + `cargo test` (708 tests)
-- **test-frontend**: `tsc --noEmit` + `pnpm test` (242 tests, 18 suites)
+- **test-frontend**: `tsc --noEmit` + `pnpm test` (298 tests, 22 suites)
 - **test-shell**: `make test-shell` (186 bats tests, 8 suites)
 </details>
 
