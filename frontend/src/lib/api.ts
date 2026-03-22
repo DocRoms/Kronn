@@ -80,6 +80,19 @@ export function authHeaders(): Record<string, string> {
   return h;
 }
 
+// ─── API base URL (empty = same origin, set for Tauri desktop mode) ─────────
+
+/** Resolved once: Tauri injects the backend URL, web mode uses relative paths */
+let _apiBase = '';
+
+export function setApiBase(base: string) {
+  _apiBase = base.replace(/\/$/, ''); // strip trailing slash
+}
+
+export function getApiBase(): string {
+  return _apiBase;
+}
+
 // ─── Generic API wrapper ────────────────────────────────────────────────────
 
 interface ApiResponse<T> {
@@ -96,7 +109,7 @@ async function api<T>(
   const headers: Record<string, string> = { ...authHeaders() };
   if (body) headers['Content-Type'] = 'application/json';
 
-  const res = await fetch(`/api${path}`, {
+  const res = await fetch(`${_apiBase}/api${path}`, {
     method,
     headers,
     body: body ? JSON.stringify(body) : undefined,
@@ -206,7 +219,7 @@ export const projects = {
     let finished = false;
     const done = () => { if (!finished) { finished = true; handlers.onDone(); } };
 
-    const res = await fetch(`/api/projects/${id}/ai-audit`, {
+    const res = await fetch(`${_apiBase}/api/projects/${id}/ai-audit`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify(req),
@@ -278,7 +291,7 @@ export const projects = {
     let finished = false;
     const done = () => { if (!finished) { finished = true; handlers.onDone(); } };
 
-    const res = await fetch(`/api/projects/${id}/partial-audit`, {
+    const res = await fetch(`${_apiBase}/api/projects/${id}/partial-audit`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify(req),
@@ -354,7 +367,7 @@ export const projects = {
       if (!finished) { finished = true; handlers.onDone(discId, tmpl); }
     };
 
-    const res = await fetch(`/api/projects/${id}/full-audit`, {
+    const res = await fetch(`${_apiBase}/api/projects/${id}/full-audit`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify(req),
@@ -556,7 +569,7 @@ export const discussions = {
     onError: (error: string) => void,
     signal?: AbortSignal,
     onStart?: () => void,
-  ) => discussions._streamSSE(`/api/discussions/${id}/messages`, req, onChunk, onDone, onError, signal, onStart),
+  ) => discussions._streamSSE(`${_apiBase}/api/discussions/${id}/messages`, req, onChunk, onDone, onError, signal, onStart),
 
   /** Trigger agent on existing messages (used after create). */
   runAgent: (
@@ -565,7 +578,7 @@ export const discussions = {
     onDone: () => void,
     onError: (error: string) => void,
     signal?: AbortSignal,
-  ) => discussions._streamSSE(`/api/discussions/${id}/run`, null, onChunk, onDone, onError, signal),
+  ) => discussions._streamSSE(`${_apiBase}/api/discussions/${id}/run`, null, onChunk, onDone, onError, signal),
 
   /** Launch multi-agent orchestration debate. */
   orchestrate: async (
@@ -585,7 +598,7 @@ export const discussions = {
     let finished = false;
     const done = () => { if (!finished) { finished = true; handlers.onDone(); } };
 
-    const res = await fetch(`/api/discussions/${id}/orchestrate`, {
+    const res = await fetch(`${_apiBase}/api/discussions/${id}/orchestrate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify(req),
@@ -663,7 +676,7 @@ export const workflows = {
     onError: (error: string) => void,
     signal?: AbortSignal,
   ) => {
-    const res = await fetch(`/api/workflows/${id}/trigger`, {
+    const res = await fetch(`${_apiBase}/api/workflows/${id}/trigger`, {
       method: 'POST',
       headers: authHeaders(),
       signal,

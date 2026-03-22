@@ -139,7 +139,12 @@ export async function speakText(
       const voice = voices.find(v => v.lang.startsWith(lang) && v.localService)
         || voices.find(v => v.lang.startsWith(lang));
       if (voice) utterance.voice = voice;
-      window.speechSynthesis.speak(utterance);
+      // Wait for SpeechSynthesis to finish (not fire-and-forget)
+      await new Promise<void>((resolve) => {
+        utterance.onend = () => resolve();
+        utterance.onerror = () => resolve();
+        window.speechSynthesis.speak(utterance);
+      });
     }
   }
 }
