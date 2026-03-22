@@ -298,6 +298,7 @@ export function DiscussionsPage({
   const handleSendMessageRef = useRef<(() => void) | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
+  const sttCancelledRef = useRef(false);
 
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -645,7 +646,7 @@ export function DiscussionsPage({
     return {};
   };
 
-  // Keyboard shortcut: Enter or Space stops recording
+  // Keyboard shortcuts during recording: Enter/Space = stop & send, Escape = cancel
   useEffect(() => {
     if (sttState !== 'recording') return;
     const onKey = (e: KeyboardEvent) => {
@@ -653,9 +654,15 @@ export function DiscussionsPage({
         e.preventDefault();
         e.stopPropagation();
         mediaRecorderRef.current?.stop();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        sttCancelledRef.current = true;
+        mediaRecorderRef.current?.stop();
+        if (voiceMode) { setVoiceMode(false); }
       }
     };
-    window.addEventListener('keydown', onKey, true); // capture phase
+    window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
   }, [sttState]);
 
@@ -672,6 +679,7 @@ export function DiscussionsPage({
       const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
       mediaRecorderRef.current = recorder;
       audioChunksRef.current = [];
+      sttCancelledRef.current = false;
 
       recorder.ondataavailable = (e) => {
         if (e.data.size > 0) audioChunksRef.current.push(e.data);
@@ -680,6 +688,15 @@ export function DiscussionsPage({
       recorder.onstop = async () => {
         // Stop mic access
         stream.getTracks().forEach(t => t.stop());
+
+        // If cancelled, discard everything and go idle
+        if (sttCancelledRef.current) {
+          sttCancelledRef.current = false;
+          audioChunksRef.current = [];
+          setSttState('idle');
+          return;
+        }
+
         setSttState('transcribing');
 
         try {
@@ -2415,6 +2432,21 @@ export function DiscussionsPage({
                   }} />
                   <span style={{ fontSize: 12, color: '#ff8a9e', flex: 1 }}>Enregistrement en cours...</span>
                   <button
+                    onClick={() => {
+                      sttCancelledRef.current = true;
+                      mediaRecorderRef.current?.stop();
+                      if (voiceMode) { setVoiceMode(false); }
+                    }}
+                    style={{
+                      background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)',
+                      borderRadius: 6, padding: '4px 10px', cursor: 'pointer',
+                      color: 'rgba(255,255,255,0.5)', fontSize: 11, fontFamily: 'inherit', fontWeight: 600,
+                      display: 'flex', alignItems: 'center', gap: 4,
+                    }}
+                  >
+                    <X size={10} /> Annuler
+                  </button>
+                  <button
                     onClick={handleMicToggle}
                     style={{
                       background: 'rgba(255,77,106,0.15)', border: '1px solid rgba(255,77,106,0.3)',
@@ -2423,7 +2455,7 @@ export function DiscussionsPage({
                       display: 'flex', alignItems: 'center', gap: 4,
                     }}
                   >
-                    <StopCircle size={10} /> Stop
+                    <StopCircle size={10} /> {voiceMode ? 'Envoyer' : 'Stop'}
                   </button>
                 </div>
               )}

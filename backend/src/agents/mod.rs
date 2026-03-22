@@ -4,6 +4,24 @@ use std::time::Instant;
 use anyhow::Result;
 use crate::models::{AgentDetection, AgentType};
 
+/// Run a shell command cross-platform (sh on Unix, cmd on Windows)
+async fn run_shell_cmd(cmd: &str) -> Result<std::process::Output> {
+    #[cfg(unix)]
+    {
+        Ok(tokio::process::Command::new("sh")
+            .args(["-c", cmd])
+            .output()
+            .await?)
+    }
+    #[cfg(windows)]
+    {
+        Ok(tokio::process::Command::new("cmd")
+            .args(["/C", cmd])
+            .output()
+            .await?)
+    }
+}
+
 pub mod runner;
 
 /// Cache for runtime probe results (npx availability).
@@ -249,17 +267,37 @@ async fn get_version_from(binary_path: &str) -> Result<String> {
 }
 
 /// Install an agent (runs the install command)
+/// Check if a runtime prerequisite is available (e.g. npm, uv, curl)
+fn check_prerequisite(cmd: &str) -> bool {
+    which::which(cmd).is_ok()
+}
+
+/// Prerequisite needed for each agent's install command
+fn install_prerequisite(agent_type: &AgentType) -> Option<(&'static str, &'static str)> {
+    match agent_type {
+        AgentType::ClaudeCode | AgentType::Codex | AgentType::GeminiCli =>
+            Some(("npm", "Node.js is required. Install it from https://nodejs.org")),
+        AgentType::Vibe =>
+            Some(("uv", "uv is required. Install it from https://docs.astral.sh/uv")),
+        _ => None,
+    }
+}
+
 pub async fn install_agent(agent_type: &AgentType) -> Result<String> {
     let def = KNOWN_AGENTS.iter()
         .find(|d| std::mem::discriminant(&d.agent_type) == std::mem::discriminant(agent_type))
         .ok_or_else(|| anyhow::anyhow!("Unknown agent type"))?;
 
+    // Check prerequisite before attempting install
+    if let Some((prereq, msg)) = install_prerequisite(agent_type) {
+        if !check_prerequisite(prereq) {
+            anyhow::bail!("{}", msg);
+        }
+    }
+
     tracing::info!("Installing agent: {}", def.install_cmd);
 
-    let output = tokio::process::Command::new("sh")
-        .args(["-c", def.install_cmd])
-        .output()
-        .await?;
+    let output = run_shell_cmd(def.install_cmd).await?;
 
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -286,10 +324,7 @@ pub async fn uninstall_agent(agent_type: &AgentType) -> Result<String> {
 
     tracing::info!("Uninstalling agent: {}", uninstall_cmd);
 
-    let output = tokio::process::Command::new("sh")
-        .args(["-c", uninstall_cmd])
-        .output()
-        .await?;
+    let output = run_shell_cmd(uninstall_cmd).await?;
 
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
