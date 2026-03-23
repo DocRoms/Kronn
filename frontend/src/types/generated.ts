@@ -726,6 +726,7 @@ export interface ServerConfigPublic {
   port: number;
   domain: string | null;
   max_concurrent_agents: number;
+  agent_stall_timeout_min: number;
   auth_enabled: boolean;
 }
 

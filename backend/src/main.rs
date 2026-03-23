@@ -7,8 +7,9 @@ use kronn::{build_router, core::{config, mcp_scanner}, db::Database, workflows::
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialize tracing
+    // Initialize tracing — write to stdout (Docker best practice: stdout for logs, stderr for panics)
     tracing_subscriber::fmt()
+        .with_writer(std::io::stdout)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "kronn=info,tower_http=info".into()),

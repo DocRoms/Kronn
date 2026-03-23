@@ -1,5 +1,6 @@
 services:
   backend:
+    restart: unless-stopped
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -70,6 +71,7 @@ services:
       start_period: 5s
 
   frontend:
+    restart: unless-stopped
     build:
       context: ./frontend
       dockerfile: Dockerfile
@@ -92,6 +94,7 @@ services:
 
   # Single entry point: nginx reverse proxy
   gateway:
+    restart: unless-stopped
     image: nginx:alpine
     deploy:
       resources:

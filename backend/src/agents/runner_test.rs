@@ -798,4 +798,32 @@ mod tests {
         std::env::remove_var("KRONN_HOST_HOME");
         std::env::remove_var("KRONN_HOST_OS");
     }
+
+    // ─── StreamJsonEvent: ToolStart / ToolInputDelta / ToolEnd ──────────────
+
+    #[test]
+    fn parse_stream_tool_start() {
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01","name":"Read","input":{}}}}"#;
+        match parse_claude_stream_line(line) {
+            StreamJsonEvent::ToolStart(name) => assert_eq!(name, "Read"),
+            other => panic!("Expected ToolStart, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_stream_tool_input_delta() {
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"file_path\":\"/src"}}}"#;
+        match parse_claude_stream_line(line) {
+            StreamJsonEvent::ToolInputDelta(partial) => {
+                assert!(partial.contains("file_path"), "Should contain partial JSON, got: {}", partial);
+            }
+            other => panic!("Expected ToolInputDelta, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_stream_tool_end() {
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_stop","index":1}}"#;
+        assert!(matches!(parse_claude_stream_line(line), StreamJsonEvent::ToolEnd));
+    }
 }

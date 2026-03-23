@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
+import { useIsMobile } from '../hooks/useMediaQuery';
 import { useT } from '../lib/I18nContext';
 import { workflows as workflowsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi } from '../lib/api';
 import { useApi } from '../hooks/useApi';
@@ -10,7 +11,7 @@ import type {
   CreateWorkflowRequest, Skill, AgentProfile, Directive,
 } from '../types/generated';
 import {
-  Plus, Trash2, Play, Loader2, Check, X, ChevronRight, ChevronDown,
+  Plus, Trash2, Play, Loader2, Check, X, ChevronLeft, ChevronRight, ChevronDown,
   Clock, GitBranch, Zap, Eye, HelpCircle, Settings, Shield,
   ToggleLeft, ToggleRight, RefreshCw, AlertTriangle, UserCircle, FileText,
 } from 'lucide-react';
@@ -41,6 +42,7 @@ const checkAgentRestricted = isAgentRestricted;
 
 export function WorkflowsPage({ projects, installedAgentTypes, agentAccess }: WorkflowsPageProps) {
   const { t } = useT();
+  const isMobile = useIsMobile();
   const { data: workflowList, refetch } = useApi(() => workflowsApi.list(), []);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
@@ -188,8 +190,6 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess }: Wo
   return (
     <div>
       <style>{`
-        @keyframes spin { to { transform: rotate(360deg) } }
-        @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.3 } }
         @media (prefers-reduced-motion: reduce) {
           *, *::before, *::after {
             animation-duration: 0.01ms !important;
@@ -237,16 +237,17 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess }: Wo
         <div style={ws.empty}>
           <Zap size={32} style={{ color: 'rgba(255,255,255,0.15)', marginBottom: 8 }} />
           <p>{t('wf.empty')}</p>
-          <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginTop: 4 }}>
+          <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginTop: 4 }}>
             {t('wf.emptyHint')}
           </p>
         </div>
       )}
 
       {!showCreate && !editingWorkflow && workflows.length > 0 && (
-        <div style={{ display: 'flex', gap: 16 }}>
+        <div style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', gap: 16 }}>
           {/* List — grouped by project */}
-          <div style={{ flex: '0 0 380px' }}>
+          {!(isMobile && selectedId) && (
+          <div style={{ flex: isMobile ? '1 1 auto' : '0 0 380px' }}>
             {groupedWorkflows.map(group => (
               <div key={group.key} style={{ marginBottom: 12 }}>
                 {/* Group header */}
@@ -338,9 +339,23 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess }: Wo
               </div>
             ))}
           </div>
+          )}
 
           {/* Detail panel */}
           <div style={{ flex: 1, minWidth: 0 }}>
+            {isMobile && selectedId && (
+              <button
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 4, padding: '6px 10px',
+                  background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.08)',
+                  borderRadius: 6, color: 'rgba(255,255,255,0.7)', fontSize: 12, cursor: 'pointer',
+                  marginBottom: 8, font: 'inherit',
+                }}
+                onClick={() => setSelectedId(null)}
+              >
+                <ChevronLeft size={14} /> {t('wf.back') ?? 'Back'}
+              </button>
+            )}
             {selectedId && loadingDetail && (
               <div style={{ ...ws.empty, padding: 40 }}>
                 <Loader2 size={24} style={{ color: '#c8ff00', animation: 'spin 1s linear infinite' }} />
@@ -413,7 +428,10 @@ function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit,
   const triggerLabel = (() => {
     switch (workflow.trigger.type) {
       case 'Cron': return `Cron: ${workflow.trigger.schedule}`;
-      case 'Tracker': return `Tracker: ${(workflow.trigger.source as any)?.owner}/${(workflow.trigger.source as any)?.repo}`;
+      case 'Tracker': {
+        const src = workflow.trigger.source;
+        return `Tracker: ${src.owner}/${src.repo}`;
+      }
       case 'Manual': return t('wf.manual');
       default: return t('wf.unknown');
     }
@@ -647,7 +665,7 @@ function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit,
       </div>
 
       {showRuns && runs.length === 0 && (
-        <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.25)', marginTop: 8 }}>{t('wf.noRuns')}</p>
+        <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', marginTop: 8 }}>{t('wf.noRuns')}</p>
       )}
 
       {showRuns && runs.map(run => (
@@ -683,12 +701,12 @@ function RunDetail({ run, onDelete }: { run: WorkflowRun; onDelete: () => void }
         <span style={{ fontWeight: 600, fontSize: 12, color: STATUS_COLORS[run.status] ?? '#888' }}>
           {run.status}
         </span>
-        <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', flex: 1 }}>
+        <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.4)', flex: 1 }}>
           {new Date(run.started_at).toLocaleString()}
           {run.finished_at && ` — ${new Date(run.finished_at).toLocaleString()}`}
         </span>
         {run.tokens_used > 0 && (
-          <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)' }}>{run.tokens_used} tokens</span>
+          <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.4)' }}>{run.tokens_used} tokens</span>
         )}
         <button
           style={{
@@ -774,7 +792,7 @@ function RunDetail({ run, onDelete }: { run: WorkflowRun; onDelete: () => void }
                     }}>
                       {sr.output || t('wf.noOutput')}
                     </div>
-                    <div style={{ display: 'flex', gap: 12, marginTop: 6, fontSize: 10, color: 'rgba(255,255,255,0.25)' }}>
+                    <div style={{ display: 'flex', gap: 12, marginTop: 6, fontSize: 10, color: 'rgba(255,255,255,0.35)' }}>
                       <span>{t('wf.status')}: <span style={{ color: STATUS_COLORS[sr.status] ?? '#888' }}>{sr.status}</span></span>
                       {sr.duration_ms > 0 && <span>{t('wf.duration')}: {(sr.duration_ms / 1000).toFixed(1)}s</span>}
                       {sr.tokens_used > 0 && <span>Tokens: {sr.tokens_used}</span>}
@@ -829,8 +847,8 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAge
   const [cronEvery, setCronEvery] = useState(initCron?.every ?? 5);
   const [cronUnit, setCronUnit] = useState<'minutes' | 'hours' | 'days' | 'weeks' | 'months'>(initCron?.unit ?? 'minutes');
   const [cronAt, setCronAt] = useState(initCron?.at ?? '00:00');
-  const [trackerOwner, setTrackerOwner] = useState((initTracker?.source as any)?.owner ?? '');
-  const [trackerRepo, setTrackerRepo] = useState((initTracker?.source as any)?.repo ?? '');
+  const [trackerOwner, setTrackerOwner] = useState(initTracker?.source?.owner ?? '');
+  const [trackerRepo, setTrackerRepo] = useState(initTracker?.source?.repo ?? '');
   const [trackerLabels, setTrackerLabels] = useState(initTracker?.labels?.join(', ') ?? '');
   const [trackerInterval, setTrackerInterval] = useState(initTracker?.interval ?? '*/5 * * * *');
   const [showVarHelp, setShowVarHelp] = useState(false);
@@ -1618,7 +1636,7 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAge
                           {cond.action.type === 'Goto' && (
                             <input
                               style={{ ...ws.input, width: 80, fontSize: 11 }}
-                              value={(cond.action as any).step_name ?? ''}
+                              value={cond.action.type === 'Goto' ? cond.action.step_name : ''}
                               onChange={e => updateCondition(i, j, { action: { type: 'Goto', step_name: e.target.value } })}
                               placeholder="step name"
                             />
@@ -1718,7 +1736,7 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAge
               <GitBranch size={14} style={{ color: 'rgba(255,255,255,0.4)' }} />
               <span style={{ fontSize: 13, fontWeight: 600, color: 'rgba(255,255,255,0.6)' }}>{t('wiz.hooks')}</span>
             </div>
-            <p style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)', margin: '0 0 8px' }}>
+            <p style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', margin: '0 0 8px' }}>
               {t('wiz.hooksHint')}
             </p>
 
@@ -1841,7 +1859,7 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAge
 const ws = {
   h1: { fontSize: 22, fontWeight: 800, letterSpacing: '-0.02em', color: '#e8eaed', margin: 0 } as const,
   meta: { fontSize: 12, color: 'rgba(255,255,255,0.35)', margin: '4px 0 0' } as const,
-  empty: { display: 'flex', flexDirection: 'column' as const, alignItems: 'center', justifyContent: 'center', padding: 60, color: 'rgba(255,255,255,0.25)', fontSize: 13 },
+  empty: { display: 'flex', flexDirection: 'column' as const, alignItems: 'center', justifyContent: 'center', padding: 60, color: 'rgba(255,255,255,0.35)', fontSize: 13 },
   card: (active: boolean) => ({
     padding: '14px 16px', borderRadius: 10,
     background: active ? 'rgba(200,255,0,0.03)' : 'rgba(255,255,255,0.02)',
@@ -1874,7 +1892,7 @@ const ws = {
     background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)',
   } as const,
   infoRow: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, marginBottom: 6, color: 'rgba(255,255,255,0.5)' } as const,
-  infoLabel: { fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.3)', width: 100 } as const,
+  infoLabel: { fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.4)', width: 100 } as const,
   sectionTitle: { fontSize: 12, fontWeight: 700, color: 'rgba(255,255,255,0.5)', marginTop: 16, marginBottom: 8, textTransform: 'uppercase' as const, letterSpacing: '0.04em' },
   stepCard: {
     padding: '10px 14px', borderRadius: 8, marginBottom: 6,
@@ -1926,7 +1944,7 @@ const ws = {
     alignItems: 'center', justifyContent: 'center', gap: 6, fontSize: 11, fontFamily: 'inherit',
   } as const,
   summaryRow: { fontSize: 12, padding: '4px 0', color: 'rgba(255,255,255,0.5)' } as const,
-  summaryLabel: { fontWeight: 600, color: 'rgba(255,255,255,0.3)', marginRight: 8, display: 'inline-block', width: 70 } as const,
+  summaryLabel: { fontWeight: 600, color: 'rgba(255,255,255,0.4)', marginRight: 8, display: 'inline-block', width: 70 } as const,
   // Help panel
   smallHelpBtn: {
     display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px',

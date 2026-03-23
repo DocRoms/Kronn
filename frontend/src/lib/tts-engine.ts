@@ -12,6 +12,8 @@ let ttsPaused = false;
 let ttsResumeResolver: (() => void) | null = null;
 
 /** Synthesize one sentence via a TTS worker */
+// Safe: TTS sentences are processed sequentially (awaited), and STT calls are one-at-a-time.
+// If concurrent calls are ever needed, add a message ID protocol.
 function synthesizeSentence(worker: Worker, text: string, voiceId: string): Promise<Blob> {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error('TTS worker timeout')), 60000);

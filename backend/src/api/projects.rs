@@ -237,7 +237,8 @@ pub async fn bootstrap(
                 let kiro_src = template_dir.join(".kiro/steering/instructions.md");
                 let kiro_dst = project_path.join(".kiro/steering/instructions.md");
                 if kiro_src.exists() && !kiro_dst.exists() {
-                    let _ = std::fs::create_dir_all(kiro_dst.parent().unwrap());
+                    // Safety: kiro_dst is a multi-segment path (.kiro/steering/instructions.md), parent() cannot be None
+                    let _ = std::fs::create_dir_all(kiro_dst.parent().expect("kiro_dst has a parent"));
                     let _ = std::fs::copy(&kiro_src, &kiro_dst);
                 }
             }
@@ -1322,7 +1323,8 @@ pub async fn run_audit(
         return Sse::new(stream);
     }
 
-    let project = project.unwrap();
+    // Safety: early return above guarantees project is Some
+    let project = project.expect("project is Some after early return");
     let project_path_str = project.path.clone();
     let project_path = scanner::resolve_host_path(&project.path);
     let briefing_notes = resolve_briefing_notes(&project_path, &project.briefing_notes);
@@ -1523,7 +1525,8 @@ pub async fn partial_audit(
         return Sse::new(stream);
     }
 
-    let project = project.unwrap();
+    // Safety: early return above guarantees project is Some
+    let project = project.expect("project is Some after early return");
     let project_path_str = project.path.clone();
     let project_path = scanner::resolve_host_path(&project.path);
     let briefing_notes = resolve_briefing_notes(&project_path, &project.briefing_notes);
@@ -2003,7 +2006,8 @@ pub async fn full_audit(
         return Sse::new(stream);
     }
 
-    let project = project.unwrap();
+    // Safety: early return above guarantees project is Some
+    let project = project.expect("project is Some after early return");
     let project_id = project.id.clone();
     let project_path_str = project.path.clone();
     let project_path = scanner::resolve_host_path(&project.path);
@@ -2793,7 +2797,10 @@ fn build_ai_file_tree(dir: &std::path::Path, rel_prefix: &str) -> Vec<AiFileNode
     for entry in entries {
         let name = entry.file_name().to_string_lossy().to_string();
         let path = format!("{}/{}", rel_prefix, name);
-        let file_type = entry.file_type().unwrap_or_else(|_| entry.metadata().unwrap().file_type());
+        let file_type = match entry.file_type().or_else(|_| entry.metadata().map(|m| m.file_type())) {
+            Ok(ft) => ft,
+            Err(_) => continue, // skip entries with unreadable metadata
+        };
 
         if file_type.is_dir() {
             let children = build_ai_file_tree(&entry.path(), &path);
@@ -3517,16 +3524,20 @@ pub async fn project_exec(
         }
     }
 
-    // Block dangerous commands
-    let first_word = cmd.split_whitespace().next().unwrap_or("");
-    const BLOCKED: &[&str] = &["rm", "sudo", "chmod", "chown", "kill", "reboot", "shutdown", "mkfs", "dd"];
-    if BLOCKED.contains(&first_word) {
-        return Json(ApiResponse::err(format!("Command '{}' is not allowed", first_word)));
+    // Validate command against strict allowlist
+    if let Err(msg) = super::git_ops::validate_exec_command(&cmd) {
+        return Json(ApiResponse::err(msg));
     }
 
     let repo_path = match resolve_project_path(&state, &id).await {
         Ok(p) => p,
         Err(e) => return Json(ApiResponse::err(e)),
+    };
+
+    // Rate-limit concurrent exec calls via the shared agent semaphore
+    let _permit = match state.agent_semaphore.acquire().await {
+        Ok(p) => p,
+        Err(_) => return Json(ApiResponse::err("Server is shutting down")),
     };
 
     let result = tokio::task::spawn_blocking(move || {

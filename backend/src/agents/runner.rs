@@ -17,11 +17,18 @@ pub enum OutputMode {
 }
 
 /// Result of parsing a single stream-json line
+#[derive(Debug)]
 pub enum StreamJsonEvent {
     /// A text chunk to stream to the user
     Text(String),
     /// Token usage from a message_delta event (input_tokens, output_tokens)
     Usage { input_tokens: u64, output_tokens: u64 },
+    /// Tool use started — name of the tool
+    ToolStart(String),
+    /// Partial JSON input for the current tool (accumulated to build full input)
+    ToolInputDelta(String),
+    /// Content block finished (tool input complete)
+    ToolEnd,
     /// Nothing useful (metadata, start/stop events, etc.)
     Skip,
 }
@@ -43,7 +50,7 @@ pub struct AgentProcess {
     pub work_dir: PathBuf,
     agent_type: AgentType,
     rx: mpsc::Receiver<String>,
-    stderr_capture: Arc<Mutex<Vec<String>>>,
+    pub stderr_capture: Arc<Mutex<Vec<String>>>,
     stderr_task: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -732,6 +739,31 @@ pub fn parse_claude_stream_line(line: &str) -> StreamJsonEvent {
                         return StreamJsonEvent::Usage { input_tokens: input, output_tokens: output };
                     }
                 }
+            }
+
+            // Tool input delta — accumulate partial JSON
+            if let Some(delta) = event.get("delta") {
+                if delta.get("type").and_then(|v| v.as_str()) == Some("input_json_delta") {
+                    if let Some(partial) = delta.get("partial_json").and_then(|v| v.as_str()) {
+                        return StreamJsonEvent::ToolInputDelta(partial.to_string());
+                    }
+                }
+            }
+
+            // Content block start — tool use or thinking
+            if let Some(content_block) = event.get("content_block") {
+                let block_type = content_block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                if block_type == "tool_use" {
+                    if let Some(name) = content_block.get("name").and_then(|v| v.as_str()) {
+                        return StreamJsonEvent::ToolStart(name.to_string());
+                    }
+                }
+            }
+
+            // Content block stop — tool input complete
+            let event_type_inner = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            if event_type_inner == "content_block_stop" {
+                return StreamJsonEvent::ToolEnd;
             }
 
             StreamJsonEvent::Skip

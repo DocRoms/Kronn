@@ -1,5 +1,8 @@
+// Note: assertions use French strings because the default UI locale is 'fr'.
+// If the default locale changes, these assertions must be updated.
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, act, cleanup } from '@testing-library/react';
+import { I18nProvider } from '../../lib/I18nContext';
 
 // ─── API mock ────────────────────────────────────────────────────────────────
 
@@ -78,7 +81,7 @@ afterEach(() => {
 const wrap = async (ui: React.ReactElement) => {
   let result: ReturnType<typeof render>;
   await act(async () => {
-    result = render(ui);
+    result = render(<I18nProvider>{ui}</I18nProvider>);
   });
   return result!;
 };

@@ -4,7 +4,8 @@ import { useApi } from '../hooks/useApi';
 import { useToast } from '../hooks/useToast';
 import type { Project, AgentDetection, AgentType, RemoteRepo, RepoSource, DriftCheckResponse } from '../types/generated';
 import { useT } from '../lib/I18nContext';
-import { getProjectGroup } from '../lib/constants';
+import { useIsMobile } from '../hooks/useMediaQuery';
+import { getProjectGroup, isHiddenPath, isUsable, isValidationDisc } from '../lib/constants';
 import { McpPage } from './McpPage';
 import { WorkflowsPage } from './WorkflowsPage';
 import { SettingsPage } from './SettingsPage';
@@ -25,7 +26,6 @@ interface DashboardProps {
   onReset: () => void;
 }
 
-const isHiddenPath = (path: string) => path.split('/').some(s => s.startsWith('.'));
 
 const isAiReady = (p: Project) => p.audit_status !== 'NoTemplate';
 
@@ -34,17 +34,15 @@ const STATUS_COLORS: Record<string, string> = {
   Failed: '#ff4d6a', Cancelled: 'rgba(255,255,255,0.3)', WaitingApproval: '#c8ff00',
 };
 
-/** Agent is usable: locally installed OR available via npx/uvx runtime fallback */
-const isUsable = (a: AgentDetection) => (a.installed || a.runtime_available) && a.enabled;
 /** Agents that can run audits/briefings (need filesystem access + CLI mode). Excludes Vibe (API-only). */
 const canAudit = (a: AgentDetection) => isUsable(a) && a.agent_type !== 'Vibe';
 
-const isValidationDisc = (title: string) => title === 'Validation audit AI';
 
 
 // Sort score for project readiness
 export function Dashboard({ onReset }: DashboardProps) {
   const { t } = useT();
+  const isMobile = useIsMobile();
   const { toast, ToastContainer } = useToast();
   const [page, setPage] = useState<Page>('projects');
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -95,11 +93,13 @@ export function Dashboard({ onReset }: DashboardProps) {
 
   // ─── Lifted discussion streaming state (survives page changes) ──────────
   const [sendingMap, setSendingMap] = useState<Record<string, boolean>>({});
+  const [sendingStartMap, setSendingStartMap] = useState<Record<string, number>>({});
   const [streamingMap, setStreamingMap] = useState<Record<string, string>>({});
   const abortControllers = useRef<Record<string, AbortController>>({});
 
   const cleanupStream = useCallback((discId: string) => {
     setSendingMap(prev => ({ ...prev, [discId]: false }));
+    setSendingStartMap(prev => { const n = { ...prev }; delete n[discId]; return n; });
     setStreamingMap(prev => { const n = { ...prev }; delete n[discId]; return n; });
     delete abortControllers.current[discId];
   }, []);
@@ -444,8 +444,7 @@ export function Dashboard({ onReset }: DashboardProps) {
   return (
     <div style={s.app}>
       <ToastContainer />
-      <style>{`@keyframes spin { to { transform: rotate(360deg) } }
-@media (prefers-reduced-motion: reduce) {
+      <style>{`@media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
@@ -454,10 +453,12 @@ export function Dashboard({ onReset }: DashboardProps) {
 }`}</style>
       {/* Nav */}
       <nav style={s.nav}>
-        <div style={s.navBrand}>
+        <div style={{ ...s.navBrand, ...(isMobile ? { marginRight: 8 } : {}) }}>
           <Zap size={18} style={{ color: '#c8ff00' }} />
-          <span style={s.navTitle}>Kronn</span>
+          {!isMobile && <span style={s.navTitle}>Kronn</span>}
+          {isMobile && <span style={{ ...s.navTitle, fontSize: 12 }}>K</span>}
         </div>
+        <div style={isMobile ? { display: 'flex', gap: 4, overflowX: 'auto', WebkitOverflowScrolling: 'touch', scrollbarWidth: 'none', flex: 1 } as React.CSSProperties : { display: 'contents' }}>
         {([
           ['projects', Folder, t('nav.projects')],
           ['discussions', MessageSquare, t('nav.discussions')],
@@ -465,12 +466,12 @@ export function Dashboard({ onReset }: DashboardProps) {
           ['workflows', Workflow, t('nav.workflows')],
           ['settings', Settings, t('nav.config')],
         ] as [string, typeof Folder, string][]).map(([id, Icon, label]) => (
-          <button key={id} style={{ ...s.navBtn(page === id), position: 'relative' }} onClick={() => setPage(id as Page)}>
+          <button key={id} style={{ ...s.navBtn(page === id), position: 'relative', ...(isMobile ? { padding: '6px 8px', fontSize: 10, whiteSpace: 'nowrap', gap: 3 } : {}) } as React.CSSProperties} onClick={() => setPage(id as Page)} title={label}>
             {id === 'workflows' && runningWorkflows > 0
-              ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite', color: '#c8ff00' }} />
-              : <Icon size={14} />
+              ? <Loader2 size={isMobile ? 16 : 14} style={{ animation: 'spin 1s linear infinite', color: '#c8ff00' }} />
+              : <Icon size={isMobile ? 16 : 14} />
             }
-            {' '}{label}
+            {!isMobile && <>{' '}{label}</>}
             {id === 'discussions' && totalUnseen > 0 && (
               <span style={{
                 position: 'absolute', top: 2, right: 2,
@@ -489,12 +490,13 @@ export function Dashboard({ onReset }: DashboardProps) {
             )}
           </button>
         ))}
-        <div style={{ flex: 1 }} />
-        <button style={s.scanBtn} onClick={() => setShowBootstrap(true)}>
-          <Plus size={14} /> {t('projects.bootstrap')}
+        </div>
+        <div style={{ flex: isMobile ? 0 : 1 }} />
+        <button style={s.scanBtn} onClick={() => setShowBootstrap(true)} title={t('projects.bootstrap')}>
+          <Plus size={14} /> {!isMobile && t('projects.bootstrap')}
         </button>
-        <button style={s.scanBtn} onClick={handleScan}>
-          <Search size={14} /> {t('nav.scan')}
+        <button style={s.scanBtn} onClick={handleScan} title={t('nav.scan')}>
+          <Search size={14} /> {!isMobile && t('nav.scan')}
         </button>
       </nav>
 
@@ -507,7 +509,7 @@ export function Dashboard({ onReset }: DashboardProps) {
           <div
             style={{
               background: '#161b22', border: '1px solid rgba(200,255,0,0.15)', borderRadius: 12,
-              padding: 24, width: 480, maxWidth: '90vw',
+              padding: isMobile ? 16 : 24, width: isMobile ? '95vw' : 480, maxWidth: '95vw', maxHeight: '90vh', overflowY: 'auto' as const,
             }}
             onClick={e => e.stopPropagation()}
             role="dialog"
@@ -761,10 +763,10 @@ export function Dashboard({ onReset }: DashboardProps) {
                           <div style={{ fontSize: 13, color: '#e6edf3', fontWeight: 500 }}>
                             {repo.full_name}
                             {repo.language && (
-                              <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginLeft: 8 }}>{repo.language}</span>
+                              <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginLeft: 8 }}>{repo.language}</span>
                             )}
                             {repo.stargazers_count > 0 && (
-                              <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginLeft: 6 }}>&#9733; {repo.stargazers_count}</span>
+                              <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginLeft: 6 }}>&#9733; {repo.stargazers_count}</span>
                             )}
                           </div>
                           {repo.description && (
@@ -846,7 +848,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                 <p style={s.meta}>
                   {aiCount}/{visibleProjects.length} {t('projects.aiReady')}
                   {hiddenProjects.length > 0 && (
-                    <span style={{ color: 'rgba(255,255,255,0.25)' }}> + {hiddenProjects.length} {hiddenProjects.length > 1 ? t('projects.hiddenPlural') : t('projects.hidden')}</span>
+                    <span style={{ color: 'rgba(255,255,255,0.35)' }}> + {hiddenProjects.length} {hiddenProjects.length > 1 ? t('projects.hiddenPlural') : t('projects.hidden')}</span>
                   )}
                 </p>
               </div>
@@ -1003,14 +1005,14 @@ export function Dashboard({ onReset }: DashboardProps) {
                         )}
                         {/* Audit date */}
                         {driftByProject[proj.id]?.audit_date && (
-                          <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.25)' }}>
+                          <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.35)' }}>
                             {t('audit.auditDate', new Date(driftByProject[proj.id].audit_date!).toLocaleDateString())}
                           </span>
                         )}
                       </div>
                       <div style={s.projPath}>{proj.path}</div>
                     </div>
-                    <div style={s.projMeta}>
+                    <div style={{ ...s.projMeta, ...(isMobile ? { flexWrap: 'wrap' } : {}) } as React.CSSProperties}>
                       <span style={s.metaItem}><Server size={12} /> {mcpOverview.configs.filter(c => c.is_global || c.project_ids.includes(proj.id)).length}</span>
                       <span style={s.metaItem}><MessageSquare size={12} /> {projDiscussions.length}</span>
                     </div>
@@ -1040,7 +1042,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                                     {isValidationDisc(disc.title) && <ShieldCheck size={10} style={{ color: '#c8ff00' }} />}
                                     {disc.title}
                                   </span>
-                                  <span style={{ marginLeft: 8, fontSize: 11, color: 'rgba(255,255,255,0.3)' }}>
+                                  <span style={{ marginLeft: 8, fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>
                                     {disc.message_count ?? disc.messages.length} msg · {disc.agent}
                                   </span>
                                 </div>
@@ -1104,7 +1106,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                                     </div>
                                     <div style={{ flex: 1 }}>
                                       <span style={{ fontWeight: 600, fontSize: 12 }}>{cfg.server_name}</span>
-                                      <span style={{ marginLeft: 6, fontSize: 11, color: 'rgba(255,255,255,0.3)' }}>{cfg.label}</span>
+                                      <span style={{ marginLeft: 6, fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>{cfg.label}</span>
                                       {cfg.is_global && <span style={{ marginLeft: 4, fontSize: 9, color: '#c8ff00' }}>GLOBAL</span>}
                                     </div>
                                     <button
@@ -1150,7 +1152,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                                     </div>
                                     <div style={{ flex: 1 }}>
                                       <span style={{ fontWeight: 600, fontSize: 12 }}>{wf.name}</span>
-                                      <span style={{ marginLeft: 6, fontSize: 10, color: 'rgba(255,255,255,0.3)' }}>
+                                      <span style={{ marginLeft: 6, fontSize: 10, color: 'rgba(255,255,255,0.4)' }}>
                                         {wf.trigger_type} · {wf.step_count} step{wf.step_count > 1 ? 's' : ''}
                                       </span>
                                       {wf.last_run && (
@@ -1517,6 +1519,11 @@ export function Dashboard({ onReset }: DashboardProps) {
                   document.getElementById(`project-${opts.projectId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
                 }, 100);
               }
+              if (opts?.scrollTo) {
+                setTimeout(() => {
+                  document.getElementById(opts.scrollTo!)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }, 200);
+              }
             }}
             prefill={discPrefill}
             onPrefillConsumed={handlePrefillConsumed}
@@ -1527,6 +1534,8 @@ export function Dashboard({ onReset }: DashboardProps) {
             toast={toast}
             sendingMap={sendingMap}
             setSendingMap={setSendingMap}
+            sendingStartMap={sendingStartMap}
+            setSendingStartMap={setSendingStartMap}
             streamingMap={streamingMap}
             setStreamingMap={setStreamingMap}
             abortControllers={abortControllers}
@@ -1587,7 +1596,7 @@ const s = {
   meta: { color: 'rgba(255,255,255,0.4)', fontSize: 12, marginTop: 4 } as const,
   card: (active: boolean) => ({ background: '#12151c', border: `1px solid ${active ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.07)'}`, borderRadius: 10, marginBottom: 10, transition: 'border-color 0.2s' } as const),
   cardHeader: { display: 'flex', alignItems: 'center', gap: 12, padding: '16px 20px', cursor: 'pointer', background: 'none', border: 'none', width: '100%', font: 'inherit', color: 'inherit', textAlign: 'left' as const, borderRadius: 10, transition: 'background 0.15s' } as const,
-  cardBody: { padding: '0 20px 20px', borderTop: '1px solid rgba(255,255,255,0.05)' } as const,
+  cardBody: { padding: '0 20px 20px', borderTop: '1px solid rgba(255,255,255,0.05)', overflowX: 'hidden' as const } as const,
   projName: { fontWeight: 600, fontSize: 14 } as const,
   projPath: { fontSize: 11, color: 'rgba(255,255,255,0.55)', fontFamily: 'JetBrains Mono, monospace', marginTop: 2 } as const,
   projMeta: { display: 'flex', gap: 14, fontSize: 11, color: 'rgba(255,255,255,0.4)', flexShrink: 0 } as const,

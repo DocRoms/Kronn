@@ -369,4 +369,41 @@ mod tests {
         std::env::remove_var("KRONN_HOST_OS");
         assert!(!host_is_macos(), "Should not be macOS when env is unset on Linux");
     }
+
+    // ─── run_shell_cmd ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_shell_cmd_echo_hello() {
+        let output = super::run_shell_cmd("echo hello").await.expect("run_shell_cmd should succeed");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("hello"), "stdout should contain 'hello', got: {}", stdout);
+    }
+
+    // ─── check_prerequisite ──────────────────────────────────────────────────
+
+    #[test]
+    fn check_prerequisite_sh_exists() {
+        assert!(super::check_prerequisite("sh"), "sh should be available on unix");
+    }
+
+    #[test]
+    fn check_prerequisite_nonexistent_binary() {
+        assert!(!super::check_prerequisite("nonexistent_binary_xyz"),
+            "nonexistent binary should not be found");
+    }
+
+    // ─── install_prerequisite ────────────────────────────────────────────────
+
+    #[test]
+    fn install_prerequisite_claude_code_returns_npm() {
+        let result = super::install_prerequisite(&AgentType::ClaudeCode);
+        assert!(result.is_some(), "ClaudeCode should have a prerequisite");
+        assert_eq!(result.unwrap().0, "npm");
+    }
+
+    #[test]
+    fn install_prerequisite_kiro_returns_none() {
+        let result = super::install_prerequisite(&AgentType::Kiro);
+        assert!(result.is_none(), "Kiro should have no prerequisite");
+    }
 }

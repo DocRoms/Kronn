@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES, agentColor, getProjectGroup } from '../constants';
+import { AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES, agentColor, getProjectGroup, isHiddenPath, isUsable, isValidationDisc } from '../constants';
 
 describe('constants', () => {
   describe('AGENT_COLORS', () => {
@@ -98,6 +98,56 @@ describe('constants', () => {
 
     it('returns empty string repo_url as local', () => {
       expect(getProjectGroup({ repo_url: '' })).toBe('Local');
+    });
+  });
+
+  describe('isHiddenPath()', () => {
+    it('detects hidden segments in path', () => {
+      expect(isHiddenPath('/home/.config/app')).toBe(true);
+      expect(isHiddenPath('.hidden/project')).toBe(true);
+      expect(isHiddenPath('/home/user/.local/share')).toBe(true);
+    });
+
+    it('returns false for visible paths', () => {
+      expect(isHiddenPath('/home/user/projects/my-app')).toBe(false);
+      expect(isHiddenPath('projects/frontend')).toBe(false);
+    });
+
+    it('handles edge cases', () => {
+      expect(isHiddenPath('')).toBe(false);
+      expect(isHiddenPath('.')).toBe(true);
+      expect(isHiddenPath('..')).toBe(true);
+    });
+  });
+
+  describe('isUsable()', () => {
+    it('returns true when installed and enabled', () => {
+      expect(isUsable({ installed: true, runtime_available: false, enabled: true })).toBe(true);
+    });
+
+    it('returns true when runtime available and enabled', () => {
+      expect(isUsable({ installed: false, runtime_available: true, enabled: true })).toBe(true);
+    });
+
+    it('returns false when disabled', () => {
+      expect(isUsable({ installed: true, runtime_available: true, enabled: false })).toBe(false);
+    });
+
+    it('returns false when neither installed nor runtime available', () => {
+      expect(isUsable({ installed: false, runtime_available: false, enabled: true })).toBe(false);
+    });
+  });
+
+  describe('isValidationDisc()', () => {
+    it('detects exact validation title', () => {
+      expect(isValidationDisc('Validation audit AI')).toBe(true);
+    });
+
+    it('rejects non-matching titles', () => {
+      expect(isValidationDisc('validation audit AI')).toBe(false);
+      expect(isValidationDisc('Validation audit AI ')).toBe(false);
+      expect(isValidationDisc('')).toBe(false);
+      expect(isValidationDisc('Some other discussion')).toBe(false);
     });
   });
 });

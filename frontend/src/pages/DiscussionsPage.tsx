@@ -5,22 +5,17 @@ import { discussions as discussionsApi, projects as projectsApi, skills as skill
 import { GitPanel } from '../components/GitPanel';
 import type { Project, AgentDetection, Discussion, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility } from '../types/generated';
 import { useT } from '../lib/I18nContext';
-import { AGENT_LABELS, agentColor, isAgentRestricted as isAgentRestrictedUtil, hasAgentFullAccess, getProjectGroup } from '../lib/constants';
+import { AGENT_LABELS, agentColor, isAgentRestricted as isAgentRestrictedUtil, hasAgentFullAccess, getProjectGroup, isHiddenPath, isUsable, isValidationDisc } from '../lib/constants';
 import type { ToastFn } from '../hooks/useToast';
 import {
   Folder, ChevronRight, Cpu, GitBranch, Server,
   Plus, Trash2, Loader2,
   MessageSquare, Send, X, Key, AlertTriangle, Users,
   StopCircle, RotateCcw, Pencil, ShieldCheck, Check, Archive, Zap, UserCircle, FileText, Settings, Rocket, Play, Pause,
-  Volume2, VolumeX, Mic, MicOff, Phone, PhoneOff,
+  Volume2, VolumeX, Mic, MicOff, Phone, PhoneOff, Menu,
 } from 'lucide-react';
+import { useIsMobile } from '../hooks/useMediaQuery';
 
-const isHiddenPath = (path: string) => path.split('/').some(s => s.startsWith('.'));
-
-/** Agent is usable: locally installed OR available via npx/uvx runtime fallback */
-const isUsable = (a: AgentDetection) => (a.installed || a.runtime_available) && a.enabled;
-
-const isValidationDisc = (title: string) => title === 'Validation audit AI';
 const isBootstrapDisc = (title: string) => title.startsWith('Bootstrap: ');
 const isBriefingDisc = (title: string) => title.startsWith('Briefing');
 
@@ -131,7 +126,7 @@ const SwipeableDiscItem = memo(function SwipeableDiscItem({ disc, isActive, last
               }}>{unseen}</span>
             )}
           </div>
-          <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', marginTop: 2, display: 'flex', alignItems: 'center', gap: 4 }}>
+          <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.4)', marginTop: 2, display: 'flex', alignItems: 'center', gap: 4 }}>
             {isSending && <Loader2 size={8} style={{ animation: 'spin 1s linear infinite', color: '#c8ff00' }} />}
             {(disc.participants?.length ?? 0) > 1 && (
               <Users size={8} style={{ color: '#8b5cf6' }} />
@@ -152,7 +147,7 @@ export interface DiscussionsPageProps {
   agentAccess: AgentsConfig | null;
   refetchDiscussions: () => void;
   refetchProjects: () => void;
-  onNavigate: (page: string, opts?: { projectId?: string }) => void;
+  onNavigate: (page: string, opts?: { projectId?: string; scrollTo?: string }) => void;
   prefill?: { projectId: string; title: string; prompt: string; locked?: boolean } | null;
   initialActiveDiscussionId?: string | null;
   onPrefillConsumed?: () => void;
@@ -166,6 +161,8 @@ export interface DiscussionsPageProps {
   // Lifted streaming state (lives in Dashboard, survives page changes)
   sendingMap: Record<string, boolean>;
   setSendingMap: React.Dispatch<React.SetStateAction<Record<string, boolean>>>;
+  sendingStartMap: Record<string, number>;
+  setSendingStartMap: React.Dispatch<React.SetStateAction<Record<string, number>>>;
   streamingMap: Record<string, string>;
   setStreamingMap: React.Dispatch<React.SetStateAction<Record<string, string>>>;
   abortControllers: React.MutableRefObject<Record<string, AbortController>>;
@@ -222,6 +219,8 @@ export function DiscussionsPage({
   toast,
   sendingMap,
   setSendingMap,
+  sendingStartMap,
+  setSendingStartMap,
   streamingMap,
   setStreamingMap,
   abortControllers,
@@ -234,8 +233,10 @@ export function DiscussionsPage({
   mcpIncompatibilities = [],
 }: DiscussionsPageProps) {
   const { t } = useT();
+  const isMobile = useIsMobile();
 
   // ─── Internal state ──────────────────────────────────────────────────────
+  const [sidebarOpen, setSidebarOpen] = useState(true); // always start open; mobile auto-closes on select
   const [activeDiscussionId, setActiveDiscussionId] = useState<string | null>(initialActiveDiscussionId ?? null);
   const [showNewDiscussion, setShowNewDiscussion] = useState(false);
   const [newDiscTitle, setNewDiscTitle] = useState('');
@@ -297,6 +298,12 @@ export function DiscussionsPage({
   const voiceAutoSendRef = useRef(false);
   const handleSendMessageRef = useRef<(() => void) | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const [sendingElapsed, setSendingElapsed] = useState(0);
+  const sendingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [agentLogs, setAgentLogs] = useState<string[]>([]);
+  const [showLogs, setShowLogs] = useState(false);
+  const onAgentLog = useCallback((log: string) => setAgentLogs(prev => [...prev.slice(-50), log]), []);
+  const resetAgentLogs = useCallback(() => { setAgentLogs([]); setShowLogs(false); }, []);
   const audioChunksRef = useRef<Blob[]>([]);
   const sttCancelledRef = useRef(false);
 
@@ -471,6 +478,27 @@ export function DiscussionsPage({
     }
   }, [activeDiscussionId, activeDiscussion?.messages.length, sendingMap, markDiscussionSeen]);
 
+  // Timer for agent activity duration — uses lifted startMap to survive page switches
+  useEffect(() => {
+    if (sending && activeDiscussionId) {
+      // Record start time if not already set
+      if (!sendingStartMap[activeDiscussionId]) {
+        setSendingStartMap(prev => ({ ...prev, [activeDiscussionId!]: Date.now() }));
+      }
+      // Update elapsed every second from the persistent start time
+      const tick = () => {
+        const start = sendingStartMap[activeDiscussionId!] || Date.now();
+        setSendingElapsed(Math.floor((Date.now() - start) / 1000));
+      };
+      tick();
+      sendingTimerRef.current = setInterval(tick, 1000);
+    } else {
+      if (sendingTimerRef.current) { clearInterval(sendingTimerRef.current); sendingTimerRef.current = null; }
+      setSendingElapsed(0);
+    }
+    return () => { if (sendingTimerRef.current) clearInterval(sendingTimerRef.current); };
+  }, [sending, activeDiscussionId, sendingStartMap]);
+
   // Auto-scroll on new messages / streaming
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -578,6 +606,7 @@ export function DiscussionsPage({
         () => cleanupStream(discId),
         (error) => { console.error('Agent error:', error); toast(String(error), 'error'); cleanupStream(discId); },
         controller.signal,
+        onAgentLog,
       );
     }, 500);
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -596,19 +625,25 @@ export function DiscussionsPage({
     if (!newDiscPrompt.trim() || !newDiscAgent) return;
     const prompt = newDiscPrompt.trim();
     const title = newDiscTitle.trim() || prompt.slice(0, 60);
-    const disc = await discussionsApi.create({
-      project_id: newDiscProjectId || null,
-      title,
-      agent: newDiscAgent as AgentType,
-      language: configLanguage ?? 'fr',
-      initial_prompt: prompt,
-      skill_ids: newDiscSkillIds.length > 0 ? newDiscSkillIds : undefined,
-      profile_ids: newDiscProfileIds.length > 0 ? newDiscProfileIds : undefined,
-      ...(newDiscDirectiveIds.length > 0 ? { directive_ids: newDiscDirectiveIds } : {}),
-      workspace_mode: newDiscWorkspaceMode === 'Isolated' ? 'Isolated' : undefined,
-      base_branch: newDiscWorkspaceMode === 'Isolated' ? newDiscBaseBranch : undefined,
-      tier: newDiscTier !== 'default' ? newDiscTier : undefined,
-    });
+    let disc;
+    try {
+      disc = await discussionsApi.create({
+        project_id: newDiscProjectId || null,
+        title,
+        agent: newDiscAgent as AgentType,
+        language: configLanguage ?? 'fr',
+        initial_prompt: prompt,
+        skill_ids: newDiscSkillIds.length > 0 ? newDiscSkillIds : undefined,
+        profile_ids: newDiscProfileIds.length > 0 ? newDiscProfileIds : undefined,
+        ...(newDiscDirectiveIds.length > 0 ? { directive_ids: newDiscDirectiveIds } : {}),
+        workspace_mode: newDiscWorkspaceMode === 'Isolated' ? 'Isolated' : undefined,
+        base_branch: newDiscWorkspaceMode === 'Isolated' ? newDiscBaseBranch : undefined,
+        tier: newDiscTier !== 'default' ? newDiscTier : undefined,
+      });
+    } catch (e) {
+      toast(String(e), 'error');
+      return;
+    }
     setShowNewDiscussion(false);
     setNewDiscTitle('');
     setNewDiscPrompt('');
@@ -628,12 +663,14 @@ export function DiscussionsPage({
     abortControllers.current[discId] = controller;
     setSendingMap(prev => ({ ...prev, [discId]: true }));
     setStreamingMap(prev => ({ ...prev, [discId]: '' }));
+    resetAgentLogs();
     await discussionsApi.runAgent(
       discId,
       (text) => appendStreamChunk(discId, text),
       () => cleanupStream(discId),
       (error) => { console.error('Agent error:', error); toast(String(error), 'error'); cleanupStream(discId); },
       controller.signal,
+        onAgentLog,
     );
   };
 
@@ -704,8 +741,12 @@ export function DiscussionsPage({
           const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
           const arrayBuf = await blob.arrayBuffer();
           const audioCtx = new AudioContext({ sampleRate: 16000 });
-          const decoded = await audioCtx.decodeAudioData(arrayBuf);
-          await audioCtx.close();
+          let decoded;
+          try {
+            decoded = await audioCtx.decodeAudioData(arrayBuf);
+          } finally {
+            await audioCtx.close();
+          }
           const float32 = audioBufferToFloat32(decoded);
 
           const lang = activeDiscussion?.language || 'fr';
@@ -832,6 +873,7 @@ export function DiscussionsPage({
     abortControllers.current[discId] = controller;
     setStreamingMap(prev => ({ ...prev, [discId]: '' }));
 
+    resetAgentLogs();
     await discussionsApi.sendMessageStream(
       discId,
       { content: msg, target_agent: targetAgent },
@@ -842,9 +884,9 @@ export function DiscussionsPage({
       () => {
         refetchDiscussions();
         setSendingMap(prev => ({ ...prev, [discId]: true }));
-        // Mark seen so user's own message doesn't trigger unseen badge
         markDiscussionSeen(discId, (activeDiscussion?.messages.length ?? 0) + 1);
       },
+      onAgentLog,
     );
   };
 
@@ -866,12 +908,14 @@ export function DiscussionsPage({
     abortControllers.current[discId] = controller;
     setSendingMap(prev => ({ ...prev, [discId]: true }));
     setStreamingMap(prev => ({ ...prev, [discId]: '' }));
+    resetAgentLogs();
     await discussionsApi.runAgent(
       discId,
       (text) => appendStreamChunk(discId, text),
       () => cleanupStream(discId),
       (error) => { console.error('Agent error:', error); toast(String(error), 'error'); cleanupStream(discId); },
       controller.signal,
+        onAgentLog,
     );
   };
 
@@ -890,12 +934,14 @@ export function DiscussionsPage({
     abortControllers.current[discId] = controller;
     setSendingMap(prev => ({ ...prev, [discId]: true }));
     setStreamingMap(prev => ({ ...prev, [discId]: '' }));
+    resetAgentLogs();
     await discussionsApi.runAgent(
       discId,
       (text) => appendStreamChunk(discId, text),
       () => cleanupStream(discId),
       (error) => { console.error('Agent error:', error); toast(String(error), 'error'); cleanupStream(discId); },
       controller.signal,
+        onAgentLog,
     );
   };
 
@@ -981,12 +1027,18 @@ export function DiscussionsPage({
   return (
     <div style={{ display: 'flex', height: 'calc(100vh - 56px)', margin: '-24px -20px', overflow: 'hidden' }}>
       {/* Sidebar */}
-      <div style={ds.sidebar}>
+      {(!isMobile || sidebarOpen) && (
+      <div style={isMobile ? { position: 'fixed', inset: 0, zIndex: 100, width: '100%', background: '#12151c', display: 'flex', flexDirection: 'column' as const } : ds.sidebar}>
         <div style={ds.sidebarHeader}>
           <span style={{ fontWeight: 600, fontSize: 13 }}>Discussions</span>
-          <button style={ls.scanBtn} onClick={() => { setShowNewDiscussion(true); setNewDiscPrefilled(false); }}>
-            <Plus size={12} /> {t('disc.new')}
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <button style={ls.scanBtn} onClick={() => { setShowNewDiscussion(true); setNewDiscPrefilled(false); }}>
+              <Plus size={12} /> {t('disc.new')}
+            </button>
+            {isMobile && (
+              <button style={ls.iconBtn} onClick={() => setSidebarOpen(false)} aria-label="Close sidebar"><X size={16} /></button>
+            )}
+          </div>
         </div>
 
         {/* Discussion list grouped by project */}
@@ -1014,13 +1066,14 @@ export function DiscussionsPage({
                     isActive={disc.id === activeDiscussionId}
                     lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
                     isSending={!!sendingMap[disc.id]}
-                    onSelect={() => { setActiveDiscussionId(disc.id); markDiscussionSeen(disc.id, disc.message_count ?? disc.messages.length); }}
+                    onSelect={() => { setActiveDiscussionId(disc.id); markDiscussionSeen(disc.id, disc.message_count ?? disc.messages.length); if (isMobile) setSidebarOpen(false); }}
                     onArchive={async () => {
                       await discussionsApi.update(disc.id, { archived: true });
                       if (activeDiscussionId === disc.id) setActiveDiscussionId(null);
                       refetchDiscussions();
                     }}
                     onDelete={async () => {
+                      if (!confirm('Supprimer cette discussion et tous ses messages ?')) return;
                       await discussionsApi.delete(disc.id);
                       if (activeDiscussionId === disc.id) setActiveDiscussionId(null);
                       refetchDiscussions();
@@ -1098,7 +1151,7 @@ export function DiscussionsPage({
                             isActive={disc.id === activeDiscussionId}
                             lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
                             isSending={!!sendingMap[disc.id]}
-                            onSelect={() => { setActiveDiscussionId(disc.id); markDiscussionSeen(disc.id, disc.message_count ?? disc.messages.length); }}
+                            onSelect={() => { setActiveDiscussionId(disc.id); markDiscussionSeen(disc.id, disc.message_count ?? disc.messages.length); if (isMobile) setSidebarOpen(false); }}
                             onArchive={async () => {
                               await discussionsApi.update(disc.id, { archived: true });
                               if (activeDiscussionId === disc.id) setActiveDiscussionId(null);
@@ -1121,7 +1174,7 @@ export function DiscussionsPage({
           })()}
 
           {allDiscussions.length === 0 && !showNewDiscussion && (
-            <div style={{ padding: 24, textAlign: 'center', color: 'rgba(255,255,255,0.25)', fontSize: 12, whiteSpace: 'pre-line' }}>
+            <div style={{ padding: 24, textAlign: 'center', color: 'rgba(255,255,255,0.35)', fontSize: 12, whiteSpace: 'pre-line' }}>
               {t('disc.empty')}
             </div>
           )}
@@ -1145,13 +1198,14 @@ export function DiscussionsPage({
                   isActive={disc.id === activeDiscussionId}
                   lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
                   isSending={!!sendingMap[disc.id]}
-                  onSelect={() => { setActiveDiscussionId(disc.id); markDiscussionSeen(disc.id, disc.message_count ?? disc.messages.length); }}
+                  onSelect={() => { setActiveDiscussionId(disc.id); markDiscussionSeen(disc.id, disc.message_count ?? disc.messages.length); if (isMobile) setSidebarOpen(false); }}
                   onArchive={async () => {
                     // Swipe right on archived = unarchive
                     await discussionsApi.update(disc.id, { archived: false });
                     refetchDiscussions();
                   }}
                   onDelete={async () => {
+                    if (!confirm('Supprimer cette discussion et tous ses messages ?')) return;
                     await discussionsApi.delete(disc.id);
                     if (activeDiscussionId === disc.id) setActiveDiscussionId(null);
                     refetchDiscussions();
@@ -1164,6 +1218,7 @@ export function DiscussionsPage({
           )}
         </div>
       </div>
+      )}
 
       {/* Main area */}
       <div style={ds.chatArea}>
@@ -1187,7 +1242,7 @@ export function DiscussionsPage({
                     setNewDiscProjectId(pid);
                     const proj = projects.find(p => p.id === pid);
                     if (proj?.default_skill_ids?.length) setNewDiscSkillIds(proj.default_skill_ids);
-                    if ((proj as any)?.default_profile_id) setNewDiscProfileIds([(proj as any).default_profile_id]);
+                    // default_profile_id removed — profiles are selected per-discussion
                     setNewDiscWorkspaceMode('Direct');
                     setNewDiscBranchName('');
                     setNewDiscBaseBranch('main');
@@ -1529,6 +1584,15 @@ export function DiscussionsPage({
           <>
             {/* Chat header */}
             <div style={ds.chatHeader}>
+              {isMobile && (
+                <button
+                  style={{ background: 'rgba(200,255,0,0.08)', border: '1px solid rgba(200,255,0,0.2)', borderRadius: 6, color: '#c8ff00', cursor: 'pointer', padding: 6, display: 'flex', alignItems: 'center', flexShrink: 0 }}
+                  onClick={() => setSidebarOpen(true)}
+                  aria-label="Open sidebar"
+                >
+                  <Menu size={18} />
+                </button>
+              )}
               <div style={{ flex: 1 }}>
                 <div style={{ fontWeight: 600, fontSize: 14, display: 'flex', alignItems: 'center', gap: 6 }}>
                   {isValidationDisc(activeDiscussion.title) && <ShieldCheck size={14} style={{ color: '#c8ff00', flexShrink: 0 }} />}
@@ -1696,7 +1760,7 @@ export function DiscussionsPage({
                           </div>
                         )}
                         {discMcps.length === 0 ? (
-                          <div style={{ padding: '4px 12px', fontSize: 11, color: 'rgba(255,255,255,0.3)' }}>{t('disc.noMcps')}</div>
+                          <div style={{ padding: '4px 12px', fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>{t('disc.noMcps')}</div>
                         ) : discMcps.map(c => {
                           const incomp = mcpIncompatibilities.find(
                             i => i.server_id === c.server_id && i.agent === activeDiscussion.agent
@@ -2106,9 +2170,19 @@ export function DiscussionsPage({
                         >
                           <Key size={11} /> {t('disc.overrideKey')}
                         </button>
-                        <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)', alignSelf: 'center' }}>
+                        <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', alignSelf: 'center' }}>
                           {t('disc.orCheckAgent')}
                         </span>
+                      </div>
+                    )}
+                    {/Réponse partielle.*interrompu|Timeout d'inactivité/i.test(msg.content) && (
+                      <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+                        <button
+                          style={{ ...ls.scanBtn, fontSize: 11, padding: '5px 12px', borderColor: 'rgba(245,158,11,0.3)', background: 'rgba(245,158,11,0.08)', color: '#f59e0b' }}
+                          onClick={() => onNavigate('settings', { scrollTo: 'settings-server' })}
+                        >
+                          <Settings size={11} /> {t('disc.editTimeout')}
+                        </button>
                       </div>
                     )}
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 4 }}>
@@ -2184,15 +2258,59 @@ export function DiscussionsPage({
               {sending && !orchState[activeDiscussion.id]?.active && (
                 <div style={ds.msgRow(false)} aria-live="polite">
                   <div style={ds.msgBubble(false)}>
-                    <div style={{ ...ds.msgAgent, color: agentColor(activeDiscussion.agent) }}>
-                      <Cpu size={10} /> {activeDiscussion.agent}
-                      <Loader2 size={10} style={{ animation: 'spin 1s linear infinite', marginLeft: 4 }} />
+                    <div style={{ ...ds.msgAgent, color: agentColor(activeDiscussion.agent), justifyContent: 'space-between' }}>
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <Cpu size={10} /> {activeDiscussion.agent}
+                        <Loader2 size={10} style={{ animation: 'spin 1s linear infinite', marginLeft: 4 }} />
+                      </span>
+                      <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.35)', fontVariantNumeric: 'tabular-nums', fontWeight: 400 }}>
+                        {sendingElapsed >= 60
+                          ? `${Math.floor(sendingElapsed / 60)}m${String(sendingElapsed % 60).padStart(2, '0')}s`
+                          : `${sendingElapsed}s`}
+                      </span>
                     </div>
                     {streamingText ? (
                       <MarkdownContent content={streamingText} />
                     ) : (
-                      <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)', fontStyle: 'italic' }} aria-live="assertive">
+                      <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)', fontStyle: 'italic', display: 'flex', alignItems: 'center', gap: 6 }} aria-live="assertive">
+                        <span style={{
+                          width: 6, height: 6, borderRadius: '50%', background: '#c8ff00',
+                          animation: 'pulse 2s ease-in-out infinite',
+                        }} />
                         {t('disc.running')}
+                        {agentLogs.length > 0 && (
+                          <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', marginLeft: 4 }}>
+                            — {agentLogs[agentLogs.length - 1]?.slice(0, 60)}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                    {/* Agent logs panel */}
+                    {agentLogs.length > 0 && (
+                      <div style={{ marginTop: 6 }}>
+                        <button
+                          onClick={() => setShowLogs(v => !v)}
+                          style={{
+                            background: 'none', border: 'none', cursor: 'pointer', fontFamily: 'inherit',
+                            fontSize: 10, color: 'rgba(255,255,255,0.3)', display: 'flex', alignItems: 'center', gap: 4,
+                            padding: 0,
+                          }}
+                        >
+                          <ChevronRight size={10} style={{ transform: showLogs ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s' }} />
+                          {t('disc.logs')} ({agentLogs.length})
+                        </button>
+                        {showLogs && (
+                          <div style={{
+                            marginTop: 4, padding: '6px 8px', borderRadius: 6,
+                            background: 'rgba(0,0,0,0.3)', maxHeight: 150, overflowY: 'auto',
+                            fontFamily: 'JetBrains Mono, monospace', fontSize: 10, lineHeight: 1.6,
+                            color: 'rgba(255,255,255,0.4)',
+                          }}>
+                            {agentLogs.map((log, i) => (
+                              <div key={i}>{log}</div>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -2223,7 +2341,7 @@ export function DiscussionsPage({
                           {as_.text ? (
                             <MarkdownContent content={as_.text} />
                           ) : !as_.done ? (
-                            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.3)', fontStyle: 'italic' }}>
+                            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', fontStyle: 'italic' }}>
                               {t('disc.thinking', as_.agent)}
                             </div>
                           ) : null}
@@ -2402,7 +2520,7 @@ export function DiscussionsPage({
                     fontSize: 20, fontWeight: 800, color: '#c8ff00',
                     fontVariantNumeric: 'tabular-nums', minWidth: 24, textAlign: 'center',
                   }}>{voiceCountdown}</span>
-                  <span style={{ fontSize: 12, color: 'rgba(200,255,0,0.6)', flex: 1 }}>Reprise de l'écoute...</span>
+                  <span style={{ fontSize: 12, color: 'rgba(200,255,0,0.6)', flex: 1 }}>{t('disc.resumeListening')}</span>
                   <button
                     onClick={() => {
                       if (voiceCountdownRef.current) { clearInterval(voiceCountdownRef.current); voiceCountdownRef.current = null; }
@@ -2415,7 +2533,7 @@ export function DiscussionsPage({
                       color: 'rgba(255,255,255,0.5)', fontSize: 11, fontFamily: 'inherit',
                     }}
                   >
-                    Annuler
+                    {t('disc.cancelVoice')}
                   </button>
                 </div>
               )}
@@ -2430,7 +2548,7 @@ export function DiscussionsPage({
                     width: 8, height: 8, borderRadius: '50%', background: '#ff4d6a',
                     animation: 'pulse 1.5s ease-in-out infinite',
                   }} />
-                  <span style={{ fontSize: 12, color: '#ff8a9e', flex: 1 }}>Enregistrement en cours...</span>
+                  <span style={{ fontSize: 12, color: '#ff8a9e', flex: 1 }}>{t('disc.recording')}</span>
                   <button
                     onClick={() => {
                       sttCancelledRef.current = true;
@@ -2444,7 +2562,7 @@ export function DiscussionsPage({
                       display: 'flex', alignItems: 'center', gap: 4,
                     }}
                   >
-                    <X size={10} /> Annuler
+                    <X size={10} /> {t('disc.cancelVoice')}
                   </button>
                   <button
                     onClick={handleMicToggle}
@@ -2455,7 +2573,7 @@ export function DiscussionsPage({
                       display: 'flex', alignItems: 'center', gap: 4,
                     }}
                   >
-                    <StopCircle size={10} /> {voiceMode ? 'Envoyer' : 'Stop'}
+                    <StopCircle size={10} /> {voiceMode ? t('disc.sendVoice') : t('disc.stopRecording')}
                   </button>
                 </div>
               )}
@@ -2466,7 +2584,7 @@ export function DiscussionsPage({
                   background: 'rgba(200,255,0,0.04)', border: '1px solid rgba(200,255,0,0.1)',
                 }}>
                   <Loader2 size={12} style={{ color: '#c8ff00', animation: 'spin 1s linear infinite' }} />
-                  <span style={{ fontSize: 12, color: 'rgba(200,255,0,0.7)' }}>Transcription en cours...</span>
+                  <span style={{ fontSize: 12, color: 'rgba(200,255,0,0.7)' }}>{t('disc.transcribing')}</span>
                 </div>
               )}
 
@@ -2565,8 +2683,8 @@ export function DiscussionsPage({
 
                 {/* Bottom toolbar inside composer */}
                 <div style={{
-                  display: 'flex', alignItems: 'center', padding: '4px 8px 8px',
-                  gap: 2,
+                  display: 'flex', alignItems: 'center', padding: isMobile ? '4px 4px 8px' : '4px 8px 8px',
+                  gap: 2, ...(isMobile ? { flexWrap: 'wrap' as const } : {}),
                 }}>
                   {/* Left: secondary actions */}
                   <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
@@ -2574,7 +2692,7 @@ export function DiscussionsPage({
                     <button
                       onClick={handleMicToggle}
                       disabled={sending || sttState === 'transcribing'}
-                      title={sttState === 'recording' ? 'Arrêter' : 'Dicter'}
+                      title={sttState === 'recording' ? t('disc.micStop') : t('disc.micDictate')}
                       style={{
                         background: sttState === 'recording' ? 'rgba(255,77,106,0.15)' : 'transparent',
                         border: 'none', borderRadius: 6, padding: '6px 7px', cursor: 'pointer',
@@ -2598,7 +2716,7 @@ export function DiscussionsPage({
                           setVoiceCountdown(null);
                         }
                       }}
-                      title={voiceMode ? 'Désactiver le mode conversation' : 'Mode conversation vocale'}
+                      title={voiceMode ? t('disc.voiceModeOff') : t('disc.voiceModeOn')}
                       style={{
                         background: voiceMode ? 'rgba(200,255,0,0.12)' : 'transparent',
                         border: 'none', borderRadius: 6, padding: '6px 7px', cursor: 'pointer',
@@ -2618,7 +2736,7 @@ export function DiscussionsPage({
                           return !prev;
                         });
                       }}
-                      title={ttsEnabled ? 'Désactiver la lecture vocale' : 'Activer la lecture vocale'}
+                      title={ttsEnabled ? t('disc.ttsDisable') : t('disc.ttsEnable')}
                       style={{
                         background: 'transparent', border: 'none', borderRadius: 6,
                         padding: '6px 7px', cursor: 'pointer',
@@ -2872,6 +2990,15 @@ export function DiscussionsPage({
           </>
         ) : !showNewDiscussion && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, color: 'rgba(255,255,255,0.2)' }}>
+            {isMobile && (
+              <button
+                style={{ position: 'absolute', top: 14, left: 14, background: 'none', border: 'none', color: 'rgba(255,255,255,0.5)', cursor: 'pointer', padding: 4, display: 'flex', alignItems: 'center' }}
+                onClick={() => setSidebarOpen(true)}
+                aria-label="Open sidebar"
+              >
+                <Menu size={20} />
+              </button>
+            )}
             <MessageSquare size={48} style={{ marginBottom: 16, opacity: 0.3 }} />
             <p style={{ fontSize: 14 }}>{t('disc.selectOrCreate')}</p>
           </div>

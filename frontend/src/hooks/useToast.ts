@@ -40,6 +40,8 @@ export function useToast() {
       children.push(
         React.createElement('div', {
           key: t.id,
+          role: 'alert',
+          'aria-live': 'assertive',
           style: {
             padding: '10px 16px',
             borderRadius: 8,

@@ -9,19 +9,29 @@ const Dashboard = lazy(() => import('./pages/Dashboard').then(m => ({ default: m
 export function App() {
   const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null);
   const [loading, setLoading] = useState(true);
+  const [apiError, setApiError] = useState(false);
 
-  useEffect(() => {
+  const fetchStatus = () => {
+    setLoading(true);
+    setApiError(false);
     setupApi.getStatus()
-      .then(setSetupStatus)
+      .then((status) => { setSetupStatus(status); setApiError(false); })
       .catch(() => {
-        // If API is down, show setup anyway
         setSetupStatus(null);
+        setApiError(true);
       })
       .finally(() => setLoading(false));
-  }, []);
+  };
+
+  useEffect(() => { fetchStatus(); }, []);
 
   if (loading) {
     return <LoadingScreen />;
+  }
+
+  // API unreachable — show error screen with retry, NOT the wizard
+  if (apiError) {
+    return <ApiErrorScreen onRetry={fetchStatus} />;
   }
 
   // First run or setup incomplete → show wizard
@@ -57,6 +67,60 @@ export function App() {
   );
 }
 
+function ApiErrorScreen({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div style={{
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      height: '100vh',
+      flexDirection: 'column',
+      gap: 16,
+    }}>
+      <div style={{
+        width: 48, height: 48,
+        borderRadius: '50%',
+        background: 'rgba(255,77,106,0.1)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontSize: 24,
+      }}>!</div>
+      <span style={{ color: '#ff4d6a', fontSize: 15, fontWeight: 600, fontFamily: 'JetBrains Mono, monospace' }}>
+        Cannot connect to backend
+      </span>
+      <span style={{ color: 'rgba(255,255,255,0.4)', fontSize: 12, textAlign: 'center', maxWidth: 320 }}>
+        The API server is unreachable. Check that the backend is running and try again.
+      </span>
+      <button
+        onClick={onRetry}
+        style={{
+          marginTop: 8,
+          padding: '8px 20px',
+          borderRadius: 6,
+          border: '1px solid rgba(200,255,0,0.3)',
+          background: 'rgba(200,255,0,0.08)',
+          color: '#c8ff00',
+          cursor: 'pointer',
+          fontSize: 13,
+          fontFamily: 'JetBrains Mono, monospace',
+          fontWeight: 500,
+        }}
+      >
+        Retry
+      </button>
+      <style>{`@keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.3 } }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}`}</style>
+    </div>
+  );
+}
+
 function LoadingScreen() {
   return (
     <div style={{
@@ -77,15 +141,7 @@ function LoadingScreen() {
       <span style={{ color: 'rgba(255,255,255,0.4)', fontSize: 13, fontFamily: 'JetBrains Mono, monospace' }}>
         Entering the grid...
       </span>
-      <style>{`@keyframes spin { to { transform: rotate(360deg) } }
-@keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.3 } }
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-  }
-}`}</style>
+      {/* Keyframes (spin, pulse, reduced-motion) defined in index.html */}
     </div>
   );
 }

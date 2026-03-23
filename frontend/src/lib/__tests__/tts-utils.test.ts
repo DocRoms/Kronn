@@ -99,6 +99,11 @@ describe('stripMarkdown', () => {
     expect(result).not.toContain('..');
   });
 
+  it('converts blockquote to sentence ending with period', () => {
+    const result = stripMarkdown('> This is a quote');
+    expect(result).toContain('This is a quote.');
+  });
+
   it('removes table pipes', () => {
     const result = stripMarkdown('| Col1 | Col2 |');
     expect(result).not.toContain('|');

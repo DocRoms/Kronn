@@ -110,6 +110,44 @@ describe('WorkflowsPage', () => {
     expect(screen.getByText('Nouveau workflow')).toBeDefined();
   });
 
+  // ─── Mobile responsive ─────────────────────────────────────────────────
+
+  it('renders layout without error on mobile viewport', async () => {
+    Object.defineProperty(window, 'matchMedia', {
+      writable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: query.includes('767'),
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
+
+    await wrap(
+      <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />
+    );
+
+    // Page title and create button should still render on mobile
+    expect(screen.getByText('Workflows')).toBeDefined();
+    expect(screen.getByText('Nouveau workflow')).toBeDefined();
+
+    // The layout should use column direction on mobile (flex-direction: column)
+    // Just verify no crash and content is accessible
+    const body = document.body.textContent!;
+    expect(body).toContain('Workflows');
+
+    // Restore default matchMedia
+    Object.defineProperty(window, 'matchMedia', {
+      writable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
+  });
+
   // ─── Workflow edit preserves existing steps ───────────────────────────────
 
   it('populates steps when editing an existing workflow', async () => {

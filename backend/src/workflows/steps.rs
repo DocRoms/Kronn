@@ -184,7 +184,7 @@ async fn run_agent_with_timeout(
                         StreamJsonEvent::Usage { input_tokens, output_tokens } => {
                             stream_json_tokens = input_tokens + output_tokens;
                         }
-                        StreamJsonEvent::Skip => {}
+                        StreamJsonEvent::ToolStart(_) | StreamJsonEvent::ToolInputDelta(_) | StreamJsonEvent::ToolEnd | StreamJsonEvent::Skip => {}
                     }
                 } else {
                     if !output.is_empty() {

@@ -7,6 +7,10 @@ describe('WHISPER_LANGS', () => {
     expect(WHISPER_LANGS.en).toBe('english');
     expect(WHISPER_LANGS.es).toBe('spanish');
   });
+
+  it('has exactly 3 language entries', () => {
+    expect(Object.keys(WHISPER_LANGS)).toHaveLength(3);
+  });
 });
 
 describe('audioBufferToFloat32', () => {

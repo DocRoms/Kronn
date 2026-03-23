@@ -428,4 +428,77 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("builtin"));
     }
+
+    // ─── build_skills_prompt_compact ─────────────────────────────────────
+
+    #[test]
+    fn build_skills_prompt_compact_empty() {
+        let prompt = build_skills_prompt_compact(&[]);
+        assert!(prompt.is_empty());
+    }
+
+    #[test]
+    fn build_skills_prompt_compact_with_ids() {
+        let prompt = build_skills_prompt_compact(&["rust".into(), "typescript".into()]);
+        assert!(prompt.contains("=== Skills ==="));
+        assert!(prompt.contains("Rust"));
+        assert!(prompt.contains("TypeScript"));
+    }
+
+    #[test]
+    fn build_skills_prompt_compact_unknown_ids_ignored() {
+        let prompt = build_skills_prompt_compact(&["nonexistent-1".into()]);
+        assert!(prompt.is_empty());
+    }
+
+    #[test]
+    fn build_skills_prompt_compact_shorter_than_full() {
+        let ids: Vec<String> = vec!["rust".into(), "typescript".into(), "python".into()];
+        let full = build_skills_prompt(&ids);
+        let compact = build_skills_prompt_compact(&ids);
+        assert!(
+            compact.len() < full.len(),
+            "Compact prompt ({} bytes) should be shorter than full ({} bytes)",
+            compact.len(),
+            full.len()
+        );
+    }
+
+    // ─── token_estimate ──────────────────────────────────────────────────
+
+    #[test]
+    fn token_estimate_is_positive_for_all_builtins() {
+        let skills = list_all_skills();
+        for skill in &skills {
+            assert!(
+                skill.token_estimate > 0,
+                "Skill '{}' should have positive token estimate",
+                skill.id
+            );
+        }
+    }
+
+    // ─── parse_skill_markdown edge cases ─────────────────────────────────
+
+    #[test]
+    fn parse_frontmatter_with_description() {
+        let raw = "---\nname: Test\nicon: T\ndescription: A test skill\ncategory: domain\n---\ncontent";
+        let skill = parse_skill_markdown("test", raw, false).unwrap();
+        assert_eq!(skill.description, "A test skill");
+    }
+
+    #[test]
+    fn parse_frontmatter_whitespace_before_start() {
+        let raw = "  \n---\nname: Test\nicon: T\ncategory: domain\n---\ncontent";
+        let skill = parse_skill_markdown("test", raw, false).unwrap();
+        assert_eq!(skill.name, "Test");
+    }
+
+    #[test]
+    fn parse_frontmatter_multiline_content() {
+        let raw = "---\nname: Multi\nicon: M\ncategory: language\n---\nLine 1\nLine 2\nLine 3";
+        let skill = parse_skill_markdown("multi", raw, false).unwrap();
+        assert!(skill.content.contains("Line 1"));
+        assert!(skill.content.contains("Line 3"));
+    }
 }

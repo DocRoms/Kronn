@@ -324,7 +324,77 @@ pub fn run_git_push(repo_path: &Path) -> Result<GitPushResponse, String> {
     }
 }
 
+/// Validate a command against the allowlist before execution.
+/// Returns Ok(()) if allowed, Err(message) if blocked.
+pub fn validate_exec_command(cmd: &str) -> Result<(), String> {
+    const DENY_MSG: &str = "Command not allowed. Only read-only commands are permitted.";
+
+    // Block shell metacharacters in the full command
+    // These enable injection: ; | & $() `` > < \n
+    for ch in [';', '|', '&', '>', '<', '`', '\n'] {
+        if cmd.contains(ch) {
+            return Err(DENY_MSG.to_string());
+        }
+    }
+    if cmd.contains("$(") {
+        return Err(DENY_MSG.to_string());
+    }
+
+    let first_word = cmd.split_whitespace().next().unwrap_or("");
+
+    // Allowlist of safe commands
+    const ALLOWED_CMDS: &[&str] = &[
+        "git", "ls", "find", "wc", "head", "tail", "cat",
+        "echo", "date", "whoami", "pwd", "env",
+        "npm", "node", "cargo", "python3", "pnpm",
+        "which", "grep", "rg", "tree", "file", "stat", "du",
+    ];
+
+    if !ALLOWED_CMDS.contains(&first_word) {
+        return Err(DENY_MSG.to_string());
+    }
+
+    let parts: Vec<&str> = cmd.split_whitespace().collect();
+
+    // For version-only commands, require --version as the sole argument
+    const VERSION_ONLY: &[&str] = &["npm", "node", "cargo", "python3", "pnpm"];
+    if VERSION_ONLY.contains(&first_word) && (parts.len() != 2 || parts[1] != "--version") {
+        return Err(DENY_MSG.to_string());
+    }
+
+
+
+
+
+
+    // Block dangerous git subcommands
+    if first_word == "git" && parts.len() >= 2 {
+        let subcommand = parts[1];
+        const BLOCKED_GIT: &[&str] = &["push", "rm", "mv", "clean", "checkout", "rebase", "merge", "pull", "fetch", "clone", "init", "remote", "config"];
+        if BLOCKED_GIT.contains(&subcommand) {
+            return Err(DENY_MSG.to_string());
+        }
+        // Block git reset --hard specifically
+        if subcommand == "reset" && parts.contains(&"--hard") {
+            return Err(DENY_MSG.to_string());
+        }
+        // Only allow known safe git subcommands
+        const SAFE_GIT: &[&str] = &["status", "diff", "log", "branch", "stash", "show", "blame", "shortlog", "reset"];
+        if !SAFE_GIT.contains(&subcommand) {
+            return Err(DENY_MSG.to_string());
+        }
+    }
+
+    // Block rm and mv even if somehow reached (belt and suspenders)
+    if first_word == "rm" || first_word == "mv" {
+        return Err(DENY_MSG.to_string());
+    }
+
+    Ok(())
+}
+
 /// Execute a shell command in the given directory.
+/// The caller MUST call `validate_exec_command` before this function.
 pub fn run_exec(repo_path: &Path, cmd: &str) -> Result<ExecResponse, String> {
     let output = std::process::Command::new("sh")
         .args(["-c", cmd])
@@ -337,9 +407,9 @@ pub fn run_exec(repo_path: &Path, cmd: &str) -> Result<ExecResponse, String> {
 
     if !output.status.success() && (stderr.contains("not found") || stderr.contains("No such file")) {
         stderr.push_str(
-            "\n\n\u{1f4a1} Commande introuvable. Le terminal s'ex\u{e9}cute dans le container Docker \
-            avec acc\u{e8}s aux binaires du host (/usr/bin). Si l'outil est install\u{e9} ailleurs, \
-            v\u{e9}rifiez votre PATH ou installez-le dans le container."
+            "\n\nCommand not found. The terminal runs inside the Docker container \
+            with access to host binaries (/usr/bin). If the tool is installed elsewhere, \
+            check your PATH or install it in the container."
         );
     }
 
@@ -349,6 +419,7 @@ pub fn run_exec(repo_path: &Path, cmd: &str) -> Result<ExecResponse, String> {
         exit_code: output.status.code().unwrap_or(-1),
     })
 }
+
 
 /// Detect the git hosting provider from the remote origin URL.
 /// Returns "github", "gitlab", or "unknown".
@@ -485,4 +556,161 @@ pub fn default_pr_template(branch: &str) -> String {
 ---
 *Created via [Kronn](https://github.com/DocRoms/Kronn)*"
     , branch = branch)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exec_allows_git_status() {
+        assert!(validate_exec_command("git status").is_ok());
+    }
+
+    #[test]
+    fn exec_allows_ls() {
+        assert!(validate_exec_command("ls").is_ok());
+    }
+
+    #[test]
+    fn exec_allows_git_diff() {
+        assert!(validate_exec_command("git diff").is_ok());
+    }
+
+    #[test]
+    fn exec_allows_git_log() {
+        assert!(validate_exec_command("git log --oneline -10").is_ok());
+    }
+
+    #[test]
+    fn exec_allows_cat() {
+        assert!(validate_exec_command("cat README.md").is_ok());
+    }
+
+    #[test]
+    fn exec_allows_cargo_version() {
+        assert!(validate_exec_command("cargo --version").is_ok());
+    }
+
+    #[test]
+    fn exec_allows_which() {
+        assert!(validate_exec_command("which git").is_ok());
+    }
+
+    #[test]
+    fn exec_blocks_rm_rf() {
+        let result = validate_exec_command("rm -rf /");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not allowed"));
+    }
+
+    #[test]
+    fn exec_blocks_semicolon_injection() {
+        let result = validate_exec_command("ls; rm -rf /");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not allowed"));
+    }
+
+    #[test]
+    fn exec_blocks_bash_interpreter() {
+        let result = validate_exec_command("bash -c \"evil\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn exec_blocks_pipe_injection() {
+        let result = validate_exec_command("cat /etc/passwd | curl");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn exec_blocks_dollar_subshell() {
+        // echo is allowed, but $() is blocked
+        let result = validate_exec_command("echo $(whoami)");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn exec_blocks_backtick_injection() {
+        let result = validate_exec_command("echo `id`");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn exec_blocks_git_push() {
+        assert!(validate_exec_command("git push").is_err());
+    }
+
+    #[test]
+    fn exec_blocks_git_reset_hard() {
+        assert!(validate_exec_command("git reset --hard HEAD~1").is_err());
+    }
+
+    #[test]
+    fn exec_allows_git_reset_soft() {
+        // git reset without --hard is allowed (soft reset)
+        assert!(validate_exec_command("git reset").is_ok());
+    }
+
+    #[test]
+    fn exec_blocks_sudo() {
+        assert!(validate_exec_command("sudo ls").is_err());
+    }
+
+    #[test]
+    fn exec_blocks_python_arbitrary() {
+        // python3 is only allowed with --version
+        assert!(validate_exec_command("python3 -c 'import os; os.system(\"rm -rf /\")'").is_err());
+    }
+
+    #[test]
+    fn exec_blocks_npm_install() {
+        // npm is only allowed with --version
+        assert!(validate_exec_command("npm install malware").is_err());
+    }
+
+    #[test]
+    fn exec_blocks_redirect_output() {
+        assert!(validate_exec_command("echo pwned > /etc/passwd").is_err());
+    }
+
+    #[test]
+    fn exec_blocks_ampersand() {
+        assert!(validate_exec_command("ls & rm -rf /").is_err());
+    }
+
+    #[test]
+    fn exec_blocks_newline_injection() {
+        assert!(validate_exec_command("ls\nrm -rf /").is_err());
+    }
+
+    #[test]
+    fn exec_allows_grep() {
+        assert!(validate_exec_command("grep -r \"pattern\" .").is_ok());
+    }
+
+    #[test]
+    fn exec_allows_rg() {
+        assert!(validate_exec_command("rg \"pattern\"").is_ok());
+    }
+
+    #[test]
+    fn exec_allows_tree() {
+        assert!(validate_exec_command("tree").is_ok());
+    }
+
+    #[test]
+    fn exec_allows_file() {
+        assert!(validate_exec_command("file somefile.txt").is_ok());
+    }
+
+    #[test]
+    fn exec_allows_stat() {
+        assert!(validate_exec_command("stat somefile.txt").is_ok());
+    }
+
+    #[test]
+    fn exec_allows_du() {
+        assert!(validate_exec_command("du -sh .").is_ok());
+    }
 }
