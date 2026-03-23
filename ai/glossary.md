@@ -24,7 +24,7 @@ Project-specific terms. For deep dives, follow the linked `ai/architecture/` fil
 
 **DbExport** — Full JSON dump of all database tables, retrieved via `GET /api/config/export` and restored via `POST /api/config/import`.
 
-**ServerConfig** — Backend server configuration: `host`, `port`, `domain` (for CORS), `auth_token` (opt-in Bearer auth), `auth_enabled` (distinguishes user-set from auto-generated token), `max_concurrent_agents` (1–20, default 5).
+**ServerConfig** — Backend server configuration: `host`, `port`, `domain` (for CORS), `auth_token` (opt-in Bearer auth), `auth_enabled` (distinguishes user-set from auto-generated token), `max_concurrent_agents` (1–20, default 5), `agent_stall_timeout` (1–60 min, default 5).
 
 **ServerConfigPublic** — Public view of ServerConfig returned by `GET /api/config/server`: `host`, `port`, `domain`, `max_concurrent_agents`, `auth_enabled`. Excludes `auth_token` for security.
 
@@ -50,7 +50,7 @@ Project-specific terms. For deep dives, follow the linked `ai/architecture/` fil
 
 **McpConfigDisplay** — Read-only projection of McpConfig with masked secrets, server name, and linked project names. Used in API responses.
 
-**McpDefinition** — A template MCP from the built-in registry (name, transport, env_keys, tags, token_url, token_help). 26 official servers grouped by category (Git & Code, Databases, Cloud & Infra, Search & Web, Analytics & Monitoring, Communication, Project Management, Design, Knowledge & Docs, Payments, SEO, Files, Email). `token_url` links to the provider's token generation page; `token_help` provides a short description.
+**McpDefinition** — A template MCP from the built-in registry (name, transport, env_keys, tags, token_url, token_help). 43 official servers grouped by category (Git & Code, Databases, Cloud & Infra, CDN & Edge, Search & Web, Analytics & Monitoring, Communication, Project Management, Design, Knowledge & Docs, Payments, SEO, Files, Email). `token_url` links to the provider's token generation page; `token_help` provides a short description.
 
 **McpInstance** — Legacy type kept for backward compatibility in the Project struct.
 
@@ -204,3 +204,27 @@ Project-specific terms. For deep dives, follow the linked `ai/architecture/` fil
 **Discussion title editing** — Inline rename via double-click or pencil icon in chat header. Saves via `PATCH /api/discussions/:id`.
 
 **Toast notifications** — `useToast()` hook in `frontend/src/hooks/useToast.ts`. Returns `{ toast, ToastContainer }`. Types: `success` (green), `error` (red), `info` (blue). Auto-dismiss 4s, max 3 visible, slide-in animation. Replaces all `alert()` calls.
+
+**Agent stall timeout** — Configurable in `ServerConfig`, default 5 minutes, range 1–60 minutes. If an agent produces no output for this duration, the process is killed and the step/message is marked as failed.
+
+**Agent activity logs** — Real-time stderr + stream-json tool activity streamed via SSE `log` events. Shows what the agent is doing (reading files, running commands, editing) during a conversation or workflow step.
+
+**format_tool_log** — Formats rich log lines from tool name + JSON input. Displays human-readable activity: `Read path`, `$ command`, `Edit path`, etc. Used in agent activity log rendering.
+
+**sendingStartMap** — Lifted `Record<string, number>` timestamp map tracking when each discussion's agent request started. Persists across page switches so the elapsed timer remains accurate when navigating away and back.
+
+**Tauri desktop app** — Native desktop wrapper (Windows/macOS/Linux) in `desktop/`. Backend is embedded (no Docker needed), frontend served via HTTP with COOP/COEP headers for SharedArrayBuffer (required by WASM workers). Auto-detects and installs agents (npm required). Same features as web version. Built via `.github/workflows/desktop-build.yml`.
+
+**ModelTier** — Enum: `economy`, `default`, `reasoning`. Selects the model quality/cost tier per agent. Configured globally in `ModelTiersConfig` (one `ModelTierConfig` per agent). Can be overridden per-message or per-workflow-step via `AgentSettings`. Stored in DB via migrations 015-016.
+
+**DriftCheckResponse** — Response from `GET /api/projects/:id/drift`. Contains `up_to_date: bool` and `stale_sections: Vec<DriftSection>`. Used by frontend to show amber badge on stale projects.
+
+**DriftSection** — A section of AI documentation that has drifted from the source code. Contains section name, file path, and staleness indicator.
+
+**PartialAudit** — Re-audit of only stale sections detected by drift check. Triggered via `POST /api/projects/:id/partial-audit` with a `PartialAuditRequest` specifying which sections to re-run. Costs ~3-5K tokens vs ~20K for a full audit.
+
+**Briefing** — Optional pre-audit conversational step where the AI asks 5 quick questions about the project. Output saved to `ai/briefing.md` and `briefing_notes` field on the project (migration 018). Injected into audit prompts via `PROMPT_PREAMBLE`.
+
+**pin_first_message** — Boolean flag on discussions (migration 019). When true, the first message is pinned at the top of the chat view and always visible, even when scrolling. Used for bootstrap and validation discussions where the initial prompt provides important context.
+
+**message_count** — Integer field on discussions (migration 017). Tracks the number of messages in a discussion without requiring a COUNT query. Incremented on message insert, exposed in discussion list responses for UI display.

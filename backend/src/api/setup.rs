@@ -395,6 +395,7 @@ pub async fn get_server_config(
         port: config.server.port,
         domain: config.server.domain.clone(),
         max_concurrent_agents: config.server.max_concurrent_agents,
+        agent_stall_timeout_min: config.server.agent_stall_timeout_min,
         auth_enabled: config.server.auth_enabled && config.server.auth_token.is_some(),
     }))
 }
@@ -410,6 +411,9 @@ pub async fn set_server_config(
     }
     if let Some(max) = req.max_concurrent_agents {
         config.server.max_concurrent_agents = max.clamp(1, 20);
+    }
+    if let Some(timeout) = req.agent_stall_timeout_min {
+        config.server.agent_stall_timeout_min = timeout.clamp(1, 60) as u32;
     }
     match config::save(&config).await {
         Ok(_) => Json(ApiResponse::ok(())),
@@ -453,7 +457,8 @@ fn sync_codex_auth(key: Option<&str>) {
                 "auth_mode": "apikey",
                 "OPENAI_API_KEY": k,
             });
-            match std::fs::write(&codex_auth_path, serde_json::to_string_pretty(&content).unwrap()) {
+            // Safety: serializing a serde_json::Value literal cannot fail
+            match std::fs::write(&codex_auth_path, serde_json::to_string_pretty(&content).expect("JSON Value serialization cannot fail")) {
                 Ok(_) => tracing::info!("Synced OpenAI key to {}", codex_auth_path.display()),
                 Err(e) => tracing::warn!("Failed to write {}: {}", codex_auth_path.display(), e),
             }

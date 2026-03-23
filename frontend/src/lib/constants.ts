@@ -62,3 +62,15 @@ export function hasAgentFullAccess(agentAccess: AgentsConfig | undefined, agentT
   };
   return map[agentType] === true;
 }
+
+// ─── Shared predicates (used by Dashboard, DiscussionsPage, McpPage) ────────
+
+/** Check if a path contains a hidden segment (starts with '.') */
+export const isHiddenPath = (path: string) => path.split('/').some(s => s.startsWith('.'));
+
+/** Agent is usable: locally installed OR available via npx/uvx runtime fallback */
+export const isUsable = (a: { installed: boolean; runtime_available: boolean; enabled: boolean }) =>
+  (a.installed || a.runtime_available) && a.enabled;
+
+/** Check if a discussion title matches the validation audit title */
+export const isValidationDisc = (title: string) => title === 'Validation audit AI';

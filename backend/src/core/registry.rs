@@ -535,6 +535,58 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             token_url: Some("https://app.datadoghq.com/organization-settings/api-keys".into()),
             token_help: Some("API key + Application key from Datadog settings".into()),
         },
+        McpDefinition {
+            id: "mcp-fastly".into(),
+            name: "Fastly".into(),
+            description: "CDN management, cache purge, VCL, WAF, backends, domains, stats — official Fastly server".into(),
+            transport: McpTransport::Stdio {
+                command: "npx".into(),
+                args: vec!["-y".into(), "fastly-mcp-server".into()],
+            },
+            env_keys: vec!["FASTLY_API_TOKEN".into()],
+            tags: vec!["cdn".into(), "cache".into(), "infrastructure".into(), "edge".into(), "waf".into()],
+            token_url: Some("https://manage.fastly.com/account/personal/tokens".into()),
+            token_help: Some("Personal API token from Fastly dashboard".into()),
+        },
+        McpDefinition {
+            id: "mcp-tavily".into(),
+            name: "Tavily".into(),
+            description: "AI-optimized web search and content extraction — factual results for RAG and research".into(),
+            transport: McpTransport::Stdio {
+                command: "npx".into(),
+                args: vec!["-y".into(), "tavily-mcp@latest".into()],
+            },
+            env_keys: vec!["TAVILY_API_KEY".into()],
+            tags: vec!["search".into(), "web".into(), "rag".into(), "research".into()],
+            token_url: Some("https://app.tavily.com/home".into()),
+            token_help: Some("API key from Tavily dashboard".into()),
+        },
+        McpDefinition {
+            id: "mcp-google-colab".into(),
+            name: "Google Colab".into(),
+            description: "Execute code on Google Colab runtimes with GPU/TPU — official Google server".into(),
+            transport: McpTransport::Stdio {
+                command: "uvx".into(),
+                args: vec!["--from".into(), "git+https://github.com/googlecolab/colab-mcp".into(), "colab_mcp".into()],
+            },
+            env_keys: vec![],
+            tags: vec!["compute".into(), "gpu".into(), "python".into(), "data-science".into(), "notebook".into()],
+            token_url: None,
+            token_help: Some("No API key needed — authenticates via Google account in browser".into()),
+        },
+        McpDefinition {
+            id: "mcp-mindsdb".into(),
+            name: "MindsDB".into(),
+            description: "Unified query layer over 200+ data sources — databases, warehouses, and applications".into(),
+            transport: McpTransport::Stdio {
+                command: "npx".into(),
+                args: vec!["-y".into(), "minds-mcp".into()],
+            },
+            env_keys: vec!["MINDS_API_KEY".into()],
+            tags: vec!["database".into(), "data".into(), "ai".into(), "federation".into()],
+            token_url: Some("https://mdb.ai/account/api-keys".into()),
+            token_help: Some("API key from MindsDB Cloud dashboard".into()),
+        },
     ]
 }
 

@@ -116,7 +116,7 @@ pub async fn execute_run(
     let mut all_success = true;
     let mut step_idx = 0;
     let total_steps = workflow.steps.len();
-    let max_total_iterations = total_steps * 10 + 50; // safeguard against infinite Goto loops
+    let max_total_iterations = max_iterations_for(total_steps); // safeguard against infinite Goto loops
     let mut iteration_count = 0;
 
     while step_idx < workflow.steps.len() {
@@ -215,8 +215,8 @@ pub async fn execute_run(
         let _ = ws.after_run().await;
     }
 
-    // TODO: Execute post-step actions (CreatePr, CommentIssue, etc.)
-    // This requires the tracker adapter implementation
+    // Post-step actions (CreatePr, CommentIssue, etc.) are handled by MCP tools
+    // injected into agent prompts — no separate actions phase needed.
 
     // Final status
     run.status = if all_success { RunStatus::Success } else { RunStatus::Failed };
@@ -236,6 +236,12 @@ pub async fn execute_run(
 
     tracing::info!("Workflow run {} finished: {:?}", run.id, run.status);
     Ok(())
+}
+
+/// Build the maximum iteration safeguard for a given step count.
+/// Formula: total_steps * 10 + 50.
+pub(crate) fn max_iterations_for(total_steps: usize) -> usize {
+    total_steps * 10 + 50
 }
 
 /// Inject trigger context JSON into template variables.
@@ -269,5 +275,162 @@ fn inject_trigger_context(ctx: &mut TemplateContext, trigger_json: &serde_json::
                 ctx.set(key.clone(), s);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── inject_trigger_context ──────────────────────────────────────────
+
+    #[test]
+    fn inject_trigger_context_issue_fields() {
+        let mut ctx = TemplateContext::new();
+        let json = serde_json::json!({
+            "issue_title": "Fix the bug",
+            "issue_body": "It crashes on startup",
+            "issue_number": "42",
+            "issue_url": "https://github.com/owner/repo/issues/42",
+            "issue_labels": ["bug", "priority-high"],
+        });
+        inject_trigger_context(&mut ctx, &json);
+
+        assert_eq!(ctx.render("{{issue.title}}").unwrap(), "Fix the bug");
+        assert_eq!(ctx.render("{{issue.body}}").unwrap(), "It crashes on startup");
+        assert_eq!(ctx.render("{{issue.number}}").unwrap(), "42");
+        assert_eq!(ctx.render("{{issue.url}}").unwrap(), "https://github.com/owner/repo/issues/42");
+        assert_eq!(ctx.render("{{issue.labels}}").unwrap(), "bug, priority-high");
+    }
+
+    #[test]
+    fn inject_trigger_context_issue_number_as_u64() {
+        let mut ctx = TemplateContext::new();
+        let json = serde_json::json!({
+            "issue_number": 99,
+        });
+        inject_trigger_context(&mut ctx, &json);
+        assert_eq!(ctx.render("{{issue.number}}").unwrap(), "99");
+    }
+
+    #[test]
+    fn inject_trigger_context_generic_string_fields() {
+        let mut ctx = TemplateContext::new();
+        let json = serde_json::json!({
+            "type": "tracker",
+            "custom_field": "hello",
+        });
+        inject_trigger_context(&mut ctx, &json);
+        assert_eq!(ctx.render("{{type}}").unwrap(), "tracker");
+        assert_eq!(ctx.render("{{custom_field}}").unwrap(), "hello");
+    }
+
+    #[test]
+    fn inject_trigger_context_non_string_values_ignored() {
+        let mut ctx = TemplateContext::new();
+        let json = serde_json::json!({
+            "count": 42,
+            "nested": {"key": "val"},
+        });
+        inject_trigger_context(&mut ctx, &json);
+        // Non-string generic fields are NOT injected
+        assert_eq!(ctx.render("{{count}}").unwrap(), "{{count}}");
+        assert_eq!(ctx.render("{{nested}}").unwrap(), "{{nested}}");
+    }
+
+    #[test]
+    fn inject_trigger_context_empty_object() {
+        let mut ctx = TemplateContext::new();
+        let json = serde_json::json!({});
+        inject_trigger_context(&mut ctx, &json);
+        // No variables set — template placeholders remain
+        assert_eq!(ctx.render("{{issue.title}}").unwrap(), "{{issue.title}}");
+    }
+
+    #[test]
+    fn inject_trigger_context_not_an_object() {
+        let mut ctx = TemplateContext::new();
+        let json = serde_json::json!("just a string");
+        inject_trigger_context(&mut ctx, &json);
+        // Should silently do nothing
+        assert_eq!(ctx.render("{{anything}}").unwrap(), "{{anything}}");
+    }
+
+    #[test]
+    fn inject_trigger_context_null_value() {
+        let mut ctx = TemplateContext::new();
+        let json = serde_json::Value::Null;
+        inject_trigger_context(&mut ctx, &json);
+        assert_eq!(ctx.render("{{anything}}").unwrap(), "{{anything}}");
+    }
+
+    #[test]
+    fn inject_trigger_context_empty_labels() {
+        let mut ctx = TemplateContext::new();
+        let json = serde_json::json!({
+            "issue_labels": [],
+        });
+        inject_trigger_context(&mut ctx, &json);
+        assert_eq!(ctx.render("{{issue.labels}}").unwrap(), "");
+    }
+
+    #[test]
+    fn inject_trigger_context_labels_with_non_string_items() {
+        let mut ctx = TemplateContext::new();
+        let json = serde_json::json!({
+            "issue_labels": ["bug", 42, "feature"],
+        });
+        inject_trigger_context(&mut ctx, &json);
+        // Non-string items in labels array are filtered out
+        assert_eq!(ctx.render("{{issue.labels}}").unwrap(), "bug, feature");
+    }
+
+    // ─── max_iterations_for ──────────────────────────────────────────────
+
+    #[test]
+    fn max_iterations_zero_steps() {
+        assert_eq!(max_iterations_for(0), 50);
+    }
+
+    #[test]
+    fn max_iterations_typical_workflow() {
+        assert_eq!(max_iterations_for(3), 80);  // 3*10 + 50
+        assert_eq!(max_iterations_for(5), 100); // 5*10 + 50
+    }
+
+    #[test]
+    fn max_iterations_single_step() {
+        assert_eq!(max_iterations_for(1), 60);  // 1*10 + 50
+    }
+
+    // ─── RunEvent serialization ──────────────────────────────────────────
+
+    #[test]
+    fn run_event_step_start_serializes() {
+        let evt = RunEvent::StepStart {
+            step_name: "analyze".into(),
+            step_index: 0,
+            total_steps: 3,
+        };
+        let json = serde_json::to_value(&evt).unwrap();
+        assert_eq!(json["event"], "StepStart");
+        assert_eq!(json["data"]["step_name"], "analyze");
+        assert_eq!(json["data"]["step_index"], 0);
+        assert_eq!(json["data"]["total_steps"], 3);
+    }
+
+    #[test]
+    fn run_event_run_done_serializes() {
+        let evt = RunEvent::RunDone { status: RunStatus::Success };
+        let json = serde_json::to_value(&evt).unwrap();
+        assert_eq!(json["event"], "RunDone");
+    }
+
+    #[test]
+    fn run_event_run_error_serializes() {
+        let evt = RunEvent::RunError { error: "timeout".into() };
+        let json = serde_json::to_value(&evt).unwrap();
+        assert_eq!(json["event"], "RunError");
+        assert_eq!(json["data"]["error"], "timeout");
     }
 }

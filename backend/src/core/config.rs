@@ -121,6 +121,7 @@ pub fn default_config() -> AppConfig {
             auth_token: None,
             auth_enabled: false,
             max_concurrent_agents: 5,
+            agent_stall_timeout_min: 5,
         },
         tokens: TokensConfig {
             anthropic: None,
@@ -182,4 +183,39 @@ pub fn default_config() -> AppConfig {
 pub async fn is_first_run() -> Result<bool> {
     let path = config_path()?;
     Ok(!path.exists())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_is_valid() {
+        let cfg = default_config();
+        assert!(!cfg.server.host.is_empty(), "host must be non-empty");
+        assert!(cfg.server.port > 0, "port must be > 0");
+        assert!(cfg.encryption_secret.is_some(), "encryption_secret must be set");
+        assert!(!cfg.encryption_secret.as_ref().unwrap().is_empty(), "encryption_secret must be non-empty");
+    }
+
+    #[test]
+    fn config_dir_returns_path() {
+        // May fail in exotic CI environments without HOME, but works in normal setups
+        let dir = config_dir();
+        assert!(dir.is_ok(), "config_dir() should return Ok: {:?}", dir.err());
+        let path = dir.unwrap();
+        assert!(!path.as_os_str().is_empty(), "config dir path must be non-empty");
+    }
+
+    #[test]
+    fn config_path_ends_in_config_toml() {
+        let path = config_path();
+        assert!(path.is_ok(), "config_path() should return Ok: {:?}", path.err());
+        let p = path.unwrap();
+        assert!(
+            p.to_string_lossy().ends_with("config.toml"),
+            "config path should end in config.toml, got: {}",
+            p.display()
+        );
+    }
 }

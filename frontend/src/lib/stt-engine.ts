@@ -33,6 +33,8 @@ export function audioBufferToFloat32(buffer: AudioBuffer): Float32Array {
 }
 
 /** Send audio to the STT worker and wait for transcription */
+// Safe: TTS sentences are processed sequentially (awaited), and STT calls are one-at-a-time.
+// If concurrent calls are ever needed, add a message ID protocol.
 export function transcribeAudio(
   worker: Worker,
   audio: Float32Array,

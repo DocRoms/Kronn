@@ -61,8 +61,9 @@ impl Database {
             conn.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")?;
         }
 
-        // Run migrations before wrapping in Mutex (avoids blocking_lock inside async runtime)
-        migrations::run(&conn)?;
+        // Run migrations before wrapping in Mutex (avoids blocking_lock inside async runtime).
+        // Pass db path so a backup is created before pending migrations.
+        migrations::run_with_backup(&conn, Some(path))?;
 
         Ok(Self { conn: Arc::new(Mutex::new(conn)), path: path.clone() })
     }

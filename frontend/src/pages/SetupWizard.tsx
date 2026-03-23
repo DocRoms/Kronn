@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { setup as setupApi, agents as agentsApi, projects as projectsApi } from '../lib/api';
 import type { SetupStatus, AgentDetection, DetectedRepo } from '../types/generated';
+import { useT } from '../lib/I18nContext';
 import {
   Cpu, FolderSearch, Scan, ChevronRight, Check, Download, Loader2, RefreshCw,
   GitBranch, FolderOpen, Eye,
@@ -11,13 +12,14 @@ interface Props {
   onComplete: () => void;
 }
 
-const STEPS = [
-  { id: 'agents', label: 'Agents', icon: Cpu },
-  { id: 'repos', label: 'Depots', icon: FolderSearch },
-  { id: 'done', label: 'Termine', icon: Check },
-] as const;
-
 export function SetupWizard({ initialStatus, onComplete }: Props) {
+  const { t } = useT();
+
+  const STEPS = [
+    { id: 'agents', label: t('setup.step.agents'), icon: Cpu },
+    { id: 'repos', label: t('setup.step.repos'), icon: FolderSearch },
+    { id: 'done', label: t('setup.step.done'), icon: Check },
+  ] as const;
   const [step, setStep] = useState(0);
   const [agents, setAgents] = useState<AgentDetection[]>(initialStatus?.agents_detected ?? []);
   const [repos, setRepos] = useState<DetectedRepo[]>(initialStatus?.repos_detected ?? []);
@@ -42,7 +44,7 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
       const detected = await agentsApi.detect();
       setAgents(detected);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Detection failed');
+      setError(e instanceof Error ? e.message : t('setup.detectionFailed'));
     } finally {
       setDetecting(false);
     }
@@ -55,7 +57,7 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
       await agentsApi.install(agent.agent_type);
       await refreshAgents();
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Install failed');
+      setError(e instanceof Error ? e.message : t('setup.installFailed'));
     } finally {
       setInstalling(null);
     }
@@ -82,7 +84,7 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
         setShowManualPath(true);
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Scan failed');
+      setError(e instanceof Error ? e.message : t('setup.scanFailed'));
     } finally {
       setScanning(false);
     }
@@ -121,7 +123,7 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
         <div style={styles.header}>
           <div style={styles.logo}>&#x26A1;</div>
           <h1 style={styles.title}>Kronn</h1>
-          <p style={styles.subtitle}>Enter the grid. Command your agents.</p>
+          <p style={styles.subtitle}>{t('setup.subtitle')}</p>
         </div>
 
         {/* Step indicator */}
@@ -154,15 +156,15 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
           {step === 0 && (
             <div>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <h2 style={styles.h2}>Agents IA</h2>
-                <button style={styles.btnIcon} onClick={refreshAgents} disabled={detecting} title="Rafraichir">
+                <h2 style={styles.h2}>{t('setup.aiAgents')}</h2>
+                <button style={styles.btnIcon} onClick={refreshAgents} disabled={detecting} title={t('setup.refresh')}>
                   <RefreshCw size={14} style={detecting ? { animation: 'spin 1s linear infinite' } : undefined} />
                 </button>
               </div>
               <p style={styles.desc}>
                 {installedCount > 0
-                  ? `${installedCount} agent${installedCount > 1 ? 's' : ''} detecte${installedCount > 1 ? 's' : ''} sur votre systeme.`
-                  : 'Aucun agent detecte — installez-en au moins un.'}
+                  ? t('setup.agentsDetected', installedCount, installedCount > 1 ? 's' : '', installedCount > 1 ? 's' : '')
+                  : t('setup.noAgentDetected')}
               </p>
 
               <div style={styles.agentList}>
@@ -201,7 +203,7 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
                         {installing === agent.name ? (
                           <><Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> ...</>
                         ) : (
-                          <><Download size={14} /> Installer</>
+                          <><Download size={14} /> {t('setup.install')}</>
                         )}
                       </button>
                     )}
@@ -212,14 +214,14 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
                 ))}
               </div>
 
-              <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
+              {/* spin keyframe defined in App.tsx */}
 
               <button
                 style={{ ...styles.btnPrimary, opacity: installedCount === 0 ? 0.4 : 1, cursor: installedCount === 0 ? 'not-allowed' : 'pointer' }}
                 onClick={handleGoToRepos}
                 disabled={installedCount === 0}
               >
-                Continuer <ChevronRight size={16} />
+                {t('setup.continue')} <ChevronRight size={16} />
               </button>
             </div>
           )}
@@ -232,8 +234,8 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
             return (
             <div>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <h2 style={styles.h2}>Depots detectes</h2>
-                <button style={styles.btnIcon} onClick={() => handleScan(paths)} disabled={scanning} title="Re-scanner">
+                <h2 style={styles.h2}>{t('setup.detectedRepos')}</h2>
+                <button style={styles.btnIcon} onClick={() => handleScan(paths)} disabled={scanning} title={t('setup.rescan')}>
                   <RefreshCw size={14} style={scanning ? { animation: 'spin 1s linear infinite' } : undefined} />
                 </button>
               </div>
@@ -241,14 +243,14 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
               {scanning ? (
                 <div style={{ textAlign: 'center', padding: '40px 0' }}>
                   <Loader2 size={28} style={{ color: '#c8ff00', animation: 'spin 1s linear infinite' }} />
-                  <p style={{ ...styles.desc, marginTop: 12 }}>Scan des depots git...</p>
+                  <p style={{ ...styles.desc, marginTop: 12 }}>{t('setup.scanningRepos')}</p>
                 </div>
               ) : displayRepos.length > 0 ? (
                 <>
                   <p style={styles.desc}>
-                    {visibleRepos.length} depot{visibleRepos.length > 1 ? 's' : ''} git trouve{visibleRepos.length > 1 ? 's' : ''}.
+                    {t('setup.reposFound', visibleRepos.length, visibleRepos.length > 1 ? 's' : '', visibleRepos.length > 1 ? 's' : '')}
                     {hiddenRepos.length > 0 && !showHidden && (
-                      <span style={{ color: 'rgba(255,255,255,0.25)' }}> + {hiddenRepos.length} cache{hiddenRepos.length > 1 ? 's' : ''}</span>
+                      <span style={{ color: 'rgba(255,255,255,0.35)' }}> {t('setup.hiddenRepos', hiddenRepos.length, hiddenRepos.length > 1 ? 's' : '')}</span>
                     )}
                   </p>
                   <div style={styles.repoList}>
@@ -258,7 +260,7 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
                         <div style={{ flex: 1 }}>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                             <span style={styles.repoName}>{repo.name}</span>
-                            {repo.hidden && <span style={styles.hiddenBadge}>cache</span>}
+                            {repo.hidden && <span style={styles.hiddenBadge}>{t('setup.hidden')}</span>}
                           </div>
                           <div style={styles.repoMeta}>
                             <span>{repo.branch}</span>
@@ -275,12 +277,12 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
                   <div style={{ display: 'flex', gap: 12, marginTop: 8 }}>
                     {hiddenRepos.length > 0 && (
                       <button style={styles.btnText} onClick={() => setShowHidden(!showHidden)}>
-                        <Eye size={12} /> {showHidden ? 'Masquer' : 'Voir'} les {hiddenRepos.length} depot{hiddenRepos.length > 1 ? 's' : ''} cache{hiddenRepos.length > 1 ? 's' : ''}
+                        <Eye size={12} /> {t('setup.hiddenReposToggle', showHidden ? t('setup.hide') : t('setup.show'), hiddenRepos.length, hiddenRepos.length > 1 ? 's' : '', hiddenRepos.length > 1 ? 's' : '')}
                       </button>
                     )}
                     {!showManualPath && (
                       <button style={styles.btnText} onClick={() => setShowManualPath(true)}>
-                        <FolderOpen size={12} /> Ajouter un autre chemin
+                        <FolderOpen size={12} /> {t('setup.addPath')}
                       </button>
                     )}
                   </div>
@@ -288,7 +290,7 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
               ) : (
                 <div style={{ textAlign: 'center', padding: '24px 0' }}>
                   <FolderSearch size={32} style={{ color: 'rgba(255,255,255,0.15)', marginBottom: 12 }} />
-                  <p style={styles.desc}>Aucun depot git trouve. Indiquez un chemin a scanner.</p>
+                  <p style={styles.desc}>{t('setup.noRepoFound')}</p>
                 </div>
               )}
 
@@ -303,7 +305,7 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
                       onKeyDown={(e) => { if (e.key === 'Enter') handleAddPath(); }}
                     />
                     <button style={styles.btnSecondary} onClick={handleAddPath}>
-                      <Scan size={14} /> Scanner
+                      <Scan size={14} /> {t('setup.scan')}
                     </button>
                   </div>
                   {paths.length > 0 && (
@@ -324,7 +326,7 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
                 onClick={() => setStep(2)}
                 disabled={visibleRepos.length === 0}
               >
-                Continuer <ChevronRight size={16} />
+                {t('setup.continue')} <ChevronRight size={16} />
               </button>
             </div>
             );
@@ -334,12 +336,12 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
           {step === 2 && (
             <div style={{ textAlign: 'center', padding: '24px 0' }}>
               <div style={{ fontSize: 48, marginBottom: 12 }}>&#x2713;</div>
-              <h2 style={styles.h2}>Configuration terminee</h2>
+              <h2 style={styles.h2}>{t('setup.configDone')}</h2>
               <p style={styles.desc}>
-                {installedCount} agent{installedCount > 1 ? 's' : ''}, {repos.length} depot{repos.length > 1 ? 's' : ''} detecte{repos.length > 1 ? 's' : ''}.
+                {t('setup.summary', installedCount, installedCount > 1 ? 's' : '', repos.length, repos.length > 1 ? 's' : '', repos.length > 1 ? 's' : '')}
               </p>
               <button style={styles.btnPrimary} onClick={handleComplete}>
-                Acceder au dashboard <ChevronRight size={16} />
+                {t('setup.goToDashboard')} <ChevronRight size={16} />
               </button>
             </div>
           )}

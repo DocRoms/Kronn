@@ -12,10 +12,10 @@ mod tests {
     }
 
     #[test]
-    fn registry_count_at_least_34() {
+    fn registry_count_at_least_35() {
         let reg = builtin_registry();
-        assert!(reg.len() >= 34,
-            "Expected at least 34 MCPs in registry, got {}", reg.len());
+        assert!(reg.len() >= 43,
+            "Expected at least 43 MCPs in registry, got {}", reg.len());
     }
 
     #[test]
@@ -135,6 +135,14 @@ mod tests {
             "mcp-cloudflare", "mcp-aws-cloudwatch", "mcp-azure", "mcp-gcloud", "mcp-bigquery",
             // Browser & Testing
             "mcp-playwright", "mcp-chrome-devtools", "mcp-puppeteer",
+            // CDN & Edge
+            "mcp-fastly",
+            // Search
+            "mcp-tavily",
+            // Compute
+            "mcp-google-colab",
+            // Data Federation
+            "mcp-mindsdb",
             // Communication & PM
             "mcp-slack", "mcp-linear", "mcp-atlassian",
             // Design
@@ -338,5 +346,45 @@ mod tests {
         let results = search("knowledge graph");
         assert!(results.iter().any(|m| m.id == "mcp-memory"),
             "Searching 'knowledge graph' should find Memory MCP");
+    }
+
+    #[test]
+    fn fastly_mcp_configuration() {
+        let reg = builtin_registry();
+        let m = reg.iter().find(|m| m.id == "mcp-fastly").unwrap();
+        assert_eq!(m.name, "Fastly");
+        assert!(m.description.contains("CDN"), "Fastly MCP should mention CDN");
+        assert!(m.env_keys.contains(&"FASTLY_API_TOKEN".to_string()));
+        assert!(m.tags.contains(&"cdn".to_string()));
+        assert!(m.token_url.is_some());
+    }
+
+    #[test]
+    fn tavily_mcp_configuration() {
+        let reg = builtin_registry();
+        let m = reg.iter().find(|m| m.id == "mcp-tavily").unwrap();
+        assert_eq!(m.name, "Tavily");
+        assert!(m.description.contains("search"), "Tavily MCP should mention search");
+        assert!(m.env_keys.contains(&"TAVILY_API_KEY".to_string()));
+        assert!(m.tags.contains(&"search".to_string()));
+    }
+
+    #[test]
+    fn google_colab_mcp_configuration() {
+        let reg = builtin_registry();
+        let m = reg.iter().find(|m| m.id == "mcp-google-colab").unwrap();
+        assert_eq!(m.name, "Google Colab");
+        assert!(m.description.contains("GPU"), "Colab MCP should mention GPU");
+        assert!(m.tags.contains(&"compute".to_string()));
+        assert!(m.env_keys.is_empty(), "Colab uses browser auth, no API key");
+    }
+
+    #[test]
+    fn mindsdb_mcp_configuration() {
+        let reg = builtin_registry();
+        let m = reg.iter().find(|m| m.id == "mcp-mindsdb").unwrap();
+        assert_eq!(m.name, "MindsDB");
+        assert!(m.env_keys.contains(&"MINDS_API_KEY".to_string()));
+        assert!(m.tags.contains(&"database".to_string()));
     }
 }

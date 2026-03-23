@@ -58,6 +58,9 @@ import type { DiscoverKeysResponse } from '../types/extensions';
 
 // ─── Auth token ──────────────────────────────────────────────────────────────
 
+// Security note: localStorage is accessible to any JS on the page (XSS risk).
+// For self-hosted/Tauri desktop deployments this is acceptable.
+// For public-facing deployments, consider httpOnly cookies instead.
 let _authToken: string | null = localStorage.getItem('kronn_auth_token');
 
 export function setAuthToken(token: string | null) {
@@ -91,6 +94,101 @@ export function setApiBase(base: string) {
 
 export function getApiBase(): string {
   return _apiBase;
+}
+
+// ─── Shared SSE stream parser ────────────────────────────────────────────────
+
+/**
+ * Parse an SSE response body and dispatch events to handlers.
+ * Extracts the duplicated ReadableStream SSE parsing loop used by
+ * auditStream, partialAuditStream, fullAuditStream, _streamSSE, etc.
+ */
+async function parseSSEStream(
+  res: Response,
+  handlers: {
+    onEvent: (type: string, data: unknown) => void;
+    onDone: () => void;
+    onError: (error: string) => void;
+  },
+) {
+  if (!res.ok || !res.body) {
+    handlers.onError(`HTTP ${res.status}`);
+    return;
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  try {
+    while (true) {
+      const { done: streamDone, value } = await reader.read();
+      if (streamDone) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+
+      let eventType = '';
+      for (const line of lines) {
+        if (line.startsWith('event:')) {
+          eventType = line.slice(6).trim();
+        } else if (line.startsWith('data:')) {
+          const data = line.slice(5).trim();
+          try {
+            const parsed = JSON.parse(data);
+            handlers.onEvent(eventType, parsed);
+          } catch { /* ignore non-JSON */ }
+        }
+      }
+    }
+    // Process any remaining data in buffer
+    if (buffer.trim()) {
+      const lines = buffer.split('\n');
+      let eventType = '';
+      for (const line of lines) {
+        if (line.startsWith('event:')) {
+          eventType = line.slice(6).trim();
+        } else if (line.startsWith('data:')) {
+          const data = line.slice(5).trim();
+          try {
+            const parsed = JSON.parse(data);
+            handlers.onEvent(eventType, parsed);
+          } catch { /* ignore non-JSON */ }
+        }
+      }
+    }
+  } catch (e: unknown) {
+    if (e instanceof DOMException && e.name === 'AbortError') { handlers.onDone(); return; }
+    throw e;
+  }
+
+  handlers.onDone();
+}
+
+/**
+ * Initiate a fetch for SSE and parse the stream. Handles AbortSignal and common error patterns.
+ * Returns null if aborted before response.
+ */
+async function fetchAndParseSSE(
+  url: string,
+  options: { method: string; headers: Record<string, string>; body?: string; signal?: AbortSignal },
+  handlers: {
+    onEvent: (type: string, data: unknown) => void;
+    onDone: () => void;
+    onError: (error: string) => void;
+  },
+  onResponse?: (res: Response) => void,
+) {
+  const res = await fetch(url, options).catch(e => {
+    if (e.name === 'AbortError') { handlers.onDone(); return null; }
+    throw e;
+  });
+  if (!res) return;
+
+  if (onResponse) onResponse(res);
+
+  await parseSSEStream(res, handlers);
 }
 
 // ─── Generic API wrapper ────────────────────────────────────────────────────
@@ -165,7 +263,7 @@ export const config = {
   exportData: () => api<DbExport>('GET', '/config/export'),
   importData: (data: DbExport) => api<void>('POST', '/config/import', data),
   getServerConfig: () => api<ServerConfigPublic>('GET', '/config/server'),
-  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number }) => api<void>('POST', '/config/server', req),
+  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number }) => api<void>('POST', '/config/server', req),
   regenerateAuthToken: () => api<string>('POST', '/config/auth-token/regenerate'),
 };
 
@@ -219,61 +317,24 @@ export const projects = {
     let finished = false;
     const done = () => { if (!finished) { finished = true; handlers.onDone(); } };
 
-    const res = await fetch(`${_apiBase}/api/projects/${id}/ai-audit`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify(req),
-      signal,
-    }).catch(e => {
-      if (e.name === 'AbortError') { done(); return null; }
-      throw e;
-    });
-    if (!res) return;
-
-    if (!res.ok || !res.body) {
-      handlers.onError(`HTTP ${res.status}`);
-      return;
-    }
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    try {
-      while (true) {
-        const { done: streamDone, value } = await reader.read();
-        if (streamDone) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
-
-        let eventType = '';
-        for (const line of lines) {
-          if (line.startsWith('event:')) {
-            eventType = line.slice(6).trim();
-          } else if (line.startsWith('data:')) {
-            const data = line.slice(5).trim();
-            try {
-              const p = JSON.parse(data);
-              switch (eventType) {
-                case 'step_start': handlers.onStepStart(p.step, p.total, p.file); break;
-                case 'chunk': handlers.onChunk(p.text, p.step); break;
-                case 'step_done': handlers.onStepDone(p.step, p.success); break;
-                case 'step_error': handlers.onError(p.error ?? 'Step error'); break;
-                case 'done': done(); break;
-                case 'error': handlers.onError(p.error ?? 'Unknown error'); break;
-              }
-            } catch { /* ignore non-JSON */ }
+    await fetchAndParseSSE(
+      `${_apiBase}/api/projects/${id}/ai-audit`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify(req), signal },
+      {
+        onEvent: (type, p: any) => {
+          switch (type) {
+            case 'step_start': handlers.onStepStart(p.step, p.total, p.file); break;
+            case 'chunk': handlers.onChunk(p.text, p.step); break;
+            case 'step_done': handlers.onStepDone(p.step, p.success); break;
+            case 'step_error': handlers.onError(p.error ?? 'Step error'); break;
+            case 'done': done(); break;
+            case 'error': handlers.onError(p.error ?? 'Unknown error'); break;
           }
-        }
-      }
-    } catch (e: unknown) {
-      if (e instanceof DOMException && e.name === 'AbortError') { done(); return; }
-      throw e;
-    }
-
-    done();
+        },
+        onDone: done,
+        onError: handlers.onError,
+      },
+    );
   },
   /** Stream a partial re-audit for stale sections via SSE */
   partialAuditStream: async (
@@ -291,61 +352,24 @@ export const projects = {
     let finished = false;
     const done = () => { if (!finished) { finished = true; handlers.onDone(); } };
 
-    const res = await fetch(`${_apiBase}/api/projects/${id}/partial-audit`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify(req),
-      signal,
-    }).catch(e => {
-      if (e.name === 'AbortError') { done(); return null; }
-      throw e;
-    });
-    if (!res) return;
-
-    if (!res.ok || !res.body) {
-      handlers.onError(`HTTP ${res.status}`);
-      return;
-    }
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    try {
-      while (true) {
-        const { done: streamDone, value } = await reader.read();
-        if (streamDone) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
-
-        let eventType = '';
-        for (const line of lines) {
-          if (line.startsWith('event:')) {
-            eventType = line.slice(6).trim();
-          } else if (line.startsWith('data:')) {
-            const data = line.slice(5).trim();
-            try {
-              const p = JSON.parse(data);
-              switch (eventType) {
-                case 'step_start': handlers.onStepStart(p.step, p.total, p.file); break;
-                case 'chunk': handlers.onChunk(p.text, p.step); break;
-                case 'step_done': handlers.onStepDone(p.step, p.success); break;
-                case 'step_error': handlers.onError(p.error ?? 'Step error'); break;
-                case 'done': done(); break;
-                case 'error': handlers.onError(p.error ?? 'Unknown error'); break;
-              }
-            } catch { /* ignore non-JSON */ }
+    await fetchAndParseSSE(
+      `${_apiBase}/api/projects/${id}/partial-audit`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify(req), signal },
+      {
+        onEvent: (type, p: any) => {
+          switch (type) {
+            case 'step_start': handlers.onStepStart(p.step, p.total, p.file); break;
+            case 'chunk': handlers.onChunk(p.text, p.step); break;
+            case 'step_done': handlers.onStepDone(p.step, p.success); break;
+            case 'step_error': handlers.onError(p.error ?? 'Step error'); break;
+            case 'done': done(); break;
+            case 'error': handlers.onError(p.error ?? 'Unknown error'); break;
           }
-        }
-      }
-    } catch (e: unknown) {
-      if (e instanceof DOMException && e.name === 'AbortError') { done(); return; }
-      throw e;
-    }
-
-    done();
+        },
+        onDone: done,
+        onError: handlers.onError,
+      },
+    );
   },
   /** Stream the full audit (template + audit + validation discussion) via SSE */
   fullAuditStream: async (
@@ -367,70 +391,26 @@ export const projects = {
       if (!finished) { finished = true; handlers.onDone(discId, tmpl); }
     };
 
-    const res = await fetch(`${_apiBase}/api/projects/${id}/full-audit`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify(req),
-      signal,
-    }).catch(e => {
-      if (e.name === 'AbortError') { done(null, false); return null; }
-      throw e;
-    });
-    if (!res) return;
-
-    if (!res.ok || !res.body) {
-      handlers.onError(`HTTP ${res.status}`);
-      return;
-    }
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    const processLines = (lines: string[], eventType: { current: string }) => {
-      for (const line of lines) {
-        if (line.startsWith('event:')) {
-          eventType.current = line.slice(6).trim();
-        } else if (line.startsWith('data:')) {
-          const data = line.slice(5).trim();
-          try {
-            const p = JSON.parse(data);
-            switch (eventType.current) {
-              case 'template_installed': handlers.onTemplateInstalled(p.installed); break;
-              case 'step_start': handlers.onStepStart(p.step, p.total, p.file); break;
-              case 'chunk': handlers.onChunk(p.text, p.step); break;
-              case 'step_done': handlers.onStepDone(p.step, p.success); break;
-              case 'step_error': handlers.onError(p.error ?? 'Step error'); break;
-              case 'validation_created': handlers.onValidationCreated(p.discussion_id); break;
-              case 'done': done(p.discussion_id ?? null, p.template_was_installed ?? false); break;
-              case 'error': handlers.onError(p.error ?? 'Unknown error'); break;
-            }
-          } catch { /* ignore non-JSON */ }
-        }
-      }
-    };
-
-    const eventType = { current: '' };
-    try {
-      while (true) {
-        const { done: streamDone, value } = await reader.read();
-        if (streamDone) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
-        processLines(lines, eventType);
-      }
-      // Process any remaining data in buffer (last chunk may lack trailing newline)
-      if (buffer.trim()) {
-        processLines(buffer.split('\n'), eventType);
-      }
-    } catch (e: unknown) {
-      if (e instanceof DOMException && e.name === 'AbortError') { done(null, false); return; }
-      throw e;
-    }
-
-    done(null, false);
+    await fetchAndParseSSE(
+      `${_apiBase}/api/projects/${id}/full-audit`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify(req), signal },
+      {
+        onEvent: (type, p: any) => {
+          switch (type) {
+            case 'template_installed': handlers.onTemplateInstalled(p.installed); break;
+            case 'step_start': handlers.onStepStart(p.step, p.total, p.file); break;
+            case 'chunk': handlers.onChunk(p.text, p.step); break;
+            case 'step_done': handlers.onStepDone(p.step, p.success); break;
+            case 'step_error': handlers.onError(p.error ?? 'Step error'); break;
+            case 'validation_created': handlers.onValidationCreated(p.discussion_id); break;
+            case 'done': done(p.discussion_id ?? null, p.template_was_installed ?? false); break;
+            case 'error': handlers.onError(p.error ?? 'Unknown error'); break;
+          }
+        },
+        onDone: () => done(null, false),
+        onError: handlers.onError,
+      },
+    );
   },
 };
 
@@ -478,6 +458,7 @@ export const discussions = {
     onError: (error: string) => void,
     signal?: AbortSignal,
     onStart?: () => void,
+    onLog?: (text: string) => void,
   ) => {
     let finished = false;
     const done = () => { if (!finished) { finished = true; onDone(); } };
@@ -485,64 +466,27 @@ export const discussions = {
     const hdrs: Record<string, string> = { ...authHeaders() };
     if (body) hdrs['Content-Type'] = 'application/json';
 
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: hdrs,
-      body: body ? JSON.stringify(body) : undefined,
-      signal,
-    }).catch(e => {
-      if (e.name === 'AbortError') { done(); return null; }
-      throw e;
-    });
-    if (!res) return;
-
-    // Response received — backend has processed the request (user message added)
-    if (onStart) onStart();
-
-    if (!res.ok || !res.body) {
-      onError(`HTTP ${res.status}`);
-      return;
-    }
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    try {
-      while (true) {
-        const { done: streamDone, value } = await reader.read();
-        if (streamDone) break;
-
-        buffer += decoder.decode(value, { stream: true });
-
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
-
-        let eventType = '';
-        for (const line of lines) {
-          if (line.startsWith('event:')) {
-            eventType = line.slice(6).trim();
-          } else if (line.startsWith('data:')) {
-            const data = line.slice(5).trim();
-            try {
-              const parsed = JSON.parse(data);
-              if (eventType === 'chunk' && parsed.text !== undefined) {
-                onChunk(parsed.text);
-              } else if (eventType === 'done') {
-                done();
-              } else if (eventType === 'error') {
-                onError(parsed.error ?? 'Unknown error');
-              }
-            } catch { /* ignore */ }
+    await fetchAndParseSSE(
+      url,
+      { method: 'POST', headers: hdrs, body: body ? JSON.stringify(body) : undefined, signal },
+      {
+        onEvent: (type, parsed: any) => {
+          if (type === 'chunk' && parsed.text !== undefined) {
+            onChunk(parsed.text);
+          } else if (type === 'log' && parsed.text !== undefined) {
+            if (onLog) onLog(parsed.text);
+          } else if (type === 'done') {
+            done();
+          } else if (type === 'error') {
+            onError(parsed.error ?? 'Unknown error');
           }
-        }
-      }
-    } catch (e: unknown) {
-      if (e instanceof DOMException && e.name === 'AbortError') { done(); return; }
-      throw e;
-    }
-
-    done();
+        },
+        onDone: done,
+        onError,
+      },
+      // Response received — backend has processed the request (user message added)
+      () => { if (onStart) onStart(); },
+    );
   },
 
   // ── Discussion-scoped git operations ──
@@ -569,7 +513,8 @@ export const discussions = {
     onError: (error: string) => void,
     signal?: AbortSignal,
     onStart?: () => void,
-  ) => discussions._streamSSE(`${_apiBase}/api/discussions/${id}/messages`, req, onChunk, onDone, onError, signal, onStart),
+    onLog?: (text: string) => void,
+  ) => discussions._streamSSE(`${_apiBase}/api/discussions/${id}/messages`, req, onChunk, onDone, onError, signal, onStart, onLog),
 
   /** Trigger agent on existing messages (used after create). */
   runAgent: (
@@ -578,7 +523,8 @@ export const discussions = {
     onDone: () => void,
     onError: (error: string) => void,
     signal?: AbortSignal,
-  ) => discussions._streamSSE(`${_apiBase}/api/discussions/${id}/run`, null, onChunk, onDone, onError, signal),
+    onLog?: (text: string) => void,
+  ) => discussions._streamSSE(`${_apiBase}/api/discussions/${id}/run`, null, onChunk, onDone, onError, signal, undefined, onLog),
 
   /** Launch multi-agent orchestration debate. */
   orchestrate: async (

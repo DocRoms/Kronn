@@ -45,6 +45,28 @@ describe('api module', () => {
     return mod;
   }
 
+  // ─── setApiBase / getApiBase ─────────────────────────────────────────
+
+  describe('setApiBase / getApiBase', () => {
+    it('sets and gets the API base URL', async () => {
+      const { setApiBase, getApiBase } = await getApi();
+      setApiBase('http://localhost:3000');
+      expect(getApiBase()).toBe('http://localhost:3000');
+    });
+
+    it('strips trailing slash', async () => {
+      const { setApiBase, getApiBase } = await getApi();
+      setApiBase('http://localhost:3000/');
+      expect(getApiBase()).toBe('http://localhost:3000');
+    });
+
+    it('returns empty string by default', async () => {
+      const { setApiBase, getApiBase } = await getApi();
+      setApiBase('');
+      expect(getApiBase()).toBe('');
+    });
+  });
+
   // ─── Structure tests ──────────────────────────────────────────────────
 
   describe('API structure', () => {

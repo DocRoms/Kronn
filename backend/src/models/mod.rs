@@ -41,9 +41,13 @@ pub struct ServerConfig {
     /// Maximum concurrent agent processes (default: 5)
     #[serde(default = "default_max_agents")]
     pub max_concurrent_agents: usize,
+    /// Agent stall timeout in minutes — abort if no output for this long (default: 5)
+    #[serde(default = "default_agent_stall_timeout")]
+    pub agent_stall_timeout_min: u32,
 }
 
 fn default_max_agents() -> usize { 5 }
+fn default_agent_stall_timeout() -> u32 { 5 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -1323,6 +1327,7 @@ pub struct ServerConfigPublic {
     pub port: u16,
     pub domain: Option<String>,
     pub max_concurrent_agents: usize,
+    pub agent_stall_timeout_min: u32,
     pub auth_enabled: bool,
 }
 
@@ -1330,6 +1335,7 @@ pub struct ServerConfigPublic {
 pub struct UpdateServerConfigRequest {
     pub domain: Option<String>,
     pub max_concurrent_agents: Option<usize>,
+    pub agent_stall_timeout_min: Option<u64>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

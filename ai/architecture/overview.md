@@ -181,7 +181,7 @@ Kronn manages MCPs with a 3-tier model:
 mcp_servers (type)  →  mcp_configs (configured instance)  →  mcp_config_projects (N:N linkage)
 ```
 
-**Servers** represent an MCP type (e.g. "GitHub"). Can come from the built-in registry (34 official servers), be detected from `.mcp.json` files, or be added manually.
+**Servers** represent an MCP type (e.g. "GitHub"). Can come from the built-in registry (43 official servers), be detected from `.mcp.json` files, or be added manually.
 
 **Configs** are configured instances of a server with encrypted env vars (AES-256-GCM), a label, and optional args override. One server can have multiple configs (e.g. two GitHub configs with different tokens). Deduplication via FNV-1a hash of (transport + args + env values).
 

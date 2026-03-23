@@ -213,6 +213,56 @@ describe('Dashboard — project list', () => {
   });
 });
 
+describe('Dashboard — mobile responsive', () => {
+  it('hides text labels on nav buttons when on mobile viewport', async () => {
+    Object.defineProperty(window, 'matchMedia', {
+      writable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: query.includes('767'),
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
+
+    vi.mocked(projectsApi.list).mockResolvedValue([]);
+    vi.mocked(discussionsApi.list).mockResolvedValue([]);
+
+    await wrap(<Dashboard onReset={vi.fn()} />);
+
+    // On mobile, nav buttons should have title attributes (for accessibility)
+    // but should NOT display text labels inline (only icons)
+    const navButtons = Array.from(document.body.querySelectorAll('button[title]'));
+    const tabButtons = navButtons.filter(b => {
+      const title = b.getAttribute('title');
+      return title && ['Projets', 'Discussions', 'MCPs', 'Workflows', 'Config'].includes(title);
+    });
+
+    // Each nav tab button should have a title attribute
+    expect(tabButtons.length).toBeGreaterThan(0);
+
+    // On mobile, the text label is hidden — button textContent should NOT contain the full label
+    // (it only shows the icon, which renders as empty text in jsdom)
+    for (const btn of tabButtons) {
+      const title = btn.getAttribute('title')!;
+      // The button text should NOT include the label (text is hidden on mobile)
+      const textContent = btn.textContent ?? '';
+      expect(textContent).not.toContain(title);
+    }
+
+    // Restore default matchMedia
+    Object.defineProperty(window, 'matchMedia', {
+      writable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
+  });
+});
+
 describe('Dashboard — Ctrl+Enter keyboard shortcuts', () => {
   it('bootstrap and clone forms open via new project button', async () => {
     vi.mocked(projectsApi.list).mockResolvedValue([]);

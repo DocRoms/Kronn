@@ -1,8 +1,16 @@
+use std::path::Path;
 use anyhow::Result;
 use rusqlite::Connection;
 
 /// Run all migrations in order. Each migration is idempotent.
+/// If `db_path` points to an existing file and there are pending migrations,
+/// a backup is created at `<db_path>.backup` before applying them.
 pub fn run(conn: &Connection) -> Result<()> {
+    run_with_backup(conn, None)
+}
+
+/// Run all migrations, optionally backing up the database file first.
+pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS _migrations (
             id INTEGER PRIMARY KEY,
@@ -33,6 +41,28 @@ pub fn run(conn: &Connection) -> Result<()> {
         ("019_pin_first_message", include_str!("sql/019_pin_first_message.sql")),
     ];
 
+    // Check if there are pending migrations before backing up
+    if let Some(path) = db_path {
+        if path.exists() {
+            let has_pending = migrations.iter().any(|(name, _)| {
+                let applied: bool = conn.query_row(
+                    "SELECT COUNT(*) > 0 FROM _migrations WHERE name = ?1",
+                    [name],
+                    |row| row.get(0),
+                ).unwrap_or(false);
+                !applied
+            });
+            if has_pending {
+                let backup_path = path.with_extension("db.backup");
+                if let Err(e) = std::fs::copy(path, &backup_path) {
+                    tracing::warn!("Failed to backup database before migration: {}", e);
+                } else {
+                    tracing::info!("Database backed up to {}", backup_path.display());
+                }
+            }
+        }
+    }
+
     for (name, sql) in migrations {
         let already_applied: bool = conn.query_row(
             "SELECT COUNT(*) > 0 FROM _migrations WHERE name = ?1",
@@ -51,4 +81,53 @@ pub fn run(conn: &Connection) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_with_backup_creates_backup_file() {
+        // Create a temp directory and a SQLite file with some data
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        // Create and populate the database, then close the connection
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch("CREATE TABLE t(id INTEGER PRIMARY KEY, val TEXT);").unwrap();
+            conn.execute("INSERT INTO t(val) VALUES (?1)", ["hello"]).unwrap();
+        }
+
+        // Open a new connection and run migrations (which will create a backup)
+        let conn = Connection::open(&db_path).unwrap();
+        run_with_backup(&conn, Some(&db_path)).expect("run_with_backup should succeed");
+
+        // Verify the backup file was created
+        let backup_path = db_path.with_extension("db.backup");
+        assert!(backup_path.exists(), "Backup file should exist at {:?}", backup_path);
+
+        // Verify the original file still exists
+        assert!(db_path.exists(), "Original database file should still exist");
+
+        // Verify the backup contains valid data by opening it as a SQLite DB
+        let backup_conn = Connection::open(&backup_path).unwrap();
+        let val: String = backup_conn.query_row(
+            "SELECT val FROM t WHERE id = 1", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(val, "hello", "Backup database should contain original data");
+
+        // Verify the original database still has our data (migrations don't destroy it)
+        let val: String = conn.query_row("SELECT val FROM t WHERE id = 1", [], |row| row.get(0)).unwrap();
+        assert_eq!(val, "hello");
+    }
+
+    #[test]
+    fn run_with_backup_no_backup_when_no_path() {
+        // When db_path is None, no backup should be attempted (in-memory DB)
+        let conn = Connection::open_in_memory().unwrap();
+        run_with_backup(&conn, None).expect("run_with_backup with None path should succeed");
+        // No assertion on files — just ensure it doesn't panic
+    }
 }

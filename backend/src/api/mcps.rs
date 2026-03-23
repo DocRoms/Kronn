@@ -574,7 +574,8 @@ fn dedup_configs(conn: &Connection) -> anyhow::Result<()> {
 
     for (dup_id, keeper_id) in &to_delete {
         // Merge project linkages from duplicate into keeper
-        let dup = configs.iter().find(|c| c.id == *dup_id).unwrap();
+        // Safety: dup_id was collected from iterating configs, so it is guaranteed to be found
+        let dup = configs.iter().find(|c| c.id == *dup_id).expect("dup_id came from configs");
         for pid in &dup.project_ids {
             db::mcps::link_config_project(conn, keeper_id, pid)?;
         }

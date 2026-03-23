@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { App } from '../App';
 
 // Mock the lazy-loaded pages to avoid loading the full component trees
@@ -68,10 +68,35 @@ describe('App', () => {
     await waitFor(() => expect(screen.getByTestId('dashboard')).toBeDefined());
   });
 
-  it('shows SetupWizard when API is down', async () => {
+  it('shows API error screen when API is down (not the wizard)', async () => {
     (setupApi.getStatus as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('Network error'));
 
     render(<App />);
-    await waitFor(() => expect(screen.getByTestId('setup-wizard')).toBeDefined());
+    await waitFor(() => expect(screen.getByText('Cannot connect to backend')).toBeDefined());
+    // Should NOT show the wizard
+    expect(screen.queryByTestId('setup-wizard')).toBeNull();
+  });
+
+  it('retries connection when clicking Retry on API error screen', async () => {
+    const mockGetStatus = setupApi.getStatus as ReturnType<typeof vi.fn>;
+    // First call: error
+    mockGetStatus.mockRejectedValueOnce(new Error('Network error'));
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByText('Cannot connect to backend')).toBeDefined());
+
+    // Second call: success
+    mockGetStatus.mockResolvedValueOnce({
+      is_first_run: false,
+      current_step: 'Complete',
+      agents_detected: [],
+      scan_paths_set: true,
+      repos_detected: [],
+      default_scan_path: '/home',
+    });
+
+    fireEvent.click(screen.getByText('Retry'));
+    await waitFor(() => expect(screen.getByTestId('dashboard')).toBeDefined());
+    expect(mockGetStatus).toHaveBeenCalledTimes(2);
   });
 });

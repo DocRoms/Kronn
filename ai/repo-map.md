@@ -51,12 +51,20 @@ Kronn/
 │       │       ├── 008_discussions_index.sql # Performance index
 │       │       ├── 009_profiles.sql          # Profile support (profile_id on discussions/projects)
 │       │       ├── 010_directives.sql        # Directives support
-│       │       └── 011_multi_profiles.sql    # Multi-profile support (profile_id → profile_ids_json)
+│       │       ├── 011_multi_profiles.sql    # Multi-profile support (profile_id → profile_ids_json)
+│       │       ├── 012_mcp_general.sql       # Global MCP configs
+│       │       ├── 013_discussion_worktrees.sql # Worktree support for discussions
+│       │       ├── 014_summary_cache.sql     # Summary caching
+│       │       ├── 015_model_tier.sql        # ModelTier system
+│       │       ├── 016_message_model_tier.sql # Per-message model tier
+│       │       ├── 017_message_count.sql     # Message count tracking
+│       │       ├── 018_briefing_notes.sql    # Pre-audit briefing notes
+│       │       └── 019_pin_first_message.sql # Pin first message feature
 │       ├── core/               # Business logic
 │       │   ├── mod.rs          # Re-exports
 │       │   ├── config.rs       # Config load/save (~/.config/kronn/)
 │       │   ├── scanner.rs      # Git repo scanner + AI audit detection (detect_audit_status, count_ai_todos)
-│       │   ├── registry.rs     # MCP registry (34 built-in official servers, grouped by category, with token_url/token_help)
+│       │   ├── registry.rs     # MCP registry (43 built-in official servers, grouped by category, with token_url/token_help)
 │       │   ├── mcp_scanner.rs  # Multi-agent MCP sync + MCP injection. read_all_mcp_contexts() reads .mcp.json + context files and generates prompt listing available MCP tools. Disk sync: .mcp.json (Claude), .vibe/config.toml (Vibe), ~/.codex/config.toml (Codex). .gitignore safety
 │       │   ├── crypto.rs       # AES-256-GCM encryption for MCP secrets
 │       │   ├── skills.rs      # Skills loader: builtin (embedded .md) + custom (~/.config/kronn/skills/). Frontmatter parsing, build_skills_prompt()
@@ -99,10 +107,10 @@ Kronn/
 │       ├── App.tsx             # Router (setup wizard vs dashboard) + ErrorBoundary + React.lazy code splitting
 │       ├── pages/
 │       │   ├── Dashboard.tsx   # Main UI shell (~1625 lines) — projects tab (collapsible sections, bootstrap modal), nav bar, routes to sub-pages
-│       │   ├── SettingsPage.tsx # Settings (~1830 lines) — language, voice (TTS/STT model selection), agents config, tokens, usage stats, DB management
-│       │   ├── DiscussionsPage.tsx # Discussions (~2900 lines) — sidebar, chat, streaming, debate, archive, swipe gestures, TTS/STT, voice conversation mode
+│       │   ├── SettingsPage.tsx # Settings (~1870 lines) — language, voice (TTS/STT model selection), agents config, tokens, usage stats, DB management
+│       │   ├── DiscussionsPage.tsx # Discussions (~3100 lines) — sidebar, chat, streaming, debate, archive, swipe gestures, TTS/STT, voice conversation mode, agent activity logs, persistent timer
 │       │   ├── McpPage.tsx     # MCP management (registry, configs, inline secret editing with per-field visibility, context files, project toggles)
-│       │   ├── WorkflowsPage.tsx # Workflow management (~1700 lines, list, wizard, detail, runs, access warnings)
+│       │   ├── WorkflowsPage.tsx # Workflow management (~1975 lines, list, wizard, detail, runs, access warnings)
 │       │   └── SetupWizard.tsx # First-run setup flow
 │       ├── hooks/
 │       │   ├── useApi.ts       # Generic fetch hook with loading/error/refetch + race condition protection
@@ -152,6 +160,9 @@ Kronn/
 │   ├── portability.bats        # Cross-platform tests (18)
 │   └── bugfixes.bats           # Non-regression tests (12)
 ├── kronn                       # CLI entrypoint (bash script, cross-platform)
+├── desktop/                    # Tauri desktop app (native Windows/macOS/Linux wrapper)
+│   ├── package.json            # Desktop app dependencies
+│   └── src-tauri/              # Tauri Rust backend (embedded server, COOP/COEP headers)
 ├── docker-compose.yml          # 3 services: backend, frontend, gateway
 ├── Makefile                    # start, stop, logs, build, dev-backend, dev-frontend, typegen
 └── .docker/                    # Docker configs (nginx gateway)
@@ -168,11 +179,11 @@ Kronn/
 ## Notes
 - `README.md` is not guaranteed to be up-to-date; prefer actual config files as source of truth.
 - `frontend/src/types/generated.ts` is auto-generated — never edit manually.
-- Dashboard.tsx (~1625 lines) is the main UI shell with projects tab (collapsible accordion sections, bootstrap modal), nav bar. Extracted: SettingsPage.tsx (~1830 lines), DiscussionsPage.tsx (~2900 lines), McpPage.tsx (~715 lines), WorkflowsPage.tsx (~1700 lines).
+- Dashboard.tsx (~1625 lines) is the main UI shell with projects tab (collapsible accordion sections, bootstrap modal), nav bar. Extracted: SettingsPage.tsx (~1870 lines), DiscussionsPage.tsx (~3100 lines), McpPage.tsx (~715 lines), WorkflowsPage.tsx (~1975 lines).
 - DiscussionsPage includes: SwipeableDiscItem (swipe-to-archive/delete), inline title editing, disabled agent detection, multi-line textarea, archive section, TTS/STT integration, voice conversation mode.
 - TTS/STT logic extracted into `lib/tts-*.ts` and `lib/stt-*.ts` modules (7 files, ~400 lines total). Web Workers for WASM inference run off the main thread.
 - Shared constants (AGENT_COLORS, AGENT_LABELS) extracted to `lib/constants.ts` — imported by Dashboard and WorkflowsPage.
-- Frontend tests in `__tests__/` directories alongside source (22 suites, 298 tests). See `ai/testing-quality.md`.
+- Frontend tests in `__tests__/` directories alongside source (22 suites, ~315 tests). See `ai/testing-quality.md`.
 - Shell tests in `tests/bats/` (8 suites, 186 tests via bats-core). See `ai/testing-quality.md`.
-- CI pipeline: `.github/workflows/ci-test.yml` triggered on push to main + all PRs (backend clippy/test + frontend tsc/test + shell bats + security scan).
+- CI pipeline: `.github/workflows/ci-test.yml` triggered on push to main + all PRs (backend clippy/test + frontend tsc/test + shell bats + security scan). Desktop build: `.github/workflows/desktop-build.yml`.
 - `templates/` directory contains the AI context template files (ai/ skeleton, CLAUDE.md, .cursorrules, etc.) mounted at `/app/templates:ro` in Docker.

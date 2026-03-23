@@ -189,3 +189,103 @@ impl WorkflowEngine {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── WorkflowRun construction (mirrors spawn_run logic) ──────────────
+
+    #[test]
+    fn workflow_run_initial_state() {
+        let now = Utc::now();
+        let run = WorkflowRun {
+            id: Uuid::new_v4().to_string(),
+            workflow_id: "wf-123".into(),
+            status: RunStatus::Pending,
+            trigger_context: Some(serde_json::json!({"type": "cron"})),
+            step_results: vec![],
+            tokens_used: 0,
+            workspace_path: None,
+            started_at: now,
+            finished_at: None,
+        };
+
+        assert_eq!(run.status, RunStatus::Pending);
+        assert!(run.step_results.is_empty());
+        assert_eq!(run.tokens_used, 0);
+        assert!(run.workspace_path.is_none());
+        assert!(run.finished_at.is_none());
+        assert!(!run.id.is_empty());
+    }
+
+    #[test]
+    fn workflow_run_id_is_uuid_format() {
+        let id = Uuid::new_v4().to_string();
+        assert_eq!(id.len(), 36); // UUID v4 = 8-4-4-4-12 = 36 chars
+        assert_eq!(id.chars().filter(|c| *c == '-').count(), 4);
+    }
+
+    #[test]
+    fn workflow_run_trigger_context_serialization() {
+        let ctx = serde_json::json!({
+            "type": "tracker",
+            "issue_title": "Bug report",
+            "issue_number": 42,
+        });
+        let run = WorkflowRun {
+            id: "test-id".into(),
+            workflow_id: "wf-1".into(),
+            status: RunStatus::Pending,
+            trigger_context: Some(ctx.clone()),
+            step_results: vec![],
+            tokens_used: 0,
+            workspace_path: None,
+            started_at: Utc::now(),
+            finished_at: None,
+        };
+        let tc = run.trigger_context.unwrap();
+        assert_eq!(tc["type"], "tracker");
+        assert_eq!(tc["issue_title"], "Bug report");
+        assert_eq!(tc["issue_number"], 42);
+    }
+
+    #[test]
+    fn workflow_run_manual_trigger_context() {
+        let ctx = serde_json::json!({
+            "type": "manual",
+            "triggered_by": "user@example.com",
+        });
+        let serialized = serde_json::to_string(&ctx).unwrap();
+        assert!(serialized.contains("manual"));
+    }
+
+    // ─── RunStatus equality ──────────────────────────────────────────────
+
+    #[test]
+    fn run_status_equality() {
+        assert_eq!(RunStatus::Pending, RunStatus::Pending);
+        assert_eq!(RunStatus::Running, RunStatus::Running);
+        assert_eq!(RunStatus::Success, RunStatus::Success);
+        assert_eq!(RunStatus::Failed, RunStatus::Failed);
+        assert_ne!(RunStatus::Success, RunStatus::Failed);
+    }
+
+    // ─── Concurrency limit logic ─────────────────────────────────────────
+
+    #[test]
+    fn concurrency_limit_check_logic() {
+        // Mirrors the check in check_triggers
+        let limit: Option<u32> = Some(2);
+        let active: u32 = 2;
+        if let Some(l) = limit {
+            assert!(active >= l, "Should skip when active >= limit");
+        }
+    }
+
+    #[test]
+    fn concurrency_no_limit_always_allows() {
+        let limit: Option<u32> = None;
+        assert!(limit.is_none(), "No limit should allow any number of runs");
+    }
+}

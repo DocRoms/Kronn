@@ -20,8 +20,8 @@ const MAX_TITLE_LEN: usize = 500;
 const MAX_CONTENT_LEN: usize = 100_000;
 /// Global timeout for a single agent stream (30 minutes).
 const AGENT_GLOBAL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
-/// Stall timeout — abort if no output line received for this long (5 minutes).
-const AGENT_STALL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+/// Default stall timeout (5 minutes) — overridden by config.server.agent_stall_timeout_min
+const DEFAULT_STALL_TIMEOUT_MIN: u32 = 5;
 
 /// Per-agent prompt budget in characters.
 /// Leaves room for the agent's response within its context window.
@@ -42,6 +42,7 @@ enum AgentStreamEvent {
     Start,
     Meta { auth_mode: String },
     Chunk { data: serde_json::Value },
+    Log { text: String },
     Done { data: serde_json::Value },
     Error { data: serde_json::Value },
     // Orchestration-specific:
@@ -417,7 +418,8 @@ async fn make_agent_stream(
         return Sse::new(stream);
     }
 
-    let disc = disc.unwrap();
+    // Safety: early return above guarantees disc is Some
+    let disc = disc.expect("disc is Some after early return");
     let agent_type = agent_override.unwrap_or_else(|| disc.agent.clone());
     let disc_tier = disc.tier;
     let skill_ids = disc.skill_ids.clone();
@@ -435,9 +437,9 @@ async fn make_agent_stream(
         String::new()
     };
 
-    // For general discussions (no project), build MCP context from global configs
+    // For general discussions (no project), write .mcp.json + build MCP context
     let global_mcp_context = if project_path.is_empty() {
-        build_global_mcp_context(&state).await
+        prepare_general_mcp(&state, &workspace_path).await
     } else {
         None
     };
@@ -492,9 +494,46 @@ async fn make_agent_stream(
                 let mut full_response = String::new();
                 let mut stream_json_tokens: u64 = 0;
                 let is_stream_json = process.output_mode == runner::OutputMode::StreamJson;
+                // Track current tool for rich log messages
+                let mut current_tool: Option<String> = None;
+                let mut current_tool_input = String::new();
                 let global_deadline = tokio::time::Instant::now() + AGENT_GLOBAL_TIMEOUT;
+
+                // Stream stderr logs to the client in real-time
+                let stderr_log_capture = process.stderr_capture.clone();
+                let log_tx = tx.clone();
+                let log_task = tokio::spawn(async move {
+                    let mut last_len = 0;
+                    loop {
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        let lines = stderr_log_capture.lock().expect("lock poisoned").clone();
+                        if lines.len() > last_len {
+                            for line in &lines[last_len..] {
+                                let trimmed = line.trim();
+                                if !trimmed.is_empty() {
+                                    let _ = log_tx.send(AgentStreamEvent::Log { text: trimmed.to_string() }).await;
+                                }
+                            }
+                            last_len = lines.len();
+                        }
+                        if log_tx.is_closed() { break; }
+                    }
+                });
+                let stall_timeout_min = {
+                    let cfg = state.config.read().await;
+                    let t = cfg.server.agent_stall_timeout_min;
+                    if t > 0 { t } else { DEFAULT_STALL_TIMEOUT_MIN }
+                };
+                let stall_timeout = Duration::from_secs(stall_timeout_min as u64 * 60);
                 let mut was_interrupted = false;
 
+                // Stall timeout pattern: the `tokio::time::sleep(stall_timeout)` future
+                // is created fresh on each iteration of the `while let` loop because the
+                // entire `select!` block is re-evaluated. This is intentional — each time
+                // process.next_line() yields a line, we re-enter the loop, creating a NEW
+                // sleep future, effectively resetting the stall timer. If the agent produces
+                // no output for `stall_timeout`, the sleep wins the select! and we break.
+                // The global_deadline sleep_until is NOT reset (absolute deadline).
                 while let Some(line) = tokio::select! {
                     line = process.next_line() => line,
                     _ = tokio::time::sleep_until(global_deadline) => {
@@ -503,9 +542,9 @@ async fn make_agent_stream(
                         None
                     }
                     _ = async {
-                        tokio::time::sleep(AGENT_STALL_TIMEOUT).await
+                        tokio::time::sleep(stall_timeout).await
                     } => {
-                        tracing::warn!("Agent stream stall timeout ({:?}) — no output", AGENT_STALL_TIMEOUT);
+                        tracing::warn!("Agent stream stall timeout ({:?}) — no output", stall_timeout);
                         was_interrupted = true;
                         None
                     }
@@ -524,6 +563,23 @@ async fn make_agent_stream(
                             }
                             runner::StreamJsonEvent::Usage { input_tokens, output_tokens } => {
                                 stream_json_tokens = stream_json_tokens.max(input_tokens + output_tokens);
+                            }
+                            runner::StreamJsonEvent::ToolStart(name) => {
+                                current_tool = Some(name);
+                                current_tool_input.clear();
+                            }
+                            runner::StreamJsonEvent::ToolInputDelta(partial) => {
+                                current_tool_input.push_str(&partial);
+                            }
+                            runner::StreamJsonEvent::ToolEnd => {
+                                if let Some(ref tool) = current_tool {
+                                    let log = format_tool_log(tool, &current_tool_input);
+                                    if !client_gone {
+                                        let _ = tx.send(AgentStreamEvent::Log { text: log }).await;
+                                    }
+                                }
+                                current_tool = None;
+                                current_tool_input.clear();
                             }
                             runner::StreamJsonEvent::Skip => {}
                         }
@@ -545,6 +601,9 @@ async fn make_agent_stream(
                     }
                 }
 
+                // Stop the stderr log streamer
+                log_task.abort();
+
                 // Kill agent on timeout/stall (process may still be running)
                 if was_interrupted {
                     let _ = process.child.kill().await;
@@ -561,9 +620,13 @@ async fn make_agent_stream(
                 let stderr_lines = process.captured_stderr_flushed().await;
                 let stderr_text = stderr_lines.join("\n");
 
-                // Mark partial responses
+                // Mark partial responses with actionable hint
                 if was_interrupted && !full_response.is_empty() {
-                    full_response.push_str("\n\n---\n⚠️ [Réponse partielle — agent interrompu]");
+                    full_response.push_str(&format!(
+                        "\n\n---\n⚠️ **Partial response** — the agent was interrupted after {} min without output. \
+                        You can increase the timeout in **Config > Server > Agent inactivity timeout**.",
+                        stall_timeout_min
+                    ));
                 }
 
                 if full_response.is_empty() && !success {
@@ -576,10 +639,10 @@ async fn make_agent_stream(
                         // No output at all — likely auth/session issue
                         full_response = format!(
                             "[Agent exited with error] ({})\n\n\
-                            ⚠️ **Aucune sortie capturée.** Causes possibles :\n\
-                            - Session expirée → lancez `/login` dans le terminal\n\
-                            - Clé API invalide → vérifiez Config > Tokens\n\
-                            - Agent non installé ou non trouvé",
+                            ⚠️ **No output captured.** Possible causes:\n\
+                            - Expired session → run `/login` in the terminal\n\
+                            - Invalid API key → check Config > Tokens\n\
+                            - Agent not installed or not found",
                             exit_info
                         );
                     } else {
@@ -723,6 +786,11 @@ async fn make_agent_stream(
                 AgentStreamEvent::Done { data } => {
                     yield Event::default().event("done").data(data.to_string());
                 }
+                AgentStreamEvent::Log { text } => {
+                    yield Event::default().event("log").data(
+                        serde_json::json!({ "text": text }).to_string()
+                    );
+                }
                 AgentStreamEvent::Error { data } => {
                     yield Event::default().event("error").data(data.to_string());
                 }
@@ -766,7 +834,8 @@ pub async fn orchestrate(
         return Sse::new(stream);
     }
 
-    let disc = disc.unwrap();
+    // Safety: early return above guarantees disc is Some
+    let disc = disc.expect("disc is Some after early return");
     let orch_workspace_path = disc.workspace_path.clone();
     let original_question = disc.messages.iter().rev()
         .find(|m| matches!(m.role, MessageRole::User))
@@ -825,9 +894,9 @@ pub async fn orchestrate(
         String::new()
     };
 
-    // For general discussions (no project), build MCP context from global configs
+    // For general discussions (no project), write .mcp.json + build MCP context
     let global_mcp_context = if project_path.is_empty() {
-        build_global_mcp_context(&state).await
+        prepare_general_mcp(&state, &orch_workspace_path).await
     } else {
         None
     };
@@ -1036,6 +1105,8 @@ pub async fn orchestrate(
                     Ok(mut process) => {
                         let mut full_response = String::new();
                         let mut orch_stream_tokens: u64 = 0;
+                        let mut orch_current_tool: Option<String> = None;
+                        let mut orch_tool_input = String::new();
                         let orch_is_stream_json = process.output_mode == runner::OutputMode::StreamJson;
                         let orch_deadline = tokio::time::Instant::now() + AGENT_GLOBAL_TIMEOUT;
 
@@ -1058,6 +1129,20 @@ pub async fn orchestrate(
                                     }
                                     runner::StreamJsonEvent::Usage { input_tokens, output_tokens } => {
                                         orch_stream_tokens = orch_stream_tokens.max(input_tokens + output_tokens);
+                                    }
+                                    runner::StreamJsonEvent::ToolStart(name) => {
+                                        orch_current_tool = Some(name);
+                                        orch_tool_input.clear();
+                                    }
+                                    runner::StreamJsonEvent::ToolInputDelta(partial) => {
+                                        orch_tool_input.push_str(&partial);
+                                    }
+                                    runner::StreamJsonEvent::ToolEnd => {
+                                        if let Some(ref tool) = orch_current_tool {
+                                            emit!(AgentStreamEvent::Log { text: format_tool_log(tool, &orch_tool_input) });
+                                        }
+                                        orch_current_tool = None;
+                                        orch_tool_input.clear();
                                     }
                                     runner::StreamJsonEvent::Skip => {}
                                 }
@@ -1192,6 +1277,8 @@ pub async fn orchestrate(
                 Ok(mut process) => {
                     let mut full_response = String::new();
                     let mut synth_stream_tokens: u64 = 0;
+                    let mut synth_current_tool: Option<String> = None;
+                    let mut synth_tool_input = String::new();
                     let synth_is_stream_json = process.output_mode == runner::OutputMode::StreamJson;
                     let synth_deadline = tokio::time::Instant::now() + AGENT_GLOBAL_TIMEOUT;
 
@@ -1214,6 +1301,20 @@ pub async fn orchestrate(
                                 }
                                 runner::StreamJsonEvent::Usage { input_tokens, output_tokens } => {
                                     synth_stream_tokens = synth_stream_tokens.max(input_tokens + output_tokens);
+                                }
+                                runner::StreamJsonEvent::ToolStart(name) => {
+                                    synth_current_tool = Some(name);
+                                    synth_tool_input.clear();
+                                }
+                                runner::StreamJsonEvent::ToolInputDelta(partial) => {
+                                    synth_tool_input.push_str(&partial);
+                                }
+                                runner::StreamJsonEvent::ToolEnd => {
+                                    if let Some(ref tool) = synth_current_tool {
+                                        emit!(AgentStreamEvent::Log { text: format_tool_log(tool, &synth_tool_input) });
+                                    }
+                                    synth_current_tool = None;
+                                    synth_tool_input.clear();
                                 }
                                 runner::StreamJsonEvent::Skip => {}
                             }
@@ -1315,6 +1416,11 @@ pub async fn orchestrate(
                 }
                 AgentStreamEvent::AgentDone { data } => {
                     yield Event::default().event("agent_done").data(data.to_string());
+                }
+                AgentStreamEvent::Log { text } => {
+                    yield Event::default().event("log").data(
+                        serde_json::json!({ "text": text }).to_string()
+                    );
                 }
             }
         }
@@ -2046,6 +2152,9 @@ fn build_agent_prompt(disc: &Discussion, agent_type: &AgentType, extra_context_l
 }
 
 /// Detect common agent error patterns and return a user-friendly hint.
+// Note: error hints are in French by default. The frontend could override
+// these with translated versions based on the UI locale, but since Kronn
+// is primarily used in French-speaking environments, this is acceptable for v0.1.0.
 pub(crate) fn detect_agent_error_hint(output: &str) -> Option<String> {
     let lower = output.to_lowercase();
 
@@ -2054,11 +2163,11 @@ pub(crate) fn detect_agent_error_hint(output: &str) -> Option<String> {
         || lower.contains("mcp server") && lower.contains("failed to start")
     {
         return Some(
-            "⚠️ **Erreur de configuration MCP.**\n\
-             Un serveur MCP n'a pas pu démarrer. Causes possibles :\n\
-             - Commande MCP non installée (npx/uvx introuvable)\n\
-             - Chemin de projet invalide (montage Docker)\n\
-             - `.mcp.json` corrompu → relancez un sync depuis MCPs > Actualiser".to_string()
+            "⚠️ **MCP configuration error.**\n\
+             An MCP server failed to start. Possible causes:\n\
+             - MCP command not installed (npx/uvx not found)\n\
+             - Invalid project path (Docker mount)\n\
+             - Corrupted `.mcp.json` → re-sync from MCPs > Refresh".to_string()
         );
     }
 
@@ -2071,9 +2180,9 @@ pub(crate) fn detect_agent_error_hint(output: &str) -> Option<String> {
         || lower.contains("not authenticated")
     {
         return Some(
-            "⚠️ **Session expirée ou clé API invalide.**\n\
-             Reconnectez-vous en lançant `/login` dans le CLI de l'agent concerné.\n\
-             Vérifiez aussi vos clés API dans Config > Tokens.".to_string()
+            "⚠️ **Expired session or invalid API key.**\n\
+             Re-authenticate by running `/login` in the agent's CLI.\n\
+             Also check your API keys in Config > Tokens.".to_string()
         );
     }
 
@@ -2082,9 +2191,9 @@ pub(crate) fn detect_agent_error_hint(output: &str) -> Option<String> {
         || lower.contains("429") || lower.contains("too many requests")
     {
         return Some(
-            "⚠️ **Limite de requêtes atteinte (rate limit).**\n\
-             Attendez quelques minutes avant de réessayer.\n\
-             Status Anthropic : https://status.anthropic.com".to_string()
+            "⚠️ **Rate limit reached.**\n\
+             Wait a few minutes before retrying.\n\
+             Anthropic status: https://status.anthropic.com".to_string()
         );
     }
 
@@ -2093,9 +2202,9 @@ pub(crate) fn detect_agent_error_hint(output: &str) -> Option<String> {
         || lower.contains("capacity") || lower.contains("server_busy")
     {
         return Some(
-            "⚠️ **Serveurs surchargés.**\n\
-             Les serveurs de l'API sont temporairement saturés. Réessayez dans quelques minutes.\n\
-             Status Anthropic : https://status.anthropic.com".to_string()
+            "⚠️ **Servers overloaded.**\n\
+             The API servers are temporarily at capacity. Retry in a few minutes.\n\
+             Anthropic status: https://status.anthropic.com".to_string()
         );
     }
 
@@ -2104,9 +2213,9 @@ pub(crate) fn detect_agent_error_hint(output: &str) -> Option<String> {
         || lower.contains("503 service unavailable") || lower.contains("api error: 500")
     {
         return Some(
-            "⚠️ **Erreur serveur API.**\n\
-             Le service est temporairement indisponible. Réessayez dans quelques minutes.\n\
-             Status Anthropic : https://status.anthropic.com".to_string()
+            "⚠️ **API server error.**\n\
+             The service is temporarily unavailable. Retry in a few minutes.\n\
+             Anthropic status: https://status.anthropic.com".to_string()
         );
     }
 
@@ -2115,8 +2224,8 @@ pub(crate) fn detect_agent_error_hint(output: &str) -> Option<String> {
         || lower.contains("payment required") || lower.contains("402")
     {
         return Some(
-            "⚠️ **Quota épuisé ou problème de facturation.**\n\
-             Vérifiez votre abonnement et vos crédits API.".to_string()
+            "⚠️ **Quota exhausted or billing issue.**\n\
+             Check your subscription and API credits.".to_string()
         );
     }
 
@@ -2126,19 +2235,19 @@ pub(crate) fn detect_agent_error_hint(output: &str) -> Option<String> {
         || lower.contains("timeout") || lower.contains("timed out")
     {
         return Some(
-            "⚠️ **Erreur réseau.**\n\
-             Impossible de joindre l'API. Vérifiez votre connexion internet.".to_string()
+            "⚠️ **Network error.**\n\
+             Unable to reach the API. Check your internet connection.".to_string()
         );
     }
 
     // Permission denied (sandbox / file access)
     if lower.contains("permission denied") || lower.contains("sandbox permission") {
         return Some(
-            "⚠️ **Permission refusée sur le répertoire du projet.**\n\
-             Causes possibles :\n\
-             - Le projet n'est pas dans le répertoire rw (`KRONN_REPOS_DIR`)\n\
-             - Le container a un UID différent du propriétaire des fichiers → `make stop && make start` pour rebuild\n\
-             - Sur macOS : vérifiez que Docker Desktop a accès au répertoire dans Settings > Resources > File sharing".to_string()
+            "⚠️ **Permission denied on project directory.**\n\
+             Possible causes:\n\
+             - Project is not in the rw directory (`KRONN_REPOS_DIR`)\n\
+             - Container UID differs from file owner → `make stop && make start` to rebuild\n\
+             - On macOS: check that Docker Desktop has access to the directory in Settings > Resources > File sharing".to_string()
         );
     }
 
@@ -2303,15 +2412,20 @@ pub async fn disc_exec(
         }
     }
 
-    let first_word = cmd.split_whitespace().next().unwrap_or("");
-    const BLOCKED: &[&str] = &["rm", "sudo", "chmod", "chown", "kill", "reboot", "shutdown", "mkfs", "dd"];
-    if BLOCKED.contains(&first_word) {
-        return Json(ApiResponse::err(format!("Command '{}' is not allowed", first_word)));
+    // Validate command against strict allowlist
+    if let Err(msg) = super::git_ops::validate_exec_command(&cmd) {
+        return Json(ApiResponse::err(msg));
     }
 
     let (work_dir, _) = match resolve_discussion_work_dir(&state, &id).await {
         Ok(v) => v,
         Err(e) => return Json(ApiResponse::err(e)),
+    };
+
+    // Rate-limit concurrent exec calls via the shared agent semaphore
+    let _permit = match state.agent_semaphore.acquire().await {
+        Ok(p) => p,
+        Err(_) => return Json(ApiResponse::err("Server is shutting down")),
     };
 
     let result = tokio::task::spawn_blocking(move || {
@@ -2414,6 +2528,87 @@ async fn build_global_mcp_context(state: &AppState) -> Option<String> {
     Some(result)
 }
 
+/// Build global MCP context AND write .mcp.json for general (no-project) discussions.
+async fn prepare_general_mcp(state: &AppState, workspace_path: &Option<String>) -> Option<String> {
+    let work_dir = workspace_path.clone()
+        .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
+    {
+        let db = state.db.clone();
+        let cfg = state.config.read().await;
+        if let Some(ref secret) = cfg.encryption_secret {
+            let secret = secret.clone();
+            let wd = work_dir;
+            let _ = db.with_conn(move |conn| {
+                let _ = crate::core::mcp_scanner::write_general_mcp_json(conn, &secret, &wd);
+                Ok(())
+            }).await;
+        }
+    }
+    build_global_mcp_context(state).await
+}
+
+/// Format a rich log line from tool name + accumulated JSON input
+fn format_tool_log(tool: &str, input_json: &str) -> String {
+    // Try to parse the accumulated JSON and extract the most relevant field
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(input_json) {
+        match tool {
+            "Read" => {
+                if let Some(path) = val.get("file_path").and_then(|v| v.as_str()) {
+                    return format!("Read {}", path);
+                }
+            }
+            "Bash" => {
+                if let Some(cmd) = val.get("command").and_then(|v| v.as_str()) {
+                    let short = if cmd.len() > 80 { &cmd[..80] } else { cmd };
+                    return format!("$ {}", short.replace('\n', " "));
+                }
+            }
+            "Edit" => {
+                if let Some(path) = val.get("file_path").and_then(|v| v.as_str()) {
+                    return format!("Edit {}", path);
+                }
+            }
+            "Write" => {
+                if let Some(path) = val.get("file_path").and_then(|v| v.as_str()) {
+                    return format!("Write {}", path);
+                }
+            }
+            "Grep" => {
+                if let Some(pattern) = val.get("pattern").and_then(|v| v.as_str()) {
+                    let path = val.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+                    return format!("Grep '{}' in {}", pattern, path);
+                }
+            }
+            "Glob" => {
+                if let Some(pattern) = val.get("pattern").and_then(|v| v.as_str()) {
+                    return format!("Glob {}", pattern);
+                }
+            }
+            "WebFetch" => {
+                if let Some(url) = val.get("url").and_then(|v| v.as_str()) {
+                    return format!("Fetch {}", url);
+                }
+            }
+            "Agent" => {
+                if let Some(desc) = val.get("description").and_then(|v| v.as_str()) {
+                    return format!("Agent: {}", desc);
+                }
+            }
+            _ => {
+                // MCP tools: mcp__server__tool
+                if tool.starts_with("mcp__") {
+                    let parts: Vec<&str> = tool.splitn(3, "__").collect();
+                    if parts.len() == 3 {
+                        return format!("MCP {}/{}", parts[1], parts[2]);
+                    }
+                }
+            }
+        }
+    }
+    // Fallback: just the tool name
+    format!("Tool: {}", tool)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2422,7 +2617,7 @@ mod tests {
     fn error_hint_auth_401() {
         let hint = detect_agent_error_hint("Error: api error: 401 Unauthorized");
         assert!(hint.is_some());
-        assert!(hint.unwrap().contains("Session expirée"));
+        assert!(hint.unwrap().contains("Expired session"));
     }
 
     #[test]
@@ -2442,21 +2637,21 @@ mod tests {
     fn error_hint_rate_limit_429() {
         let hint = detect_agent_error_hint("Error 429: too many requests");
         assert!(hint.is_some());
-        assert!(hint.unwrap().contains("rate limit"));
+        assert!(hint.unwrap().contains("Rate limit"));
     }
 
     #[test]
     fn error_hint_overloaded_529() {
         let hint = detect_agent_error_hint("Server overloaded (529)");
         assert!(hint.is_some());
-        assert!(hint.unwrap().contains("surchargés"));
+        assert!(hint.unwrap().contains("overloaded"));
     }
 
     #[test]
     fn error_hint_server_error_502() {
         let hint = detect_agent_error_hint("502 Bad Gateway");
         assert!(hint.is_some());
-        assert!(hint.unwrap().contains("indisponible"));
+        assert!(hint.unwrap().contains("unavailable"));
     }
 
     #[test]
@@ -2482,7 +2677,7 @@ mod tests {
     fn error_hint_network_econnrefused() {
         let hint = detect_agent_error_hint("ECONNREFUSED: connection refused");
         assert!(hint.is_some());
-        assert!(hint.unwrap().contains("réseau"));
+        assert!(hint.unwrap().contains("Network error"));
     }
 
     #[test]
@@ -3236,5 +3431,70 @@ mod tests {
             let mode = auth_mode_for(&agent, &tokens);
             assert!(mode == "local" || mode == "override", "Agent {:?} auth mode should be local or override", agent);
         }
+    }
+
+    // ─── format_tool_log ─────────────────────────────────────────────────────
+
+    #[test]
+    fn format_tool_log_read_with_file_path() {
+        let result = format_tool_log("Read", r#"{"file_path":"/path/to/file"}"#);
+        assert_eq!(result, "Read /path/to/file");
+    }
+
+    #[test]
+    fn format_tool_log_bash_with_command() {
+        let result = format_tool_log("Bash", r#"{"command":"ls -la"}"#);
+        assert_eq!(result, "$ ls -la");
+    }
+
+    #[test]
+    fn format_tool_log_bash_long_command_truncated() {
+        let long_cmd = "a".repeat(120);
+        let input = format!(r#"{{"command":"{}"}}"#, long_cmd);
+        let result = format_tool_log("Bash", &input);
+        assert_eq!(result, format!("$ {}", &long_cmd[..80]));
+        assert!(result.len() <= 82 + 2); // "$ " + 80 chars
+    }
+
+    #[test]
+    fn format_tool_log_edit_with_file_path() {
+        let result = format_tool_log("Edit", r#"{"file_path":"/path/to/file"}"#);
+        assert_eq!(result, "Edit /path/to/file");
+    }
+
+    #[test]
+    fn format_tool_log_grep_with_pattern_and_path() {
+        let result = format_tool_log("Grep", r#"{"pattern":"TODO","path":"src/"}"#);
+        assert_eq!(result, "Grep 'TODO' in src/");
+    }
+
+    #[test]
+    fn format_tool_log_glob_with_pattern() {
+        let result = format_tool_log("Glob", r#"{"pattern":"**/*.rs"}"#);
+        assert_eq!(result, "Glob **/*.rs");
+    }
+
+    #[test]
+    fn format_tool_log_mcp_tool() {
+        let result = format_tool_log("mcp__github__search", r#"{"query":"test"}"#);
+        assert_eq!(result, "MCP github/search");
+    }
+
+    #[test]
+    fn format_tool_log_unknown_tool_unparseable_json() {
+        let result = format_tool_log("Unknown", "not valid json {{{");
+        assert_eq!(result, "Tool: Unknown");
+    }
+
+    #[test]
+    fn format_tool_log_agent_with_description() {
+        let result = format_tool_log("Agent", r#"{"description":"Search for files"}"#);
+        assert_eq!(result, "Agent: Search for files");
+    }
+
+    #[test]
+    fn format_tool_log_write_with_file_path() {
+        let result = format_tool_log("Write", r#"{"file_path":"/path/to/file"}"#);
+        assert_eq!(result, "Write /path/to/file");
     }
 }

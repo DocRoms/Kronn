@@ -90,6 +90,8 @@ const wrap = async (ui: React.ReactElement) => {
 const liftedProps = () => ({
   sendingMap: {},
   setSendingMap: vi.fn(),
+  sendingStartMap: {},
+  setSendingStartMap: vi.fn(),
   streamingMap: {},
   setStreamingMap: vi.fn(),
   abortControllers: { current: {} } as React.MutableRefObject<Record<string, AbortController>>,
@@ -393,6 +395,51 @@ describe('DiscussionsPage', () => {
     expect(titleInput.value).toBe('Validation audit AI');
   });
 
+  // ─── Mobile responsive tests ─────────────────────────────────────────
+
+  it('shows hamburger Menu button on mobile when no discussion is selected', async () => {
+    Object.defineProperty(window, 'matchMedia', {
+      writable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: query.includes('767'),
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[makeListDiscussion('d1', 1)]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        {...liftedProps()}
+      />
+    );
+
+    // On mobile, when sidebar is initially open, a close button should be visible
+    // OR when a discussion is active, a hamburger menu button with aria-label "Open sidebar" should exist
+    const menuBtn = document.querySelector('button[aria-label="Open sidebar"], button[aria-label="Close sidebar"]');
+    expect(menuBtn).toBeTruthy();
+
+    // Restore default matchMedia
+    Object.defineProperty(window, 'matchMedia', {
+      writable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
+  });
+
   // ─── Sidebar content tests ────────────────────────────────────────────
 
   it('sidebar shows discussion titles in the list', async () => {
@@ -620,8 +667,8 @@ describe('DiscussionsPage', () => {
     // After toggle, it should be persisted as 'true'
     expect(localStorage.getItem('kronn:ttsEnabled')).toBe('true');
 
-    // Button title should now say "Désactiver"
-    const ttsBtnAfter = document.querySelector('button[title="Désactiver la lecture vocale"]');
+    // Button title should now say "Desactiver"
+    const ttsBtnAfter = document.querySelector('button[title="Desactiver la lecture vocale"]');
     expect(ttsBtnAfter).toBeTruthy();
   });
 

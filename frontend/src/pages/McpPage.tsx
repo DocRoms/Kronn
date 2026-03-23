@@ -1,13 +1,13 @@
 import { useState, useRef } from 'react';
 import { mcps as mcpsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
+import { isHiddenPath } from '../lib/constants';
 import type { Project, McpConfigDisplay, McpDefinition, McpOverview } from '../types/generated';
 import {
   Server, Plus, Trash2, Eye, Check, RefreshCw, Square, CheckSquare,
   X, Key, Pencil, FileText, ExternalLink, Save, Search, ChevronRight,
 } from 'lucide-react';
 
-const isHiddenPath = (path: string) => path.split('/').some(s => s.startsWith('.'));
 const slugify = (label: string) => label.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
 
 interface McpPageProps {
@@ -47,28 +47,36 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
 
   const handleSaveLabel = async (configId: string) => {
     if (!editingLabelText.trim()) return;
-    await mcpsApi.updateConfig(configId, { label: editingLabelText.trim() });
-    setEditingLabelId(null);
-    refetchMcps();
+    try {
+      await mcpsApi.updateConfig(configId, { label: editingLabelText.trim() });
+      setEditingLabelId(null);
+      refetchMcps();
+    } catch (e) {
+      console.error('Failed to save label:', e);
+    }
   };
 
   const handleAddMcpFromRegistry = async () => {
     if (!addMcpSelected) return;
-    await mcpsApi.createConfig({
-      server_id: addMcpSelected,
-      label: addMcpLabel || mcpRegistry.find(m => m.id === addMcpSelected)?.name || 'New MCP',
-      env: addMcpEnv,
-      args_override: null,
-      is_global: addMcpGlobal,
-      project_ids: [],
-    });
-    setShowAddMcp(false);
-    setAddMcpSelected(null);
-    setAddMcpLabel('');
-    setAddMcpEnv({});
-    setAddMcpGlobal(false);
-    setAddMcpSearch('');
-    refetchMcps();
+    try {
+      await mcpsApi.createConfig({
+        server_id: addMcpSelected,
+        label: addMcpLabel || mcpRegistry.find(m => m.id === addMcpSelected)?.name || 'New MCP',
+        env: addMcpEnv,
+        args_override: null,
+        is_global: addMcpGlobal,
+        project_ids: [],
+      });
+      setShowAddMcp(false);
+      setAddMcpSelected(null);
+      setAddMcpLabel('');
+      setAddMcpEnv({});
+      setAddMcpGlobal(false);
+      setAddMcpSearch('');
+      refetchMcps();
+    } catch (e) {
+      console.error('Failed to add MCP config:', e);
+    }
   };
 
   const handleAddDuplicateConfig = (serverId: string, serverName: string) => {
@@ -88,13 +96,21 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
   };
 
   const handleDeleteMcpConfig = async (configId: string) => {
-    await mcpsApi.deleteConfig(configId);
-    refetchMcps();
+    try {
+      await mcpsApi.deleteConfig(configId);
+      refetchMcps();
+    } catch (e) {
+      console.error('Failed to delete MCP config:', e);
+    }
   };
 
   const handleToggleConfigGlobal = async (config: McpConfigDisplay) => {
-    await mcpsApi.updateConfig(config.id, { is_global: !config.is_global });
-    refetchMcps();
+    try {
+      await mcpsApi.updateConfig(config.id, { is_global: !config.is_global });
+      refetchMcps();
+    } catch (e) {
+      console.error('Failed to toggle global:', e);
+    }
   };
 
   const handleToggleConfigProject = async (configId: string, projectId: string, currentlyLinked: boolean) => {
@@ -103,8 +119,12 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
     const newIds = currentlyLinked
       ? config.project_ids.filter(id => id !== projectId)
       : [...config.project_ids, projectId];
-    await mcpsApi.setConfigProjects(configId, { project_ids: newIds });
-    refetchMcps();
+    try {
+      await mcpsApi.setConfigProjects(configId, { project_ids: newIds });
+      refetchMcps();
+    } catch (e) {
+      console.error('Failed to toggle project:', e);
+    }
   };
 
   const handleStartEditSecrets = async (configId: string) => {
@@ -231,7 +251,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
           <button style={{ ...s.scanBtn, background: 'rgba(200,255,0,0.1)', color: '#c8ff00' }} onClick={() => { setShowAddMcp(true); setAddMcpSelected(null); setAddMcpSearch(''); }} title={t('mcp.addTitle')}>
             <Plus size={14} /> {t('mcp.add')}
           </button>
-          <button style={s.scanBtn} onClick={async () => { await mcpsApi.refresh(); refetchMcps(); }} title={t('mcp.detect')}>
+          <button style={s.scanBtn} onClick={async () => { try { await mcpsApi.refresh(); refetchMcps(); } catch (e) { console.error('Failed to refresh MCPs:', e); } }} title={t('mcp.detect')}>
             <RefreshCw size={14} /> {t('mcp.detect')}
           </button>
         </div>
@@ -303,7 +323,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                                 <span style={{ fontWeight: 600, fontSize: 12 }}>{m.name}</span>
                                 {alreadyAdded && <span style={s.alreadyBadge}>{t('mcp.alreadyAdded')}</span>}
-                                {m.env_keys.length > 0 && <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.3)' }}>{m.env_keys.length} {m.env_keys.length > 1 ? t('mcp.keysPlural') : t('mcp.keys')}</span>}
+                                {m.env_keys.length > 0 && <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.4)' }}>{m.env_keys.length} {m.env_keys.length > 1 ? t('mcp.keysPlural') : t('mcp.keys')}</span>}
                               </div>
                               <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', marginTop: 1 }}>{m.description}</div>
                             </div>
@@ -428,7 +448,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                 <h2 style={s.sectionLabel}>
                   {serverName}
                 </h2>
-                <span style={{ fontWeight: 400, fontSize: 11, color: 'rgba(255,255,255,0.3)' }}>
+                <span style={{ fontWeight: 400, fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>
                   {group.configs.length} {group.configs.length > 1 ? t('mcp.configPlural') : t('mcp.config')}
                   {!isExpanded && linkedCount > 0 && ` · ${linkedCount} ${linkedCount > 1 ? t('mcp.projectPlural') : t('mcp.project')}`}
                 </span>
@@ -575,7 +595,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                           </span>
                           <span
                             style={s.generalLabel(cfg.include_general)}
-                            onClick={async () => { await mcpsApi.updateConfig(cfg.id, { include_general: !cfg.include_general }); refetchMcps(); }}
+                            onClick={async () => { try { await mcpsApi.updateConfig(cfg.id, { include_general: !cfg.include_general }); refetchMcps(); } catch (e) { console.error('Failed to toggle general:', e); } }}
                             title={cfg.include_general ? t('mcp.disableGeneral') : t('mcp.enableGeneral')}
                           >
                             {t('mcp.general')}
@@ -742,7 +762,7 @@ const s = {
   generalLabel: (active: boolean) => ({ fontSize: 11, fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase' as const, cursor: 'pointer', userSelect: 'none' as const, padding: '4px 10px', borderRadius: 5, border: `1px solid ${active ? 'rgba(96,165,250,0.3)' : 'rgba(255,255,255,0.08)'}`, background: active ? 'rgba(96,165,250,0.12)' : 'transparent', color: active ? '#60a5fa' : 'rgba(255,255,255,0.25)', transition: 'all 0.15s' }),
   projectToggle: (active: boolean) => ({ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 10px', borderRadius: 5, fontSize: 11, fontFamily: 'inherit', cursor: 'pointer', border: `1px solid ${active ? 'rgba(200,255,0,0.2)' : 'rgba(255,255,255,0.08)'}`, background: active ? 'rgba(200,255,0,0.06)' : 'rgba(255,255,255,0.02)', color: active ? 'rgba(200,255,0,0.8)' : 'rgba(255,255,255,0.35)' } as const),
   fieldLabel: { fontSize: 11, color: 'rgba(255,255,255,0.4)', display: 'block', marginBottom: 4 } as const,
-  categoryHeader: { fontSize: 10, fontWeight: 700, color: 'rgba(255,255,255,0.25)', textTransform: 'uppercase' as const, letterSpacing: 1, padding: '8px 4px 4px', borderBottom: '1px solid rgba(255,255,255,0.05)', marginBottom: 2 },
+  categoryHeader: { fontSize: 10, fontWeight: 700, color: 'rgba(255,255,255,0.35)', textTransform: 'uppercase' as const, letterSpacing: 1, padding: '8px 4px 4px', borderBottom: '1px solid rgba(255,255,255,0.05)', marginBottom: 2 },
   registryItem: { display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', borderRadius: 6, cursor: 'pointer', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)' } as const,
   alreadyBadge: { fontSize: 9, color: '#00d4ff', background: 'rgba(0,212,255,0.1)', padding: '1px 5px', borderRadius: 3 } as const,
 };

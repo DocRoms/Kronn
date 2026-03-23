@@ -67,6 +67,7 @@ ts-rs = { version = "9", features = ["chrono-impl", "uuid-impl", "serde-json-imp
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 serial_test = "3"
+tempfile = "3"
 
 # ── Build profiles ───────────────────────────────────────────────────────────
 

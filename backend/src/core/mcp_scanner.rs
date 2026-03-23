@@ -58,7 +58,7 @@ pub struct McpJsonFile {
     pub mcp_servers: HashMap<String, McpServerEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct McpServerEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
@@ -68,6 +68,18 @@ pub struct McpServerEntry {
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub env: HashMap<String, String>,
+}
+
+/// Custom Debug impl that masks env values (may contain secrets like API keys).
+impl std::fmt::Debug for McpServerEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpServerEntry")
+            .field("command", &self.command)
+            .field("args", &self.args)
+            .field("url", &self.url)
+            .field("env", &format!("[{} keys]", self.env.len()))
+            .finish()
+    }
 }
 
 // ─── Read .mcp.json ──────────────────────────────────────────────────────────
@@ -115,6 +127,95 @@ fn atomic_write(target: &Path, content: &str) -> Result<(), String> {
             let _ = std::fs::remove_file(&tmp);
             format!("Failed to rename {} → {}: {}", tmp.display(), target.display(), e)
         })
+}
+
+/// Write a .mcp.json to `target_dir` with all MCP configs that have `include_general` set.
+/// Used for general discussions (no project) so agents still have access to global MCPs.
+pub fn write_general_mcp_json(
+    conn: &rusqlite::Connection,
+    secret: &str,
+    target_dir: &str,
+) -> Result<(), String> {
+    use crate::db;
+
+    let configs = db::mcps::list_configs(conn).map_err(|e| e.to_string())?;
+    let general_configs: Vec<_> = configs.into_iter().filter(|c| c.include_general).collect();
+    if general_configs.is_empty() { return Ok(()); }
+
+    let servers = db::mcps::list_servers(conn).map_err(|e| e.to_string())?;
+    let server_map: HashMap<String, &crate::models::McpServer> = servers.iter()
+        .map(|s| (s.id.clone(), s)).collect();
+
+    let mut configs_per_server: HashMap<String, usize> = HashMap::new();
+    for c in &general_configs {
+        *configs_per_server.entry(c.server_id.clone()).or_insert(0) += 1;
+    }
+
+    let mut mcp_servers = HashMap::new();
+    for config in &general_configs {
+        let server = match server_map.get(&config.server_id) {
+            Some(s) => s,
+            None => continue,
+        };
+        let env = db::mcps::decrypt_env(&config.env_encrypted, secret).unwrap_or_default();
+        let entry = match &server.transport {
+            McpTransport::Stdio { command, args } => {
+                if !is_command_available(command) { continue; }
+                let final_args = config.args_override.clone().unwrap_or_else(|| args.clone());
+                McpServerEntry { command: Some(command.clone()), args: Some(final_args), url: None, env }
+            }
+            McpTransport::Sse { url } | McpTransport::Streamable { url } => {
+                McpServerEntry { command: None, args: None, url: Some(url.clone()), env }
+            }
+        };
+        let key = if configs_per_server.get(&config.server_id).copied().unwrap_or(0) > 1 {
+            config.label.clone()
+        } else {
+            server.name.to_lowercase()
+        };
+        mcp_servers.insert(key, entry);
+    }
+
+    if !mcp_servers.is_empty() {
+        // ── Claude Code: .mcp.json (stdio only) ──
+        let stdio_only: HashMap<String, McpServerEntry> = mcp_servers.iter()
+            .filter(|(_, e)| e.command.is_some())
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        if !stdio_only.is_empty() {
+            let data = McpJsonFile { mcp_servers: stdio_only };
+            write_mcp_json(target_dir, &data)?;
+        }
+
+        // ── Kiro: .kiro/settings/mcp.json + .ai/mcp/mcp.json (filter incompatible) ──
+        let kiro_servers: HashMap<String, McpServerEntry> = mcp_servers.iter()
+            .filter(|(key, _)| {
+                !general_configs.iter().any(|cfg| {
+                    if let Some(srv) = server_map.get(&cfg.server_id) {
+                        let cfg_key = if configs_per_server.get(&cfg.server_id).copied().unwrap_or(0) > 1 {
+                            &cfg.label
+                        } else {
+                            &srv.name.to_lowercase()
+                        };
+                        cfg_key == key.as_str() && check_incompatibility(srv, &AgentType::Kiro).is_some()
+                    } else { false }
+                })
+            })
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let kiro_data = McpJsonFile { mcp_servers: kiro_servers };
+        let _ = write_mcp_json_to_subpath(target_dir, ".kiro/settings/mcp.json", &kiro_data);
+        let _ = write_mcp_json_to_subpath(target_dir, ".ai/mcp/mcp.json", &kiro_data);
+
+        // ── Gemini: .gemini/settings.json (full, no localhost filter for desktop) ──
+        let full_data = McpJsonFile { mcp_servers: mcp_servers.clone() };
+        let _ = write_mcp_json_to_subpath(target_dir, ".gemini/settings.json", &full_data);
+
+        // ── Vibe: .vibe/config.toml ──
+        let server_map_owned: HashMap<String, &crate::models::McpServer> = server_map;
+        sync_vibe_project_config(target_dir, &general_configs, &server_map_owned, secret);
+    }
+    Ok(())
 }
 
 // ─── Sync DB → disk ──────────────────────────────────────────────────────

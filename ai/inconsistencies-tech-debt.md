@@ -30,7 +30,7 @@
 | TD-20260318-orchestrate-god-fn | `orchestrate()` in discussions.rs is ~543 lines — should be split | Backend | High |
 | TD-20260314-no-pagination | No pagination on list_discussions / list_runs / list_projects | Backend | Medium |
 | TD-20260314-error-boundary-single | Single ErrorBoundary — one component crash takes down entire UI | Frontend | Medium |
-| TD-20260314-backup-sqlite | No automatic SQLite backup before migrations — 17 migrations, one bad one destroys data | Backend | Medium |
+| TD-20260314-backup-sqlite | ~~No automatic SQLite backup before migrations~~ **FIXED**: backup created before pending migrations | Backend | ~~Medium~~ Done |
 | TD-20260314-no-changelog | No CHANGELOG, version stuck at 0.1.0 | Docs | Medium |
 | TD-20260314-no-api-docs | No OpenAPI/Swagger API documentation | Docs | Medium |
 | TD-20260318-token-tracking-incomplete | Token usage returns 0 for Gemini CLI and Vibe (TODO in runner.rs) | Backend | Medium |
@@ -42,7 +42,7 @@
 | TD-20260314-workflow-clones | Excessive `run.clone()` in workflow runner — O(n²) memory | Backend | Low |
 | TD-20260314-home-mount | `$HOME` mounted read-only in container — security + portability risk | Infra | Low |
 | TD-20260314-no-multi-arch | No multi-architecture Docker support (ARM64) | Infra | Low |
-| TD-20260314-error-hints-french | `detect_agent_error_hint` messages hardcoded in French | Backend | Low |
-| TD-20260318-console-errors-prod | 20+ console.error() left in frontend production code | Frontend | Low |
-| TD-20260318-no-docker-restart | No restart policy on Docker services | Infra | Low |
-| TD-20260318-csp-missing | No Content-Security-Policy header in nginx | Infra | Low |
+| TD-20260314-error-hints-french | `detect_agent_error_hint` messages hardcoded in French (exec hint in git_ops.rs fixed) | Backend | Low |
+| TD-20260318-console-errors-prod | 51 console.error() left in frontend production code (intentional for v0.1.0 debugging) | Frontend | Low |
+| TD-20260318-no-docker-restart | ~~No restart policy on Docker services~~ **FIXED**: `restart: unless-stopped` on all 3 services | Infra | ~~Low~~ Done |
+| TD-20260318-csp-missing | ~~No Content-Security-Policy header in nginx~~ **FIXED**: CSP header added | Infra | ~~Low~~ Done |

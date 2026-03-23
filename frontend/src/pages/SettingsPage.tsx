@@ -107,6 +107,7 @@ export function SettingsPage({
 
   const [serverDomain, setServerDomain] = useState('');
   const [serverMaxAgents, setServerMaxAgents] = useState(5);
+  const [serverStallTimeout, setServerStallTimeout] = useState(5);
   const [authToken, setAuthTokenState] = useState<string | null>(null);
   const [authVisible, setAuthVisible] = useState(false);
 
@@ -114,7 +115,7 @@ export function SettingsPage({
   const { data: tokenConfig, refetch: refetchTokens } = useApi(() => configApi.getTokens(), []);
   const { data: dbInfo, refetch: refetchDbInfo } = useApi(() => configApi.dbInfo(), []);
   useApi(() => configApi.getServerConfig().then(cfg => {
-    if (cfg) { setServerDomain(cfg.domain ?? ''); setServerMaxAgents(cfg.max_concurrent_agents); }
+    if (cfg) { setServerDomain(cfg.domain ?? ''); setServerMaxAgents(cfg.max_concurrent_agents); setServerStallTimeout(cfg.agent_stall_timeout_min ?? 5); }
     return cfg;
   }), []);
 
@@ -166,7 +167,7 @@ export function SettingsPage({
       <div style={{ position: 'sticky', top: 0, zIndex: 10, background: '#0a0c10', padding: '10px 0 8px', marginBottom: 12, display: 'flex', gap: 6, overflowX: 'auto', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
         {[
           { id: 'settings-languages', label: 'Languages' },
-          { id: 'settings-voice', label: 'Voice' },
+          { id: 'settings-voice', label: t('settings.voice') },
           { id: 'settings-scan', label: 'Scan' },
           { id: 'settings-agents', label: 'Agents' },
           { id: 'settings-skills', label: 'Skills' },
@@ -253,16 +254,16 @@ export function SettingsPage({
         <div style={{ padding: '16px 20px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
             <Mic size={14} style={{ color: '#c8ff00' }} />
-            <span style={{ fontWeight: 600, fontSize: 14 }}>Voice</span>
+            <span style={{ fontWeight: 600, fontSize: 14 }}>{t('settings.voice')}</span>
           </div>
 
           <div style={{ marginBottom: 16 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
               <Mic size={12} style={{ color: 'rgba(255,255,255,0.4)' }} />
-              <span style={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.6)' }}>Speech-to-Text (Whisper)</span>
+              <span style={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.6)' }}>{t('settings.sttLabel')}</span>
             </div>
             <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', marginBottom: 10, lineHeight: 1.4 }}>
-              100% local via Whisper WASM. Le modèle est téléchargé au premier usage puis caché dans le navigateur.
+              {t('settings.sttDesc')}
             </p>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               {STT_MODELS.map(m => {
@@ -288,7 +289,7 @@ export function SettingsPage({
                     <div style={{ flex: 1 }}>
                       <div style={{ fontSize: 13, fontWeight: 600, color: active ? '#e8eaed' : 'rgba(255,255,255,0.6)' }}>
                         {m.label}
-                        <span style={{ fontSize: 10, fontWeight: 400, color: 'rgba(255,255,255,0.3)', marginLeft: 8 }}>{m.size}</span>
+                        <span style={{ fontSize: 10, fontWeight: 400, color: 'rgba(255,255,255,0.4)', marginLeft: 8 }}>{m.size}</span>
                       </div>
                       <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', marginTop: 2 }}>{m.description}</div>
                     </div>
@@ -302,11 +303,10 @@ export function SettingsPage({
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
               <Volume2 size={12} style={{ color: 'rgba(255,255,255,0.4)' }} />
-              <span style={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.6)' }}>Text-to-Speech (Piper)</span>
+              <span style={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.6)' }}>{t('settings.ttsLabel')}</span>
             </div>
             <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', marginBottom: 12, lineHeight: 1.4 }}>
-              100% local via Piper WASM. Activable via le bouton volume dans les discussions.
-              Le modèle est téléchargé au premier usage (~50 MB) puis caché dans le navigateur.
+              {t('settings.ttsDesc')}
             </p>
             {Object.entries(TTS_VOICES).map(([lang, lv]) => (
               <div key={lang} style={{ marginBottom: 12 }}>
@@ -600,7 +600,7 @@ export function SettingsPage({
                     )}
                   </div>
                   {!agent.installed && !agent.runtime_available && (
-                    <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)', marginTop: 2 }}>
+                    <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', marginTop: 2 }}>
                       <code style={ss.code}>{agent.install_command}</code>
                     </div>
                   )}
@@ -634,7 +634,7 @@ export function SettingsPage({
                       {agent.enabled ? t('config.enabled') : t('config.disabled')}
                     </button>
                     {agent.host_managed && (
-                      <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.25)', marginLeft: 2 }} title={t('config.hostManaged')}>{agent.host_label ?? 'host'}</span>
+                      <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.35)', marginLeft: 2 }} title={t('config.hostManaged')}>{agent.host_label ?? 'host'}</span>
                     )}
                     <button
                       style={{ ...ss.iconBtn, color: 'rgba(255,255,255,0.2)' }}
@@ -708,7 +708,7 @@ export function SettingsPage({
                     </div>
                     <code style={{ fontSize: 10, color: isFullAccess ? '#c8ff00' : 'rgba(255,255,255,0.4)' }}>{perm.flag}</code>
                   </div>
-                  <p style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', marginTop: 4, marginLeft: 38 }}>
+                  <p style={{ fontSize: 10, color: 'rgba(255,255,255,0.4)', marginTop: 4, marginLeft: 38 }}>
                     {t(perm.descKey)}
                   </p>
                 </div>
@@ -802,7 +802,7 @@ export function SettingsPage({
                   {providerKeys.length === 0 && !isAdding && (
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, paddingLeft: 16 }}>
                       <Key size={10} style={{ color: 'rgba(255,255,255,0.25)', flexShrink: 0 }} />
-                      <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)' }}>{t('config.localAuth')}</span>
+                      <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)' }}>{t('config.localAuth')}</span>
                       <a href={tf.url} target="_blank" rel="noopener noreferrer"
                         style={{ display: 'flex', alignItems: 'center', color: 'rgba(255,255,255,0.25)', flexShrink: 0 }}
                         title={t('config.getKey')}>
@@ -955,7 +955,7 @@ export function SettingsPage({
                 return (
                   <div style={{ marginLeft: 22, marginTop: 6 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-                      <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', fontWeight: 600 }}>{t('disc.modelTier')}</span>
+                      <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.4)', fontWeight: 600 }}>{t('disc.modelTier')}</span>
                       {models.modelsUrl && (
                         <a href={models.modelsUrl} target="_blank" rel="noopener noreferrer"
                           style={{ fontSize: 9, color: 'rgba(100,180,255,0.5)', display: 'flex', alignItems: 'center', gap: 2, textDecoration: 'none' }}
@@ -1132,7 +1132,7 @@ export function SettingsPage({
                   <select
                     style={{ ...ss.input, cursor: 'pointer' }}
                     value={newSkillCategory}
-                    onChange={e => setNewSkillCategory(e.target.value as any)}
+                    onChange={e => setNewSkillCategory(e.target.value as 'Language' | 'Domain' | 'Business')}
                   >
                     <option value="Language">{t('skills.language')}</option>
                     <option value="Business">{t('skills.business')}</option>
@@ -1265,7 +1265,7 @@ export function SettingsPage({
                 {profile.persona_prompt && (
                   <div style={{ marginBottom: 10 }}>
                     <div style={{
-                      fontSize: 10, color: 'rgba(255,255,255,0.3)', lineHeight: 1.4,
+                      fontSize: 10, color: 'rgba(255,255,255,0.4)', lineHeight: 1.4,
                       ...(expandedProfileDesc !== profile.id ? {
                         overflow: 'hidden', display: '-webkit-box',
                         WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' as const,
@@ -1360,7 +1360,7 @@ export function SettingsPage({
                   <select
                     style={{ ...ss.input, cursor: 'pointer' }}
                     value={newProfileCategory}
-                    onChange={e => setNewProfileCategory(e.target.value as any)}
+                    onChange={e => setNewProfileCategory(e.target.value as 'Technical' | 'Business' | 'Meta')}
                   >
                     <option value="Technical">{t('profiles.technical')}</option>
                     <option value="Business">{t('profiles.business')}</option>
@@ -1513,7 +1513,7 @@ export function SettingsPage({
                   <select
                     style={{ ...ss.input, cursor: 'pointer' }}
                     value={newDirectiveCategory}
-                    onChange={e => setNewDirectiveCategory(e.target.value as any)}
+                    onChange={e => setNewDirectiveCategory(e.target.value as 'Output' | 'Language')}
                   >
                     <option value="Output">{t('directives.output')}</option>
                     <option value="Language">{t('directives.language')}</option>
@@ -1624,7 +1624,7 @@ export function SettingsPage({
                     <RefreshCw size={11} />
                   </button>
                 </div>
-                <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', marginTop: 4 }}>
+                <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.4)', marginTop: 4 }}>
                   {t('config.authHint')}
                 </div>
               </>
@@ -1641,7 +1641,7 @@ export function SettingsPage({
                 }}>
                   <Shield size={12} /> {t('config.authActivate')}
                 </button>
-                <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', marginTop: 4 }}>
+                <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.4)', marginTop: 4 }}>
                   {t('config.authDisabledHint')}
                 </div>
               </div>
@@ -1670,7 +1670,7 @@ export function SettingsPage({
                 <Save size={11} />
               </button>
             </div>
-            <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', marginTop: 4 }}>
+            <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.4)', marginTop: 4 }}>
               {t('config.domainHint')}
             </div>
           </div>
@@ -1696,9 +1696,44 @@ export function SettingsPage({
               />
               <span style={{ fontSize: 12, fontWeight: 600, color: '#c8ff00', minWidth: 24, textAlign: 'center' }}>{serverMaxAgents}</span>
             </div>
-            <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', marginTop: 4 }}>
+            <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.4)', marginTop: 4 }}>
               {t('config.maxAgentsHint')}
             </div>
+          </div>
+
+          {/* Stall timeout */}
+          <div style={{ marginTop: 16 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+              <span style={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.6)' }}>{t('settings.stallTimeout')}</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <input
+                type="range" min={1} max={60} step={1}
+                value={serverStallTimeout}
+                onChange={async (e) => {
+                  const v = Number(e.target.value);
+                  setServerStallTimeout(v);
+                  try { await configApi.setServerConfig({ agent_stall_timeout_min: v }); } catch {}
+                }}
+                style={{ flex: 1, accentColor: '#c8ff00', cursor: 'pointer' }}
+              />
+              <span style={{ fontSize: 12, fontWeight: 600, color: '#c8ff00', minWidth: 36, textAlign: 'center' }}>{serverStallTimeout} min</span>
+            </div>
+            <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.4)', marginTop: 4 }}>
+              {t('settings.stallTimeoutHint')}
+            </div>
+            {serverStallTimeout > 10 && (
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 6, marginTop: 8,
+                padding: '6px 10px', borderRadius: 6,
+                background: 'rgba(245,158,11,0.06)', border: '1px solid rgba(245,158,11,0.15)',
+              }}>
+                <AlertTriangle size={12} style={{ color: '#f59e0b', flexShrink: 0 }} />
+                <span style={{ fontSize: 10, color: 'rgba(245,158,11,0.8)', lineHeight: 1.4 }}>
+                  {t('settings.stallTimeoutWarning')}
+                </span>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -1807,7 +1842,7 @@ export function SettingsPage({
           </div>
         </div>
       </div>
-      <div style={{ textAlign: 'center', padding: '20px 0 10px', color: 'rgba(255,255,255,0.3)', fontSize: 11 }}>
+      <div style={{ textAlign: 'center', padding: '20px 0 10px', color: 'rgba(255,255,255,0.4)', fontSize: 11 }}>
         Kronn v0.1.0 — <a href="https://github.com/DocRoms/Kronn" target="_blank" rel="noopener noreferrer" style={{ color: 'rgba(200,255,0,0.5)', textDecoration: 'none' }}>Source code (AGPL-3.0)</a>
       </div>
     </div>

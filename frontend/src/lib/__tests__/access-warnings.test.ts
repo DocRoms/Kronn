@@ -169,8 +169,7 @@ describe('hasFullAccess', () => {
 // ─── isAgentDisabled logic (Dashboard: active discussion with disabled agent) ─
 
 import type { AgentDetection } from '../../types/generated';
-
-const isUsable = (a: AgentDetection) => (a.installed || a.runtime_available) && a.enabled;
+import { isUsable } from '../constants';
 
 function isAgentDisabled(agentType: AgentType, agents: AgentDetection[]): boolean {
   if (agents.length === 0) return false;

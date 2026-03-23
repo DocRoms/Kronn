@@ -165,8 +165,9 @@ struct BackendInfo {
 }
 
 fn main() {
-    // Initialize tracing
+    // Initialize tracing — stdout for logs (Docker/desktop best practice)
     tracing_subscriber::fmt()
+        .with_writer(std::io::stdout)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "kronn=info".into()),

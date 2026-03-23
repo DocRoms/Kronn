@@ -70,7 +70,7 @@ A 3-tier architecture with encrypted secrets:
 Server (type)  →  Config (instance + secrets)  →  Project (N:N)
 ```
 
-**34 built-in servers** covering Git, databases, cloud & infra, browsers, monitoring, communication, project management, design, payments, knowledge bases, AI reasoning, SEO, and sandboxing. [Full list →](docs/mcps.md)
+**43 built-in servers** covering Git, databases, cloud & infra, browsers, monitoring, communication, project management, design, payments, knowledge bases, AI reasoning, SEO, and sandboxing. [Full list →](docs/mcps.md)
 
 Key capabilities:
 - **Auto-detection** from existing `.mcp.json` files across projects
@@ -269,7 +269,8 @@ kronn/
 │   └── src/
 │       ├── pages/          # SetupWizard, Dashboard, Settings, Discussions, MCPs, Workflows
 │       ├── types/          # generated.ts (from Rust via ts-rs — DO NOT EDIT)
-│       └── lib/            # Typed API client + SSE + i18n (fr/en/es)
+│       └── lib/            # Typed API client + SSE + i18n (fr/en/es) + TTS/STT engines
+├── desktop/            # Tauri desktop app (backend embedded, no Docker needed)
 ├── ai/                 # AI context (for agents working on Kronn itself)
 ├── templates/          # AI context templates (for managed projects)
 ├── tests/bats/         # 186 shell tests (bats-core)
@@ -306,9 +307,10 @@ scan_depth = 4
 <summary><strong>CI pipeline</strong></summary>
 
 GitHub Actions triggered by `ci-test` label on PRs:
-- **test-backend**: `cargo check` + `cargo clippy` + `cargo test` (708 tests)
-- **test-frontend**: `tsc --noEmit` + `pnpm test` (298 tests, 22 suites)
+- **test-backend**: `cargo check` + `cargo clippy` + `cargo test` (~746 tests)
+- **test-frontend**: `tsc --noEmit` + `pnpm test` (~315 tests, 22 suites)
 - **test-shell**: `make test-shell` (186 bats tests, 8 suites)
+- **desktop-build**: `.github/workflows/desktop-build.yml` — builds Tauri installers for Windows, macOS, and Linux
 </details>
 
 ---

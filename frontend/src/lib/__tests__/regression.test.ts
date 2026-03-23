@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { t } from '../i18n';
+import { isValidationDisc } from '../constants';
 import type { Discussion, BootstrapProjectRequest, BootstrapProjectResponse } from '../../types/generated';
 
 /**
@@ -100,9 +101,6 @@ describe('regression tests', () => {
 
   describe('validation flow improvements (Phase 3)', () => {
     it('isValidationDisc detects validation title exactly', () => {
-      // Replicate the function logic from DiscussionsPage.tsx
-      const isValidationDisc = (title: string) => title === 'Validation audit AI';
-
       expect(isValidationDisc('Validation audit AI')).toBe(true);
       expect(isValidationDisc('validation audit AI')).toBe(false); // exact match
       expect(isValidationDisc('Validation audit AI ')).toBe(false); // trailing space
