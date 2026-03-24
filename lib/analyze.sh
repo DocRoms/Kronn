@@ -175,19 +175,19 @@ analyze_repo() {
     local repo_name
     repo_name=$(basename "$repo_dir")
 
-    step "Analyse de $repo_name par $agent"
+    step "Analysis of $repo_name by $agent"
 
     # Verify agent is installed and supports non-interactive mode
     case "$agent" in
         claude|codex|vibe)
             if ! command -v "$agent" >/dev/null 2>&1; then
-                fail "$agent n'est pas installe ou pas dans le PATH."
+                fail "$agent is not installed or not in PATH."
                 return 1
             fi
             ;;
         *)
-            fail "Agent $agent : analyse auto non disponible."
-            info "Lancez votre agent manuellement dans le depot."
+            fail "Agent $agent: auto-analysis not available."
+            info "Launch your agent manually in the repository."
             return 0
             ;;
     esac
@@ -218,7 +218,7 @@ analyze_repo() {
 
             # Update step label and progress
             if [[ "$target_file" == "REVIEW" ]]; then
-                tron_set_step "Relecture et finalisation"
+                tron_set_step "Review and finalization"
             else
                 tron_set_step "$target_file"
             fi
@@ -226,7 +226,7 @@ analyze_repo() {
 
             # Log activity
             if [[ "$target_file" == "REVIEW" ]]; then
-                echo "Relecture globale..." > "$activity_file"
+                echo "Global review..." > "$activity_file"
             else
                 echo "✎ $(basename "$target_file")" >> "$activity_file"
             fi
@@ -236,7 +236,7 @@ analyze_repo() {
             local exit_code=$?
 
             if [[ $exit_code -ne 0 ]]; then
-                echo "ERREUR: $target_file (code $exit_code)" >> "$activity_file"
+                echo "ERROR: $target_file (code $exit_code)" >> "$activity_file"
             fi
         done
 
@@ -247,7 +247,7 @@ analyze_repo() {
     local bg_pid=$!
 
     # Run the loader (blocking until signal_done)
-    tron_loader_run "Analyse de $repo_name"
+    tron_loader_run "Analysis of $repo_name"
 
     # Collect exit code
     wait "$bg_pid" 2>/dev/null
@@ -257,10 +257,10 @@ analyze_repo() {
 
     if [[ $exit_code -eq 0 ]]; then
         echo
-        success "Analyse terminee — $total_steps etapes completees."
+        success "Analysis complete — $total_steps steps completed."
     else
         echo
-        fail "Erreur lors de l'analyse."
+        fail "Error during analysis."
     fi
 
     rm -f "$activity_file" 2>/dev/null || true
@@ -279,9 +279,9 @@ maybe_analyze_repo() {
 
     echo
     local agent_label="${SELECTED_AGENT:-agent}"
-    if ask_yn "Analyser le depot avec $agent_label pour structurer ai/ ?"; then
+    if ask_yn "Analyze the repository with $agent_label to structure ai/?"; then
         analyze_repo "$repo_dir"
     else
-        info "Lancez 'kronn init $repo_dir' quand vous serez pret."
+        info "Run 'kronn init $repo_dir' when you are ready."
     fi
 }

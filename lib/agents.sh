@@ -135,11 +135,11 @@ show_detected_agents() {
     local count
     count=$(_count_detected)
     if [[ "$count" -eq 0 ]]; then
-        warn "Aucun agent IA detecte."
+        warn "No AI agent detected."
         return 1
     fi
 
-    info "Agents detectes :"
+    info "Detected agents:"
     check_agent_updates
 
     local i
@@ -162,13 +162,13 @@ _check_node_version() {
     local node_version
     node_version=$(node --version 2>/dev/null | grep -oE '[0-9]+' | head -1)
     if [[ -z "$node_version" ]]; then
-        fail "Node.js non trouve."
+        fail "Node.js not found."
         return 1
     fi
 
     if (( node_version < min )); then
-        fail "Node.js >= $min requis (actuel : v${node_version})."
-        printf "  ${DIM}Mettre a jour Node.js : https://nodejs.org ou via nvm${RESET}\n"
+        fail "Node.js >= $min required (current: v${node_version})."
+        printf "  ${DIM}Update Node.js: https://nodejs.org or via nvm${RESET}\n"
         return 1
     fi
     return 0
@@ -179,7 +179,7 @@ _npm_install_global() {
     if npm install -g "$package" 2>&1; then
         return 0
     fi
-    warn "Permission refusee. Nouvelle tentative avec sudo..."
+    warn "Permission denied. Retrying with sudo..."
     sudo npm install -g "$package"
 }
 
@@ -189,9 +189,9 @@ install_agent() {
     local agent="$1"
     case "$agent" in
         claude)
-            step "Installation de Claude Code"
+            step "Installing Claude Code"
             if ! command -v npm >/dev/null 2>&1; then
-                fail "npm requis pour installer Claude Code"
+                fail "npm required to install Claude Code"
                 printf "  ${DIM}https://docs.anthropic.com/en/docs/claude-code${RESET}\n"
                 return 1
             fi
@@ -199,16 +199,16 @@ install_agent() {
             _npm_install_global @anthropic-ai/claude-code
             ;;
         codex)
-            step "Installation de Codex"
+            step "Installing Codex"
             if ! command -v npm >/dev/null 2>&1; then
-                fail "npm requis pour installer Codex"
+                fail "npm required to install Codex"
                 return 1
             fi
             _check_node_version codex || return 1
             _npm_install_global @openai/codex
             ;;
         vibe)
-            step "Installation de Vibe (Mistral)"
+            step "Installing Vibe (Mistral)"
             if command -v uv >/dev/null 2>&1; then
                 uv tool install mistral-vibe
             elif command -v pipx >/dev/null 2>&1; then
@@ -216,15 +216,15 @@ install_agent() {
             elif command -v pip3 >/dev/null 2>&1; then
                 pip3 install --user mistral-vibe
             else
-                fail "uv, pipx ou pip3 requis pour installer Vibe"
+                fail "uv, pipx, or pip3 required to install Vibe"
                 printf "  ${DIM}https://github.com/mistralai/mistral-vibe${RESET}\n"
                 return 1
             fi
             ;;
         gemini)
-            step "Installation de Gemini CLI (Google)"
+            step "Installing Gemini CLI (Google)"
             if ! command -v npm >/dev/null 2>&1; then
-                fail "npm requis pour installer Gemini CLI"
+                fail "npm required to install Gemini CLI"
                 printf "  ${DIM}https://github.com/google-gemini/gemini-cli${RESET}\n"
                 return 1
             fi
@@ -232,16 +232,16 @@ install_agent() {
             _npm_install_global @google/gemini-cli
             ;;
         kiro-cli)
-            step "Installation de Kiro (Amazon)"
+            step "Installing Kiro (Amazon)"
             if ! command -v curl >/dev/null 2>&1; then
-                fail "curl requis pour installer Kiro"
+                fail "curl required to install Kiro"
                 printf "  ${DIM}https://cli.kiro.dev${RESET}\n"
                 return 1
             fi
             curl -fsSL https://cli.kiro.dev/install | bash
             ;;
         *)
-            fail "Agent inconnu : $agent"
+            fail "Unknown agent: $agent"
             return 1
             ;;
     esac
@@ -252,14 +252,14 @@ install_agent() {
 uninstall_agent() {
     local agent="$1"
     local idx
-    idx=$(_agent_idx "$agent") || { fail "Agent inconnu : $agent"; return 1; }
+    idx=$(_agent_idx "$agent") || { fail "Unknown agent: $agent"; return 1; }
     local pkg="${_AGENT_PKGS[$idx]}"
     local label="${_AGENT_LABELS[$idx]}"
 
     local type="${pkg%%:*}"
     local name="${pkg#*:}"
 
-    step "Desinstallation de $label"
+    step "Uninstalling $label"
 
     case "$type" in
         npm)
@@ -281,23 +281,23 @@ uninstall_agent() {
 
     detect_agents
     if [[ -z "${_AGENT_PATHS[$idx]}" ]]; then
-        success "$label desinstalle."
+        success "$label uninstalled."
     else
-        fail "Echec de la desinstallation."
+        fail "Uninstallation failed."
     fi
 }
 
 update_agent() {
     local agent="$1"
     local idx
-    idx=$(_agent_idx "$agent") || { fail "Agent inconnu : $agent"; return 1; }
+    idx=$(_agent_idx "$agent") || { fail "Unknown agent: $agent"; return 1; }
     local pkg="${_AGENT_PKGS[$idx]}"
     local label="${_AGENT_LABELS[$idx]}"
 
     local type="${pkg%%:*}"
     local name="${pkg#*:}"
 
-    step "Mise a jour de $label"
+    step "Updating $label"
 
     case "$type" in
         npm)
@@ -317,7 +317,7 @@ update_agent() {
 
     detect_agents
     check_agent_updates
-    success "$label mis a jour."
+    success "$label updated."
 }
 
 # ─── Agent management ────────────────────────────────────────────────────────
@@ -328,7 +328,7 @@ manage_agents() {
         check_agent_updates
 
         echo
-        info "Gestion des agents :"
+        info "Agent management:"
         echo
 
         local -a options=()
@@ -345,25 +345,25 @@ manage_agents() {
                 local latest="${_AGENT_LATESTS[$i]}"
 
                 if [[ -n "$latest" && "$latest" != "$ver" ]]; then
-                    options+=("${YELLOW}⬆${RESET}  ${label} ${DIM}v${ver} → v${latest}${RESET} ${CYAN}[${origin}]${RESET} ${DIM}— mettre a jour${RESET}")
+                    options+=("${YELLOW}⬆${RESET}  ${label} ${DIM}v${ver} → v${latest}${RESET} ${CYAN}[${origin}]${RESET} ${DIM}— update${RESET}")
                     actions+=("update:$a")
                 fi
 
-                options+=("${RED}✕${RESET}  ${label} ${DIM}v${ver}${RESET} ${CYAN}[${origin}]${RESET} ${DIM}— desinstaller${RESET}")
+                options+=("${RED}✕${RESET}  ${label} ${DIM}v${ver}${RESET} ${CYAN}[${origin}]${RESET} ${DIM}— uninstall${RESET}")
                 actions+=("remove:$a")
             else
                 local extra=""
-                [[ "$a" == "claude" ]] && extra=" ${DIM}— recommande${RESET}"
-                [[ "$a" == "vibe" ]] && extra=" ${DIM}— souverain${RESET}"
-                options+=("${GREEN}+${RESET}  ${label} ${CYAN}[${origin}]${RESET}${extra} ${DIM}— installer${RESET}")
+                [[ "$a" == "claude" ]] && extra=" ${DIM}— recommended${RESET}"
+                [[ "$a" == "vibe" ]] && extra=" ${DIM}— sovereign${RESET}"
+                options+=("${GREEN}+${RESET}  ${label} ${CYAN}[${origin}]${RESET}${extra} ${DIM}— install${RESET}")
                 actions+=("install:$a")
             fi
         done
 
-        options+=("${BOLD}Continuer${RESET}")
+        options+=("${BOLD}Continue${RESET}")
         actions+=("done")
 
-        menu_choice "Action :" "${options[@]}"
+        menu_choice "Action:" "${options[@]}"
         local action="${actions[$((REPLY-1))]}"
         local action_type="${action%%:*}"
         local action_agent="${action#*:}"
@@ -385,17 +385,17 @@ select_agent() {
     detect_agents
 
     if show_detected_agents; then
-        if ask_yn "Ajouter / modifier un agent ?"; then
+        if ask_yn "Add / modify an agent?"; then
             manage_agents
         fi
     else
-        warn "Aucun agent installe. Installation requise."
+        warn "No agent installed. Installation required."
         manage_agents
 
         local count
         count=$(_count_detected)
         if [[ "$count" -eq 0 ]]; then
-            fail "Aucun agent installe. Installer manuellement puis relancer kronn."
+            fail "No agent installed. Install manually then relaunch kronn."
             exit 1
         fi
     fi
@@ -411,10 +411,10 @@ select_agent() {
 
     if [[ ${#names[@]} -eq 1 ]]; then
         SELECTED_AGENT="${keys[0]}"
-        success "Agent principal : $SELECTED_AGENT"
+        success "Primary agent: $SELECTED_AGENT"
     elif [[ ${#names[@]} -gt 1 ]]; then
-        menu_choice "Quel agent principal ?" "${names[@]}"
+        menu_choice "Which primary agent?" "${names[@]}"
         SELECTED_AGENT="${keys[$((REPLY-1))]}"
-        success "Agent principal : $SELECTED_AGENT"
+        success "Primary agent: $SELECTED_AGENT"
     fi
 }

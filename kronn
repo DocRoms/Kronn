@@ -5,19 +5,19 @@ set -euo pipefail
 # macOS ships Bash 3.2 (2007). Kronn needs Bash 4+ for some features.
 if (( BASH_VERSINFO[0] < 4 )); then
     echo ""
-    printf "\033[0;33m  ⚠  Bash %s détecté — version 4+ recommandée.\033[0m\n" "$BASH_VERSION"
+    printf "\033[0;33m  ⚠  Bash %s detected — version 4+ recommended.\033[0m\n" "$BASH_VERSION"
     echo ""
     if command -v brew >/dev/null 2>&1; then
-        printf "\033[0;36m  Installer via Homebrew :\033[0m\n"
+        printf "\033[0;36m  Install via Homebrew:\033[0m\n"
         printf "\033[2m    brew install bash\033[0m\n"
-        printf "\033[2m    Puis relancer : /opt/homebrew/bin/bash %s\033[0m\n" "$(printf '%q ' "$0" "$@")"
+        printf "\033[2m    Then relaunch: /opt/homebrew/bin/bash %s\033[0m\n" "$(printf '%q ' "$0" "$@")"
     else
-        printf "\033[0;36m  Installer Homebrew d'abord :\033[0m\n"
+        printf "\033[0;36m  Install Homebrew first:\033[0m\n"
         printf '\033[2m    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"\033[0m\n'
         printf "\033[2m    brew install bash\033[0m\n"
     fi
     echo ""
-    printf "\033[0;33m  Tentative de lancement en mode compatibilité...\033[0m\n"
+    printf "\033[0;33m  Attempting to start in compatibility mode...\033[0m\n"
     echo ""
 fi
 
@@ -79,20 +79,20 @@ maybe_login_kiro() {
     [[ "$(uname -s 2>/dev/null || true)" == "Darwin" ]] || return 0
 
     if ! kiro_container_available; then
-        warn "kiro-cli n'est pas disponible dans le conteneur (installation en cours ou échouée)."
+        warn "kiro-cli is not available in the container (installation in progress or failed)."
         return 0
     fi
 
-    info "Kiro détecté — vérification de l'authentification..."
+    info "Kiro detected — checking authentication..."
     if kiro_container_authenticated; then
-        success "Kiro déjà authentifié."
+        success "Kiro already authenticated."
         return 0
     fi
 
-    warn "Kiro non authentifié dans le conteneur."
-    info "Lancement du login Kiro (device flow)..."
+    warn "Kiro not authenticated in the container."
+    info "Starting Kiro login (device flow)..."
     if ! (cd "$KRONN_DIR" && make kiro-login); then
-        warn "Login Kiro non finalisé. Tu peux relancer: make kiro-login"
+        warn "Kiro login not completed. You can retry: make kiro-login"
     fi
 }
 
@@ -105,9 +105,9 @@ cmd_start() {
     select_agent
 
     # 2. Web interface or CLI?
-    menu_choice "Mode d'utilisation" \
-        "Lancer l'interface web" \
-        "Rester en CLI"
+    menu_choice "Usage mode" \
+        "Launch web interface" \
+        "Stay in CLI"
 
     if [[ "$REPLY" == "1" ]]; then
         cmd_web
@@ -119,43 +119,43 @@ cmd_start() {
 }
 
 cmd_web() {
-    step "Lancement de l'interface web"
+    step "Starting web interface"
 
     # Check docker
     if ! command -v docker >/dev/null 2>&1; then
-        fail "Docker n'est pas installé."
+        fail "Docker is not installed."
         printf "  ${DIM}https://docs.docker.com/get-docker/${RESET}\n"
         return 1
     fi
 
     # Check make
     if ! command -v make >/dev/null 2>&1; then
-        warn "make n'est pas installé."
-        if ask_yn "Installer make ?"; then
+        warn "make is not installed."
+        if ask_yn "Install make?"; then
             install_make
         else
-            fail "make est requis pour l'interface web."
+            fail "make is required for the web interface."
             return 1
         fi
     fi
 
-    info "Build & démarrage..."
+    info "Build & starting..."
     (cd "$KRONN_DIR" && make start)
     maybe_login_kiro
 }
 
 cmd_repos() {
-    step "Scan des dépôts"
+    step "Repository scan"
 
-    info "Scan de : $SCAN_PATH"
+    info "Scanning: $SCAN_PATH"
     scan_repos "$SCAN_PATH"
 
     if [[ ${#REPO_PATHS[@]} -eq 0 ]]; then
-        warn "Aucun dépôt git trouvé dans $SCAN_PATH"
+        warn "No git repository found in $SCAN_PATH"
         return
     fi
 
-    success "${#REPO_PATHS[@]} dépôt(s) trouvé(s)"
+    success "${#REPO_PATHS[@]} repository(ies) found"
 
     # Loop: let user configure repos or launch web
     while true; do
@@ -185,7 +185,7 @@ cmd_mcp() {
             sync_mcp_all
             ;;
         check)
-            step "Prérequis MCP"
+            step "MCP prerequisites"
             check_mcp_prereqs
             ;;
         secrets)
@@ -203,20 +203,20 @@ cmd_status() {
 
     step "Agents"
     detect_agents
-    show_detected_agents || warn "Aucun agent détecté"
+    show_detected_agents || warn "No agent detected"
 
-    step "Dépôts ($SCAN_PATH)"
+    step "Repositories ($SCAN_PATH)"
     scan_repos "$SCAN_PATH"
 
     if [[ ${#REPO_PATHS[@]} -eq 0 ]]; then
-        warn "Aucun dépôt trouvé"
+        warn "No repository found"
         return
     fi
 
     for i in "${!REPO_NAMES[@]}"; do
         local name="${REPO_NAMES[$i]}"
         local status="${REPO_STATUS[$i]}"
-        if [[ "$status" == "non configuré" ]]; then
+        if [[ "$status" == "not configured" ]]; then
             printf "  ${DIM}%s — %s${RESET}\n" "$name" "$status"
         else
             printf "  ${GREEN}%s${RESET} — %s\n" "$name" "$status"
@@ -225,9 +225,9 @@ cmd_status() {
 
     step "Secrets MCP"
     if secrets_configured; then
-        success "Secrets configurés dans $KRONN_CONFIG_DIR/secrets.toml"
+        success "Secrets configured in $KRONN_CONFIG_DIR/secrets.toml"
     else
-        warn "Secrets non configurés — lancer : kronn mcp secrets"
+        warn "Secrets not configured — run: kronn mcp secrets"
     fi
 }
 
@@ -236,7 +236,7 @@ cmd_init() {
     target=$(cd "$target" 2>/dev/null && pwd)
 
     if [[ ! -d "$target/.git" ]]; then
-        fail "$target n'est pas un dépôt git."
+        fail "$target is not a git repository."
         return 1
     fi
 
@@ -244,9 +244,9 @@ cmd_init() {
 }
 
 cmd_stop() {
-    step "Arrêt de Kronn"
+    step "Stopping Kronn"
     (cd "$KRONN_DIR" && make stop)
-    success "Kronn arrêté."
+    success "Kronn stopped."
 }
 
 cmd_restart() {
@@ -261,18 +261,19 @@ cmd_logs() {
 
 cmd_help() {
     banner
-    printf "${BOLD}Usage :${RESET} kronn [commande]\n"
+    printf "${BOLD}Usage:${RESET} kronn [command]\n"
     echo
-    printf "  ${CYAN}start${RESET}          Flow interactif (défaut)\n"
-    printf "  ${CYAN}stop${RESET}           Arrêter les services\n"
-    printf "  ${CYAN}restart${RESET}        Redémarrer les services\n"
-    printf "  ${CYAN}logs${RESET}           Afficher les logs\n"
-    printf "  ${CYAN}status${RESET}         Vue d'ensemble\n"
-    printf "  ${CYAN}init [path]${RESET}    Configurer un dépôt\n"
-    printf "  ${CYAN}mcp sync${RESET}       Synchroniser les .mcp.json\n"
-    printf "  ${CYAN}mcp check${RESET}      Vérifier les prérequis MCP\n"
-    printf "  ${CYAN}mcp secrets${RESET}    Configurer les tokens\n"
-    printf "  ${CYAN}help${RESET}           Cette aide\n"
+    printf "  ${CYAN}start${RESET}          Interactive flow (default)\n"
+    printf "  ${CYAN}stop${RESET}           Stop services\n"
+    printf "  ${CYAN}restart${RESET}        Restart services\n"
+    printf "  ${CYAN}logs${RESET}           Show logs\n"
+    printf "  ${CYAN}status${RESET}         Overview\n"
+    printf "  ${CYAN}init [path]${RESET}    Configure a repository\n"
+    printf "  ${CYAN}mcp sync${RESET}       Sync .mcp.json files\n"
+    printf "  ${CYAN}mcp check${RESET}      Check MCP prerequisites\n"
+    printf "  ${CYAN}web${RESET}            Launch web interface directly\n"
+    printf "  ${CYAN}mcp secrets${RESET}    Configure tokens\n"
+    printf "  ${CYAN}help${RESET}           This help\n"
     echo
 }
 
@@ -288,8 +289,8 @@ install_make() {
     elif command -v brew >/dev/null 2>&1; then
         brew install make
     else
-        fail "Impossible de détecter le gestionnaire de paquets."
-        echo "Installer make manuellement."
+        fail "Unable to detect the package manager."
+        echo "Install make manually."
         return 1
     fi
 }
@@ -313,23 +314,23 @@ ensure_in_path() {
     fi
 
     echo
-    info "kronn n'est pas dans votre PATH."
-    if ask_yn "Créer un lien dans $link_dir ?"; then
+    info "kronn is not in your PATH."
+    if ask_yn "Create a symlink in $link_dir?"; then
         mkdir -p "$link_dir"
         ln -sf "$KRONN_DIR/kronn" "$link_path"
-        success "Lien créé : $link_path -> $KRONN_DIR/kronn"
+        success "Symlink created: $link_path -> $KRONN_DIR/kronn"
 
         # Check if ~/.local/bin is in PATH
         if [[ ":$PATH:" != *":$link_dir:"* ]]; then
-            warn "$link_dir n'est pas dans votre PATH."
-            printf "  ${DIM}Ajouter à ~/.bashrc ou ~/.zshrc :${RESET}\n"
+            warn "$link_dir is not in your PATH."
+            printf "  ${DIM}Add to ~/.bashrc or ~/.zshrc:${RESET}\n"
             printf "  ${DIM}  export PATH=\"\$HOME/.local/bin:\$PATH\"${RESET}\n"
             echo
             # Add it for this session
             export PATH="$link_dir:$PATH"
         fi
 
-        success "kronn est maintenant accessible partout."
+        success "kronn is now accessible everywhere."
     fi
 }
 
@@ -355,7 +356,7 @@ main() {
         web)         cmd_web ;;
         help|--help|-h) cmd_help ;;
         *)
-            fail "Commande inconnue : $cmd"
+            fail "Unknown command: $cmd"
             cmd_help
             exit 1
             ;;

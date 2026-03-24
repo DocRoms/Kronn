@@ -14,14 +14,14 @@ init_secrets() {
         return 0
     fi
 
-    step "Configuration des secrets MCP"
-    info "Les tokens sont stockés une seule fois dans :"
+    step "MCP secrets configuration"
+    info "Tokens are stored once in:"
     printf "  ${DIM}%s${RESET}\n" "$secrets_file"
     echo
 
     cat > "$secrets_file" <<'TOML'
-# Kronn — MCP Secrets (tokens centralisés)
-# Ce fichier est utilisé par `kronn` pour générer les .mcp.json de chaque dépôt.
+# Kronn — MCP Secrets (centralized tokens)
+# This file is used by `kronn` to generate .mcp.json for each repository.
 
 [atlassian]
 url = ""
@@ -38,8 +38,8 @@ region = "eu-west-1"
 TOML
 
     chmod 600 "$secrets_file"
-    success "Fichier secrets créé : $secrets_file"
-    warn "Éditer ce fichier avec vos tokens, puis relancer kronn."
+    success "Secrets file created: $secrets_file"
+    warn "Edit this file with your tokens, then relaunch kronn."
     printf "  ${DIM}nano %s${RESET}\n" "$secrets_file"
     echo
 }
@@ -111,9 +111,9 @@ sync_mcp_for_repo() {
     if command -v envsubst >/dev/null 2>&1; then
         # Restrict substitution to known Kronn secrets only — prevent leaking $HOME, $PATH, etc.
         envsubst '$ATLASSIAN_URL $JIRA_USERNAME $JIRA_API_TOKEN $CONFLUENCE_USERNAME $CONFLUENCE_API_TOKEN $GITHUB_PERSONAL_ACCESS_TOKEN $AWS_ACCESS_KEY_ID $AWS_SECRET_ACCESS_KEY $AWS_REGION' < "$template" > "$output"
-        success ".mcp.json généré pour $(basename "$repo_dir")"
+        success ".mcp.json generated for $(basename "$repo_dir")"
     else
-        fail "envsubst non trouvé — installer gettext"
+        fail "envsubst not found — install gettext"
         printf "  ${DIM}sudo apt install gettext (Linux) / brew install gettext (macOS)${RESET}\n"
         return 1
     fi
@@ -121,10 +121,10 @@ sync_mcp_for_repo() {
 
 # Sync MCP for all known repos.
 sync_mcp_all() {
-    step "Synchronisation des MCPs"
+    step "MCP synchronization"
 
     if ! secrets_configured; then
-        warn "Aucun secret configuré."
+        warn "No secret configured."
         init_secrets
         return 1
     fi
@@ -138,10 +138,10 @@ sync_mcp_all() {
     done
 
     if (( synced == 0 )); then
-        info "Aucun dépôt avec .mcp.json.example trouvé."
+        info "No repository with .mcp.json.example found."
     else
         echo
-        success "$synced dépôt(s) synchronisé(s)."
+        success "$synced repository(ies) synchronized."
     fi
 }
 
@@ -151,23 +151,23 @@ check_mcp_prereqs() {
     local ok=true
 
     if command -v uvx >/dev/null 2>&1; then
-        success "uvx trouvé"
+        success "uvx found"
     else
-        fail "uvx non trouvé — https://docs.astral.sh/uv/"
+        fail "uvx not found — https://docs.astral.sh/uv/"
         ok=false
     fi
 
     if command -v npx >/dev/null 2>&1; then
-        success "npx trouvé"
+        success "npx found"
     else
-        fail "npx non trouvé — installer Node.js"
+        fail "npx not found — install Node.js"
         ok=false
     fi
 
     if command -v envsubst >/dev/null 2>&1; then
-        success "envsubst trouvé"
+        success "envsubst found"
     else
-        fail "envsubst non trouvé — sudo apt install gettext"
+        fail "envsubst not found — sudo apt install gettext"
         ok=false
     fi
 
