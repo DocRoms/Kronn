@@ -81,12 +81,12 @@ teardown() {
 
 # ─── detect_ai_context ──────────────────────────────────────────────────────
 
-@test "detect_ai_context: reports 'non configure' for empty repo" {
+@test "detect_ai_context: reports 'not configured' for empty repo" {
     mkdir -p "$TEST_TMPDIR/repo"
 
     run detect_ai_context "$TEST_TMPDIR/repo"
     assert_success
-    assert_output "non configuré"
+    assert_output "not configured"
 }
 
 @test "detect_ai_context: detects ai/ directory" {
@@ -104,7 +104,7 @@ teardown() {
 
     run detect_ai_context "$TEST_TMPDIR/repo"
     assert_success
-    assert_output "non configuré"
+    assert_output "not configured"
 }
 
 @test "detect_ai_context: detects CLAUDE.md redirector" {
@@ -113,7 +113,7 @@ teardown() {
 
     run detect_ai_context "$TEST_TMPDIR/repo"
     assert_success
-    assert_output --partial "1 redirecteurs"
+    assert_output --partial "1 redirectors"
 }
 
 @test "detect_ai_context: counts multiple redirectors" {
@@ -124,7 +124,7 @@ teardown() {
 
     run detect_ai_context "$TEST_TMPDIR/repo"
     assert_success
-    assert_output --partial "3 redirecteurs"
+    assert_output --partial "3 redirectors"
 }
 
 @test "detect_ai_context: detects all 4 redirectors" {
@@ -136,7 +136,7 @@ teardown() {
 
     run detect_ai_context "$TEST_TMPDIR/repo"
     assert_success
-    assert_output --partial "4 redirecteurs"
+    assert_output --partial "4 redirectors"
 }
 
 @test "detect_ai_context: detects MCP config with server count" {
@@ -192,7 +192,7 @@ JSON
     run detect_ai_context "$TEST_TMPDIR/repo"
     assert_success
     assert_output --partial "ai/"
-    assert_output --partial "1 redirecteurs"
+    assert_output --partial "1 redirectors"
     assert_output --partial "1 MCPs"
     assert_output --partial ".claude/"
     assert_output --partial "+"

@@ -49,7 +49,7 @@ detect_ai_context() {
         [[ -f "$repo_dir/$f" ]] && ((redirectors++))
     done
     if (( redirectors > 0 )); then
-        parts+=("${redirectors} redirecteurs")
+        parts+=("${redirectors} redirectors")
     fi
 
     # MCP config
@@ -67,7 +67,7 @@ detect_ai_context() {
     fi
 
     if [[ ${#parts[@]} -eq 0 ]]; then
-        echo "non configuré"
+        echo "not configured"
     else
         local IFS=" + "
         echo "${parts[*]}"
@@ -86,15 +86,15 @@ select_repo() {
         local name="${REPO_NAMES[$i]}"
         local status="${REPO_STATUS[$i]}"
 
-        if [[ "$status" == "non configuré" ]]; then
+        if [[ "$status" == "not configured" ]]; then
             options+=("${name} ${DIM}(${status})${RESET}")
         else
             options+=("${name} ${GREEN}(${status})${RESET}")
         fi
     done
 
-    options+=("${CYAN}Lancer l'interface Web${RESET}")
-    menu_choice "Depots detectes — choisir celui a configurer :" "${options[@]}"
+    options+=("${CYAN}Launch Web interface${RESET}")
+    menu_choice "Detected repositories — choose one to configure:" "${options[@]}"
     # Last option = web interface
     if (( REPLY == ${#options[@]} )); then
         REPLY=0
@@ -110,12 +110,12 @@ init_repo() {
     repo_name=$(basename "$repo_dir")
     local template_dir="${KRONN_DIR:?KRONN_DIR is not set}/templates"
 
-    step "Configuration de $repo_name"
+    step "Configuring $repo_name"
 
     # Copy ai/ structure if missing or incomplete
     local fresh_ai=false
     if [[ ! -f "$repo_dir/ai/index.md" ]]; then
-        info "Copie du template ai/..."
+        info "Copying ai/ template..."
         mkdir -p "$repo_dir/ai"
         # Use rsync if available (portable), fallback to cp without -n (BSD compat)
         if command -v rsync >/dev/null 2>&1; then
@@ -130,20 +130,20 @@ init_repo() {
                 fi
             done)
         fi
-        success "ai/ créé"
+        success "ai/ created"
         fresh_ai=true
 
         # Inject bootstrap prompt for agent auto-analysis
         inject_bootstrap_prompt "$repo_dir"
     else
-        success "ai/ existe déjà"
+        success "ai/ already exists"
     fi
 
     # Copy redirectors if missing
     for f in CLAUDE.md .cursorrules .windsurfrules .clinerules; do
         if [[ ! -f "$repo_dir/$f" && -f "$template_dir/$f" ]]; then
             cp "$template_dir/$f" "$repo_dir/$f"
-            success "$f créé"
+            success "$f created"
         fi
     done
 
@@ -152,7 +152,7 @@ init_repo() {
         if [[ ! -f "$repo_dir/.cursor/rules/repo-instructions.mdc" ]]; then
             mkdir -p "$repo_dir/.cursor/rules"
             cp "$template_dir/.cursor/rules/repo-instructions.mdc" "$repo_dir/.cursor/rules/"
-            success ".cursor/rules/ créé"
+            success ".cursor/rules/ created"
         fi
     fi
 
@@ -161,19 +161,19 @@ init_repo() {
         if [[ ! -f "$repo_dir/.github/copilot-instructions.md" ]]; then
             mkdir -p "$repo_dir/.github"
             cp "$template_dir/.github/copilot-instructions.md" "$repo_dir/.github/"
-            success ".github/copilot-instructions.md créé"
+            success ".github/copilot-instructions.md created"
         fi
     fi
 
     # MCP template
     if [[ ! -f "$repo_dir/.mcp.json.example" && -f "$template_dir/.mcp.json.example" ]]; then
         cp "$template_dir/.mcp.json.example" "$repo_dir/"
-        success ".mcp.json.example créé"
+        success ".mcp.json.example created"
     fi
 
     if [[ ! -f "$repo_dir/.env.mcp.example" && -f "$template_dir/.env.mcp.example" ]]; then
         cp "$template_dir/.env.mcp.example" "$repo_dir/"
-        success ".env.mcp.example créé"
+        success ".env.mcp.example created"
     fi
 
     # Ensure gitignore has MCP entries
@@ -182,11 +182,11 @@ init_repo() {
     # Ask about gitignoring ai/
     if [[ "$fresh_ai" == true ]]; then
         echo
-        if ask_yn "Ajouter ai/ dans le .gitignore ? (ne pas commiter la doc AI)"; then
+        if ask_yn "Add ai/ to .gitignore? (do not commit AI docs)"; then
             if ! grep -qxF "ai/" "$repo_dir/.gitignore" 2>/dev/null; then
                 echo "ai/" >> "$repo_dir/.gitignore"
             fi
-            success "ai/ ajouté au .gitignore"
+            success "ai/ added to .gitignore"
         fi
     fi
 
@@ -196,7 +196,7 @@ init_repo() {
     fi
 
     echo
-    success "Dépôt $repo_name configuré."
+    success "Repository $repo_name configured."
 
     # Propose agent analysis if fresh setup
     if [[ "$fresh_ai" == true ]]; then

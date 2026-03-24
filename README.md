@@ -13,7 +13,7 @@ Orchestrate Claude Code, Codex, Vibe, Gemini CLI, and Kiro — with less waste.
   ╰──╯ Enter the grid.
 ```
 
-![Kronn CLI startup](docs/screenshots/cli.png)
+![Kronn CLI startup](docs/screenshots/kronn_cli.png)
 
 ## Quick Start
 
@@ -26,7 +26,7 @@ cd kronn
 
 Three commands. The CLI detects your agents, offers CLI or web mode, and handles everything. First web launch opens the setup wizard.
 
-![Kronn Dashboard](docs/screenshots/hero.png)
+![Kronn Dashboard](docs/screenshots/kronn_dashboard.png)
 
 ---
 
@@ -60,7 +60,7 @@ Chat with agents in project context. Use `@claude` or `@codex` to target specifi
 
 Persistent conversations backed by SQLite — no context rebuilt from scratch, every resumed conversation is compute saved. Full i18n support (French, English, Spanish). Claude Code responses streamed token-by-token with per-message token tracking. Archive, retry, edit, swipe gestures, multi-line input with auto-resize.
 
-![Multi-agent discussion with debate mode](docs/screenshots/discussions.png)
+![Multi-agent discussion with debate mode](docs/screenshots/kronn_multi-ai_discussion.png)
 
 ### 🔌 MCP Management
 
@@ -183,6 +183,8 @@ Talk to your agents. Literally. No cloud, no API, no data leaves your machine.
 **Voice Conversation Mode** — hands-free loop: speak → auto-send → agent responds → TTS reads → countdown 3-2-1 → mic auto-starts → repeat. Toggle with the phone icon in the composer toolbar.
 
 All models are downloaded on first use and cached in the browser (IndexedDB / OPFS). Configurable in Settings > Voice.
+
+![Audio Dicussion mode](docs/screenshots/kronn_audio_discussion.png)
 
 ### 🛡️ Drift Detection & Partial Re-audit
 

@@ -137,7 +137,7 @@ _menu_interactive() {
     local selected=0
 
     printf "\n${BOLD}%s${RESET}\n" "$title"
-    printf "${DIM}  ↑↓ naviguer · enter confirmer${RESET}\n\n"
+    printf "${DIM}  ↑↓ navigate · enter confirm${RESET}\n\n"
 
     printf "${HIDE_CURSOR}"
     trap 'printf "${SHOW_CURSOR}"' RETURN
@@ -187,14 +187,14 @@ _menu_fallback() {
 
     echo
     while true; do
-        printf "${BOLD}Choix [1-%d] :${RESET} " "$count"
+        printf "${BOLD}Choice [1-%d]:${RESET} " "$count"
         read -r REPLY
         # Validate input
         if [[ "$REPLY" =~ ^[0-9]+$ ]] && (( REPLY >= 1 && REPLY <= count )); then
             printf "${GREEN}  ▸ %s${RESET}\n" "$(printf "%b" "${options[$((REPLY-1))]}" | sed 's/\x1b\[[0-9;]*m//g')"
             return 0
         fi
-        printf "${RED}  Entrer un nombre entre 1 et %d${RESET}\n" "$count"
+        printf "${RED}  Enter a number between 1 and %d${RESET}\n" "$count"
     done
 }
 
@@ -211,12 +211,12 @@ menu_choice() {
     fi
 }
 
-# Interactive menu with a "Passer" option at the end.
-# Returns 0 in $REPLY if user picks "Passer".
+# Interactive menu with a "Skip" option at the end.
+# Returns 0 in $REPLY if user picks "Skip".
 menu_choice_or_skip() {
     local title="$1"; shift
     local options=("$@")
-    options+=("Passer")
+    options+=("Skip")
 
     menu_choice "$title" "${options[@]}"
 
@@ -240,7 +240,7 @@ ask_yn() {
 _ask_yn_interactive() {
     local prompt="$1"
     local selected=0
-    local options=("Oui" "Non")
+    local options=("Yes" "No")
 
     printf "\n${BOLD}%s${RESET}\n\n" "$prompt"
     printf "${HIDE_CURSOR}"
@@ -288,18 +288,18 @@ _ask_yn_fallback() {
     local prompt="$1"
     echo
     while true; do
-        printf "${BOLD}%s${RESET} ${DIM}(o/n)${RESET} " "$prompt"
+        printf "${BOLD}%s${RESET} ${DIM}(y/n)${RESET} " "$prompt"
         local answer
         read -r answer
         case "$answer" in
-            o|O|oui|OUI|y|Y|yes|YES)
+            y|Y|yes|YES|o|O|oui|OUI)
                 return 0
                 ;;
-            n|N|non|NON|no|NO)
+            n|N|no|NO|non|NON)
                 return 1
                 ;;
             *)
-                printf "${RED}  Répondre o (oui) ou n (non)${RESET}\n"
+                printf "${RED}  Answer y (yes) or n (no)${RESET}\n"
                 ;;
         esac
     done
