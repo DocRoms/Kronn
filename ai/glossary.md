@@ -50,7 +50,7 @@ Project-specific terms. For deep dives, follow the linked `ai/architecture/` fil
 
 **McpConfigDisplay** — Read-only projection of McpConfig with masked secrets, server name, and linked project names. Used in API responses.
 
-**McpDefinition** — A template MCP from the built-in registry (name, transport, env_keys, tags, token_url, token_help). 43 official servers grouped by category (Git & Code, Databases, Cloud & Infra, CDN & Edge, Search & Web, Analytics & Monitoring, Communication, Project Management, Design, Knowledge & Docs, Payments, SEO, Files, Email). `token_url` links to the provider's token generation page; `token_help` provides a short description.
+**McpDefinition** — A template MCP from the built-in registry (name, transport, env_keys, tags, token_url, token_help). 48 official servers grouped by category (Git & Code, Databases, Cloud & Infra, CDN & Edge, Search & Web, Analytics & Monitoring, Communication, Project Management, Design, Knowledge & Docs, Payments, SEO, Files, Email). `token_url` links to the provider's token generation page; `token_help` provides a short description.
 
 **McpInstance** — Legacy type kept for backward compatibility in the Project struct.
 

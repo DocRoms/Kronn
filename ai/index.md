@@ -66,6 +66,7 @@ Never load everything "just in case".
 ## 2. Prerequisites before running commands
 
 - **Docker + Docker Compose** required for running the full stack.
+- **Windows**: WSL2 is mandatory — Kronn mounts host binaries, Unix sockets, and Linux paths. Docker Desktop is not required; Docker Engine inside WSL works. Install WSL: `wsl --install`.
 - Start: `./kronn start` or `make start` (builds and runs all services).
 - Stop: `./kronn stop` or `make stop`.
 - Restart: `./kronn restart`.
@@ -239,4 +240,4 @@ Redirectors to this file: `CLAUDE.md`, `GEMINI.md`, `AGENTS.md`, `.kiro/steering
 
 ## 11. Last updated
 
-AI context last reviewed: **2026-03-20**.
+AI context last reviewed: **2026-03-25**.

@@ -889,6 +889,8 @@ fn sample_workflow(id: &str) -> Workflow {
         project_id: None,
         trigger: WorkflowTrigger::Manual,
         steps: vec![WorkflowStep {
+            step_type: StepType::default(),
+            description: None,
             name: "step1".into(),
             agent: AgentType::ClaudeCode,
             prompt_template: "Do something".into(),
@@ -1168,6 +1170,8 @@ fn workflow_multi_step_roundtrip() {
         trigger: WorkflowTrigger::Manual,
         steps: vec![
             WorkflowStep {
+                step_type: StepType::default(),
+                description: None,
                 name: "analyze".into(),
                 agent: AgentType::ClaudeCode,
                 prompt_template: "Analyze this".into(),
@@ -1183,6 +1187,8 @@ fn workflow_multi_step_roundtrip() {
                 directive_ids: vec![],
             },
             WorkflowStep {
+                step_type: StepType::default(),
+                description: None,
                 name: "fix".into(),
                 agent: AgentType::Codex,
                 prompt_template: "Fix: {{previous_step.output}}".into(),
@@ -1201,6 +1207,8 @@ fn workflow_multi_step_roundtrip() {
                 directive_ids: vec![],
             },
             WorkflowStep {
+                step_type: StepType::default(),
+                description: None,
                 name: "review".into(),
                 agent: AgentType::GeminiCli,
                 prompt_template: "Review the changes".into(),
@@ -1253,6 +1261,8 @@ fn workflow_update_steps_count() {
 
     // Add a second step
     wf.steps.push(WorkflowStep {
+        step_type: StepType::default(),
+        description: None,
         name: "step2".into(),
         agent: AgentType::ClaudeCode,
         prompt_template: "Second step".into(),

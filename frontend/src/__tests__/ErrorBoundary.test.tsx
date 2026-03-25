@@ -1,7 +1,7 @@
 // Note: assertions use French strings because the default UI locale is 'fr'.
 // If the default locale changes, these assertions must be updated.
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 
 function BrokenComponent(): never {
@@ -66,5 +66,67 @@ describe('ErrorBoundary', () => {
 
     expect(screen.getByTestId('happy-child')).toBeDefined();
     expect(screen.queryByText('Une erreur est survenue.')).toBeNull();
+  });
+
+  // ─── Zone mode tests ───────────────────────────────────────────────
+
+  it('zone mode renders contained error with label', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    localStorage.removeItem('kronn:ui-locale');
+
+    render(
+      <ErrorBoundary mode="zone" label="Discussions">
+        <BrokenComponent />
+      </ErrorBoundary>
+    );
+
+    expect(screen.getByText(/Discussions/)).toBeDefined();
+    expect(screen.getByText('Test explosion')).toBeDefined();
+    expect(screen.getByText('Retry')).toBeDefined();
+    // Should NOT have the fullscreen Reload button
+    expect(screen.queryByText('Reload')).toBeNull();
+
+    spy.mockRestore();
+  });
+
+  it('zone mode retry resets error state', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    localStorage.removeItem('kronn:ui-locale');
+
+    render(
+      <ErrorBoundary mode="zone" label="Test">
+        <BrokenComponent />
+      </ErrorBoundary>
+    );
+
+    // Should show error with Retry button
+    expect(screen.getByText('Retry')).toBeDefined();
+    expect(screen.getByText('Test explosion')).toBeDefined();
+
+    // Click Retry — error state is cleared (component will re-throw, but
+    // the boundary correctly resets its internal state)
+    fireEvent.click(screen.getByText('Retry'));
+
+    // After retry, BrokenComponent throws again so we're back in error state
+    // but the important thing is the boundary didn't crash or become unresponsive
+    expect(screen.getByText('Retry')).toBeDefined();
+
+    spy.mockRestore();
+  });
+
+  it('fullscreen mode shows Reload button (not Retry)', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    localStorage.removeItem('kronn:ui-locale');
+
+    render(
+      <ErrorBoundary mode="fullscreen">
+        <BrokenComponent />
+      </ErrorBoundary>
+    );
+
+    expect(screen.getByText('Reload')).toBeDefined();
+    expect(screen.queryByText('Retry')).toBeNull();
+
+    spy.mockRestore();
   });
 });

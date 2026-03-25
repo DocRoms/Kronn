@@ -22,7 +22,7 @@ vi.mock('../../lib/api', () => ({
 }));
 
 import { McpPage } from '../McpPage';
-import type { McpOverview, McpConfigDisplay, McpServer, McpDefinition, Project } from '../../types/generated';
+import type { McpOverview, McpConfigDisplay, McpServer, McpDefinition, Project, AgentType } from '../../types/generated';
 
 // Use fake timers to prevent the setTimeout in handleAddDuplicateConfig (50ms
 // scroll animation) from leaking across tests and causing timeout issues.
@@ -147,7 +147,7 @@ describe('McpPage', () => {
     const configs = [makeConfig('c1', 'mcp-gitlab', 'GitLab')];
     const overview: McpOverview = {
       servers, configs, customized_contexts: [],
-      incompatibilities: [{ server_id: 'mcp-gitlab', agent: 'Kiro' as any, reason: 'Empty tool schemas — incompatible with Bedrock' }],
+      incompatibilities: [{ server_id: 'mcp-gitlab', agent: 'Kiro' as AgentType, reason: 'Empty tool schemas — incompatible with Bedrock' }],
     };
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
@@ -160,7 +160,7 @@ describe('McpPage', () => {
     const configs = [makeConfig('c1', 'mcp-github', 'GitHub')];
     const overview: McpOverview = {
       servers, configs, customized_contexts: [],
-      incompatibilities: [{ server_id: 'mcp-gitlab', agent: 'Kiro' as any, reason: 'test' }],
+      incompatibilities: [{ server_id: 'mcp-gitlab', agent: 'Kiro' as AgentType, reason: 'test' }],
     };
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 

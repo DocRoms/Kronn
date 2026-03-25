@@ -247,6 +247,7 @@ export function DiscussionsPage({
   const [showAdvancedOptions, setShowAdvancedOptions] = useState(false);
   const [showGitPanel, setShowGitPanel] = useState(false);
   const [showMcpPopover, setShowMcpPopover] = useState(false);
+  const [mcpSearchFilter, setMcpSearchFilter] = useState('');
   const [showProfileEditor, setShowProfileEditor] = useState(false);
   const [chatInput, setChatInput] = useState('');
   const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
@@ -473,10 +474,10 @@ export function DiscussionsPage({
   }, [activeDiscussionId, onActiveDiscussionChange]);
 
   useEffect(() => {
-    if (activeDiscussionId && activeDiscussion && !sendingMap[activeDiscussionId]) {
+    if (activeDiscussionId && activeDiscussion) {
       markDiscussionSeen(activeDiscussionId, activeDiscussion.messages.length);
     }
-  }, [activeDiscussionId, activeDiscussion?.messages.length, sendingMap, markDiscussionSeen]);
+  }, [activeDiscussionId, activeDiscussion?.messages.length, markDiscussionSeen]);
 
   // Timer for agent activity duration — uses lifted startMap to survive page switches
   useEffect(() => {
@@ -1731,7 +1732,7 @@ export function DiscussionsPage({
                 <div style={{ position: 'relative' }}>
                   <button
                     style={{ ...ls.iconBtn, color: showMcpPopover ? '#00d4ff' : 'rgba(255,255,255,0.4)' }}
-                    onClick={() => { setShowMcpPopover(prev => !prev); setShowProfileEditor(false); }}
+                    onClick={() => { setShowMcpPopover(prev => { if (prev) setMcpSearchFilter(''); return !prev; }); setShowProfileEditor(false); }}
                     title={t('disc.mcps')}
                     aria-label={t('disc.mcps')}
                   >
@@ -1744,44 +1745,67 @@ export function DiscussionsPage({
                     // Agents running via direct API (no CLI) cannot use MCP tools
                     const apiOnlyAgents: AgentType[] = ['Vibe' as AgentType];
                     const isApiOnly = apiOnlyAgents.includes(activeDiscussion.agent);
+                    const filterLower = mcpSearchFilter.toLowerCase();
+                    const filteredMcps = filterLower
+                      ? discMcps.filter(c => c.label.toLowerCase().includes(filterLower) || c.server_name.toLowerCase().includes(filterLower))
+                      : discMcps;
                     return (
                       <div style={{
                         position: 'absolute', right: 0, top: '100%', marginTop: 4, zIndex: 100,
                         background: '#161b22', border: '1px solid rgba(0,212,255,0.2)', borderRadius: 8,
                         padding: '8px 0', minWidth: 220, boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
                       }}>
-                        <div style={{ padding: '4px 12px 6px', fontSize: 10, color: 'rgba(255,255,255,0.35)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                        <div style={{ padding: '4px 12px 6px', fontSize: 10, color: 'rgba(255,255,255,0.35)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                           {t('disc.mcps')}
+                          <span style={{ fontWeight: 400, textTransform: 'none', letterSpacing: 'normal' }}>{discMcps.length}</span>
                         </div>
+                        {discMcps.length > 6 && (
+                          <div style={{ padding: '0 8px 6px' }}>
+                            <input
+                              type="text"
+                              value={mcpSearchFilter}
+                              onChange={e => setMcpSearchFilter(e.target.value)}
+                              placeholder={t('disc.mcpSearch')}
+                              style={{
+                                width: '100%', padding: '4px 8px', fontSize: 11, background: 'rgba(255,255,255,0.06)',
+                                border: '1px solid rgba(255,255,255,0.1)', borderRadius: 4, color: '#e8eaed',
+                                outline: 'none', boxSizing: 'border-box',
+                              }}
+                              autoFocus
+                            />
+                          </div>
+                        )}
                         {isApiOnly && (
                           <div style={{ padding: '3px 12px 6px', fontSize: 10, color: '#f0a020', display: 'flex', alignItems: 'center', gap: 4 }}>
                             <span style={{ fontSize: 10 }}>⚡</span>
                             Mode API — MCPs indisponibles
                           </div>
                         )}
-                        {discMcps.length === 0 ? (
-                          <div style={{ padding: '4px 12px', fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>{t('disc.noMcps')}</div>
-                        ) : discMcps.map(c => {
-                          const incomp = mcpIncompatibilities.find(
-                            i => i.server_id === c.server_id && i.agent === activeDiscussion.agent
-                          );
-                          return (
-                            <div
-                              key={c.id}
-                              title={incomp ? `⚠ ${incomp.reason}` : isApiOnly ? 'Non disponible en mode API' : undefined}
-                              style={{
-                                padding: '3px 12px', fontSize: 11, display: 'flex', alignItems: 'center', gap: 6,
-                                color: incomp ? '#ff6b6b' : isApiOnly ? 'rgba(255,255,255,0.25)' : '#e8eaed',
-                                opacity: incomp ? 0.7 : isApiOnly ? 0.5 : 1,
-                              }}
-                            >
-                              <Server size={9} style={{ color: incomp ? '#ff6b6b' : isApiOnly ? 'rgba(255,255,255,0.2)' : '#00d4ff', flexShrink: 0 }} />
-                              {c.label}
-                              {incomp && <span style={{ fontSize: 8, color: '#ff6b6b', fontStyle: 'italic' }}>incompatible</span>}
-                              <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.15)', marginLeft: 'auto' }}>{c.server_name}</span>
-                            </div>
-                          );
-                        })}
+                        <div style={{ maxHeight: 200, overflowY: 'auto' }}>
+                          {filteredMcps.length === 0 ? (
+                            <div style={{ padding: '4px 12px', fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>{mcpSearchFilter ? t('disc.noMcps') : t('disc.noMcps')}</div>
+                          ) : filteredMcps.map(c => {
+                            const incomp = mcpIncompatibilities.find(
+                              i => i.server_id === c.server_id && i.agent === activeDiscussion.agent
+                            );
+                            return (
+                              <div
+                                key={c.id}
+                                title={incomp ? `⚠ ${incomp.reason}` : isApiOnly ? 'Non disponible en mode API' : undefined}
+                                style={{
+                                  padding: '3px 12px', fontSize: 11, display: 'flex', alignItems: 'center', gap: 6,
+                                  color: incomp ? '#ff6b6b' : isApiOnly ? 'rgba(255,255,255,0.25)' : '#e8eaed',
+                                  opacity: incomp ? 0.7 : isApiOnly ? 0.5 : 1,
+                                }}
+                              >
+                                <Server size={9} style={{ color: incomp ? '#ff6b6b' : isApiOnly ? 'rgba(255,255,255,0.2)' : '#00d4ff', flexShrink: 0 }} />
+                                {c.label}
+                                {incomp && <span style={{ fontSize: 8, color: '#ff6b6b', fontStyle: 'italic' }}>incompatible</span>}
+                                <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.15)', marginLeft: 'auto' }}>{c.server_name}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
                       </div>
                     );
                   })()}

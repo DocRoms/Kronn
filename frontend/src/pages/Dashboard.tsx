@@ -6,6 +6,7 @@ import type { Project, AgentDetection, AgentType, RemoteRepo, RepoSource, DriftC
 import { useT } from '../lib/I18nContext';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { getProjectGroup, isHiddenPath, isUsable, isValidationDisc } from '../lib/constants';
+import { ErrorBoundary } from '../components/ErrorBoundary';
 import { McpPage } from './McpPage';
 import { WorkflowsPage } from './WorkflowsPage';
 import { SettingsPage } from './SettingsPage';
@@ -807,7 +808,7 @@ export function Dashboard({ onReset }: DashboardProps) {
       <main style={s.main}>
 
         {/* ════════ PROJETS ════════ */}
-        {page === 'projects' && (() => {
+        {page === 'projects' && (<ErrorBoundary mode="zone" label="Projects">{(() => {
           const visibleProjects = projects.filter(p => !isHiddenPath(p.path));
           const hiddenProjects = projects.filter(p => isHiddenPath(p.path));
           const baseProjects = showHidden ? projects : visibleProjects;
@@ -1488,20 +1489,25 @@ export function Dashboard({ onReset }: DashboardProps) {
             )}
           </div>
           );
-        })()}
+        })()}</ErrorBoundary>)}
 
         {/* ════════ MCPs ════════ */}
         {page === 'mcps' && (
-          <McpPage projects={projects} mcpOverview={mcpOverview} mcpRegistry={mcpRegistry} refetchMcps={refetchMcps} />
+          <ErrorBoundary mode="zone" label="MCPs">
+            <McpPage projects={projects} mcpOverview={mcpOverview} mcpRegistry={mcpRegistry} refetchMcps={refetchMcps} />
+          </ErrorBoundary>
         )}
 
         {/* ════════ WORKFLOWS ════════ */}
         {page === 'workflows' && (
-          <WorkflowsPage projects={projects} installedAgentTypes={agents.filter(isUsable).map(a => a.agent_type)} agentAccess={agentAccess ?? undefined} />
+          <ErrorBoundary mode="zone" label="Workflows">
+            <WorkflowsPage projects={projects} installedAgentTypes={agents.filter(isUsable).map(a => a.agent_type)} agentAccess={agentAccess ?? undefined} />
+          </ErrorBoundary>
         )}
 
         {/* ════════ DISCUSSIONS ════════ */}
         {page === 'discussions' && (
+          <ErrorBoundary mode="zone" label="Discussions">
           <DiscussionsPage
             projects={projects}
             agents={agents}
@@ -1547,10 +1553,12 @@ export function Dashboard({ onReset }: DashboardProps) {
             mcpConfigs={mcpOverview.configs}
             mcpIncompatibilities={mcpOverview.incompatibilities}
           />
+          </ErrorBoundary>
         )}
 
         {/* ════════ CONFIG ════════ */}
         {page === 'settings' && (
+          <ErrorBoundary mode="zone" label="Settings">
           <SettingsPage
             agents={agents}
             agentAccess={agentAccess ?? null}
@@ -1564,6 +1572,7 @@ export function Dashboard({ onReset }: DashboardProps) {
             onReset={onReset}
             toast={toast}
           />
+          </ErrorBoundary>
         )}
       </main>
     </div>

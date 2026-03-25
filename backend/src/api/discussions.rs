@@ -802,6 +802,177 @@ async fn make_agent_stream(
     Sse::new(stream)
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// Orchestration helpers — extracted from orchestrate() to reduce duplication
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Metadata for SSE chunk events emitted during agent streaming.
+struct AgentStreamMeta {
+    agent_name: String,
+    agent_type: AgentType,
+    round_label: serde_json::Value,
+}
+
+/// Result of running a single agent to completion.
+struct AgentRunResult {
+    response: String,
+    tokens_used: u64,
+}
+
+/// Run an agent process to completion, streaming output via tx.
+/// Handles stream-json and plain text modes, tool logging, error detection, and token parsing.
+/// Does NOT save to DB — caller handles that (format differs per call site).
+async fn run_agent_streaming(
+    mut process: runner::AgentProcess,
+    tx: &tokio::sync::mpsc::Sender<AgentStreamEvent>,
+    meta: &AgentStreamMeta,
+    agent_type: &AgentType,
+) -> AgentRunResult {
+    let mut full_response = String::new();
+    let mut stream_tokens: u64 = 0;
+    let mut current_tool: Option<String> = None;
+    let mut tool_input = String::new();
+    let is_stream_json = process.output_mode == runner::OutputMode::StreamJson;
+    let deadline = tokio::time::Instant::now() + AGENT_GLOBAL_TIMEOUT;
+
+    loop {
+        tokio::select! {
+            line = process.next_line() => {
+                match line {
+                    Some(line) => {
+                        if is_stream_json {
+                            match runner::parse_claude_stream_line(&line) {
+                                runner::StreamJsonEvent::Text(text) => {
+                                    full_response.push_str(&text);
+                                    if !tx.is_closed() {
+                                        let chunk = serde_json::json!({
+                                            "text": text, "agent": meta.agent_name,
+                                            "agent_type": meta.agent_type, "round": meta.round_label,
+                                        });
+                                        let _ = tx.send(AgentStreamEvent::Chunk { data: chunk }).await;
+                                    }
+                                }
+                                runner::StreamJsonEvent::Usage { input_tokens, output_tokens } => {
+                                    stream_tokens = stream_tokens.max(input_tokens + output_tokens);
+                                }
+                                runner::StreamJsonEvent::ToolStart(name) => {
+                                    current_tool = Some(name);
+                                    tool_input.clear();
+                                }
+                                runner::StreamJsonEvent::ToolInputDelta(partial) => {
+                                    tool_input.push_str(&partial);
+                                }
+                                runner::StreamJsonEvent::ToolEnd => {
+                                    if let Some(ref tool) = current_tool {
+                                        if !tx.is_closed() {
+                                            let _ = tx.send(AgentStreamEvent::Log {
+                                                text: format_tool_log(tool, &tool_input),
+                                            }).await;
+                                        }
+                                    }
+                                    current_tool = None;
+                                    tool_input.clear();
+                                }
+                                runner::StreamJsonEvent::Skip => {}
+                            }
+                        } else {
+                            let nl = if full_response.is_empty() { "" } else { "\n" };
+                            full_response.push_str(&format!("{}{}", nl, line));
+                            if !tx.is_closed() {
+                                let chunk = serde_json::json!({
+                                    "text": format!("{}{}", nl, line), "agent": meta.agent_name,
+                                    "agent_type": meta.agent_type, "round": meta.round_label,
+                                });
+                                let _ = tx.send(AgentStreamEvent::Chunk { data: chunk }).await;
+                            }
+                        }
+                    }
+                    None => break,
+                }
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                tracing::warn!("Agent {:?} timed out (round: {})", agent_type, meta.round_label);
+                let _ = process.child.kill().await;
+                break;
+            }
+        }
+    }
+
+    let status = process.child.wait().await;
+    process.fix_ownership();
+    let success = status.as_ref().map(|s| s.success()).unwrap_or(false);
+    let stderr = process.captured_stderr_flushed().await;
+    let stderr_text = stderr.join("\n");
+
+    if full_response.is_empty() && !success {
+        let exit_info = match &status {
+            Ok(s) => format!("exit code: {:?}", s.code()),
+            Err(e) => format!("wait error: {}", e),
+        };
+        tracing::error!("Agent {:?} exited with error ({}). stderr: {}",
+            agent_type, exit_info,
+            if stderr_text.len() > 500 { &stderr_text[..500] } else { &stderr_text });
+        full_response = if stderr_text.is_empty() {
+            format!("[Agent exited with error] ({})", exit_info)
+        } else {
+            format!("[Agent exited with error] ({})\n\n{}", exit_info, stderr_text)
+        };
+    } else if full_response.is_empty() {
+        full_response = "[No response]".to_string();
+    }
+
+    if !success {
+        let all_output = format!("{}\n{}", full_response, stderr_text);
+        if let Some(hint) = detect_agent_error_hint(&all_output) {
+            full_response.push_str(&format!("\n\n{}", hint));
+        }
+    }
+
+    let tokens_used = if stream_tokens > 0 {
+        stream_tokens
+    } else {
+        let (cleaned, count) = runner::parse_token_usage(agent_type, &full_response, &stderr);
+        if count > 0 { full_response = cleaned; }
+        count
+    };
+
+    AgentRunResult { response: full_response, tokens_used }
+}
+
+/// Run an agent silently (no SSE streaming), return collected text.
+/// Used for conversation summarization before debate.
+async fn run_agent_collect(mut process: runner::AgentProcess) -> String {
+    let mut output = String::new();
+    let is_json = process.output_mode == runner::OutputMode::StreamJson;
+    let deadline = tokio::time::Instant::now() + AGENT_GLOBAL_TIMEOUT;
+    loop {
+        tokio::select! {
+            line = process.next_line() => {
+                match line {
+                    Some(l) => {
+                        if is_json {
+                            if let runner::StreamJsonEvent::Text(text) = runner::parse_claude_stream_line(&l) {
+                                output.push_str(&text);
+                            }
+                        } else {
+                            if !output.is_empty() { output.push('\n'); }
+                            output.push_str(&l);
+                        }
+                    }
+                    None => break,
+                }
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                tracing::warn!("Agent timed out during silent collection");
+                let _ = process.child.kill().await;
+                break;
+            }
+        }
+    }
+    let _ = process.child.wait().await;
+    output.trim().to_string()
+}
+
 /// POST /api/discussions/:id/orchestrate
 pub async fn orchestrate(
     State(state): State<AppState>,
@@ -1026,36 +1197,8 @@ pub async fn orchestrate(
                 mcp_context_override: global_mcp_context.as_deref(),
                 tier: disc_tier, model_tiers: Some(&model_tiers_config),
             }).await {
-                Ok(mut process) => {
-                    let mut summary = String::new();
-                    let is_json = process.output_mode == runner::OutputMode::StreamJson;
-                    let deadline = tokio::time::Instant::now() + AGENT_GLOBAL_TIMEOUT;
-                    loop {
-                        tokio::select! {
-                            line = process.next_line() => {
-                                match line {
-                                    Some(l) => {
-                                        if is_json {
-                                            if let runner::StreamJsonEvent::Text(text) = runner::parse_claude_stream_line(&l) {
-                                                summary.push_str(&text);
-                                            }
-                                        } else {
-                                            summary.push_str(&l);
-                                            summary.push('\n');
-                                        }
-                                    }
-                                    None => break,
-                                }
-                            }
-                            _ = tokio::time::sleep_until(deadline) => {
-                                tracing::warn!("Orchestration summary agent timed out");
-                                let _ = process.child.kill().await;
-                                break;
-                            }
-                        }
-                    }
-                    let _ = process.child.wait().await;
-                    let summary = summary.trim().to_string();
+                Ok(process) => {
+                    let summary = run_agent_collect(process).await;
                     if summary.is_empty() { String::new() } else { summary }
                 }
                 Err(e) => {
@@ -1102,125 +1245,25 @@ pub async fn orchestrate(
                     mcp_context_override: global_mcp_context.as_deref(),
                     tier: disc_tier, model_tiers: Some(&model_tiers_config),
                 }).await {
-                    Ok(mut process) => {
-                        let mut full_response = String::new();
-                        let mut orch_stream_tokens: u64 = 0;
-                        let mut orch_current_tool: Option<String> = None;
-                        let mut orch_tool_input = String::new();
-                        let orch_is_stream_json = process.output_mode == runner::OutputMode::StreamJson;
-                        let orch_deadline = tokio::time::Instant::now() + AGENT_GLOBAL_TIMEOUT;
-
-                        loop {
-                            tokio::select! {
-                                line = process.next_line() => {
-                                    match line {
-                                        Some(line) => {
-                            if orch_is_stream_json {
-                                match runner::parse_claude_stream_line(&line) {
-                                    runner::StreamJsonEvent::Text(text) => {
-                                        full_response.push_str(&text);
-                                        if !tx.is_closed() {
-                                            let chunk = serde_json::json!({
-                                                "text": text, "agent": agent_name,
-                                                "agent_type": agent_type, "round": round,
-                                            });
-                                            emit!(AgentStreamEvent::Chunk { data: chunk });
-                                        }
-                                    }
-                                    runner::StreamJsonEvent::Usage { input_tokens, output_tokens } => {
-                                        orch_stream_tokens = orch_stream_tokens.max(input_tokens + output_tokens);
-                                    }
-                                    runner::StreamJsonEvent::ToolStart(name) => {
-                                        orch_current_tool = Some(name);
-                                        orch_tool_input.clear();
-                                    }
-                                    runner::StreamJsonEvent::ToolInputDelta(partial) => {
-                                        orch_tool_input.push_str(&partial);
-                                    }
-                                    runner::StreamJsonEvent::ToolEnd => {
-                                        if let Some(ref tool) = orch_current_tool {
-                                            emit!(AgentStreamEvent::Log { text: format_tool_log(tool, &orch_tool_input) });
-                                        }
-                                        orch_current_tool = None;
-                                        orch_tool_input.clear();
-                                    }
-                                    runner::StreamJsonEvent::Skip => {}
-                                }
-                            } else {
-                                let nl = if full_response.is_empty() { "" } else { "\n" };
-                                full_response.push_str(&format!("{}{}", nl, line));
-                                if !tx.is_closed() {
-                                    let chunk = serde_json::json!({
-                                        "text": format!("{}{}", nl, line), "agent": agent_name,
-                                        "agent_type": agent_type, "round": round,
-                                    });
-                                    emit!(AgentStreamEvent::Chunk { data: chunk });
-                                }
-                            }
-                                        }
-                                        None => break,
-                                    }
-                                }
-                                _ = tokio::time::sleep_until(orch_deadline) => {
-                                    tracing::warn!("Orchestration agent {:?} timed out in round {}", agent_type, round);
-                                    let _ = process.child.kill().await;
-                                    break;
-                                }
-                            }
-                        }
-
-                        let status = process.child.wait().await;
-                        process.fix_ownership();
-                        let exit_info = match &status {
-                            Ok(s) => format!("exit code: {:?}", s.code()),
-                            Err(e) => format!("wait error: {}", e),
+                    Ok(process) => {
+                        let meta = AgentStreamMeta {
+                            agent_name: agent_name.clone(),
+                            agent_type: agent_type.clone(),
+                            round_label: serde_json::json!(round),
                         };
-                        let orch_success = status.map(|s| s.success()).unwrap_or(false);
-
-                        let orch_stderr = process.captured_stderr_flushed().await;
-                        let orch_stderr_text = orch_stderr.join("\n");
-
-                        if full_response.is_empty() && !orch_success {
-                            tracing::error!(
-                                "Orchestration agent {:?} exited with error ({}). stderr: {}",
-                                agent_type, exit_info,
-                                if orch_stderr_text.len() > 500 { &orch_stderr_text[..500] } else { &orch_stderr_text }
-                            );
-                            if orch_stderr_text.is_empty() {
-                                full_response = format!("[Agent exited with error] ({})", exit_info);
-                            } else {
-                                full_response = format!("[Agent exited with error] ({})\n\n{}", exit_info, orch_stderr_text);
-                            }
-                        } else if full_response.is_empty() {
-                            full_response = "[No response]".to_string();
-                        }
-
-                        if !orch_success {
-                            let all_output = format!("{}\n{}", full_response, orch_stderr_text);
-                            if let Some(hint) = detect_agent_error_hint(&all_output) {
-                                full_response.push_str(&format!("\n\n{}", hint));
-                            }
-                        }
-
-                        let tokens_used = if orch_stream_tokens > 0 {
-                            orch_stream_tokens
-                        } else {
-                            let (cleaned, count) = runner::parse_token_usage(agent_type, &full_response, &orch_stderr);
-                            if count > 0 { full_response = cleaned; }
-                            count
-                        };
+                        let result = run_agent_streaming(process, &tx, &meta, agent_type).await;
 
                         // Save to DB — always runs even if client is gone
                         {
                             let msg = DiscussionMessage {
                                 id: Uuid::new_v4().to_string(),
                                 role: MessageRole::Agent,
-                                content: full_response.clone(),
+                                content: result.response.clone(),
                                 agent_type: Some(agent_type.clone()),
                                 timestamp: Utc::now(),
-                                tokens_used,
+                                tokens_used: result.tokens_used,
                                 auth_mode: Some(auth_mode_for(agent_type, &tokens)),
-                                model_tier: None, // orchestration uses Default tier
+                                model_tier: None,
                             };
                             let did = disc_id.clone();
                             if let Err(e) = state.db.with_conn(move |conn| {
@@ -1234,7 +1277,7 @@ pub async fn orchestrate(
                             "agent": agent_name, "agent_type": agent_type, "round": round,
                         })});
 
-                        this_round.push((agent_name.clone(), full_response));
+                        this_round.push((agent_name.clone(), result.response));
                     }
                     Err(e) => {
                         tracing::error!("Orchestration: agent {} failed: {}", agent_name, e);
@@ -1274,93 +1317,23 @@ pub async fn orchestrate(
                 mcp_context_override: global_mcp_context.as_deref(),
                 tier: disc_tier, model_tiers: Some(&model_tiers_config),
             }).await {
-                Ok(mut process) => {
-                    let mut full_response = String::new();
-                    let mut synth_stream_tokens: u64 = 0;
-                    let mut synth_current_tool: Option<String> = None;
-                    let mut synth_tool_input = String::new();
-                    let synth_is_stream_json = process.output_mode == runner::OutputMode::StreamJson;
-                    let synth_deadline = tokio::time::Instant::now() + AGENT_GLOBAL_TIMEOUT;
-
-                    loop {
-                        tokio::select! {
-                            line = process.next_line() => {
-                                match line {
-                                    Some(line) => {
-                        if synth_is_stream_json {
-                            match runner::parse_claude_stream_line(&line) {
-                                runner::StreamJsonEvent::Text(text) => {
-                                    full_response.push_str(&text);
-                                    if !tx.is_closed() {
-                                        let chunk = serde_json::json!({
-                                            "text": text, "agent": primary_name,
-                                            "agent_type": primary_agent_type, "round": "synthesis",
-                                        });
-                                        emit!(AgentStreamEvent::Chunk { data: chunk });
-                                    }
-                                }
-                                runner::StreamJsonEvent::Usage { input_tokens, output_tokens } => {
-                                    synth_stream_tokens = synth_stream_tokens.max(input_tokens + output_tokens);
-                                }
-                                runner::StreamJsonEvent::ToolStart(name) => {
-                                    synth_current_tool = Some(name);
-                                    synth_tool_input.clear();
-                                }
-                                runner::StreamJsonEvent::ToolInputDelta(partial) => {
-                                    synth_tool_input.push_str(&partial);
-                                }
-                                runner::StreamJsonEvent::ToolEnd => {
-                                    if let Some(ref tool) = synth_current_tool {
-                                        emit!(AgentStreamEvent::Log { text: format_tool_log(tool, &synth_tool_input) });
-                                    }
-                                    synth_current_tool = None;
-                                    synth_tool_input.clear();
-                                }
-                                runner::StreamJsonEvent::Skip => {}
-                            }
-                        } else {
-                            let nl = if full_response.is_empty() { "" } else { "\n" };
-                            full_response.push_str(&format!("{}{}", nl, line));
-                            if !tx.is_closed() {
-                                let chunk = serde_json::json!({
-                                    "text": format!("{}{}", nl, line), "agent": primary_name,
-                                    "agent_type": primary_agent_type, "round": "synthesis",
-                                });
-                                emit!(AgentStreamEvent::Chunk { data: chunk });
-                            }
-                        }
-                                    }
-                                    None => break,
-                                }
-                            }
-                            _ = tokio::time::sleep_until(synth_deadline) => {
-                                tracing::warn!("Orchestration synthesis agent timed out");
-                                let _ = process.child.kill().await;
-                                break;
-                            }
-                        }
-                    }
-                    let _ = process.child.wait().await;
-                    process.fix_ownership();
-                    let synth_stderr = process.captured_stderr_flushed().await;
-
-                    let tokens_used = if synth_stream_tokens > 0 {
-                        synth_stream_tokens
-                    } else {
-                        let (cleaned, count) = runner::parse_token_usage(&primary_agent_type, &full_response, &synth_stderr);
-                        if count > 0 { full_response = cleaned; }
-                        count
+                Ok(process) => {
+                    let meta = AgentStreamMeta {
+                        agent_name: primary_name.clone(),
+                        agent_type: primary_agent_type.clone(),
+                        round_label: serde_json::json!("synthesis"),
                     };
+                    let result = run_agent_streaming(process, &tx, &meta, &primary_agent_type).await;
 
                     // Save synthesis to DB — always runs even if client is gone
                     {
                         let msg = DiscussionMessage {
                             id: Uuid::new_v4().to_string(),
                             role: MessageRole::Agent,
-                            content: format!("[Synthesis]\n\n{}", full_response),
+                            content: format!("[Synthesis]\n\n{}", result.response),
                             agent_type: Some(primary_agent_type.clone()),
                             timestamp: Utc::now(),
-                            tokens_used,
+                            tokens_used: result.tokens_used,
                             auth_mode: Some(auth_mode_for(&primary_agent_type, &tokens)),
                             model_tier: None,
                         };
@@ -2152,9 +2125,6 @@ fn build_agent_prompt(disc: &Discussion, agent_type: &AgentType, extra_context_l
 }
 
 /// Detect common agent error patterns and return a user-friendly hint.
-// Note: error hints are in French by default. The frontend could override
-// these with translated versions based on the UI locale, but since Kronn
-// is primarily used in French-speaking environments, this is acceptable for v0.1.0.
 pub(crate) fn detect_agent_error_hint(output: &str) -> Option<String> {
     let lower = output.to_lowercase();
 
@@ -2260,6 +2230,18 @@ pub(crate) fn detect_agent_error_hint(output: &str) -> Option<String> {
 
 /// Resolve the working directory for a discussion.
 /// Returns (work_dir, project_path) — work_dir is the worktree path if isolated, else project path.
+/// Resolve GitHub token from MCP configs for git operations (push, PR creation).
+async fn resolve_github_token_from_state(state: &AppState) -> Option<String> {
+    let cfg = state.config.read().await;
+    let secret = cfg.encryption_secret.clone()?;
+    drop(cfg);
+    let db = state.db.clone();
+    db.with_conn(move |conn| Ok(super::git_ops::resolve_github_token(conn, &secret)))
+        .await
+        .ok()
+        .flatten()
+}
+
 async fn resolve_discussion_work_dir(state: &AppState, discussion_id: &str) -> Result<(std::path::PathBuf, String), String> {
     let did = discussion_id.to_string();
     let disc = state.db.with_conn(move |conn| crate::db::discussions::get_discussion(conn, &did))
@@ -2383,8 +2365,9 @@ pub async fn disc_git_push(
         Err(e) => return Json(ApiResponse::err(e)),
     };
 
+    let github_token = resolve_github_token_from_state(&state).await;
     let result = tokio::task::spawn_blocking(move || {
-        super::git_ops::run_git_push(&work_dir)
+        super::git_ops::run_git_push(&work_dir, github_token.as_deref())
     }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     match result {
@@ -2452,8 +2435,9 @@ pub async fn disc_create_pr(
     let title = req.title;
     let body = req.body;
     let base = req.base;
+    let github_token = resolve_github_token_from_state(&state).await;
     let result = tokio::task::spawn_blocking(move || {
-        super::git_ops::run_create_pr(&work_dir, &title, &body, &base)
+        super::git_ops::run_create_pr(&work_dir, &title, &body, &base, github_token.as_deref())
     }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     match result {

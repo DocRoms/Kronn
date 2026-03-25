@@ -630,6 +630,10 @@ pub enum TrackerSourceConfig {
 #[ts(export)]
 pub struct WorkflowStep {
     pub name: String,
+    #[serde(default)]
+    pub step_type: StepType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub agent: AgentType,
     pub prompt_template: String,
     pub mode: StepMode,
@@ -658,6 +662,15 @@ pub struct WorkflowStep {
 #[serde(tag = "type")]
 pub enum StepMode {
     Normal,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "type")]
+pub enum StepType {
+    #[default]
+    Agent,
+    ApiCall,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

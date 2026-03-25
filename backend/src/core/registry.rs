@@ -60,15 +60,15 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
         McpDefinition {
             id: "mcp-redis".into(),
             name: "Redis".into(),
-            description: "Cache, pub/sub, streams — official Anthropic server".into(),
+            description: "Cache, pub/sub, streams, JSON, search — official Redis server".into(),
             transport: McpTransport::Stdio {
-                command: "npx".into(),
-                args: vec!["-y".into(), "@modelcontextprotocol/server-redis".into()],
+                command: "uvx".into(),
+                args: vec!["--from".into(), "redis-mcp-server@latest".into(), "redis-mcp-server".into()],
             },
-            env_keys: vec!["REDIS_URL".into()],
+            env_keys: vec!["REDIS_HOST".into(), "REDIS_PWD".into()],
             tags: vec!["cache".into(), "database".into()],
             token_url: None,
-            token_help: Some("Redis URL: redis://host:6379".into()),
+            token_help: Some("REDIS_HOST (default 127.0.0.1), REDIS_PORT (default 6379), REDIS_PWD. Optional: REDIS_SSL=true for TLS.".into()),
         },
         // ── Cloud & Infra ───────────────────────────────────────────────────
         McpDefinition {
@@ -96,6 +96,19 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["cloud".into(), "monitoring".into(), "aws".into()],
             token_url: Some("https://console.aws.amazon.com/iam/home#/security_credentials".into()),
             token_help: Some("IAM access keys with CloudWatchLogsReadOnlyAccess".into()),
+        },
+        McpDefinition {
+            id: "mcp-aws-api".into(),
+            name: "AWS API".into(),
+            description: "Unified access to all AWS services via CLI commands (EC2, S3, IAM, Lambda, RDS...) — official AWS Labs server".into(),
+            transport: McpTransport::Stdio {
+                command: "uvx".into(),
+                args: vec!["awslabs.aws-api-mcp-server@latest".into()],
+            },
+            env_keys: vec!["AWS_ACCESS_KEY_ID".into(), "AWS_SECRET_ACCESS_KEY".into(), "AWS_REGION".into()],
+            tags: vec!["cloud".into(), "aws".into(), "infrastructure".into(), "devops".into()],
+            token_url: Some("https://console.aws.amazon.com/iam/home#/security_credentials".into()),
+            token_help: Some("IAM access keys, or set AWS_API_MCP_PROFILE_NAME to use a named profile. Single-user only.".into()),
         },
         McpDefinition {
             id: "mcp-docker".into(),
@@ -186,10 +199,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             transport: McpTransport::Sse {
                 url: "https://mcp.linear.app/sse".into(),
             },
-            env_keys: vec!["LINEAR_API_KEY".into()],
+            env_keys: vec![],
             tags: vec!["project-management".into(), "issues".into()],
             token_url: Some("https://linear.app/settings/api".into()),
-            token_help: Some("Personal API key".into()),
+            token_help: Some("OAuth via browser on first connection — no API key needed".into()),
         },
         McpDefinition {
             id: "mcp-atlassian".into(),
@@ -218,8 +231,21 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             },
             env_keys: vec!["FIGMA_API_KEY".into()],
             tags: vec!["design".into(), "ui".into()],
-            token_url: Some("https://www.figma.com/developers/api#access-tokens".into()),
-            token_help: Some("Personal access token from Figma Settings > Security".into()),
+            token_url: Some("https://www.figma.com/settings".into()),
+            token_help: Some("Personal access token from Figma Settings > Personal access tokens".into()),
+        },
+        McpDefinition {
+            id: "mcp-drawio".into(),
+            name: "draw.io".into(),
+            description: "Create and edit diagrams (flowcharts, UML, architecture) — official jgraph/draw.io server".into(),
+            transport: McpTransport::Stdio {
+                command: "npx".into(),
+                args: vec!["-y".into(), "drawio-mcp".into()],
+            },
+            env_keys: vec![],
+            tags: vec!["design".into(), "diagrams".into(), "architecture".into()],
+            token_url: None,
+            token_help: None,
         },
         // ── Files & Utilities ───────────────────────────────────────────────
         McpDefinition {
@@ -507,6 +533,19 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             token_url: Some("https://console.cloud.google.com/bigquery".into()),
             token_help: Some("Requires gcloud auth + GOOGLE_PROJECT_ID env var".into()),
         },
+        McpDefinition {
+            id: "mcp-google-analytics".into(),
+            name: "Google Analytics 4".into(),
+            description: "GA4 reports, realtime data, account summaries — official Google server (read-only)".into(),
+            transport: McpTransport::Stdio {
+                command: "uvx".into(),
+                args: vec!["analytics-mcp".into()],
+            },
+            env_keys: vec!["GOOGLE_APPLICATION_CREDENTIALS".into()],
+            tags: vec!["analytics".into(), "google".into(), "seo".into(), "marketing".into()],
+            token_url: Some("https://console.cloud.google.com/apis/credentials".into()),
+            token_help: Some("Requires gcloud auth application-default login with analytics.readonly scope, or a service account JSON (GOOGLE_APPLICATION_CREDENTIALS). Enable Analytics Admin API + Analytics Data API in GCP console.".into()),
+        },
         // ── Database (serverless) ─────────────────────────────────────
         McpDefinition {
             id: "mcp-neon".into(),
@@ -574,6 +613,54 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             token_url: None,
             token_help: Some("No API key needed — authenticates via Google account in browser".into()),
         },
+        // ── Code Quality & Security ──────────────────────────────────
+        McpDefinition {
+            id: "mcp-sonarqube".into(),
+            name: "SonarQube".into(),
+            description: "Code quality analysis, security vulnerabilities, quality gates — official SonarSource server".into(),
+            transport: McpTransport::Stdio {
+                command: "docker".into(),
+                args: vec!["run".into(), "--init".into(), "-i".into(), "--rm".into(),
+                    "-e".into(), "SONARQUBE_TOKEN".into(),
+                    "-e".into(), "SONARQUBE_ORG".into(),
+                    "-e".into(), "SONARQUBE_URL".into(),
+                    "mcp/sonarqube".into()],
+            },
+            env_keys: vec!["SONARQUBE_TOKEN".into(), "SONARQUBE_ORG".into()],
+            tags: vec!["quality".into(), "security".into(), "ci".into(), "code".into()],
+            token_url: Some("https://sonarcloud.io/account/security".into()),
+            token_help: Some("User token from SonarCloud or SonarQube. Set SONARQUBE_ORG for Cloud, or SONARQUBE_URL for self-hosted.".into()),
+        },
+        // ── Infrastructure as Code ──────────────────────────────────
+        McpDefinition {
+            id: "mcp-terraform".into(),
+            name: "Terraform".into(),
+            description: "Registry search, workspace management, runs, providers — official HashiCorp server".into(),
+            transport: McpTransport::Stdio {
+                command: "docker".into(),
+                args: vec!["run".into(), "--init".into(), "-i".into(), "--rm".into(),
+                    "-e".into(), "TFE_TOKEN".into(),
+                    "hashicorp/terraform-mcp-server".into()],
+            },
+            env_keys: vec!["TFE_TOKEN".into()],
+            tags: vec!["infrastructure".into(), "iac".into(), "devops".into(), "cloud".into()],
+            token_url: Some("https://app.terraform.io/app/settings/tokens".into()),
+            token_help: Some("HCP Terraform API token. Optional: TFE_ADDRESS for self-hosted Terraform Enterprise.".into()),
+        },
+        // ── Hosting & Deployment ────────────────────────────────────
+        McpDefinition {
+            id: "mcp-vercel".into(),
+            name: "Vercel".into(),
+            description: "Projects, deployments, logs, docs — official Vercel server (OAuth)".into(),
+            transport: McpTransport::Streamable {
+                url: "https://mcp.vercel.com".into(),
+            },
+            env_keys: vec![],
+            tags: vec!["deploy".into(), "hosting".into(), "cloud".into(), "frontend".into()],
+            token_url: Some("https://vercel.com/account/tokens".into()),
+            token_help: Some("OAuth via browser on first connection — no API key needed. Supports project-specific URLs: https://mcp.vercel.com/<team>/<project>".into()),
+        },
+        // ── Data Federation ─────────────────────────────────────────
         McpDefinition {
             id: "mcp-mindsdb".into(),
             name: "MindsDB".into(),

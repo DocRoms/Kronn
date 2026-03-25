@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { version as appVersion } from '../../package.json';
 import { config as configApi, agents as agentsApi, stats as statsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi } from '../lib/api';
 import { useApi } from '../hooks/useApi';
 import { useT } from '../lib/I18nContext';
@@ -1843,7 +1844,7 @@ export function SettingsPage({
         </div>
       </div>
       <div style={{ textAlign: 'center', padding: '20px 0 10px', color: 'rgba(255,255,255,0.4)', fontSize: 11 }}>
-        Kronn v0.1.0 — <a href="https://github.com/DocRoms/Kronn" target="_blank" rel="noopener noreferrer" style={{ color: 'rgba(200,255,0,0.5)', textDecoration: 'none' }}>Source code (AGPL-3.0)</a>
+        Kronn v{appVersion} — <a href="https://github.com/DocRoms/Kronn" target="_blank" rel="noopener noreferrer" style={{ color: 'rgba(200,255,0,0.5)', textDecoration: 'none' }}>Source code (AGPL-3.0)</a>
       </div>
     </div>
   );

@@ -1,7 +1,8 @@
-.PHONY: start start-prod stop logs clean build dev-backend dev-frontend setup check test-shell lint-backend .env kiro-login
+.PHONY: start start-prod stop logs clean build dev-backend dev-frontend setup check test-shell lint-backend .env kiro-login bump
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 APP_NAME    := kronn
+VERSION     := $(shell cat VERSION 2>/dev/null || echo "0.0.0")
 PORT        := 3140
 DOCKER_COMP := docker compose
 
@@ -20,6 +21,7 @@ RESET  := \033[0m
 	@uname_s=$$(uname -s 2>/dev/null); \
 	if [ "$$uname_s" = "Darwin" ]; then \
 		echo "KRONN_HOST_OS=macOS" >> .env; \
+		echo "KRONN_MACOS_SSH_SOCK=/run/host-services/ssh-auth.sock" >> .env; \
 		if [ -d /opt/homebrew/bin ]; then \
 			echo "KRONN_GLOBAL_BIN=/opt/homebrew/bin" >> .env; \
 			echo "$(CYAN)  Detected macOS (Apple Silicon)$(RESET)"; \
@@ -97,7 +99,7 @@ start: .env _gen-override
 	@CARGO_PROFILE=fast $(DOCKER_COMP) up -d --build
 	@echo ""
 	@echo "  $(CYAN)╭──╮$(RESET)"
-	@echo "  $(CYAN)│$(GREEN)⚡$(CYAN)│$(RESET) $(GREEN)Kronn v0.1.0$(RESET)"
+	@echo "  $(CYAN)│$(GREEN)⚡$(CYAN)│$(RESET) $(GREEN)Kronn v$(VERSION)$(RESET)"
 	@echo "  $(CYAN)╰──╯$(RESET) Services running."
 	@echo ""
 	@echo "       → $(GREEN)http://localhost:$(PORT)$(RESET)"
@@ -118,7 +120,7 @@ stop:
 	@$(DOCKER_COMP) down
 	@echo ""
 	@echo "  $(CYAN)╭──╮$(RESET)"
-	@echo "  $(CYAN)│$(RED)⚡$(CYAN)│$(RESET) $(RED)Kronn v0.1.0$(RESET)"
+	@echo "  $(CYAN)│$(RED)⚡$(CYAN)│$(RESET) $(RED)Kronn v$(VERSION)$(RESET)"
 	@echo "  $(CYAN)╰──╯$(RESET) Services stopped."
 	@echo ""
 
@@ -212,4 +214,23 @@ help:
 	@echo "  make kiro-login     Kiro OAuth login (device flow in container)"
 	@echo "  make typegen        Sync Rust → TS types"
 	@echo "  make test-shell     Run shell tests (bats)"
+	@echo "  make bump V=x.y.z  Bump version everywhere"
 	@echo ""
+
+## ─── Version bump ────────────────────────────────────────────────────────────
+## Usage: make bump V=0.2.0
+bump:
+ifndef V
+	$(error Usage: make bump V=x.y.z)
+endif
+	@echo "$(YELLOW)▸ Bumping version to $(V)...$(RESET)"
+	@echo "$(V)" > VERSION
+	@sed -i 's/^version = ".*"/version = "$(V)"/' backend/Cargo.toml
+	@sed -i 's/^version = ".*"/version = "$(V)"/' desktop/src-tauri/Cargo.toml
+	@sed -i 's/"version": ".*"/"version": "$(V)"/' frontend/package.json
+	@sed -i 's/"version": ".*"/"version": "$(V)"/' desktop/package.json
+	@sed -i 's/"version": ".*"/"version": "$(V)"/' desktop/src-tauri/tauri.conf.json
+	@sed -i 's/Kronn v[0-9]\+\.[0-9]\+\.[0-9]\+/Kronn v$(V)/' README.md
+	@echo "$(GREEN)✓ Version bumped to $(V) in all files$(RESET)"
+	@echo "  Files updated: VERSION, backend/Cargo.toml, desktop/src-tauri/Cargo.toml,"
+	@echo "  frontend/package.json, desktop/package.json, desktop/src-tauri/tauri.conf.json, README.md"

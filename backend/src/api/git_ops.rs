@@ -1,7 +1,26 @@
 //! Shared git operation helpers used by both project and discussion endpoints.
 
 use std::path::Path;
+use rusqlite::Connection;
 use crate::models::*;
+
+/// Resolve a GitHub token from MCP configs in the database.
+/// Looks for configs with server_id "mcp-github" and extracts GITHUB_PERSONAL_ACCESS_TOKEN.
+pub fn resolve_github_token(conn: &Connection, secret: &str) -> Option<String> {
+    let configs = crate::db::mcps::list_configs(conn).ok()?;
+    for config in &configs {
+        if config.server_id == "mcp-github" {
+            if let Ok(env) = crate::db::mcps::decrypt_env(&config.env_encrypted, secret) {
+                if let Some(token) = env.get("GITHUB_PERSONAL_ACCESS_TOKEN") {
+                    if !token.is_empty() {
+                        return Some(token.clone());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
 
 /// Run `git status` in the given repo directory and return structured status.
 pub fn run_git_status(repo_path: &Path) -> Result<GitStatusResponse, String> {
@@ -284,8 +303,17 @@ pub fn run_git_commit(repo_path: &Path, files: &[String], message: &str, amend: 
     Ok(GitCommitResponse { hash, message: message.to_string() })
 }
 
+/// Convert a git SSH URL to HTTPS with embedded token for push.
+/// `git@github.com:org/repo.git` → `https://x-access-token:TOKEN@github.com/org/repo.git`
+fn ssh_to_https_with_token(remote_url: &str, token: &str) -> Option<String> {
+    remote_url.strip_prefix("git@github.com:")
+        .map(|rest| format!("https://x-access-token:{}@github.com/{}", token, rest))
+        .or_else(|| remote_url.strip_prefix("git@gitlab.com:")
+            .map(|rest| format!("https://oauth2:{}@gitlab.com/{}", token, rest)))
+}
+
 /// Push the current branch to origin.
-pub fn run_git_push(repo_path: &Path) -> Result<GitPushResponse, String> {
+pub fn run_git_push(repo_path: &Path, github_token: Option<&str>) -> Result<GitPushResponse, String> {
     let branch_output = std::process::Command::new("git")
         .args(["branch", "--show-current"])
         .current_dir(repo_path)
@@ -297,10 +325,32 @@ pub fn run_git_push(repo_path: &Path) -> Result<GitPushResponse, String> {
         return Err("Cannot determine current branch (detached HEAD?)".to_string());
     }
 
-    let push_output = std::process::Command::new("git")
-        .args(["push", "-u", "origin", &branch])
-        .current_dir(repo_path)
-        .output()
+    // Determine push target: if we have a token and the remote is SSH, use HTTPS with embedded token
+    let push_target = if let Some(token) = github_token {
+        let remote_url = std::process::Command::new("git")
+            .args(["remote", "get-url", "origin"])
+            .current_dir(repo_path)
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+        ssh_to_https_with_token(&remote_url, token)
+    } else {
+        None
+    };
+
+    let mut cmd = std::process::Command::new("git");
+    if let Some(ref https_url) = push_target {
+        // Push to HTTPS URL with embedded token (avoids SSH auth issues)
+        cmd.args(["push", "-u", https_url, &branch]);
+    } else {
+        // Fallback: push to origin via SSH
+        cmd.args(["push", "-u", "origin", &branch]);
+    }
+    cmd.current_dir(repo_path);
+    if let Some(token) = github_token {
+        cmd.env("GH_TOKEN", token);
+    }
+    let push_output = cmd.output()
         .map_err(|e| format!("Failed to run git push: {}", e))?;
 
     if push_output.status.success() {
@@ -447,7 +497,23 @@ pub fn detect_provider(repo_path: &Path) -> &'static str {
 }
 
 /// Create a pull/merge request via gh (GitHub) or glab (GitLab) CLI.
-pub fn run_create_pr(repo_path: &Path, title: &str, body: &str, base: &str) -> Result<String, String> {
+/// Automatically pushes the current branch first if it has no upstream.
+pub fn run_create_pr(repo_path: &Path, title: &str, body: &str, base: &str, github_token: Option<&str>) -> Result<String, String> {
+    // Ensure the branch is pushed before creating the PR
+    let has_upstream = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+        .current_dir(repo_path)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if !has_upstream {
+        let push_result = run_git_push(repo_path, github_token)?;
+        if !push_result.success {
+            return Err(format!("Auto-push failed before PR creation: {}", push_result.message));
+        }
+    }
+
     let provider = detect_provider(repo_path);
 
     let output = match provider {
@@ -472,10 +538,12 @@ pub fn run_create_pr(repo_path: &Path, title: &str, body: &str, base: &str) -> R
                 args.push("--body");
                 args.push(body);
             }
-            std::process::Command::new("gh")
-                .args(&args)
-                .current_dir(repo_path)
-                .output()
+            let mut cmd = std::process::Command::new("gh");
+            cmd.args(&args).current_dir(repo_path);
+            if let Some(token) = github_token {
+                cmd.env("GH_TOKEN", token);
+            }
+            cmd.output()
                 .map_err(|e| format!("Failed to run gh: {} (is gh installed?)", e))?
         }
     };

@@ -14,8 +14,8 @@ mod tests {
     #[test]
     fn registry_count_at_least_35() {
         let reg = builtin_registry();
-        assert!(reg.len() >= 43,
-            "Expected at least 43 MCPs in registry, got {}", reg.len());
+        assert!(reg.len() >= 49,
+            "Expected at least 49 MCPs in registry, got {}", reg.len());
     }
 
     #[test]
@@ -131,12 +131,17 @@ mod tests {
             "mcp-postgres", "mcp-sqlite", "mcp-redis", "mcp-neon",
             // Monitoring
             "mcp-sentry", "mcp-grafana", "mcp-datadog",
-            // Cloud
-            "mcp-cloudflare", "mcp-aws-cloudwatch", "mcp-azure", "mcp-gcloud", "mcp-bigquery",
+            // Cloud & Analytics
+            "mcp-cloudflare", "mcp-aws-cloudwatch", "mcp-aws-api", "mcp-azure", "mcp-gcloud", "mcp-bigquery",
+            "mcp-google-analytics",
             // Browser & Testing
             "mcp-playwright", "mcp-chrome-devtools", "mcp-puppeteer",
             // CDN & Edge
             "mcp-fastly",
+            // Code Quality & IaC
+            "mcp-sonarqube", "mcp-terraform",
+            // Hosting
+            "mcp-vercel",
             // Search
             "mcp-tavily",
             // Compute
@@ -146,7 +151,7 @@ mod tests {
             // Communication & PM
             "mcp-slack", "mcp-linear", "mcp-atlassian",
             // Design
-            "mcp-figma",
+            "mcp-figma", "mcp-drawio",
             // Knowledge & Docs
             "mcp-notion", "mcp-context7",
         ];
@@ -377,6 +382,108 @@ mod tests {
         assert!(m.description.contains("GPU"), "Colab MCP should mention GPU");
         assert!(m.tags.contains(&"compute".to_string()));
         assert!(m.env_keys.is_empty(), "Colab uses browser auth, no API key");
+    }
+
+    #[test]
+    fn aws_api_mcp_configuration() {
+        let reg = builtin_registry();
+        let m = reg.iter().find(|m| m.id == "mcp-aws-api").unwrap();
+        assert_eq!(m.name, "AWS API");
+        assert!(m.description.contains("Unified"), "AWS API MCP should mention unified access");
+        assert!(m.env_keys.contains(&"AWS_ACCESS_KEY_ID".to_string()));
+        assert!(m.env_keys.contains(&"AWS_SECRET_ACCESS_KEY".to_string()));
+        assert!(m.tags.contains(&"aws".to_string()));
+        assert!(m.token_url.is_some());
+    }
+
+    #[test]
+    fn google_analytics_mcp_configuration() {
+        let reg = builtin_registry();
+        let m = reg.iter().find(|m| m.id == "mcp-google-analytics").unwrap();
+        assert_eq!(m.name, "Google Analytics 4");
+        assert!(m.description.contains("GA4"), "GA4 MCP should mention GA4");
+        assert!(m.env_keys.contains(&"GOOGLE_APPLICATION_CREDENTIALS".to_string()));
+        assert!(m.tags.contains(&"analytics".to_string()));
+        assert!(m.token_url.is_some());
+        match &m.transport {
+            McpTransport::Stdio { command, args } => {
+                assert_eq!(command, "uvx");
+                assert!(args.contains(&"analytics-mcp".to_string()));
+            }
+            _ => panic!("GA4 MCP should use Stdio transport"),
+        }
+    }
+
+    #[test]
+    fn sonarqube_mcp_configuration() {
+        let reg = builtin_registry();
+        let m = reg.iter().find(|m| m.id == "mcp-sonarqube").unwrap();
+        assert_eq!(m.name, "SonarQube");
+        assert!(m.env_keys.contains(&"SONARQUBE_TOKEN".to_string()));
+        assert!(m.tags.contains(&"quality".to_string()));
+        assert!(m.token_url.is_some());
+        match &m.transport {
+            McpTransport::Stdio { command, .. } => assert_eq!(command, "docker"),
+            _ => panic!("SonarQube MCP should use Stdio transport"),
+        }
+    }
+
+    #[test]
+    fn terraform_mcp_configuration() {
+        let reg = builtin_registry();
+        let m = reg.iter().find(|m| m.id == "mcp-terraform").unwrap();
+        assert_eq!(m.name, "Terraform");
+        assert!(m.env_keys.contains(&"TFE_TOKEN".to_string()));
+        assert!(m.tags.contains(&"iac".to_string()));
+        assert!(m.token_url.is_some());
+    }
+
+    #[test]
+    fn vercel_mcp_configuration() {
+        let reg = builtin_registry();
+        let m = reg.iter().find(|m| m.id == "mcp-vercel").unwrap();
+        assert_eq!(m.name, "Vercel");
+        assert!(m.env_keys.is_empty(), "Vercel uses OAuth, no API key");
+        assert!(m.tags.contains(&"deploy".to_string()));
+        match &m.transport {
+            McpTransport::Streamable { url } => {
+                assert!(url.contains("mcp.vercel.com"));
+            }
+            _ => panic!("Vercel MCP should use Streamable transport"),
+        }
+    }
+
+    #[test]
+    fn redis_uses_official_server() {
+        let reg = builtin_registry();
+        let m = reg.iter().find(|m| m.id == "mcp-redis").unwrap();
+        assert!(m.description.contains("official Redis"), "Redis should use official Redis server, not Anthropic's");
+        match &m.transport {
+            McpTransport::Stdio { command, args } => {
+                assert_eq!(command, "uvx");
+                assert!(args.iter().any(|a| a.contains("redis-mcp-server")));
+            }
+            _ => panic!("Redis MCP should use Stdio transport"),
+        }
+    }
+
+    #[test]
+    fn drawio_mcp_configuration() {
+        let reg = builtin_registry();
+        let m = reg.iter().find(|m| m.id == "mcp-drawio").unwrap();
+        assert_eq!(m.name, "draw.io");
+        assert!(m.description.contains("diagrams"), "draw.io MCP should mention diagrams");
+        assert!(m.tags.contains(&"design".to_string()));
+        assert!(m.tags.contains(&"diagrams".to_string()));
+        assert!(m.env_keys.is_empty(), "draw.io MCP needs no API keys");
+        match &m.transport {
+            McpTransport::Stdio { command, args } => {
+                assert_eq!(command, "npx");
+                assert!(args.iter().any(|a| a.contains("drawio-mcp")),
+                    "draw.io MCP args should reference drawio-mcp package");
+            }
+            _ => panic!("draw.io MCP should use Stdio transport"),
+        }
     }
 
     #[test]

@@ -3349,6 +3349,18 @@ pub async fn read_ai_file(
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Helper: resolve a project's filesystem path from its DB id.
+/// Resolve GitHub token from MCP configs for git operations (push, PR creation).
+async fn resolve_github_token_from_state(state: &AppState) -> Option<String> {
+    let cfg = state.config.read().await;
+    let secret = cfg.encryption_secret.clone()?;
+    drop(cfg);
+    let db = state.db.clone();
+    db.with_conn(move |conn| Ok(super::git_ops::resolve_github_token(conn, &secret)))
+        .await
+        .ok()
+        .flatten()
+}
+
 async fn resolve_project_path(state: &AppState, id: &str) -> Result<std::path::PathBuf, String> {
     let pid = id.to_string();
     let project = state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &pid))
@@ -3494,8 +3506,9 @@ pub async fn git_push(
         Err(e) => return Json(ApiResponse::err(e)),
     };
 
+    let github_token = resolve_github_token_from_state(&state).await;
     let result = tokio::task::spawn_blocking(move || {
-        super::git_ops::run_git_push(&repo_path)
+        super::git_ops::run_git_push(&repo_path, github_token.as_deref())
     }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     match result {
@@ -3564,8 +3577,9 @@ pub async fn create_pr(
     let title = req.title.clone();
     let body = req.body.clone();
     let base = req.base.clone();
+    let github_token = resolve_github_token_from_state(&state).await;
     let result = tokio::task::spawn_blocking(move || {
-        super::git_ops::run_create_pr(&repo_path, &title, &body, &base)
+        super::git_ops::run_create_pr(&repo_path, &title, &body, &base, github_token.as_deref())
     }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     match result {

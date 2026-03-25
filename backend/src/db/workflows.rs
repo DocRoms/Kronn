@@ -174,17 +174,45 @@ pub fn insert_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
 }
 
 pub fn update_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
+    update_run_progress(conn, RunProgressSnapshot::from_run(run))
+}
+
+/// Lightweight snapshot of a WorkflowRun for progress updates.
+/// Avoids cloning the entire WorkflowRun (trigger_context, etc.) on every step.
+pub struct RunProgressSnapshot {
+    pub id: String,
+    pub status: RunStatus,
+    pub step_results: Vec<StepResult>,
+    pub tokens_used: u64,
+    pub workspace_path: Option<String>,
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
+impl RunProgressSnapshot {
+    pub fn from_run(run: &WorkflowRun) -> Self {
+        Self {
+            id: run.id.clone(),
+            status: run.status.clone(),
+            step_results: run.step_results.clone(),
+            tokens_used: run.tokens_used,
+            workspace_path: run.workspace_path.clone(),
+            finished_at: run.finished_at,
+        }
+    }
+}
+
+pub fn update_run_progress(conn: &Connection, snap: RunProgressSnapshot) -> Result<()> {
     conn.execute(
         "UPDATE workflow_runs SET status = ?2, step_results_json = ?3,
          tokens_used = ?4, workspace_path = ?5, finished_at = ?6
          WHERE id = ?1",
         params![
-            run.id,
-            run_status_str(&run.status),
-            serde_json::to_string(&run.step_results)?,
-            run.tokens_used as i64,
-            run.workspace_path,
-            run.finished_at.map(|d| d.to_rfc3339()),
+            snap.id,
+            run_status_str(&snap.status),
+            serde_json::to_string(&snap.step_results)?,
+            snap.tokens_used as i64,
+            snap.workspace_path,
+            snap.finished_at.map(|d| d.to_rfc3339()),
         ],
     )?;
     Ok(())

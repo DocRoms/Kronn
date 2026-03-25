@@ -27,22 +27,12 @@
 |----|---------|------|----------|
 | TD-20260314-no-tls | No TLS/HTTPS — secrets in cleartext on network. Documented in README. nginx TLS setup pending. | Infra | High |
 | TD-20260318-no-auth-by-default | API is unauthenticated until user manually sets a Bearer token — no default protection | Backend | High |
-| TD-20260318-orchestrate-god-fn | `orchestrate()` in discussions.rs is ~543 lines — should be split | Backend | High |
 | TD-20260314-no-pagination | No pagination on list_discussions / list_runs / list_projects | Backend | Medium |
-| TD-20260314-error-boundary-single | Single ErrorBoundary — one component crash takes down entire UI | Frontend | Medium |
-| TD-20260314-backup-sqlite | ~~No automatic SQLite backup before migrations~~ **FIXED**: backup created before pending migrations | Backend | ~~Medium~~ Done |
-| TD-20260314-no-changelog | No CHANGELOG, version stuck at 0.1.0 | Docs | Medium |
 | TD-20260314-no-api-docs | No OpenAPI/Swagger API documentation | Docs | Medium |
 | TD-20260318-token-tracking-incomplete | Token usage returns 0 for Gemini CLI and Vibe (TODO in runner.rs) | Backend | Medium |
 | TD-20260318-large-pages | DiscussionsPage (2325L), WorkflowsPage (1977L), SettingsPage (1874L), Dashboard (1489L) — monolithic | Frontend | Medium |
-| TD-20260318-any-types-frontend | `as any` casts in WorkflowsPage and SettingsPage — type safety gap | Frontend | Medium |
 | TD-20260318-drift-detection | Audit drift detection via `ai/checksums.json` — see `ai/tech-debt/TD-20260318-drift-detection.md` | Backend + Frontend | Feature |
 | TD-20260306-inline-styles | All styles are inline — no theming or consistency system | Frontend | Low |
 | TD-20260314-polling-heavy | Frontend polls discussions every 15s. WebSocket/SSE push still planned. | Frontend + Backend | Low |
-| TD-20260314-workflow-clones | Excessive `run.clone()` in workflow runner — O(n²) memory | Backend | Low |
 | TD-20260314-home-mount | `$HOME` mounted read-only in container — security + portability risk | Infra | Low |
-| TD-20260314-no-multi-arch | No multi-architecture Docker support (ARM64) | Infra | Low |
-| TD-20260314-error-hints-french | `detect_agent_error_hint` messages hardcoded in French (exec hint in git_ops.rs fixed) | Backend | Low |
 | TD-20260318-console-errors-prod | 51 console.error() left in frontend production code (intentional for v0.1.0 debugging) | Frontend | Low |
-| TD-20260318-no-docker-restart | ~~No restart policy on Docker services~~ **FIXED**: `restart: unless-stopped` on all 3 services | Infra | ~~Low~~ Done |
-| TD-20260318-csp-missing | ~~No Content-Security-Policy header in nginx~~ **FIXED**: CSP header added | Infra | ~~Low~~ Done |

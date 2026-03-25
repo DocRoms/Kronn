@@ -56,6 +56,14 @@ RUN ARCH=$(dpkg --print-architecture) && \
     curl -fsSL "https://gitlab.com/gitlab-org/cli/-/releases/v1.52.0/downloads/glab_1.52.0_linux_${ARCH}.deb" -o /tmp/glab.deb && \
     dpkg -i /tmp/glab.deb && rm /tmp/glab.deb
 
+# Install Bun (needed by some MCP servers like fastly-mcp-server)
+RUN BUN_ARCH=$(dpkg --print-architecture | sed 's/amd64/x64/' | sed 's/arm64/aarch64/') && \
+    curl -fsSL "https://github.com/oven-sh/bun/releases/latest/download/bun-linux-${BUN_ARCH}.zip" -o /tmp/bun.zip && \
+    unzip -o /tmp/bun.zip -d /tmp/bun && \
+    mv /tmp/bun/bun-linux-${BUN_ARCH}/bun /usr/local/bin/bun && \
+    chmod +x /usr/local/bin/bun && \
+    rm -rf /tmp/bun /tmp/bun.zip
+
 # Install uv (pinned version) as root, then make available to kronn user
 COPY --from=ghcr.io/astral-sh/uv:0.5.14 /uv /usr/local/bin/uv
 COPY --from=ghcr.io/astral-sh/uv:0.5.14 /uvx /usr/local/bin/uvx

@@ -64,7 +64,7 @@ Kronn/
 │       │   ├── mod.rs          # Re-exports
 │       │   ├── config.rs       # Config load/save (~/.config/kronn/)
 │       │   ├── scanner.rs      # Git repo scanner + AI audit detection (detect_audit_status, count_ai_todos)
-│       │   ├── registry.rs     # MCP registry (43 built-in official servers, grouped by category, with token_url/token_help)
+│       │   ├── registry.rs     # MCP registry (48 built-in official servers, grouped by category, with token_url/token_help)
 │       │   ├── mcp_scanner.rs  # Multi-agent MCP sync + MCP injection. read_all_mcp_contexts() reads .mcp.json + context files and generates prompt listing available MCP tools. Disk sync: .mcp.json (Claude), .vibe/config.toml (Vibe), ~/.codex/config.toml (Codex). .gitignore safety
 │       │   ├── crypto.rs       # AES-256-GCM encryption for MCP secrets
 │       │   ├── skills.rs      # Skills loader: builtin (embedded .md) + custom (~/.config/kronn/skills/). Frontmatter parsing, build_skills_prompt()

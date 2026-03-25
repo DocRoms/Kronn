@@ -331,6 +331,26 @@ ensure_in_path() {
         fi
 
         success "kronn is now accessible everywhere."
+
+        # Install shell completions
+        local comp_dir="$KRONN_DIR/completions"
+        if [[ -n "$BASH_VERSION" ]] && [[ -f "$comp_dir/kronn.bash" ]]; then
+            local bash_comp_dir="${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions"
+            mkdir -p "$bash_comp_dir"
+            ln -sf "$comp_dir/kronn.bash" "$bash_comp_dir/kronn"
+            info "Bash completions installed (restart shell to activate)"
+        elif [[ -n "$ZSH_VERSION" ]] && [[ -f "$comp_dir/kronn.zsh" ]]; then
+            local zsh_comp_dir="${HOME}/.zsh/completions"
+            mkdir -p "$zsh_comp_dir"
+            ln -sf "$comp_dir/kronn.zsh" "$zsh_comp_dir/_kronn"
+            if [[ ":$FPATH:" != *":$zsh_comp_dir:"* ]]; then
+                info "Zsh completions installed. Add to ~/.zshrc:"
+                printf "  ${DIM}  fpath=(~/.zsh/completions \$fpath)${RESET}\n"
+                printf "  ${DIM}  autoload -Uz compinit && compinit${RESET}\n"
+            else
+                info "Zsh completions installed (restart shell to activate)"
+            fi
+        fi
     fi
 }
 

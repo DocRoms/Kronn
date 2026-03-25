@@ -4,13 +4,14 @@
  */
 
 import * as tts from '@diffusionstudio/vits-web';
+import type { VoiceId } from '@diffusionstudio/vits-web';
 
 self.onmessage = async (event: MessageEvent<{ text: string; voiceId: string }>) => {
   const { text, voiceId } = event.data;
   try {
     const wav = await tts.predict({
       text,
-      voiceId: voiceId as any,
+      voiceId: voiceId as VoiceId,
     });
     self.postMessage({ audio: wav });
   } catch (err) {
