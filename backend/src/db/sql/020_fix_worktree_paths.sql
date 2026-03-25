@@ -1,0 +1,3 @@
+-- Worktree path migration from /data/workspaces/ to .kronn-worktrees/
+-- Actual migration is done at startup in Rust (re-attaches existing branches).
+-- This SQL is intentionally empty — it serves as a migration marker only.

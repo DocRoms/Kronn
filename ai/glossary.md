@@ -38,7 +38,9 @@ Project-specific terms. For deep dives, follow the linked `ai/architecture/` fil
 
 **Project** — A registered git repository managed by Kronn. Has MCPs, workflows, and AI config detection.
 
-**Discussion** — A chat conversation with one or more AI agents, optionally tied to a project (`project_id: Option<String>`). Supports single-agent and multi-agent (orchestration) modes. Global discussions (no project) appear under "Général" in the sidebar.
+**Discussion** — A chat conversation with one or more AI agents, optionally tied to a project (`project_id: Option<String>`). Supports single-agent and multi-agent (orchestration) modes. Global discussions (no project) appear under "Général" in the sidebar. Can be "Direct" (works on project root) or "Isolated" (dedicated git worktree).
+
+**Worktree (discussion)** — Git worktree created in `<repo>/.kronn-worktrees/<project>--<slug>` for Isolated discussions. Gives the agent its own branch (`kronn/<slug>`) without affecting the main working tree. Can be **locked** (worktree exists, branch reserved) or **unlocked** (worktree removed, branch free for user checkout/testing). Auto re-locked when the user resumes the conversation. Managed by `core/worktree.rs`, endpoints `POST /discussions/:id/worktree-unlock` and `worktree-lock`.
 
 **Orchestration** — Multi-agent debate: multiple agents discuss in configurable rounds (1–3, default 2 in UI). Primary agent speaks last and synthesizes. Round count configurable from the debate popover.
 

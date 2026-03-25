@@ -12,7 +12,7 @@ import {
   Plus, Trash2, Loader2,
   MessageSquare, Send, X, Key, AlertTriangle, Users,
   StopCircle, RotateCcw, Pencil, ShieldCheck, Check, Archive, Zap, UserCircle, FileText, Settings, Rocket, Play, Pause,
-  Volume2, VolumeX, Mic, MicOff, Phone, PhoneOff, Menu,
+  Volume2, VolumeX, Mic, MicOff, Phone, PhoneOff, Menu, Lock, Unlock, Copy, Clock,
 } from 'lucide-react';
 import { useIsMobile } from '../hooks/useMediaQuery';
 
@@ -287,6 +287,8 @@ export function DiscussionsPage({
   const [newDiscBranchName, setNewDiscBranchName] = useState('');
   const [newDiscBaseBranch, setNewDiscBaseBranch] = useState('main');
   const [expandedSummaryMsgId, setExpandedSummaryMsgId] = useState<string | null>(null);
+  const [worktreeError, setWorktreeError] = useState<string | null>(null);
+  const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
   const [ttsEnabled, setTtsEnabled] = useState<boolean>(() => {
     try { return localStorage.getItem('kronn:ttsEnabled') === 'true'; } catch { return false; }
   });
@@ -368,6 +370,9 @@ export function DiscussionsPage({
     }).catch(() => { /* ignore fetch errors */ });
     return () => { cancelled = true; };
   }, [activeDiscussionId, activeSending]);
+
+  // Clear worktree error when switching discussions
+  useEffect(() => { setWorktreeError(null); }, [activeDiscussionId]);
 
   // ─── Derived data ────────────────────────────────────────────────────────
   const activeDiscussion = (activeDiscussionId && loadedDiscussions[activeDiscussionId])
@@ -605,7 +610,7 @@ export function DiscussionsPage({
         discId,
         (text) => appendStreamChunk(discId, text),
         () => cleanupStream(discId),
-        (error) => { console.error('Agent error:', error); toast(String(error), 'error'); cleanupStream(discId); },
+        (error) => { console.error('Agent error:', error); const e = String(error); if (e.includes('checked out') || e.includes('worktree')) { setWorktreeError(e); } else { toast(e, 'error'); } cleanupStream(discId); },
         controller.signal,
         onAgentLog,
       );
@@ -669,7 +674,7 @@ export function DiscussionsPage({
       discId,
       (text) => appendStreamChunk(discId, text),
       () => cleanupStream(discId),
-      (error) => { console.error('Agent error:', error); toast(String(error), 'error'); cleanupStream(discId); },
+      (error) => { console.error('Agent error:', error); const e = String(error); if (e.includes('checked out') || e.includes('worktree')) { setWorktreeError(e); } else { toast(e, 'error'); } cleanupStream(discId); },
       controller.signal,
         onAgentLog,
     );
@@ -880,7 +885,16 @@ export function DiscussionsPage({
       { content: msg, target_agent: targetAgent },
       (text) => appendStreamChunk(discId, text),
       () => cleanupStream(discId),
-      (error) => { console.error('Agent error:', error); toast(String(error), 'error'); cleanupStream(discId); },
+      (error) => {
+        console.error('Agent error:', error);
+        const errStr = String(error);
+        if (errStr.includes('checked out') || errStr.includes('worktree')) {
+          setWorktreeError(errStr);
+        } else {
+          toast(errStr, 'error');
+        }
+        cleanupStream(discId);
+      },
       controller.signal,
       () => {
         refetchDiscussions();
@@ -914,7 +928,16 @@ export function DiscussionsPage({
       discId,
       (text) => appendStreamChunk(discId, text),
       () => cleanupStream(discId),
-      (error) => { console.error('Agent error:', error); toast(String(error), 'error'); cleanupStream(discId); },
+      (error) => {
+        console.error('Agent error:', error);
+        const errStr = String(error);
+        if (errStr.includes('checked out') || errStr.includes('worktree')) {
+          setWorktreeError(errStr);
+        } else {
+          toast(errStr, 'error');
+        }
+        cleanupStream(discId);
+      },
       controller.signal,
         onAgentLog,
     );
@@ -940,7 +963,7 @@ export function DiscussionsPage({
       discId,
       (text) => appendStreamChunk(discId, text),
       () => cleanupStream(discId),
-      (error) => { console.error('Agent error:', error); toast(String(error), 'error'); cleanupStream(discId); },
+      (error) => { console.error('Agent error:', error); const e = String(error); if (e.includes('checked out') || e.includes('worktree')) { setWorktreeError(e); } else { toast(e, 'error'); } cleanupStream(discId); },
       controller.signal,
         onAgentLog,
     );
@@ -1670,10 +1693,29 @@ export function DiscussionsPage({
                 </div>
                 <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 2, display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
                   <span>{activeDiscussion.project_id ? (projects.find(p => p.id === activeDiscussion.project_id)?.name ?? '?') : t('disc.general')} · {activeDiscussion.agent}</span>
-                  {activeDiscussion.workspace_mode === 'Isolated' && (
-                    <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 6, background: 'rgba(96,165,250,0.1)', color: '#60a5fa', border: '1px solid rgba(96,165,250,0.2)', display: 'inline-flex', alignItems: 'center', gap: 3 }}>
-                      <GitBranch size={8} /> {activeDiscussion.worktree_branch ?? t('disc.isolatedBadge')}
-                      <span style={{ opacity: 0.5, fontSize: 9 }}>worktree</span>
+                  {activeDiscussion.workspace_mode === 'Isolated' && activeDiscussion.worktree_branch && (
+                    <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 6, background: activeDiscussion.workspace_path ? 'rgba(96,165,250,0.1)' : 'rgba(250,204,21,0.1)', color: activeDiscussion.workspace_path ? '#60a5fa' : '#facc15', border: `1px solid ${activeDiscussion.workspace_path ? 'rgba(96,165,250,0.2)' : 'rgba(250,204,21,0.2)'}`, display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                      <GitBranch size={8} /> {activeDiscussion.worktree_branch}
+                      <span style={{ opacity: 0.5, fontSize: 9 }}>{activeDiscussion.workspace_path ? 'worktree' : t('disc.worktreeUnlocked')}</span>
+                      <button
+                        title={activeDiscussion.workspace_path ? t('disc.worktreeUnlock') : t('disc.worktreeLock')}
+                        onClick={async (e) => {
+                          e.stopPropagation();
+                          try {
+                            if (activeDiscussion.workspace_path) {
+                              await discussionsApi.worktreeUnlock(activeDiscussion.id);
+                            } else {
+                              await discussionsApi.worktreeLock(activeDiscussion.id);
+                            }
+                            reloadDiscussion(activeDiscussion.id);
+                          } catch (err) {
+                            toast(String(err), 'error');
+                          }
+                        }}
+                        style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: 'inherit', display: 'inline-flex', alignItems: 'center', opacity: 0.7 }}
+                      >
+                        {activeDiscussion.workspace_path ? <Unlock size={9} /> : <Lock size={9} />}
+                      </button>
                     </span>
                   )}
                   {(activeDiscussion.profile_ids?.length ?? 0) > 0 && (
@@ -2074,8 +2116,26 @@ export function DiscussionsPage({
                       : {}),
                   }}>
                     {msg.role === 'Agent' && (
-                      <div style={{ ...ds.msgAgent, color: agentColor(msg.agent_type ?? activeDiscussion.agent) }}>
-                        <Cpu size={10} /> {msg.agent_type ?? activeDiscussion.agent}
+                      <div style={{ ...ds.msgAgent, color: agentColor(msg.agent_type ?? activeDiscussion.agent), display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                          <Cpu size={10} /> {msg.agent_type ?? activeDiscussion.agent}
+                        </span>
+                        <button
+                          onClick={() => {
+                            navigator.clipboard.writeText(msg.content);
+                            setCopiedMsgId(msg.id);
+                            setTimeout(() => setCopiedMsgId(prev => prev === msg.id ? null : prev), 1500);
+                          }}
+                          title={t('disc.copyMessage')}
+                          style={{
+                            background: 'none', border: 'none', padding: '1px 4px', cursor: 'pointer',
+                            color: copiedMsgId === msg.id ? '#34d399' : 'rgba(255,255,255,0.2)',
+                            display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9,
+                            transition: 'color 0.15s',
+                          }}
+                        >
+                          {copiedMsgId === msg.id ? <><Check size={9} /> {t('disc.copied')}</> : <Copy size={9} />}
+                        </button>
                       </div>
                     )}
                     {msg.role === 'System' && (
@@ -2222,8 +2282,39 @@ export function DiscussionsPage({
                             {msg.auth_mode === 'override' ? 'API key' : 'auth locale'}
                           </span>
                         )}
+                        {msg.role === 'Agent' && (() => {
+                          const prevUser = msgs.slice(0, idx).reverse().find(m => m.role === 'User');
+                          if (!prevUser) return null;
+                          const ms = new Date(msg.timestamp).getTime() - new Date(prevUser.timestamp).getTime();
+                          if (ms <= 0) return null;
+                          const s = Math.round(ms / 1000);
+                          const label = s >= 60 ? `${Math.floor(s / 60)}m${s % 60 ? ` ${s % 60}s` : ''}` : `${s}s`;
+                          return (
+                            <span style={{ color: 'rgba(255,255,255,0.2)', fontSize: 9, display: 'inline-flex', alignItems: 'center', gap: 2 }}>
+                              <Clock size={8} /> {label}
+                            </span>
+                          );
+                        })()}
                       </div>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        {msg.role === 'Agent' && (
+                          <button
+                            onClick={() => {
+                              navigator.clipboard.writeText(msg.content);
+                              setCopiedMsgId(msg.id);
+                              setTimeout(() => setCopiedMsgId(prev => prev === msg.id ? null : prev), 1500);
+                            }}
+                            title={t('disc.copyMessage')}
+                            style={{
+                              background: 'none', border: 'none', padding: '1px 4px', cursor: 'pointer',
+                              color: copiedMsgId === msg.id ? '#34d399' : 'rgba(255,255,255,0.2)',
+                              display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9,
+                              transition: 'color 0.15s',
+                            }}
+                          >
+                            {copiedMsgId === msg.id ? <><Check size={9} /> {t('disc.copied')}</> : <><Copy size={9} /> {t('disc.copy')}</>}
+                          </button>
+                        )}
                         {msg.role === 'Agent' && hasFullAccess(msg.agent_type ?? activeDiscussion.agent) && (
                           <span style={{
                             display: 'inline-flex', alignItems: 'center', gap: 3,
@@ -2659,6 +2750,50 @@ export function DiscussionsPage({
                   );
                 })()}
 
+                {/* Worktree error banner */}
+                {worktreeError && (
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: 8,
+                    padding: '8px 12px', margin: '4px 8px 0',
+                    background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.3)',
+                    borderRadius: 8, fontSize: 11, color: '#fca5a5',
+                  }}>
+                    <AlertTriangle size={14} style={{ color: '#ef4444', flexShrink: 0 }} />
+                    <span style={{ flex: 1 }}>{worktreeError}</span>
+                    <button
+                      onClick={async () => {
+                        if (!activeDiscussionId) return;
+                        try {
+                          await discussionsApi.worktreeLock(activeDiscussionId);
+                          setWorktreeError(null);
+                          reloadDiscussion(activeDiscussionId);
+                          toast(t('disc.worktreeLock') + ' ✓', 'success');
+                        } catch (err) {
+                          setWorktreeError(String(err));
+                        }
+                      }}
+                      style={{
+                        background: 'rgba(239,68,68,0.15)', border: '1px solid rgba(239,68,68,0.3)',
+                        borderRadius: 6, padding: '4px 10px', cursor: 'pointer',
+                        color: '#fca5a5', fontSize: 10, fontFamily: 'inherit',
+                        display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0,
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      <RotateCcw size={10} /> Retry
+                    </button>
+                    <button
+                      onClick={() => setWorktreeError(null)}
+                      style={{
+                        background: 'none', border: 'none', padding: 2, cursor: 'pointer',
+                        color: 'rgba(255,255,255,0.3)', display: 'flex', flexShrink: 0,
+                      }}
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
+                )}
+
                 {/* Textarea */}
                 <textarea
                   ref={chatInputRef}
@@ -3054,6 +3189,52 @@ const mdStyles: Record<string, React.CSSProperties> = {
   strong: { fontWeight: 700, color: '#f0f0f0' },
 };
 
+/** Extract plain text from a DOM node tree (for copy-to-clipboard). */
+function extractText(node: HTMLElement): string {
+  if (node.tagName === 'TABLE') {
+    const rows = Array.from(node.querySelectorAll('tr'));
+    return rows.map(row => {
+      const cells = Array.from(row.querySelectorAll('th, td'));
+      return cells.map(c => c.textContent?.trim() ?? '').join('\t');
+    }).join('\n');
+  }
+  return node.textContent ?? '';
+}
+
+/** Tiny copy button overlaid on a block (table or code). */
+function CopyableBlock({ children, style, tag }: { children: any; style?: Record<string, any>; tag: 'table' | 'pre' }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [copied, setCopied] = useState(false);
+  const handleCopy = () => {
+    const el = ref.current?.querySelector(tag);
+    if (el) {
+      navigator.clipboard.writeText(extractText(el as HTMLElement));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    }
+  };
+  return (
+    <div ref={ref} style={{ position: 'relative', ...style }}>
+      {children}
+      <button
+        onClick={handleCopy}
+        style={{
+          position: 'absolute', top: 4, right: 4,
+          background: 'rgba(0,0,0,0.5)', border: '1px solid rgba(255,255,255,0.1)',
+          borderRadius: 4, padding: '2px 6px', cursor: 'pointer',
+          color: copied ? '#34d399' : 'rgba(255,255,255,0.4)',
+          fontSize: 9, display: 'flex', alignItems: 'center', gap: 3,
+          transition: 'color 0.15s, opacity 0.15s', opacity: 0.6,
+        }}
+        onMouseEnter={e => (e.currentTarget.style.opacity = '1')}
+        onMouseLeave={e => (e.currentTarget.style.opacity = '0.6')}
+      >
+        {copied ? <>{'\u2713'}</> : <>{'\u2398'}</>}
+      </button>
+    </div>
+  );
+}
+
 const mdComponents = {
   p: ({ children }: any) => <p style={mdStyles.p}>{children}</p>,
   h1: ({ children }: any) => <h1 style={mdStyles.h1}>{children}</h1>,
@@ -3068,8 +3249,16 @@ const mdComponents = {
       ? <code style={mdStyles.preCode}>{children}</code>
       : <code style={mdStyles.code}>{children}</code>;
   },
-  pre: ({ children }: any) => <pre style={mdStyles.pre}>{children}</pre>,
-  table: ({ children }: any) => <table style={mdStyles.table}>{children}</table>,
+  pre: ({ children }: any) => (
+    <CopyableBlock tag="pre">
+      <pre style={mdStyles.pre}>{children}</pre>
+    </CopyableBlock>
+  ),
+  table: ({ children }: any) => (
+    <CopyableBlock tag="table" style={{ overflowX: 'auto' }}>
+      <table style={mdStyles.table}>{children}</table>
+    </CopyableBlock>
+  ),
   th: ({ children }: any) => <th style={mdStyles.th}>{children}</th>,
   td: ({ children }: any) => <td style={mdStyles.td}>{children}</td>,
   blockquote: ({ children }: any) => <blockquote style={mdStyles.blockquote}>{children}</blockquote>,

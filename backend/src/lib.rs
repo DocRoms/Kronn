@@ -233,6 +233,8 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/discussions/:id/git-pr", post(api::discussions::disc_create_pr))
         .route("/api/discussions/:id/pr-template", get(api::discussions::disc_pr_template))
         .route("/api/discussions/:id/exec", post(api::discussions::disc_exec))
+        .route("/api/discussions/:id/worktree-unlock", post(api::discussions::worktree_unlock))
+        .route("/api/discussions/:id/worktree-lock", post(api::discussions::worktree_lock))
         // ── Skills ──
         .route("/api/skills", get(api::skills::list).post(api::skills::create))
         .route("/api/skills/:id", put(api::skills::update).delete(api::skills::delete))

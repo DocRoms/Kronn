@@ -425,7 +425,7 @@ async fn make_agent_stream(
     let skill_ids = disc.skill_ids.clone();
     let directive_ids = disc.directive_ids.clone();
     let profile_ids = disc.profile_ids.clone();
-    let workspace_path = disc.workspace_path.clone();
+    let mut workspace_path = disc.workspace_path.clone();
 
     let project_path = if let Some(ref pid) = disc.project_id {
         let pid = pid.clone();
@@ -436,6 +436,54 @@ async fn make_agent_stream(
     } else {
         String::new()
     };
+
+    // Auto re-lock: if discussion is Isolated but worktree was unlocked, re-create it
+    if disc.workspace_mode == "Isolated" && workspace_path.is_none() && !project_path.is_empty() {
+        if let Some(ref branch) = disc.worktree_branch {
+            let resolved = crate::core::scanner::resolve_host_path(&project_path);
+            let repo_path = std::path::Path::new(&resolved);
+
+            // Fetch project name for slug
+            let pname = if let Some(ref pid) = disc.project_id {
+                let pid = pid.clone();
+                state.db.with_conn(move |conn| {
+                    let p = crate::db::projects::get_project(conn, &pid)?;
+                    Ok(p.map(|p| p.name).unwrap_or_default())
+                }).await.unwrap_or_default()
+            } else {
+                String::new()
+            };
+
+            match crate::core::worktree::reattach_worktree(repo_path, &pname, &disc.title, branch) {
+                Ok(info) => {
+                    let did = disc.id.clone();
+                    let wp = info.path.clone();
+                    let wb = info.branch.clone();
+                    let _ = state.db.with_conn(move |conn| {
+                        crate::db::discussions::update_discussion_workspace(conn, &did, &wp, &wb)
+                    }).await;
+                    tracing::info!("Auto re-locked worktree for discussion '{}'", disc.title);
+                    workspace_path = Some(info.path);
+                }
+                Err(e) => {
+                    tracing::warn!("Auto re-lock failed for '{}': {}", disc.title, e);
+                    let err_msg = if e.contains("currently checked out") {
+                        e.clone()
+                    } else {
+                        format!("Failed to re-create worktree: {}", e)
+                    };
+                    let stream: SseStream = Box::pin(futures::stream::once(async move {
+                        Ok::<_, Infallible>(
+                            Event::default().event("error").data(
+                                serde_json::json!({ "error": err_msg }).to_string()
+                            )
+                        )
+                    }));
+                    return Sse::new(stream);
+                }
+            }
+        }
+    }
 
     // For general discussions (no project), write .mcp.json + build MCP context
     let global_mcp_context = if project_path.is_empty() {
@@ -2377,6 +2425,122 @@ pub async fn disc_git_push(
 }
 
 /// POST /api/discussions/:id/exec
+/// POST /api/discussions/:id/worktree-unlock
+/// Removes the worktree to free the branch for user checkout/testing.
+/// Keeps the branch and all commits intact.
+pub async fn worktree_unlock(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<String>> {
+    let disc = match state.db.with_conn({
+        let did = id.clone();
+        move |conn| crate::db::discussions::get_discussion(conn, &did)
+    }).await {
+        Ok(Some(d)) => d,
+        Ok(None) => return Json(ApiResponse::err("Discussion not found")),
+        Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
+    };
+
+    let wp = match &disc.workspace_path {
+        Some(p) if p.contains(".kronn-worktrees") => p.clone(),
+        Some(_) => return Json(ApiResponse::err("Workspace is not a worktree")),
+        None => return Json(ApiResponse::err("No worktree to unlock")),
+    };
+
+    let pid = match &disc.project_id {
+        Some(p) => p.clone(),
+        None => return Json(ApiResponse::err("No project associated")),
+    };
+
+    let project_path = state.db.with_conn(move |conn| {
+        let p = crate::db::projects::get_project(conn, &pid)?;
+        Ok(p.map(|p| p.path).unwrap_or_default())
+    }).await.unwrap_or_default();
+
+    if project_path.is_empty() {
+        return Json(ApiResponse::err("Project not found"));
+    }
+
+    let resolved = crate::core::scanner::resolve_host_path(&project_path);
+    let repo_path = std::path::Path::new(&resolved);
+
+    // Remove worktree but keep the branch
+    if let Err(e) = crate::core::worktree::remove_discussion_worktree(repo_path, &wp, false) {
+        return Json(ApiResponse::err(format!("Failed to unlock: {}", e)));
+    }
+
+    // Clear workspace_path in DB (worktree_branch stays so we can re-lock later)
+    let did = disc.id.clone();
+    let _ = state.db.with_conn(move |conn| {
+        conn.execute(
+            "UPDATE discussions SET workspace_path = NULL WHERE id = ?1",
+            rusqlite::params![did],
+        )?;
+        Ok(())
+    }).await;
+
+    let branch = disc.worktree_branch.unwrap_or_default();
+    tracing::info!("Unlocked worktree for discussion '{}', branch {} is free", disc.title, branch);
+    Json(ApiResponse::ok(format!("Branch {} unlocked — you can now checkout it in your repo", branch)))
+}
+
+/// POST /api/discussions/:id/worktree-lock
+/// Re-creates the worktree for the discussion branch.
+/// Fails if the branch is still checked out in the main repo.
+pub async fn worktree_lock(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<String>> {
+    let disc = match state.db.with_conn({
+        let did = id.clone();
+        move |conn| crate::db::discussions::get_discussion(conn, &did)
+    }).await {
+        Ok(Some(d)) => d,
+        Ok(None) => return Json(ApiResponse::err("Discussion not found")),
+        Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
+    };
+
+    if disc.workspace_path.is_some() {
+        return Json(ApiResponse::err("Worktree already locked"));
+    }
+
+    let branch = match &disc.worktree_branch {
+        Some(b) => b.clone(),
+        None => return Json(ApiResponse::err("No branch associated with this discussion")),
+    };
+
+    let pid = match &disc.project_id {
+        Some(p) => p.clone(),
+        None => return Json(ApiResponse::err("No project associated")),
+    };
+
+    let project = match state.db.with_conn(move |conn| {
+        crate::db::projects::get_project(conn, &pid)
+    }).await {
+        Ok(Some(p)) => p,
+        _ => return Json(ApiResponse::err("Project not found")),
+    };
+
+    let resolved = crate::core::scanner::resolve_host_path(&project.path);
+    let repo_path = std::path::Path::new(&resolved);
+
+    match crate::core::worktree::reattach_worktree(
+        repo_path, &project.name, &disc.title, &branch,
+    ) {
+        Ok(info) => {
+            let did = disc.id.clone();
+            let wp = info.path.clone();
+            let wb = info.branch.clone();
+            let _ = state.db.with_conn(move |conn| {
+                crate::db::discussions::update_discussion_workspace(conn, &did, &wp, &wb)
+            }).await;
+            tracing::info!("Re-locked worktree for discussion '{}': {}", disc.title, info.path);
+            Json(ApiResponse::ok(format!("Worktree re-created at {}", info.path)))
+        }
+        Err(e) => Json(ApiResponse::err(format!("Failed to lock: {}", e))),
+    }
+}
+
 pub async fn disc_exec(
     State(state): State<AppState>,
     Path(id): Path<String>,

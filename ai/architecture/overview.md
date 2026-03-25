@@ -48,6 +48,11 @@ Three Docker services behind nginx gateway:
 - **Archive/unarchive**: `Discussion.archived: bool` (default false). Swipe right on sidebar item to archive, swipe left to delete. Archived discussions shown in a collapsible "Archives" section at the bottom of the sidebar. `PATCH /api/discussions/:id` with `UpdateDiscussionRequest { title?, archived? }`.
 - **Title editing**: double-click or pencil icon in chat header for inline rename.
 - **Disabled agent detection**: if a discussion's agent is uninstalled or disabled, the text input is grayed out with a warning banner linking to agent config.
+- **Isolated workspace (worktree)**: discussions can run in `workspace_mode: "Isolated"`, creating a git worktree in `<repo>/.kronn-worktrees/` with a `kronn/<slug>` branch. The worktree isolates agent changes from the main working tree.
+  - **Lock/Unlock**: the worktree "locks" the branch (git forbids checkout elsewhere). User can **unlock** (`POST /discussions/:id/worktree-unlock`) to free the branch for testing in the main repo. **Lock** (`POST /discussions/:id/worktree-lock`) re-creates the worktree.
+  - **Auto re-lock**: when sending a message to an unlocked Isolated discussion, the backend auto-attempts `reattach_worktree`. If the branch is still checked out in the main repo, an SSE error is returned and a persistent red banner is shown above the input (with a Retry button).
+  - **Relative gitdir**: worktree cross-references use relative paths (`../../.git/worktrees/<name>`) so they work both inside Docker and on the host.
+  - UI: badge next to branch name (blue = locked, yellow = unlocked) with lock/unlock toggle button.
 - **Multi-line input**: `<textarea>` with auto-resize (Shift+Enter for newlines, Enter to send).
 - **Full access badge**: "Full access" indicator on agent messages when `full_access: true`.
 

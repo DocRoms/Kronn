@@ -36,6 +36,8 @@ vi.mock('../../lib/api', () => ({
     runAgent: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn(),
     _streamSSE: vi.fn(),
+    worktreeUnlock: vi.fn().mockResolvedValue('ok'),
+    worktreeLock: vi.fn().mockResolvedValue('ok'),
   },
   projects: {
     list: vi.fn().mockResolvedValue([]),
@@ -876,5 +878,67 @@ describe('DiscussionsPage', () => {
         language: 'fr',
       })
     );
+  });
+
+  it('shows copy button on agent messages', async () => {
+    const fullDisc: Discussion = {
+      ...makeListDiscussion('d-copy', 2),
+      messages: [
+        { id: 'u1', role: 'User', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'a1', role: 'Agent', content: 'World', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:05Z', tokens_used: 50, auth_mode: null },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[{ agent_type: 'ClaudeCode', name: 'Claude Code', installed: true, enabled: true, path: null, version: null, latest_version: null, origin: 'npm', install_command: null, host_managed: false, host_label: null, runtime_available: true }]}
+        allDiscussions={[makeListDiscussion('d-copy', 2)]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d-copy"
+        {...liftedProps()}
+      />
+    );
+
+    // Should find copy buttons (title attribute)
+    const copyBtns = document.querySelectorAll('[title="Copier le message"]');
+    expect(copyBtns.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('shows response duration on agent messages', async () => {
+    const fullDisc: Discussion = {
+      ...makeListDiscussion('d-time', 2),
+      messages: [
+        { id: 'u1', role: 'User', content: 'Question', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'a1', role: 'Agent', content: 'Answer', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:01:23Z', tokens_used: 100, auth_mode: null },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[{ agent_type: 'ClaudeCode', name: 'Claude Code', installed: true, enabled: true, path: null, version: null, latest_version: null, origin: 'npm', install_command: null, host_managed: false, host_label: null, runtime_available: true }]}
+        allDiscussions={[makeListDiscussion('d-time', 2)]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d-time"
+        {...liftedProps()}
+      />
+    );
+
+    // 83 seconds = 1m 23s
+    const body = document.body.textContent ?? '';
+    expect(body).toContain('1m 23s');
   });
 });
