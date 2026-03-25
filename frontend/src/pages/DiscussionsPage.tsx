@@ -2246,17 +2246,25 @@ export function DiscussionsPage({
                           : <><Play size={9} /> TTS</>}
                       </button>
                     )}
-                    {/api.?key|invalid.*key|key.*not.*config|authenticat|unauthori|login|sign.?in/i.test(msg.content) && (
+                    {/⚠️|Agent exited with error/.test(msg.content) && /api.?key|invalid.*key|key.*not.*config|authenticat|unauthori|login|sign.?in|session expired|opening browser/i.test(msg.content) && !msgs.slice(idx + 1).some(m => m.role === 'Agent' && !/⚠️|Agent exited with error/.test(m.content)) && (
                       <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
-                        <button
-                          style={{ ...ls.scanBtn, fontSize: 11, padding: '5px 12px' }}
-                          onClick={() => onNavigate('settings')}
-                        >
-                          <Key size={11} /> {t('disc.overrideKey')}
-                        </button>
-                        <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', alignSelf: 'center' }}>
-                          {t('disc.orCheckAgent')}
-                        </span>
+                        {/kronn auth kiro|Kiro session expired/i.test(msg.content) ? (
+                          <span style={{ fontSize: 11, color: '#f59e0b', alignSelf: 'center' }}>
+                            💡 Run: <code style={{ background: 'rgba(245,158,11,0.15)', padding: '2px 6px', borderRadius: 4 }}>kronn auth kiro</code>
+                          </span>
+                        ) : (
+                          <>
+                            <button
+                              style={{ ...ls.scanBtn, fontSize: 11, padding: '5px 12px' }}
+                              onClick={() => onNavigate('settings')}
+                            >
+                              <Key size={11} /> {t('disc.overrideKey')}
+                            </button>
+                            <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', alignSelf: 'center' }}>
+                              {t('disc.orCheckAgent')}
+                            </span>
+                          </>
+                        )}
                       </div>
                     )}
                     {/Réponse partielle.*interrompu|Timeout d'inactivité/i.test(msg.content) && (
