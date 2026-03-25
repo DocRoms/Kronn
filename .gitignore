@@ -30,6 +30,10 @@ kronn.toml
 *.swo
 .DS_Store
 
+# Kronn runtime
+.kronn-tmp/
+.kronn-worktrees/
+
 # Docker
 .env
 docker-compose.override.yml

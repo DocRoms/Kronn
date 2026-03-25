@@ -58,6 +58,10 @@ impl Workspace {
         // Worktree path: alongside the repo, in a .kronn-worktrees directory
         let worktree_base = repo_path.join(".kronn-worktrees");
         std::fs::create_dir_all(&worktree_base)?;
+        // Ensure .kronn-worktrees/ is gitignored in the project
+        if let Some(p) = repo_path.to_str() {
+            crate::core::mcp_scanner::ensure_gitignore_public(p, ".kronn-worktrees/");
+        }
         let worktree_path = worktree_base.join(build_worktree_dir_name(workflow_name, run_id));
 
         // Mark the repo and worktree as safe directories (needed in Docker where

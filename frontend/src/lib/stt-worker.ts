@@ -5,10 +5,9 @@
  * Sends { status: string } for progress updates.
  */
 
-import { pipeline } from '@huggingface/transformers';
+import { pipeline, type AutomaticSpeechRecognitionPipeline, type AutomaticSpeechRecognitionOutput } from '@huggingface/transformers';
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let transcriber: any = null;
+let transcriber: AutomaticSpeechRecognitionPipeline | null = null;
 let loadedModel: string | null = null;
 
 async function getTranscriber(model: string) {
@@ -16,11 +15,12 @@ async function getTranscriber(model: string) {
     transcriber = null;
     loadedModel = null;
     self.postMessage({ status: 'loading' });
-    transcriber = await (pipeline as any)(
+    // pipeline() generic union is too complex for TS — cast the result to the specific pipeline type
+    transcriber = await pipeline(
       'automatic-speech-recognition',
       model,
       { dtype: 'q8' },
-    );
+    ) as unknown as AutomaticSpeechRecognitionPipeline;
     loadedModel = model;
     self.postMessage({ status: 'ready' });
   }
@@ -36,7 +36,9 @@ self.onmessage = async (event: MessageEvent<{ audio: Float32Array; language: str
       language,
       task: 'transcribe',
     });
-    const text = Array.isArray(result) ? result.map((r: any) => r.text).join(' ') : result.text;
+    const text = Array.isArray(result)
+      ? result.map((r: AutomaticSpeechRecognitionOutput) => r.text).join(' ')
+      : result.text;
     self.postMessage({ text: text.trim() });
   } catch (err) {
     self.postMessage({ error: String(err) });

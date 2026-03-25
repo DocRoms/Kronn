@@ -341,6 +341,8 @@ export type TrackerSourceConfig =
 
 export interface WorkflowStep {
   name: string;
+  step_type?: StepType;
+  description?: string | null;
   agent: AgentType;
   prompt_template: string;
   mode: StepMode;
@@ -354,6 +356,10 @@ export interface WorkflowStep {
   profile_ids?: string[];
   directive_ids?: string[];
 }
+
+export type StepType =
+  | { type: "Agent" }
+  | { type: "ApiCall" };
 
 export type StepMode =
   | { type: "Normal" };

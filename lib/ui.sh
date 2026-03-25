@@ -67,9 +67,12 @@ fail()    { printf "${RED}  ✗ %s${RESET}\n" "$*"; }
 step()    { printf "\n${BOLD}${CYAN}── %s ──${RESET}\n\n" "$*"; }
 
 banner() {
+    local ver
+    ver="$(cat "${KRONN_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/VERSION" 2>/dev/null || echo "0.0.0")"
+    ver="${ver%%[[:space:]]}"
     printf "\n"
     printf "  ${CYAN}╭──╮${RESET}\n"
-    printf "  ${CYAN}│${YELLOW}⚡${CYAN}│${RESET} ${BOLD}Kronn${RESET} v0.1.0\n"
+    printf "  ${CYAN}│${YELLOW}⚡${CYAN}│${RESET} ${BOLD}Kronn${RESET} v%s\n" "$ver"
     printf "  ${CYAN}╰──╯${RESET} ${DIM}Enter the grid.${RESET}\n"
     printf "\n"
 }

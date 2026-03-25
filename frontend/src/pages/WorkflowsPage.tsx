@@ -669,7 +669,7 @@ function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit,
       )}
 
       {showRuns && runs.map(run => (
-        <RunDetail key={run.id} run={run} onDelete={() => onDeleteRun(run.id)} />
+        <RunDetail key={run.id} run={run} workflowSteps={workflow.steps} onDelete={() => onDeleteRun(run.id)} />
       ))}
     </div>
   );
@@ -677,7 +677,7 @@ function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit,
 
 // ─── Run Detail (expandable steps) ───────────────────────────────────────────
 
-function RunDetail({ run, onDelete }: { run: WorkflowRun; onDelete: () => void }) {
+function RunDetail({ run, workflowSteps, onDelete }: { run: WorkflowRun; workflowSteps?: WorkflowStep[]; onDelete: () => void }) {
   const { t } = useT();
   const [expandedStep, setExpandedStep] = useState<number | null>(null);
 
@@ -720,8 +720,47 @@ function RunDetail({ run, onDelete }: { run: WorkflowRun; onDelete: () => void }
         </button>
       </div>
 
-      {/* Step results */}
-      {run.step_results.length > 0 && (
+      {/* Step progress — show workflow steps with completion status when running */}
+      {run.status === 'Running' && workflowSteps && workflowSteps.length > 0 && (
+        <div style={{ marginTop: 8, padding: '6px 0' }}>
+          {workflowSteps.map((ws_step, i) => {
+            const completed = run.step_results.find(sr => sr.step_name === ws_step.name);
+            const isNext = !completed && run.step_results.length === i;
+            return (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '3px 0', fontSize: 11 }}>
+                <span style={{
+                  width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
+                  background: completed ? (STATUS_COLORS[completed.status] ?? '#888') : isNext ? '#ffc800' : 'rgba(255,255,255,0.1)',
+                  animation: isNext ? 'pulse 1.5s ease-in-out infinite' : undefined,
+                }} />
+                <span style={{
+                  fontWeight: isNext ? 600 : 400,
+                  color: completed ? 'rgba(255,255,255,0.6)' : isNext ? '#ffc800' : 'rgba(255,255,255,0.25)',
+                }}>
+                  {ws_step.name}
+                </span>
+                {ws_step.step_type && (
+                  <span style={{
+                    fontSize: 8, padding: '0 4px', borderRadius: 3,
+                    background: ws_step.step_type.type === 'ApiCall' ? 'rgba(0,212,255,0.08)' : 'rgba(200,255,0,0.06)',
+                    color: ws_step.step_type.type === 'ApiCall' ? 'rgba(0,212,255,0.5)' : 'rgba(200,255,0,0.4)',
+                  }}>{ws_step.step_type.type === 'ApiCall' ? 'API' : 'AGENT'}</span>
+                )}
+                {ws_step.description && (
+                  <span style={{ color: 'rgba(255,255,255,0.2)', fontSize: 10, fontStyle: 'italic' }}>{ws_step.description}</span>
+                )}
+                {completed && completed.duration_ms > 0 && (
+                  <span style={{ color: 'rgba(255,255,255,0.2)', fontSize: 10 }}>{(completed.duration_ms / 1000).toFixed(1)}s</span>
+                )}
+                {isNext && <span style={{ color: 'rgba(255,200,0,0.5)', fontSize: 9 }}>running...</span>}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Step results (completed runs) */}
+      {run.step_results.length > 0 && run.status !== 'Running' && (
         <div style={{ marginTop: 8 }}>
           {run.step_results.map((sr, i) => {
             const isExpanded = expandedStep === i;
@@ -896,6 +935,8 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAge
 
   const [steps, setSteps] = useState<WorkflowStep[]>(editWorkflow?.steps ?? [{
     name: 'main',
+    step_type: { type: 'Agent' },
+    description: null,
     agent: 'ClaudeCode',
     prompt_template: '',
     mode: { type: 'Normal' },
@@ -1311,6 +1352,35 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAge
                       <X size={12} />
                     </button>
                   )}
+                </div>
+                {/* Step type + description */}
+                <div style={{ display: 'flex', gap: 8, marginBottom: 6 }}>
+                  <div style={{ display: 'flex', gap: 4 }}>
+                    <button
+                      style={{
+                        padding: '3px 10px', fontSize: 10, borderRadius: 4, cursor: 'pointer', border: '1px solid',
+                        background: (!step.step_type || step.step_type.type === 'Agent') ? 'rgba(200,255,0,0.12)' : 'transparent',
+                        color: (!step.step_type || step.step_type.type === 'Agent') ? '#c8ff00' : 'rgba(255,255,255,0.4)',
+                        borderColor: (!step.step_type || step.step_type.type === 'Agent') ? 'rgba(200,255,0,0.3)' : 'rgba(255,255,255,0.1)',
+                      }}
+                      onClick={() => updateStep(i, { step_type: { type: 'Agent' } })}
+                    >{t('wiz.stepTypeAgent')}</button>
+                    <button
+                      style={{
+                        padding: '3px 10px', fontSize: 10, borderRadius: 4, cursor: 'pointer', border: '1px solid',
+                        background: step.step_type?.type === 'ApiCall' ? 'rgba(0,212,255,0.12)' : 'transparent',
+                        color: step.step_type?.type === 'ApiCall' ? '#00d4ff' : 'rgba(255,255,255,0.4)',
+                        borderColor: step.step_type?.type === 'ApiCall' ? 'rgba(0,212,255,0.3)' : 'rgba(255,255,255,0.1)',
+                      }}
+                      onClick={() => updateStep(i, { step_type: { type: 'ApiCall' } })}
+                    >{t('wiz.stepTypeApiCall')}</button>
+                  </div>
+                  <input
+                    style={{ ...ws.input, flex: 1, fontSize: 11 }}
+                    value={step.description ?? ''}
+                    onChange={e => updateStep(i, { description: e.target.value || null })}
+                    placeholder={t('wiz.stepDescriptionPlaceholder')}
+                  />
                 </div>
                 {checkAgentRestricted(agentAccess, step.agent) && (
                   <div style={{
@@ -1775,7 +1845,13 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAge
           <div style={ws.summaryRow}><span style={ws.summaryLabel}>Steps</span> {steps.length}</div>
           {steps.map((s, i) => (
             <div key={i} style={{ ...ws.summaryRow, paddingLeft: 20 }}>
-              {i + 1}. <span style={{ color: AGENT_COLORS[s.agent] ?? '#888', fontWeight: 600 }}>{s.name}</span> ({AGENT_LABELS[s.agent] ?? s.agent})
+              {i + 1}. <span style={{
+                padding: '1px 5px', borderRadius: 3, fontSize: 9, fontWeight: 600, marginRight: 4,
+                background: s.step_type?.type === 'ApiCall' ? 'rgba(0,212,255,0.1)' : 'rgba(200,255,0,0.08)',
+                color: s.step_type?.type === 'ApiCall' ? '#00d4ff' : 'rgba(200,255,0,0.6)',
+              }}>{s.step_type?.type === 'ApiCall' ? 'API' : 'AGENT'}</span>
+              <span style={{ color: AGENT_COLORS[s.agent] ?? '#888', fontWeight: 600 }}>{s.name}</span> ({AGENT_LABELS[s.agent] ?? s.agent})
+              {s.description && <span style={{ color: 'rgba(255,255,255,0.35)', fontSize: 10, fontStyle: 'italic' }}> — {s.description}</span>}
               {s.on_result && s.on_result.length > 0 && <span style={{ color: 'rgba(255,255,255,0.3)', fontSize: 10 }}> [{s.on_result.length} condition{s.on_result.length > 1 ? 's' : ''}]</span>}
               {s.retry && <span style={{ color: 'rgba(255,255,255,0.3)', fontSize: 10 }}> [retry x{s.retry.max_retries}]</span>}
               {s.stall_timeout_secs && <span style={{ color: 'rgba(255,255,255,0.3)', fontSize: 10 }}> [timeout {s.stall_timeout_secs}s]</span>}

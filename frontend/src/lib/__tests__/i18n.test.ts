@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { t, getUILocale, setUILocale, UI_LOCALES } from '../i18n';
+import { t, getUILocale, setUILocale, UI_LOCALES, type UILocale } from '../i18n';
 
 describe('i18n', () => {
   describe('t() — translation function', () => {
@@ -16,7 +16,7 @@ describe('i18n', () => {
     });
 
     it('falls back to French for unknown locale', () => {
-      expect(t('xx' as any, 'nav.projects')).toBe('Projets');
+      expect(t('xx' as UILocale, 'nav.projects')).toBe('Projets');
     });
 
     it('returns raw key for unknown translation key', () => {

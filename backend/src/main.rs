@@ -109,6 +109,27 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Ensure .kronn-tmp/ and .kronn-worktrees/ are gitignored in all projects
+    // (retroactive fix for projects created before these patterns were auto-added)
+    {
+        let db = state.db.clone();
+        if let Err(e) = db.with_conn(|conn| {
+            let projects = kronn::db::projects::list_projects(conn)?;
+            for p in &projects {
+                let resolved = kronn::core::scanner::resolve_host_path(&p.path);
+                if resolved.join(".kronn-tmp").exists() {
+                    mcp_scanner::ensure_gitignore_public(&p.path, ".kronn-tmp/");
+                }
+                if resolved.join(".kronn-worktrees").exists() {
+                    mcp_scanner::ensure_gitignore_public(&p.path, ".kronn-worktrees/");
+                }
+            }
+            Ok(())
+        }).await {
+            tracing::warn!("Gitignore startup fix failed: {}", e);
+        }
+    }
+
     // Start workflow engine in background
     let engine = workflow_engine.clone();
     tokio::spawn(async move { engine.start().await });
@@ -122,7 +143,7 @@ async fn main() -> anyhow::Result<()> {
     println!();
     println!("  ╔═══════════════════════════════════════╗");
     println!("  ║                                       ║");
-    println!("  ║   K R O N N   v0.1.0                  ║");
+    println!("  ║   K R O N N   v{:<23}║", env!("CARGO_PKG_VERSION"));
     println!("  ║   ─────────────────                   ║");
     println!("  ║   Entering the grid...                ║");
     println!("  ║                                       ║");

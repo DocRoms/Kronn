@@ -413,7 +413,7 @@ describe('regression tests', () => {
 
       // No locked field: defaults to false (not locked)
       const noPrefill = { projectId: 'p1', title: 'Test', prompt: 'Test' };
-      expect(setNewDiscPrefilled(!!(noPrefill as any).locked)).toBe(false);
+      expect(setNewDiscPrefilled(!!((noPrefill as Record<string, unknown>).locked))).toBe(false);
     });
   });
 });

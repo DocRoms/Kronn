@@ -8,6 +8,15 @@ if [ -n "$KRONN_HOST_HOME" ] && [ "$KRONN_HOST_HOME" != "$HOME" ] && [ ! -e "$KR
   ln -sf "$HOME" "$KRONN_HOST_HOME" 2>/dev/null || true
 fi
 
+# Global gitignore for Kronn runtime directories (covers all repos + worktrees)
+KRONN_GITIGNORE="${HOME}/.kronn-gitignore"
+cat > "$KRONN_GITIGNORE" <<'GITIGNORE'
+# Kronn runtime (auto-generated — do not edit)
+.kronn-tmp/
+.kronn-worktrees/
+GITIGNORE
+git config --global core.excludesFile "$KRONN_GITIGNORE"
+
 # Add GitHub/GitLab SSH host keys to known_hosts (prevents "Host key verification failed")
 mkdir -p "${HOME}/.ssh"
 if [ ! -f "${HOME}/.ssh/known_hosts" ] || ! grep -q "github.com" "${HOME}/.ssh/known_hosts" 2>/dev/null; then
@@ -15,7 +24,10 @@ if [ ! -f "${HOME}/.ssh/known_hosts" ] || ! grep -q "github.com" "${HOME}/.ssh/k
 fi
 
 # Forward host SSH agent if available (for git push via SSH)
-if [ -S "/run/host-ssh-agent.sock" ]; then
+# macOS Docker Desktop exposes the agent via a special path
+if [ -S "/run/host-services/ssh-auth.sock" ]; then
+  export SSH_AUTH_SOCK="/run/host-services/ssh-auth.sock"
+elif [ -S "/run/host-ssh-agent.sock" ]; then
   export SSH_AUTH_SOCK="/run/host-ssh-agent.sock"
 fi
 

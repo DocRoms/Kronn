@@ -93,9 +93,10 @@ vi.mock('../../lib/api', () => ({
 
 import { SettingsPage } from '../SettingsPage';
 import type { AgentsConfig, AgentDetection } from '../../types/generated';
+import type { ToastFn } from '../../hooks/useToast';
 
 const noop = () => {};
-const toastFn = vi.fn() as any;
+const toastFn: ToastFn = vi.fn();
 
 const sampleAgent: AgentDetection = {
   name: 'Claude Code',

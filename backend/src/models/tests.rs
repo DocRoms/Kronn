@@ -98,6 +98,40 @@ fn step_mode_normal_roundtrip() {
     assert!(matches!(parsed, StepMode::Normal));
 }
 
+// ─── StepType serialization ──────────────────────────────────────────────
+
+#[test]
+fn step_type_default_is_agent() {
+    assert_eq!(StepType::default(), StepType::Agent);
+}
+
+#[test]
+fn step_type_agent_roundtrip() {
+    let st = StepType::Agent;
+    let json = serde_json::to_string(&st).unwrap();
+    assert!(json.contains("Agent"));
+    let parsed: StepType = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, StepType::Agent);
+}
+
+#[test]
+fn step_type_api_call_roundtrip() {
+    let st = StepType::ApiCall;
+    let json = serde_json::to_string(&st).unwrap();
+    assert!(json.contains("ApiCall"));
+    let parsed: StepType = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, StepType::ApiCall);
+}
+
+#[test]
+fn workflow_step_without_step_type_defaults_to_agent() {
+    // Simulates existing JSON from DB that doesn't have step_type
+    let json = r#"{"name":"test","agent":"ClaudeCode","prompt_template":"do stuff","mode":{"type":"Normal"}}"#;
+    let step: WorkflowStep = serde_json::from_str(json).unwrap();
+    assert_eq!(step.step_type, StepType::Agent);
+    assert!(step.description.is_none());
+}
+
 // ─── ConditionAction serialization ───────────────────────────────────────
 
 #[test]

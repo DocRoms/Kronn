@@ -20,7 +20,7 @@ class MockUtterance {
   voice: any = null;
   constructor(text: string) { this.text = text; }
 }
-(globalThis as any).SpeechSynthesisUtterance = MockUtterance;
+(globalThis as unknown as Record<string, unknown>).SpeechSynthesisUtterance = MockUtterance;
 
 // Mock API — DiscussionsPage uses discussions, projects, and skills APIs
 vi.mock('../../lib/api', () => ({
@@ -67,10 +67,11 @@ vi.mock('../../lib/api', () => ({
 
 import { discussions as discussionsApi } from '../../lib/api';
 import { DiscussionsPage } from '../DiscussionsPage';
-import type { AgentDetection, Discussion } from '../../types/generated';
+import type { AgentDetection, AiAuditStatus, Discussion } from '../../types/generated';
+import type { ToastFn } from '../../hooks/useToast';
 
 const noop = () => {};
-const toastFn = vi.fn() as any;
+const toastFn: ToastFn = vi.fn();
 
 beforeEach(() => {
   vi.mocked(discussionsApi.get).mockReset();
@@ -569,8 +570,8 @@ describe('DiscussionsPage', () => {
   });
 
   it('groups project discussions by org when multiple orgs exist', async () => {
-    const proj1 = { id: 'p1', name: 'front_euronews', path: '/repos/front_euronews', repo_url: 'git@github.com:Euronews-tech/front_euronews.git', token_override: null, ai_config: { detected: false, configs: [] }, audit_status: 'NoTemplate' as any, ai_todo_count: 0, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' };
-    const proj2 = { id: 'p2', name: 'Kronn', path: '/repos/Kronn', repo_url: 'git@github.com:DocRoms/Kronn.git', token_override: null, ai_config: { detected: false, configs: [] }, audit_status: 'NoTemplate' as any, ai_todo_count: 0, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' };
+    const proj1 = { id: 'p1', name: 'web-app', path: '/repos/web-app', repo_url: 'git@github.com:acme-org/web-app.git', token_override: null, ai_config: { detected: false, configs: [] }, audit_status: 'NoTemplate' as AiAuditStatus, ai_todo_count: 0, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' };
+    const proj2 = { id: 'p2', name: 'api-server', path: '/repos/api-server', repo_url: 'git@github.com:johndoe/api-server.git', token_override: null, ai_config: { detected: false, configs: [] }, audit_status: 'NoTemplate' as AiAuditStatus, ai_todo_count: 0, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' };
 
     const disc1 = { ...makeListDiscussion('d1', 1), project_id: 'p1', messages: [{ id: 'm1', role: 'User' as const, content: 'test', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null }] };
     const disc2 = { ...makeListDiscussion('d2', 1), project_id: 'p2', messages: [{ id: 'm2', role: 'User' as const, content: 'test', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null }] };
@@ -594,8 +595,8 @@ describe('DiscussionsPage', () => {
 
     const body = document.body.textContent!;
     // Should show org group headers
-    expect(body).toContain('Euronews-tech');
-    expect(body).toContain('DocRoms');
+    expect(body).toContain('acme-org');
+    expect(body).toContain('johndoe');
   });
 
   // ─── TTS feature tests ──────────────────────────────────────────────────

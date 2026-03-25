@@ -53,9 +53,9 @@ pub async fn execute_run(
 
     // Update run status to Running
     run.status = RunStatus::Running;
-    let r = run.clone();
+    let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
     let db2 = db.clone();
-    db2.with_conn(move |conn| crate::db::workflows::update_run(conn, &r)).await?;
+    db2.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap)).await?;
 
     // Resolve project path
     let project_path = if let Some(ref pid) = workflow.project_id {
@@ -167,9 +167,9 @@ pub async fn execute_run(
         run.step_results.push(outcome.result);
 
         // Persist progress
-        let r = run.clone();
+        let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
         let db4 = db.clone();
-        db4.with_conn(move |conn| crate::db::workflows::update_run(conn, &r)).await?;
+        db4.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap)).await?;
 
         if step_failed {
             all_success = false;
@@ -222,9 +222,9 @@ pub async fn execute_run(
     run.status = if all_success { RunStatus::Success } else { RunStatus::Failed };
     run.finished_at = Some(Utc::now());
 
-    let r = run.clone();
+    let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
     let db5 = db.clone();
-    db5.with_conn(move |conn| crate::db::workflows::update_run(conn, &r)).await?;
+    db5.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap)).await?;
 
     // Emit run done
     emit(RunEvent::RunDone { status: run.status.clone() }).await;

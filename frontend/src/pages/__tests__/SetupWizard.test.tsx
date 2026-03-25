@@ -23,7 +23,7 @@ vi.mock('../../lib/api', () => ({
 
 import { agents as agentsApi, setup as setupApi, projects as projectsApi } from '../../lib/api';
 import { SetupWizard } from '../SetupWizard';
-import type { AgentDetection, SetupStatus } from '../../types/generated';
+import type { AgentDetection, SetupStatus, Project } from '../../types/generated';
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -70,7 +70,7 @@ beforeEach(() => {
   vi.mocked(agentsApi.detect).mockResolvedValue([]);
   vi.mocked(setupApi.getStatus).mockResolvedValue(makeStatus());
   vi.mocked(setupApi.complete).mockResolvedValue(undefined);
-  vi.mocked(projectsApi.create).mockResolvedValue({ id: 'p1' } as any);
+  vi.mocked(projectsApi.create).mockResolvedValue({ id: 'p1' } as Project);
 });
 
 afterEach(() => {

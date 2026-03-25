@@ -72,13 +72,13 @@ describe('constants', () => {
 
   describe('getProjectGroup()', () => {
     it('extracts GitHub org from SSH URL', () => {
-      expect(getProjectGroup({ repo_url: 'git@github.com:Euronews-tech/front_euronews.git' }))
-        .toBe('Euronews-tech');
+      expect(getProjectGroup({ repo_url: 'git@github.com:acme-org/my-project.git' }))
+        .toBe('acme-org');
     });
 
     it('extracts GitHub org from HTTPS URL', () => {
-      expect(getProjectGroup({ repo_url: 'https://github.com/DocRoms/Kronn.git' }))
-        .toBe('DocRoms');
+      expect(getProjectGroup({ repo_url: 'https://github.com/johndoe/awesome-app.git' }))
+        .toBe('johndoe');
     });
 
     it('extracts GitLab org from SSH URL', () => {

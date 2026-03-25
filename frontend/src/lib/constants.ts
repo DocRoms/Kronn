@@ -39,7 +39,7 @@ export function isAgentRestricted(agentAccess: AgentsConfig | undefined, agentTy
 }
 
 /** Extract org/owner from a project's repo_url for grouping.
- *  Returns the org name (e.g. "Euronews-tech") or a fallback label. */
+ *  Returns the org name (e.g. "acme-org") or a fallback label. */
 export function getProjectGroup(p: { repo_url: string | null }, localLabel = 'Local', otherLabel = 'Other'): string {
   if (!p.repo_url) return localLabel;
   try {

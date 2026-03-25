@@ -9,11 +9,23 @@ Orchestrate Claude Code, Codex, Vibe, Gemini CLI, and Kiro — with less waste.
 
 ```
   ╭──╮
-  │⚡│ Kronn v0.1.0
+  │⚡│ Kronn v0.1.1
   ╰──╯ Enter the grid.
 ```
 
 ![Kronn CLI startup](docs/screenshots/kronn_cli.png)
+
+## Prerequisites
+
+| Platform | Requirement |
+|----------|-------------|
+| **Linux** | Docker + Docker Compose |
+| **macOS** | Docker Desktop (or Docker Engine via Homebrew) |
+| **Windows** | **WSL2** + Docker + Docker Compose (see below) |
+
+> **Windows users**: Kronn requires WSL2 — it won't work with Docker alone on native Windows. Docker Desktop is **not required** — Docker Engine inside WSL works perfectly.
+
+**[Full installation guide (Linux / macOS / Windows)](docs/install.md)** — step-by-step instructions for each platform.
 
 ## Quick Start
 
@@ -70,7 +82,7 @@ A 3-tier architecture with encrypted secrets:
 Server (type)  →  Config (instance + secrets)  →  Project (N:N)
 ```
 
-**43 built-in servers** covering Git, databases, cloud & infra, browsers, monitoring, communication, project management, design, payments, knowledge bases, AI reasoning, SEO, and sandboxing. [Full list →](docs/mcps.md)
+**49 built-in servers** covering Git, databases, cloud & infra, browsers, monitoring, communication, project management, design, payments, knowledge bases, AI reasoning, SEO, code quality, IaC, and hosting. [Full list →](docs/mcps.md)
 
 Key capabilities:
 - **Auto-detection** from existing `.mcp.json` files across projects
