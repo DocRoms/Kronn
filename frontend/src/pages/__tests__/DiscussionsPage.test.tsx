@@ -819,6 +819,142 @@ describe('DiscussionsPage', () => {
     expect(mockCancel).toHaveBeenCalled();
   });
 
+  // ─── Auth error hint banner tests ──────────────────────────────────────
+
+  it('shows "kronn auth kiro" hint on Kiro session expired message', async () => {
+    const fullDisc: Discussion = {
+      ...makeListDiscussion('d1', 2),
+      messages: [
+        { id: 'm1', role: 'User', content: 'test', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm2', role: 'Agent', content: '⚠️ **Kiro session expired (AWS Builder ID).**\nRe-authenticate with: `kronn auth kiro`\n(or `make kiro-login` from the Kronn directory)', agent_type: 'Kiro', timestamp: '2026-01-01T00:00:01Z', tokens_used: 0, auth_mode: null },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[{ ...makeListDiscussion('d1', 2), messages: fullDisc.messages }]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d1"
+        {...liftedProps()}
+      />
+    );
+
+    // The "kronn auth kiro" hint banner should be visible
+    const body = document.body.textContent!;
+    expect(body).toContain('kronn auth kiro');
+  });
+
+  it('hides auth hint when a normal agent response follows the error', async () => {
+    const fullDisc: Discussion = {
+      ...makeListDiscussion('d1', 4),
+      messages: [
+        { id: 'm1', role: 'User', content: 'test', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm2', role: 'Agent', content: '⚠️ **Kiro session expired (AWS Builder ID).**\nRe-authenticate with: `kronn auth kiro`', agent_type: 'Kiro', timestamp: '2026-01-01T00:00:01Z', tokens_used: 0, auth_mode: null },
+        { id: 'm3', role: 'User', content: 'test again', agent_type: null, timestamp: '2026-01-01T00:00:02Z', tokens_used: 0, auth_mode: null },
+        { id: 'm4', role: 'Agent', content: 'Bonjour ! Comment puis-je vous aider ?', agent_type: 'Kiro', timestamp: '2026-01-01T00:00:03Z', tokens_used: 50, auth_mode: null },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[{ ...makeListDiscussion('d1', 4), messages: fullDisc.messages }]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d1"
+        {...liftedProps()}
+      />
+    );
+
+    // The 💡 Run: hint banner should NOT be visible because a normal agent response follows
+    const body = document.body.textContent!;
+    expect(body).not.toContain('💡 Run:');
+  });
+
+  it('shows generic auth hint for non-Kiro auth errors', async () => {
+    const fullDisc: Discussion = {
+      ...makeListDiscussion('d1', 2),
+      messages: [
+        { id: 'm1', role: 'User', content: 'test', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm2', role: 'Agent', content: '⚠️ **Expired session or invalid API key.**\nRe-authenticate by running `/login` in the agent\'s CLI.', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:01Z', tokens_used: 0, auth_mode: null },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+
+    const onNavigate = vi.fn();
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[{ ...makeListDiscussion('d1', 2), messages: fullDisc.messages }]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={onNavigate}
+        toast={toastFn}
+        initialActiveDiscussionId="d1"
+        {...liftedProps()}
+      />
+    );
+
+    // Should show the generic "Override key" button, not the Kiro-specific hint
+    const body = document.body.textContent!;
+    expect(body).not.toContain('kronn auth kiro');
+    // The Key button to navigate to settings should be present
+    const keyBtn = Array.from(document.querySelectorAll('button')).find(b => b.textContent?.includes('clé'));
+    expect(keyBtn).toBeTruthy();
+  });
+
+  it('does not show auth hint on normal error messages without auth keywords', async () => {
+    const fullDisc: Discussion = {
+      ...makeListDiscussion('d1', 2),
+      messages: [
+        { id: 'm1', role: 'User', content: 'test', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm2', role: 'Agent', content: '⚠️ **Network error.**\nUnable to reach the API.', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:01Z', tokens_used: 0, auth_mode: null },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[{ ...makeListDiscussion('d1', 2), messages: fullDisc.messages }]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d1"
+        {...liftedProps()}
+      />
+    );
+
+    // No auth hint should appear for network errors
+    const hintElements = document.querySelectorAll('code');
+    const authCode = Array.from(hintElements).find(el => el.textContent === 'kronn auth kiro');
+    expect(authCode).toBeFalsy();
+    const keyBtn = Array.from(document.querySelectorAll('button')).find(b => b.textContent?.includes('clé'));
+    expect(keyBtn).toBeFalsy();
+  });
+
   it('creates a new discussion via the form', async () => {
     const createdDisc: Discussion = {
       ...makeListDiscussion('new-disc', 1),

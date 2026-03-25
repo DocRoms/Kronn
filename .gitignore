@@ -48,3 +48,4 @@ docker-compose.override.yml
 .kiro/settings/
 .env
 /node_modules/
+.kronn-tmp/
