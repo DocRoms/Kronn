@@ -7,6 +7,26 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.1.2] — 2026-03-25
+
+### Added
+- **Worktree unlock/lock** — manual button next to the branch badge to release/re-create the worktree. Lets you `git checkout` the branch in your main repo for testing without archiving the discussion
+- **Auto re-lock** — when resuming a discussion whose worktree was unlocked, the worktree is automatically re-created (blocks if the branch is still checked out in the main repo)
+- **API endpoints** — `POST /discussions/:id/worktree-unlock` and `POST /discussions/:id/worktree-lock`
+- **Git signoff by default** — all commits now include `-s` (Signed-off-by), good practice at zero cost
+
+### Changed
+- **Worktrees in project directory** — worktrees are now created in `.kronn-worktrees/` inside the repo instead of `/data/workspaces/` in the Docker container. Visible from the host IDE (PHPStorm, VS Code, etc.)
+- **Relative gitdir paths** — worktree cross-references use relative paths so they work both inside Docker and on the host
+- **Startup migration** — existing worktrees at `/data/workspaces/` are automatically migrated to the new location on startup
+
+### Fixed
+- **GPG sign crash** — `--no-gpg-sign` is now passed when the user does not enable `-S`, preventing failures when `commit.gpgsign=true` is set in the git config but the signing key is missing
+- **Worktree gitdir broken on host** — `.git` files in worktrees contained Docker-internal absolute paths (`/host-home/...`), now rewritten to relative paths
+- **Branch checkout conflict** — clear error message when the branch is already checked out in the main repo instead of a cryptic git error
+
+---
+
 ## [0.1.1] — 2026-03-25
 
 ### Added

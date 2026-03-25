@@ -9,7 +9,7 @@ Orchestrate Claude Code, Codex, Vibe, Gemini CLI, and Kiro — with less waste.
 
 ```
   ╭──╮
-  │⚡│ Kronn v0.1.1
+  │⚡│ Kronn v0.1.2
   ╰──╯ Enter the grid.
 ```
 
@@ -208,7 +208,9 @@ Create a new project from scratch: name it, describe it, and Kronn creates the d
 
 ### 🌿 Worktree Isolation
 
-Each discussion and workflow can run in its own isolated git worktree — multiple agents working in parallel on the same project without touching your local branch. Kronn creates a dedicated `kronn/{slug}` branch in `~/.kronn/workspaces/`, the agent works there, and your repo stays clean.
+Each discussion and workflow can run in its own isolated git worktree — multiple agents working in parallel on the same project without touching your local branch. Kronn creates a dedicated `kronn/{slug}` branch in `.kronn-worktrees/` inside your repo, visible from your IDE.
+
+**Lock / Unlock** — The worktree "locks" the branch so git doesn't conflict. When you need to test the agent's work locally, click the 🔓 button next to the branch name to **unlock** (removes the worktree, frees the branch for `git checkout`). When you resume the conversation, the worktree is automatically re-created. If the branch is still checked out in your repo, Kronn shows an error banner with a retry button.
 
 ### 🧩 Agent Incompatibility System
 

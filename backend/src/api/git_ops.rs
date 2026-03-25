@@ -275,8 +275,11 @@ pub fn run_git_commit(repo_path: &Path, files: &[String], message: &str, amend: 
     if amend {
         commit_args.push("--amend");
     }
+    commit_args.push("-s"); // signoff by default
     if sign {
         commit_args.push("-S");
+    } else {
+        commit_args.push("--no-gpg-sign");
     }
     commit_args.push("-m");
     commit_args.push(message);
@@ -780,5 +783,56 @@ mod tests {
     #[test]
     fn exec_allows_du() {
         assert!(validate_exec_command("du -sh .").is_ok());
+    }
+
+    // ── Commit args tests ────────────────────────────────────────────────────
+
+    fn make_test_repo(name: &str) -> tempfile::TempDir {
+        let dir = tempfile::Builder::new().prefix(&format!("kronn-git-{}", name)).tempdir().unwrap();
+        std::process::Command::new("git").args(["init", "-b", "main"]).current_dir(dir.path()).output().unwrap();
+        std::process::Command::new("git").args(["config", "user.email", "test@test.com"]).current_dir(dir.path()).output().unwrap();
+        std::process::Command::new("git").args(["config", "user.name", "Test User"]).current_dir(dir.path()).output().unwrap();
+        std::fs::write(dir.path().join("init.txt"), "init").unwrap();
+        std::process::Command::new("git").args(["add", "."]).current_dir(dir.path()).output().unwrap();
+        std::process::Command::new("git").args(["commit", "-m", "init"]).current_dir(dir.path()).output().unwrap();
+        dir
+    }
+
+    #[test]
+    fn commit_adds_signoff_by_default() {
+        let repo = make_test_repo("signoff");
+        std::fs::write(repo.path().join("file.txt"), "content").unwrap();
+        let result = run_git_commit(repo.path(), &["file.txt".into()], "test signoff", false, false);
+        assert!(result.is_ok(), "commit failed: {:?}", result.err());
+
+        // Check that the commit message contains Signed-off-by
+        let log = std::process::Command::new("git")
+            .args(["log", "-1", "--format=%B"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        let msg = String::from_utf8_lossy(&log.stdout);
+        assert!(msg.contains("Signed-off-by:"), "Commit should have Signed-off-by, got: {}", msg);
+    }
+
+    #[test]
+    fn commit_without_sign_uses_no_gpg_sign() {
+        let repo = make_test_repo("nogpg");
+        // Set commit.gpgsign=true to simulate a user config that would fail without --no-gpg-sign
+        std::process::Command::new("git")
+            .args(["config", "commit.gpgsign", "true"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        // Set a nonexistent signing key to guarantee failure if --no-gpg-sign doesn't work
+        std::process::Command::new("git")
+            .args(["config", "user.signingkey", "/nonexistent/key"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+
+        std::fs::write(repo.path().join("file.txt"), "content").unwrap();
+        let result = run_git_commit(repo.path(), &["file.txt".into()], "no gpg", false, false);
+        assert!(result.is_ok(), "commit should succeed with --no-gpg-sign even when gpgsign=true: {:?}", result.err());
     }
 }

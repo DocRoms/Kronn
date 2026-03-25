@@ -497,6 +497,8 @@ export const discussions = {
   createPr: (id: string, req: { title: string; body?: string; base?: string }) => api<{ url: string }>('POST', `/discussions/${id}/git-pr`, req),
   prTemplate: (id: string) => api<{ template: string; source: string }>('GET', `/discussions/${id}/pr-template`),
   exec: (id: string, command: string) => api<{ stdout: string; stderr: string; exit_code: number }>('POST', `/discussions/${id}/exec`, { command }),
+  worktreeUnlock: (id: string) => api<string>('POST', `/discussions/${id}/worktree-unlock`, {}),
+  worktreeLock: (id: string) => api<string>('POST', `/discussions/${id}/worktree-lock`, {}),
 
   /** Delete trailing agent/system messages (for retry/edit). */
   deleteLastAgentMessages: (id: string) => api<void>('DELETE', `/discussions/${id}/messages/last`),

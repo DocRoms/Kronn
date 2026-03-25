@@ -130,6 +130,61 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Migrate worktrees from /data/workspaces/ to .kronn-worktrees/ inside each repo
+    {
+        let db = state.db.clone();
+        if let Err(e) = db.with_conn(|conn| {
+            let projects = kronn::db::projects::list_projects(conn)?;
+            let discussions = kronn::db::discussions::list_discussions(conn)?;
+
+            for disc in &discussions {
+                let old_path = match &disc.workspace_path {
+                    Some(p) if p.starts_with("/data/workspaces/") => p.clone(),
+                    _ => continue,
+                };
+                let branch = match &disc.worktree_branch {
+                    Some(b) => b.clone(),
+                    None => continue,
+                };
+                let project = match projects.iter().find(|p| Some(&p.id) == disc.project_id.as_ref()) {
+                    Some(p) => p,
+                    None => continue,
+                };
+
+                let resolved = kronn::core::scanner::resolve_host_path(&project.path);
+                let repo_path = std::path::Path::new(&resolved);
+
+                match kronn::core::worktree::reattach_worktree(
+                    repo_path, &project.name, &disc.title, &branch,
+                ) {
+                    Ok(info) => {
+                        let _ = kronn::db::discussions::update_discussion_workspace(
+                            conn, &disc.id, &info.path, &info.branch,
+                        );
+                        tracing::info!(
+                            "Migrated worktree for discussion '{}': {} -> {}",
+                            disc.title, old_path, info.path
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to migrate worktree for '{}': {} — clearing stale path",
+                            disc.title, e
+                        );
+                        // Clear stale path so it doesn't keep failing
+                        let _ = conn.execute(
+                            "UPDATE discussions SET workspace_path = NULL, worktree_branch = NULL WHERE id = ?1",
+                            rusqlite::params![disc.id],
+                        );
+                    }
+                }
+            }
+            Ok(())
+        }).await {
+            tracing::warn!("Worktree migration failed: {}", e);
+        }
+    }
+
     // Start workflow engine in background
     let engine = workflow_engine.clone();
     tokio::spawn(async move { engine.start().await });
