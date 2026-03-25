@@ -48,3 +48,4 @@ docker-compose.override.yml
 .vibe/
 .gemini/
 .ai/mcp/
+.kronn-tmp/
