@@ -438,4 +438,73 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].skill_ids, vec!["rust-dev"]);
     }
+
+    #[test]
+    fn update_discussion_agent_changes_primary_agent() {
+        let conn = test_conn();
+        let disc = make_discussion("agent-switch");
+        insert_discussion(&conn, &disc).unwrap();
+
+        // Verify initial agent
+        let before = get_discussion(&conn, "agent-switch").unwrap().unwrap();
+        assert!(matches!(before.agent, AgentType::ClaudeCode));
+
+        // Switch to GeminiCli
+        let updated = update_discussion_agent(&conn, "agent-switch", &AgentType::GeminiCli).unwrap();
+        assert!(updated);
+
+        let after = get_discussion(&conn, "agent-switch").unwrap().unwrap();
+        assert!(matches!(after.agent, AgentType::GeminiCli));
+    }
+
+    #[test]
+    fn update_discussion_agent_nonexistent_returns_false() {
+        let conn = test_conn();
+        let updated = update_discussion_agent(&conn, "nonexistent", &AgentType::Vibe).unwrap();
+        assert!(!updated);
+    }
+
+    #[test]
+    fn agent_switch_invalidates_summary_cache() {
+        let conn = test_conn();
+        let disc = make_discussion("switch-summary");
+        insert_discussion(&conn, &disc).unwrap();
+
+        // Set a summary cache
+        update_summary_cache(&conn, "switch-summary", "Previous summary text", 5).unwrap();
+        let before = get_discussion(&conn, "switch-summary").unwrap().unwrap();
+        assert!(before.summary_cache.is_some());
+
+        // Switch agent — caller is responsible for invalidating summary
+        update_discussion_agent(&conn, "switch-summary", &AgentType::Kiro).unwrap();
+        invalidate_summary_cache(&conn, "switch-summary").unwrap();
+
+        let after = get_discussion(&conn, "switch-summary").unwrap().unwrap();
+        assert!(matches!(after.agent, AgentType::Kiro));
+        assert!(after.summary_cache.is_none(), "Summary should be invalidated after agent switch");
+    }
+
+    #[test]
+    fn agent_switch_message_is_inserted() {
+        let conn = test_conn();
+        let disc = make_discussion("switch-msg");
+        insert_discussion(&conn, &disc).unwrap();
+
+        // Simulate the switch message insertion (same as API handler does)
+        let msg = DiscussionMessage {
+            id: "switch-msg-1".into(),
+            role: MessageRole::User,
+            content: "[Agent switch: ClaudeCode → Kiro] You are now the primary agent.".into(),
+            agent_type: None,
+            timestamp: chrono::Utc::now(),
+            tokens_used: 0,
+            auth_mode: None,
+            model_tier: None,
+        };
+        insert_message(&conn, "switch-msg", &msg).unwrap();
+
+        let loaded = get_discussion(&conn, "switch-msg").unwrap().unwrap();
+        assert_eq!(loaded.messages.len(), 1);
+        assert!(loaded.messages[0].content.contains("Agent switch"));
+    }
 }

@@ -52,7 +52,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
       setEditingLabelId(null);
       refetchMcps();
     } catch (e) {
-      console.error('Failed to save label:', e);
+      console.warn('Failed to save label:', e);
     }
   };
 
@@ -75,7 +75,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
       setAddMcpSearch('');
       refetchMcps();
     } catch (e) {
-      console.error('Failed to add MCP config:', e);
+      console.warn('Failed to add MCP config:', e);
     }
   };
 
@@ -100,7 +100,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
       await mcpsApi.deleteConfig(configId);
       refetchMcps();
     } catch (e) {
-      console.error('Failed to delete MCP config:', e);
+      console.warn('Failed to delete MCP config:', e);
     }
   };
 
@@ -109,7 +109,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
       await mcpsApi.updateConfig(config.id, { is_global: !config.is_global });
       refetchMcps();
     } catch (e) {
-      console.error('Failed to toggle global:', e);
+      console.warn('Failed to toggle global:', e);
     }
   };
 
@@ -123,7 +123,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
       await mcpsApi.setConfigProjects(configId, { project_ids: newIds });
       refetchMcps();
     } catch (e) {
-      console.error('Failed to toggle project:', e);
+      console.warn('Failed to toggle project:', e);
     }
   };
 
@@ -138,7 +138,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
       setEditingEnv(env);
       setEditingEnvId(configId);
     } catch (e) {
-      console.error('Failed to load secrets:', e);
+      console.warn('Failed to load secrets:', e);
     } finally {
       setEditingEnvLoading(false);
     }
@@ -152,7 +152,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
       setEditingEnvId(null);
       refetchMcps();
     } catch (e) {
-      console.error('Failed to save secrets:', e);
+      console.warn('Failed to save secrets:', e);
     } finally {
       setEditingEnvLoading(false);
     }
@@ -185,7 +185,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
       await mcpsApi.updateContext(contextEditor.projectId, contextEditor.slug, contextEditor.content);
       setContextEditor(null);
     } catch (e) {
-      console.error('Failed to save context:', e);
+      console.warn('Failed to save context:', e);
     } finally {
       setContextSaving(false);
     }
@@ -251,7 +251,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
           <button style={{ ...s.scanBtn, background: 'rgba(200,255,0,0.1)', color: '#c8ff00' }} onClick={() => { setShowAddMcp(true); setAddMcpSelected(null); setAddMcpSearch(''); }} title={t('mcp.addTitle')}>
             <Plus size={14} /> {t('mcp.add')}
           </button>
-          <button style={s.scanBtn} onClick={async () => { try { await mcpsApi.refresh(); refetchMcps(); } catch (e) { console.error('Failed to refresh MCPs:', e); } }} title={t('mcp.detect')}>
+          <button style={s.scanBtn} onClick={async () => { try { await mcpsApi.refresh(); refetchMcps(); } catch (e) { console.warn('Failed to refresh MCPs:', e); } }} title={t('mcp.detect')}>
             <RefreshCw size={14} /> {t('mcp.detect')}
           </button>
         </div>
@@ -595,7 +595,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                           </span>
                           <span
                             style={s.generalLabel(cfg.include_general)}
-                            onClick={async () => { try { await mcpsApi.updateConfig(cfg.id, { include_general: !cfg.include_general }); refetchMcps(); } catch (e) { console.error('Failed to toggle general:', e); } }}
+                            onClick={async () => { try { await mcpsApi.updateConfig(cfg.id, { include_general: !cfg.include_general }); refetchMcps(); } catch (e) { console.warn('Failed to toggle general:', e); } }}
                             title={cfg.include_general ? t('mcp.disableGeneral') : t('mcp.enableGeneral')}
                           >
                             {t('mcp.general')}

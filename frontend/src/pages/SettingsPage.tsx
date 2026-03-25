@@ -134,7 +134,7 @@ export function SettingsPage({
   useEffect(() => {
     skillsApi.list().then(setAvailableSkills).catch(() => {});
     profilesApi.list().then(setAvailableProfiles).catch(() => {});
-    directivesApi.list().then(setAvailableDirectives).catch(console.error);
+    directivesApi.list().then(setAvailableDirectives).catch(() => {});
     configApi.getModelTiers().then(tiers => {
       if (tiers) {
         // Initialize editing state with current values
@@ -240,7 +240,7 @@ export function SettingsPage({
                 }}
                 onClick={async () => {
                   try { await configApi.saveLanguage(l.code); refetchLanguage(); }
-                  catch { console.error('Failed to save language'); }
+                  catch { console.warn('Failed to save language'); }
                 }}
               >
                 {l.flag} {l.label}
@@ -383,7 +383,7 @@ export function SettingsPage({
                   const v = Number(e.target.value);
                   setScanDepth(v);
                   try { await configApi.setScanDepth(v); }
-                  catch { console.error('Failed to save scan depth'); }
+                  catch { console.warn('Failed to save scan depth'); }
                 }}
                 style={{ flex: 1, accentColor: '#c8ff00', cursor: 'pointer' }}
               />
@@ -408,7 +408,7 @@ export function SettingsPage({
                   onClick={async () => {
                     const updated = scanPaths.filter((_, j) => j !== i);
                     setScanPaths(updated);
-                    try { await configApi.setScanPaths(updated); } catch (err) { console.error(err); }
+                    try { await configApi.setScanPaths(updated); } catch (err) { console.warn('Settings action failed:', err); }
                   }}
                 >
                   <Trash2 size={10} style={{ color: 'rgba(255,107,107,0.5)' }} />
@@ -428,7 +428,7 @@ export function SettingsPage({
                     const updated = [...scanPaths, newScanPath.trim()];
                     setScanPaths(updated);
                     setNewScanPath('');
-                    try { await configApi.setScanPaths(updated); } catch (err) { console.error(err); }
+                    try { await configApi.setScanPaths(updated); } catch (err) { console.warn('Settings action failed:', err); }
                   }
                 }}
               />
@@ -440,7 +440,7 @@ export function SettingsPage({
                   const updated = [...scanPaths, newScanPath.trim()];
                   setScanPaths(updated);
                   setNewScanPath('');
-                  try { await configApi.setScanPaths(updated); } catch (err) { console.error(err); }
+                  try { await configApi.setScanPaths(updated); } catch (err) { console.warn('Settings action failed:', err); }
                 }}
               >
                 <Plus size={12} />
@@ -473,7 +473,7 @@ export function SettingsPage({
                     onClick={async () => {
                       const updated = scanIgnore.filter((_, j) => j !== i);
                       setScanIgnore(updated);
-                      try { await configApi.setScanIgnore(updated); } catch (err) { console.error(err); }
+                      try { await configApi.setScanIgnore(updated); } catch (err) { console.warn('Settings action failed:', err); }
                     }}
                   >
                     <X size={9} style={{ color: 'rgba(255,107,107,0.5)' }} />
@@ -493,7 +493,7 @@ export function SettingsPage({
                     const updated = [...scanIgnore, newIgnorePattern.trim()];
                     setScanIgnore(updated);
                     setNewIgnorePattern('');
-                    try { await configApi.setScanIgnore(updated); } catch (err) { console.error(err); }
+                    try { await configApi.setScanIgnore(updated); } catch (err) { console.warn('Settings action failed:', err); }
                   }
                 }}
               />
@@ -504,7 +504,7 @@ export function SettingsPage({
                   const updated = [...scanIgnore, newIgnorePattern.trim()];
                   setScanIgnore(updated);
                   setNewIgnorePattern('');
-                  try { await configApi.setScanIgnore(updated); } catch (err) { console.error(err); }
+                  try { await configApi.setScanIgnore(updated); } catch (err) { console.warn('Settings action failed:', err); }
                 }}
               >
                 <Plus size={12} />
@@ -685,13 +685,13 @@ export function SettingsPage({
                     tabIndex={0}
                     style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}
                     onClick={async () => {
-                      try { await configApi.setAgentAccess({ agent: agent.agent_type, full_access: !isFullAccess }); } catch (err) { console.error(err); }
+                      try { await configApi.setAgentAccess({ agent: agent.agent_type, full_access: !isFullAccess }); } catch (err) { console.warn('Settings action failed:', err); }
                       refetchAgentAccess();
                     }}
                     onKeyDown={async (e) => {
                       if (e.key === ' ' || e.key === 'Enter') {
                         e.preventDefault();
-                        try { await configApi.setAgentAccess({ agent: agent.agent_type, full_access: !isFullAccess }); } catch (err) { console.error(err); }
+                        try { await configApi.setAgentAccess({ agent: agent.agent_type, full_access: !isFullAccess }); } catch (err) { console.warn('Settings action failed:', err); }
                         refetchAgentAccess();
                       }
                     }}
@@ -729,7 +729,7 @@ export function SettingsPage({
                         style={{ ...ss.iconBtn, padding: 0 }}
                         title={isDisabled ? t('config.enableOverride') : t('config.disableOverride')}
                         onClick={async () => {
-                          try { await configApi.toggleTokenOverride(tf.key); } catch (err) { console.error(err); }
+                          try { await configApi.toggleTokenOverride(tf.key); } catch (err) { console.warn('Settings action failed:', err); }
                           refetchTokens();
                         }}
                       >
@@ -763,7 +763,7 @@ export function SettingsPage({
                         <Check size={9} style={{ color: 'rgba(52,211,153,0.7)', flexShrink: 0 }} />
                       ) : (
                         <button style={{ ...ss.iconBtn, padding: 0 }} title={t('config.activateKey')} aria-label={t('config.activateKey')}
-                          onClick={async () => { try { await configApi.activateApiKey(k.id); } catch (err) { console.error(err); } refetchTokens(); }}>
+                          onClick={async () => { try { await configApi.activateApiKey(k.id); } catch (err) { console.warn('Settings action failed:', err); } refetchTokens(); }}>
                           <div style={{ width: 9, height: 9, borderRadius: '50%', border: '1px solid rgba(255,255,255,0.2)' }} />
                         </button>
                       )}
@@ -789,7 +789,7 @@ export function SettingsPage({
                       <button style={{ ...ss.iconBtn, padding: 0 }} title={t('config.deleteKey')} aria-label={t('config.deleteKey')}
                         onClick={async () => {
                           if (confirm(t('config.deleteKeyConfirm').replace('{0}', k.name))) {
-                            try { await configApi.deleteApiKey(k.id); } catch (err) { console.error(err); }
+                            try { await configApi.deleteApiKey(k.id); } catch (err) { console.warn('Settings action failed:', err); }
                             refetchTokens();
                           }
                         }}>
@@ -1104,7 +1104,7 @@ export function SettingsPage({
                         await skillsApi.delete(skill.id);
                         setAvailableSkills(prev => prev.filter(s => s.id !== skill.id));
                         toast(t('skills.remove'), 'success');
-                      } catch (err) { console.error(err); }
+                      } catch (err) { console.warn('Settings action failed:', err); }
                     }}
                   >
                     <Trash2 size={10} />
@@ -1175,7 +1175,7 @@ export function SettingsPage({
                       setShowCreateSkill(false);
                       setNewSkillName(''); setNewSkillIcon('Star'); setNewSkillContent('');
                       toast(t('skills.add'), 'success');
-                    } catch (err) { console.error(err); }
+                    } catch (err) { console.warn('Settings action failed:', err); }
                   }}
                 >
                   <Check size={12} /> {t('skills.add')}
@@ -1234,7 +1234,7 @@ export function SettingsPage({
                               try {
                                 const updated = await profilesApi.updatePersonaName(profile.id, editingPersonaValue);
                                 setAvailableProfiles(prev => prev.map(p => p.id === profile.id ? updated : p));
-                              } catch (err) { console.error(err); }
+                              } catch (err) { console.warn('Settings action failed:', err); }
                             }
                             setEditingPersonaId(null);
                           }}
@@ -1321,7 +1321,7 @@ export function SettingsPage({
                           await profilesApi.delete(profile.id);
                           setAvailableProfiles(prev => prev.filter(p => p.id !== profile.id));
                           toast(t('common.delete'), 'success');
-                        } catch (err) { console.error(err); }
+                        } catch (err) { console.warn('Settings action failed:', err); }
                       }}
                     >
                       <Trash2 size={10} />
@@ -1408,7 +1408,7 @@ export function SettingsPage({
                       setShowCreateProfile(false);
                       setNewProfileName(''); setNewProfilePersonaName(''); setNewProfileRole(''); setNewProfileAvatar('🤖'); setNewProfileColor('#a78bfa'); setNewProfilePersona('');
                       toast(t('profiles.createCustom'), 'success');
-                    } catch (err) { console.error(err); }
+                    } catch (err) { console.warn('Settings action failed:', err); }
                   }}
                 >
                   <Check size={12} /> {t('profiles.createCustom')}
@@ -1484,7 +1484,7 @@ export function SettingsPage({
                         await directivesApi.delete(directive.id);
                         setAvailableDirectives(prev => prev.filter(d => d.id !== directive.id));
                         toast(t('directives.remove'), 'success');
-                      } catch (err) { console.error(err); }
+                      } catch (err) { console.warn('Settings action failed:', err); }
                     }}
                   >
                     <Trash2 size={10} />
@@ -1563,7 +1563,7 @@ export function SettingsPage({
                       setShowCreateDirective(false);
                       setNewDirectiveName(''); setNewDirectiveIcon('📋'); setNewDirectiveContent(''); setNewDirectiveConflicts('');
                       toast(t('directives.add'), 'success');
-                    } catch (err) { console.error(err); }
+                    } catch (err) { console.warn('Settings action failed:', err); }
                   }}
                 >
                   <Check size={12} /> {t('directives.createCustom')}
@@ -1788,7 +1788,7 @@ export function SettingsPage({
                   a.download = `kronn-export-${new Date().toISOString().slice(0, 10)}.json`;
                   a.click();
                   URL.revokeObjectURL(url);
-                } catch (err) { console.error(err); }
+                } catch (err) { console.warn('Settings action failed:', err); }
               }}
             >
               <Download size={12} /> {t('config.export')}

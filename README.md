@@ -70,7 +70,7 @@ AI is powerful — but every wasted token is wasted energy, wasted hardware, was
 
 Chat with agents in project context. Use `@claude` or `@codex` to target specific agents. **Debate mode**: agents discuss in configurable rounds (1–3) and a primary agent synthesizes — get diverse perspectives, not just one model's opinion.
 
-Persistent conversations backed by SQLite — no context rebuilt from scratch, every resumed conversation is compute saved. Full i18n support (French, English, Spanish). Claude Code responses streamed token-by-token with per-message token tracking. Archive, retry, edit, swipe gestures, multi-line input with auto-resize.
+Persistent conversations backed by SQLite — no context rebuilt from scratch, every resumed conversation is compute saved. Full i18n support (French, English, Spanish). Claude Code responses streamed token-by-token with per-message token tracking. Archive, retry, edit, swipe gestures, multi-line input with auto-resize. **Switch agent mid-conversation** — out of tokens or want a second opinion? Click the agent name to switch; the new agent auto-summarizes and continues.
 
 ![Multi-agent discussion with debate mode](docs/screenshots/kronn_multi-ai_discussion.png)
 

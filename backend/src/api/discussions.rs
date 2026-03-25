@@ -228,6 +228,7 @@ pub async fn update(
     let directive_ids = req.directive_ids;
     let project_id = req.project_id;
     let tier = req.tier;
+    let new_agent = req.agent;
 
     // Reject conflicting directives on update
     if let Some(ref ids) = directive_ids {
@@ -239,6 +240,16 @@ pub async fn update(
             }
         }
     }
+
+    // Agent switch: fetch old agent name for the system message
+    let old_agent_name = if new_agent.is_some() {
+        let did = id.clone();
+        state.db.with_conn(move |conn| {
+            crate::db::discussions::get_discussion(conn, &did)
+        }).await.ok().flatten().map(|d| format!("{:?}", d.agent))
+    } else {
+        None
+    };
 
     match state.db.with_conn(move |conn| {
         // project_id: None = don't change, Some(None) = unset, Some(Some("id")) = set
@@ -255,6 +266,30 @@ pub async fn update(
         }
         if let Some(ref t) = tier {
             updated = crate::db::discussions::update_discussion_tier(conn, &id, t)? || updated;
+        }
+        if let Some(ref agent) = new_agent {
+            updated = crate::db::discussions::update_discussion_agent(conn, &id, agent)? || updated;
+            // Invalidate summary — new agent has different budget/context
+            crate::db::discussions::invalidate_summary_cache(conn, &id)?;
+            // Insert a User message so the new agent sees the switch context
+            // (System messages are filtered from the agent prompt)
+            let old_name = old_agent_name.as_deref().unwrap_or("?");
+            let switch_msg = crate::models::DiscussionMessage {
+                id: uuid::Uuid::new_v4().to_string(),
+                role: crate::models::MessageRole::User,
+                content: format!(
+                    "[Agent switch: {} → {:?}] You are now the primary agent for this conversation. \
+                    Briefly acknowledge the switch and summarize what has been discussed so far, \
+                    then ask how you can help.",
+                    old_name, agent
+                ),
+                agent_type: None,
+                timestamp: chrono::Utc::now(),
+                tokens_used: 0,
+                auth_mode: None,
+                model_tier: None,
+            };
+            crate::db::discussions::insert_message(conn, &id, &switch_msg)?;
         }
         Ok(updated)
     }).await {

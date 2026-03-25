@@ -176,6 +176,14 @@ pub fn update_discussion_tier(conn: &Connection, id: &str, tier: &ModelTier) -> 
     Ok(affected > 0)
 }
 
+pub fn update_discussion_agent(conn: &Connection, id: &str, agent: &AgentType) -> Result<bool> {
+    let affected = conn.execute(
+        "UPDATE discussions SET agent = ?1, updated_at = ?2 WHERE id = ?3",
+        params![format_agent_type(agent), Utc::now().to_rfc3339(), id],
+    )?;
+    Ok(affected > 0)
+}
+
 pub fn update_discussion_directive_ids(conn: &Connection, id: &str, directive_ids: &[String]) -> Result<bool> {
     update_discussion_fields(conn, id, None, None, None, None, Some(directive_ids), None)
 }
