@@ -427,8 +427,7 @@ pub(crate) async fn ensure_kiro_cli_available() -> Result<(), String> {
     Ok(())
 }
 
-/// Get the command configuration for an agent type.
-/// Resolve the path to vibe-runner.py (Mistral API wrapper).
+/// Resolve the path to vibe-runner.py.
 /// In Docker: bundled at /app/scripts/vibe-runner.py
 /// Native: relative to the binary at ../scripts/vibe-runner.py
 fn vibe_runner_path() -> String {
@@ -515,20 +514,24 @@ fn agent_command(agent_type: &AgentType, prompt: &str, full_access: bool, mcp_co
             )
         },
         AgentType::Vibe => {
-            // Vibe CLI 2.5+ hangs in programmatic mode (asyncio + stdin issues).
-            // Use vibe-runner.py: a lightweight wrapper that calls the Mistral API
-            // directly with streaming, zero dependencies beyond Python stdlib.
-            // NOTE: MCP context is NOT injected — the API runner has no tool
-            // execution loop, so advertising tools causes the model to emit
-            // tool calls that never execute (stream appears "cut").
-            // When CLI mode is restored, re-enable MCP context injection.
-            let full_prompt: String = prompt.into();
+            // Vibe CLI hangs: get_prompt_from_stdin() blocks on sys.stdin.read()
+            // when stdin is not a tty, and 429 rate limits cause infinite hangs.
+            // vibe-runner.py bypasses the CLI and calls run_programmatic() directly,
+            // giving a real agent (bash, file I/O, grep, etc. + MCP if configured).
+            // Falls back to direct Mistral API streaming if vibe is not installed.
+            let full_prompt = if mcp_context.is_empty() {
+                prompt.into()
+            } else {
+                format!("{}\n\n{}", mcp_context, prompt)
+            };
             let runner_script = vibe_runner_path();
             let mut args = vec![runner_script];
             if let Some(model) = model_flag {
                 args.push("--model".into());
                 args.push(model.into());
             }
+            args.push("--max-turns".into());
+            args.push("30".into());
             args.push(full_prompt);
             (
                 "python3",

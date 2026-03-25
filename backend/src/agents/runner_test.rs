@@ -562,14 +562,15 @@ mod tests {
     // ─── agent_command: context injection per agent ─────────────────────────────
 
     #[test]
-    fn vibe_ignores_mcp_context_in_api_mode() {
+    fn vibe_prepends_mcp_context_to_prompt() {
         let (_, _, args, _, _, _) = super::super::agent_command(
-            &AgentType::Vibe, "user prompt", false, "MCP context", None,
+            &AgentType::Vibe, "user prompt", false, "MCP context here", None,
         );
-        // In API mode, MCP context is NOT injected (no tool execution loop)
+        // vibe-runner.py uses the real Vibe SDK which supports tools,
+        // so MCP context is prepended to the prompt (same as Codex/Gemini/Kiro)
         let prompt = args.last().unwrap();
-        assert_eq!(prompt, "user prompt", "MCP context must NOT be prepended in API mode");
-        assert!(!prompt.contains("MCP"), "MCP context should be absent");
+        assert!(prompt.contains("MCP context here"), "MCP context should be prepended");
+        assert!(prompt.contains("user prompt"), "User prompt should be present");
     }
 
     #[test]

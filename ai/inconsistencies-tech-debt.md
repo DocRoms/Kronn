@@ -29,10 +29,10 @@
 | TD-20260318-no-auth-by-default | API is unauthenticated until user manually sets a Bearer token — no default protection | Backend | High |
 | TD-20260314-no-pagination | No pagination on list_discussions / list_runs / list_projects | Backend | Medium |
 | TD-20260314-no-api-docs | No OpenAPI/Swagger API documentation | Docs | Medium |
-| TD-20260318-token-tracking-incomplete | Token usage returns 0 for Gemini CLI and Vibe (TODO in runner.rs) | Backend | Medium |
-| TD-20260318-large-pages | DiscussionsPage (2325L), WorkflowsPage (1977L), SettingsPage (1874L), Dashboard (1489L) — monolithic | Frontend | Medium |
+| TD-20260318-token-tracking-incomplete | Token usage returns 0 for Gemini CLI and Vibe — SDK doesn't expose token counts in output | Backend | Medium |
+| TD-20260318-large-pages | DiscussionsPage (~3400L) still monolithic but `MessageBubble` extracted as memo component (v0.1.2). WorkflowsPage, SettingsPage, Dashboard unchanged. | Frontend | Medium |
 | TD-20260318-drift-detection | Audit drift detection via `ai/checksums.json` — see `ai/tech-debt/TD-20260318-drift-detection.md` | Backend + Frontend | Feature |
-| TD-20260306-inline-styles | All styles are inline — no theming or consistency system | Frontend | Low |
+| TD-20260306-inline-styles | Most styles inline — `msgRow`/`msgBubble` pre-computed as static objects (v0.1.2), rest unchanged | Frontend | Low |
 | TD-20260314-polling-heavy | Frontend polls discussions every 15s. WebSocket/SSE push still planned. | Frontend + Backend | Low |
 | TD-20260314-home-mount | `$HOME` mounted read-only in container — security + portability risk | Infra | Low |
-| TD-20260318-console-errors-prod | 51 console.error() left in frontend production code (intentional for v0.1.0 debugging) | Frontend | Low |
+| ~~TD-20260318-console-errors-prod~~ | ~~51 console.error()~~ → **Resolved (v0.1.2)**: reduced to 9 legitimate console.error (ErrorBoundary + agent error handlers with toast). Silent catch handlers converted to console.warn. | Frontend | ~~Low~~ Done |

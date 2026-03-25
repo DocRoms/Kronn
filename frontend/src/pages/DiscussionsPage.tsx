@@ -3,7 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { discussions as discussionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi } from '../lib/api';
 import { GitPanel } from '../components/GitPanel';
-import type { Project, AgentDetection, Discussion, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility } from '../types/generated';
+import type { Project, AgentDetection, Discussion, DiscussionMessage, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility } from '../types/generated';
 import { useT } from '../lib/I18nContext';
 import { AGENT_LABELS, agentColor, isAgentRestricted as isAgentRestrictedUtil, hasAgentFullAccess, getProjectGroup, isHiddenPath, isUsable, isValidationDisc } from '../lib/constants';
 import type { ToastFn } from '../hooks/useToast';
@@ -12,12 +12,16 @@ import {
   Plus, Trash2, Loader2,
   MessageSquare, Send, X, Key, AlertTriangle, Users,
   StopCircle, RotateCcw, Pencil, ShieldCheck, Check, Archive, Zap, UserCircle, FileText, Settings, Rocket, Play, Pause,
-  Volume2, VolumeX, Mic, MicOff, Phone, PhoneOff, Menu, Lock, Unlock, Copy, Clock,
+  Volume2, VolumeX, Mic, MicOff, Phone, PhoneOff, Menu, Lock, Unlock, Copy, Clock, RefreshCw,
 } from 'lucide-react';
 import { useIsMobile } from '../hooks/useMediaQuery';
 
 const isBootstrapDisc = (title: string) => title.startsWith('Bootstrap: ');
 const isBriefingDisc = (title: string) => title.startsWith('Briefing');
+
+// Hoisted regexes (avoid creating new RegExp objects per message per render)
+const RE_AUTH_ERROR = /api.?key|invalid.*key|key.*not.*config|authenticat|unauthori|login|sign.?in/i;
+const RE_PARTIAL_RESPONSE = /Réponse partielle.*interrompu|Timeout d'inactivité/i;
 
 const ALL_AGENT_MENTIONS: { trigger: string; type: AgentType; label: string }[] = [
   { trigger: '@claude', type: 'ClaudeCode', label: 'Claude Code' },
@@ -34,9 +38,9 @@ const SwipeableDiscItem = memo(function SwipeableDiscItem({ disc, isActive, last
   isActive: boolean;
   lastSeenCount: number;
   isSending: boolean;
-  onSelect: () => void;
-  onArchive: () => void;
-  onDelete: () => void;
+  onSelect: (discId: string, msgCount: number) => void;
+  onArchive: (discId: string) => void;
+  onDelete: (discId: string) => void;
   t: (key: string, ...args: any[]) => string;
   archiveLabel?: string;
 }) {
@@ -65,11 +69,11 @@ const SwipeableDiscItem = memo(function SwipeableDiscItem({ disc, isActive, last
     if (!swiping) return;
     setSwiping(false);
     if (offsetX > SWIPE_THRESHOLD) {
-      onArchive();
+      onArchive(disc.id);
     } else if (offsetX < -SWIPE_THRESHOLD) {
-      onDelete();
+      onDelete(disc.id);
     } else if (Math.abs(offsetX) < 5) {
-      onSelect();
+      onSelect(disc.id, disc.message_count ?? disc.messages.length);
     }
     setOffsetX(0);
   };
@@ -250,6 +254,13 @@ export function DiscussionsPage({
   const [mcpSearchFilter, setMcpSearchFilter] = useState('');
   const [showProfileEditor, setShowProfileEditor] = useState(false);
   const [chatInput, setChatInput] = useState('');
+  const chatInputValueRef = useRef('');
+  const chatInputHasText = chatInput.trim().length > 0;
+  const updateChatInput = useCallback((val: string) => {
+    chatInputValueRef.current = val;
+    setChatInput(val);
+    if (chatInputRef.current) chatInputRef.current.value = val;
+  }, []);
   const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState('');
   const [collapsedDiscGroups, setCollapsedDiscGroups] = useState<Set<string>>(() => {
@@ -288,6 +299,7 @@ export function DiscussionsPage({
   const [newDiscBaseBranch, setNewDiscBaseBranch] = useState('main');
   const [expandedSummaryMsgId, setExpandedSummaryMsgId] = useState<string | null>(null);
   const [worktreeError, setWorktreeError] = useState<string | null>(null);
+  const [showAgentSwitch, setShowAgentSwitch] = useState(false);
   const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
   const [ttsEnabled, setTtsEnabled] = useState<boolean>(() => {
     try { return localStorage.getItem('kronn:ttsEnabled') === 'true'; } catch { return false; }
@@ -330,6 +342,10 @@ export function DiscussionsPage({
     setTtsPlayingMsgId(null);
   }, [activeDiscussionId]);
 
+  // Orchestration chunk buffer (same rAF pattern as streaming)
+  const orchChunkBuffer = useRef<Record<string, string>>({});
+  const orchRafId = useRef<number | null>(null);
+
   // Batched streaming: accumulate chunks in a ref, flush to state via rAF
   const streamBufferRef = useRef<Record<string, string>>({});
   const rafIdRef = useRef<number | null>(null);
@@ -371,8 +387,8 @@ export function DiscussionsPage({
     return () => { cancelled = true; };
   }, [activeDiscussionId, activeSending]);
 
-  // Clear worktree error when switching discussions
-  useEffect(() => { setWorktreeError(null); }, [activeDiscussionId]);
+  // Clear worktree error and close popovers when switching discussions
+  useEffect(() => { setWorktreeError(null); setShowAgentSwitch(false); }, [activeDiscussionId]);
 
   // ─── Derived data ────────────────────────────────────────────────────────
   const activeDiscussion = (activeDiscussionId && loadedDiscussions[activeDiscussionId])
@@ -385,7 +401,7 @@ export function DiscussionsPage({
     return !agentDet || !isUsable(agentDet);
   }, [activeDiscussion, agents]);
 
-  const installedAgentsList = agents.filter(isUsable);
+  const installedAgentsList = useMemo(() => agents.filter(isUsable), [agents]);
 
   const sending = activeDiscussionId ? !!sendingMap[activeDiscussionId] : false;
   const streamingText = activeDiscussionId ? (streamingMap[activeDiscussionId] ?? '') : '';
@@ -420,11 +436,9 @@ export function DiscussionsPage({
   }, [activeDiscussion?.messages.length, ttsEnabled, sending]);
 
   const AGENT_MENTIONS = useMemo(() => {
-    const activeAgentTypes = new Set(agents.filter(isUsable).map(a => a.agent_type));
+    const activeAgentTypes = new Set(installedAgentsList.map(a => a.agent_type));
     return ALL_AGENT_MENTIONS.filter(m => activeAgentTypes.has(m.type));
-  }, [agents]);
-
-  const installedAgents = agents.filter(isUsable);
+  }, [installedAgentsList]);
 
   // Group discussions by project (null = global), separating archived
   const { activeDiscByProject, archivedDiscussions } = useMemo(() => {
@@ -463,7 +477,7 @@ export function DiscussionsPage({
   useEffect(() => {
     skillsApi.list().then(setAvailableSkills).catch(() => {});
     profilesApi.list().then(setAvailableProfiles).catch(() => {});
-    directivesApi.list().then(setAvailableDirectives).catch(console.error);
+    directivesApi.list().then(setAvailableDirectives).catch(() => {});
   }, []);
 
   // Auto-select first installed agent if current selection is invalid
@@ -505,10 +519,18 @@ export function DiscussionsPage({
     return () => { if (sendingTimerRef.current) clearInterval(sendingTimerRef.current); };
   }, [sending, activeDiscussionId, sendingStartMap]);
 
-  // Auto-scroll on new messages / streaming
+  // Auto-scroll on new messages (instant) and streaming (throttled to avoid 60fps layout thrashing)
+  const lastScrollRef = useRef(0);
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [activeDiscussion?.messages.length, streamingText]);
+  }, [activeDiscussion?.messages.length]);
+  useEffect(() => {
+    if (!streamingText) return;
+    const now = Date.now();
+    if (now - lastScrollRef.current < 250) return;
+    lastScrollRef.current = now;
+    chatEndRef.current?.scrollIntoView({ behavior: 'instant' as ScrollBehavior });
+  }, [streamingText]);
 
   // Handle prefill from parent (e.g. "validate audit" button on Projects page)
   useEffect(() => {
@@ -763,7 +785,7 @@ export function DiscussionsPage({
             if (voiceMode) {
               voiceAutoSendRef.current = true;
             }
-            setChatInput(prev => prev ? prev + ' ' + text : text);
+            updateChatInput(chatInputValueRef.current ? chatInputValueRef.current + ' ' + text : text);
             setTimeout(() => {
               if (chatInputRef.current) {
                 chatInputRef.current.focus();
@@ -845,12 +867,13 @@ export function DiscussionsPage({
   }, [activeDiscussionId]);
 
   const handleSendMessage = async () => {
-    if (!activeDiscussionId || !chatInput.trim() || sending) return;
+    const inputVal = chatInputValueRef.current;
+    if (!activeDiscussionId || !inputVal.trim() || sending) return;
     stopTts();
     const discId = activeDiscussionId;
-    const msg = chatInput.trim();
+    const msg = inputVal.trim();
     const { targetAgent } = parseMention(msg);
-    setChatInput('');
+    updateChatInput('');
     setMentionQuery(null);
 
     // Optimistically add user message to loadedDiscussions so it appears immediately
@@ -945,6 +968,52 @@ export function DiscussionsPage({
 
   handleSendMessageRef.current = handleSendMessage;
 
+  // Stable MessageBubble callbacks (avoid breaking memo)
+  const handleMsgCopy = useCallback((msgId: string, content: string) => {
+    navigator.clipboard.writeText(content);
+    setCopiedMsgId(msgId);
+    setTimeout(() => setCopiedMsgId(prev => prev === msgId ? null : prev), 1500);
+  }, []);
+  const handleMsgTts = useCallback(async (msgId: string, content: string, lang: string) => {
+    const isThisMsg = ttsPlayingMsgId === msgId;
+    if (isThisMsg && ttsState === 'paused') { resumeTts(); setTtsState('playing'); }
+    else if (isThisMsg && (ttsState === 'playing' || ttsState === 'loading')) { pauseTts(); setTtsState('paused'); }
+    else {
+      setTtsPlayingMsgId(msgId); setTtsState('loading'); setTtsEnabled(true);
+      await speakText(getTtsWorker, content, lang, () => setTtsState('playing'));
+      setTtsPlayingMsgId(cur => { if (cur === msgId && !isTtsPaused()) { setTtsState('idle'); return null; } return cur; });
+    }
+  }, [ttsPlayingMsgId, ttsState]);
+  const handleMsgEditStart = useCallback((msgId: string, content: string) => {
+    setEditingMsgId(msgId); setEditingText(content);
+  }, []);
+  const handleMsgEditCancel = useCallback(() => { setEditingMsgId(null); setEditingText(''); }, []);
+  const handleMsgExpandSummary = useCallback((msgId: string) => {
+    setExpandedSummaryMsgId(prev => prev === msgId ? null : msgId);
+  }, []);
+
+  // Stable sidebar callbacks (avoid breaking SwipeableDiscItem memo)
+  const handleDiscSelect = useCallback((discId: string, msgCount: number) => {
+    setActiveDiscussionId(discId);
+    markDiscussionSeen(discId, msgCount);
+    if (isMobile) setSidebarOpen(false);
+  }, [isMobile, markDiscussionSeen]);
+  const handleDiscArchive = useCallback(async (discId: string) => {
+    await discussionsApi.update(discId, { archived: true });
+    setActiveDiscussionId(prev => prev === discId ? null : prev);
+    refetchDiscussions();
+  }, [refetchDiscussions]);
+  const handleDiscDelete = useCallback(async (discId: string) => {
+    if (!confirm('Supprimer cette discussion et tous ses messages ?')) return;
+    await discussionsApi.delete(discId);
+    setActiveDiscussionId(prev => prev === discId ? null : prev);
+    refetchDiscussions();
+  }, [refetchDiscussions]);
+  const handleDiscUnarchive = useCallback(async (discId: string) => {
+    await discussionsApi.update(discId, { archived: false });
+    refetchDiscussions();
+  }, [refetchDiscussions]);
+
   const handleEditMessage = async () => {
     if (!activeDiscussionId || !editingMsgId || !editingText.trim() || sending) return;
     const discId = activeDiscussionId;
@@ -1005,14 +1074,25 @@ export function DiscussionsPage({
         });
       },
       onChunk: (text, agent, _agentType, _round) => {
-        setOrchState(prev => {
-          const s = prev[discId];
-          if (!s) return prev;
-          const streams = [...s.agentStreams];
-          const last = [...streams].reverse().find((st: typeof streams[0]) => st.agent === agent && !st.done);
-          if (last) last.text = (last.text ?? '') + text;
-          return { ...prev, [discId]: { ...s, agentStreams: streams } };
-        });
+        // Buffer chunks and flush via rAF (same pattern as regular streaming)
+        const key = `${discId}:${agent}`;
+        orchChunkBuffer.current[key] = (orchChunkBuffer.current[key] ?? '') + text;
+        if (orchRafId.current === null) {
+          orchRafId.current = requestAnimationFrame(() => {
+            orchRafId.current = null;
+            const buf = { ...orchChunkBuffer.current };
+            orchChunkBuffer.current = {};
+            setOrchState(prev => {
+              const s = prev[discId];
+              if (!s) return prev;
+              const streams = s.agentStreams.map(st => {
+                const buffered = buf[`${discId}:${st.agent}`];
+                return buffered && !st.done ? { ...st, text: (st.text ?? '') + buffered } : st;
+              });
+              return { ...prev, [discId]: { ...s, agentStreams: streams } };
+            });
+          });
+        }
       },
       onAgentDone: (agent) => {
         setOrchState(prev => {
@@ -1090,18 +1170,9 @@ export function DiscussionsPage({
                     isActive={disc.id === activeDiscussionId}
                     lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
                     isSending={!!sendingMap[disc.id]}
-                    onSelect={() => { setActiveDiscussionId(disc.id); markDiscussionSeen(disc.id, disc.message_count ?? disc.messages.length); if (isMobile) setSidebarOpen(false); }}
-                    onArchive={async () => {
-                      await discussionsApi.update(disc.id, { archived: true });
-                      if (activeDiscussionId === disc.id) setActiveDiscussionId(null);
-                      refetchDiscussions();
-                    }}
-                    onDelete={async () => {
-                      if (!confirm('Supprimer cette discussion et tous ses messages ?')) return;
-                      await discussionsApi.delete(disc.id);
-                      if (activeDiscussionId === disc.id) setActiveDiscussionId(null);
-                      refetchDiscussions();
-                    }}
+                    onSelect={handleDiscSelect}
+                    onArchive={handleDiscArchive}
+                    onDelete={handleDiscDelete}
                     t={t}
                   />
                 ))}
@@ -1175,17 +1246,9 @@ export function DiscussionsPage({
                             isActive={disc.id === activeDiscussionId}
                             lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
                             isSending={!!sendingMap[disc.id]}
-                            onSelect={() => { setActiveDiscussionId(disc.id); markDiscussionSeen(disc.id, disc.message_count ?? disc.messages.length); if (isMobile) setSidebarOpen(false); }}
-                            onArchive={async () => {
-                              await discussionsApi.update(disc.id, { archived: true });
-                              if (activeDiscussionId === disc.id) setActiveDiscussionId(null);
-                              refetchDiscussions();
-                            }}
-                            onDelete={async () => {
-                              await discussionsApi.delete(disc.id);
-                              if (activeDiscussionId === disc.id) setActiveDiscussionId(null);
-                              refetchDiscussions();
-                            }}
+                            onSelect={handleDiscSelect}
+                            onArchive={handleDiscArchive}
+                            onDelete={handleDiscDelete}
                             t={t}
                           />
                         ))}
@@ -1222,18 +1285,9 @@ export function DiscussionsPage({
                   isActive={disc.id === activeDiscussionId}
                   lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
                   isSending={!!sendingMap[disc.id]}
-                  onSelect={() => { setActiveDiscussionId(disc.id); markDiscussionSeen(disc.id, disc.message_count ?? disc.messages.length); if (isMobile) setSidebarOpen(false); }}
-                  onArchive={async () => {
-                    // Swipe right on archived = unarchive
-                    await discussionsApi.update(disc.id, { archived: false });
-                    refetchDiscussions();
-                  }}
-                  onDelete={async () => {
-                    if (!confirm('Supprimer cette discussion et tous ses messages ?')) return;
-                    await discussionsApi.delete(disc.id);
-                    if (activeDiscussionId === disc.id) setActiveDiscussionId(null);
-                    refetchDiscussions();
-                  }}
+                  onSelect={handleDiscSelect}
+                  onArchive={handleDiscUnarchive}
+                  onDelete={handleDiscDelete}
                   archiveLabel={t('disc.unarchive')}
                   t={t}
                 />
@@ -1280,10 +1334,10 @@ export function DiscussionsPage({
                 <div>
                   <label style={ds.label}>{t('disc.agent')}</label>
                   <select style={ds.selectStyled} value={newDiscAgent} onChange={e => setNewDiscAgent(e.target.value as AgentType)}>
-                    {installedAgents.map(a => (
+                    {installedAgentsList.map(a => (
                       <option key={a.name} value={a.agent_type}>{a.name}</option>
                     ))}
-                    {installedAgents.length === 0 && (
+                    {installedAgentsList.length === 0 && (
                       <option value="" disabled>{t('disc.noAgent')}</option>
                     )}
                   </select>
@@ -1692,7 +1746,74 @@ export function DiscussionsPage({
                   )}
                 </div>
                 <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 2, display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
-                  <span>{activeDiscussion.project_id ? (projects.find(p => p.id === activeDiscussion.project_id)?.name ?? '?') : t('disc.general')} · {activeDiscussion.agent}</span>
+                  <span>{activeDiscussion.project_id ? (projects.find(p => p.id === activeDiscussion.project_id)?.name ?? '?') : t('disc.general')} · </span>
+                  <span style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                    <button
+                      onClick={() => setShowAgentSwitch(prev => !prev)}
+                      disabled={sending}
+                      title={t('disc.switchAgent')}
+                      style={{
+                        background: 'none', border: 'none', padding: '1px 4px', cursor: sending ? 'default' : 'pointer',
+                        color: agentColor(activeDiscussion.agent), fontFamily: 'inherit', fontSize: 11, fontWeight: 600,
+                        display: 'inline-flex', alignItems: 'center', gap: 3, opacity: sending ? 0.5 : 1,
+                      }}
+                    >
+                      {activeDiscussion.agent} <RefreshCw size={8} style={{ opacity: 0.5 }} />
+                    </button>
+                    {showAgentSwitch && (
+                      <div style={{
+                        position: 'absolute', top: '100%', left: 0, marginTop: 4, zIndex: 20,
+                        background: '#1a1d26', border: '1px solid rgba(200,255,0,0.2)',
+                        borderRadius: 8, overflow: 'hidden', boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
+                        minWidth: 160,
+                      }}>
+                        {installedAgentsList.map(a => (
+                          <button
+                            key={a.agent_type}
+                            disabled={a.agent_type === activeDiscussion.agent}
+                            style={{
+                              display: 'flex', alignItems: 'center', gap: 8,
+                              width: '100%', padding: '8px 12px', border: 'none', cursor: 'pointer',
+                              background: a.agent_type === activeDiscussion.agent ? 'rgba(200,255,0,0.08)' : 'transparent',
+                              color: a.agent_type === activeDiscussion.agent ? '#c8ff00' : '#e8eaed',
+                              fontFamily: 'inherit', fontSize: 11, textAlign: 'left',
+                              opacity: a.agent_type === activeDiscussion.agent ? 0.5 : 1,
+                            }}
+                            onClick={async () => {
+                              setShowAgentSwitch(false);
+                              try {
+                                const discId = activeDiscussion.id;
+                                await discussionsApi.update(discId, { agent: a.agent_type });
+                                reloadDiscussion(discId);
+                                refetchDiscussions();
+                                // Auto-trigger the new agent to introduce itself with a summary
+                                const controller = new AbortController();
+                                abortControllers.current[discId] = controller;
+                                setSendingMap(prev => ({ ...prev, [discId]: true }));
+                                setSendingStartMap(prev => ({ ...prev, [discId]: Date.now() }));
+                                setStreamingMap(prev => ({ ...prev, [discId]: '' }));
+                                resetAgentLogs();
+                                await discussionsApi.runAgent(
+                                  discId,
+                                  (text) => appendStreamChunk(discId, text),
+                                  () => cleanupStream(discId),
+                                  (error) => { console.error('Agent error:', error); const e = String(error); if (e.includes('checked out') || e.includes('worktree')) { setWorktreeError(e); } else { toast(e, 'error'); } cleanupStream(discId); },
+                                  controller.signal,
+                                  onAgentLog,
+                                );
+                              } catch (err) {
+                                toast(String(err), 'error');
+                              }
+                            }}
+                          >
+                            <Cpu size={10} style={{ color: agentColor(a.agent_type) }} />
+                            {a.name}
+                            {a.agent_type === activeDiscussion.agent && <Check size={10} style={{ marginLeft: 'auto', color: '#c8ff00' }} />}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </span>
                   {activeDiscussion.workspace_mode === 'Isolated' && activeDiscussion.worktree_branch && (
                     <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 6, background: activeDiscussion.workspace_path ? 'rgba(96,165,250,0.1)' : 'rgba(250,204,21,0.1)', color: activeDiscussion.workspace_path ? '#60a5fa' : '#facc15', border: `1px solid ${activeDiscussion.workspace_path ? 'rgba(96,165,250,0.2)' : 'rgba(250,204,21,0.2)'}`, display: 'inline-flex', alignItems: 'center', gap: 3 }}>
                       <GitBranch size={8} /> {activeDiscussion.worktree_branch}
@@ -2089,10 +2210,17 @@ export function DiscussionsPage({
             <div style={ds.messages}>
               {(() => {
                 const msgs = activeDiscussion.messages;
-                // Pre-compute last user/agent indices in O(n) instead of O(n²)
+                // Pre-compute indices and timestamps in O(n) instead of O(n²)
                 let lastUserIdx = -1;
                 for (let i = msgs.length - 1; i >= 0; i--) { if (msgs[i].role === 'User') { lastUserIdx = i; break; } }
                 const lastAgentIdx = msgs.length - 1;
+                // Pre-compute previous user timestamp per message (for response duration display)
+                const prevUserTs: (string | null)[] = [];
+                let lastSeenUserTs: string | null = null;
+                for (let i = 0; i < msgs.length; i++) {
+                  prevUserTs.push(lastSeenUserTs);
+                  if (msgs[i].role === 'User') lastSeenUserTs = msgs[i].timestamp;
+                }
                 // Hide the initial system prompt for automated discussions (briefing, validation, bootstrap)
                 const isAutoPrompt = (idx: number) => idx === 0 && msgs[0]?.role === 'User' && (
                   activeDiscussion.title.startsWith('Briefing') ||
@@ -2101,270 +2229,36 @@ export function DiscussionsPage({
                 );
                 return msgs.map((msg, idx) => {
                 if (isAutoPrompt(idx)) return null;
-                const isLastUser = msg.role === 'User' && idx === lastUserIdx;
-                const isLastAgent = msg.role === 'Agent' && idx === lastAgentIdx;
-                const isEditing = editingMsgId === msg.id;
-
                 return (
-                <div key={msg.id} style={ds.msgRow(msg.role === 'User')}>
-                  <div style={{
-                    ...ds.msgBubble(msg.role === 'User'),
-                    ...(msg.role === 'System'
-                      ? msg.content.startsWith('summary cached')
-                        ? { borderColor: 'rgba(52,211,153,0.3)', background: 'rgba(52,211,153,0.06)' }
-                        : { borderColor: 'rgba(255,77,106,0.3)', background: 'rgba(255,77,106,0.06)' }
-                      : {}),
-                  }}>
-                    {msg.role === 'Agent' && (
-                      <div style={{ ...ds.msgAgent, color: agentColor(msg.agent_type ?? activeDiscussion.agent), display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                          <Cpu size={10} /> {msg.agent_type ?? activeDiscussion.agent}
-                        </span>
-                        <button
-                          onClick={() => {
-                            navigator.clipboard.writeText(msg.content);
-                            setCopiedMsgId(msg.id);
-                            setTimeout(() => setCopiedMsgId(prev => prev === msg.id ? null : prev), 1500);
-                          }}
-                          title={t('disc.copyMessage')}
-                          style={{
-                            background: 'none', border: 'none', padding: '1px 4px', cursor: 'pointer',
-                            color: copiedMsgId === msg.id ? '#34d399' : 'rgba(255,255,255,0.2)',
-                            display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9,
-                            transition: 'color 0.15s',
-                          }}
-                        >
-                          {copiedMsgId === msg.id ? <><Check size={9} /> {t('disc.copied')}</> : <Copy size={9} />}
-                        </button>
-                      </div>
-                    )}
-                    {msg.role === 'System' && (
-                      <div style={{ ...ds.msgAgent, color: msg.content.startsWith('summary cached') ? '#34d399' : '#ff4d6a' }}>
-                        {msg.content.startsWith('summary cached') ? <Zap size={10} /> : <AlertTriangle size={10} />}
-                        {' '}{msg.content.startsWith('summary cached') ? t('disc.summaryCached') : t('disc.system')}
-                        {msg.content.startsWith('summary cached') && activeDiscussion.summary_cache && (
-                          <button
-                            aria-label={t('disc.viewSummary')}
-                            style={{
-                              background: 'none', border: 'none', cursor: 'pointer',
-                              color: 'rgba(52,211,153,0.6)', fontSize: 10, fontFamily: 'inherit',
-                              marginLeft: 6, textDecoration: 'underline',
-                            }}
-                            onClick={() => setExpandedSummaryMsgId(prev => prev === msg.id ? null : msg.id)}
-                          >
-                            {expandedSummaryMsgId === msg.id ? t('disc.hideSummary') : t('disc.viewSummary')}
-                          </button>
-                        )}
-                      </div>
-                    )}
-                    {msg.role === 'System' && msg.content.startsWith('summary cached') && expandedSummaryMsgId === msg.id && activeDiscussion.summary_cache && (
-                      <div style={{
-                        marginTop: 6, padding: '8px 10px', borderRadius: 6,
-                        background: 'rgba(52,211,153,0.04)', border: '1px solid rgba(52,211,153,0.15)',
-                        fontSize: 11, color: 'rgba(255,255,255,0.7)', lineHeight: 1.5,
-                        whiteSpace: 'pre-wrap',
-                      }}>
-                        {activeDiscussion.summary_cache}
-                      </div>
-                    )}
-                    {isEditing ? (
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                        <textarea
-                          value={editingText}
-                          onChange={e => setEditingText(e.target.value)}
-                          onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); handleEditMessage(); } }}
-                          style={{
-                            width: '100%', minHeight: 60, padding: 8, borderRadius: 6,
-                            background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(200,255,0,0.3)',
-                            color: '#e8eaed', fontFamily: 'inherit', fontSize: 12, resize: 'vertical',
-                          }}
-                          autoFocus
-                        />
-                        <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
-                          <button
-                            style={{ ...ls.iconBtn, fontSize: 11, padding: '4px 10px', color: 'rgba(255,255,255,0.4)' }}
-                            onClick={() => { setEditingMsgId(null); setEditingText(''); }}
-                          >
-                            {t('disc.cancel')}
-                          </button>
-                          <button
-                            style={{ ...ls.scanBtn, fontSize: 11, padding: '4px 10px' }}
-                            onClick={handleEditMessage}
-                            disabled={!editingText.trim()}
-                          >
-                            <Send size={10} /> {t('disc.resend')}
-                            <span style={{ fontSize: 9, opacity: 0.5, marginLeft: 4 }}>Ctrl+Enter</span>
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <MarkdownContent content={msg.content.replace(/KRONN:(BRIEFING_COMPLETE|VALIDATION_COMPLETE|BOOTSTRAP_COMPLETE)/gi, '').trim()} />
-                    )}
-                    {msg.role === 'Agent' && (
-                      <button
-                        style={{
-                          background: 'none', border: 'none', borderRadius: 4,
-                          padding: '2px 6px', cursor: 'pointer',
-                          color: 'rgba(255,255,255,0.25)', fontSize: 10,
-                          display: 'inline-flex', alignItems: 'center', gap: 3,
-                          marginTop: 4,
-                        }}
-                        onClick={async () => {
-                          const isThisMsg = ttsPlayingMsgId === msg.id;
-                          if (isThisMsg && ttsState === 'paused') {
-                            resumeTts();
-                            setTtsState('playing');
-                          } else if (isThisMsg && (ttsState === 'playing' || ttsState === 'loading')) {
-                            pauseTts();
-                            setTtsState('paused');
-                          } else {
-                            // New message (or different message) → stop previous, start this one
-                            const myId = msg.id;
-                            setTtsPlayingMsgId(myId);
-                            setTtsState('loading');
-                            setTtsEnabled(true);
-                            await speakText(getTtsWorker, msg.content, activeDiscussion.language || 'fr', () => setTtsState('playing'));
-                            // Only reset if we're still the active message (not replaced by another click)
-                            setTtsPlayingMsgId(cur => {
-                              if (cur === myId && !isTtsPaused()) { setTtsState('idle'); return null; }
-                              return cur;
-                            });
-                          }
-                        }}
-                        title={
-                          ttsPlayingMsgId === msg.id
-                            ? ttsState === 'loading' ? 'Chargement...' : ttsState === 'playing' ? 'Pause' : ttsState === 'paused' ? 'Reprendre' : 'Lire à voix haute'
-                            : 'Lire à voix haute'
-                        }
-                      >
-                        {ttsPlayingMsgId === msg.id && ttsState === 'loading'
-                          ? <><Loader2 size={9} style={{ animation: 'spin 1s linear infinite' }} /> TTS</>
-                          : ttsPlayingMsgId === msg.id && ttsState === 'playing'
-                          ? <><Pause size={9} /> Pause</>
-                          : ttsPlayingMsgId === msg.id && ttsState === 'paused'
-                          ? <><Play size={9} /> Reprendre</>
-                          : <><Play size={9} /> TTS</>}
-                      </button>
-                    )}
-                    {/api.?key|invalid.*key|key.*not.*config|authenticat|unauthori|login|sign.?in/i.test(msg.content) && (
-                      <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
-                        <button
-                          style={{ ...ls.scanBtn, fontSize: 11, padding: '5px 12px' }}
-                          onClick={() => onNavigate('settings')}
-                        >
-                          <Key size={11} /> {t('disc.overrideKey')}
-                        </button>
-                        <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', alignSelf: 'center' }}>
-                          {t('disc.orCheckAgent')}
-                        </span>
-                      </div>
-                    )}
-                    {/Réponse partielle.*interrompu|Timeout d'inactivité/i.test(msg.content) && (
-                      <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
-                        <button
-                          style={{ ...ls.scanBtn, fontSize: 11, padding: '5px 12px', borderColor: 'rgba(245,158,11,0.3)', background: 'rgba(245,158,11,0.08)', color: '#f59e0b' }}
-                          onClick={() => onNavigate('settings', { scrollTo: 'settings-server' })}
-                        >
-                          <Settings size={11} /> {t('disc.editTimeout')}
-                        </button>
-                      </div>
-                    )}
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 4 }}>
-                      <div style={{ ...ds.msgTime, display: 'flex', alignItems: 'center', gap: 6 }}>
-                        {new Date(msg.timestamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
-                        {msg.tokens_used > 0 && (
-                          <span style={{ color: 'rgba(255,255,255,0.2)', fontSize: 9 }}>
-                            {msg.tokens_used.toLocaleString()} tok
-                          </span>
-                        )}
-                        {msg.auth_mode && (
-                          <span style={{ color: msg.auth_mode === 'override' ? 'rgba(200,255,0,0.3)' : 'rgba(255,255,255,0.15)', fontSize: 9 }}>
-                            {msg.auth_mode === 'override' ? 'API key' : 'auth locale'}
-                          </span>
-                        )}
-                        {msg.role === 'Agent' && (() => {
-                          const prevUser = msgs.slice(0, idx).reverse().find(m => m.role === 'User');
-                          if (!prevUser) return null;
-                          const ms = new Date(msg.timestamp).getTime() - new Date(prevUser.timestamp).getTime();
-                          if (ms <= 0) return null;
-                          const s = Math.round(ms / 1000);
-                          const label = s >= 60 ? `${Math.floor(s / 60)}m${s % 60 ? ` ${s % 60}s` : ''}` : `${s}s`;
-                          return (
-                            <span style={{ color: 'rgba(255,255,255,0.2)', fontSize: 9, display: 'inline-flex', alignItems: 'center', gap: 2 }}>
-                              <Clock size={8} /> {label}
-                            </span>
-                          );
-                        })()}
-                      </div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                        {msg.role === 'Agent' && (
-                          <button
-                            onClick={() => {
-                              navigator.clipboard.writeText(msg.content);
-                              setCopiedMsgId(msg.id);
-                              setTimeout(() => setCopiedMsgId(prev => prev === msg.id ? null : prev), 1500);
-                            }}
-                            title={t('disc.copyMessage')}
-                            style={{
-                              background: 'none', border: 'none', padding: '1px 4px', cursor: 'pointer',
-                              color: copiedMsgId === msg.id ? '#34d399' : 'rgba(255,255,255,0.2)',
-                              display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9,
-                              transition: 'color 0.15s',
-                            }}
-                          >
-                            {copiedMsgId === msg.id ? <><Check size={9} /> {t('disc.copied')}</> : <><Copy size={9} /> {t('disc.copy')}</>}
-                          </button>
-                        )}
-                        {msg.role === 'Agent' && hasFullAccess(msg.agent_type ?? activeDiscussion.agent) && (
-                          <span style={{
-                            display: 'inline-flex', alignItems: 'center', gap: 3,
-                            fontSize: 9, color: 'rgba(255,200,0,0.5)',
-                            padding: '1px 5px', borderRadius: 4,
-                            background: 'rgba(255,200,0,0.06)', border: '1px solid rgba(255,200,0,0.1)',
-                          }}>
-                            <AlertTriangle size={8} />
-                            {t('config.fullAccessBadge')}
-                          </span>
-                        )}
-                        {msg.role === 'Agent' && msg.model_tier && (
-                          <span style={{
-                            display: 'inline-flex', alignItems: 'center', gap: 3,
-                            fontSize: 9, padding: '1px 5px', borderRadius: 4,
-                            color: msg.model_tier === 'economy' ? 'rgba(52,211,153,0.6)' : 'rgba(245,158,11,0.6)',
-                            background: msg.model_tier === 'economy' ? 'rgba(52,211,153,0.06)' : 'rgba(245,158,11,0.06)',
-                            border: `1px solid ${msg.model_tier === 'economy' ? 'rgba(52,211,153,0.15)' : 'rgba(245,158,11,0.15)'}`,
-                          }}>
-                            {msg.model_tier === 'economy' ? '⚡' : '🧠'} {t(`disc.tier.${msg.model_tier}`)}
-                          </span>
-                        )}
-                        {!sending && !isEditing && (isLastUser || isLastAgent) && (
-                          <div style={{ display: 'flex', gap: 4 }}>
-                            {isLastUser && (
-                              <button
-                                style={{ ...ls.iconBtn, padding: '2px 6px', fontSize: 10, color: 'rgba(255,255,255,0.3)' }}
-                                onClick={() => { setEditingMsgId(msg.id); setEditingText(msg.content); }}
-                                title={t('disc.editResend')}
-                                aria-label={t('disc.editResend')}
-                              >
-                                <Pencil size={10} />
-                              </button>
-                            )}
-                            {isLastAgent && (
-                              <button
-                                style={{ ...ls.iconBtn, padding: '2px 6px', fontSize: 10, color: 'rgba(255,255,255,0.3)' }}
-                                onClick={handleRetry}
-                                title={t('disc.retryResponse')}
-                                aria-label={t('disc.retryResponse')}
-                              >
-                                <RotateCcw size={10} />
-                              </button>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                </div>
+                  <MessageBubble
+                    key={msg.id}
+                    msg={msg}
+                    idx={idx}
+                    isLastUser={msg.role === 'User' && idx === lastUserIdx}
+                    isLastAgent={msg.role === 'Agent' && idx === lastAgentIdx}
+                    isEditing={editingMsgId === msg.id}
+                    isCopied={copiedMsgId === msg.id}
+                    isTtsActive={ttsPlayingMsgId === msg.id}
+                    ttsState={ttsState}
+                    isExpandedSummary={expandedSummaryMsgId === msg.id}
+                    prevUserTs={prevUserTs[idx]}
+                    defaultAgent={activeDiscussion.agent}
+                    summaryCache={activeDiscussion.summary_cache ?? null}
+                    language={activeDiscussion.language || 'fr'}
+                    sending={sending}
+                    editingText={editingMsgId === msg.id ? editingText : ''}
+                    hasFullAccess={hasFullAccess(msg.agent_type ?? activeDiscussion.agent)}
+                    onCopy={handleMsgCopy}
+                    onTts={handleMsgTts}
+                    onEditStart={handleMsgEditStart}
+                    onEditCancel={handleMsgEditCancel}
+                    onEditSubmit={handleEditMessage}
+                    onEditTextChange={setEditingText}
+                    onRetry={handleRetry}
+                    onExpandSummary={handleMsgExpandSummary}
+                    onNavigate={onNavigate}
+                    t={t}
+                  />
                 );
               });
               })()}
@@ -2385,7 +2279,7 @@ export function DiscussionsPage({
                       </span>
                     </div>
                     {streamingText ? (
-                      <MarkdownContent content={streamingText} />
+                      <pre style={{ fontSize: 13, lineHeight: 1.55, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: 'inherit', margin: 0, color: '#e8eaed' }}>{streamingText}</pre>
                     ) : (
                       <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)', fontStyle: 'italic', display: 'flex', alignItems: 'center', gap: 6 }} aria-live="assertive">
                         <span style={{
@@ -2735,7 +2629,7 @@ export function DiscussionsPage({
                           }}
                           onMouseDown={e => {
                             e.preventDefault();
-                            setChatInput(m.trigger + ' ');
+                            updateChatInput(m.trigger + ' ');
                             setMentionQuery(null);
                             chatInputRef.current?.focus();
                           }}
@@ -2808,12 +2702,17 @@ export function DiscussionsPage({
                   placeholder={activeDiscussion && (activeDiscussion.participants?.length ?? 0) > 1 && AGENT_MENTIONS.length > 0
                     ? t('disc.mentionHint', AGENT_MENTIONS.map(m => m.trigger).join(', '))
                     : t('disc.messagePlaceholder')}
-                  value={chatInput}
+                  defaultValue=""
                   onChange={e => {
                     const val = e.target.value;
-                    setChatInput(val);
-                    e.target.style.height = 'auto';
-                    e.target.style.height = Math.min(e.target.scrollHeight, 160) + 'px';
+                    chatInputValueRef.current = val;
+                    // Debounce state update — only needed for send button style + voice auto-send
+                    const hadText = chatInputHasText;
+                    const hasText = val.trim().length > 0;
+                    if (hadText !== hasText) setChatInput(val);
+                    // Auto-resize (use rAF to avoid layout thrashing)
+                    const ta = e.target;
+                    requestAnimationFrame(() => { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 160) + 'px'; });
                     const atMatch = val.match(/^@(\w*)$/);
                     if (atMatch) {
                       setMentionQuery(atMatch[1].toLowerCase());
@@ -2829,7 +2728,7 @@ export function DiscussionsPage({
                       if (e.key === 'ArrowUp') { e.preventDefault(); setMentionIndex(i => Math.max(i - 1, 0)); return; }
                       if ((e.key === 'Tab' || e.key === 'Enter') && filtered.length > 0) {
                         e.preventDefault();
-                        setChatInput(filtered[mentionIndex].trigger + ' ');
+                        updateChatInput(filtered[mentionIndex].trigger + ' ');
                         setMentionQuery(null);
                         return;
                       }
@@ -2912,7 +2811,7 @@ export function DiscussionsPage({
                       <button
                         onClick={() => {
                           if (!showDebatePopover) {
-                            setDebateAgents(installedAgents.map(a => a.agent_type));
+                            setDebateAgents(installedAgentsList.map(a => a.agent_type));
                           }
                           setShowDebatePopover(!showDebatePopover);
                         }}
@@ -2941,7 +2840,7 @@ export function DiscussionsPage({
                           <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginBottom: 10, lineHeight: 1.4 }}>
                             {t('debate.instructions')}
                           </p>
-                          {installedAgents.map(a => {
+                          {installedAgentsList.map(a => {
                             const isPrincipal = a.agent_type === activeDiscussion?.agent;
                             const checked = debateAgents.includes(a.agent_type);
                             return (
@@ -3115,13 +3014,13 @@ export function DiscussionsPage({
                   ) : (
                     <button
                       onClick={handleSendMessage}
-                      disabled={!chatInput.trim()}
+                      disabled={!chatInputHasText}
                       aria-label="Send message"
                       style={{
-                        background: chatInput.trim() ? 'rgba(200,255,0,0.15)' : 'transparent',
-                        border: chatInput.trim() ? '1px solid rgba(200,255,0,0.25)' : '1px solid rgba(255,255,255,0.06)',
-                        borderRadius: 8, padding: '6px 10px', cursor: chatInput.trim() ? 'pointer' : 'default',
-                        color: chatInput.trim() ? '#c8ff00' : 'rgba(255,255,255,0.15)',
+                        background: chatInputHasText ? 'rgba(200,255,0,0.15)' : 'transparent',
+                        border: chatInputHasText ? '1px solid rgba(200,255,0,0.25)' : '1px solid rgba(255,255,255,0.06)',
+                        borderRadius: 8, padding: '6px 10px', cursor: chatInputHasText ? 'pointer' : 'default',
+                        color: chatInputHasText ? '#c8ff00' : 'rgba(255,255,255,0.15)',
                         display: 'flex', alignItems: 'center',
                         transition: 'all 0.15s',
                       }}
@@ -3166,6 +3065,205 @@ export function DiscussionsPage({
     </div>
   );
 }
+
+// ─── MessageBubble component (memo'd to avoid re-rendering all messages) ─────
+
+interface MessageBubbleProps {
+  msg: DiscussionMessage;
+  idx: number;
+  isLastUser: boolean;
+  isLastAgent: boolean;
+  isEditing: boolean;
+  isCopied: boolean;
+  isTtsActive: boolean;
+  ttsState: string;
+  isExpandedSummary: boolean;
+  prevUserTs: string | null;
+  defaultAgent: AgentType;
+  summaryCache: string | null;
+  language: string;
+  sending: boolean;
+  editingText: string;
+  hasFullAccess: boolean;
+  onCopy: (msgId: string, content: string) => void;
+  onTts: (msgId: string, content: string, lang: string) => void;
+  onEditStart: (msgId: string, content: string) => void;
+  onEditCancel: () => void;
+  onEditSubmit: () => void;
+  onEditTextChange: (text: string) => void;
+  onRetry: () => void;
+  onExpandSummary: (msgId: string) => void;
+  onNavigate: (page: string, opts?: { scrollTo?: string }) => void;
+  t: (key: string, ...args: any[]) => string;
+}
+
+const msgBubbleSystemSummary = { borderColor: 'rgba(52,211,153,0.3)', background: 'rgba(52,211,153,0.06)' } as const;
+const msgBubbleSystemError = { borderColor: 'rgba(255,77,106,0.3)', background: 'rgba(255,77,106,0.06)' } as const;
+
+const MessageBubble = memo(function MessageBubble(props: MessageBubbleProps) {
+  const { msg, isLastUser, isLastAgent, isEditing, isCopied, isTtsActive, ttsState: tts, isExpandedSummary,
+    prevUserTs, defaultAgent, summaryCache, language, sending, editingText, hasFullAccess,
+    onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onExpandSummary, onNavigate, t } = props;
+  const isUser = msg.role === 'User';
+  const agentType = msg.agent_type ?? defaultAgent;
+
+  const copyBtn = (size: number, showLabel: boolean) => (
+    <button
+      onClick={() => onCopy(msg.id, msg.content)}
+      title={t('disc.copyMessage')}
+      style={{
+        background: 'none', border: 'none', padding: '1px 4px', cursor: 'pointer',
+        color: isCopied ? '#34d399' : 'rgba(255,255,255,0.2)',
+        display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9,
+        transition: 'color 0.15s',
+      }}
+    >
+      {isCopied ? <><Check size={size} /> {t('disc.copied')}</> : <><Copy size={size} /> {showLabel && t('disc.copy')}</>}
+    </button>
+  );
+
+  // Duration calculation (O(1) — prevUserTs is pre-computed)
+  const durationLabel = useMemo(() => {
+    if (msg.role !== 'Agent' || !prevUserTs) return null;
+    const ms = new Date(msg.timestamp).getTime() - new Date(prevUserTs).getTime();
+    if (ms <= 0) return null;
+    const s = Math.round(ms / 1000);
+    return s >= 60 ? `${Math.floor(s / 60)}m${s % 60 ? ` ${s % 60}s` : ''}` : `${s}s`;
+  }, [msg.role, msg.timestamp, prevUserTs]);
+
+  // Memoize formatted time
+  const formattedTime = useMemo(() =>
+    new Date(msg.timestamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }),
+    [msg.timestamp]
+  );
+
+  return (
+    <div style={ds.msgRow(isUser)}>
+      <div style={{
+        ...ds.msgBubble(isUser),
+        ...(msg.role === 'System'
+          ? msg.content.startsWith('summary cached') ? msgBubbleSystemSummary : msgBubbleSystemError
+          : {}),
+      }}>
+        {msg.role === 'Agent' && (
+          <div style={{ ...ds.msgAgent, color: agentColor(agentType), display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <Cpu size={10} /> {agentType}
+            </span>
+            {copyBtn(9, false)}
+          </div>
+        )}
+        {msg.role === 'System' && (
+          <div style={{ ...ds.msgAgent, color: msg.content.startsWith('summary cached') ? '#34d399' : '#ff4d6a' }}>
+            {msg.content.startsWith('summary cached') ? <Zap size={10} /> : <AlertTriangle size={10} />}
+            {' '}{msg.content.startsWith('summary cached') ? t('disc.summaryCached') : t('disc.system')}
+            {msg.content.startsWith('summary cached') && summaryCache && (
+              <button
+                aria-label={t('disc.viewSummary')}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'rgba(52,211,153,0.6)', fontSize: 10, fontFamily: 'inherit', marginLeft: 6, textDecoration: 'underline' }}
+                onClick={() => onExpandSummary(msg.id)}
+              >
+                {isExpandedSummary ? t('disc.hideSummary') : t('disc.viewSummary')}
+              </button>
+            )}
+          </div>
+        )}
+        {msg.role === 'System' && msg.content.startsWith('summary cached') && isExpandedSummary && summaryCache && (
+          <div style={{ marginTop: 6, padding: '8px 10px', borderRadius: 6, background: 'rgba(52,211,153,0.04)', border: '1px solid rgba(52,211,153,0.15)', fontSize: 11, color: 'rgba(255,255,255,0.7)', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
+            {summaryCache}
+          </div>
+        )}
+        {isEditing ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <textarea
+              value={editingText}
+              onChange={e => onEditTextChange(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); onEditSubmit(); } }}
+              style={{ width: '100%', minHeight: 60, padding: 8, borderRadius: 6, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(200,255,0,0.3)', color: '#e8eaed', fontFamily: 'inherit', fontSize: 12, resize: 'vertical' }}
+              autoFocus
+            />
+            <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+              <button style={{ ...ls.iconBtn, fontSize: 11, padding: '4px 10px', color: 'rgba(255,255,255,0.4)' }} onClick={onEditCancel}>{t('disc.cancel')}</button>
+              <button style={{ ...ls.scanBtn, fontSize: 11, padding: '4px 10px' }} onClick={onEditSubmit} disabled={!editingText.trim()}>
+                <Send size={10} /> {t('disc.resend')}
+                <span style={{ fontSize: 9, opacity: 0.5, marginLeft: 4 }}>Ctrl+Enter</span>
+              </button>
+            </div>
+          </div>
+        ) : (
+          <MarkdownContent content={msg.content.replace(/KRONN:(BRIEFING_COMPLETE|VALIDATION_COMPLETE|BOOTSTRAP_COMPLETE)/gi, '').trim()} />
+        )}
+        {msg.role === 'Agent' && (
+          <button
+            style={{ background: 'none', border: 'none', borderRadius: 4, padding: '2px 6px', cursor: 'pointer', color: 'rgba(255,255,255,0.25)', fontSize: 10, display: 'inline-flex', alignItems: 'center', gap: 3, marginTop: 4 }}
+            onClick={() => onTts(msg.id, msg.content, language)}
+            title={isTtsActive ? (tts === 'loading' ? 'Chargement...' : tts === 'playing' ? 'Pause' : tts === 'paused' ? 'Reprendre' : 'Lire') : 'Lire à voix haute'}
+          >
+            {isTtsActive && tts === 'loading' ? <><Loader2 size={9} style={{ animation: 'spin 1s linear infinite' }} /> TTS</>
+              : isTtsActive && tts === 'playing' ? <><Pause size={9} /> Pause</>
+              : isTtsActive && tts === 'paused' ? <><Play size={9} /> Reprendre</>
+              : <><Play size={9} /> TTS</>}
+          </button>
+        )}
+        {RE_AUTH_ERROR.test(msg.content) && (
+          <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+            <button style={{ ...ls.scanBtn, fontSize: 11, padding: '5px 12px' }} onClick={() => onNavigate('settings')}>
+              <Key size={11} /> {t('disc.overrideKey')}
+            </button>
+            <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', alignSelf: 'center' }}>{t('disc.orCheckAgent')}</span>
+          </div>
+        )}
+        {RE_PARTIAL_RESPONSE.test(msg.content) && (
+          <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+            <button style={{ ...ls.scanBtn, fontSize: 11, padding: '5px 12px', borderColor: 'rgba(245,158,11,0.3)', background: 'rgba(245,158,11,0.08)', color: '#f59e0b' }} onClick={() => onNavigate('settings', { scrollTo: 'settings-server' })}>
+              <Settings size={11} /> {t('disc.editTimeout')}
+            </button>
+          </div>
+        )}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 4 }}>
+          <div style={{ ...ds.msgTime, display: 'flex', alignItems: 'center', gap: 6 }}>
+            {formattedTime}
+            {msg.tokens_used > 0 && <span style={{ color: 'rgba(255,255,255,0.2)', fontSize: 9 }}>{msg.tokens_used.toLocaleString()} tok</span>}
+            {msg.auth_mode && <span style={{ color: msg.auth_mode === 'override' ? 'rgba(200,255,0,0.3)' : 'rgba(255,255,255,0.15)', fontSize: 9 }}>{msg.auth_mode === 'override' ? 'API key' : 'auth locale'}</span>}
+            {durationLabel && <span style={{ color: 'rgba(255,255,255,0.2)', fontSize: 9, display: 'inline-flex', alignItems: 'center', gap: 2 }}><Clock size={8} /> {durationLabel}</span>}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            {msg.role === 'Agent' && copyBtn(9, true)}
+            {msg.role === 'Agent' && hasFullAccess && (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, color: 'rgba(255,200,0,0.5)', padding: '1px 5px', borderRadius: 4, background: 'rgba(255,200,0,0.06)', border: '1px solid rgba(255,200,0,0.1)' }}>
+                <AlertTriangle size={8} /> {t('config.fullAccessBadge')}
+              </span>
+            )}
+            {msg.role === 'Agent' && msg.model_tier && (
+              <span style={{
+                display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, padding: '1px 5px', borderRadius: 4,
+                color: msg.model_tier === 'economy' ? 'rgba(52,211,153,0.6)' : 'rgba(245,158,11,0.6)',
+                background: msg.model_tier === 'economy' ? 'rgba(52,211,153,0.06)' : 'rgba(245,158,11,0.06)',
+                border: `1px solid ${msg.model_tier === 'economy' ? 'rgba(52,211,153,0.15)' : 'rgba(245,158,11,0.15)'}`,
+              }}>
+                {msg.model_tier === 'economy' ? '⚡' : '🧠'} {t(`disc.tier.${msg.model_tier}`)}
+              </span>
+            )}
+            {!sending && !isEditing && (isLastUser || isLastAgent) && (
+              <div style={{ display: 'flex', gap: 4 }}>
+                {isLastUser && (
+                  <button style={{ ...ls.iconBtn, padding: '2px 6px', fontSize: 10, color: 'rgba(255,255,255,0.3)' }} onClick={() => onEditStart(msg.id, msg.content)} title={t('disc.editResend')} aria-label={t('disc.editResend')}>
+                    <Pencil size={10} />
+                  </button>
+                )}
+                {isLastAgent && (
+                  <button style={{ ...ls.iconBtn, padding: '2px 6px', fontSize: 10, color: 'rgba(255,255,255,0.3)' }} onClick={onRetry} title={t('disc.retryResponse')} aria-label={t('disc.retryResponse')}>
+                    <RotateCcw size={10} />
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+});
 
 // ─── MarkdownContent component ───────────────────────────────────────────────
 
@@ -3306,13 +3404,13 @@ const ds = {
   chatArea: { flex: 1, display: 'flex', flexDirection: 'column' as const, minWidth: 0, background: '#0a0c10' },
   chatHeader: { display: 'flex', alignItems: 'center', gap: 12, padding: '14px 20px', borderBottom: '1px solid rgba(255,255,255,0.07)', background: '#12151c', flexShrink: 0 } as const,
   messages: { flex: 1, overflowY: 'auto' as const, padding: '20px 20px 10px' },
-  msgRow: (isUser: boolean) => ({ display: 'flex', justifyContent: isUser ? 'flex-end' : 'flex-start', marginBottom: 12 }),
-  msgBubble: (isUser: boolean) => ({
-    maxWidth: '70%', padding: '10px 14px', borderRadius: 12,
-    background: isUser ? 'rgba(200,255,0,0.08)' : 'rgba(255,255,255,0.04)',
-    border: `1px solid ${isUser ? 'rgba(200,255,0,0.15)' : 'rgba(255,255,255,0.07)'}`,
-    color: '#e8eaed',
-  }),
+  // Pre-computed style variants (avoid creating new objects on every render)
+  msgRowUser: { display: 'flex', justifyContent: 'flex-end', marginBottom: 12 } as const,
+  msgRowAgent: { display: 'flex', justifyContent: 'flex-start', marginBottom: 12 } as const,
+  msgRow: (isUser: boolean) => isUser ? ds.msgRowUser : ds.msgRowAgent,
+  msgBubbleUser: { maxWidth: '70%', padding: '10px 14px', borderRadius: 12, background: 'rgba(200,255,0,0.08)', border: '1px solid rgba(200,255,0,0.15)', color: '#e8eaed', overflowWrap: 'break-word' as const, wordBreak: 'break-word' as const, minWidth: 0 } as const,
+  msgBubbleAgent: { maxWidth: '70%', padding: '10px 14px', borderRadius: 12, background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.07)', color: '#e8eaed', overflowWrap: 'break-word' as const, wordBreak: 'break-word' as const, minWidth: 0 } as const,
+  msgBubble: (isUser: boolean) => isUser ? ds.msgBubbleUser : ds.msgBubbleAgent,
   msgAgent: { display: 'flex', alignItems: 'center', gap: 4, fontSize: 10, fontWeight: 600, color: 'rgba(139,92,246,0.7)', marginBottom: 4 } as const,
   msgTime: { fontSize: 10, color: 'rgba(255,255,255,0.55)', marginTop: 4, textAlign: 'right' as const },
   inputBar: { display: 'flex', gap: 8, padding: '12px 20px', borderTop: '1px solid rgba(255,255,255,0.07)', background: '#12151c', flexShrink: 0 } as const,

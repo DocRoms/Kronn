@@ -106,7 +106,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess }: Wo
       setDetailWorkflow(wf);
       setDetailRuns(runs);
     } catch (e) {
-      console.error(e);
+      console.warn('Workflow action failed:', e);
     } finally {
       setLoadingDetail(false);
     }
@@ -157,7 +157,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess }: Wo
       },
       // onError
       (error) => {
-        console.error('Workflow trigger error:', error);
+        console.warn('Workflow trigger error:', error);
         setLiveRun(prev => prev ? { ...prev, finished: true, status: 'Failed', currentStep: null } : prev);
         setTriggering(null);
       },
@@ -170,7 +170,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess }: Wo
       await workflowsApi.update(wf.id, { enabled: !wf.enabled });
       refetch();
     } catch (e) {
-      console.error(e);
+      console.warn('Workflow action failed:', e);
     }
   };
 
@@ -183,7 +183,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess }: Wo
       }
       refetch();
     } catch (e) {
-      console.error(e);
+      console.warn('Workflow action failed:', e);
     }
   };
 
@@ -968,7 +968,7 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAge
   useEffect(() => {
     skillsApi.list().then(setAvailableSkills).catch(() => {});
     profilesApi.list().then(setAvailableProfiles).catch(() => {});
-    directivesApi.list().then(setAvailableDirectives).catch(console.error);
+    directivesApi.list().then(setAvailableDirectives).catch(() => {});
   }, []);
 
   const addStep = () => {
@@ -1066,7 +1066,7 @@ function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAge
       }
       onDone();
     } catch (e) {
-      console.error(e);
+      console.warn('Workflow action failed:', e);
     } finally {
       setSaving(false);
     }

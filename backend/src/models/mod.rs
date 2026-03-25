@@ -1299,6 +1299,9 @@ pub struct UpdateDiscussionRequest {
     /// Change model tier for this discussion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<ModelTier>,
+    /// Switch the primary agent for this discussion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentType>,
 }
 
 fn default_language() -> String {

@@ -212,7 +212,7 @@ export function Dashboard({ onReset }: DashboardProps) {
       await projectsApi.cancelAudit(projectId);
       toast(t('audit.cancelled'), 'success');
     } catch (e) {
-      console.error('Cancel audit failed:', e);
+      console.warn('Cancel audit failed:', e);
     }
 
     setAuditState(prev => ({
@@ -259,12 +259,12 @@ export function Dashboard({ onReset }: DashboardProps) {
           }
         },
         onError: (error) => {
-          console.error('Full audit error:', error);
+          console.warn('Full audit error:', error);
         },
       }, controller.signal);
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') return; // cancelled by user
-      console.error('Full audit failed:', e);
+      console.warn('Full audit failed:', e);
       setAuditState(prev => ({
         ...prev,
         [projectId]: { ...prev[projectId], active: false }
@@ -309,12 +309,12 @@ export function Dashboard({ onReset }: DashboardProps) {
           toast(t('audit.updateStale', String(steps.length)), 'success');
         },
         onError: (error) => {
-          console.error('Partial audit error:', error);
+          console.warn('Partial audit error:', error);
         },
       }, controller.signal);
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') return;
-      console.error('Partial audit failed:', e);
+      console.warn('Partial audit failed:', e);
       setAuditState(prev => ({
         ...prev,
         [projectId]: { ...prev[projectId], active: false }

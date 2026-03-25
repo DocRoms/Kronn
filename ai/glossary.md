@@ -42,6 +42,8 @@ Project-specific terms. For deep dives, follow the linked `ai/architecture/` fil
 
 **Worktree (discussion)** — Git worktree created in `<repo>/.kronn-worktrees/<project>--<slug>` for Isolated discussions. Gives the agent its own branch (`kronn/<slug>`) without affecting the main working tree. Can be **locked** (worktree exists, branch reserved) or **unlocked** (worktree removed, branch free for user checkout/testing). Auto re-locked when the user resumes the conversation. Managed by `core/worktree.rs`, endpoints `POST /discussions/:id/worktree-unlock` and `worktree-lock`.
 
+**Agent switch** — Changing the primary agent (`Discussion.agent`) mid-conversation. Invalidates `summary_cache`, inserts a prompt for the new agent to summarize and continue, and auto-triggers a run. UI: clickable agent name in chat header → dropdown of installed agents.
+
 **Orchestration** — Multi-agent debate: multiple agents discuss in configurable rounds (1–3, default 2 in UI). Primary agent speaks last and synthesizes. Round count configurable from the debate popover.
 
 **MCP (Model Context Protocol)** — Standardized protocol for giving AI agents access to tools/data. Kronn uses a 3-tier model: servers → configs → project linkages.

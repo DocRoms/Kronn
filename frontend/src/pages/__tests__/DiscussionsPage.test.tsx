@@ -941,4 +941,73 @@ describe('DiscussionsPage', () => {
     const body = document.body.textContent ?? '';
     expect(body).toContain('1m 23s');
   });
+
+  it('message bubbles have overflow-wrap to prevent long URLs from breaking layout', async () => {
+    const fullDisc: Discussion = {
+      ...makeListDiscussion('d-overflow', 2),
+      messages: [
+        { id: 'u1', role: 'User', content: 'https://example.com/very-long-url-that-should-not-break-the-bubble-layout/with/many/path/segments/and-no-spaces-at-all', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'a1', role: 'Agent', content: 'Here is the response', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:05Z', tokens_used: 50, auth_mode: null },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[{ agent_type: 'ClaudeCode', name: 'Claude Code', installed: true, enabled: true, path: null, version: null, latest_version: null, origin: 'npm', install_command: null, host_managed: false, host_label: null, runtime_available: true }]}
+        allDiscussions={[makeListDiscussion('d-overflow', 2)]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d-overflow"
+        {...liftedProps()}
+      />
+    );
+
+    // All message bubbles should have overflow-wrap: break-word
+    const bubbles = document.querySelectorAll('[style*="max-width"]');
+    const withOverflow = Array.from(bubbles).filter(el =>
+      (el as HTMLElement).style.overflowWrap === 'break-word'
+    );
+    expect(withOverflow.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('shows agent switch button in chat header', async () => {
+    const fullDisc: Discussion = {
+      ...makeListDiscussion('d-switch', 2),
+      messages: [
+        { id: 'u1', role: 'User', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'a1', role: 'Agent', content: 'Hi', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:05Z', tokens_used: 50, auth_mode: null },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[
+          { agent_type: 'ClaudeCode', name: 'Claude Code', installed: true, enabled: true, path: null, version: null, latest_version: null, origin: 'npm', install_command: null, host_managed: false, host_label: null, runtime_available: true },
+          { agent_type: 'GeminiCli', name: 'Gemini CLI', installed: true, enabled: true, path: null, version: null, latest_version: null, origin: 'npm', install_command: null, host_managed: false, host_label: null, runtime_available: true },
+        ]}
+        allDiscussions={[makeListDiscussion('d-switch', 2)]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d-switch"
+        {...liftedProps()}
+      />
+    );
+
+    // Agent switch button should be visible with the current agent name
+    const switchBtn = document.querySelector('[title="Changer d\'agent"]');
+    expect(switchBtn).toBeTruthy();
+    expect(switchBtn?.textContent).toContain('ClaudeCode');
+  });
 });
