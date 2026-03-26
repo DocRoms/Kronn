@@ -125,7 +125,7 @@ pub async fn create(
         timestamp: now,
         tokens_used: 0,
         auth_mode: None,
-        model_tier: None,
+        model_tier: None, author_pseudo: None, author_avatar_email: None,
     };
 
     let workspace_mode = req.workspace_mode.unwrap_or_else(|| "Direct".into());
@@ -287,7 +287,7 @@ pub async fn update(
                 timestamp: chrono::Utc::now(),
                 tokens_used: 0,
                 auth_mode: None,
-                model_tier: None,
+                model_tier: None, author_pseudo: None, author_avatar_email: None,
             };
             crate::db::discussions::insert_message(conn, &id, &switch_msg)?;
         }
@@ -389,6 +389,12 @@ pub async fn send_message(
 
     let target = req.target_agent.clone();
 
+    // Read user identity from config for message attribution
+    let (author_pseudo, author_avatar_email) = {
+        let config = state.config.read().await;
+        (config.server.pseudo.clone(), config.server.avatar_email.clone())
+    };
+
     // Add user message to DB
     let user_msg = DiscussionMessage {
         id: Uuid::new_v4().to_string(),
@@ -398,7 +404,7 @@ pub async fn send_message(
         timestamp: Utc::now(),
         tokens_used: 0,
         auth_mode: None,
-        model_tier: None,
+        model_tier: None, author_pseudo, author_avatar_email,
     };
     let disc_id = id.clone();
     let msg = user_msg.clone();
@@ -767,6 +773,7 @@ async fn make_agent_stream(
                     tokens_used,
                     auth_mode: Some(auth_mode_str.clone()),
                     model_tier: tier_label,
+                    author_pseudo: None, author_avatar_email: None,
                 };
 
                 let did = disc_id.clone();
@@ -835,7 +842,7 @@ async fn make_agent_stream(
                     timestamp: Utc::now(),
                     tokens_used: 0,
                     auth_mode: None,
-                    model_tier: None,
+                    model_tier: None, author_pseudo: None, author_avatar_email: None,
                 };
 
                 let did = disc_id.clone();
@@ -1224,7 +1231,7 @@ pub async fn orchestrate(
                 timestamp: Utc::now(),
                 tokens_used: 0,
                 auth_mode: None,
-            model_tier: None,
+            model_tier: None, author_pseudo: None, author_avatar_email: None,
             };
             let did = disc_id.clone();
             if let Err(e) = state.db.with_conn(move |conn| {
@@ -1346,7 +1353,7 @@ pub async fn orchestrate(
                                 timestamp: Utc::now(),
                                 tokens_used: result.tokens_used,
                                 auth_mode: Some(auth_mode_for(agent_type, &tokens)),
-                                model_tier: None,
+                                model_tier: None, author_pseudo: None, author_avatar_email: None,
                             };
                             let did = disc_id.clone();
                             if let Err(e) = state.db.with_conn(move |conn| {
@@ -1418,7 +1425,7 @@ pub async fn orchestrate(
                             timestamp: Utc::now(),
                             tokens_used: result.tokens_used,
                             auth_mode: Some(auth_mode_for(&primary_agent_type, &tokens)),
-                            model_tier: None,
+                            model_tier: None, author_pseudo: None, author_avatar_email: None,
                         };
                         let did = disc_id.clone();
                         if let Err(e) = state.db.with_conn(move |conn| {
@@ -1944,7 +1951,7 @@ async fn maybe_generate_summary(
                             timestamp: chrono::Utc::now(),
                             tokens_used: 0,
                             auth_mode: None,
-                            model_tier: Some("economy".into()),
+                            model_tier: Some("economy".into()), author_pseudo: None, author_avatar_email: None,
                         };
                         crate::db::discussions::insert_message(conn, &did2, &sys_msg)?;
                         Ok(())
@@ -1993,10 +2000,7 @@ fn estimate_extra_context_len(
         crate::core::skills::build_skills_prompt(skill_ids).len()
     };
     let directives_len = crate::core::directives::build_directives_prompt(directive_ids).len();
-    // Vibe runs in API mode — MCP context is never injected (no tool execution loop)
-    let mcp_len = if matches!(agent_type, AgentType::Vibe) {
-        0
-    } else if let Some(ctx) = mcp_override {
+    let mcp_len = if let Some(ctx) = mcp_override {
         ctx.len()
     } else if !project_path.is_empty() {
         crate::core::mcp_scanner::read_all_mcp_contexts(project_path).len()
@@ -2173,20 +2177,29 @@ fn build_agent_prompt(disc: &Discussion, agent_type: &AgentType, extra_context_l
         prompt.push_str(&summary_block);
     }
 
-    if omitted_count > 0 && summary_block.is_empty() {
-        // Only show omitted notice if there's no summary covering those messages
+    if omitted_count > 0 {
+        let has_summary = !summary_block.is_empty();
         let omitted_notice = match disc.language.as_str() {
             "fr" => format!(
-                "(... {} messages précédents omis pour respecter la fenêtre de contexte ...)\n\n",
-                omitted_count
+                "════════════════════════════════════════\n\
+                 CONTEXTE LIMITE : {} messages anterieurs non inclus{}\n\
+                 ════════════════════════════════════════\n\n",
+                omitted_count,
+                if has_summary { " (resume ci-dessus)" } else { " — demandez a l'utilisateur si besoin" }
             ),
             "es" => format!(
-                "(... {} mensajes anteriores omitidos para caber en la ventana de contexto ...)\n\n",
-                omitted_count
+                "════════════════════════════════════════\n\
+                 CONTEXTO LIMITADO: {} mensajes anteriores no incluidos{}\n\
+                 ════════════════════════════════════════\n\n",
+                omitted_count,
+                if has_summary { " (resumen arriba)" } else { " — pregunte al usuario si necesario" }
             ),
             _ => format!(
-                "(... {} earlier messages omitted to fit context window ...)\n\n",
-                omitted_count
+                "════════════════════════════════════════\n\
+                 CONTEXT LIMITED: {} earlier messages not included{}\n\
+                 ════════════════════════════════════════\n\n",
+                omitted_count,
+                if has_summary { " (see summary above)" } else { " — ask user to recap if needed" }
             ),
         };
         prompt.push_str(&omitted_notice);
@@ -2904,7 +2917,7 @@ mod tests {
             timestamp: chrono::Utc::now(),
             tokens_used: 0,
             auth_mode: None,
-            model_tier: None,
+            model_tier: None, author_pseudo: None, author_avatar_email: None,
         }
     }
 

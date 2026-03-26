@@ -16,3 +16,9 @@ Expert Kotlin knowledge with modern patterns:
 - Spring Boot: Kotlin-first Spring apps. Use `@ConfigurationProperties` with data classes, coroutine-based controllers.
 - Testing: JUnit 5 with backtick test names, MockK for Kotlin-native mocking, Turbine for Flow testing.
 - Idioms: `when` expressions, scope functions (`let`, `apply`, `also`, `run`), sealed classes for state modeling.
+
+Apply when: reviewing or writing Kotlin code, Android apps, Kotlin-based Spring Boot services.
+Do NOT apply when: working with pure Java codebases, iOS/Swift projects, or frontend code.
+
+`✓ val name = user?.name ?: "Anonymous"`
+`✗ val name = user!!.name // NullPointerException risk`

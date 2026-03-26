@@ -16,3 +16,9 @@ Expert Swift knowledge with Apple platform patterns:
 - Combine: publishers and subscribers for reactive data flow. Prefer `AsyncSequence` in new code.
 - Error handling: `Result` type, `throws`/`try`/`catch`. Typed throws in Swift 6. Never force-unwrap optionals in production.
 - Testing: XCTest with `async` test support. Use protocols and dependency injection for testability.
+
+Apply when: reviewing or writing Swift code, iOS/macOS apps, SwiftUI interfaces.
+Do NOT apply when: working with Android/Kotlin code, web frontend, or cross-platform Flutter projects.
+
+`✓ guard let user = fetchUser() else { return }`
+`✗ let user = fetchUser()! // force-unwrap crashes on nil`

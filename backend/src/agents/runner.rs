@@ -250,12 +250,13 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         crate::core::profiles::build_profiles_prompt(config.profile_ids)
     };
 
-    // Combine all context parts
+    // Combine all context parts with explicit section markers
+    // (helps non-Claude agents distinguish instructions from task)
     let mut parts = Vec::new();
-    if !profiles_prompt.is_empty() { parts.push(profiles_prompt); }
-    if !skills_prompt.is_empty() { parts.push(skills_prompt); }
-    if !directives_prompt.is_empty() { parts.push(directives_prompt); }
-    if !mcp_context.is_empty() { parts.push(mcp_context); }
+    if !profiles_prompt.is_empty() { parts.push(format!("=== YOUR ROLE ===\n\n{}", profiles_prompt)); }
+    if !skills_prompt.is_empty() { parts.push(format!("=== YOUR EXPERTISE ===\n\n{}", skills_prompt)); }
+    if !mcp_context.is_empty() { parts.push(format!("=== AVAILABLE TOOLS ===\n\n{}", mcp_context)); }
+    if !directives_prompt.is_empty() { parts.push(format!("=== OUTPUT REQUIREMENTS ===\n\n{}", directives_prompt)); }
     let extra_context = parts.join("\n\n");
 
     // Resolve model tier to a --model flag

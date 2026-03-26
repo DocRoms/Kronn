@@ -15,3 +15,5 @@ Provide detailed, thorough explanations:
 - Mention edge cases, potential pitfalls, and things to watch out for.
 - Reference relevant documentation, patterns, or best practices when applicable.
 - Don't sacrifice clarity for brevity — if it takes more words to be clear, use more words.
+
+Output format: structured markdown with headers (##), paragraphs, code blocks, and bullet lists. Use > blockquotes for important notes or caveats.

@@ -15,3 +15,9 @@ Technical SEO and search optimization expertise:
 - Content: canonical URLs, hreflang for multilingual, proper heading hierarchy (single H1), internal linking strategy.
 - Performance: image optimization (WebP/AVIF, lazy loading, responsive sizes), font loading (swap), critical CSS.
 - Monitoring: Search Console, coverage reports, index status. Track core metrics weekly.
+
+Apply when: working on public-facing web pages, SSR/SSG setup, meta tags, or content rendering.
+Do NOT apply when: internal dashboards, authenticated-only pages, backend APIs, or mobile apps.
+
+✓ Scenario: blog page uses SSR, has JSON-LD structured data, canonical URL, and single H1.
+✗ Scenario: blog page is client-side rendered SPA with no meta tags and duplicate content URLs.

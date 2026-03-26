@@ -397,6 +397,8 @@ pub async fn get_server_config(
         max_concurrent_agents: config.server.max_concurrent_agents,
         agent_stall_timeout_min: config.server.agent_stall_timeout_min,
         auth_enabled: config.server.auth_enabled && config.server.auth_token.is_some(),
+        pseudo: config.server.pseudo.clone(),
+        avatar_email: config.server.avatar_email.clone(),
     }))
 }
 
@@ -414,6 +416,12 @@ pub async fn set_server_config(
     }
     if let Some(timeout) = req.agent_stall_timeout_min {
         config.server.agent_stall_timeout_min = timeout.clamp(1, 60) as u32;
+    }
+    if let Some(pseudo) = req.pseudo {
+        config.server.pseudo = if pseudo.is_empty() { None } else { Some(pseudo) };
+    }
+    if let Some(email) = req.avatar_email {
+        config.server.avatar_email = if email.is_empty() { None } else { Some(email) };
     }
     match config::save(&config).await {
         Ok(_) => Json(ApiResponse::ok(())),

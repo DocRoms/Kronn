@@ -16,3 +16,9 @@ DevOps and infrastructure expertise:
 - 12-factor app: config in env, stateless processes, port binding, disposability, dev/prod parity.
 - Cost: FinOps mindset. Right-size instances. Spot/preemptible where possible. Monitor spend.
 - Reliability: define SLOs. Error budgets. Graceful degradation. Circuit breakers. Blast radius containment.
+
+Apply when: modifying CI/CD pipelines, Dockerfiles, infrastructure config, deployment scripts, or monitoring setup.
+Do NOT apply when: pure application logic changes, frontend styling, or business rule implementation.
+
+✓ Scenario: Dockerfile uses multi-stage build, runs as non-root, pins base image version.
+✗ Scenario: Dockerfile uses `latest` tag, runs as root, copies entire repo into image.

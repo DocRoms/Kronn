@@ -3,7 +3,7 @@
 ## Rules
 
 - **Quality gate is non-negotiable**: code must compile and build after any change.
-- **All tests must pass**: `npm run test` (frontend, 146+ tests), `cargo test` (backend), `make test-shell` (186 bats tests).
+- **All tests must pass**: `npm run test` (frontend, 333+ tests), `cargo test` (backend), `make test-shell` (186 bats tests).
 - **0 ESLint errors**: `npm run lint` must report 0 errors (warnings are tolerated for existing patterns).
 
 ## Build checks
@@ -15,7 +15,7 @@
 | Rust format | `cargo fmt --check` | Formatting check |
 | TS compile | `cd frontend && npx tsc -b` | Type check |
 | Frontend lint | `cd frontend && npm run lint` | ESLint 10 strict |
-| Frontend tests | `cd frontend && npm test` | Vitest 4 (146+ tests) |
+| Frontend tests | `cd frontend && npm test` | Vitest 4 (329+ tests) |
 | Frontend coverage | `cd frontend && npm run test:coverage` | Vitest + @vitest/coverage-v8 |
 | Frontend build | `cd frontend && npm run build` | Production build (Vite, code-split) |
 | Shell tests | `make test-shell` | bats-core (186 tests) |
@@ -30,7 +30,7 @@
 - **Setup file**: `frontend/src/test/setup.ts`
 - **Node requirement**: >= 23.6.0 (native TS support, latest tooling)
 
-### Test files (15 suites, 146+ tests)
+### Test files (23 suites, 333+ tests)
 
 | File | Tests | Covers |
 |------|-------|--------|
@@ -45,7 +45,7 @@
 | `src/__tests__/App.test.tsx` | 4 | Loading screen, SetupWizard vs Dashboard routing, API down fallback |
 | `src/__tests__/ErrorBoundary.test.tsx` | 2 | Error catch + display, normal render |
 | `src/pages/__tests__/WorkflowsPage.test.tsx` | 3 | Render with undefined/restricted/full agentAccess |
-| `src/pages/__tests__/DiscussionsPage.test.tsx` | 3 | Render with minimal props, agentAccess, prefill |
+| `src/pages/__tests__/DiscussionsPage.test.tsx` | 26 | Render, prefill, sidebar (message_count, titles, archives, org groups, collapse, search filter), streaming (thinking loader, tab restore, SSE abort, refetch), TTS (toggle, persist, play, speech cancel), discussion creation, copy button, response time, overflow-wrap, agent switch (button, dropdown) |
 | `src/pages/__tests__/SettingsPage.test.tsx` | 3 | Render with minimal props, agentAccess, agents detected |
 | `src/pages/__tests__/McpPage.test.tsx` | 3 | Render with minimal props, configs, agents |
 

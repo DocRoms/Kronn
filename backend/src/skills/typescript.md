@@ -16,3 +16,9 @@ Expert TypeScript knowledge with modern patterns:
 - Async: `async/await` over raw Promises. Always handle errors with try/catch or `.catch()`.
 - Imports: named imports, no `import *`. Prefer absolute paths with path aliases.
 - Testing: describe/it structure. Mock at boundaries, not internals.
+
+Apply when: reviewing or writing TypeScript/JavaScript code, frontend or Node.js backend.
+Do NOT apply when: working with Rust, Python, or other non-TS/JS codebases.
+
+`✓ const value: unknown = getInput(); if (typeof value === "string") { ... }`
+`✗ const value: any = getInput(); doSomething(value);`

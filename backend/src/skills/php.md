@@ -16,3 +16,9 @@ Expert PHP knowledge with modern patterns:
 - Laravel conventions when applicable: Eloquent, Form Requests, Resources, Policies.
 - Composer: lockfile committed, minimal dependencies, prefer well-maintained packages.
 - Testing: PHPUnit or Pest. Feature tests for HTTP, unit tests for domain logic.
+
+Apply when: reviewing or writing PHP code, Laravel/Symfony projects.
+Do NOT apply when: working with Node.js, Python, or any non-PHP backend.
+
+`✓ declare(strict_types=1); function getPrice(int $id): float`
+`✗ function getPrice($id) { // no strict_types, no type hints`

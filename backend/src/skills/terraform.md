@@ -16,3 +16,9 @@ Expert Infrastructure as Code knowledge:
 - Testing: `terraform validate`, `tflint` for linting, Terratest or `terraform test` for integration tests.
 - Alternatives: understand trade-offs with Pulumi (general-purpose languages), CloudFormation (AWS-native), CDK (imperative-to-declarative).
 - Best practices: pin provider versions, use `for_each` over `count` for named resources, tag everything, document with comments.
+
+Apply when: writing or reviewing Terraform/IaC files, cloud provisioning, or infrastructure changes.
+Do NOT apply when: application code changes, Dockerfiles (use DevOps skill), or CI pipeline scripts.
+
+✓ Scenario: `resource "aws_s3_bucket" "logs"` uses `for_each`, tags, and versioning enabled.
+✗ Scenario: `resource "aws_s3_bucket" "bucket1"` with `count`, no tags, public access by default.

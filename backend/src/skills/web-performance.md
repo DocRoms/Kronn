@@ -15,3 +15,9 @@ Web performance optimization expertise:
 - CSS: critical CSS inline. Remove unused styles. Avoid layout thrashing.
 - Caching: CDN with proper cache headers. Immutable assets with content hashes. Service worker for repeat visits.
 - Measurement: Lighthouse CI in pipeline. RUM (Real User Monitoring). WebPageTest for deep analysis.
+
+Apply when: working on frontend rendering, asset loading, bundle configuration, or page speed issues.
+Do NOT apply when: backend-only API changes, database migrations, or CLI tool development.
+
+✓ Scenario: images use `<img srcset="..." loading="lazy" width="800" height="600">` with WebP format.
+✗ Scenario: unoptimized 4MB PNG loaded eagerly with no dimensions set, causing CLS.

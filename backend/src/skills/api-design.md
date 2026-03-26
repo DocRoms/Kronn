@@ -20,3 +20,9 @@ API design expertise covering protocols, conventions, and best practices:
 - Authentication: use Bearer tokens (OAuth2/JWT). API keys for server-to-server. Never pass credentials in query strings.
 
 When reviewing APIs, flag: inconsistent naming, missing pagination, no error envelope, breaking changes without versioning, missing rate limiting, and undocumented endpoints.
+
+Apply when: designing, reviewing, or modifying REST/GraphQL/gRPC endpoints or API contracts.
+Do NOT apply when: working on internal function signatures, CLI tools, or frontend-only components.
+
+✓ Scenario: `GET /v1/users?cursor=abc123` returns `{ "data": [...], "next_cursor": "def456" }`
+✗ Scenario: `GET /users` returns raw array with no pagination, no versioning, no error envelope.

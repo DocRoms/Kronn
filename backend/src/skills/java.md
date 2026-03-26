@@ -16,3 +16,9 @@ Expert Java knowledge with enterprise patterns:
 - Testing: JUnit 5 with `@Nested` classes, Mockito for mocking, Testcontainers for integration tests.
 - Code style: follow Google Java Style or project conventions. Prefer immutability. Use `Optional` instead of null returns.
 - Concurrency: `CompletableFuture`, virtual threads (Project Loom), avoid raw `synchronized` blocks when possible.
+
+Apply when: reviewing or writing Java code, Spring Boot services, JVM-based projects.
+Do NOT apply when: working with Kotlin-specific patterns, frontend code, or non-JVM languages.
+
+`✓ Optional<User> user = repository.findById(id);`
+`✗ User user = repository.findById(id); // returns null, NPE risk`

@@ -14,3 +14,5 @@ Explain your reasoning step by step:
 - For code changes, explain what each change does before showing it.
 - For debugging, walk through the investigation: what you checked, what you found, what it means.
 - End with a summary of all steps taken.
+
+Output format: numbered list (Step 1, Step 2, ...). Each step is a short paragraph. Code blocks inline with explanation. Final summary as a bullet list.

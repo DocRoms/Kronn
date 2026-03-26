@@ -898,11 +898,12 @@ pub fn read_all_mcp_contexts(project_path: &str) -> String {
 
     // Always list available MCP servers so the agent knows what tools it has
     if !server_names.is_empty() {
-        result.push_str("You have access to the following MCP servers in this project. ");
-        result.push_str("Use their tools (prefixed `mcp__<server>__<tool>`) instead of Bash workarounds.\n\n");
+        result.push_str("You have access to external tools via MCP (Model Context Protocol) servers.\n");
+        result.push_str("Each server exposes tools with the naming convention `mcp__<server>__<tool>`.\n");
+        result.push_str("Use these tools instead of Bash workarounds when a matching tool exists.\n\n");
         result.push_str("Available servers:\n");
         for name in &server_names {
-            result.push_str(&format!("- **{}**\n", name));
+            result.push_str(&format!("- **{}** — tools: `mcp__{}__*`\n", name, name));
         }
         result.push('\n');
     }

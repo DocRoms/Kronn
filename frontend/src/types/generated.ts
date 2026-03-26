@@ -653,6 +653,8 @@ export interface DiscussionMessage {
   tokens_used: number;
   auth_mode: string | null;
   model_tier?: string | null;
+  author_pseudo?: string | null;
+  author_avatar_email?: string | null;
 }
 
 export type MessageRole = "User" | "Agent" | "System";
@@ -734,6 +736,8 @@ export interface ServerConfigPublic {
   max_concurrent_agents: number;
   agent_stall_timeout_min: number;
   auth_enabled: boolean;
+  pseudo: string | null;
+  avatar_email: string | null;
 }
 
 export interface DbInfo {

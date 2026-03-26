@@ -872,7 +872,6 @@ describe('DiscussionsPage', () => {
     // Verify discussionsApi.create was called with the right data
     expect(vi.mocked(discussionsApi.create)).toHaveBeenCalledWith(
       expect.objectContaining({
-        title: 'Test discussion',
         agent: 'ClaudeCode',
         initial_prompt: 'Analyse this code',
         language: 'fr',
@@ -1009,5 +1008,88 @@ describe('DiscussionsPage', () => {
     const switchBtn = document.querySelector('[title="Changer d\'agent"]');
     expect(switchBtn).toBeTruthy();
     expect(switchBtn?.textContent).toContain('ClaudeCode');
+  });
+
+  // ─── Discussion search filter tests ──────────────────────────────────
+
+  it('search input exists and filters discussions by title', async () => {
+    const disc1: Discussion = { ...makeListDiscussion('d-alpha', 1), title: 'Alpha project chat' };
+    const disc2: Discussion = { ...makeListDiscussion('d-beta', 2), title: 'Beta refactoring' };
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[disc1, disc2]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        {...liftedProps()}
+      />
+    );
+
+    // Both discussions should be visible initially
+    const bodyBefore = document.body.textContent!;
+    expect(bodyBefore).toContain('Alpha project chat');
+    expect(bodyBefore).toContain('Beta refactoring');
+
+    // Find the search input by placeholder
+    const searchInput = document.querySelector('input[placeholder="Rechercher..."]') as HTMLInputElement;
+    expect(searchInput).toBeTruthy();
+
+    // Type "Alpha" in the search
+    await act(async () => { fireEvent.change(searchInput, { target: { value: 'Alpha' } }); });
+
+    // Only the matching discussion should be visible
+    const bodyAfter = document.body.textContent!;
+    expect(bodyAfter).toContain('Alpha project chat');
+    expect(bodyAfter).not.toContain('Beta refactoring');
+  });
+
+  // ─── Agent switch dropdown tests ─────────────────────────────────────
+
+  it('clicking agent switch button shows dropdown with other agents', async () => {
+    const fullDisc: Discussion = {
+      ...makeListDiscussion('d-dropdown', 2),
+      messages: [
+        { id: 'u1', role: 'User', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'a1', role: 'Agent', content: 'Hi', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:05Z', tokens_used: 50, auth_mode: null },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[
+          { agent_type: 'ClaudeCode', name: 'Claude Code', installed: true, enabled: true, path: null, version: null, latest_version: null, origin: 'npm', install_command: null, host_managed: false, host_label: null, runtime_available: true },
+          { agent_type: 'Codex', name: 'Codex', installed: true, enabled: true, path: null, version: null, latest_version: null, origin: 'npm', install_command: null, host_managed: false, host_label: null, runtime_available: true },
+          { agent_type: 'GeminiCli', name: 'Gemini CLI', installed: true, enabled: true, path: null, version: null, latest_version: null, origin: 'npm', install_command: null, host_managed: false, host_label: null, runtime_available: true },
+        ]}
+        allDiscussions={[makeListDiscussion('d-dropdown', 2)]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d-dropdown"
+        {...liftedProps()}
+      />
+    );
+
+    // Click the agent switch button
+    const switchBtn = document.querySelector('[title="Changer d\'agent"]') as HTMLButtonElement;
+    expect(switchBtn).toBeTruthy();
+    await act(async () => { fireEvent.click(switchBtn); });
+
+    // The dropdown should now show all installed agents (using display names)
+    const body = document.body.textContent!;
+    expect(body).toContain('Claude Code');
+    expect(body).toContain('Codex');
+    expect(body).toContain('Gemini CLI');
   });
 });

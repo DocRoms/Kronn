@@ -6,13 +6,14 @@ import { GitPanel } from '../components/GitPanel';
 import type { Project, AgentDetection, Discussion, DiscussionMessage, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility } from '../types/generated';
 import { useT } from '../lib/I18nContext';
 import { AGENT_LABELS, agentColor, isAgentRestricted as isAgentRestrictedUtil, hasAgentFullAccess, getProjectGroup, isHiddenPath, isUsable, isValidationDisc } from '../lib/constants';
+import { gravatarUrl } from '../lib/gravatar';
 import type { ToastFn } from '../hooks/useToast';
 import {
   Folder, ChevronRight, Cpu, GitBranch, Server,
   Plus, Trash2, Loader2,
   MessageSquare, Send, X, Key, AlertTriangle, Users,
   StopCircle, RotateCcw, Pencil, ShieldCheck, Check, Archive, Zap, UserCircle, FileText, Settings, Rocket, Play, Pause,
-  Volume2, VolumeX, Mic, MicOff, Phone, PhoneOff, Menu, Lock, Unlock, Copy, Clock, RefreshCw,
+  Volume2, VolumeX, Mic, MicOff, Phone, PhoneOff, Menu, Lock, Unlock, Copy, Clock, RefreshCw, Search,
 } from 'lucide-react';
 import { useIsMobile } from '../hooks/useMediaQuery';
 
@@ -300,6 +301,7 @@ export function DiscussionsPage({
   const [expandedSummaryMsgId, setExpandedSummaryMsgId] = useState<string | null>(null);
   const [worktreeError, setWorktreeError] = useState<string | null>(null);
   const [showAgentSwitch, setShowAgentSwitch] = useState(false);
+  const [discSearchFilter, setDiscSearchFilter] = useState('');
   const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
   const [ttsEnabled, setTtsEnabled] = useState<boolean>(() => {
     try { return localStorage.getItem('kronn:ttsEnabled') === 'true'; } catch { return false; }
@@ -1145,25 +1147,44 @@ export function DiscussionsPage({
           </div>
         </div>
 
+        {/* Search filter */}
+        <div style={{ padding: '6px 14px 2px', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 8px', borderRadius: 6, background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.06)' }}>
+            <Search size={11} style={{ color: 'rgba(255,255,255,0.25)', flexShrink: 0 }} />
+            <input
+              type="text"
+              value={discSearchFilter}
+              onChange={e => setDiscSearchFilter(e.target.value)}
+              placeholder={t('disc.searchPlaceholder')}
+              style={{ background: 'none', border: 'none', outline: 'none', color: '#e8eaed', fontSize: 11, fontFamily: 'inherit', width: '100%', padding: 0 }}
+            />
+            {discSearchFilter && (
+              <button onClick={() => setDiscSearchFilter('')} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: 'rgba(255,255,255,0.3)', display: 'flex' }}>
+                <X size={10} />
+              </button>
+            )}
+          </div>
+        </div>
+
         {/* Discussion list grouped by project */}
         <div style={ds.sidebarList}>
           {/* Global discussions (no project) */}
           {(() => {
             const globalDiscs = activeDiscByProject.get(null) ?? [];
             if (globalDiscs.length === 0) return null;
-            const isCollapsed = collapsedDiscGroups.has('__global__');
+            const isCollapsed = collapsedDiscGroups.has('__global__') && !discSearchFilter;
             return (
               <div>
                 <button
                   style={{ ...ds.projectGroup, borderTop: 'none', cursor: 'pointer', userSelect: 'none' as const, background: 'none', border: 'none', width: '100%', font: 'inherit', color: 'inherit', textAlign: 'left' as const }}
-                  onClick={() => setCollapsedDiscGroups(prev => { const n = new Set(prev); isCollapsed ? n.delete('__global__') : n.add('__global__'); return n; })}
+                  onClick={() => setCollapsedDiscGroups(prev => { const n = new Set(prev); prev.has('__global__') ? n.delete('__global__') : n.add('__global__'); return n; })}
                   aria-expanded={!isCollapsed}
                 >
                   <ChevronRight size={10} style={{ transform: isCollapsed ? 'none' : 'rotate(90deg)', transition: 'transform 0.15s' }} />
                   <MessageSquare size={10} /> {t('disc.general')}
                   <span style={{ fontWeight: 400, opacity: 0.5, marginLeft: 'auto' }}>{globalDiscs.length}</span>
                 </button>
-                {!isCollapsed && globalDiscs.sort((a, b) => b.updated_at.localeCompare(a.updated_at)).map(disc => (
+                {!isCollapsed && globalDiscs.filter(d => !discSearchFilter || d.title.toLowerCase().includes(discSearchFilter.toLowerCase())).sort((a, b) => b.updated_at.localeCompare(a.updated_at)).map(disc => (
                   <SwipeableDiscItem
                     key={disc.id}
                     disc={disc}
@@ -1201,7 +1222,7 @@ export function DiscussionsPage({
 
             return sortedOrgs.map(([orgName, orgProjects]) => {
               const orgKey = `org::${orgName}`;
-              const isOrgCollapsed = collapsedDiscGroups.has(orgKey);
+              const isOrgCollapsed = collapsedDiscGroups.has(orgKey) && !discSearchFilter;
               const orgDiscCount = orgProjects.reduce((sum, p) => sum + (activeDiscByProject.get(p.id) ?? []).length, 0);
               // Color from org name hash (same as Dashboard)
               const orgColor = orgName === localLabel ? 'rgba(255,255,255,0.3)'
@@ -1227,19 +1248,19 @@ export function DiscussionsPage({
                   )}
                   {!isOrgCollapsed && orgProjects.map(proj => {
                     const projDiscs = activeDiscByProject.get(proj.id) ?? [];
-                    const isCollapsed = collapsedDiscGroups.has(proj.id);
+                    const isCollapsed = collapsedDiscGroups.has(proj.id) && !discSearchFilter;
                     return (
                       <div key={proj.id}>
                         <button
                           style={{ ...ds.projectGroup, cursor: 'pointer', userSelect: 'none' as const, background: 'none', border: 'none', width: '100%', font: 'inherit', color: 'inherit', textAlign: 'left' as const }}
-                          onClick={() => setCollapsedDiscGroups(prev => { const n = new Set(prev); isCollapsed ? n.delete(proj.id) : n.add(proj.id); return n; })}
+                          onClick={() => setCollapsedDiscGroups(prev => { const n = new Set(prev); prev.has(proj.id) ? n.delete(proj.id) : n.add(proj.id); return n; })}
                           aria-expanded={!isCollapsed}
                         >
                           <ChevronRight size={10} style={{ transform: isCollapsed ? 'none' : 'rotate(90deg)', transition: 'transform 0.15s' }} />
                           <Folder size={10} /> {proj.name}
                           <span style={{ fontWeight: 400, opacity: 0.5, marginLeft: 'auto' }}>{projDiscs.length}</span>
                         </button>
-                        {!isCollapsed && projDiscs.sort((a, b) => b.updated_at.localeCompare(a.updated_at)).map(disc => (
+                        {!isCollapsed && projDiscs.filter(d => !discSearchFilter || d.title.toLowerCase().includes(discSearchFilter.toLowerCase())).sort((a, b) => b.updated_at.localeCompare(a.updated_at)).map(disc => (
                           <SwipeableDiscItem
                             key={disc.id}
                             disc={disc}
@@ -1278,7 +1299,7 @@ export function DiscussionsPage({
                 <Archive size={10} /> {t('disc.archived')}
                 <span style={{ fontWeight: 400, opacity: 0.5, marginLeft: 'auto' }}>{archivedDiscussions.length}</span>
               </button>
-              {showArchives && archivedDiscussions.sort((a, b) => b.updated_at.localeCompare(a.updated_at)).map(disc => (
+              {(showArchives || !!discSearchFilter) && archivedDiscussions.filter(d => !discSearchFilter || d.title.toLowerCase().includes(discSearchFilter.toLowerCase())).sort((a, b) => b.updated_at.localeCompare(a.updated_at)).map(disc => (
                 <SwipeableDiscItem
                   key={disc.id}
                   disc={disc}
@@ -3145,6 +3166,18 @@ const MessageBubble = memo(function MessageBubble(props: MessageBubbleProps) {
           ? msg.content.startsWith('summary cached') ? msgBubbleSystemSummary : msgBubbleSystemError
           : {}),
       }}>
+        {isUser && (msg.author_pseudo || msg.author_avatar_email) && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+            {msg.author_avatar_email ? (
+              <img src={gravatarUrl(msg.author_avatar_email, 20)} alt="" style={{ width: 16, height: 16, borderRadius: '50%' }} />
+            ) : msg.author_pseudo ? (
+              <span style={{ width: 16, height: 16, borderRadius: '50%', background: 'rgba(200,255,0,0.15)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 8, fontWeight: 700, color: '#c8ff00' }}>
+                {msg.author_pseudo.slice(0, 2).toUpperCase()}
+              </span>
+            ) : null}
+            <span style={{ fontSize: 10, fontWeight: 600, color: 'rgba(200,255,0,0.6)' }}>{msg.author_pseudo}</span>
+          </div>
+        )}
         {msg.role === 'Agent' && (
           <div style={{ ...ds.msgAgent, color: agentColor(agentType), display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>

@@ -45,6 +45,7 @@ Three Docker services behind nginx gateway:
 - Discussions without a project are "global" — shown under "Général" group in the sidebar.
 - Agent runs in a temp directory for global discussions (no project context).
 - `CreateDiscussionRequest.project_id` is also optional; frontend offers "Aucun projet" option.
+- **Discussion search/filter**: sidebar includes a search input (`discSearchFilter` state) that filters discussions by title (case-insensitive substring match). When a search term is active, collapsed groups are auto-expanded and only matching discussions are shown. A clear button resets the filter.
 - **Archive/unarchive**: `Discussion.archived: bool` (default false). Swipe right on sidebar item to archive, swipe left to delete. Archived discussions shown in a collapsible "Archives" section at the bottom of the sidebar. `PATCH /api/discussions/:id` with `UpdateDiscussionRequest { title?, archived? }`.
 - **Title editing**: double-click or pencil icon in chat header for inline rename.
 - **Disabled agent detection**: if a discussion's agent is uninstalled or disabled, the text input is grayed out with a warning banner linking to agent config.
@@ -54,6 +55,11 @@ Three Docker services behind nginx gateway:
   - **Auto re-lock**: when sending a message to an unlocked Isolated discussion, the backend auto-attempts `reattach_worktree`. If the branch is still checked out in the main repo, an SSE error is returned and a persistent red banner is shown above the input (with a Retry button).
   - **Relative gitdir**: worktree cross-references use relative paths (`../../.git/worktrees/<name>`) so they work both inside Docker and on the host.
   - UI: badge next to branch name (blue = locked, yellow = unlocked) with lock/unlock toggle button.
+- **User identity**: `pseudo` and `avatar_email` in `ServerConfig`. Messages store `author_pseudo`/`author_avatar_email` (migration 021). Gravatar avatar (SHA-256) displayed in user message bubbles + Settings UI.
+- **Copy button**: on every agent message (header + footer) and on markdown tables/code blocks via `CopyableBlock` wrapper. Tables copied as TSV.
+- **Response time**: per agent message, computed frontend-side as `timestamp(agent) - timestamp(previous user)`.
+- **Performance**: `MessageBubble` extracted as `memo` component, streaming uses `<pre>` instead of markdown, auto-scroll throttled, `chatInput` non-controlled, styles pre-computed as static objects.
+- **Vibe agent**: uses `vibe-runner.py` (calls `run_programmatic()` SDK directly, bypasses CLI stdin hang). Falls back to Mistral API if vibe not installed.
 - **Multi-line input**: `<textarea>` with auto-resize (Shift+Enter for newlines, Enter to send).
 - **Full access badge**: "Full access" indicator on agent messages when `full_access: true`.
 
@@ -130,6 +136,14 @@ Agents are configured along three independent axes, each multi-selectable:
 When multiple profiles are selected, the prompt builder generates a **multi-agent collaboration** instruction: each profile's perspective must be considered, trade-offs identified, and assumptions challenged.
 
 **Persona name overrides**: stored in `~/.config/kronn/persona_overrides.json`. Applies to both builtin and custom profiles. API: `PUT /api/profiles/:id/persona-name`.
+
+**Skills guardrails**: each skill includes "Apply when" and "Do NOT apply when" sections in its frontmatter — scoping when the skill's knowledge is relevant vs. when it should be ignored. Prevents cross-domain noise (e.g. Rust skill on a frontend-only change).
+
+**Directives output format specifications**: each directive includes an "Output format" field specifying the expected format (plain text, numbered steps, JSON, diff, markdown report, etc.). This ensures agents produce consistent, predictable output structures.
+
+**Best practices links**: Settings > Agents section includes external links to official prompt engineering best practices (Anthropic, OpenAI) for reference.
+
+**Token-saver directive**: encourages concise output (2-3 sentences per point, no unnecessary headers), reducing token consumption while preserving information density.
 
 All three axes are available in:
 - Discussions (profile/skill/directive selectors in new discussion form)

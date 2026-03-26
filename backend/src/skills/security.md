@@ -18,3 +18,9 @@ Security expertise covering application and infrastructure security:
 - Logging: never log secrets, tokens, PII. Log security events (failed auth, permission denials).
 
 When reviewing code, flag: hardcoded secrets, missing input validation, SQL concatenation, unescaped output, overpermissive CORS, missing auth checks.
+
+Apply when: any code handling user input, authentication, secrets, network requests, or data storage.
+Do NOT apply when: purely cosmetic UI changes, documentation edits, or static asset updates.
+
+✓ Scenario: user input passed to `db.query("SELECT * FROM users WHERE id = $1", [id])`
+✗ Scenario: user input passed to `db.query("SELECT * FROM users WHERE id = " + id)`

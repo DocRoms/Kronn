@@ -44,6 +44,12 @@ pub struct ServerConfig {
     /// Agent stall timeout in minutes — abort if no output for this long (default: 5)
     #[serde(default = "default_agent_stall_timeout")]
     pub agent_stall_timeout_min: u32,
+    /// User identity — displayed in messages and used for future multi-user
+    #[serde(default)]
+    pub pseudo: Option<String>,
+    /// Email for Gravatar avatar (optional, decoupled from git)
+    #[serde(default)]
+    pub avatar_email: Option<String>,
 }
 
 fn default_max_agents() -> usize { 5 }
@@ -1081,6 +1087,11 @@ pub struct DiscussionMessage {
     /// Which model tier was used for this message (economy/default/reasoning).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_tier: Option<String>,
+    /// Author identity (for multi-user / display)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_pseudo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_avatar_email: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -1345,6 +1356,8 @@ pub struct ServerConfigPublic {
     pub max_concurrent_agents: usize,
     pub agent_stall_timeout_min: u32,
     pub auth_enabled: bool,
+    pub pseudo: Option<String>,
+    pub avatar_email: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1352,6 +1365,8 @@ pub struct UpdateServerConfigRequest {
     pub domain: Option<String>,
     pub max_concurrent_agents: Option<usize>,
     pub agent_stall_timeout_min: Option<u64>,
+    pub pseudo: Option<String>,
+    pub avatar_email: Option<String>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

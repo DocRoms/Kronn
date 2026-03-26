@@ -15,3 +15,9 @@ Sustainable development and eco-design expertise:
 - Backend: optimize queries to reduce CPU time. Cache aggressively. Batch operations over individual calls.
 - Dependencies: fewer dependencies = less to download, build, and run. Audit bundle size impact of every new lib.
 - Measurement: estimate CO2 with tools like Website Carbon, EcoIndex, GreenFrame. Track trends, not just snapshots.
+
+Apply when: adding new features, dependencies, heavy assets, or infrastructure that increases resource usage.
+Do NOT apply when: fixing critical bugs, security patches, or removing code/features (already reducing footprint).
+
+✓ Scenario: hero image served as 80KB WebP with lazy loading for below-the-fold content.
+✗ Scenario: 3MB autoplay video background on every page, loaded eagerly on mobile too.
