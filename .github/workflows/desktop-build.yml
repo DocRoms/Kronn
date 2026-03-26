@@ -20,7 +20,7 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             label: macOS-arm64
-          - os: macos-13
+          - os: macos-15
             target: x86_64-apple-darwin
             label: macOS-x64
           - os: ubuntu-22.04
@@ -29,6 +29,8 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     name: Build ${{ matrix.label }}
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       - uses: actions/checkout@v4
@@ -77,7 +79,16 @@ jobs:
         working-directory: desktop/src-tauri
         run: cargo tauri build --target ${{ matrix.target }}
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ''
+          # Signing env vars — only effective when GitHub Secrets are configured.
+          # Empty/unset secrets are ignored by Tauri (builds unsigned).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_ID: ${{ secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID || '' }}
 
       # ─── Upload artifacts ─────────────────────────────────────────
 

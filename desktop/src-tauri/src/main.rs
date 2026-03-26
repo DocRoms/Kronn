@@ -164,6 +164,11 @@ struct BackendInfo {
     port: u16,
 }
 
+#[tauri::command]
+fn get_backend_url(info: tauri::State<'_, BackendInfo>) -> String {
+    format!("http://127.0.0.1:{}", info.port)
+}
+
 fn main() {
     // Initialize tracing — stdout for logs (Docker/desktop best practice)
     tracing_subscriber::fmt()
@@ -204,6 +209,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(BackendInfo { port })
+        .invoke_handler(tauri::generate_handler![get_backend_url])
         .setup(move |app| {
             use tauri::Manager;
             if let Some(window) = app.get_webview_window("main") {

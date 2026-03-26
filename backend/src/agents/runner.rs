@@ -100,10 +100,14 @@ impl AgentProcess {
 /// Files created in Docker may have wrong ownership if container UID differs from host UID.
 /// On macOS with VirtioFS, chown is silently ignored by the filesystem driver.
 pub fn fix_file_ownership(work_dir: &Path) {
+    // Only relevant in Docker — native apps own their own files
+    if !crate::core::env::is_docker() {
+        return;
+    }
     let uid = std::env::var("KRONN_HOST_UID").unwrap_or_default();
     let gid = std::env::var("KRONN_HOST_GID").unwrap_or_default();
     if uid.is_empty() || gid.is_empty() {
-        return; // Not in Docker or no UID/GID configured
+        return;
     }
 
     // Skip if container user already matches the desired UID (expected when
@@ -429,15 +433,29 @@ pub(crate) async fn ensure_kiro_cli_available() -> Result<(), String> {
 }
 
 /// Resolve the path to vibe-runner.py.
-/// In Docker: bundled at /app/scripts/vibe-runner.py
-/// Native: relative to the binary at ../scripts/vibe-runner.py
+/// Searches: Docker bundle → next to executable → cargo manifest dir (dev).
 fn vibe_runner_path() -> String {
-    // Docker: scripts are copied into /app/scripts/
+    // 1. Docker: scripts are copied into /app/scripts/
     let docker_path = "/app/scripts/vibe-runner.py";
     if std::path::Path::new(docker_path).exists() {
         return docker_path.to_string();
     }
-    // Native dev: relative to cargo manifest
+    // 2. Native/Tauri: next to the running executable (or in ../scripts/)
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            // Same directory as exe (Tauri resource bundling)
+            let beside = dir.join("scripts").join("vibe-runner.py");
+            if beside.exists() {
+                return beside.to_string_lossy().to_string();
+            }
+            // One level up (typical install layout)
+            let up = dir.join("..").join("scripts").join("vibe-runner.py");
+            if up.exists() {
+                return up.to_string_lossy().to_string();
+            }
+        }
+    }
+    // 3. Dev mode: relative to cargo manifest
     let dev_path = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/vibe-runner.py");
     dev_path.to_string()
 }
