@@ -1,4 +1,4 @@
-.PHONY: start start-prod stop logs clean build dev-backend dev-frontend setup check test-shell lint-backend .env kiro-login bump
+.PHONY: start start-prod stop logs clean build dev-backend dev-frontend setup check test-shell lint-backend .env kiro-login bump desktop desktop-dev desktop-target
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 APP_NAME    := kronn
@@ -197,6 +197,32 @@ test-shell:
 	@echo "$(CYAN)▸ Running shell tests...$(RESET)"
 	@./tests/bats/run.sh
 
+## ─── Desktop app (Tauri) ────────────────────────────────────────────────────
+
+## Build the desktop app for the current platform
+desktop:
+	@echo "$(CYAN)▸ Building desktop app...$(RESET)"
+	@cd frontend && pnpm build
+	@cd desktop && pnpm build
+	@echo "$(GREEN)✓ Desktop app built$(RESET)"
+	@echo "  Output: desktop/src-tauri/target/release/bundle/"
+
+## Run the desktop app in dev mode (hot reload)
+desktop-dev:
+	@echo "$(CYAN)▸ Starting desktop app (dev)...$(RESET)"
+	@cd desktop && pnpm dev
+
+## Build desktop app for a specific target (cross-compilation)
+## Usage: make desktop-target T=x86_64-pc-windows-msvc
+desktop-target:
+ifndef T
+	$(error Usage: make desktop-target T=<rust-target-triple>  Ex: x86_64-pc-windows-msvc, aarch64-apple-darwin)
+endif
+	@echo "$(CYAN)▸ Building desktop app for $(T)...$(RESET)"
+	@cd frontend && pnpm build
+	@cd desktop/src-tauri && cargo build --release --target $(T)
+	@echo "$(GREEN)✓ Desktop app built for $(T)$(RESET)"
+
 help:
 	@echo ""
 	@echo "$(CYAN)$(APP_NAME) — Enter the grid. Command your agents.$(RESET)"
@@ -215,6 +241,9 @@ help:
 	@echo "  make typegen        Sync Rust → TS types"
 	@echo "  make test-shell     Run shell tests (bats)"
 	@echo "  make bump V=x.y.z  Bump version everywhere"
+	@echo "  make desktop        Build desktop app (current platform)"
+	@echo "  make desktop-dev    Run desktop app (dev mode)"
+	@echo "  make desktop-target T=<triple>  Cross-compile desktop app"
 	@echo ""
 
 ## ─── Version bump ────────────────────────────────────────────────────────────

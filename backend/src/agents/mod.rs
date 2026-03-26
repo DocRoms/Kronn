@@ -48,9 +48,9 @@ const KNOWN_AGENTS: &[AgentDef] = &[
     AgentDef { name: "Kiro", agent_type: AgentType::Kiro, binary: "kiro-cli", origin: "US", install_cmd: "curl -fsSL https://cli.kiro.dev/install | bash" },
 ];
 
-/// Detect the host platform label (WSL, macOS, Linux, etc.)
-/// The backend runs inside Docker (always Linux), so we use runtime
-/// heuristics rather than compile-time cfg!() checks.
+/// Detect the host platform label (WSL, macOS, Linux, Windows, etc.)
+/// In Docker: uses runtime heuristics (env vars, /proc/version).
+/// Native: uses compile-time detection + env var override.
 fn detect_host_label() -> String {
     // 1. Trust the environment variable first (set by Makefile → .env → docker-compose)
     if let Ok(host_os) = std::env::var("KRONN_HOST_OS") {
@@ -58,29 +58,36 @@ fn detect_host_label() -> String {
             return host_os;
         }
     }
-    // 2. Heuristics from /proc/version (single read, case-insensitive)
-    if let Ok(version) = std::fs::read_to_string("/proc/version") {
-        let lower = version.to_lowercase();
-        if lower.contains("microsoft") || lower.contains("wsl") {
-            return "WSL".into();
-        }
-        if lower.contains("linuxkit") || lower.contains("docker desktop") {
-            return "macOS".into();
+    // 2. Heuristics from /proc/version (Linux/WSL/Docker Desktop detection)
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(version) = std::fs::read_to_string("/proc/version") {
+            let lower = version.to_lowercase();
+            if lower.contains("microsoft") || lower.contains("wsl") {
+                return "WSL".into();
+            }
+            if lower.contains("linuxkit") || lower.contains("docker desktop") {
+                return "macOS".into();
+            }
         }
     }
-    // 3. Native macOS (no /proc/version, not in Docker)
+    // 3. Compile-time detection for native execution
     #[cfg(target_os = "macos")]
     return "macOS".into();
+    #[cfg(target_os = "windows")]
+    return "Windows".into();
+    #[cfg(target_os = "linux")]
+    return "Linux".into();
 
-    // 4. Default to Linux (safest assumption inside Docker)
     #[allow(unreachable_code)]
-    "Linux".into()
+    "Unknown".into()
 }
 
 fn host_is_macos() -> bool {
-    std::env::var("KRONN_HOST_OS")
-        .map(|os| os.eq_ignore_ascii_case("macos"))
-        .unwrap_or(false)
+    if let Ok(os) = std::env::var("KRONN_HOST_OS") {
+        return os.eq_ignore_ascii_case("macos");
+    }
+    cfg!(target_os = "macos")
         || detect_host_label() == "macOS"
 }
 
@@ -316,9 +323,15 @@ pub async fn uninstall_agent(agent_type: &AgentType) -> Result<String> {
     let uninstall_cmd = match def.agent_type {
         AgentType::ClaudeCode => "npm uninstall -g @anthropic-ai/claude-code",
         AgentType::Codex => "npm uninstall -g @openai/codex",
+        #[cfg(unix)]
         AgentType::Vibe => "uv tool uninstall mistral-vibe 2>/dev/null || pipx uninstall mistral-vibe 2>/dev/null || pip3 uninstall -y mistral-vibe",
+        #[cfg(windows)]
+        AgentType::Vibe => "uv tool uninstall mistral-vibe",
         AgentType::GeminiCli => "npm uninstall -g @google/gemini-cli",
+        #[cfg(unix)]
         AgentType::Kiro => "rm -f $(which kiro-cli)",
+        #[cfg(windows)]
+        AgentType::Kiro => "where kiro-cli >nul 2>&1 && del /f /q kiro-cli",
         AgentType::Custom => anyhow::bail!("Cannot uninstall custom agents"),
     };
 

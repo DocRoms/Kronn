@@ -141,13 +141,15 @@ pub fn create_discussion_worktree(
         crate::core::mcp_scanner::ensure_gitignore_public(p, ".kronn-worktrees/");
     }
 
-    // Mark repo as safe directory (needed in Docker)
-    let _ = std::process::Command::new("git")
-        .args(["config", "--global", "--add", "safe.directory", &repo_path.to_string_lossy()])
-        .output();
-    let _ = std::process::Command::new("git")
-        .args(["config", "--global", "--add", "safe.directory", &worktree_path.to_string_lossy()])
-        .output();
+    // Mark repo as safe directory (needed in Docker where mount owner differs)
+    if crate::core::env::is_docker() {
+        let _ = std::process::Command::new("git")
+            .args(["config", "--global", "--add", "safe.directory", &repo_path.to_string_lossy()])
+            .output();
+        let _ = std::process::Command::new("git")
+            .args(["config", "--global", "--add", "safe.directory", &worktree_path.to_string_lossy()])
+            .output();
+    }
 
     // Create the worktree with a new branch based on base_branch
     let output = std::process::Command::new("git")
@@ -268,12 +270,14 @@ pub fn reattach_worktree(
         crate::core::mcp_scanner::ensure_gitignore_public(p, ".kronn-worktrees/");
     }
 
-    let _ = std::process::Command::new("git")
-        .args(["config", "--global", "--add", "safe.directory", &repo_path.to_string_lossy()])
-        .output();
-    let _ = std::process::Command::new("git")
-        .args(["config", "--global", "--add", "safe.directory", &worktree_path.to_string_lossy()])
-        .output();
+    if crate::core::env::is_docker() {
+        let _ = std::process::Command::new("git")
+            .args(["config", "--global", "--add", "safe.directory", &repo_path.to_string_lossy()])
+            .output();
+        let _ = std::process::Command::new("git")
+            .args(["config", "--global", "--add", "safe.directory", &worktree_path.to_string_lossy()])
+            .output();
+    }
 
     // Prune stale worktree entries first (old /data/workspaces/ refs)
     let _ = std::process::Command::new("git")
