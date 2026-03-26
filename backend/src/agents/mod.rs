@@ -241,6 +241,22 @@ pub fn find_binary(name: &str) -> Option<BinaryLocation> {
         }
     }
 
+    // On Windows native: try finding the binary inside WSL
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(output) = std::process::Command::new("wsl.exe")
+            .args(["-e", "which", name])
+            .output()
+        {
+            if output.status.success() {
+                let wsl_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !wsl_path.is_empty() {
+                    return Some(BinaryLocation { path: wsl_path, host_managed: true });
+                }
+            }
+        }
+    }
+
     None
 }
 

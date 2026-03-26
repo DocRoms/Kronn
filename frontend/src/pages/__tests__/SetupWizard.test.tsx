@@ -83,6 +83,7 @@ const wrap = async (ui: React.ReactElement) => {
   await act(async () => {
     result = render(<I18nProvider>{ui}</I18nProvider>);
   });
+  await act(async () => { await new Promise(r => setTimeout(r, 0)); });
   return result!;
 };
 
@@ -105,14 +106,14 @@ describe('SetupWizard — step 0 (agents detection)', () => {
     await wrap(<SetupWizard initialStatus={null} onComplete={vi.fn()} />);
     const body = document.body.textContent!;
     expect(body).toContain('Agents');
-    expect(body).toContain('Depots');
-    expect(body).toContain('Termine');
+    expect(body).toContain('Dépôts');
+    expect(body).toContain('Terminé');
   });
 
   it('shows "no agent detected" message when no agents are found', async () => {
     vi.mocked(agentsApi.detect).mockResolvedValue([]);
     await wrap(<SetupWizard initialStatus={null} onComplete={vi.fn()} />);
-    expect(document.body.textContent).toContain('Aucun agent detecte');
+    expect(document.body.textContent).toContain('Aucun agent détecté');
   });
 
   it('shows detected agents with their name and OK badge when installed', async () => {
@@ -150,7 +151,7 @@ describe('SetupWizard — step 0 (agents detection)', () => {
     await wrap(<SetupWizard initialStatus={null} onComplete={vi.fn()} />);
 
     const body = document.body.textContent!;
-    expect(body).toContain('1 agent detecte');
+    expect(body).toContain('1 agent détecté');
   });
 
   it('shows agent version when available', async () => {
@@ -210,7 +211,7 @@ describe('SetupWizard — navigation to step 1 (repos)', () => {
 
     await act(async () => { continuerBtn!.click(); });
 
-    expect(document.body.textContent).toContain('Depots detectes');
+    expect(document.body.textContent).toContain('Dépôts détectés');
   });
 
   it('shows scanning indicator when entering step 1 with no repos', async () => {
@@ -229,7 +230,7 @@ describe('SetupWizard — navigation to step 1 (repos)', () => {
     await act(async () => { continuerBtn!.click(); });
 
     // While scanning is in progress, the loader should appear
-    expect(document.body.textContent).toContain('Scan des depots git');
+    expect(document.body.textContent).toContain('Scan des dépôts git');
 
     // Resolve the promise to let the component settle
     await act(async () => {
@@ -308,10 +309,10 @@ describe('SetupWizard — step 2 (completion)', () => {
     const continuerBtn2 = Array.from(document.body.querySelectorAll('button')).find(b => b.textContent?.includes('Continuer'));
     await act(async () => { continuerBtn2!.click(); });
 
-    expect(document.body.textContent).toContain('Configuration terminee');
+    expect(document.body.textContent).toContain('Configuration terminée');
 
     // Trigger completion
-    const dashboardBtn = Array.from(document.body.querySelectorAll('button')).find(b => b.textContent?.includes('Acceder au dashboard'));
+    const dashboardBtn = Array.from(document.body.querySelectorAll('button')).find(b => b.textContent?.includes('Accéder au dashboard'));
     expect(dashboardBtn).toBeTruthy();
     await act(async () => { dashboardBtn!.click(); });
 
@@ -334,8 +335,8 @@ describe('SetupWizard — step 2 (completion)', () => {
     const btn2 = Array.from(document.body.querySelectorAll('button')).find(b => b.textContent?.includes('Continuer'));
     await act(async () => { btn2!.click(); });
 
-    expect(document.body.textContent).toContain('Configuration terminee');
-    expect(document.body.textContent).toContain('Acceder au dashboard');
+    expect(document.body.textContent).toContain('Configuration terminée');
+    expect(document.body.textContent).toContain('Accéder au dashboard');
   });
 });
 

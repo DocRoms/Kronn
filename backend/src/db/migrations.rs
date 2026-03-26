@@ -41,6 +41,8 @@ pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> 
         ("019_pin_first_message", include_str!("sql/019_pin_first_message.sql")),
         ("020_fix_worktree_paths", include_str!("sql/020_fix_worktree_paths.sql")),
         ("021_message_identity", include_str!("sql/021_message_identity.sql")),
+        ("022_contacts", include_str!("sql/022_contacts.sql")),
+        ("023_shared_discussions", include_str!("sql/023_shared_discussions.sql")),
     ];
 
     // Check if there are pending migrations before backing up

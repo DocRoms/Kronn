@@ -7,6 +7,47 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.2.0] — 2026-03-28
+
+### Added
+- **Multi-user P2P chat** — share discussions between Kronn instances via WebSocket. Replicated model: each peer stores a full copy, messages sync in real-time
+- **`POST /api/discussions/:id/share`** — share a discussion with contacts, broadcasts `DiscussionInvite` via WS
+- **`WsMessage::ChatMessage`** — real-time message relay between peers with idempotent insertion (no duplicates)
+- **`WsMessage::DiscussionInvite`** — auto-creates local discussion when a peer shares with you
+- **Auto-add peers** — unknown but valid invite codes are auto-accepted as pending contacts (no mutual-add required)
+- **Host IP detection for Docker** — `KRONN_HOST_IPS` env var, detected at `make start`, passed to container for accurate invite codes
+- **Native skill files** — SKILL.md written to `.claude/skills/`, `.agents/skills/` (Codex), `.gemini/skills/` for progressive agent discovery (~95% token savings vs prompt injection)
+- **Native agent profiles** — profiles synced as `.claude/agents/`, `.gemini/agents/`, `.codex/agents/` files
+- **CSS design system** — `tokens.css` (83 CSS variables), `utilities.css`, `components.css` + per-page CSS files
+- **Pagination API** — `?page=1&per_page=50` on discussions list and workflow runs (backward compatible)
+- **Auth by default** — auto-generated Bearer token at first launch. Localhost exempt (no lock-out risk). Peers require token. WS auth via invite code
+- **Share button** — in chat header, pick a contact to share the discussion with
+- **Shared badge** — green Users icon on shared discussions in sidebar
+- **Network feedback** — orange "pending" badge + tooltip on unreachable contacts, "offline" label for disconnected accepted contacts
+
+### Changed
+- **DiscussionsPage split** — 3254 → 1218 lines + 6 extracted components (ChatHeader, ChatInput, DiscussionSidebar, NewDiscussionForm, MessageBubble, SwipeableDiscItem)
+- **SettingsPage split** — 1944 → 990 lines + 3 sections (AgentsSection, IdentitySection, ProfilesSection)
+- **WorkflowsPage split** — 1780 → 373 lines + 3 components (WorkflowWizard, WorkflowDetail, RunDetail)
+- **Dashboard split** — 1478 → 674 lines + 2 components (ProjectList, ProjectCard)
+- **Backend split** — `projects.rs` 3823 → 1396 + `audit.rs` + `ai_docs.rs` + `discover.rs`. `discussions.rs` 3696 → 2322 + `disc_git.rs`
+- **Inline styles extraction** — 1157 → 182 inline styles (dynamic only). All static styles moved to CSS
+- **Prompt optimization** — native SKILL.md files use progressive disclosure instead of injecting full content. ~25 token reference prompt vs ~800 tokens full injection
+- **WS endpoint** — skips auth middleware (invite code verification in ws.rs instead)
+- **Tauri desktop app** — frontend files embedded in binary via `include_dir!` (fixes 404 on Windows/macOS installs)
+- **Windows Tauri + WSL** — agents detected and executed via `wsl.exe -e` when running on Windows native. Windows paths auto-converted to WSL paths
+
+### Fixed
+- **TTS no sound** — added `media-src blob:` to nginx CSP (audio blobs were silently blocked)
+- **Tailscale badge** — now conditional on `advertised_host === tailscale_ip` (badge stayed when switching to LAN IP)
+- **French accents** — ~120 i18n strings corrected (détecté, sélectionné, créer, réseau, etc.)
+- **Spanish accents** — ~90 i18n strings corrected (configuración, validación, código, etc.)
+- **Discussion CTA from Projects** — clicking a discussion in ProjectCard now correctly opens it (was missing `onOpenDiscussion(disc.id)`)
+- **Discussion visibility on navigate** — `ensureDiscussionVisible` now waits for `allDiscussions` to load before expanding sidebar groups
+- **Test stability** — added `act()` flush in `wrap()` helper across 4 test files to reduce flaky failures
+
+---
+
 ## [0.1.2] — 2026-03-25
 
 ### Added

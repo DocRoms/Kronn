@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { projects as projectsApi } from '../lib/api';
 import type { AiFileNode } from '../types/generated';
 import { useT } from '../lib/I18nContext';
+import './AiDocViewer.css';
 import {
   ChevronRight, ChevronDown, ChevronUp,
   FileText, Folder, Loader2, Search, MessageSquare, X,
@@ -177,7 +178,7 @@ export function AiDocViewer({ projectId, onDiscussFile }: AiDocViewerProps) {
 
   if (treeLoading) {
     return (
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: 16, color: 'rgba(255,255,255,0.4)', fontSize: 12 }}>
+      <div className="aidoc-loading">
         <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> {t('projects.docAi.loading')}
       </div>
     );
@@ -185,7 +186,7 @@ export function AiDocViewer({ projectId, onDiscussFile }: AiDocViewerProps) {
 
   if (tree.length === 0) {
     return (
-      <div style={{ padding: 16, color: 'rgba(255,255,255,0.3)', fontSize: 12 }}>
+      <div className="aidoc-empty">
         {t('projects.docAi.empty')}
       </div>
     );
@@ -194,29 +195,25 @@ export function AiDocViewer({ projectId, onDiscussFile }: AiDocViewerProps) {
   const isSearching = searchQuery.trim().length > 0;
 
   return (
-    <div style={{ display: 'flex', maxHeight: 400, border: '1px solid rgba(255,255,255,0.06)', borderRadius: 8, overflow: 'hidden', background: 'rgba(0,0,0,0.2)' }}>
+    <div className="aidoc-root">
       {/* File tree */}
-      <div style={{ width: '30%', minWidth: 170, borderRight: '1px solid rgba(255,255,255,0.06)', display: 'flex', flexDirection: 'column' }}>
+      <div className="aidoc-tree-panel">
         {/* Search bar */}
-        <div style={{ padding: '6px 6px 4px', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
-          <div style={{ position: 'relative' }}>
-            <Search size={11} style={{ position: 'absolute', left: 7, top: 6, color: 'rgba(255,255,255,0.25)', pointerEvents: 'none' }} />
+        <div className="aidoc-search-wrap">
+          <div className="aidoc-search-box">
+            <Search size={11} className="aidoc-search-icon" />
             <input
               type="text"
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
               onKeyDown={handleSearchKeyDown}
               placeholder={t('projects.docAi.search')}
-              style={{
-                width: '100%', padding: '4px 22px 4px 22px', background: 'rgba(255,255,255,0.04)',
-                border: '1px solid rgba(255,255,255,0.08)', borderRadius: 4, color: '#e8eaed',
-                fontSize: 10, fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box',
-              }}
+              className="aidoc-search-input"
             />
             {searchQuery && (
               <button
                 onClick={() => setSearchQuery('')}
-                style={{ position: 'absolute', right: 4, top: 3, background: 'none', border: 'none', color: 'rgba(255,255,255,0.3)', cursor: 'pointer', padding: 0, lineHeight: 1 }}
+                className="aidoc-search-clear"
               >
                 <X size={10} />
               </button>
@@ -224,27 +221,27 @@ export function AiDocViewer({ projectId, onDiscussFile }: AiDocViewerProps) {
           </div>
           {/* Search results bar: count + navigation */}
           {isSearching && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 4, fontSize: 10 }}>
+            <div className="aidoc-search-results">
               {searchLoading ? (
-                <Loader2 size={10} style={{ animation: 'spin 1s linear infinite', color: 'rgba(255,255,255,0.3)' }} />
+                <Loader2 size={10} style={{ animation: 'spin 1s linear infinite' }} className="text-dim" />
               ) : globalPosition.total > 0 ? (
                 <>
-                  <span style={{ color: 'rgba(200,255,0,0.7)' }}>
+                  <span className="aidoc-search-position">
                     {globalPosition.current} / {globalPosition.total}
                   </span>
-                  <span style={{ color: 'rgba(255,255,255,0.25)', marginLeft: 2 }}>
+                  <span className="aidoc-search-files-count">
                     ({filesWithMatches.length} {filesWithMatches.length > 1 ? t('projects.docAi.files') : t('projects.docAi.file')})
                   </span>
                 </>
               ) : (
-                <span style={{ color: 'rgba(255,255,255,0.3)' }}>{t('projects.docAi.noResults')}</span>
+                <span className="aidoc-search-no-results">{t('projects.docAi.noResults')}</span>
               )}
               {globalPosition.total > 1 && (
-                <div style={{ marginLeft: 'auto', display: 'flex', gap: 2 }}>
-                  <button onClick={goPrev} style={navBtnStyle} title="Shift+Enter">
+                <div className="aidoc-search-nav">
+                  <button onClick={goPrev} className="aidoc-nav-btn" title="Shift+Enter">
                     <ChevronUp size={10} />
                   </button>
-                  <button onClick={goNext} style={navBtnStyle} title="Enter">
+                  <button onClick={goNext} className="aidoc-nav-btn" title="Enter">
                     <ChevronDown size={10} />
                   </button>
                 </div>
@@ -253,7 +250,7 @@ export function AiDocViewer({ projectId, onDiscussFile }: AiDocViewerProps) {
           )}
         </div>
         {/* Tree — always show ALL files, with match badges */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '4px 0' }}>
+        <div className="aidoc-tree-list">
           {tree.map(node => (
             <TreeNode
               key={node.path} node={node} selectedPath={selectedPath}
@@ -265,21 +262,17 @@ export function AiDocViewer({ projectId, onDiscussFile }: AiDocViewerProps) {
         </div>
       </div>
       {/* Content */}
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      <div className="aidoc-content-panel">
         {/* Toolbar */}
         {selectedPath && content !== null && !loading && (
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 12px', borderBottom: '1px solid rgba(255,255,255,0.04)', flexShrink: 0, gap: 8 }}>
-            <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', fontFamily: 'JetBrains Mono, monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          <div className="aidoc-toolbar">
+            <span className="aidoc-toolbar-path">
               {selectedPath}
             </span>
             {onDiscussFile && (
               <button
                 onClick={() => onDiscussFile(selectedPath)}
-                style={{
-                  display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 8px', borderRadius: 4,
-                  fontSize: 10, fontFamily: 'inherit', cursor: 'pointer', flexShrink: 0,
-                  background: 'rgba(200,255,0,0.06)', border: '1px solid rgba(200,255,0,0.15)', color: '#c8ff00',
-                }}
+                className="aidoc-discuss-btn"
               >
                 <MessageSquare size={10} /> {t('projects.docAi.discuss')}
               </button>
@@ -287,15 +280,15 @@ export function AiDocViewer({ projectId, onDiscussFile }: AiDocViewerProps) {
           </div>
         )}
         {/* Content area */}
-        <div ref={contentRef} key={renderKey} style={{ flex: 1, overflowY: 'auto', padding: '12px 16px' }}>
+        <div ref={contentRef} key={renderKey} className="aidoc-content-area">
           {loading ? (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'rgba(255,255,255,0.4)', fontSize: 12 }}>
+            <div className="aidoc-loading">
               <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> {t('projects.docAi.loading')}
             </div>
           ) : content !== null ? (
             <DocMarkdown content={content} />
           ) : (
-            <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 12 }}>
+            <div className="aidoc-select-file">
               {t('projects.docAi.selectFile')}
             </div>
           )}
@@ -304,14 +297,6 @@ export function AiDocViewer({ projectId, onDiscussFile }: AiDocViewerProps) {
     </div>
   );
 }
-
-// ─── Styles ──────────────────────────────────────────────────────────────────
-
-const navBtnStyle: React.CSSProperties = {
-  background: 'none', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 3,
-  color: 'rgba(255,255,255,0.5)', cursor: 'pointer', padding: '1px 3px',
-  display: 'inline-flex', alignItems: 'center', lineHeight: 1,
-};
 
 // ─── DOM highlight ───────────────────────────────────────────────────────────
 
@@ -407,11 +392,12 @@ function TreeNode({ node, selectedPath, expandedDirs, onSelect, onToggleDir, dep
     return (
       <>
         <div
-          style={{ display: 'flex', alignItems: 'center', gap: 4, padding: `3px 8px 3px ${pl}px`, cursor: 'pointer', fontSize: 11, color: 'rgba(255,255,255,0.5)', userSelect: 'none' }}
+          className="aidoc-tree-dir"
+          style={{ paddingLeft: pl, padding: `3px 8px 3px ${pl}px` }}
           onClick={() => onToggleDir(node.path)}
         >
           {isExpanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
-          <Folder size={11} style={{ color: 'rgba(200,255,0,0.5)' }} />
+          <Folder size={11} className="aidoc-tree-dir-icon" />
           <span>{node.name}</span>
         </div>
         {isExpanded && (node.children ?? []).map(child => (
@@ -426,24 +412,18 @@ function TreeNode({ node, selectedPath, expandedDirs, onSelect, onToggleDir, dep
 
   return (
     <div
-      style={{
-        display: 'flex', alignItems: 'center', gap: 4, padding: `3px 8px 3px ${pl}px`, cursor: 'pointer', fontSize: 11,
-        color: isSelected ? '#c8ff00' : dimmed ? 'rgba(255,255,255,0.2)' : 'rgba(255,255,255,0.6)',
-        background: isSelected ? 'rgba(200,255,0,0.06)' : 'transparent',
-        borderRight: isSelected ? '2px solid #c8ff00' : '2px solid transparent',
-        opacity: dimmed ? 0.5 : 1,
-      }}
+      className="aidoc-tree-file"
+      data-selected={isSelected}
+      data-dimmed={dimmed}
+      style={{ paddingLeft: pl, padding: `3px 8px 3px ${pl}px` }}
       onClick={() => onSelect(node.path)}
     >
-      <FileText size={11} style={{ flexShrink: 0 }} />
-      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+      <FileText size={11} className="flex-shrink-0" />
+      <span className="aidoc-tree-file-name">
         {node.name}
       </span>
       {hasMatches && (
-        <span style={{
-          fontSize: 9, padding: '0 5px', borderRadius: 8, fontWeight: 600, flexShrink: 0,
-          background: 'rgba(200,255,0,0.12)', color: 'rgba(200,255,0,0.8)',
-        }}>
+        <span className="aidoc-match-badge">
           {matchCount}
         </span>
       )}
@@ -477,52 +457,32 @@ function flattenFilePaths(nodes: AiFileNode[], out: string[]) {
 
 // ─── Markdown ────────────────────────────────────────────────────────────────
 
-const mdStyles: Record<string, React.CSSProperties> = {
-  p: { margin: '4px 0' },
-  h1: { fontSize: 18, fontWeight: 700, margin: '12px 0 6px', color: '#e8eaed' },
-  h2: { fontSize: 16, fontWeight: 700, margin: '10px 0 4px', color: '#e8eaed' },
-  h3: { fontSize: 14, fontWeight: 600, margin: '8px 0 4px', color: '#e8eaed' },
-  ul: { margin: '4px 0', paddingLeft: 20 },
-  ol: { margin: '4px 0', paddingLeft: 20 },
-  li: { margin: '2px 0' },
-  code: { background: 'rgba(255,255,255,0.08)', padding: '1px 5px', borderRadius: 4, fontSize: 12, fontFamily: 'monospace' },
-  pre: { background: 'rgba(0,0,0,0.3)', padding: '10px 12px', borderRadius: 8, overflowX: 'auto', margin: '6px 0', border: '1px solid rgba(255,255,255,0.06)' },
-  preCode: { background: 'none', padding: 0, fontSize: 12, fontFamily: 'monospace', color: '#c8ff00' },
-  table: { borderCollapse: 'collapse' as const, width: '100%', margin: '8px 0', fontSize: 12 },
-  th: { border: '1px solid rgba(255,255,255,0.12)', padding: '6px 10px', background: 'rgba(255,255,255,0.05)', fontWeight: 600, textAlign: 'left' as const },
-  td: { border: '1px solid rgba(255,255,255,0.08)', padding: '5px 10px' },
-  blockquote: { borderLeft: '3px solid rgba(200,255,0,0.3)', margin: '6px 0', paddingLeft: 12, color: 'rgba(255,255,255,0.6)' },
-  hr: { border: 'none', borderTop: '1px solid rgba(255,255,255,0.1)', margin: '10px 0' },
-  a: { color: '#c8ff00', textDecoration: 'underline' },
-  strong: { fontWeight: 700, color: '#f0f0f0' },
-};
-
 const DocMarkdown = ({ content }: { content: string }) => (
-  <div style={{ fontSize: 13, lineHeight: 1.55 }}>
+  <div className="aidoc-md">
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
       components={{
-        p: ({ children }) => <p style={mdStyles.p}>{children}</p>,
-        h1: ({ children }) => <h1 style={mdStyles.h1}>{children}</h1>,
-        h2: ({ children }) => <h2 style={mdStyles.h2}>{children}</h2>,
-        h3: ({ children }) => <h3 style={mdStyles.h3}>{children}</h3>,
-        ul: ({ children }) => <ul style={mdStyles.ul}>{children}</ul>,
-        ol: ({ children }) => <ol style={mdStyles.ol}>{children}</ol>,
-        li: ({ children }) => <li style={mdStyles.li}>{children}</li>,
+        p: ({ children }) => <p>{children}</p>,
+        h1: ({ children }) => <h1>{children}</h1>,
+        h2: ({ children }) => <h2>{children}</h2>,
+        h3: ({ children }) => <h3>{children}</h3>,
+        ul: ({ children }) => <ul>{children}</ul>,
+        ol: ({ children }) => <ol>{children}</ol>,
+        li: ({ children }) => <li>{children}</li>,
         code: ({ className, children }) => {
           const isBlock = className?.includes('language-');
           return isBlock
-            ? <code style={mdStyles.preCode}>{children}</code>
-            : <code style={mdStyles.code}>{children}</code>;
+            ? <code className="aidoc-md-pre-code">{children}</code>
+            : <code>{children}</code>;
         },
-        pre: ({ children }) => <pre style={mdStyles.pre}>{children}</pre>,
-        table: ({ children }) => <table style={mdStyles.table}>{children}</table>,
-        th: ({ children }) => <th style={mdStyles.th}>{children}</th>,
-        td: ({ children }) => <td style={mdStyles.td}>{children}</td>,
-        blockquote: ({ children }) => <blockquote style={mdStyles.blockquote}>{children}</blockquote>,
-        hr: () => <hr style={mdStyles.hr} />,
-        a: ({ href, children }) => <a href={href} style={mdStyles.a} target="_blank" rel="noopener noreferrer">{children}</a>,
-        strong: ({ children }) => <strong style={mdStyles.strong}>{children}</strong>,
+        pre: ({ children }) => <pre>{children}</pre>,
+        table: ({ children }) => <table>{children}</table>,
+        th: ({ children }) => <th>{children}</th>,
+        td: ({ children }) => <td>{children}</td>,
+        blockquote: ({ children }) => <blockquote>{children}</blockquote>,
+        hr: () => <hr />,
+        a: ({ href, children }) => <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,
+        strong: ({ children }) => <strong>{children}</strong>,
       }}
     >
       {content}

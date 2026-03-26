@@ -1,11 +1,17 @@
 pub mod setup;
 pub mod projects;
+pub mod audit;
+pub mod ai_docs;
+pub mod discover;
 pub mod agents;
 pub mod mcps;
+pub mod contacts;
 pub mod discussions;
+pub mod disc_git;
 pub mod workflows;
 pub mod stats;
 pub mod skills;
 pub mod profiles;
 pub mod directives;
 pub mod git_ops;
+pub mod ws;

@@ -1,0 +1,528 @@
+/* McpPage — page-specific styles */
+
+/* ── Page header ────────────────────────────────────────── */
+.mcp-page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: var(--kr-sp-9);
+}
+
+.mcp-h1 {
+  font-size: var(--kr-fs-2xl);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.mcp-meta {
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-base);
+  margin-top: var(--kr-sp-2);
+}
+
+/* ── Scan / action buttons ──────────────────────────────── */
+.mcp-btn-action {
+  padding: 7px var(--kr-sp-7);
+  border-radius: var(--kr-r-md);
+  border: 1px solid var(--kr-accent-border);
+  background: var(--kr-accent-bg);
+  color: var(--kr-accent);
+  cursor: pointer;
+  font-size: var(--kr-fs-base);
+  font-family: inherit;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+}
+
+.mcp-btn-action-primary {
+  background: var(--kr-accent-bg-strong);
+  color: var(--kr-accent);
+}
+
+/* ── Icon button ────────────────────────────────────────── */
+.mcp-icon-btn {
+  background: none;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-sm);
+  padding: var(--kr-sp-2) var(--kr-sp-4);
+  color: var(--kr-text-tertiary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  font-size: var(--kr-fs-sm);
+}
+
+/* ── Card ───────────────────────────────────────────────── */
+.mcp-card {
+  background: var(--kr-bg-surface);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-xl);
+  padding: var(--kr-sp-8) var(--kr-sp-9);
+}
+
+/* ── Add MCP panel ──────────────────────────────────────── */
+.mcp-add-panel {
+  margin-bottom: var(--kr-sp-9);
+  border-color: var(--kr-accent-border);
+}
+
+.mcp-add-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: var(--kr-sp-6);
+}
+
+.mcp-add-title {
+  font-size: var(--kr-fs-lg);
+  font-weight: 600;
+  color: var(--kr-accent);
+  margin: 0;
+}
+
+/* ── Registry list ──────────────────────────────────────── */
+.mcp-registry-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.mcp-category-header {
+  font-size: var(--kr-fs-xs);
+  font-weight: 700;
+  color: var(--kr-text-faint);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  padding: var(--kr-sp-4) var(--kr-sp-2) var(--kr-sp-2);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  margin-bottom: 2px;
+}
+
+.mcp-registry-item {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-4);
+  padding: 7px var(--kr-sp-5);
+  border-radius: var(--kr-r-md);
+  cursor: pointer;
+  background: var(--kr-bg-hover);
+  border: 1px solid var(--kr-border-light);
+}
+
+.mcp-registry-item-name {
+  font-weight: 600;
+  font-size: var(--kr-fs-base);
+}
+
+.mcp-registry-item-desc {
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-faint);
+  margin-top: 1px;
+}
+
+.mcp-registry-item-keys {
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-muted);
+}
+
+.mcp-already-badge {
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-cyan);
+  background: rgba(0, 212, 255, 0.1);
+  padding: 1px 5px;
+  border-radius: var(--kr-r-xs);
+}
+
+/* ── Form fields ────────────────────────────────────────── */
+.mcp-field-label {
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-muted);
+  display: block;
+  margin-bottom: var(--kr-sp-2);
+}
+
+.mcp-field-label-inline {
+  margin: 0;
+}
+
+.mcp-env-key-label {
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-tertiary);
+  font-family: var(--kr-font-mono);
+  min-width: 180px;
+}
+
+.mcp-token-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-cyan);
+  text-decoration: none;
+}
+
+.mcp-token-hint {
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-faint);
+}
+
+.mcp-input-mono {
+  flex: 1;
+  font-family: var(--kr-font-mono);
+  font-size: var(--kr-fs-sm);
+}
+
+/* ── Search bar ─────────────────────────────────────────── */
+.mcp-search-wrap {
+  position: relative;
+  margin-bottom: var(--kr-sp-8);
+}
+
+.mcp-search-icon {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: rgba(255, 255, 255, 0.25);
+  pointer-events: none;
+}
+
+.mcp-search-input {
+  padding-left: 32px;
+  width: 100%;
+}
+
+.mcp-search-clear {
+  position: absolute;
+  right: var(--kr-sp-4);
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--kr-text-dim);
+  padding: 2px;
+}
+
+/* ── Server group ───────────────────────────────────────── */
+.mcp-server-group {
+  margin-bottom: var(--kr-sp-6);
+}
+
+.mcp-server-header {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  cursor: pointer;
+  padding: var(--kr-sp-2) 0;
+  background: none;
+  border: none;
+  width: 100%;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+}
+
+.mcp-server-header[aria-expanded="true"] {
+  margin-bottom: var(--kr-sp-4);
+}
+
+.mcp-server-chevron {
+  color: var(--kr-accent);
+  flex-shrink: 0;
+  transition: transform 0.15s;
+}
+
+.mcp-server-chevron-open {
+  transform: rotate(90deg);
+}
+
+.mcp-server-label {
+  font-size: var(--kr-fs-sm);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--kr-text-muted);
+  margin: 0;
+}
+
+.mcp-server-meta {
+  font-weight: 400;
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-muted);
+}
+
+.mcp-server-incompat {
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-error);
+  background: rgba(var(--kr-error-rgb), 0.1);
+  padding: 1px var(--kr-sp-3);
+  border-radius: var(--kr-r-sm);
+  font-weight: 500;
+}
+
+/* ── Config card ────────────────────────────────────────── */
+.mcp-config-card {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--kr-sp-6);
+  padding: var(--kr-sp-7) var(--kr-sp-8);
+  border-radius: var(--kr-r-lg);
+  background: var(--kr-bg-hover);
+  margin-bottom: var(--kr-sp-4);
+  border: 1px solid var(--kr-border-light);
+}
+
+.mcp-config-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--kr-r-full);
+  margin-top: 5px;
+  flex-shrink: 0;
+}
+
+.mcp-config-dot-global {
+  background: var(--kr-accent);
+}
+
+.mcp-config-dot-project {
+  background: var(--kr-cyan);
+}
+
+/* ── Config header: label + badges ──────────────────────── */
+.mcp-config-header {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  flex-wrap: wrap;
+}
+
+.mcp-config-label {
+  font-weight: 600;
+  font-size: var(--kr-fs-md);
+  cursor: pointer;
+}
+
+.mcp-config-label-input {
+  width: 180px;
+  font-size: var(--kr-fs-md);
+  font-weight: 600;
+  padding: 2px var(--kr-sp-3);
+}
+
+.mcp-source-badge {
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  padding: 1px var(--kr-sp-3);
+  border-radius: var(--kr-r-sm);
+  background: rgba(var(--kr-accent-rgb), 0.08);
+  color: var(--kr-accent-text);
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.12);
+}
+
+/* ── Env keys row ───────────────────────────────────────── */
+.mcp-env-keys-row {
+  display: flex;
+  gap: var(--kr-sp-2);
+  margin-top: var(--kr-sp-3);
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.mcp-env-key-name {
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-faint);
+  font-family: var(--kr-font-mono);
+}
+
+/* ── Secrets editor ─────────────────────────────────────── */
+.mcp-secrets-editor {
+  margin-top: var(--kr-sp-4);
+  padding: var(--kr-sp-6);
+  background: var(--kr-bg-subtle);
+  border-radius: var(--kr-r-md);
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.1);
+}
+
+.mcp-secrets-token-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-cyan);
+  margin-bottom: var(--kr-sp-4);
+  text-decoration: none;
+}
+
+.mcp-secrets-hint {
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-muted);
+  margin: 0 0 var(--kr-sp-4);
+}
+
+/* ── Toggle labels (Global / General) ───────────────────── */
+.mcp-toggle-row {
+  display: flex;
+  gap: var(--kr-sp-3);
+  margin-top: var(--kr-sp-4);
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.mcp-toggle-label {
+  font-size: var(--kr-fs-sm);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+  user-select: none;
+  padding: var(--kr-sp-2) var(--kr-sp-5);
+  border-radius: 5px;
+  transition: all 0.15s;
+}
+
+.mcp-toggle-global {
+  border: 1px solid var(--kr-border);
+  background: transparent;
+  color: rgba(255, 255, 255, 0.25);
+}
+
+.mcp-toggle-global-active {
+  border-color: rgba(var(--kr-accent-rgb), 0.3);
+  background: rgba(var(--kr-accent-rgb), 0.12);
+  color: var(--kr-accent);
+}
+
+.mcp-toggle-general {
+  border: 1px solid var(--kr-border);
+  background: transparent;
+  color: rgba(255, 255, 255, 0.25);
+}
+
+.mcp-toggle-general-active {
+  border-color: rgba(var(--kr-info-rgb), 0.3);
+  background: rgba(var(--kr-info-rgb), 0.12);
+  color: var(--kr-info);
+}
+
+.mcp-separator {
+  color: rgba(255, 255, 255, 0.12);
+  font-size: var(--kr-fs-sm);
+}
+
+/* ── Project toggles ────────────────────────────────────── */
+.mcp-project-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  padding: var(--kr-sp-2) var(--kr-sp-5);
+  border-radius: 5px;
+  font-size: var(--kr-fs-sm);
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.mcp-project-toggle-off {
+  border: 1px solid var(--kr-border);
+  background: var(--kr-bg-subtle);
+  color: var(--kr-text-faint);
+}
+
+.mcp-project-toggle-on {
+  border: 1px solid var(--kr-accent-border);
+  background: rgba(var(--kr-accent-rgb), 0.06);
+  color: rgba(var(--kr-accent-rgb), 0.8);
+}
+
+.mcp-context-btn {
+  padding: 3px 5px;
+  margin-left: -1px;
+  border-left: none;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+.mcp-more-projects-btn {
+  background: none;
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.15);
+  border-radius: var(--kr-r-sm);
+  color: var(--kr-accent);
+  font-size: var(--kr-fs-xs);
+  padding: 2px var(--kr-sp-4);
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.mcp-less-projects-btn {
+  background: none;
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-sm);
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+  padding: 2px var(--kr-sp-4);
+  cursor: pointer;
+  font-family: inherit;
+}
+
+/* ── Empty state ────────────────────────────────────────── */
+.mcp-empty {
+  text-align: center;
+  padding: 40px;
+}
+
+.mcp-empty-text {
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-md);
+}
+
+/* ── Context editor modal ───────────────────────────────── */
+.mcp-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--kr-bg-overlay);
+  z-index: var(--kr-z-modal);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.mcp-modal {
+  background: var(--kr-bg-surface);
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.15);
+  border-radius: var(--kr-r-2xl);
+  padding: var(--kr-sp-10);
+  width: 90%;
+  max-width: 700px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-6);
+}
+
+.mcp-modal-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.mcp-modal-subtitle {
+  margin: var(--kr-sp-2) 0 0;
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-faint);
+}
+
+.mcp-modal-textarea {
+  min-height: 350px;
+  resize: vertical;
+  font-family: var(--kr-font-mono);
+  font-size: var(--kr-fs-base);
+  line-height: 1.6;
+  white-space: pre-wrap;
+}

@@ -24,7 +24,7 @@ describe('i18n', () => {
     });
 
     it('interpolates {0} arguments', () => {
-      expect(t('fr', 'audit.step', '3', '10', 'coding-rules.md')).toBe('Etape 3/10 — coding-rules.md');
+      expect(t('fr', 'audit.step', '3', '10', 'coding-rules.md')).toBe('Étape 3/10 — coding-rules.md');
     });
 
     it('interpolates numeric arguments', () => {

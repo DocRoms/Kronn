@@ -1,6 +1,6 @@
 [package]
 name = "kronn-desktop"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 description = "Kronn Desktop — Self-hosted AI coding agent control plane"
 license = "AGPL-3.0-only"
@@ -23,6 +23,9 @@ anyhow = "1"
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Embed frontend dist into binary (no filesystem dependency in production)
+include_dir = "0.7"
 
 # Serialization for Tauri commands
 serde = { version = "1", features = ["derive"] }

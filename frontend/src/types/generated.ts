@@ -640,6 +640,8 @@ export interface Discussion {
   worktree_branch?: string | null;
   summary_cache?: string | null;
   summary_up_to_msg_idx?: number | null;
+  shared_id?: string | null;
+  shared_with?: string[];
   created_at: string; // ISO 8601
   updated_at: string;
 }
@@ -727,6 +729,38 @@ export interface OrchestrationRequest {
   skill_ids?: string[];
   profile_ids?: string[];
   directive_ids?: string[];
+}
+
+export interface Contact {
+  id: string;
+  pseudo: string;
+  avatar_email: string | null;
+  kronn_url: string;
+  invite_code: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export type WsMessage =
+  | { type: 'presence'; from_pseudo: string; from_invite_code: string; online: boolean }
+  | { type: 'ping'; timestamp: number }
+  | { type: 'pong'; timestamp: number }
+  | { type: 'chat_message'; shared_discussion_id: string; message_id: string; from_pseudo: string; from_avatar_email: string | null; from_invite_code: string; content: string; timestamp: number }
+  | { type: 'discussion_invite'; shared_discussion_id: string; title: string; from_pseudo: string; from_invite_code: string };
+
+export interface DetectedIp {
+  ip: string;
+  kind: 'tailscale' | 'vpn' | 'lan';
+  label: string;
+}
+
+export interface NetworkInfo {
+  tailscale_ip: string | null;
+  advertised_host: string;
+  port: number;
+  domain: string | null;
+  detected_ips: DetectedIp[];
 }
 
 export interface ServerConfigPublic {

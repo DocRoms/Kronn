@@ -67,6 +67,7 @@ const wrap = async (ui: React.ReactElement) => {
   await act(async () => {
     result = render(<I18nProvider>{ui}</I18nProvider>);
   });
+  await act(async () => { await new Promise(r => setTimeout(r, 0)); });
   return result!;
 };
 

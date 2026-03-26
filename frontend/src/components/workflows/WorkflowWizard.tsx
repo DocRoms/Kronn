@@ -1,0 +1,1053 @@
+import { useState, useRef, useEffect } from 'react';
+import { useT } from '../../lib/I18nContext';
+import { workflows as workflowsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi } from '../../lib/api';
+import { AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES, isAgentRestricted } from '../../lib/constants';
+import type {
+  Project, Workflow, WorkflowTrigger,
+  WorkflowStep, AgentType, WorkflowSafety,
+  WorkspaceConfig, StepConditionRule,
+  CreateWorkflowRequest, Skill, AgentProfile, Directive,
+} from '../../types/generated';
+import type { AgentsConfig } from '../../types/generated';
+import {
+  Plus, Loader2, Check, X, ChevronRight, ChevronDown,
+  Clock, GitBranch, Zap, HelpCircle, Settings, Shield,
+  AlertTriangle, UserCircle, FileText,
+} from 'lucide-react';
+import '../../pages/WorkflowsPage.css';
+
+const checkAgentRestricted = isAgentRestricted;
+
+/** Parse a cron expression back into visual builder values */
+function parseCronExpr(expr: string): { every: number; unit: 'minutes' | 'hours' | 'days' | 'weeks' | 'months'; at: string } {
+  const parts = expr.split(' ');
+  if (parts.length !== 5) return { every: 5, unit: 'minutes', at: '00:00' };
+  const [min, hour, dom, , ] = parts;
+  if (min.startsWith('*/')) return { every: parseInt(min.slice(2)) || 5, unit: 'minutes', at: '00:00' };
+  if (hour.startsWith('*/')) return { every: parseInt(hour.slice(2)) || 1, unit: 'hours', at: `00:${min.padStart(2, '0')}` };
+  if (dom.startsWith('*/')) return { every: parseInt(dom.slice(2)) || 1, unit: 'days', at: `${hour.padStart(2, '0')}:${min.padStart(2, '0')}` };
+  return { every: 1, unit: 'days', at: `${hour.padStart(2, '0')}:${min.padStart(2, '0')}` };
+}
+
+export interface WorkflowWizardProps {
+  projects: Project[];
+  editWorkflow?: Workflow;
+  onDone: () => void;
+  onCancel: () => void;
+  installedAgentTypes?: AgentType[];
+  agentAccess?: AgentsConfig;
+}
+
+export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAgentTypes, agentAccess }: WorkflowWizardProps) {
+  const { t } = useT();
+  const availableAgents = (installedAgentTypes && installedAgentTypes.length > 0
+    ? installedAgentTypes
+    : ALL_AGENT_TYPES
+  ).map(at => ({ type: at, label: AGENT_LABELS[at] ?? at }));
+  const isEdit = !!editWorkflow;
+  const initTrigger = editWorkflow?.trigger;
+  const initCron = initTrigger?.type === 'Cron' ? parseCronExpr(initTrigger.schedule) : null;
+  const initTracker = initTrigger?.type === 'Tracker' ? initTrigger : null;
+
+  const [wizardStep, setWizardStep] = useState(0);
+  const [name, setName] = useState(editWorkflow?.name ?? '');
+  const [projectId, setProjectId] = useState<string>(editWorkflow?.project_id ?? '');
+  const [triggerType, setTriggerType] = useState<'Cron' | 'Tracker' | 'Manual'>(initTrigger?.type ?? 'Manual');
+  const [cronEvery, setCronEvery] = useState(initCron?.every ?? 5);
+  const [cronUnit, setCronUnit] = useState<'minutes' | 'hours' | 'days' | 'weeks' | 'months'>(initCron?.unit ?? 'minutes');
+  const [cronAt, setCronAt] = useState(initCron?.at ?? '00:00');
+  const [trackerOwner, setTrackerOwner] = useState(initTracker?.source?.owner ?? '');
+  const [trackerRepo, setTrackerRepo] = useState(initTracker?.source?.repo ?? '');
+  const [trackerLabels, setTrackerLabels] = useState(initTracker?.labels?.join(', ') ?? '');
+  const [trackerInterval, setTrackerInterval] = useState(initTracker?.interval ?? '*/5 * * * *');
+  const [showVarHelp, setShowVarHelp] = useState(false);
+  const [expandedStepAdvanced, setExpandedStepAdvanced] = useState<number | null>(null);
+
+  // Safety state
+  const [safety, setSafety] = useState<WorkflowSafety>(editWorkflow?.safety ?? {
+    sandbox: false, max_files: null, max_lines: null, require_approval: false,
+  });
+
+  // Workspace config state
+  const initHooks = editWorkflow?.workspace_config?.hooks;
+  const [wsHookAfterCreate, setWsHookAfterCreate] = useState(initHooks?.after_create ?? '');
+  const [wsHookBeforeRun, setWsHookBeforeRun] = useState(initHooks?.before_run ?? '');
+  const [wsHookAfterRun, setWsHookAfterRun] = useState(initHooks?.after_run ?? '');
+  const [wsHookBeforeRemove, setWsHookBeforeRemove] = useState(initHooks?.before_remove ?? '');
+
+  // Concurrency
+  const [concurrencyLimit, setConcurrencyLimit] = useState<string>(editWorkflow?.concurrency_limit?.toString() ?? '');
+
+  // Build cron expression from visual inputs
+  const buildCronExpr = (): string => {
+    const [hh, mm] = cronAt.split(':').map(Number);
+    const h = isNaN(hh) ? 0 : hh;
+    const m = isNaN(mm) ? 0 : mm;
+    switch (cronUnit) {
+      case 'minutes': return `*/${cronEvery} * * * *`;
+      case 'hours':   return `${m} */${cronEvery} * * *`;
+      case 'days':    return `${m} ${h} */${cronEvery} * *`;
+      case 'weeks':   return `${m} ${h} * * 1`;
+      case 'months':  return `${m} ${h} 1 */${cronEvery} *`;
+      default:        return '*/5 * * * *';
+    }
+  };
+
+  const cronHumanLabel = (): string => {
+    const [hh, mm] = cronAt.split(':');
+    const atStr = `${hh ?? '00'}:${mm ?? '00'}`;
+    const unitLabels: Record<string, string> = { minutes: t('wiz.minutes'), hours: t('wiz.hours'), days: t('wiz.days'), weeks: t('wiz.weeks'), months: t('wiz.months') };
+    if (cronUnit === 'minutes' || cronUnit === 'hours') {
+      return `${t('wiz.every')} ${cronEvery} ${unitLabels[cronUnit]}`;
+    }
+    return `${t('wiz.every')} ${cronEvery} ${unitLabels[cronUnit]} ${t('wiz.at')} ${atStr}`;
+  };
+
+  const [steps, setSteps] = useState<WorkflowStep[]>(editWorkflow?.steps ?? [{
+    name: 'main',
+    step_type: { type: 'Agent' },
+    description: null,
+    agent: 'ClaudeCode',
+    prompt_template: '',
+    mode: { type: 'Normal' },
+  }]);
+  const [saving, setSaving] = useState(false);
+  const [availableSkills, setAvailableSkills] = useState<Skill[]>([]);
+  const [availableProfiles, setAvailableProfiles] = useState<AgentProfile[]>([]);
+  const [availableDirectives, setAvailableDirectives] = useState<Directive[]>([]);
+  const promptTextareaRefs = useRef<Record<number, HTMLTextAreaElement | null>>({});
+
+  /** Insert text at cursor position in the prompt textarea of step `stepIndex` */
+  const insertVarAtCursor = (stepIndex: number, text: string) => {
+    const el = promptTextareaRefs.current[stepIndex];
+    if (!el) return;
+    const start = el.selectionStart ?? el.value.length;
+    const end = el.selectionEnd ?? start;
+    const before = el.value.slice(0, start);
+    const after = el.value.slice(end);
+    const newValue = before + text + after;
+    updateStep(stepIndex, { prompt_template: newValue });
+    // Restore cursor position after React re-render
+    requestAnimationFrame(() => {
+      el.focus();
+      const pos = start + text.length;
+      el.setSelectionRange(pos, pos);
+    });
+  };
+
+  useEffect(() => {
+    skillsApi.list().then(setAvailableSkills).catch(() => {});
+    profilesApi.list().then(setAvailableProfiles).catch(() => {});
+    directivesApi.list().then(setAvailableDirectives).catch(() => {});
+  }, []);
+
+  const addStep = () => {
+    setSteps([...steps, {
+      name: `step-${steps.length + 1}`,
+      agent: 'ClaudeCode',
+      prompt_template: '',
+      mode: { type: 'Normal' },
+    }]);
+  };
+
+  const updateStep = (idx: number, patch: Partial<WorkflowStep>) => {
+    setSteps(steps.map((s, i) => i === idx ? { ...s, ...patch } : s));
+  };
+
+  const removeStep = (idx: number) => {
+    if (steps.length > 1) setSteps(steps.filter((_, i) => i !== idx));
+  };
+
+  // --- on_result helpers ---
+  const addCondition = (stepIdx: number) => {
+    const step = steps[stepIdx];
+    const conditions: StepConditionRule[] = [...(step.on_result ?? []), { contains: '', action: { type: 'Stop' } }];
+    updateStep(stepIdx, { on_result: conditions });
+  };
+
+  const updateCondition = (stepIdx: number, condIdx: number, patch: Partial<StepConditionRule>) => {
+    const step = steps[stepIdx];
+    const conditions = (step.on_result ?? []).map((c, i) => i === condIdx ? { ...c, ...patch } : c);
+    updateStep(stepIdx, { on_result: conditions });
+  };
+
+  const removeCondition = (stepIdx: number, condIdx: number) => {
+    const step = steps[stepIdx];
+    updateStep(stepIdx, { on_result: (step.on_result ?? []).filter((_, i) => i !== condIdx) });
+  };
+
+  const buildTrigger = (): WorkflowTrigger => {
+    switch (triggerType) {
+      case 'Cron': return { type: 'Cron', schedule: buildCronExpr() };
+      case 'Tracker': return {
+        type: 'Tracker',
+        source: { type: 'GitHub', owner: trackerOwner, repo: trackerRepo },
+        query: '',
+        labels: trackerLabels.split(',').map(l => l.trim()).filter(Boolean),
+        interval: trackerInterval,
+      };
+      case 'Manual': return { type: 'Manual' };
+    }
+  };
+
+  const buildWorkspaceConfig = (): WorkspaceConfig | null => {
+    const hasHooks = wsHookAfterCreate || wsHookBeforeRun || wsHookAfterRun || wsHookBeforeRemove;
+    if (!hasHooks) return null;
+    return {
+      hooks: {
+        after_create: wsHookAfterCreate || null,
+        before_run: wsHookBeforeRun || null,
+        after_run: wsHookAfterRun || null,
+        before_remove: wsHookBeforeRemove || null,
+      }
+    };
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      const trigger = buildTrigger();
+      const wsConfig = buildWorkspaceConfig();
+      const safetyVal = (safety.sandbox || safety.require_approval || safety.max_files || safety.max_lines) ? safety : undefined;
+      const concurrency = concurrencyLimit ? parseInt(concurrencyLimit) : undefined;
+
+      if (isEdit && editWorkflow) {
+        await workflowsApi.update(editWorkflow.id, {
+          name,
+          trigger,
+          steps,
+          actions: [],
+          safety: safetyVal ?? editWorkflow.safety,
+          workspace_config: wsConfig ?? undefined,
+          concurrency_limit: concurrency ?? null,
+        });
+      } else {
+        const req: CreateWorkflowRequest = {
+          name,
+          project_id: projectId || null,
+          trigger,
+          steps,
+          actions: [],
+          safety: safetyVal,
+          workspace_config: wsConfig ?? undefined,
+          concurrency_limit: concurrency,
+        };
+        await workflowsApi.create(req);
+      }
+      onDone();
+    } catch (e) {
+      console.warn('Workflow action failed:', e);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const WIZARD_STEPS = [t('wiz.infos'), t('wiz.trigger'), t('wiz.steps'), t('wiz.config'), t('wiz.summary')];
+  const lastStep = WIZARD_STEPS.length - 1;
+
+  return (
+    <div className="wf-wizard-card">
+      {/* Progress bar */}
+      <div className="flex-row gap-2 mb-9">
+        {WIZARD_STEPS.map((label, i) => (
+          <div key={i} className="flex-1 text-center">
+            <div className="wf-wizard-progress-segment" data-active={i <= wizardStep} />
+            <span className="text-xs" style={{ color: i <= wizardStep ? '#c8ff00' : 'rgba(255,255,255,0.3)' }}>
+              {label}
+            </span>
+          </div>
+        ))}
+      </div>
+
+      {/* Step 0: Name + Project */}
+      {wizardStep === 0 && (
+        <div>
+          <label className="wf-label">{t('wiz.name')}</label>
+          <input
+            className="wf-input"
+            value={name}
+            onChange={e => setName(e.target.value)}
+            placeholder={t('wiz.namePlaceholder')}
+          />
+
+          <label className="wf-label mt-6">{isEdit ? t('wiz.project') : t('wiz.projectOptional')}</label>
+          <select className="wf-select" value={projectId} onChange={e => {
+            const pid = e.target.value;
+            setProjectId(pid);
+            const proj = projects.find(p => p.id === pid);
+            if (proj?.default_skill_ids?.length) {
+              setSteps(prev => prev.map(s => ({ ...s, skill_ids: s.skill_ids?.length ? s.skill_ids : proj.default_skill_ids })));
+            }
+          }} disabled={isEdit}>
+            <option value="">{t('wiz.noProject')}</option>
+            {projects.map(p => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      {/* Step 1: Trigger */}
+      {wizardStep === 1 && (
+        <div>
+          <label className="wf-label">{t('wiz.triggerType')}</label>
+          <div className="flex-row gap-4 mb-6">
+            {(['Manual', 'Cron', 'Tracker'] as const).map(tt => (
+              <button
+                key={tt}
+                className="wf-trigger-btn"
+                data-selected={triggerType === tt}
+                onClick={() => setTriggerType(tt)}
+              >
+                {tt === 'Manual' && <Zap size={12} />}
+                {tt === 'Cron' && <Clock size={12} />}
+                {tt === 'Tracker' && <GitBranch size={12} />}
+                {tt}
+              </button>
+            ))}
+          </div>
+
+          {triggerType === 'Cron' && (
+            <>
+              <label className="wf-label">{t('wiz.frequency')}</label>
+              <div className="flex-row gap-4 mb-4">
+                <span className="text-base text-tertiary">{t('wiz.every')}</span>
+                <input
+                  type="number" min={1} max={60}
+                  className="wf-input"
+                  style={{ width: 60, textAlign: 'center' }}
+                  value={cronEvery}
+                  onChange={e => setCronEvery(Math.max(1, parseInt(e.target.value) || 1))}
+                />
+                <select
+                  className="wf-select"
+                  style={{ width: 130 }}
+                  value={cronUnit}
+                  onChange={e => setCronUnit(e.target.value as typeof cronUnit)}
+                >
+                  <option value="minutes">{t('wiz.minutes')}</option>
+                  <option value="hours">{t('wiz.hours')}</option>
+                  <option value="days">{t('wiz.days')}</option>
+                  <option value="weeks">{t('wiz.weeks')}</option>
+                  <option value="months">{t('wiz.months')}</option>
+                </select>
+                {(cronUnit === 'days' || cronUnit === 'weeks' || cronUnit === 'months') && (
+                  <>
+                    <span className="text-base text-tertiary">{t('wiz.at')}</span>
+                    <input
+                      type="time"
+                      className="wf-input"
+                      style={{ width: 100 }}
+                      value={cronAt}
+                      onChange={e => setCronAt(e.target.value)}
+                    />
+                  </>
+                )}
+              </div>
+              <div className="wf-cron-preview">
+                <Clock size={12} className="text-accent flex-shrink-0" />
+                <span className="text-sm text-tertiary">{cronHumanLabel()}</span>
+                <span className="text-xs text-ghost mono" style={{ marginLeft: 'auto' }}>
+                  {buildCronExpr()}
+                </span>
+              </div>
+            </>
+          )}
+
+          {triggerType === 'Tracker' && (
+            <>
+              <div className="flex-row gap-4">
+                <div className="flex-1">
+                  <label className="wf-label">Owner</label>
+                  <input className="wf-input" value={trackerOwner} onChange={e => setTrackerOwner(e.target.value)} placeholder="owner" />
+                </div>
+                <div className="flex-1">
+                  <label className="wf-label">Repo</label>
+                  <input className="wf-input" value={trackerRepo} onChange={e => setTrackerRepo(e.target.value)} placeholder="repo" />
+                </div>
+              </div>
+              <label className="wf-label mt-4">{t('wiz.labels')}</label>
+              <input className="wf-input" value={trackerLabels} onChange={e => setTrackerLabels(e.target.value)} placeholder="bug-5xx, auto-fix" />
+              <label className="wf-label mt-4">{t('wiz.pollInterval')}</label>
+              <input className="wf-input" value={trackerInterval} onChange={e => setTrackerInterval(e.target.value)} placeholder="*/5 * * * *" />
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Step 2: Steps (with advanced per-step config) */}
+      {wizardStep === 2 && (
+        <div>
+          {/* Variable help toggle */}
+          <button
+            className="wf-small-help-btn mb-6"
+            data-open={showVarHelp}
+            onClick={() => setShowVarHelp(!showVarHelp)}
+          >
+            <HelpCircle size={12} />
+            {t('wiz.availableVars')}
+            <ChevronRight size={10} className={showVarHelp ? 'wf-chevron-rotated' : 'wf-chevron'} />
+          </button>
+
+          {showVarHelp && (
+            <div className="wf-help-panel">
+              <div className="wf-help-section">
+                <div className="wf-help-title">{t('wiz.triggerVars')}</div>
+                <div className="wf-help-grid">
+                  {[
+                    ['{{issue.title}}', t('wiz.issueTitle')],
+                    ['{{issue.body}}', t('wiz.issueBody')],
+                    ['{{issue.number}}', t('wiz.issueNumber')],
+                    ['{{issue.url}}', t('wiz.issueUrl')],
+                    ['{{issue.labels}}', t('wiz.issueLabels')],
+                  ].map(([v, d]) => (
+                    <div key={v} className="wf-help-row">
+                      <code
+                        className="wf-help-code"
+                        onClick={() => navigator.clipboard.writeText(v!)}
+                        title={t('wiz.clickToInsert')}
+                      >{v}</code>
+                      <span className="wf-help-desc">{d}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="wf-help-section">
+                <div className="wf-help-title">{t('wiz.stepChaining')}</div>
+                <div className="wf-help-grid">
+                  {[
+                    ['{{previous_step.output}}', t('wiz.prevOutput')],
+                    ['{{steps.<nom>.output}}', t('wiz.namedOutput')],
+                  ].map(([v, d]) => (
+                    <div key={v} className="wf-help-row">
+                      <code
+                        className="wf-help-code"
+                        onClick={() => navigator.clipboard.writeText(v!)}
+                        title={t('wiz.clickToInsert')}
+                      >{v}</code>
+                      <span className="wf-help-desc">{d}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="wf-help-section">
+                <div className="wf-help-title">{t('wiz.availableSignals')}</div>
+                <div className="wf-help-grid">
+                  {[
+                    ['[SIGNAL: NO_RESULTS]', t('wiz.signalNoResults')],
+                    ['[SIGNAL: CONTINUE]', t('wiz.signalContinue')],
+                  ].map(([v, d]) => (
+                    <div key={v} className="wf-help-row">
+                      <code className="wf-help-code-signal">{v}</code>
+                      <span className="wf-help-desc">{d}</span>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-2xs text-ghost mt-2" style={{ margin: '4px 0 0' }}>
+                  {`Auto-injecte quand des conditions (on_result) sont definies sur un step.`}
+                </p>
+              </div>
+
+              <div className="wf-help-section">
+                <div className="wf-help-title">{t('wiz.example')}</div>
+                <div className="wf-help-example">
+                  <div><span className="text-dim">{'// Step 1 : "analyze"'}</span></div>
+                  <div>Analyse le bug <span className="text-accent">{'{{issue.title}}'}</span> dans <span className="text-accent">{'{{issue.url}}'}</span>.</div>
+                  <div>Trouve la cause racine.</div>
+                  <div style={{ height: 8 }} />
+                  <div><span className="text-dim">{'// Step 2 : "fix"'}</span></div>
+                  <div>Analyse : <span className="text-accent">{'{{previous_step.output}}'}</span></div>
+                  <div>Ecris le correctif.</div>
+                  <div style={{ height: 8 }} />
+                  <div><span className="text-dim">{'// Step 3 : "verify"'}</span></div>
+                  <div>Contexte : <span className="text-accent">{'{{steps.analyze.output}}'}</span></div>
+                  <div>Fix : <span className="text-accent">{'{{steps.fix.output}}'}</span></div>
+                  <div>Lance les tests et verifie.</div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {steps.map((step, i) => {
+            const isAdvOpen = expandedStepAdvanced === i;
+            const hasAdvanced = (step.on_result && step.on_result.length > 0) ||
+              step.agent_settings ||
+              step.stall_timeout_secs || step.retry || step.delay_after_secs;
+
+            return (
+              <div key={i} className="wf-step-edit-card mb-6">
+                <div className="flex-row gap-4 mb-4">
+                  <span className="wf-step-number">
+                    {i + 1}
+                  </span>
+                  <input
+                    className="wf-input flex-1"
+                    value={step.name}
+                    onChange={e => updateStep(i, { name: e.target.value })}
+                    placeholder={t('wiz.stepName')}
+                  />
+                  <select
+                    className="wf-select"
+                    style={{ width: 120 }}
+                    value={step.agent}
+                    onChange={e => updateStep(i, { agent: e.target.value as AgentType })}
+                  >
+                    {availableAgents.map(a => (
+                      <option key={a.type} value={a.type}>{a.label}</option>
+                    ))}
+                  </select>
+                  {steps.length > 1 && (
+                    <button className="wf-icon-btn" onClick={() => removeStep(i)} aria-label="Remove step">
+                      <X size={12} />
+                    </button>
+                  )}
+                </div>
+                {/* Step type + description */}
+                <div className="flex-row gap-4 mb-3">
+                  <div className="flex-row gap-2">
+                    <button
+                      className="wf-step-type-btn"
+                      data-type="agent"
+                      data-selected={!step.step_type || step.step_type.type === 'Agent'}
+                      onClick={() => updateStep(i, { step_type: { type: 'Agent' } })}
+                    >{t('wiz.stepTypeAgent')}</button>
+                    <button
+                      className="wf-step-type-btn"
+                      data-type="api"
+                      data-selected={step.step_type?.type === 'ApiCall'}
+                      onClick={() => updateStep(i, { step_type: { type: 'ApiCall' } })}
+                    >{t('wiz.stepTypeApiCall')}</button>
+                  </div>
+                  <input
+                    className="wf-input flex-1 text-sm"
+                    value={step.description ?? ''}
+                    onChange={e => updateStep(i, { description: e.target.value || null })}
+                    placeholder={t('wiz.stepDescriptionPlaceholder')}
+                  />
+                </div>
+                {checkAgentRestricted(agentAccess, step.agent) && (
+                  <div className="wf-restricted-warning">
+                    <AlertTriangle size={12} />
+                    <span>{t('config.restrictedStep')}</span>
+                    <span className="cursor-pointer" style={{ textDecoration: 'underline', marginLeft: 4 }}
+                      onClick={() => window.location.hash = '#config'}
+                    >{t('config.restrictedAgentLink')}</span>
+                  </div>
+                )}
+                <textarea
+                  ref={el => { promptTextareaRefs.current[i] = el; }}
+                  className="wf-textarea"
+                  rows={3}
+                  value={step.prompt_template}
+                  onChange={e => updateStep(i, { prompt_template: e.target.value })}
+                  placeholder={i === 0
+                    ? 'Prompt template... ex: Analyse le bug {{issue.title}}. Trouve la cause racine.'
+                    : `Prompt template... ex: Voici l'analyse : {{previous_step.output}}. Ecris le correctif.`
+                  }
+                />
+                {/* Hint: available variables for this step (clickable) */}
+                {i > 0 && (
+                  <div className="mt-2 text-xs text-ghost flex-wrap flex-row gap-1">
+                    <span>{t('wiz.clickToInsert')} :</span>
+                    <code
+                      className="wf-var-hint-code"
+                      onClick={() => insertVarAtCursor(i, '{{previous_step.output}}')}
+                      title={t('wiz.prevOutput')}
+                    >{'{{previous_step.output}}'}</code>
+                    {steps.slice(0, i).map(prev => (
+                      <code
+                        key={prev.name}
+                        className="wf-var-hint-code"
+                        onClick={() => insertVarAtCursor(i, `{{steps.${prev.name}.output}}`)}
+                        title={`${t('wiz.namedOutput')}: ${prev.name}`}
+                      >{`{{steps.${prev.name}.output}}`}</code>
+                    ))}
+                  </div>
+                )}
+
+                {/* Skills selector per step */}
+                {availableSkills.length > 0 && (
+                  <div className="mt-4">
+                    <label className="wf-selector-label">
+                      <Zap size={9} /> {t('skills.selectSkills')}
+                    </label>
+                    <div className="flex-wrap flex-row gap-2 mt-2">
+                      {availableSkills.map(skill => {
+                        const ids = step.skill_ids ?? [];
+                        const selected = ids.includes(skill.id);
+                        return (
+                          <button
+                            key={skill.id}
+                            type="button"
+                            onClick={() => {
+                              const newIds = selected ? ids.filter(id => id !== skill.id) : [...ids, skill.id];
+                              updateStep(i, { skill_ids: newIds.length > 0 ? newIds : undefined });
+                            }}
+                            className="wf-chip wf-chip-skill"
+                            data-selected={selected}
+                            title={skill.name}
+                          >
+                            {selected && <Check size={8} />}
+                            {skill.name}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Profile selector per step (single-select) */}
+                {availableProfiles.length > 0 && (
+                  <div className="mt-4">
+                    <label className="wf-selector-label">
+                      <UserCircle size={9} /> {t('profiles.select')}
+                    </label>
+                    <div className="flex-wrap flex-row gap-2 mt-2">
+                      <button
+                        type="button"
+                        onClick={() => updateStep(i, { profile_ids: [] })}
+                        className="wf-chip wf-chip-profile-none"
+                        data-selected={!step.profile_ids?.length}
+                      >
+                        {t('profiles.none')}
+                      </button>
+                      {availableProfiles.map(profile => {
+                        const selected = step.profile_ids?.includes(profile.id) ?? false;
+                        return (
+                          <button
+                            key={profile.id}
+                            type="button"
+                            onClick={() => updateStep(i, { profile_ids: selected ? (step.profile_ids ?? []).filter(id => id !== profile.id) : [...(step.profile_ids ?? []), profile.id] })}
+                            className="wf-chip wf-chip-profile"
+                            data-selected={selected}
+                            style={selected ? {
+                              fontWeight: 600,
+                              border: `1px solid ${profile.color || 'rgba(139,92,246,0.4)'}`,
+                              background: `${profile.color}15`,
+                              color: profile.color || '#a78bfa',
+                            } : undefined}
+                            title={profile.role}
+                          >
+                            {selected && <Check size={8} />}
+                            {profile.avatar} {profile.persona_name || profile.name}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Directive selector per step (multi-select) */}
+                {availableDirectives.length > 0 && (
+                  <div className="mt-4">
+                    <label className="wf-selector-label">
+                      <FileText size={9} /> {t('directives.title')}
+                    </label>
+                    <div className="flex-wrap flex-row gap-2 mt-2">
+                      {availableDirectives.map(directive => {
+                        const ids = step.directive_ids ?? [];
+                        const selected = ids.includes(directive.id);
+                        return (
+                          <button
+                            key={directive.id}
+                            type="button"
+                            onClick={() => {
+                              const newIds = selected
+                                ? ids.filter(id => id !== directive.id)
+                                : [...ids, directive.id];
+                              updateStep(i, { directive_ids: newIds });
+                            }}
+                            className="wf-chip wf-chip-directive"
+                            data-selected={selected}
+                            title={directive.name}
+                          >
+                            {selected && <Check size={8} />}
+                            {directive.icon} {directive.name}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Advanced toggle */}
+                <button
+                  className="wf-advanced-toggle"
+                  style={{ color: hasAdvanced ? '#c8ff00' : 'rgba(255,255,255,0.25)' }}
+                  onClick={() => setExpandedStepAdvanced(isAdvOpen ? null : i)}
+                >
+                  <Settings size={10} />
+                  {t('wiz.advanced')}{hasAdvanced ? ' *' : ''}
+                  {isAdvOpen ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+                </button>
+
+                {isAdvOpen && (
+                  <div className="wf-advanced-panel">
+                    {/* Agent settings */}
+                    <div className="mb-5">
+                      <label className="wf-label">{t('wiz.agentSettings')}</label>
+                      <div className="flex-row gap-3">
+                        <div className="flex-1">
+                          <label className="wf-label text-2xs">{t('wiz.model')}</label>
+                          <input
+                            className="wf-input"
+                            value={step.agent_settings?.model ?? ''}
+                            onChange={e => updateStep(i, {
+                              agent_settings: { ...step.agent_settings, model: e.target.value || null }
+                            })}
+                            placeholder="ex: o3"
+                          />
+                        </div>
+                        <div className="flex-1">
+                          <label className="wf-label text-2xs">Reasoning effort</label>
+                          <select
+                            className="wf-select"
+                            value={step.agent_settings?.reasoning_effort ?? ''}
+                            onChange={e => updateStep(i, {
+                              agent_settings: { ...step.agent_settings, reasoning_effort: e.target.value || null }
+                            })}
+                          >
+                            <option value="">default</option>
+                            <option value="low">low</option>
+                            <option value="medium">medium</option>
+                            <option value="high">high</option>
+                          </select>
+                        </div>
+                        <div className="flex-1">
+                          <label className="wf-label text-2xs">Max tokens</label>
+                          <input
+                            type="number"
+                            className="wf-input"
+                            value={step.agent_settings?.max_tokens ?? ''}
+                            onChange={e => updateStep(i, {
+                              agent_settings: { ...step.agent_settings, max_tokens: e.target.value ? parseInt(e.target.value) : null }
+                            })}
+                            placeholder="ex: 16000"
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Stall timeout */}
+                    <div className="flex-row gap-6 mb-5">
+                      <div>
+                        <label className="wf-label">{t('wiz.stallTimeout')}</label>
+                        <input
+                          type="number" min={0}
+                          className="wf-input"
+                          style={{ width: 90 }}
+                          value={step.stall_timeout_secs ?? ''}
+                          onChange={e => updateStep(i, {
+                            stall_timeout_secs: e.target.value ? parseInt(e.target.value) : null,
+                          })}
+                          placeholder="600"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="wf-label">{t('wiz.delayAfter')}</label>
+                        <input
+                          type="number" min={0}
+                          className="wf-input"
+                          style={{ width: 90 }}
+                          value={step.delay_after_secs ?? ''}
+                          onChange={e => updateStep(i, {
+                            delay_after_secs: e.target.value ? parseInt(e.target.value) : null,
+                          })}
+                          placeholder="0"
+                        />
+                      </div>
+
+                      {/* Retry */}
+                      <div className="flex-1">
+                        <label className="wf-label">{t('wiz.retry')}</label>
+                        <div className="flex-row gap-3">
+                          <input
+                            type="number" min={0} max={10}
+                            className="wf-input"
+                            style={{ width: 60 }}
+                            value={step.retry?.max_retries ?? ''}
+                            onChange={e => {
+                              const val = e.target.value ? parseInt(e.target.value) : 0;
+                              updateStep(i, {
+                                retry: val > 0 ? { max_retries: val, backoff: step.retry?.backoff ?? 'exponential' } : null,
+                              });
+                            }}
+                            placeholder="0"
+                          />
+                          <select
+                            className="wf-select"
+                            style={{ width: 120 }}
+                            value={step.retry?.backoff ?? 'exponential'}
+                            onChange={e => {
+                              if (step.retry) {
+                                updateStep(i, { retry: { ...step.retry, backoff: e.target.value } });
+                              }
+                            }}
+                            disabled={!step.retry}
+                          >
+                            <option value="exponential">exponential</option>
+                            <option value="fixed">fixed</option>
+                          </select>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* on_result conditions */}
+                    <div>
+                      <label className="wf-label">{t('wiz.conditions')}</label>
+                      {(step.on_result ?? []).map((cond, j) => (
+                        <div key={j} className="flex-row gap-3 mb-2">
+                          <span className="text-xs text-dim" style={{ whiteSpace: 'nowrap' }}>{t('wiz.ifContains')}</span>
+                          <input
+                            className="wf-input flex-1 text-sm"
+                            style={{ borderColor: !cond.contains ? 'rgba(255,77,106,0.4)' : undefined }}
+                            value={cond.contains}
+                            onChange={e => updateCondition(i, j, { contains: e.target.value })}
+                            placeholder="NO_RESULTS (obligatoire)"
+                          />
+                          <span className="text-xs text-dim">&rarr;</span>
+                          <select
+                            className="wf-select text-sm"
+                            style={{ width: 100 }}
+                            value={cond.action.type}
+                            onChange={e => {
+                              const type = e.target.value as 'Stop' | 'Skip' | 'Goto';
+                              const action = type === 'Goto' ? { type: 'Goto' as const, step_name: '' } : { type };
+                              updateCondition(i, j, { action: action as StepConditionRule['action'] });
+                            }}
+                          >
+                            <option value="Stop">Stop</option>
+                            <option value="Skip">Skip</option>
+                            <option value="Goto">Goto</option>
+                          </select>
+                          {cond.action.type === 'Goto' && (
+                            <input
+                              className="wf-input text-sm"
+                              style={{ width: 80 }}
+                              value={cond.action.type === 'Goto' ? cond.action.step_name : ''}
+                              onChange={e => updateCondition(i, j, { action: { type: 'Goto', step_name: e.target.value } })}
+                              placeholder="step name"
+                            />
+                          )}
+                          <button className="wf-icon-btn" onClick={() => removeCondition(i, j)} aria-label="Remove condition">
+                            <X size={10} />
+                          </button>
+                        </div>
+                      ))}
+                      {(step.on_result ?? []).length === 0 && (
+                        <div className="flex-row gap-2 mt-2 flex-wrap">
+                          <button className="wf-add-step-btn wf-add-step-btn-inline" onClick={() => addCondition(i)}>
+                            <Plus size={10} /> Condition custom
+                          </button>
+                          <span className="text-2xs text-ghost" style={{ alignSelf: 'center' }}>ou :</span>
+                          <button
+                            className="wf-add-step-btn wf-add-step-btn-preset"
+                            onClick={() => updateStep(i, { on_result: [{ contains: 'NO_RESULTS', action: { type: 'Stop' } }] })}
+                          >{t('wiz.noResultsStop')}</button>
+                        </div>
+                      )}
+                      <p className="text-2xs text-ghost" style={{ margin: '4px 0 0' }}>
+                        L'agent recevra l'instruction de terminer par <code className="text-accent" style={{ opacity: 0.4 }}>[SIGNAL: mot-cle]</code> en derniere ligne.
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          <button className="wf-add-step-btn" onClick={addStep}>
+            <Plus size={12} /> {t('wiz.addStep')}
+          </button>
+        </div>
+      )}
+
+      {/* Step 3: Config (Safety + Workspace + Concurrency) */}
+      {wizardStep === 3 && (
+        <div>
+          {/* Safety */}
+          <div className="mb-8">
+            <div className="flex-row gap-3 mb-4">
+              <Shield size={14} className="text-muted" />
+              <span className="text-md font-semibold text-secondary">{t('wiz.security')}</span>
+            </div>
+
+            <div className="flex-row gap-6 mb-4">
+              <label className="wf-checkbox-label">
+                <input type="checkbox" checked={safety.sandbox} onChange={e => setSafety({ ...safety, sandbox: e.target.checked })} />
+                <span>{t('wiz.sandbox')}</span>
+              </label>
+              <label className="wf-checkbox-label">
+                <input type="checkbox" checked={safety.require_approval} onChange={e => setSafety({ ...safety, require_approval: e.target.checked })} />
+                <span>{t('wiz.requireApproval')}</span>
+              </label>
+            </div>
+
+            <div className="flex-row gap-4">
+              <div>
+                <label className="wf-label">{t('wiz.maxFiles')}</label>
+                <input
+                  type="number" min={0}
+                  className="wf-input"
+                  style={{ width: 90 }}
+                  value={safety.max_files ?? ''}
+                  onChange={e => setSafety({ ...safety, max_files: e.target.value ? parseInt(e.target.value) : null })}
+                  placeholder="illimite"
+                />
+              </div>
+              <div>
+                <label className="wf-label">{t('wiz.maxLines')}</label>
+                <input
+                  type="number" min={0}
+                  className="wf-input"
+                  style={{ width: 90 }}
+                  value={safety.max_lines ?? ''}
+                  onChange={e => setSafety({ ...safety, max_lines: e.target.value ? parseInt(e.target.value) : null })}
+                  placeholder="illimite"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Concurrency */}
+          <div className="mb-8">
+            <label className="wf-label">{t('wiz.concurrency')}</label>
+            <input
+              type="number" min={1} max={20}
+              className="wf-input"
+              style={{ width: 90 }}
+              value={concurrencyLimit}
+              onChange={e => setConcurrencyLimit(e.target.value)}
+              placeholder="illimite"
+            />
+          </div>
+
+          {/* Workspace hooks */}
+          <div>
+            <div className="flex-row gap-3 mb-4">
+              <GitBranch size={14} className="text-muted" />
+              <span className="text-md font-semibold text-secondary">{t('wiz.hooks')}</span>
+            </div>
+            <p className="text-xs text-faint" style={{ margin: '0 0 8px' }}>
+              {t('wiz.hooksHint')}
+            </p>
+
+            {([
+              ['after_create', t('wiz.hookAfterCreate'), wsHookAfterCreate, setWsHookAfterCreate, 'npm install'],
+              ['before_run', t('wiz.hookBeforeRun'), wsHookBeforeRun, setWsHookBeforeRun, 'git pull origin main'],
+              ['after_run', t('wiz.hookAfterRun'), wsHookAfterRun, setWsHookAfterRun, 'npm run lint'],
+              ['before_remove', t('wiz.hookBeforeRemove'), wsHookBeforeRemove, setWsHookBeforeRemove, 'git stash'],
+            ] as [string, string, string, (v: string) => void, string][]).map(([key, label, value, setter, placeholder]) => (
+              <div key={key} className="mb-3">
+                <label className="wf-label text-xs">{label} ({key})</label>
+                <input
+                  className="wf-input"
+                  value={value}
+                  onChange={e => setter(e.target.value)}
+                  placeholder={placeholder}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Step 4: Summary */}
+      {wizardStep === 4 && (
+        <div>
+          <div className="wf-summary-row"><span className="wf-summary-label">Nom</span> {name}</div>
+          <div className="wf-summary-row"><span className="wf-summary-label">Projet</span> {projects.find(p => p.id === projectId)?.name ?? 'Aucun'}</div>
+          <div className="wf-summary-row">
+            <span className="wf-summary-label">Trigger</span>
+            {triggerType === 'Cron' ? `${cronHumanLabel()} (${buildCronExpr()})` : triggerType === 'Tracker' ? `Tracker: ${trackerOwner}/${trackerRepo}` : 'Manuel'}
+          </div>
+          {concurrencyLimit && (
+            <div className="wf-summary-row"><span className="wf-summary-label">Concurrence</span> max {concurrencyLimit} runs</div>
+          )}
+          <div className="wf-summary-row"><span className="wf-summary-label">Steps</span> {steps.length}</div>
+          {steps.map((s, i) => (
+            <div key={i} className="wf-summary-row" style={{ paddingLeft: 20 }}>
+              {i + 1}. <span className="wf-summary-step-type" data-type={s.step_type?.type === 'ApiCall' ? 'api' : 'agent'}>
+                {s.step_type?.type === 'ApiCall' ? 'API' : 'AGENT'}
+              </span>
+              <span className="font-semibold" style={{ color: AGENT_COLORS[s.agent] ?? '#888' }}>{s.name}</span> ({AGENT_LABELS[s.agent] ?? s.agent})
+              {s.description && <span className="text-faint text-xs" style={{ fontStyle: 'italic' }}> &mdash; {s.description}</span>}
+              {s.on_result && s.on_result.length > 0 && <span className="text-dim text-xs"> [{s.on_result.length} condition{s.on_result.length > 1 ? 's' : ''}]</span>}
+              {s.retry && <span className="text-dim text-xs"> [retry x{s.retry.max_retries}]</span>}
+              {s.stall_timeout_secs && <span className="text-dim text-xs"> [timeout {s.stall_timeout_secs}s]</span>}
+              {s.delay_after_secs && <span className="text-dim text-xs"> [delai {s.delay_after_secs}s]</span>}
+            </div>
+          ))}
+          {(safety.sandbox || safety.require_approval || safety.max_files || safety.max_lines) && (
+            <div className="wf-summary-row">
+              <span className="wf-summary-label">Securite</span>
+              {[
+                safety.sandbox && 'sandbox',
+                safety.require_approval && 'approbation',
+                safety.max_files && `max ${safety.max_files} fichiers`,
+                safety.max_lines && `max ${safety.max_lines} lignes`,
+              ].filter(Boolean).join(', ')}
+            </div>
+          )}
+          {(wsHookAfterCreate || wsHookBeforeRun || wsHookAfterRun || wsHookBeforeRemove) && (
+            <div className="wf-summary-row">
+              <span className="wf-summary-label">Hooks</span>
+              {[
+                wsHookAfterCreate && 'after_create',
+                wsHookBeforeRun && 'before_run',
+                wsHookAfterRun && 'after_run',
+                wsHookBeforeRemove && 'before_remove',
+              ].filter(Boolean).join(', ')}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Validation errors */}
+      {wizardStep === lastStep && (() => {
+        const errors: string[] = [];
+        if (!name) errors.push(t('wiz.errorNoName'));
+        steps.forEach((s, i) => {
+          if (!s.prompt_template) errors.push(t('wiz.errorNoPrompt').replace('{0}', s.name || `step-${i + 1}`));
+          (s.on_result ?? []).forEach((r, j) => {
+            if (!r.contains) errors.push(t('wiz.errorNoCondition').replace('{0}', s.name || `step-${i + 1}`).replace('{1}', String(j + 1)));
+          });
+        });
+        return errors.length > 0 ? (
+          <div className="wf-validation-errors">
+            {errors.map((err, i) => (
+              <div key={i} className="wf-validation-error">&bull; {err}</div>
+            ))}
+          </div>
+        ) : null;
+      })()}
+
+      {/* Navigation */}
+      <div className="flex-between mt-9">
+        <button className="wf-cancel-btn" onClick={wizardStep === 0 ? onCancel : () => setWizardStep(wizardStep - 1)}>
+          {wizardStep === 0 ? t('common.cancel') : t('wiz.previous')}
+        </button>
+        {wizardStep < lastStep ? (
+          <button
+            className="wf-next-btn"
+            onClick={() => setWizardStep(wizardStep + 1)}
+            disabled={wizardStep === 0 && !name}
+          >
+            {t('wiz.next')} <ChevronRight size={12} />
+          </button>
+        ) : (
+          <button
+            className="wf-next-btn"
+            onClick={handleSave}
+            disabled={saving || !name || steps.some(s => !s.prompt_template || (s.on_result ?? []).some(r => !r.contains))}
+          >
+            {saving ? <Loader2 size={12} /> : <Check size={12} />}
+            {isEdit ? t('wiz.save') : t('wiz.create')}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}

@@ -19,6 +19,8 @@ import type {
   OrchestrationRequest,
   AgentDetection,
   AgentType,
+  Contact,
+  NetworkInfo,
   TokenUsageSummary,
   DbInfo,
   DbExport,
@@ -267,6 +269,17 @@ export const config = {
   regenerateAuthToken: () => api<string>('POST', '/config/auth-token/regenerate'),
 };
 
+// ─── Contacts ───────────────────────────────────────────────────────────────
+
+export const contacts = {
+  list: () => api<Contact[]>('GET', '/contacts'),
+  add: (invite_code: string) => api<Contact>('POST', '/contacts', { invite_code }),
+  delete: (id: string) => api<void>('DELETE', `/contacts/${id}`),
+  inviteCode: () => api<string>('GET', '/contacts/invite-code'),
+  ping: (id: string) => api<boolean>('GET', `/contacts/${id}/ping`),
+  networkInfo: () => api<NetworkInfo>('GET', '/contacts/network-info'),
+};
+
 // ─── Projects ───────────────────────────────────────────────────────────────
 
 export const projects = {
@@ -448,6 +461,7 @@ export const discussions = {
   create: (req: CreateDiscussionRequest) => api<Discussion>('POST', '/discussions', req),
   delete: (id: string) => api<void>('DELETE', `/discussions/${id}`),
   update: (id: string, body: { title?: string; archived?: boolean; skill_ids?: string[]; profile_ids?: string[]; directive_ids?: string[]; project_id?: string | null; tier?: ModelTier; agent?: AgentType }) => api<void>('PATCH', `/discussions/${id}`, body),
+  share: (id: string, contactIds: string[]) => api<string>('POST', `/discussions/${id}/share`, { contact_ids: contactIds }),
 
   /** Stream SSE helper shared by sendMessage and run. */
   _streamSSE: async (

@@ -1,0 +1,129 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   Kronn Utility Classes
+   Low-specificity, single-purpose classes for common patterns.
+   Sorted by frequency of inline occurrence in the codebase.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Layout (372+ inline occurrences) ───────────────────────────────────── */
+.flex-row    { display: flex; align-items: center; }
+.flex-col    { display: flex; flex-direction: column; }
+.flex-center { display: flex; align-items: center; justify-content: center; }
+.flex-between { display: flex; align-items: center; justify-content: space-between; }
+.flex-start  { display: flex; align-items: flex-start; }
+.flex-wrap   { display: flex; flex-wrap: wrap; }
+.flex-1      { flex: 1; }
+.flex-shrink-0 { flex-shrink: 0; }
+.min-w-0     { min-width: 0; }
+.w-full      { width: 100%; }
+.relative    { position: relative; }
+
+/* ── Gap (269 inline occurrences) ───────────────────────────────────────── */
+.gap-1  { gap: var(--kr-sp-1); }
+.gap-2  { gap: var(--kr-sp-2); }
+.gap-3  { gap: var(--kr-sp-3); }
+.gap-4  { gap: var(--kr-sp-4); }
+.gap-5  { gap: var(--kr-sp-5); }
+.gap-6  { gap: var(--kr-sp-6); }
+.gap-8  { gap: var(--kr-sp-8); }
+.gap-9  { gap: var(--kr-sp-9); }
+.gap-10 { gap: var(--kr-sp-10); }
+
+/* ── Font size (431 inline occurrences) ─────────────────────────────────── */
+.text-2xs { font-size: var(--kr-fs-2xs); }
+.text-xs  { font-size: var(--kr-fs-xs); }
+.text-sm  { font-size: var(--kr-fs-sm); }
+.text-base { font-size: var(--kr-fs-base); }
+.text-md  { font-size: var(--kr-fs-md); }
+.text-lg  { font-size: var(--kr-fs-lg); }
+.text-xl  { font-size: var(--kr-fs-xl); }
+.text-2xl { font-size: var(--kr-fs-2xl); }
+.text-3xl { font-size: var(--kr-fs-3xl); }
+.text-4xl { font-size: var(--kr-fs-4xl); }
+
+/* ── Font weight (~80 inline occurrences) ───────────────────────────────── */
+.font-normal    { font-weight: 400; }
+.font-medium    { font-weight: 500; }
+.font-semibold  { font-weight: 600; }
+.font-bold      { font-weight: 700; }
+.font-extrabold { font-weight: 800; }
+
+/* ── Text color ─────────────────────────────────────────────────────────── */
+.text-primary   { color: var(--kr-text-primary); }
+.text-secondary { color: var(--kr-text-secondary); }
+.text-tertiary  { color: var(--kr-text-tertiary); }
+.text-muted     { color: var(--kr-text-muted); }
+.text-faint     { color: var(--kr-text-faint); }
+.text-dim       { color: var(--kr-text-dim); }
+.text-ghost     { color: var(--kr-text-ghost); }
+.text-accent    { color: var(--kr-accent); }
+.text-success   { color: var(--kr-success); }
+.text-error     { color: var(--kr-error); }
+.text-warning   { color: var(--kr-warning); }
+.text-info      { color: var(--kr-info); }
+
+/* ── Text utils ─────────────────────────────────────────────────────────── */
+.text-center { text-align: center; }
+.text-right  { text-align: right; }
+.mono        { font-family: var(--kr-font-mono); }
+.tracking-tight { letter-spacing: -0.02em; }
+.tracking-wide  { letter-spacing: 0.04em; }
+.uppercase   { text-transform: uppercase; }
+.truncate    { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.break-word  { overflow-wrap: break-word; word-break: break-word; }
+.whitespace-pre { white-space: pre-wrap; }
+.line-clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+
+/* ── Border radius (267 inline occurrences) ─────────────────────────────── */
+.rounded-xs  { border-radius: var(--kr-r-xs); }
+.rounded-sm  { border-radius: var(--kr-r-sm); }
+.rounded-md  { border-radius: var(--kr-r-md); }
+.rounded-lg  { border-radius: var(--kr-r-lg); }
+.rounded-xl  { border-radius: var(--kr-r-xl); }
+.rounded-2xl { border-radius: var(--kr-r-2xl); }
+.rounded-3xl { border-radius: var(--kr-r-3xl); }
+.rounded-full { border-radius: var(--kr-r-full); }
+
+/* ── Margin bottom (~50 inline occurrences) ─────────────────────────────── */
+.mb-1  { margin-bottom: var(--kr-sp-1); }
+.mb-2  { margin-bottom: var(--kr-sp-2); }
+.mb-3  { margin-bottom: var(--kr-sp-3); }
+.mb-4  { margin-bottom: var(--kr-sp-4); }
+.mb-5  { margin-bottom: var(--kr-sp-5); }
+.mb-6  { margin-bottom: var(--kr-sp-6); }
+.mb-8  { margin-bottom: var(--kr-sp-8); }
+.mb-9  { margin-bottom: var(--kr-sp-9); }
+
+/* ── Margin top ─────────────────────────────────────────────────────────── */
+.mt-2  { margin-top: var(--kr-sp-2); }
+.mt-4  { margin-top: var(--kr-sp-4); }
+.mt-6  { margin-top: var(--kr-sp-6); }
+.mt-8  { margin-top: var(--kr-sp-8); }
+
+/* ── Padding ────────────────────────────────────────────────────────────── */
+.p-2   { padding: var(--kr-sp-2); }
+.p-3   { padding: var(--kr-sp-3); }
+.p-4   { padding: var(--kr-sp-4); }
+.p-6   { padding: var(--kr-sp-6); }
+.p-8   { padding: var(--kr-sp-8); }
+.px-4  { padding-left: var(--kr-sp-4); padding-right: var(--kr-sp-4); }
+.px-6  { padding-left: var(--kr-sp-6); padding-right: var(--kr-sp-6); }
+.px-8  { padding-left: var(--kr-sp-8); padding-right: var(--kr-sp-8); }
+.py-2  { padding-top: var(--kr-sp-2); padding-bottom: var(--kr-sp-2); }
+.py-4  { padding-top: var(--kr-sp-4); padding-bottom: var(--kr-sp-4); }
+.py-8  { padding-top: var(--kr-sp-8); padding-bottom: var(--kr-sp-8); }
+
+/* ── Misc ───────────────────────────────────────────────────────────────── */
+.cursor-pointer  { cursor: pointer; }
+.cursor-default  { cursor: default; }
+.select-none     { user-select: none; }
+.overflow-y-auto { overflow-y: auto; }
+.overflow-hidden { overflow: hidden; }
+.opacity-50      { opacity: 0.5; }
+.opacity-40      { opacity: 0.4; }
+.border-none     { border: none; }
+.bg-none         { background: none; }
+.ml-auto         { margin-left: auto; }
+.mr-auto         { margin-right: auto; }
+.leading-snug    { line-height: 1.4; }
+.leading-relaxed { line-height: 1.6; }
+.transition-colors { transition: background 0.15s, border-color 0.15s, color 0.15s; }

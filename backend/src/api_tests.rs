@@ -28,12 +28,14 @@ mod tests {
         let config = default_config();
         let config_arc = Arc::new(RwLock::new(config));
         let workflow_engine = Arc::new(WorkflowEngine::new(db.clone(), config_arc.clone()));
+        let (ws_tx, _) = tokio::sync::broadcast::channel(256);
         AppState {
             config: config_arc,
             db,
             workflow_engine,
             agent_semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_AGENTS)),
             audit_tracker: Arc::new(std::sync::Mutex::new(AuditTracker::default())),
+            ws_broadcast: Arc::new(ws_tx),
         }
     }
 
@@ -45,12 +47,14 @@ mod tests {
         config.server.auth_enabled = true;
         let config_arc = Arc::new(RwLock::new(config));
         let workflow_engine = Arc::new(WorkflowEngine::new(db.clone(), config_arc.clone()));
+        let (ws_tx, _) = tokio::sync::broadcast::channel(256);
         AppState {
             config: config_arc,
             db,
             workflow_engine,
             agent_semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_AGENTS)),
             audit_tracker: Arc::new(std::sync::Mutex::new(AuditTracker::default())),
+            ws_broadcast: Arc::new(ws_tx),
         }
     }
 
@@ -224,6 +228,22 @@ mod tests {
 
         let (status, _) = send(state, true, req).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "wrong token should return 401");
+    }
+
+    /// WS endpoint skips auth — authentication is handled via invite code in ws.rs.
+    #[tokio::test]
+    async fn auth_ws_always_accessible() {
+        let token = "ws-test-token";
+        let state = test_state_with_token(token);
+
+        // WS without token → should NOT be 401 (auth skipped for /api/ws)
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/ws")
+            .body(Body::empty())
+            .unwrap();
+        let (status, _) = send(state, true, req).await;
+        assert_ne!(status, StatusCode::UNAUTHORIZED, "WS should skip auth middleware — invite code verified in ws.rs");
     }
 
     // ─── Q3: Projects API integration tests ───────────────────────────────────
@@ -496,6 +516,8 @@ mod tests {
                 pin_first_message: false,
                 summary_cache: None,
                 summary_up_to_msg_idx: None,
+            shared_id: None,
+            shared_with: vec![],
                 created_at: now,
                 updated_at: now,
             };
@@ -622,6 +644,8 @@ mod tests {
                 tier: crate::models::ModelTier::Default,
                 pin_first_message: false,
                 summary_cache: None, summary_up_to_msg_idx: None,
+            shared_id: None,
+            shared_with: vec![],
                 created_at: now, updated_at: now,
             };
             crate::db::discussions::insert_discussion(conn, &disc)?;
@@ -846,6 +870,8 @@ mod tests {
                     tier: crate::models::ModelTier::Default,
                     pin_first_message: false,
                     summary_cache: None, summary_up_to_msg_idx: None,
+            shared_id: None,
+            shared_with: vec![],
                     created_at: now, updated_at: now,
                 };
                 crate::db::discussions::insert_discussion(conn, &disc)?;
@@ -1493,6 +1519,8 @@ mod tests {
                 tier: crate::models::ModelTier::Default,
                 pin_first_message: true,
                 summary_cache: None, summary_up_to_msg_idx: None,
+            shared_id: None,
+            shared_with: vec![],
                 created_at: now, updated_at: now,
             };
             crate::db::discussions::insert_discussion(conn, &disc)?;

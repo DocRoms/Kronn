@@ -123,13 +123,31 @@ pub fn delete_workflow(conn: &Connection, id: &str) -> Result<()> {
 
 // ─── Workflow Runs CRUD ─────────────────────────────────────────────────────
 
+pub fn count_runs(conn: &Connection, workflow_id: &str) -> Result<u32> {
+    let count: u32 = conn.query_row(
+        "SELECT COUNT(*) FROM workflow_runs WHERE workflow_id = ?1",
+        params![workflow_id], |row| row.get(0),
+    )?;
+    Ok(count)
+}
+
 pub fn list_runs(conn: &Connection, workflow_id: &str) -> Result<Vec<WorkflowRun>> {
-    let mut stmt = conn.prepare(
+    list_runs_paginated(conn, workflow_id, None, None)
+}
+
+pub fn list_runs_paginated(conn: &Connection, workflow_id: &str, limit: Option<u32>, offset: Option<u32>) -> Result<Vec<WorkflowRun>> {
+    let sql = format!(
         "SELECT id, workflow_id, status, trigger_context, step_results_json,
                 tokens_used, workspace_path, started_at, finished_at
          FROM workflow_runs WHERE workflow_id = ?1
-         ORDER BY started_at DESC"
-    )?;
+         ORDER BY started_at DESC{}",
+        match (limit, offset) {
+            (Some(l), Some(o)) => format!(" LIMIT {} OFFSET {}", l, o),
+            (Some(l), None) => format!(" LIMIT {}", l),
+            _ => String::new(),
+        }
+    );
+    let mut stmt = conn.prepare(&sql)?;
 
     let runs = stmt.query_map(params![workflow_id], |row| {
         Ok(row_to_run(row))

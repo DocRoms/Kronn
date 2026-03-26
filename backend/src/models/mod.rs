@@ -1024,6 +1024,82 @@ pub struct DailyUsage {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Contacts (multi-user)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Contact {
+    pub id: String,
+    pub pseudo: String,
+    pub avatar_email: Option<String>,
+    pub kronn_url: String,
+    pub invite_code: String,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AddContactRequest {
+    pub invite_code: String,
+}
+
+/// Network info for multi-user connectivity.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct NetworkInfo {
+    /// Detected Tailscale IPv4 address (100.x.x.x), if available.
+    pub tailscale_ip: Option<String>,
+    /// The host used in invite codes (domain > tailscale > host).
+    pub advertised_host: String,
+    /// Backend port.
+    pub port: u16,
+    /// Configured domain, if any.
+    pub domain: Option<String>,
+    /// All detected network IPs (tailscale, vpn, lan).
+    pub detected_ips: Vec<crate::core::tailscale::DetectedIp>,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// WebSocket Protocol
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Real-time message exchanged between Kronn instances via WebSocket.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WsMessage {
+    /// Presence announcement: a peer is online or offline.
+    Presence {
+        from_pseudo: String,
+        from_invite_code: String,
+        online: bool,
+    },
+    /// Heartbeat ping (sent by client).
+    Ping { timestamp: i64 },
+    /// Heartbeat pong (reply to ping).
+    Pong { timestamp: i64 },
+    /// Chat message in a shared discussion.
+    ChatMessage {
+        shared_discussion_id: String,
+        message_id: String,
+        from_pseudo: String,
+        from_avatar_email: Option<String>,
+        from_invite_code: String,
+        content: String,
+        timestamp: i64,
+    },
+    /// Invitation to join a shared discussion.
+    DiscussionInvite {
+        shared_discussion_id: String,
+        title: String,
+        from_pseudo: String,
+        from_invite_code: String,
+    },
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Discussions
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1066,6 +1142,12 @@ pub struct Discussion {
     /// Index of the last message included in summary_cache (0-based).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary_up_to_msg_idx: Option<u32>,
+    /// Shared discussion UUID (None = local-only, Some = replicated with peers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_id: Option<String>,
+    /// Contact IDs this discussion is shared with.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shared_with: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -1329,6 +1411,12 @@ pub struct SendMessageRequest {
 
 #[derive(Debug, Deserialize, TS)]
 #[ts(export)]
+pub struct ShareDiscussionRequest {
+    pub contact_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 pub struct OrchestrationRequest {
     pub agents: Vec<AgentType>,
     pub max_rounds: Option<u32>,
@@ -1544,6 +1632,27 @@ impl<T: Serialize> ApiResponse<T> {
         Self { success: false, data: None, error: Some(msg.into()) }
     }
 }
+
+/// Paginated API response — wraps a list with total count + page info.
+#[derive(Debug, Serialize)]
+pub struct PaginatedResponse<T: Serialize> {
+    pub items: Vec<T>,
+    pub total: u32,
+    pub page: u32,
+    pub per_page: u32,
+}
+
+/// Query params for paginated endpoints.
+#[derive(Debug, Deserialize)]
+pub struct PaginationQuery {
+    #[serde(default = "default_page")]
+    pub page: u32,
+    #[serde(default = "default_per_page")]
+    pub per_page: u32,
+}
+
+fn default_page() -> u32 { 1 }
+fn default_per_page() -> u32 { 50 }
 
 #[cfg(test)]
 #[path = "tests.rs"]

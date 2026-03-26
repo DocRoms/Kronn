@@ -89,6 +89,14 @@ vi.mock('../../lib/api', () => ({
     update: vi.fn(),
     delete: vi.fn(),
   },
+  contacts: {
+    networkInfo: vi.fn().mockResolvedValue({ tailscale_ip: null, advertised_host: null, detected_ips: [] }),
+    list: vi.fn().mockResolvedValue([]),
+    add: vi.fn(),
+    delete: vi.fn(),
+    inviteCode: vi.fn().mockResolvedValue('kronn:test@localhost:3456'),
+    ping: vi.fn().mockResolvedValue(false),
+  },
 }));
 
 import { SettingsPage } from '../SettingsPage';
@@ -120,6 +128,8 @@ const wrap = async (ui: React.ReactElement) => {
   await act(async () => {
     result = render(<I18nProvider>{ui}</I18nProvider>);
   });
+  // Wait for async data to settle (useApi hooks resolve in microtasks)
+  await act(async () => { await new Promise(r => setTimeout(r, 0)); });
   return result!;
 };
 
@@ -145,7 +155,7 @@ describe('SettingsPage', () => {
     // Configuration heading
     expect(body).toContain('Configuration');
     // Database section
-    expect(body).toContain('Base de donnees');
+    expect(body).toContain('Base de données');
     // Agents section
     expect(body).toContain('Agents');
     // Skills section
@@ -204,8 +214,8 @@ describe('SettingsPage', () => {
     await wrap(<SettingsPage {...defaultProps} />);
     const body = document.body.textContent!;
     expect(body).toContain('Profondeur de scan');
-    expect(body).toContain('Dossiers a scanner');
-    expect(body).toContain('Patterns a ignorer');
+    expect(body).toContain('Dossiers à scanner');
+    expect(body).toContain('Patterns à ignorer');
   });
 
   it('renders agent token usage when agents are detected', async () => {
@@ -217,7 +227,7 @@ describe('SettingsPage', () => {
 
   it('renders the auto-detect button for API keys', async () => {
     await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
-    expect(screen.getByText('Auto-detecter')).toBeDefined();
+    expect(screen.getByText('Auto-détecter')).toBeDefined();
   });
 
   it('renders Vibe agent with API key management section', async () => {
@@ -230,20 +240,20 @@ describe('SettingsPage', () => {
     const body = document.body.textContent!;
     expect(body).toContain('Vibe');
     expect(body).toContain('auth locale');
-    expect(body).toContain('Ajouter une cle');
+    expect(body).toContain('Ajouter une clé');
   });
 
   it('does NOT render per-project default skills section', async () => {
     await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
     const body = document.body.textContent!;
-    expect(body).not.toContain('Skills par defaut par projet');
+    expect(body).not.toContain('Skills par défaut par projet');
     expect(body).not.toContain('Default skills per project');
   });
 
   it('does NOT render per-project default profiles section', async () => {
     await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
     const body = document.body.textContent!;
-    expect(body).not.toContain('Profil par defaut par projet');
+    expect(body).not.toContain('Profil par défaut par projet');
     expect(body).not.toContain('Default profile per project');
   });
 
@@ -258,14 +268,14 @@ describe('SettingsPage', () => {
     await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
 
     // The "Ajouter une cle" button should be visible for ClaudeCode
-    const addKeyBtn = screen.getByText('Ajouter une cle');
+    const addKeyBtn = screen.getByText('Ajouter une clé');
     expect(addKeyBtn).toBeTruthy();
 
     // Click it to show the add key form
     await act(async () => { fireEvent.click(addKeyBtn); });
 
     // After clicking, the input fields for name and key should appear
-    const nameInput = document.querySelector('input[placeholder="Nom de la cle"]') as HTMLInputElement;
+    const nameInput = document.querySelector('input[placeholder="Nom de la clé"]') as HTMLInputElement;
     expect(nameInput).toBeTruthy();
 
     const keyInput = document.querySelector('input[type="password"]') as HTMLInputElement;

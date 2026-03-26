@@ -6,17 +6,34 @@ use crate::models::{*, ModelTier};
 
 // ─── Discussions ────────────────────────────────────────────────────────────
 
+/// Count total discussions (for pagination).
+pub fn count_discussions(conn: &Connection) -> Result<u32> {
+    let count: u32 = conn.query_row("SELECT COUNT(*) FROM discussions", [], |row| row.get(0))?;
+    Ok(count)
+}
+
 pub fn list_discussions(conn: &Connection) -> Result<Vec<Discussion>> {
-    let mut stmt = conn.prepare(
+    list_discussions_paginated(conn, None, None)
+}
+
+pub fn list_discussions_paginated(conn: &Connection, limit: Option<u32>, offset: Option<u32>) -> Result<Vec<Discussion>> {
+    let sql = format!(
         "SELECT d.id, d.project_id, d.title, d.agent, d.language, d.participants_json,
                 d.created_at, d.updated_at, d.archived, d.skill_ids_json,
                 d.message_count,
                 d.profile_ids_json, d.directive_ids_json,
                 d.workspace_mode, d.workspace_path, d.worktree_branch,
                 d.summary_cache, d.summary_up_to_msg_idx, d.model_tier,
-                d.pin_first_message
-         FROM discussions d ORDER BY d.updated_at DESC"
-    )?;
+                d.pin_first_message,
+                d.shared_id, d.shared_with_json
+         FROM discussions d ORDER BY d.updated_at DESC{}",
+        match (limit, offset) {
+            (Some(l), Some(o)) => format!(" LIMIT {} OFFSET {}", l, o),
+            (Some(l), None) => format!(" LIMIT {}", l),
+            _ => String::new(),
+        }
+    );
+    let mut stmt = conn.prepare(&sql)?;
 
     let discussions: Vec<Discussion> = stmt.query_map([], |row| {
         let agent_str: String = row.get(3)?;
@@ -45,6 +62,8 @@ pub fn list_discussions(conn: &Connection) -> Result<Vec<Discussion>> {
             pin_first_message: row.get::<_, i32>(19).unwrap_or(0) != 0,
             summary_cache: row.get::<_, Option<String>>(16).unwrap_or(None),
             summary_up_to_msg_idx: row.get::<_, Option<u32>>(17).unwrap_or(None),
+            shared_id: row.get::<_, Option<String>>(20).unwrap_or(None),
+            shared_with: serde_json::from_str(&row.get::<_, String>(21).unwrap_or_else(|_| "[]".into())).unwrap_or_default(),
             created_at: parse_dt(row.get::<_, String>(6)?),
             updated_at: parse_dt(row.get::<_, String>(7)?),
         })
@@ -79,7 +98,8 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
         "SELECT id, project_id, title, agent, language, participants_json,
                 created_at, updated_at, archived, skill_ids_json, profile_ids_json, directive_ids_json,
                 workspace_mode, workspace_path, worktree_branch,
-                summary_cache, summary_up_to_msg_idx, model_tier, pin_first_message
+                summary_cache, summary_up_to_msg_idx, model_tier, pin_first_message,
+                shared_id, shared_with_json
          FROM discussions WHERE id = ?1"
     )?;
 
@@ -110,6 +130,8 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
             pin_first_message: row.get::<_, i32>(18).unwrap_or(0) != 0,
             summary_cache: row.get::<_, Option<String>>(15).unwrap_or(None),
             summary_up_to_msg_idx: row.get::<_, Option<u32>>(16).unwrap_or(None),
+            shared_id: row.get::<_, Option<String>>(19).unwrap_or(None),
+            shared_with: serde_json::from_str(&row.get::<_, String>(20).unwrap_or_else(|_| "[]".into())).unwrap_or_default(),
             created_at: parse_dt(row.get::<_, String>(6)?),
             updated_at: parse_dt(row.get::<_, String>(7)?),
         })
@@ -126,8 +148,8 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
 
 pub fn insert_discussion(conn: &Connection, disc: &Discussion) -> Result<()> {
     conn.execute(
-        "INSERT INTO discussions (id, project_id, title, agent, language, participants_json, created_at, updated_at, archived, skill_ids_json, profile_ids_json, directive_ids_json, workspace_mode, workspace_path, worktree_branch, model_tier, pin_first_message)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+        "INSERT INTO discussions (id, project_id, title, agent, language, participants_json, created_at, updated_at, archived, skill_ids_json, profile_ids_json, directive_ids_json, workspace_mode, workspace_path, worktree_branch, model_tier, pin_first_message, shared_id, shared_with_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         params![
             disc.id,
             disc.project_id,
@@ -146,6 +168,8 @@ pub fn insert_discussion(conn: &Connection, disc: &Discussion) -> Result<()> {
             disc.worktree_branch,
             format_model_tier(&disc.tier),
             disc.pin_first_message as i32,
+            disc.shared_id,
+            serde_json::to_string(&disc.shared_with)?,
         ],
     )?;
     Ok(())
@@ -360,6 +384,25 @@ pub fn insert_message(conn: &Connection, discussion_id: &str, msg: &DiscussionMe
 
     update_discussion_timestamp(conn, discussion_id)?;
     Ok(())
+}
+
+/// Find a discussion by its shared_id (cross-Kronn replicated ID).
+pub fn find_discussion_by_shared_id(conn: &Connection, shared_id: &str) -> Result<Option<String>> {
+    let id = conn.query_row(
+        "SELECT id FROM discussions WHERE shared_id = ?1",
+        params![shared_id],
+        |row| row.get::<_, String>(0),
+    ).ok();
+    Ok(id)
+}
+
+/// Update shared_id and shared_with for a discussion.
+pub fn update_discussion_sharing(conn: &Connection, discussion_id: &str, shared_id: &str, shared_with: &[String]) -> Result<bool> {
+    let affected = conn.execute(
+        "UPDATE discussions SET shared_id = ?1, shared_with_json = ?2, updated_at = ?3 WHERE id = ?4",
+        params![shared_id, serde_json::to_string(shared_with)?, Utc::now().to_rfc3339(), discussion_id],
+    )?;
+    Ok(affected > 0)
 }
 
 pub fn delete_last_agent_messages(conn: &Connection, discussion_id: &str) -> Result<u64> {

@@ -9,7 +9,10 @@ pub mod profiles;
 pub mod registry;
 pub mod scanner;
 pub mod skills;
+pub mod native_files;
 pub mod worktree;
+pub mod tailscale;
+pub mod ws_client;
 
 #[cfg(test)]
 #[path = "crypto_test.rs"]

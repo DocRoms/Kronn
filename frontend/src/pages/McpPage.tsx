@@ -7,6 +7,7 @@ import {
   Server, Plus, Trash2, Eye, Check, RefreshCw, Square, CheckSquare,
   X, Key, Pencil, FileText, ExternalLink, Save, Search, ChevronRight,
 } from 'lucide-react';
+import './McpPage.css';
 
 const slugify = (label: string) => label.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
 
@@ -240,18 +241,18 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
 
   return (
     <div>
-      <div style={s.pageHeader}>
+      <div className="mcp-page-header">
         <div>
-          <h1 style={s.h1}>{t('mcp.title')}</h1>
-          <p style={s.meta}>
+          <h1 className="mcp-h1">{t('mcp.title')}</h1>
+          <p className="mcp-meta">
             {totalConfigs} {totalConfigs > 1 ? t('mcp.configPlural') : t('mcp.config')} · {servers.length} {servers.length > 1 ? t('mcp.serverPlural') : t('mcp.server')} · {globalConfigs.length} {globalConfigs.length > 1 ? t('mcp.globalPlural') : t('mcp.global')}
           </p>
         </div>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <button style={{ ...s.scanBtn, background: 'rgba(200,255,0,0.1)', color: '#c8ff00' }} onClick={() => { setShowAddMcp(true); setAddMcpSelected(null); setAddMcpSearch(''); }} title={t('mcp.addTitle')}>
+        <div className="flex-row gap-4">
+          <button className="mcp-btn-action mcp-btn-action-primary" onClick={() => { setShowAddMcp(true); setAddMcpSelected(null); setAddMcpSearch(''); }} title={t('mcp.addTitle')}>
             <Plus size={14} /> {t('mcp.add')}
           </button>
-          <button style={s.scanBtn} onClick={async () => { try { await mcpsApi.refresh(); refetchMcps(); } catch (e) { console.warn('Failed to refresh MCPs:', e); } }} title={t('mcp.detect')}>
+          <button className="mcp-btn-action" onClick={async () => { try { await mcpsApi.refresh(); refetchMcps(); } catch (e) { console.warn('Failed to refresh MCPs:', e); } }} title={t('mcp.detect')}>
             <RefreshCw size={14} /> {t('mcp.detect')}
           </button>
         </div>
@@ -259,12 +260,12 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
 
       {/* ── Add MCP from registry ── */}
       {showAddMcp && (
-        <div ref={addMcpRef} style={{ ...s.card, marginBottom: 20, border: '1px solid rgba(200,255,0,0.2)' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-            <h3 style={{ fontSize: 14, fontWeight: 600, color: '#c8ff00', margin: 0 }}>
+        <div ref={addMcpRef} className="mcp-card mcp-add-panel">
+          <div className="mcp-add-header">
+            <h3 className="mcp-add-title">
               {addMcpSelected ? t('mcp.configure', selectedDef?.name ?? addMcpLabel) : t('mcp.addTitle')}
             </h3>
-            <button style={s.iconBtn} onClick={() => { setShowAddMcp(false); setAddMcpSelected(null); }} aria-label="Close">
+            <button className="mcp-icon-btn" onClick={() => { setShowAddMcp(false); setAddMcpSelected(null); }} aria-label="Close">
               <X size={14} />
             </button>
           </div>
@@ -272,13 +273,13 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
           {!addMcpSelected ? (
             <>
               <input
-                style={{ ...s.input, marginBottom: 10 }}
+                className="input mb-5"
                 placeholder={t('mcp.searchRegistry')}
                 value={addMcpSearch}
                 onChange={(e) => setAddMcpSearch(e.target.value)}
                 autoFocus
               />
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 2, maxHeight: 400, overflowY: 'auto' }}>
+              <div className="mcp-registry-list">
                 {(() => {
                   const categoryMap: Record<string, string> = {
                     git: t('mcp.cat.gitCode'), code: t('mcp.cat.gitCode'),
@@ -303,13 +304,13 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                   }
                   return categoryOrder.filter(cat => grouped.has(cat)).map(cat => (
                     <div key={cat}>
-                      <div style={s.categoryHeader}>{cat}</div>
+                      <div className="mcp-category-header">{cat}</div>
                       {grouped.get(cat)!.map(m => {
                         const alreadyAdded = configuredServerIds.has(m.id);
                         return (
                           <div
                             key={m.id}
-                            style={s.registryItem}
+                            className="mcp-registry-item"
                             onClick={() => {
                               setAddMcpSelected(m.id);
                               setAddMcpLabel(alreadyAdded ? `${m.name} (${configs.filter(c => c.server_name === m.name).length + 1})` : m.name);
@@ -318,16 +319,16 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                               setAddMcpEnv(envInit);
                             }}
                           >
-                            <Server size={12} style={{ color: alreadyAdded ? '#00d4ff' : '#c8ff00', flexShrink: 0 }} />
-                            <div style={{ flex: 1 }}>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                                <span style={{ fontWeight: 600, fontSize: 12 }}>{m.name}</span>
-                                {alreadyAdded && <span style={s.alreadyBadge}>{t('mcp.alreadyAdded')}</span>}
-                                {m.env_keys.length > 0 && <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.4)' }}>{m.env_keys.length} {m.env_keys.length > 1 ? t('mcp.keysPlural') : t('mcp.keys')}</span>}
+                            <Server size={12} className={alreadyAdded ? 'text-info' : 'text-accent'} style={{ flexShrink: 0 }} />
+                            <div className="flex-1">
+                              <div className="flex-row gap-3">
+                                <span className="mcp-registry-item-name">{m.name}</span>
+                                {alreadyAdded && <span className="mcp-already-badge">{t('mcp.alreadyAdded')}</span>}
+                                {m.env_keys.length > 0 && <span className="mcp-registry-item-keys">{m.env_keys.length} {m.env_keys.length > 1 ? t('mcp.keysPlural') : t('mcp.keys')}</span>}
                               </div>
-                              <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', marginTop: 1 }}>{m.description}</div>
+                              <div className="mcp-registry-item-desc">{m.description}</div>
                             </div>
-                            <Plus size={14} style={{ color: 'rgba(255,255,255,0.2)' }} />
+                            <Plus size={14} className="text-ghost" />
                           </div>
                         );
                       })}
@@ -339,10 +340,10 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
           ) : (
             <>
               {/* Label */}
-              <div style={{ marginBottom: 10 }}>
-                <label style={s.fieldLabel}>{t('mcp.label')}</label>
+              <div className="mb-5">
+                <label className="mcp-field-label">{t('mcp.label')}</label>
                 <input
-                  style={s.input}
+                  className="input"
                   value={addMcpLabel}
                   onChange={(e) => setAddMcpLabel(e.target.value)}
                   placeholder={selectedDef?.name ?? 'Label'}
@@ -352,29 +353,29 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
               {(() => {
                 const envKeys = selectedDef?.env_keys ?? mcpOverview.configs.find(c => c.server_id === addMcpSelected)?.env_keys ?? [];
                 return envKeys.length > 0 ? (
-                <div style={{ marginBottom: 10 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                    <label style={{ ...s.fieldLabel, margin: 0 }}>{t('mcp.envVars')}</label>
+                <div className="mb-5">
+                  <div className="flex-row gap-4 mb-3">
+                    <label className="mcp-field-label mcp-field-label-inline">{t('mcp.envVars')}</label>
                     {selectedDef?.token_url && (
                       <a
                         href={selectedDef.token_url}
                         target="_blank"
                         rel="noopener noreferrer"
-                        style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, color: '#00d4ff', textDecoration: 'none' }}
+                        className="mcp-token-link"
                       >
                         <ExternalLink size={10} />
                         {selectedDef.token_help ?? t('mcp.getToken')}
                       </a>
                     )}
                     {!selectedDef?.token_url && selectedDef?.token_help && (
-                      <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)' }}>{selectedDef.token_help}</span>
+                      <span className="mcp-token-hint">{selectedDef.token_help}</span>
                     )}
                   </div>
                   {envKeys.map(k => (
-                    <div key={k} style={{ display: 'flex', gap: 8, marginBottom: 4, alignItems: 'center' }}>
-                      <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.5)', fontFamily: 'monospace', minWidth: 180 }}>{k}</span>
+                    <div key={k} className="flex-row gap-4 mb-2">
+                      <span className="mcp-env-key-label">{k}</span>
                       <input
-                        style={{ ...s.input, flex: 1, fontFamily: 'monospace', fontSize: 11 }}
+                        className="input mcp-input-mono"
                         value={addMcpEnv[k] ?? ''}
                         onChange={(e) => setAddMcpEnv(prev => ({ ...prev, [k]: e.target.value }))}
                         placeholder={t('mcp.value')}
@@ -385,21 +386,21 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                 </div>
               ) : null; })()}
               {/* Global toggle */}
-              <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center' }}>
-                <button style={s.projectToggle(addMcpGlobal)} onClick={() => setAddMcpGlobal(!addMcpGlobal)}>
-                  {addMcpGlobal ? <CheckSquare size={11} style={{ color: '#c8ff00' }} /> : <Square size={11} />}
+              <div className="flex-row gap-4 mb-6">
+                <button className={`mcp-project-toggle ${addMcpGlobal ? 'mcp-project-toggle-on' : 'mcp-project-toggle-off'}`} onClick={() => setAddMcpGlobal(!addMcpGlobal)}>
+                  {addMcpGlobal ? <CheckSquare size={11} className="text-accent" /> : <Square size={11} />}
                   {t('mcp.globalAll')}
                 </button>
               </div>
               {/* Actions */}
-              <div style={{ display: 'flex', gap: 8 }}>
+              <div className="flex-row gap-4">
                 <button
-                  style={{ ...s.scanBtn, background: 'rgba(200,255,0,0.15)', color: '#c8ff00' }}
+                  className="mcp-btn-action mcp-btn-action-primary"
                   onClick={handleAddMcpFromRegistry}
                 >
                   <Check size={14} /> {t('mcp.addBtn')}
                 </button>
-                <button style={s.scanBtn} onClick={() => setAddMcpSelected(null)}>
+                <button className="mcp-btn-action" onClick={() => setAddMcpSelected(null)}>
                   {t('mcp.back')}
                 </button>
               </div>
@@ -410,17 +411,17 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
 
       {/* ── Search bar ── */}
       {totalConfigs > 3 && (
-        <div style={{ position: 'relative', marginBottom: 16 }}>
-          <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'rgba(255,255,255,0.25)', pointerEvents: 'none' }} />
+        <div className="mcp-search-wrap">
+          <Search size={14} className="mcp-search-icon" />
           <input
-            style={{ ...s.input, paddingLeft: 32, width: '100%' }}
+            className="input mcp-search-input"
             placeholder={t('mcp.search')}
             value={mcpSearch}
             onChange={(e) => setMcpSearch(e.target.value)}
           />
           {mcpSearch && (
             <button
-              style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: 'rgba(255,255,255,0.3)', padding: 2 }}
+              className="mcp-search-clear"
               onClick={() => setMcpSearch('')}
               aria-label="Clear search"
             >
@@ -437,18 +438,19 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
             const isExpanded = expandedServers.has(serverName) || !!mcpSearch;
             const linkedCount = group.configs.reduce((sum, c) => sum + (c.is_global ? projects.length : c.project_ids.length), 0);
             return (
-            <div key={serverName} style={{ marginBottom: 12 }}>
+            <div key={serverName} className="mcp-server-group">
               <button
-                style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: isExpanded ? 8 : 0, cursor: 'pointer', padding: '4px 0', background: 'none', border: 'none', width: '100%', font: 'inherit', color: 'inherit', textAlign: 'left' as const }}
+                className="mcp-server-header"
                 onClick={() => toggleServer(serverName)}
                 aria-expanded={isExpanded}
+                style={isExpanded ? { marginBottom: 8 } : undefined}
               >
-                <ChevronRight size={13} style={{ color: '#c8ff00', transform: isExpanded ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s', flexShrink: 0 }} />
-                <Server size={13} style={{ color: '#c8ff00' }} />
-                <h2 style={s.sectionLabel}>
+                <ChevronRight size={13} className={`mcp-server-chevron${isExpanded ? ' mcp-server-chevron-open' : ''}`} />
+                <Server size={13} className="text-accent" />
+                <h2 className="mcp-server-label">
                   {serverName}
                 </h2>
-                <span style={{ fontWeight: 400, fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>
+                <span className="mcp-server-meta">
                   {group.configs.length} {group.configs.length > 1 ? t('mcp.configPlural') : t('mcp.config')}
                   {!isExpanded && linkedCount > 0 && ` · ${linkedCount} ${linkedCount > 1 ? t('mcp.projectPlural') : t('mcp.project')}`}
                 </span>
@@ -457,7 +459,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                   return serverIncomp.length > 0 ? (
                     <span
                       title={serverIncomp.map(i => `⚠ ${i.agent}: ${i.reason}`).join('\n')}
-                      style={{ fontSize: 10, color: '#ff6b6b', background: 'rgba(255,107,107,0.1)', padding: '1px 6px', borderRadius: 4, fontWeight: 500 }}
+                      className="mcp-server-incompat"
                     >
                       ⚠ {serverIncomp.map(i => i.agent).join(', ')}
                     </span>
@@ -465,7 +467,8 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                 })()}
                 {group.configs.some(c => c.env_keys.length > 0) && (
                   <button
-                    style={{ ...s.iconBtn, marginLeft: 4, color: 'rgba(255,255,255,0.3)' }}
+                    className="mcp-icon-btn"
+                    style={{ marginLeft: 4, color: 'rgba(255,255,255,0.3)' }}
                     onClick={(e) => { e.stopPropagation(); handleAddDuplicateConfig(group.serverId, serverName); }}
                     title={t('mcp.addAnother', serverName)}
                     aria-label={t('mcp.addAnother', serverName)}
@@ -478,15 +481,15 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
               {isExpanded && group.configs.map(cfg => {
                 const isEditingLabel = editingLabelId === cfg.id;
                 return (
-                  <div key={cfg.id} style={s.mcpCard}>
-                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, flex: 1 }}>
-                      <div style={{ width: 8, height: 8, borderRadius: '50%', background: cfg.is_global ? '#c8ff00' : '#00d4ff', marginTop: 5, flexShrink: 0 }} />
-                      <div style={{ flex: 1 }}>
+                  <div key={cfg.id} className="mcp-config-card">
+                    <div className="flex-start gap-5 flex-1">
+                      <div className={`mcp-config-dot ${cfg.is_global ? 'mcp-config-dot-global' : 'mcp-config-dot-project'}`} />
+                      <div className="flex-1">
                         {/* Header: label (editable) + badges */}
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                        <div className="mcp-config-header">
                           {isEditingLabel ? (
                             <input
-                              style={{ ...s.input, width: 180, fontSize: 13, fontWeight: 600, padding: '2px 6px' }}
+                              className="input mcp-config-label-input"
                               value={editingLabelText}
                               onChange={(e) => setEditingLabelText(e.target.value)}
                               onBlur={() => handleSaveLabel(cfg.id)}
@@ -495,16 +498,16 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                             />
                           ) : (
                             <span
-                              style={{ fontWeight: 600, fontSize: 13, cursor: 'pointer' }}
+                              className="mcp-config-label"
                               onClick={() => { setEditingLabelId(cfg.id); setEditingLabelText(cfg.label); }}
                               title={t('mcp.clickToRename')}
                             >
                               {cfg.label}
-                              <Pencil size={9} style={{ marginLeft: 4, color: 'rgba(255,255,255,0.2)' }} />
+                              <Pencil size={9} className="text-ghost" style={{ marginLeft: 4 }} />
                             </span>
                           )}
                           {cfg.project_names.length > 0 && (
-                            <span style={s.sourceBadge} title={cfg.project_names.join(', ')}>
+                            <span className="mcp-source-badge" title={cfg.project_names.join(', ')}>
                               {cfg.project_names.length <= 3
                                 ? cfg.project_names.join(', ')
                                 : `${cfg.project_names.slice(0, 3).join(', ')} +${cfg.project_names.length - 3}`}
@@ -515,68 +518,70 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                         {/* Env keys */}
                         {cfg.env_keys.length > 0 && (
                           <>
-                            <div style={{ display: 'flex', gap: 4, marginTop: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-                              <Key size={10} style={{ color: 'rgba(255,255,255,0.3)' }} />
+                            <div className="mcp-env-keys-row">
+                              <Key size={10} className="text-dim" />
                               {editingEnvId !== cfg.id && cfg.env_keys.map(k => (
-                                <span key={k} style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', fontFamily: 'monospace' }}>{k}</span>
+                                <span key={k} className="mcp-env-key-name">{k}</span>
                               ))}
                               <button
-                                style={{ ...s.iconBtn, marginLeft: 4 }}
+                                className="mcp-icon-btn"
+                                style={{ marginLeft: 4 }}
                                 onClick={() => handleStartEditSecrets(cfg.id)}
                                 title={editingEnvId === cfg.id ? t('mcp.close') : t('mcp.editKeys')}
                                 aria-label={editingEnvId === cfg.id ? t('mcp.close') : t('mcp.editKeys')}
                               >
-                                <Pencil size={11} style={{ color: editingEnvId === cfg.id ? '#c8ff00' : 'rgba(255,255,255,0.3)' }} />
+                                <Pencil size={11} style={{ color: editingEnvId === cfg.id ? 'var(--kr-accent)' : 'rgba(255,255,255,0.3)' }} />
                               </button>
                             </div>
                             {/* Inline edit secrets form */}
                             {editingEnvId === cfg.id && (() => {
                               const def = mcpRegistry.find(m => m.id === cfg.server_id);
                               return (
-                                <div style={{ marginTop: 8, padding: 12, background: 'rgba(255,255,255,0.02)', borderRadius: 6, border: '1px solid rgba(200,255,0,0.1)' }}>
+                                <div className="mcp-secrets-editor">
                                   {def?.token_url && (
                                     <a
                                       href={def.token_url}
                                       target="_blank"
                                       rel="noopener noreferrer"
-                                      style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, color: '#00d4ff', marginBottom: 8, textDecoration: 'none' }}
+                                      className="mcp-secrets-token-link"
                                     >
                                       <ExternalLink size={10} />
                                       {def.token_help ?? t('mcp.getToken')}
                                     </a>
                                   )}
                                   {!def?.token_url && def?.token_help && (
-                                    <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', margin: '0 0 8px' }}>{def.token_help}</p>
+                                    <p className="mcp-secrets-hint">{def.token_help}</p>
                                   )}
                                   {cfg.env_keys.map(k => (
-                                    <div key={k} style={{ display: 'flex', gap: 8, marginBottom: 4, alignItems: 'center' }}>
-                                      <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.5)', fontFamily: 'monospace', minWidth: 180 }}>{k}</span>
+                                    <div key={k} className="flex-row gap-4 mb-2">
+                                      <span className="mcp-env-key-label">{k}</span>
                                       <input
-                                        style={{ ...s.input, flex: 1, fontFamily: 'monospace', fontSize: 11 }}
+                                        className="input mcp-input-mono"
                                         value={editingEnv[k] ?? ''}
                                         onChange={e => setEditingEnv(prev => ({ ...prev, [k]: e.target.value }))}
                                         type={visibleFields.has(k) ? 'text' : 'password'}
                                         placeholder={t('mcp.value')}
                                       />
                                       <button
-                                        style={{ ...s.iconBtn, padding: '4px 6px', flexShrink: 0 }}
+                                        className="mcp-icon-btn flex-shrink-0"
+                                        style={{ padding: '4px 6px' }}
                                         onClick={() => toggleFieldVisibility(k)}
                                         title={visibleFields.has(k) ? t('mcp.hide') : t('mcp.show')}
                                         aria-label={visibleFields.has(k) ? t('mcp.hide') : t('mcp.show')}
                                       >
-                                        <Eye size={11} style={{ color: visibleFields.has(k) ? '#c8ff00' : 'rgba(255,255,255,0.25)' }} />
+                                        <Eye size={11} style={{ color: visibleFields.has(k) ? 'var(--kr-accent)' : 'rgba(255,255,255,0.25)' }} />
                                       </button>
                                     </div>
                                   ))}
-                                  <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+                                  <div className="flex-row gap-3 mt-4">
                                     <button
-                                      style={{ ...s.scanBtn, background: 'rgba(200,255,0,0.15)', color: '#c8ff00' }}
+                                      className="mcp-btn-action mcp-btn-action-primary"
                                       onClick={handleSaveSecrets}
                                       disabled={editingEnvLoading}
                                     >
                                       <Save size={12} /> {editingEnvLoading ? t('mcp.saving') : t('mcp.save')}
                                     </button>
-                                    <button style={s.scanBtn} onClick={() => setEditingEnvId(null)}>{t('mcp.cancel')}</button>
+                                    <button className="mcp-btn-action" onClick={() => setEditingEnvId(null)}>{t('mcp.cancel')}</button>
                                   </div>
                                 </div>
                               );
@@ -585,22 +590,22 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                         )}
 
                         {/* Global label + project toggles */}
-                        <div style={{ display: 'flex', gap: 6, marginTop: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                        <div className="mcp-toggle-row">
                           <span
-                            style={s.globalLabel(cfg.is_global)}
+                            className={`mcp-toggle-label mcp-toggle-global${cfg.is_global ? ' mcp-toggle-global-active' : ''}`}
                             onClick={() => handleToggleConfigGlobal(cfg)}
                             title={cfg.is_global ? t('mcp.disableGlobal') : t('mcp.enableGlobal')}
                           >
                             Global
                           </span>
                           <span
-                            style={s.generalLabel(cfg.include_general)}
+                            className={`mcp-toggle-label mcp-toggle-general${cfg.include_general ? ' mcp-toggle-general-active' : ''}`}
                             onClick={async () => { try { await mcpsApi.updateConfig(cfg.id, { include_general: !cfg.include_general }); refetchMcps(); } catch (e) { console.warn('Failed to toggle general:', e); } }}
                             title={cfg.include_general ? t('mcp.disableGeneral') : t('mcp.enableGeneral')}
                           >
                             {t('mcp.general')}
                           </span>
-                          <span style={{ color: 'rgba(255,255,255,0.12)', fontSize: 11 }}>|</span>
+                          <span className="mcp-separator">|</span>
                           {(() => {
                             const sorted = projects.filter(p => !isHiddenPath(p.path)).sort((a, b) => {
                               const aLinked = (cfg.is_global || cfg.project_ids.includes(a.id)) ? 0 : 1;
@@ -614,12 +619,12 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                               {visible.map(proj => {
                                 const isLinked = cfg.is_global || cfg.project_ids.includes(proj.id);
                                 return (
-                                  <span key={proj.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 0 }}>
+                                  <span key={proj.id} className="flex-row">
                                     <button
-                                      style={s.projectToggle(isLinked)}
+                                      className={`mcp-project-toggle ${isLinked ? 'mcp-project-toggle-on' : 'mcp-project-toggle-off'}`}
                                       onClick={() => handleToggleConfigProject(cfg.id, proj.id, isLinked)}
                                     >
-                                      {isLinked ? <CheckSquare size={11} style={{ color: '#c8ff00' }} /> : <Square size={11} />}
+                                      {isLinked ? <CheckSquare size={11} className="text-accent" /> : <Square size={11} />}
                                       {proj.name}
                                     </button>
                                     {isLinked && (() => {
@@ -627,12 +632,12 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                                       const isCustomized = mcpOverview.customized_contexts.includes(`${slug}:${proj.id}`);
                                       return (
                                         <button
-                                          style={{ ...s.iconBtn, padding: '3px 5px', marginLeft: -1, borderLeft: 'none', borderTopLeftRadius: 0, borderBottomLeftRadius: 0 }}
+                                          className="mcp-icon-btn mcp-context-btn"
                                           onClick={() => handleOpenContext(proj.id, proj.name, cfg.label)}
                                           title={`${t('mcp.editContext', cfg.label, proj.name)}${isCustomized ? ' ' + t('mcp.customized') : ' ' + t('mcp.default')}`}
                                           aria-label={`${t('mcp.editContext', cfg.label, proj.name)}`}
                                         >
-                                          <FileText size={10} style={{ color: isCustomized ? '#c8ff00' : 'rgba(255,255,255,0.2)' }} />
+                                          <FileText size={10} style={{ color: isCustomized ? 'var(--kr-accent)' : 'rgba(255,255,255,0.2)' }} />
                                         </button>
                                       );
                                     })()}
@@ -641,7 +646,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                               })}
                               {hiddenCount > 0 && (
                                 <button
-                                  style={{ background: 'none', border: '1px solid rgba(200,255,0,0.15)', borderRadius: 4, color: '#c8ff00', fontSize: 10, padding: '2px 8px', cursor: 'pointer', fontFamily: 'inherit' }}
+                                  className="mcp-more-projects-btn"
                                   onClick={() => setExpandedProjectLists(prev => { const n = new Set(prev); n.add(cfg.id); return n; })}
                                 >
                                   {t('mcp.moreProjects', hiddenCount)}
@@ -649,7 +654,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                               )}
                               {showAll && sorted.length > PROJECT_TOGGLE_LIMIT && (
                                 <button
-                                  style={{ background: 'none', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 4, color: 'rgba(255,255,255,0.4)', fontSize: 10, padding: '2px 8px', cursor: 'pointer', fontFamily: 'inherit' }}
+                                  className="mcp-less-projects-btn"
                                   onClick={() => setExpandedProjectLists(prev => { const n = new Set(prev); n.delete(cfg.id); return n; })}
                                 >
                                   {t('mcp.lessProjects')}
@@ -662,7 +667,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
 
                       {/* Delete button */}
                       <button
-                        style={{ ...s.iconBtn, color: '#ff4d6a' }}
+                        className="mcp-icon-btn text-error"
                         onClick={() => handleDeleteMcpConfig(cfg.id)}
                         title={t('mcp.deleteConfig')}
                         aria-label={t('mcp.deleteConfig')}
@@ -678,9 +683,9 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
           })}
         </>
       ) : !showAddMcp ? (
-        <div style={{ ...s.card, textAlign: 'center', padding: 40 }}>
-          <Server size={32} style={{ color: 'rgba(255,255,255,0.15)', marginBottom: 12 }} />
-          <p style={{ color: 'rgba(255,255,255,0.4)', fontSize: 13 }}>
+        <div className="mcp-card mcp-empty">
+          <Server size={32} className="text-ghost mb-6" />
+          <p className="mcp-empty-text">
             {t('mcp.empty')}
           </p>
         </div>
@@ -688,50 +693,39 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
 
       {/* ── MCP Context Editor Modal ── */}
       {contextEditor && (
-        <div style={{
-          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
-          background: 'rgba(0,0,0,0.7)', zIndex: 1000,
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-        }} onClick={() => setContextEditor(null)}>
+        <div className="mcp-modal-overlay" onClick={() => setContextEditor(null)}>
           <div
-            style={{
-              background: '#12151c', border: '1px solid rgba(200,255,0,0.15)',
-              borderRadius: 12, padding: 24, width: '90%', maxWidth: 700, maxHeight: '80vh',
-              display: 'flex', flexDirection: 'column', gap: 12,
-            }}
+            className="mcp-modal"
             onClick={e => e.stopPropagation()}
             role="dialog"
             aria-modal="true"
             aria-labelledby="context-editor-title"
             onKeyDown={e => { if (e.key === 'Escape') setContextEditor(null); }}
           >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div className="flex-between">
               <div>
-                <h3 id="context-editor-title" style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>
-                  <FileText size={14} style={{ marginRight: 6, color: '#c8ff00' }} />
+                <h3 id="context-editor-title" className="mcp-modal-title">
+                  <FileText size={14} className="text-accent" style={{ marginRight: 6 }} />
                   {t('mcp.contextTitle', contextEditor.slug.replace(/-/g, ' '))}
                 </h3>
-                <p style={{ margin: '4px 0 0', fontSize: 11, color: 'rgba(255,255,255,0.35)' }}>
+                <p className="mcp-modal-subtitle">
                   {t('mcp.contextInfo', contextEditor.projectName, contextEditor.slug)}
                 </p>
               </div>
-              <button style={s.iconBtn} onClick={() => setContextEditor(null)} aria-label="Close"><X size={14} /></button>
+              <button className="mcp-icon-btn" onClick={() => setContextEditor(null)} aria-label="Close"><X size={14} /></button>
             </div>
 
             <textarea
-              style={{
-                ...s.input, minHeight: 350, resize: 'vertical', fontFamily: 'monospace',
-                fontSize: 12, lineHeight: 1.6, whiteSpace: 'pre-wrap',
-              }}
+              className="input mcp-modal-textarea"
               value={contextEditor.content}
               onChange={e => setContextEditor(prev => prev ? { ...prev, content: e.target.value } : null)}
               placeholder={t('mcp.contextPlaceholder')}
             />
 
-            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-              <button style={s.scanBtn} onClick={() => setContextEditor(null)}>{t('mcp.cancel')}</button>
+            <div className="flex-row gap-4" style={{ justifyContent: 'flex-end' }}>
+              <button className="mcp-btn-action" onClick={() => setContextEditor(null)}>{t('mcp.cancel')}</button>
               <button
-                style={{ ...s.scanBtn, background: 'rgba(200,255,0,0.15)', color: '#c8ff00' }}
+                className="mcp-btn-action mcp-btn-action-primary"
                 onClick={handleSaveContext}
                 disabled={contextSaving}
               >
@@ -744,25 +738,3 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
     </div>
   );
 }
-
-// ── Styles ──
-
-const s = {
-  pageHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 } as const,
-  h1: { fontSize: 20, fontWeight: 700, letterSpacing: '-0.02em' } as const,
-  meta: { color: 'rgba(255,255,255,0.4)', fontSize: 12, marginTop: 4 } as const,
-  scanBtn: { padding: '7px 14px', borderRadius: 6, border: '1px solid rgba(200,255,0,0.2)', background: 'rgba(200,255,0,0.05)', color: '#c8ff00', cursor: 'pointer', fontSize: 12, fontFamily: 'inherit', fontWeight: 500, display: 'flex', alignItems: 'center', gap: 6 } as const,
-  card: { background: '#12151c', border: '1px solid rgba(255,255,255,0.07)', borderRadius: 10, padding: '16px 20px' } as const,
-  input: { width: '100%', padding: '8px 12px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 6, color: '#e8eaed', fontSize: 12, fontFamily: 'inherit' } as const,
-  iconBtn: { background: 'none', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 4, padding: '4px 8px', color: 'rgba(255,255,255,0.5)', cursor: 'pointer', display: 'flex', alignItems: 'center', fontSize: 11 } as const,
-  sectionLabel: { fontSize: 11, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', margin: 0 },
-  mcpCard: { display: 'flex', alignItems: 'flex-start', gap: 12, padding: '14px 16px', borderRadius: 8, background: 'rgba(255,255,255,0.03)', marginBottom: 8, border: '1px solid rgba(255,255,255,0.06)' } as const,
-  sourceBadge: { fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 4, background: 'rgba(200,255,0,0.08)', color: 'rgba(200,255,0,0.6)', border: '1px solid rgba(200,255,0,0.12)' } as const,
-  globalLabel: (active: boolean) => ({ fontSize: 11, fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase' as const, cursor: 'pointer', userSelect: 'none' as const, padding: '4px 10px', borderRadius: 5, border: `1px solid ${active ? 'rgba(200,255,0,0.3)' : 'rgba(255,255,255,0.08)'}`, background: active ? 'rgba(200,255,0,0.12)' : 'transparent', color: active ? '#c8ff00' : 'rgba(255,255,255,0.25)', transition: 'all 0.15s' }),
-  generalLabel: (active: boolean) => ({ fontSize: 11, fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase' as const, cursor: 'pointer', userSelect: 'none' as const, padding: '4px 10px', borderRadius: 5, border: `1px solid ${active ? 'rgba(96,165,250,0.3)' : 'rgba(255,255,255,0.08)'}`, background: active ? 'rgba(96,165,250,0.12)' : 'transparent', color: active ? '#60a5fa' : 'rgba(255,255,255,0.25)', transition: 'all 0.15s' }),
-  projectToggle: (active: boolean) => ({ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 10px', borderRadius: 5, fontSize: 11, fontFamily: 'inherit', cursor: 'pointer', border: `1px solid ${active ? 'rgba(200,255,0,0.2)' : 'rgba(255,255,255,0.08)'}`, background: active ? 'rgba(200,255,0,0.06)' : 'rgba(255,255,255,0.02)', color: active ? 'rgba(200,255,0,0.8)' : 'rgba(255,255,255,0.35)' } as const),
-  fieldLabel: { fontSize: 11, color: 'rgba(255,255,255,0.4)', display: 'block', marginBottom: 4 } as const,
-  categoryHeader: { fontSize: 10, fontWeight: 700, color: 'rgba(255,255,255,0.35)', textTransform: 'uppercase' as const, letterSpacing: 1, padding: '8px 4px 4px', borderBottom: '1px solid rgba(255,255,255,0.05)', marginBottom: 2 },
-  registryItem: { display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', borderRadius: 6, cursor: 'pointer', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)' } as const,
-  alreadyBadge: { fontSize: 9, color: '#00d4ff', background: 'rgba(0,212,255,0.1)', padding: '1px 5px', borderRadius: 3 } as const,
-};

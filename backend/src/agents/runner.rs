@@ -7,6 +7,43 @@ use tokio::sync::mpsc;
 
 use crate::models::{AgentType, ModelTier, ModelTiersConfig, TokensConfig};
 
+/// Detect if we're running inside WSL (vs Windows native).
+/// In WSL, /proc/version contains "microsoft" or "WSL".
+#[allow(dead_code)]
+fn is_wsl() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/proc/version")
+            .map(|v| v.contains("microsoft") || v.contains("WSL"))
+            .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
+/// Convert a Windows path (C:\Users\...) to WSL path (/mnt/c/Users/...).
+#[cfg(target_os = "windows")]
+fn windows_to_wsl_path(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        // Extended-length path
+        convert_drive_path(rest)
+    } else if s.len() >= 3 && s.as_bytes()[1] == b':' {
+        convert_drive_path(&s)
+    } else {
+        path.to_path_buf()
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn convert_drive_path(s: &str) -> PathBuf {
+    let drive = s.chars().next().unwrap().to_lowercase().next().unwrap();
+    let rest = s[2..].replace('\\', "/");
+    PathBuf::from(format!("/mnt/{}{}", drive, rest))
+}
+
 /// Output mode — how to interpret stdout from the agent
 #[derive(Clone, Copy, PartialEq)]
 pub enum OutputMode {
@@ -237,18 +274,45 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // Use compact format for agents with small context windows (eco-design)
     let compact = matches!(config.agent_type, AgentType::Codex | AgentType::Kiro | AgentType::Vibe);
 
-    // Build skills prompt
-    let skills_prompt = if compact {
+    // Ensure this discussion's skills/profiles exist as native files on disk.
+    // Skills are installed at the PROJECT level (shared by all discussions).
+    // This is additive: it only creates missing files, never removes others.
+    // Full cleanup only happens at startup / project config change.
+    let native_sync_ok = if !config.project_path.is_empty() && (!config.skill_ids.is_empty() || !config.profile_ids.is_empty()) {
+        let profile_ids_vec: Vec<String> = config.profile_ids.to_vec();
+        crate::core::native_files::sync_project_native_files(
+            config.project_path, config.skill_ids, &profile_ids_vec,
+        ).is_ok()
+    } else {
+        false
+    };
+
+    // If native files exist AND the agent discovers them (not all do — Vibe/Kiro don't),
+    // send a lightweight hint (~15 tokens) instead of full content (~500-800 tokens).
+    let native_skills = native_sync_ok
+        && crate::core::native_files::supports_native_skills(config.agent_type)
+        && crate::core::native_files::has_native_skills(config.project_path, config.agent_type);
+    let native_profiles = native_sync_ok
+        && config.profile_ids.len() == 1 // Multi-profile always needs prompt injection
+        && crate::core::native_files::supports_native_profiles(config.agent_type)
+        && crate::core::native_files::has_native_profiles(config.project_path, config.agent_type);
+
+    // Build skills prompt — native hint (~15 tokens) or full injection (~500-800 tokens)
+    let skills_prompt = if native_skills {
+        crate::core::native_files::build_skills_reference_prompt(config.skill_ids)
+    } else if compact {
         crate::core::skills::build_skills_prompt_compact(config.skill_ids)
     } else {
         crate::core::skills::build_skills_prompt(config.skill_ids)
     };
 
-    // Build directives prompt
+    // Build directives prompt (always injected — no native format)
     let directives_prompt = crate::core::directives::build_directives_prompt(config.directive_ids);
 
-    // Build profiles prompt
-    let profiles_prompt = if compact {
+    // Build profiles prompt — skip if native agent file loaded by the agent
+    let profiles_prompt = if native_profiles {
+        String::new() // Agent loads the .claude/agents/ file natively
+    } else if compact {
         crate::core::profiles::build_profiles_prompt_compact(config.profile_ids)
     } else {
         crate::core::profiles::build_profiles_prompt(config.profile_ids)
@@ -673,9 +737,37 @@ fn try_spawn(
         if api_key.is_some() { "override" } else { "local auth" }
     );
 
-    let mut cmd = Command::new(&cmd_name);
-    cmd.args(&cmd_args)
-        .current_dir(work_dir)
+    // On Windows native (Tauri desktop app), agents are typically installed in WSL.
+    // Wrap the command in `wsl.exe -e` to execute inside WSL, similar to how
+    // JetBrains IDEs and VS Code handle WSL integration.
+    #[cfg(target_os = "windows")]
+    let use_wsl = !is_wsl();
+    #[cfg(not(target_os = "windows"))]
+    let use_wsl = false;
+
+    let (final_cmd, final_args, effective_work_dir) = if use_wsl {
+        // Convert Windows path to WSL path for --cd
+        #[cfg(target_os = "windows")]
+        let wsl_work_dir = windows_to_wsl_path(work_dir);
+        #[cfg(not(target_os = "windows"))]
+        let wsl_work_dir = work_dir.to_path_buf();
+
+        let mut wsl_args = vec![
+            "--cd".to_string(),
+            wsl_work_dir.display().to_string(),
+            "-e".to_string(),
+            cmd_name.clone(),
+        ];
+        wsl_args.extend(cmd_args.iter().cloned());
+        // wsl.exe runs from the Windows current dir, but --cd sets WSL's cwd
+        ("wsl.exe".to_string(), wsl_args, work_dir.to_path_buf())
+    } else {
+        (cmd_name.clone(), cmd_args.clone(), work_dir.to_path_buf())
+    };
+
+    let mut cmd = Command::new(&final_cmd);
+    cmd.args(&final_args)
+        .current_dir(&effective_work_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
