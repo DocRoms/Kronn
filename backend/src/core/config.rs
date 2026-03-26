@@ -122,6 +122,8 @@ pub fn default_config() -> AppConfig {
             auth_enabled: false,
             max_concurrent_agents: 5,
             agent_stall_timeout_min: 5,
+            pseudo: None,
+            avatar_email: None,
         },
         tokens: TokensConfig {
             anthropic: None,

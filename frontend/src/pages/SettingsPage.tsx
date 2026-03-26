@@ -17,6 +17,14 @@ import {
 import { STT_MODELS, getSttModelId, setSttModelId } from '../lib/stt-models';
 import { TTS_VOICES, getTtsVoiceId, setTtsVoiceId } from '../lib/tts-models';
 import { setAuthToken } from '../lib/api';
+import { gravatarUrl } from '../lib/gravatar';
+
+function GravatarPreview({ email }: { email: string }) {
+  if (!email || !email.includes('@')) return null;
+  return (
+    <img src={gravatarUrl(email, 64)} alt="avatar" style={{ width: 48, height: 48, borderRadius: '50%', border: '2px solid rgba(200,255,0,0.2)' }} />
+  );
+}
 
 /** Output languages for agents (sent to backend, not related to UI i18n) */
 const LANGUAGES: { code: string; label: string; flag: string }[] = [
@@ -107,6 +115,8 @@ export function SettingsPage({
   const [newDirectiveConflicts, setNewDirectiveConflicts] = useState('');
 
   const [serverDomain, setServerDomain] = useState('');
+  const [pseudo, setPseudo] = useState('');
+  const [avatarEmail, setAvatarEmail] = useState('');
   const [serverMaxAgents, setServerMaxAgents] = useState(5);
   const [serverStallTimeout, setServerStallTimeout] = useState(5);
   const [authToken, setAuthTokenState] = useState<string | null>(null);
@@ -116,7 +126,7 @@ export function SettingsPage({
   const { data: tokenConfig, refetch: refetchTokens } = useApi(() => configApi.getTokens(), []);
   const { data: dbInfo, refetch: refetchDbInfo } = useApi(() => configApi.dbInfo(), []);
   useApi(() => configApi.getServerConfig().then(cfg => {
-    if (cfg) { setServerDomain(cfg.domain ?? ''); setServerMaxAgents(cfg.max_concurrent_agents); setServerStallTimeout(cfg.agent_stall_timeout_min ?? 5); }
+    if (cfg) { setServerDomain(cfg.domain ?? ''); setServerMaxAgents(cfg.max_concurrent_agents); setServerStallTimeout(cfg.agent_stall_timeout_min ?? 5); setPseudo(cfg.pseudo ?? ''); setAvatarEmail(cfg.avatar_email ?? ''); }
     return cfg;
   }), []);
 
@@ -1049,6 +1059,19 @@ export function SettingsPage({
             </div>
             );
           })}
+          {/* Best practices links */}
+          <div style={{ marginTop: 16, padding: '12px 14px', borderRadius: 8, background: 'rgba(200,255,0,0.03)', border: '1px solid rgba(200,255,0,0.08)' }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: 'rgba(200,255,0,0.6)', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <ExternalLink size={10} /> {t('config.bestPractices')}
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 16px', fontSize: 10 }}>
+              <a href="https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents" target="_blank" rel="noopener noreferrer" style={{ color: 'rgba(255,255,255,0.5)', textDecoration: 'none' }}>Anthropic — Context Engineering</a>
+              <a href="https://help.openai.com/en/articles/6654000-best-practices-for-prompt-engineering-with-the-openai-api" target="_blank" rel="noopener noreferrer" style={{ color: 'rgba(255,255,255,0.5)', textDecoration: 'none' }}>OpenAI — Prompt Engineering</a>
+              <a href="https://help.mistral.ai/en/articles/347476-how-to-write-good-instructions-for-my-agent" target="_blank" rel="noopener noreferrer" style={{ color: 'rgba(255,255,255,0.5)', textDecoration: 'none' }}>Mistral — Agent Instructions</a>
+              <a href="https://ai.google.dev/gemini-api/docs/prompting-strategies" target="_blank" rel="noopener noreferrer" style={{ color: 'rgba(255,255,255,0.5)', textDecoration: 'none' }}>Google — Gemini Prompting</a>
+              <a href="https://kiro.dev/docs/cli/custom-agents/configuration-reference/" target="_blank" rel="noopener noreferrer" style={{ color: 'rgba(255,255,255,0.5)', textDecoration: 'none' }}>Kiro — Agent Configuration</a>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -1581,6 +1604,76 @@ export function SettingsPage({
       </div>
 
       {/* Server & Security */}
+      {/* ── Identity ──────────────────────────────────────────── */}
+      <div id="settings-identity" style={ss.card(false)}>
+        <div style={{ padding: '16px 20px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+            <UserCircle size={14} style={{ color: '#c8ff00' }} />
+            <span style={{ fontWeight: 600, fontSize: 14 }}>{t('settings.identity')}</span>
+          </div>
+          <p style={{ color: 'rgba(255,255,255,0.35)', fontSize: 12, marginBottom: 12 }}>
+            {t('settings.identityHint')}
+          </p>
+          <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ marginBottom: 12 }}>
+                <span style={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.6)', display: 'block', marginBottom: 6 }}>{t('settings.pseudo')}</span>
+                <input
+                  type="text"
+                  value={pseudo}
+                  placeholder="Ex: JohnDoe42"
+                  onChange={e => {
+                    setPseudo(e.target.value);
+                    configApi.setServerConfig({ pseudo: e.target.value });
+                  }}
+                  style={ss.input}
+                />
+              </div>
+              <div>
+                <span style={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.6)', display: 'block', marginBottom: 6 }}>{t('settings.avatarEmail')}</span>
+                <input
+                  type="email"
+                  value={avatarEmail}
+                  placeholder="email@example.com"
+                  onChange={e => {
+                    setAvatarEmail(e.target.value);
+                    configApi.setServerConfig({ avatar_email: e.target.value });
+                  }}
+                  style={ss.input}
+                />
+                <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.4)', marginTop: 4 }}>
+                  {t('settings.avatarHint')}
+                </div>
+              </div>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, marginTop: 8 }}>
+              {avatarEmail ? (
+                <GravatarPreview email={avatarEmail} />
+              ) : pseudo ? (
+                <div style={{
+                  width: 48, height: 48, borderRadius: '50%',
+                  background: 'rgba(200,255,0,0.1)', border: '2px solid rgba(200,255,0,0.2)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: 16, fontWeight: 700, color: '#c8ff00',
+                }}>
+                  {pseudo.slice(0, 2).toUpperCase()}
+                </div>
+              ) : (
+                <div style={{
+                  width: 48, height: 48, borderRadius: '50%',
+                  background: 'rgba(255,255,255,0.05)', border: '2px solid rgba(255,255,255,0.1)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: 12, color: 'rgba(255,255,255,0.2)',
+                }}>?</div>
+              )}
+              <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.4)' }}>
+                {pseudo || 'User'}
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div id="settings-server" style={ss.card(false)}>
         <div style={{ padding: '16px 20px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>

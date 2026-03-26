@@ -16,3 +16,9 @@ Expert Python knowledge with modern patterns:
 - Dependencies: `pyproject.toml`, pinned versions, virtual environments.
 - Testing: pytest with fixtures. Parametrize for variations. Mock at boundaries.
 - Docstrings: Google or NumPy style, consistently applied.
+
+Apply when: reviewing or writing Python code, data scripts, or FastAPI/Django services.
+Do NOT apply when: working with compiled languages (Rust, Go, Java) or frontend code.
+
+`✓ def fetch_user(user_id: int) -> User | None:`
+`✗ def fetch_user(user_id): # no type hints, returns untyped dict`

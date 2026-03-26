@@ -286,6 +286,8 @@ fn list_all_messages(conn: &Connection) -> Result<std::collections::HashMap<Stri
             tokens_used: row.get::<_, i64>(6).unwrap_or(0) as u64,
             auth_mode: row.get(7)?,
             model_tier: row.get::<_, Option<String>>(8).unwrap_or(None),
+            author_pseudo: None,
+            author_avatar_email: None,
         }))
     })?;
 
@@ -298,7 +300,7 @@ fn list_all_messages(conn: &Connection) -> Result<std::collections::HashMap<Stri
 
 pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<DiscussionMessage>> {
     let mut stmt = conn.prepare(
-        "SELECT id, role, content, agent_type, timestamp, tokens_used, auth_mode, model_tier
+        "SELECT id, role, content, agent_type, timestamp, tokens_used, auth_mode, model_tier, author_pseudo, author_avatar_email
          FROM messages WHERE discussion_id = ?1
          ORDER BY sort_order, timestamp"
     )?;
@@ -316,6 +318,8 @@ pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<Discu
             tokens_used: row.get::<_, i64>(5).unwrap_or(0) as u64,
             auth_mode: row.get(6)?,
             model_tier: row.get::<_, Option<String>>(7).unwrap_or(None),
+            author_pseudo: row.get::<_, Option<String>>(8).unwrap_or(None),
+            author_avatar_email: row.get::<_, Option<String>>(9).unwrap_or(None),
         })
     })?.filter_map(|r| r.ok()).collect();
 
@@ -331,8 +335,8 @@ pub fn insert_message(conn: &Connection, discussion_id: &str, msg: &DiscussionMe
     )?;
 
     conn.execute(
-        "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, sort_order, tokens_used, auth_mode, model_tier)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, sort_order, tokens_used, auth_mode, model_tier, author_pseudo, author_avatar_email)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             msg.id,
             discussion_id,
@@ -344,6 +348,8 @@ pub fn insert_message(conn: &Connection, discussion_id: &str, msg: &DiscussionMe
             msg.tokens_used as i64,
             msg.auth_mode,
             msg.model_tier,
+            msg.author_pseudo,
+            msg.author_avatar_email,
         ],
     )?;
 

@@ -20,3 +20,9 @@ Testing expertise covering strategy, methodology, and implementation:
 - Fixtures and factories: avoid shared mutable state. Each test sets up its own data. Use builders or factories.
 
 When reviewing code, flag: missing tests for new logic, tests that test implementation details, shared mutable test state, flaky assertions (timing, ordering), and untested error paths.
+
+Apply when: any code change that adds or modifies logic, bug fixes, refactors.
+Do NOT apply when: config-only changes (env vars, CI labels), documentation edits, or dependency bumps with no code change.
+
+✓ Scenario: new `calculateDiscount()` function ships with a unit test covering edge cases.
+✗ Scenario: new `calculateDiscount()` function ships, tests planned "for later."

@@ -16,3 +16,9 @@ Expert C# knowledge with .NET patterns:
 - Testing: xUnit with `[Fact]` and `[Theory]`. NSubstitute or Moq for mocking. `WebApplicationFactory` for integration tests.
 - Unity: MonoBehaviour lifecycle, ScriptableObjects for data, coroutines for async in Unity. Avoid `Find` methods at runtime.
 - Patterns: nullable reference types enabled. Records for immutable data. `Span<T>` for performance-critical code.
+
+Apply when: reviewing or writing C# code, ASP.NET APIs, Entity Framework, Unity projects.
+Do NOT apply when: working with Java/Spring, frontend JavaScript, or non-.NET backends.
+
+`✓ var result = await httpClient.GetAsync(url);`
+`✗ var result = httpClient.GetAsync(url).Result; // deadlock risk`

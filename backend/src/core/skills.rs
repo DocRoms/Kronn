@@ -170,7 +170,7 @@ pub fn build_skills_prompt(skill_ids: &[String]) -> String {
 }
 
 /// Build a compact skills prompt for agents with small context windows.
-/// Uses only the first line of each skill's content (~50% token savings).
+/// Uses the first 2-3 meaningful lines instead of just 1 (~40% token savings).
 pub fn build_skills_prompt_compact(skill_ids: &[String]) -> String {
     let skills = get_skills_by_ids(skill_ids);
     if skills.is_empty() {
@@ -179,11 +179,17 @@ pub fn build_skills_prompt_compact(skill_ids: &[String]) -> String {
 
     let mut prompt = String::from("=== Skills ===\n");
     for skill in &skills {
-        // Take first meaningful line of content as a compact summary
-        let summary = skill.content.lines()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or(&skill.name);
-        prompt.push_str(&format!("[{}: {}]\n", skill.name, summary.trim()));
+        // Take first 2-3 meaningful lines (up to ~200 chars) for better context
+        let mut summary = String::new();
+        for line in skill.content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() { continue; }
+            if !summary.is_empty() { summary.push(' '); }
+            summary.push_str(trimmed);
+            if summary.len() > 150 { break; }
+        }
+        if summary.is_empty() { summary = skill.name.clone(); }
+        prompt.push_str(&format!("[{}: {}]\n", skill.name, summary));
     }
     prompt
 }

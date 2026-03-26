@@ -15,3 +15,9 @@ Data engineering expertise:
 - Processing: batch (Spark, dbt) vs streaming (Kafka Streams, Flink). Know when each is appropriate.
 - Orchestration: Airflow, Dagster, or Prefect. DAGs with clear dependencies. Retry and alerting.
 - Performance: partitioning, indexing, materialized views. Query optimization. Avoid full table scans.
+
+Apply when: building or reviewing ETL/ELT pipelines, data models, warehouse queries, or orchestration DAGs.
+Do NOT apply when: application-level CRUD operations, frontend code, or simple single-table queries.
+
+✓ Scenario: pipeline job is idempotent — re-running it produces the same result without duplicates.
+✗ Scenario: pipeline appends on every run with no deduplication, corrupting downstream aggregates.

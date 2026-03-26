@@ -44,6 +44,12 @@ Project-specific terms. For deep dives, follow the linked `ai/architecture/` fil
 
 **Agent switch** — Changing the primary agent (`Discussion.agent`) mid-conversation. Invalidates `summary_cache`, inserts a prompt for the new agent to summarize and continue, and auto-triggers a run. UI: clickable agent name in chat header → dropdown of installed agents.
 
+**User Identity** — Config in `[server]`: `pseudo` (display name) and `avatar_email` (Gravatar, decoupled from git). Messages store `author_pseudo` and `author_avatar_email` (migration 021). UI: Settings card + avatar in user message bubbles. Gravatar uses SHA-256 hash.
+
+**CopyableBlock** — React component wrapping `<table>` and `<pre>` blocks in markdown with a copy-to-clipboard button. Extracts plain text (TSV for tables). Part of `MarkdownContent` in `DiscussionsPage.tsx`.
+
+**Vibe runner** — `backend/scripts/vibe-runner.py` — Python wrapper that calls Vibe's `run_programmatic()` SDK directly, bypassing the CLI (which hangs due to stdin blocking). Falls back to direct Mistral API streaming if vibe is not installed. See `backend/src/agents/runner.rs`.
+
 **Orchestration** — Multi-agent debate: multiple agents discuss in configurable rounds (1–3, default 2 in UI). Primary agent speaks last and synthesizes. Round count configurable from the debate popover.
 
 **MCP (Model Context Protocol)** — Standardized protocol for giving AI agents access to tools/data. Kronn uses a 3-tier model: servers → configs → project linkages.
@@ -202,6 +208,8 @@ Project-specific terms. For deep dives, follow the linked `ai/architecture/` fil
 **Config** — Unified config tab, delegates to `SettingsPage.tsx`. (Agents tab merged into Config.)
 
 **@mention** — Chat feature to target a specific agent (e.g., `@claude`) with autocomplete.
+
+**Discussion search filter** — Sidebar search input (`discSearchFilter` state in `DiscussionsPage.tsx`) that filters discussions by title using case-insensitive substring matching. When active, collapsed groups are auto-expanded and only matching discussions are shown across all groups (global, per-project, archives). Clear button resets the filter. i18n key: `disc.searchPlaceholder`.
 
 **Discussion archive** — Discussions can be archived (`archived: bool`, default false). Archived discussions hidden from main sidebar, shown in collapsible "Archives" section. Backend: `PATCH /api/discussions/:id` with `UpdateDiscussionRequest`.
 

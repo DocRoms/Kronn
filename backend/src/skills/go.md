@@ -15,3 +15,9 @@ Expert Go knowledge with idiomatic patterns:
 - Naming: short, descriptive names. Receivers are one or two letters. Exported = capitalized.
 - Testing: table-driven tests with `t.Run()`. Use `testify` sparingly. Prefer stdlib testing.
 - Dependencies: minimal. Go standard library is rich — use it. `go mod tidy` always.
+
+Apply when: reviewing or writing Go code, CLI tools, microservices in Go.
+Do NOT apply when: working with Rust, Java, or any non-Go codebase.
+
+`✓ if err != nil { return fmt.Errorf("load config: %w", err) }`
+`✗ result, _ := doSomething() // silently ignoring error`

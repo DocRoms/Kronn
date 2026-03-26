@@ -260,8 +260,16 @@ pub fn build_profiles_prompt_compact(profile_ids: &[String]) -> String {
     let mut prompt = String::from("=== Profiles ===\n");
     for p in &profiles {
         prompt.push_str(&format!("[{} {} | {} | {}]\n", p.avatar, p.persona_name, p.role,
-            // Extract first sentence of persona_prompt as a compact description
-            p.persona_prompt.split('.').next().unwrap_or("").trim()
+            // Extract first 2 sentences of persona_prompt for better context
+            {
+                let sentences: Vec<&str> = p.persona_prompt.splitn(3, '.').collect();
+                let s = if sentences.len() >= 2 {
+                    format!("{}. {}.", sentences[0].trim(), sentences[1].trim())
+                } else {
+                    sentences[0].trim().to_string()
+                };
+                s
+            }
         ));
     }
 

@@ -66,7 +66,7 @@ fn sample_message(id: &str, role: MessageRole) -> DiscussionMessage {
         timestamp: Utc::now(),
         tokens_used: 0,
         auth_mode: None,
-        model_tier: None,
+        model_tier: None, author_pseudo: None, author_avatar_email: None,
     }
 }
 

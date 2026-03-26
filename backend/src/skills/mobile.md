@@ -20,3 +20,9 @@ Mobile development expertise covering cross-platform and native patterns:
 - Security: store secrets in Keychain/Keystore, not SharedPreferences. Certificate pinning for sensitive APIs. Obfuscate release builds.
 
 When reviewing mobile code, flag: synchronous network calls on main thread, missing offline handling, hardcoded dimensions, excessive bridge calls, and missing permission handling.
+
+Apply when: building or reviewing React Native, Flutter, or native iOS/Android code.
+Do NOT apply when: web-only SPAs, backend services, or desktop applications (use relevant skill instead).
+
+✓ Scenario: list uses `FlatList` with `keyExtractor`, lazy loading, and offline cache fallback.
+✗ Scenario: list renders 1000 items in a `ScrollView` with no virtualization, crashes on low-end devices.
