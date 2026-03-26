@@ -21,15 +21,21 @@ Kronn/
 │       ├── api/                # HTTP handlers (one file per domain)
 │       │   ├── mod.rs          # Re-exports
 │       │   ├── setup.rs        # Setup wizard + config endpoints (tokens, language, agents, server config, auth token)
-│       │   ├── projects.rs     # Project CRUD + scan + bootstrap + AI audit pipeline (template install, SSE audit, validation, skill auto-detection)
-│       │   ├── discussions.rs  # Discussion CRUD + SSE streaming + orchestration
+│       │   ├── projects.rs     # Project CRUD (~1396L) + scan + bootstrap + clone + template install + git ops + defaults
+│       │   ├── audit.rs        # AI audit pipeline (~1848L) — SSE audit, full_audit, drift, validation, briefing, cancel, skill detection
+│       │   ├── ai_docs.rs      # AI doc file browser (~184L) — list/search/read ai/ files
+│       │   ├── discover.rs     # Remote repo discovery (~426L) — GitHub/GitLab multi-source with token from MCPs
+│       │   ├── discussions.rs  # Discussion CRUD + SSE streaming + orchestration (~3696L)
+│       │   ├── contacts.rs     # Contacts CRUD + invite codes + network info + ping
+│       │   ├── ws.rs           # WebSocket handler — peer-to-peer presence + auto-add unknown peers
 │       │   ├── mcps.rs         # MCP 3-tier API: overview, configs CRUD, registry, refresh, secrets
 │       │   ├── workflows.rs    # Workflow CRUD + trigger + runs
 │       │   ├── agents.rs       # Agent detection + install + uninstall + toggle (enable/disable)
 │       │   ├── stats.rs        # Token usage stats
-│       │   ├── skills.rs      # Skills API: list, create, update, delete
-│       │   ├── profiles.rs    # Profiles API: list, create, update, delete, persona-name override
-│       │   └── directives.rs  # Directives API: list, create, update, delete
+│       │   ├── skills.rs       # Skills API: list, create, update, delete
+│       │   ├── profiles.rs     # Profiles API: list, create, update, delete, persona-name override
+│       │   ├── directives.rs   # Directives API: list, create, update, delete
+│       │   └── git_ops.rs      # Shared git helpers (838L) — used by projects + discussions
 │       ├── agents/             # Agent runner (CLI execution)
 │       │   ├── mod.rs          # Re-exports
 │       │   └── runner.rs       # Spawns agent CLIs, streams stdout as SSE. Two output modes: Text (line-by-line) and StreamJson (Claude Code stream-json with token tracking). Runtime probe (npx fallback, 5min cache). MCP contexts injected into prompts
@@ -65,7 +71,10 @@ Kronn/
 │       │   ├── config.rs       # Config load/save (~/.config/kronn/)
 │       │   ├── scanner.rs      # Git repo scanner + AI audit detection (detect_audit_status, count_ai_todos)
 │       │   ├── registry.rs     # MCP registry (48 built-in official servers, grouped by category, with token_url/token_help)
-│       │   ├── mcp_scanner.rs  # Multi-agent MCP sync + MCP injection. read_all_mcp_contexts() reads .mcp.json + context files and generates prompt listing available MCP tools. Disk sync: .mcp.json (Claude), .vibe/config.toml (Vibe), ~/.codex/config.toml (Codex). .gitignore safety
+│       │   ├── mcp_scanner.rs  # Multi-agent MCP sync + MCP injection. read_all_mcp_contexts() reads .mcp.json + context files. Disk sync: .mcp.json (Claude), .vibe/config.toml (Vibe), ~/.codex/config.toml (Codex). .gitignore safety
+│       │   ├── native_files.rs # Native SKILL.md + agent file sync. Writes skills to .claude/skills/, .agents/skills/, .gemini/skills/. Profiles to .claude/agents/, .gemini/agents/, .codex/agents/. Additive sync for discussions, full cleanup at startup.
+│       │   ├── tailscale.rs   # Network & VPN auto-detection (Tailscale, VPN, LAN IPs). KRONN_HOST_IPS env for Docker. Used for multi-user invite codes.
+│       │   ├── ws_client.rs   # WebSocket client manager: outbound connections to contacts with exponential backoff. Auto-reconnects.
 │       │   ├── crypto.rs       # AES-256-GCM encryption for MCP secrets
 │       │   ├── skills.rs      # Skills loader: builtin (embedded .md) + custom (~/.config/kronn/skills/). Frontmatter parsing, build_skills_prompt()
 │       │   ├── profiles.rs   # Profiles loader: builtin (embedded .md) + custom (~/.config/kronn/profiles/). Persona override system, build_profiles_prompt()
@@ -106,12 +115,30 @@ Kronn/
 │       ├── main.tsx            # React DOM entry
 │       ├── App.tsx             # Router (setup wizard vs dashboard) + ErrorBoundary + React.lazy code splitting
 │       ├── pages/
-│       │   ├── Dashboard.tsx   # Main UI shell (~1625 lines) — projects tab (collapsible sections, bootstrap modal), nav bar, routes to sub-pages
+│       │   ├── Dashboard.tsx   # Main UI shell (~674L) — nav bar, page routing, shared state. Project list extracted to components/ProjectList + ProjectCard
 │       │   ├── SettingsPage.tsx # Settings (~1870 lines) — language, voice (TTS/STT model selection), agents config, tokens, usage stats, DB management
-│       │   ├── DiscussionsPage.tsx # Discussions (~3100 lines) — sidebar, chat, streaming, debate, archive, swipe gestures, TTS/STT, voice conversation mode, agent activity logs, persistent timer
+│       │   ├── DiscussionsPage.tsx # Discussions orchestrator (~1218L) — state, streaming, callbacks. Split into components below.
 │       │   ├── McpPage.tsx     # MCP management (registry, configs, inline secret editing with per-field visibility, context files, project toggles)
-│       │   ├── WorkflowsPage.tsx # Workflow management (~1975 lines, list, wizard, detail, runs, access warnings)
-│       │   └── SetupWizard.tsx # First-run setup flow
+│       │   ├── WorkflowsPage.tsx # Workflow management (~1780L, list, wizard, detail, runs, access warnings)
+│       │   ├── SetupWizard.tsx # First-run setup flow
+│       │   └── *.css           # Per-page CSS files (tokens + utilities in src/styles/)
+│       ├── components/
+│       │   ├── ChatHeader.tsx    # Discussion chat header (502L) — title editing, agent badges, MCP/settings popovers, git toggle
+│       │   ├── ChatInput.tsx     # Chat input composer (695L) — textarea, @mentions, voice STT, debate popover, send/stop
+│       │   ├── DiscussionSidebar.tsx # Sidebar (346L) — discussion list, contacts, search, archives
+│       │   ├── NewDiscussionForm.tsx  # New discussion form (447L) — project/agent/skills/profiles/directives selection
+│       │   ├── MessageBubble.tsx # Message bubble (329L) — user/agent/system, markdown, TTS, edit, copy, retry
+│       │   ├── SwipeableDiscItem.tsx  # Swipeable sidebar item (110L) — swipe-to-archive/delete
+│       │   ├── GitPanel.tsx      # Git file/branch panel
+│       │   ├── AiDocViewer.tsx   # AI doc viewer
+│       │   ├── ProjectList.tsx   # Project list with search, filter, group-by-org (234L)
+│       │   └── ProjectCard.tsx   # Single project accordion card — discussions, AI docs, MCPs, workflows, skills, audit (707L)
+│       ├── styles/
+│       │   ├── tokens.css        # CSS custom properties (--kr-bg-*, --kr-text-*, --kr-accent-*, --kr-sp-*, --kr-r-*, --kr-fs-*)
+│       │   ├── reset.css         # Global reset + font-face (moved from index.html)
+│       │   ├── utilities.css     # Utility classes (.flex-row, .gap-*, .text-*, .rounded-*, .mb-*, etc.)
+│       │   ├── components.css    # Shared component classes (.btn, .card, .input, .badge, .dot, .code, .label)
+│       │   └── index.css         # Barrel import for all CSS files
 │       ├── hooks/
 │       │   ├── useApi.ts       # Generic fetch hook with loading/error/refetch + race condition protection
 │       │   └── useToast.ts     # Toast notifications (success/error/info, auto-dismiss 4s, max 3 visible)
@@ -179,8 +206,9 @@ Kronn/
 ## Notes
 - `README.md` is not guaranteed to be up-to-date; prefer actual config files as source of truth.
 - `frontend/src/types/generated.ts` is auto-generated — never edit manually.
-- Dashboard.tsx (~1625 lines) is the main UI shell with projects tab (collapsible accordion sections, bootstrap modal), nav bar. Extracted: SettingsPage.tsx (~1870 lines), DiscussionsPage.tsx (~3100 lines), McpPage.tsx (~715 lines), WorkflowsPage.tsx (~1975 lines).
-- DiscussionsPage includes: SwipeableDiscItem (swipe-to-archive/delete), inline title editing, disabled agent detection, multi-line textarea, archive section, TTS/STT integration, voice conversation mode.
+- Dashboard.tsx (~674L) is the main UI shell (nav bar, page routing). Sub-pages: SettingsPage (~990L + 3 sections), DiscussionsPage (~1241L + 6 components), McpPage (~740L), WorkflowsPage (~373L + 3 components). Projects: ProjectList (~234L) + ProjectCard (~707L).
+- DiscussionsPage split (2026-03-28): ChatHeader, ChatInput, DiscussionSidebar, NewDiscussionForm, MessageBubble, SwipeableDiscItem — each < 700L.
+- CSS system: `src/styles/` (tokens, utilities, components) + per-page CSS. ~319 inline styles remain (dynamic only).
 - TTS/STT logic extracted into `lib/tts-*.ts` and `lib/stt-*.ts` modules (7 files, ~400 lines total). Web Workers for WASM inference run off the main thread.
 - Shared constants (AGENT_COLORS, AGENT_LABELS) extracted to `lib/constants.ts` — imported by Dashboard and WorkflowsPage.
 - Frontend tests in `__tests__/` directories alongside source (22 suites, ~315 tests). See `ai/testing-quality.md`.

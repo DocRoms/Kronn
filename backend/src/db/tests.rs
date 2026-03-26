@@ -52,6 +52,8 @@ fn sample_discussion(id: &str, project_id: Option<&str>) -> Discussion {
         pin_first_message: false,
         summary_cache: None,
         summary_up_to_msg_idx: None,
+            shared_id: None,
+            shared_with: vec![],
         created_at: now,
         updated_at: now,
     }

@@ -65,6 +65,18 @@ vi.mock('../../lib/api', () => ({
     update: vi.fn(),
     delete: vi.fn(),
   },
+  contacts: {
+    list: vi.fn().mockResolvedValue([]),
+    add: vi.fn(),
+    delete: vi.fn(),
+    inviteCode: vi.fn().mockResolvedValue('kronn:test@localhost:3456'),
+    ping: vi.fn().mockResolvedValue(false),
+  },
+}));
+
+// Mock useWebSocket hook (WS not available in jsdom)
+vi.mock('../../hooks/useWebSocket', () => ({
+  useWebSocket: vi.fn(() => ({ connected: false })),
 }));
 
 import { discussions as discussionsApi } from '../../lib/api';
@@ -866,7 +878,7 @@ describe('DiscussionsPage', () => {
 
     // The agent select should already have ClaudeCode selected (only installed agent)
     // Click the create/start button
-    const startBtn = screen.getByText(/Demarrer la discussion/);
+    const startBtn = screen.getByText(/Démarrer la discussion/);
     await act(async () => { fireEvent.click(startBtn); });
 
     // Verify discussionsApi.create was called with the right data
@@ -967,12 +979,9 @@ describe('DiscussionsPage', () => {
       />
     );
 
-    // All message bubbles should have overflow-wrap: break-word
-    const bubbles = document.querySelectorAll('[style*="max-width"]');
-    const withOverflow = Array.from(bubbles).filter(el =>
-      (el as HTMLElement).style.overflowWrap === 'break-word'
-    );
-    expect(withOverflow.length).toBeGreaterThanOrEqual(2);
+    // All message bubbles use the disc-msg-bubble CSS class which includes overflow-wrap: break-word
+    const bubbles = document.querySelectorAll('.disc-msg-bubble');
+    expect(bubbles.length).toBeGreaterThanOrEqual(2);
   });
 
   it('shows agent switch button in chat header', async () => {
@@ -1091,5 +1100,190 @@ describe('DiscussionsPage', () => {
     expect(body).toContain('Claude Code');
     expect(body).toContain('Codex');
     expect(body).toContain('Gemini CLI');
+  });
+
+  it('shows contacts section in sidebar when contacts exist', async () => {
+    // Mock contacts.list to return contacts
+    const { contacts: contactsApi } = await import('../../lib/api');
+    vi.mocked(contactsApi.list).mockResolvedValue([
+      { id: 'c1', pseudo: 'PeerOne', avatar_email: null, kronn_url: 'http://100.64.1.2:3456', invite_code: 'kronn:peerone@100.64.1.2:3456', status: 'accepted', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' },
+    ]);
+    vi.mocked(contactsApi.ping).mockResolvedValue(true);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        {...liftedProps()}
+      />
+    );
+
+    // Wait for contacts to load
+    await act(async () => { await new Promise(r => setTimeout(r, 50)); });
+
+    const body = document.body.textContent ?? '';
+    expect(body).toContain('Contacts');
+    expect(body).toContain('PeerOne');
+  });
+
+  it('shows WS connection indicator in contacts section', async () => {
+    const { contacts: contactsApi } = await import('../../lib/api');
+    vi.mocked(contactsApi.list).mockResolvedValue([
+      { id: 'c1', pseudo: 'PeerAlpha', avatar_email: null, kronn_url: 'http://10.0.0.1:3456', invite_code: 'kronn:PeerAlpha@10.0.0.1:3456', status: 'accepted', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' },
+    ]);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        {...liftedProps()}
+      />
+    );
+
+    await act(async () => { await new Promise(r => setTimeout(r, 50)); });
+
+    // Should show 0/1 (no contacts online since WS mock returns connected: false)
+    const body = document.body.textContent ?? '';
+    expect(body).toContain('0/1');
+  });
+
+  it('updates contact online status when useWebSocket mock is configured', async () => {
+    // Override the mock to call the handler with a presence message
+    const { useWebSocket } = await import('../../hooks/useWebSocket');
+    vi.mocked(useWebSocket).mockImplementation((onMessage) => {
+      // Simulate receiving a presence message after mount
+      setTimeout(() => {
+        onMessage({
+          type: 'presence',
+          from_pseudo: 'PeerAlpha',
+          from_invite_code: 'kronn:PeerAlpha@10.0.0.1:3456',
+          online: true,
+        });
+      }, 10);
+      return { connected: true };
+    });
+
+    const { contacts: contactsApi } = await import('../../lib/api');
+    vi.mocked(contactsApi.list).mockResolvedValue([
+      { id: 'c1', pseudo: 'PeerAlpha', avatar_email: null, kronn_url: 'http://10.0.0.1:3456', invite_code: 'kronn:PeerAlpha@10.0.0.1:3456', status: 'accepted', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' },
+    ]);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        {...liftedProps()}
+      />
+    );
+
+    // Wait for contacts to load + WS message to fire
+    await act(async () => { await new Promise(r => setTimeout(r, 100)); });
+
+    // Should show 1/1 (PeerAlpha is online via WS presence)
+    const body = document.body.textContent ?? '';
+    expect(body).toContain('1/1');
+
+    // Restore default mock
+    vi.mocked(useWebSocket).mockImplementation(() => ({ connected: false }));
+  });
+
+  it('shows contacts section with add button even when no contacts exist', async () => {
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        {...liftedProps()}
+      />
+    );
+
+    await act(async () => { await new Promise(r => setTimeout(r, 50)); });
+
+    // Contacts section should always be visible with its title
+    const body = document.body.textContent ?? '';
+    expect(body).toContain('Contacts');
+  });
+
+  it('shows add contact form when plus button is clicked', async () => {
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        {...liftedProps()}
+      />
+    );
+
+    await act(async () => { await new Promise(r => setTimeout(r, 50)); });
+
+    // Click the + button to show add contact form
+    const addBtn = document.querySelector('button[title="Ajouter un contact"]');
+    expect(addBtn).toBeTruthy();
+    fireEvent.click(addBtn!);
+
+    // Should show the input field with placeholder
+    const input = document.querySelector('input[placeholder="kronn:pseudo@host:port"]');
+    expect(input).toBeTruthy();
+  });
+
+  it('shows delete button on each contact', async () => {
+    const { contacts: contactsApi } = await import('../../lib/api');
+    vi.mocked(contactsApi.list).mockResolvedValue([
+      { id: 'c1', pseudo: 'PeerAlpha', avatar_email: null, kronn_url: 'http://10.0.0.1:3456', invite_code: 'kronn:PeerAlpha@10.0.0.1:3456', status: 'accepted', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' },
+    ]);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        {...liftedProps()}
+      />
+    );
+
+    await act(async () => { await new Promise(r => setTimeout(r, 50)); });
+
+    // Should have a delete button
+    const deleteBtn = document.querySelector('button[title="Supprimer"]');
+    expect(deleteBtn).toBeTruthy();
   });
 });

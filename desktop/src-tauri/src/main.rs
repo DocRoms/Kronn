@@ -3,7 +3,6 @@
 
 use std::sync::Arc;
 use tokio::sync::{RwLock, Semaphore};
-use tower_http::services::ServeDir;
 
 use kronn::{
     build_router,
@@ -14,41 +13,55 @@ use kronn::{
     AppState, AuditTracker, DEFAULT_MAX_CONCURRENT_AGENTS,
 };
 
+// Embed frontend/dist/ into the binary at compile time.
+// This ensures the desktop app works regardless of install location.
+use include_dir::{include_dir, Dir};
+static FRONTEND_DIST: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../frontend/dist");
+
 /// Find a free TCP port for the embedded backend
 fn find_free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("Failed to bind to free port");
     listener.local_addr().unwrap().port()
 }
 
-/// Resolve the frontend dist directory
-fn frontend_dist_dir() -> std::path::PathBuf {
-    // In production: next to the executable
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_default();
-
-    // Check multiple locations
-    let candidates = [
-        exe_dir.join("frontend-dist"),
-        exe_dir.join("../frontend/dist"),
-        exe_dir.join("../../frontend/dist"),
-        // Dev mode: CARGO_MANIFEST_DIR = desktop/src-tauri, so ../../frontend/dist = Kronn/frontend/dist
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../frontend/dist"),
-    ];
-
-    for c in &candidates {
-        if c.join("index.html").exists() {
-            return c.clone();
+/// Extract embedded frontend files to a temp directory for serving.
+/// Returns the path to the extracted directory.
+fn extract_frontend_dist() -> std::path::PathBuf {
+    // In dev mode, try the filesystem path first (faster iteration, no re-extract)
+    #[cfg(debug_assertions)]
+    {
+        let dev_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../frontend/dist");
+        if dev_path.join("index.html").exists() {
+            tracing::info!("Dev mode: serving frontend from filesystem {:?}", dev_path);
+            return dev_path;
         }
     }
 
-    tracing::warn!("Frontend dist not found, tried: {:?}", candidates);
-    candidates.last().unwrap().clone()
+    // Production: extract embedded files to a temp directory
+    let temp_dir = std::env::temp_dir().join("kronn-desktop-frontend");
+    let _ = std::fs::remove_dir_all(&temp_dir); // Clean stale files
+    extract_dir(&FRONTEND_DIST, &temp_dir);
+    tracing::info!("Extracted frontend dist to {:?}", temp_dir);
+    temp_dir
+}
+
+/// Recursively extract an embedded directory to the filesystem.
+fn extract_dir(dir: &Dir<'_>, target: &std::path::Path) {
+    std::fs::create_dir_all(target).ok();
+    for file in dir.files() {
+        let path = target.join(file.path());
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::write(&path, file.contents()).ok();
+    }
+    for sub in dir.dirs() {
+        extract_dir(sub, &target.join(sub.path()));
+    }
 }
 
 /// Start the Kronn backend server on a given port (runs in a tokio task)
-async fn start_backend(port: u16) -> anyhow::Result<()> {
+async fn start_backend(port: u16, dist_dir: std::path::PathBuf) -> anyhow::Result<()> {
     tracing::info!("Starting embedded Kronn backend on port {}", port);
 
     // Load or create config
@@ -71,6 +84,7 @@ async fn start_backend(port: u16) -> anyhow::Result<()> {
     let database = Arc::new(Database::open().expect("Failed to open database"));
 
     // Build state
+    let (ws_tx, _) = tokio::sync::broadcast::channel(256);
     let config_arc = Arc::new(RwLock::new(app_config));
     let workflow_engine = Arc::new(WorkflowEngine::new(database.clone(), config_arc.clone()));
     let state = AppState {
@@ -79,6 +93,7 @@ async fn start_backend(port: u16) -> anyhow::Result<()> {
         workflow_engine: workflow_engine.clone(),
         agent_semaphore: Arc::new(Semaphore::new(max_agents)),
         audit_tracker: Arc::new(std::sync::Mutex::new(AuditTracker::default())),
+        ws_broadcast: Arc::new(ws_tx),
     };
 
     // Auto-discover API keys
@@ -124,15 +139,15 @@ async fn start_backend(port: u16) -> anyhow::Result<()> {
     let engine = workflow_engine.clone();
     tokio::spawn(async move { engine.start().await });
 
+    // Start WS client manager for multi-user sync
+    let ws_state = state.clone();
+    tokio::spawn(async move { kronn::core::ws_client::run(ws_state).await });
+
     // Build API router
     let api_router = build_router(state);
 
     // Serve frontend static files + API
-    // Frontend files are served with COOP/COEP headers for SharedArrayBuffer (WASM threads)
-    let dist_dir = frontend_dist_dir();
-    tracing::info!("Serving frontend from {:?}", dist_dir);
-
-    let frontend_service = ServeDir::new(&dist_dir)
+    let frontend_service = tower_http::services::ServeDir::new(&dist_dir)
         .append_index_html_on_directories(true);
 
     // Merge: /api/* → backend, /* → frontend static files
@@ -143,13 +158,13 @@ async fn start_backend(port: u16) -> anyhow::Result<()> {
             tower_http::set_header::SetResponseHeaderLayer::overriding(
                 axum::http::HeaderName::from_static("cross-origin-opener-policy"),
                 axum::http::HeaderValue::from_static("same-origin"),
-            )
+            ),
         )
         .layer(
             tower_http::set_header::SetResponseHeaderLayer::overriding(
                 axum::http::HeaderName::from_static("cross-origin-embedder-policy"),
                 axum::http::HeaderValue::from_static("require-corp"),
-            )
+            ),
         );
 
     let addr = format!("127.0.0.1:{}", port);
@@ -170,7 +185,7 @@ fn get_backend_url(info: tauri::State<'_, BackendInfo>) -> String {
 }
 
 fn main() {
-    // Initialize tracing — stdout for logs (Docker/desktop best practice)
+    // Initialize tracing
     tracing_subscriber::fmt()
         .with_writer(std::io::stdout)
         .with_env_filter(
@@ -181,6 +196,9 @@ fn main() {
 
     let port = find_free_port();
 
+    // Extract frontend dist (embedded in binary for production, filesystem for dev)
+    let dist_dir = extract_frontend_dist();
+
     // Start the backend in a background thread with its own tokio runtime
     let backend_port = port;
     std::thread::spawn(move || {
@@ -189,7 +207,7 @@ fn main() {
             .build()
             .expect("Failed to create Tokio runtime");
         rt.block_on(async {
-            if let Err(e) = start_backend(backend_port).await {
+            if let Err(e) = start_backend(backend_port, dist_dir).await {
                 tracing::error!("Backend failed: {}", e);
             }
         });

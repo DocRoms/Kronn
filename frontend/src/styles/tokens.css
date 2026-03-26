@@ -1,0 +1,102 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   Kronn Design Tokens — CSS Custom Properties
+   Single source of truth for colors, spacing, radius, typography.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* ── Backgrounds ──────────────────────────────────────────────────────── */
+  --kr-bg-base: #0a0c10;
+  --kr-bg-raised: #0e1117;
+  --kr-bg-surface: #12151c;
+  --kr-bg-elevated: #161b22;
+  --kr-bg-input: #1a1d26;
+  --kr-bg-hover: rgba(255, 255, 255, 0.03);
+  --kr-bg-subtle: rgba(255, 255, 255, 0.02);
+  --kr-bg-overlay: rgba(0, 0, 0, 0.6);
+
+  /* ── Accent (lime) ────────────────────────────────────────────────────── */
+  --kr-accent: #c8ff00;
+  --kr-accent-rgb: 200, 255, 0;
+  --kr-accent-bg: rgba(200, 255, 0, 0.03);
+  --kr-accent-bg-hover: rgba(200, 255, 0, 0.08);
+  --kr-accent-bg-strong: rgba(200, 255, 0, 0.15);
+  --kr-accent-border: rgba(200, 255, 0, 0.2);
+  --kr-accent-border-light: rgba(200, 255, 0, 0.1);
+  --kr-accent-text: rgba(200, 255, 0, 0.6);
+
+  /* ── Text hierarchy ───────────────────────────────────────────────────── */
+  --kr-text-primary: #e8eaed;
+  --kr-text-secondary: rgba(255, 255, 255, 0.6);
+  --kr-text-tertiary: rgba(255, 255, 255, 0.5);
+  --kr-text-muted: rgba(255, 255, 255, 0.4);
+  --kr-text-faint: rgba(255, 255, 255, 0.35);
+  --kr-text-dim: rgba(255, 255, 255, 0.3);
+  --kr-text-ghost: rgba(255, 255, 255, 0.2);
+
+  /* ── Semantic colors ──────────────────────────────────────────────────── */
+  --kr-success: #34d399;
+  --kr-success-rgb: 52, 211, 153;
+  --kr-error: #ff4d6a;
+  --kr-error-rgb: 255, 77, 106;
+  --kr-warning: #ffc800;
+  --kr-warning-rgb: 255, 200, 0;
+  --kr-info: #60a5fa;
+  --kr-info-rgb: 96, 165, 250;
+  --kr-cyan: #00d4ff;
+  --kr-purple: #8b5cf6;
+
+  /* ── Borders ──────────────────────────────────────────────────────────── */
+  --kr-border: rgba(255, 255, 255, 0.07);
+  --kr-border-light: rgba(255, 255, 255, 0.06);
+  --kr-border-medium: rgba(255, 255, 255, 0.1);
+  --kr-border-strong: rgba(255, 255, 255, 0.12);
+
+  /* ── Spacing scale ────────────────────────────────────────────────────── */
+  --kr-sp-1: 2px;
+  --kr-sp-2: 4px;
+  --kr-sp-3: 6px;
+  --kr-sp-4: 8px;
+  --kr-sp-5: 10px;
+  --kr-sp-6: 12px;
+  --kr-sp-7: 14px;
+  --kr-sp-8: 16px;
+  --kr-sp-9: 20px;
+  --kr-sp-10: 24px;
+  --kr-sp-12: 32px;
+
+  /* ── Border radius ────────────────────────────────────────────────────── */
+  --kr-r-xs: 3px;
+  --kr-r-sm: 4px;
+  --kr-r-md: 6px;
+  --kr-r-lg: 8px;
+  --kr-r-xl: 10px;
+  --kr-r-2xl: 12px;
+  --kr-r-3xl: 16px;
+  --kr-r-full: 50%;
+
+  /* ── Font sizes ───────────────────────────────────────────────────────── */
+  --kr-fs-2xs: 9px;
+  --kr-fs-xs: 10px;
+  --kr-fs-sm: 11px;
+  --kr-fs-base: 12px;
+  --kr-fs-md: 13px;
+  --kr-fs-lg: 14px;
+  --kr-fs-xl: 17px;
+  --kr-fs-2xl: 20px;
+  --kr-fs-3xl: 22px;
+  --kr-fs-4xl: 24px;
+
+  /* ── Font families ────────────────────────────────────────────────────── */
+  --kr-font-sans: 'Inter', system-ui, sans-serif;
+  --kr-font-mono: 'JetBrains Mono', monospace;
+
+  /* ── Shadows ──────────────────────────────────────────────────────────── */
+  --kr-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --kr-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
+  --kr-shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
+
+  /* ── Z-index scale ────────────────────────────────────────────────────── */
+  --kr-z-sticky: 50;
+  --kr-z-modal: 100;
+  --kr-z-toast: 200;
+}

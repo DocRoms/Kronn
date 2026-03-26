@@ -16,6 +16,8 @@ use tokio::sync::RwLock;
 use tower::ServiceExt;
 
 use kronn::{build_router_with_auth, AppState, DEFAULT_MAX_CONCURRENT_AGENTS};
+use kronn::models::WsMessage;
+use futures::{SinkExt, StreamExt};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Test helpers
@@ -33,12 +35,14 @@ fn test_state() -> AppState {
         db.clone(),
         config.clone(),
     ));
+    let (ws_tx, _) = tokio::sync::broadcast::channel(256);
     AppState {
         config,
         db,
         workflow_engine,
         agent_semaphore: Arc::new(tokio::sync::Semaphore::new(DEFAULT_MAX_CONCURRENT_AGENTS)),
         audit_tracker: Arc::new(std::sync::Mutex::new(kronn::AuditTracker::default())),
+        ws_broadcast: Arc::new(ws_tx),
     }
 }
 
@@ -853,7 +857,7 @@ fn template_glossary_has_todo_marker_guidance() {
 #[test]
 fn analysis_steps_glossary_mentions_todo_markers() {
     // The glossary step prompt should instruct the agent to add TODO markers for unknown terms
-    let prompt_preamble = include_str!("../src/api/projects.rs");
+    let prompt_preamble = include_str!("../src/api/audit.rs");
     // Find the glossary step prompt
     assert!(
         prompt_preamble.contains("TODO: ask user"),
@@ -863,7 +867,7 @@ fn analysis_steps_glossary_mentions_todo_markers() {
 
 #[test]
 fn analysis_steps_tech_debt_creates_detail_files() {
-    let source = include_str!("../src/api/projects.rs");
+    let source = include_str!("../src/api/audit.rs");
     assert!(
         source.contains("ai/tech-debt/TD-"),
         "Tech debt step should instruct creating detail files in ai/tech-debt/"
@@ -872,7 +876,7 @@ fn analysis_steps_tech_debt_creates_detail_files() {
 
 #[test]
 fn analysis_steps_tech_debt_checks_outdated_prerequisites() {
-    let source = include_str!("../src/api/projects.rs");
+    let source = include_str!("../src/api/audit.rs");
     // The tech debt step should mention checking for outdated prerequisites
     assert!(
         source.contains("deprecated") || source.contains("EOL") || source.contains("outdated"),
@@ -882,7 +886,7 @@ fn analysis_steps_tech_debt_checks_outdated_prerequisites() {
 
 #[test]
 fn analysis_steps_review_checks_tech_debt_files() {
-    let source = include_str!("../src/api/projects.rs");
+    let source = include_str!("../src/api/audit.rs");
     assert!(
         source.contains("Tech debt files") || source.contains("tech-debt/"),
         "Review step should verify tech-debt detail files exist"
@@ -891,7 +895,7 @@ fn analysis_steps_review_checks_tech_debt_files() {
 
 #[test]
 fn analysis_steps_review_checks_glossary_todos() {
-    let source = include_str!("../src/api/projects.rs");
+    let source = include_str!("../src/api/audit.rs");
     assert!(
         source.contains("Glossary TODO") || source.contains("TODO: ask user"),
         "Review step should check glossary TODO markers"
@@ -1142,7 +1146,7 @@ fn bootstrap_prompt_contains_project_name() {
 
 #[test]
 fn detect_project_skills_function_exists() {
-    let source = include_str!("../src/api/projects.rs");
+    let source = include_str!("../src/api/audit.rs");
     assert!(source.contains("detect_project_skills"), "detect_project_skills function should exist");
     // Should check common project files
     assert!(source.contains("Cargo.toml"), "Should detect Rust projects");
@@ -1506,4 +1510,605 @@ async fn exec_returns_expected_fields() {
     assert!(data["exit_code"].is_number(), "Response should have exit_code field");
     assert_eq!(data["stdout"].as_str().unwrap().trim(), "hello");
     assert_eq!(data["exit_code"].as_i64().unwrap(), 0);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// WebSocket integration tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Helper: start a real TCP server with the router and return the address.
+async fn start_test_server(state: AppState) -> std::net::SocketAddr {
+    let app = build_router_with_auth(state, false);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    addr
+}
+
+/// WS upgrade succeeds and broadcast relay works (send → receive round-trip).
+#[tokio::test]
+async fn ws_broadcast_relay() {
+    let state = test_state();
+    let addr = start_test_server(state.clone()).await;
+
+    let url = format!("ws://{}/api/ws", addr);
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("WS connect failed");
+
+    let (mut sender, mut receiver) = StreamExt::split(ws_stream);
+
+    // Send a presence message through broadcast → it should arrive on the WS
+    let presence = WsMessage::Presence {
+        from_pseudo: "PeerAlpha".into(),
+        from_invite_code: "".into(), // empty = local frontend, no verification needed
+        online: true,
+    };
+    state.ws_broadcast.send(presence).unwrap();
+
+    // Read the relayed message
+    let msg = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        StreamExt::next(&mut receiver),
+    )
+    .await
+    .expect("timeout waiting for WS message")
+    .expect("stream ended")
+    .expect("WS error");
+
+    if let tokio_tungstenite::tungstenite::Message::Text(text) = msg {
+        let parsed: WsMessage = serde_json::from_str(text.as_ref()).unwrap();
+        match parsed {
+            WsMessage::Presence {
+                from_pseudo,
+                online,
+                ..
+            } => {
+                assert_eq!(from_pseudo, "PeerAlpha");
+                assert!(online);
+            }
+            _ => panic!("Expected Presence, got {:?}", parsed),
+        }
+    } else {
+        panic!("Expected text message, got {:?}", msg);
+    }
+
+    // Clean up
+    let _ = sender
+        .close()
+        .await;
+}
+
+/// WS handler forwards client messages to broadcast channel.
+#[tokio::test]
+async fn ws_client_to_broadcast() {
+    let state = test_state();
+    let addr = start_test_server(state.clone()).await;
+
+    // Subscribe to broadcast BEFORE the WS client sends
+    let mut broadcast_rx = state.ws_broadcast.subscribe();
+
+    let url = format!("ws://{}/api/ws", addr);
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("WS connect failed");
+    let (mut sender, _receiver) = StreamExt::split(ws_stream);
+
+    // Send a presence message via WS
+    let msg = WsMessage::Presence {
+        from_pseudo: "PeerBeta".into(),
+        from_invite_code: "".into(),
+        online: true,
+    };
+    let json = serde_json::to_string(&msg).unwrap();
+    sender
+        .send(tokio_tungstenite::tungstenite::Message::Text(json.into()))
+        .await
+        .unwrap();
+
+    // Should appear on broadcast channel
+    let received = tokio::time::timeout(std::time::Duration::from_secs(2), broadcast_rx.recv())
+        .await
+        .expect("timeout")
+        .expect("recv error");
+
+    match received {
+        WsMessage::Presence {
+            from_pseudo,
+            online,
+            ..
+        } => {
+            assert_eq!(from_pseudo, "PeerBeta");
+            assert!(online);
+        }
+        _ => panic!("Expected Presence, got {:?}", received),
+    }
+}
+
+/// WS handler responds to Ping with Pong via broadcast.
+#[tokio::test]
+async fn ws_ping_pong() {
+    let state = test_state();
+    let addr = start_test_server(state.clone()).await;
+
+    let mut broadcast_rx = state.ws_broadcast.subscribe();
+
+    let url = format!("ws://{}/api/ws", addr);
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("WS connect failed");
+    let (mut sender, _receiver) = StreamExt::split(ws_stream);
+
+    // Send a Ping
+    let ping = WsMessage::Ping {
+        timestamp: 1711000000,
+    };
+    sender
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            serde_json::to_string(&ping).unwrap().into(),
+        ))
+        .await
+        .unwrap();
+
+    // Should get a Pong on broadcast
+    let received = tokio::time::timeout(std::time::Duration::from_secs(2), broadcast_rx.recv())
+        .await
+        .expect("timeout")
+        .expect("recv error");
+
+    match received {
+        WsMessage::Pong { timestamp } => {
+            assert_eq!(timestamp, 1711000000);
+        }
+        _ => panic!("Expected Pong, got {:?}", received),
+    }
+}
+
+/// WS auto-adds unknown but valid invite code as pending contact and relays the message.
+#[tokio::test]
+async fn ws_auto_adds_unknown_valid_invite_code() {
+    let state = test_state();
+    let addr = start_test_server(state.clone()).await;
+
+    let mut broadcast_rx = state.ws_broadcast.subscribe();
+
+    let url = format!("ws://{}/api/ws", addr);
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("WS connect failed");
+    let (mut sender, _receiver) = StreamExt::split(ws_stream);
+
+    // Send a presence with a valid invite code that doesn't exist in contacts DB
+    let msg = WsMessage::Presence {
+        from_pseudo: "PeerGamma".into(),
+        from_invite_code: "kronn:PeerGamma@10.0.0.99:3456".into(),
+        online: true,
+    };
+    sender
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            serde_json::to_string(&msg).unwrap().into(),
+        ))
+        .await
+        .unwrap();
+
+    // The message should be relayed to broadcast (auto-add accepted the peer)
+    let received = tokio::time::timeout(std::time::Duration::from_secs(2), broadcast_rx.recv())
+        .await
+        .expect("timeout — message was not relayed")
+        .expect("recv error");
+
+    match received {
+        WsMessage::Presence {
+            from_pseudo,
+            online,
+            ..
+        } => {
+            assert_eq!(from_pseudo, "PeerGamma");
+            assert!(online);
+        }
+        _ => panic!("Expected Presence, got {:?}", received),
+    }
+
+    // Verify the contact was auto-created in DB
+    let contacts = state
+        .db
+        .with_conn(kronn::db::contacts::list_contacts)
+        .await
+        .unwrap();
+    assert_eq!(contacts.len(), 1);
+    assert_eq!(contacts[0].pseudo, "PeerGamma");
+    assert_eq!(contacts[0].status, "pending");
+    assert_eq!(contacts[0].invite_code, "kronn:PeerGamma@10.0.0.99:3456");
+}
+
+/// WS rejects invalid invite code format (not parseable as kronn:pseudo@host:port).
+#[tokio::test]
+async fn ws_rejects_invalid_invite_code_format() {
+    let state = test_state();
+    let addr = start_test_server(state.clone()).await;
+
+    let mut broadcast_rx = state.ws_broadcast.subscribe();
+
+    let url = format!("ws://{}/api/ws", addr);
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("WS connect failed");
+    let (mut sender, _receiver) = StreamExt::split(ws_stream);
+
+    // Send a presence with an INVALID invite code format
+    let msg = WsMessage::Presence {
+        from_pseudo: "BadPeer".into(),
+        from_invite_code: "not-a-valid-code".into(),
+        online: true,
+    };
+    sender
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            serde_json::to_string(&msg).unwrap().into(),
+        ))
+        .await
+        .unwrap();
+
+    // Give the server a moment to process
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // The message should NOT have been relayed (invalid format → rejected)
+    let result = broadcast_rx.try_recv();
+    assert!(
+        result.is_err(),
+        "Message with invalid invite code should NOT be relayed, but got: {:?}",
+        result
+    );
+}
+
+/// WS accepts known invite code from a contact in the DB.
+#[tokio::test]
+async fn ws_accepts_known_invite_code() {
+    let state = test_state();
+
+    // Insert a contact into the DB
+    let contact = kronn::models::Contact {
+        id: "contact-1".into(),
+        pseudo: "PeerDelta".into(),
+        avatar_email: None,
+        kronn_url: "http://10.0.0.50:3456".into(),
+        invite_code: "kronn:PeerDelta@10.0.0.50:3456".into(),
+        status: "accepted".into(),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    let c = contact.clone();
+    state
+        .db
+        .with_conn(move |conn| kronn::db::contacts::insert_contact(conn, &c))
+        .await
+        .unwrap();
+
+    let addr = start_test_server(state.clone()).await;
+    let mut broadcast_rx = state.ws_broadcast.subscribe();
+
+    let url = format!("ws://{}/api/ws", addr);
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("WS connect failed");
+    let (mut sender, _receiver) = StreamExt::split(ws_stream);
+
+    // Send presence with the KNOWN invite code
+    let msg = WsMessage::Presence {
+        from_pseudo: "PeerDelta".into(),
+        from_invite_code: "kronn:PeerDelta@10.0.0.50:3456".into(),
+        online: true,
+    };
+    sender
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            serde_json::to_string(&msg).unwrap().into(),
+        ))
+        .await
+        .unwrap();
+
+    // Should be forwarded to broadcast (not rejected)
+    let received = tokio::time::timeout(std::time::Duration::from_secs(2), broadcast_rx.recv())
+        .await
+        .expect("timeout — message should have been relayed")
+        .expect("recv error");
+
+    match received {
+        WsMessage::Presence {
+            from_pseudo,
+            online,
+            ..
+        } => {
+            assert_eq!(from_pseudo, "PeerDelta");
+            assert!(online);
+        }
+        _ => panic!("Expected Presence, got {:?}", received),
+    }
+}
+
+/// Two WS clients connected simultaneously both receive broadcast messages.
+#[tokio::test]
+async fn ws_multiple_clients_receive_broadcast() {
+    let state = test_state();
+    let addr = start_test_server(state.clone()).await;
+    let url = format!("ws://{}/api/ws", addr);
+
+    // Connect two clients
+    let (ws1, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let (ws2, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+    let (_sender1, mut receiver1) = StreamExt::split(ws1);
+    let (_sender2, mut receiver2) = StreamExt::split(ws2);
+
+    // Broadcast a message
+    let msg = WsMessage::Presence {
+        from_pseudo: "PeerEpsilon".into(),
+        from_invite_code: "".into(),
+        online: true,
+    };
+    state.ws_broadcast.send(msg).unwrap();
+
+    // Both clients should receive it
+    let r1 = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        StreamExt::next(&mut receiver1),
+    )
+    .await
+    .expect("client 1 timeout");
+
+    let r2 = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        StreamExt::next(&mut receiver2),
+    )
+    .await
+    .expect("client 2 timeout");
+
+    assert!(r1.is_some(), "Client 1 should receive message");
+    assert!(r2.is_some(), "Client 2 should receive message");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Multi-user P2P Chat Tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Sharing a discussion generates a shared_id and broadcasts DiscussionInvite.
+#[tokio::test]
+async fn share_discussion_creates_shared_id() {
+    let state = test_state();
+    let app = build_router_with_auth(state.clone(), false);
+
+    // Create a discussion first
+    let create_body = serde_json::json!({
+        "title": "Test Chat",
+        "agent": "ClaudeCode",
+        "initial_prompt": "Hello",
+        "language": "fr"
+    });
+    let (status, body) = post_json(app.clone(), "/api/discussions", create_body).await;
+    assert_eq!(status, StatusCode::OK);
+    let disc_id = body["data"]["id"].as_str().unwrap().to_string();
+
+    // Create a contact to share with
+    let contact = kronn::models::Contact {
+        id: "contact-share-1".into(),
+        pseudo: "PeerTest".into(),
+        avatar_email: None,
+        kronn_url: "http://10.0.0.99:3456".into(),
+        invite_code: "kronn:PeerTest@10.0.0.99:3456".into(),
+        status: "accepted".into(),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    state.db.with_conn(move |conn| {
+        kronn::db::contacts::insert_contact(conn, &contact)
+    }).await.unwrap();
+
+    // Subscribe to broadcast to catch the DiscussionInvite
+    let mut broadcast_rx = state.ws_broadcast.subscribe();
+
+    // Share the discussion
+    let share_body = serde_json::json!({ "contact_ids": ["contact-share-1"] });
+    let (status, body) = post_json(app.clone(), &format!("/api/discussions/{}/share", disc_id), share_body).await;
+    assert_eq!(status, StatusCode::OK);
+    let shared_id = body["data"].as_str().unwrap();
+    assert!(!shared_id.is_empty(), "shared_id should be generated");
+
+    // Verify DiscussionInvite was broadcast
+    let received = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        broadcast_rx.recv(),
+    ).await.expect("timeout").expect("recv error");
+
+    match received {
+        WsMessage::DiscussionInvite { shared_discussion_id, title, .. } => {
+            assert_eq!(shared_discussion_id, shared_id);
+            assert_eq!(title, "Test Chat");
+        }
+        _ => panic!("Expected DiscussionInvite, got {:?}", received),
+    }
+
+    // Verify discussion now has shared_id in DB
+    let disc = state.db.with_conn(move |conn| {
+        kronn::db::discussions::get_discussion(conn, &disc_id)
+    }).await.unwrap().unwrap();
+    assert_eq!(disc.shared_id.as_deref(), Some(shared_id));
+    assert!(disc.shared_with.contains(&"contact-share-1".to_string()));
+}
+
+/// ChatMessage from a remote peer is inserted into the local shared discussion.
+#[tokio::test]
+async fn ws_chat_message_inserts_into_shared_discussion() {
+    let state = test_state();
+    let addr = start_test_server(state.clone()).await;
+
+    // Create a discussion with a shared_id
+    let now = chrono::Utc::now();
+    let disc = kronn::models::Discussion {
+        id: "disc-chat-test".into(),
+        project_id: None,
+        title: "Shared Chat".into(),
+        agent: kronn::models::AgentType::ClaudeCode,
+        language: "fr".into(),
+        participants: vec![],
+        messages: vec![],
+        message_count: 0,
+        skill_ids: vec![],
+        profile_ids: vec![],
+        directive_ids: vec![],
+        archived: false,
+        workspace_mode: "Direct".into(),
+        workspace_path: None,
+        worktree_branch: None,
+        tier: kronn::models::ModelTier::Default,
+        pin_first_message: false,
+        summary_cache: None,
+        summary_up_to_msg_idx: None,
+        shared_id: Some("shared-abc-123".into()),
+        shared_with: vec![],
+        created_at: now,
+        updated_at: now,
+    };
+    let d = disc.clone();
+    state.db.with_conn(move |conn| {
+        kronn::db::discussions::insert_discussion(conn, &d)
+    }).await.unwrap();
+
+    // Connect via WS and send a ChatMessage
+    let url = format!("ws://{}/api/ws", addr);
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.expect("WS connect failed");
+    let (mut sender, _receiver) = StreamExt::split(ws_stream);
+
+    let chat_msg = WsMessage::ChatMessage {
+        shared_discussion_id: "shared-abc-123".into(),
+        message_id: "remote-msg-001".into(),
+        from_pseudo: "RemotePeer".into(),
+        from_avatar_email: None,
+        from_invite_code: "kronn:RemotePeer@10.0.0.50:3456".into(),
+        content: "Hello from the other side!".into(),
+        timestamp: now.timestamp_millis(),
+    };
+    sender.send(tokio_tungstenite::tungstenite::Message::Text(
+        serde_json::to_string(&chat_msg).unwrap().into(),
+    )).await.unwrap();
+
+    // Give the handler time to process
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // Verify the message was inserted into the local discussion
+    let updated_disc = state.db.with_conn(move |conn| {
+        kronn::db::discussions::get_discussion(conn, "disc-chat-test")
+    }).await.unwrap().unwrap();
+
+    assert_eq!(updated_disc.messages.len(), 1, "Should have 1 message from remote peer");
+    assert_eq!(updated_disc.messages[0].id, "remote-msg-001");
+    assert_eq!(updated_disc.messages[0].content, "Hello from the other side!");
+    assert_eq!(updated_disc.messages[0].author_pseudo.as_deref(), Some("RemotePeer"));
+}
+
+/// DiscussionInvite creates a new local discussion with the shared_id.
+#[tokio::test]
+async fn ws_discussion_invite_creates_local_discussion() {
+    let state = test_state();
+    let addr = start_test_server(state.clone()).await;
+
+    // Connect via WS and send a DiscussionInvite
+    let url = format!("ws://{}/api/ws", addr);
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.expect("WS connect failed");
+    let (mut sender, _receiver) = StreamExt::split(ws_stream);
+
+    let invite = WsMessage::DiscussionInvite {
+        shared_discussion_id: "shared-invite-xyz".into(),
+        title: "Design Review".into(),
+        from_pseudo: "Alice".into(),
+        from_invite_code: "kronn:Alice@10.0.0.1:3456".into(),
+    };
+    sender.send(tokio_tungstenite::tungstenite::Message::Text(
+        serde_json::to_string(&invite).unwrap().into(),
+    )).await.unwrap();
+
+    // Give the handler time to process
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // Verify a discussion was created with the shared_id
+    let disc_id = state.db.with_conn(move |conn| {
+        kronn::db::discussions::find_discussion_by_shared_id(conn, "shared-invite-xyz")
+    }).await.unwrap();
+
+    assert!(disc_id.is_some(), "Discussion should have been created from invite");
+
+    let disc = state.db.with_conn(move |conn| {
+        kronn::db::discussions::get_discussion(conn, &disc_id.unwrap())
+    }).await.unwrap().unwrap();
+
+    assert!(disc.title.contains("Design Review"));
+    assert!(disc.title.contains("Alice"));
+    assert_eq!(disc.shared_id.as_deref(), Some("shared-invite-xyz"));
+}
+
+/// Duplicate ChatMessage (same message_id) is not inserted twice.
+#[tokio::test]
+async fn ws_chat_message_idempotent() {
+    let state = test_state();
+    let addr = start_test_server(state.clone()).await;
+
+    // Create a shared discussion
+    let now = chrono::Utc::now();
+    let disc = kronn::models::Discussion {
+        id: "disc-idempotent".into(),
+        project_id: None,
+        title: "Idempotent Test".into(),
+        agent: kronn::models::AgentType::ClaudeCode,
+        language: "fr".into(),
+        participants: vec![],
+        messages: vec![],
+        message_count: 0,
+        skill_ids: vec![],
+        profile_ids: vec![],
+        directive_ids: vec![],
+        archived: false,
+        workspace_mode: "Direct".into(),
+        workspace_path: None,
+        worktree_branch: None,
+        tier: kronn::models::ModelTier::Default,
+        pin_first_message: false,
+        summary_cache: None,
+        summary_up_to_msg_idx: None,
+        shared_id: Some("shared-idem-001".into()),
+        shared_with: vec![],
+        created_at: now,
+        updated_at: now,
+    };
+    let d = disc.clone();
+    state.db.with_conn(move |conn| {
+        kronn::db::discussions::insert_discussion(conn, &d)
+    }).await.unwrap();
+
+    // Connect and send the same ChatMessage twice
+    let url = format!("ws://{}/api/ws", addr);
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.expect("WS connect failed");
+    let (mut sender, _receiver) = StreamExt::split(ws_stream);
+
+    let chat_msg = WsMessage::ChatMessage {
+        shared_discussion_id: "shared-idem-001".into(),
+        message_id: "msg-duplicate-001".into(),
+        from_pseudo: "PeerAlpha".into(),
+        from_avatar_email: None,
+        from_invite_code: "kronn:PeerAlpha@10.0.0.1:3456".into(),
+        content: "This message should appear once".into(),
+        timestamp: now.timestamp_millis(),
+    };
+
+    // Send twice
+    let json = serde_json::to_string(&chat_msg).unwrap();
+    sender.send(tokio_tungstenite::tungstenite::Message::Text(json.clone().into())).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    sender.send(tokio_tungstenite::tungstenite::Message::Text(json.into())).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // Verify only 1 message exists
+    let updated = state.db.with_conn(move |conn| {
+        kronn::db::discussions::get_discussion(conn, "disc-idempotent")
+    }).await.unwrap().unwrap();
+
+    assert_eq!(updated.messages.len(), 1, "Duplicate message should not be inserted twice");
 }

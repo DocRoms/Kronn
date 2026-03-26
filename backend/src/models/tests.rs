@@ -281,3 +281,64 @@ fn full_access_for_returns_per_agent_setting() {
     assert!(config.full_access_for(&AgentType::Vibe));
     assert!(!config.full_access_for(&AgentType::Custom));
 }
+
+// ─── WsMessage ──────────────────────────────────────────────────────────
+
+#[test]
+fn ws_message_presence_round_trip() {
+    let msg = WsMessage::Presence {
+        from_pseudo: "PeerAlpha".into(),
+        from_invite_code: "kronn:PeerAlpha@100.64.1.5:3456".into(),
+        online: true,
+    };
+    let json = serde_json::to_string(&msg).unwrap();
+    assert!(json.contains(r#""type":"presence""#));
+    assert!(json.contains("PeerAlpha"));
+    let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+    match parsed {
+        WsMessage::Presence { from_pseudo, online, .. } => {
+            assert_eq!(from_pseudo, "PeerAlpha");
+            assert!(online);
+        }
+        _ => panic!("Expected Presence variant"),
+    }
+}
+
+#[test]
+fn ws_message_ping_pong_round_trip() {
+    let ping = WsMessage::Ping { timestamp: 1711000000 };
+    let json = serde_json::to_string(&ping).unwrap();
+    assert!(json.contains(r#""type":"ping""#));
+    let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+    match parsed {
+        WsMessage::Ping { timestamp } => assert_eq!(timestamp, 1711000000),
+        _ => panic!("Expected Ping variant"),
+    }
+
+    let pong = WsMessage::Pong { timestamp: 1711000001 };
+    let json = serde_json::to_string(&pong).unwrap();
+    assert!(json.contains(r#""type":"pong""#));
+    let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+    match parsed {
+        WsMessage::Pong { timestamp } => assert_eq!(timestamp, 1711000001),
+        _ => panic!("Expected Pong variant"),
+    }
+}
+
+#[test]
+fn ws_message_presence_offline() {
+    let msg = WsMessage::Presence {
+        from_pseudo: "PeerBeta".into(),
+        from_invite_code: "kronn:PeerBeta@10.0.0.2:3456".into(),
+        online: false,
+    };
+    let json = serde_json::to_string(&msg).unwrap();
+    let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+    match parsed {
+        WsMessage::Presence { from_pseudo, online, .. } => {
+            assert_eq!(from_pseudo, "PeerBeta");
+            assert!(!online);
+        }
+        _ => panic!("Expected Presence variant"),
+    }
+}

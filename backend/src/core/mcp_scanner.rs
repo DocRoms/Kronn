@@ -117,7 +117,7 @@ pub fn write_mcp_json_to_subpath(project_path: &str, subpath: &str, data: &McpJs
 
 /// Write content to a file atomically: write to a temp sibling then rename.
 /// This prevents agents from reading a partially-written config file.
-fn atomic_write(target: &Path, content: &str) -> Result<(), String> {
+pub(crate) fn atomic_write(target: &Path, content: &str) -> Result<(), String> {
     let tmp = target.with_extension("tmp");
     std::fs::write(&tmp, content)
         .map_err(|e| format!("Failed to write temp {}: {}", tmp.display(), e))?;
@@ -403,6 +403,18 @@ pub fn sync_project_mcps_to_disk(
         // MCP context files are only created when the user explicitly writes
         // custom instructions via the UI (write_mcp_context). No auto-creation
         // of empty/template files — they add no value and pollute the project.
+    }
+
+    // ── Native skill & profile files (SKILL.md, agent files) ──
+    // Full sync with cleanup: removes stale files from deselected skills/profiles.
+    // Safe here because this runs at startup / project config change, not per-discussion.
+    {
+        let profile_ids: Vec<String> = project.default_profile_id.iter().cloned().collect();
+        if let Err(e) = crate::core::native_files::sync_project_native_files_full(
+            &project.path, &project.default_skill_ids, &profile_ids,
+        ) {
+            tracing::warn!("Failed to sync native files for {}: {}", project.path, e);
+        }
     }
 
     // ── Ensure redirector files exist (auto-update for projects with ai/) ──

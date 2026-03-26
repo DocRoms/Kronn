@@ -58,10 +58,19 @@ Three Docker services behind nginx gateway:
 - **User identity**: `pseudo` and `avatar_email` in `ServerConfig`. Messages store `author_pseudo`/`author_avatar_email` (migration 021). Gravatar avatar (SHA-256) displayed in user message bubbles + Settings UI.
 - **Copy button**: on every agent message (header + footer) and on markdown tables/code blocks via `CopyableBlock` wrapper. Tables copied as TSV.
 - **Response time**: per agent message, computed frontend-side as `timestamp(agent) - timestamp(previous user)`.
-- **Performance**: `MessageBubble` extracted as `memo` component, streaming uses `<pre>` instead of markdown, auto-scroll throttled, `chatInput` non-controlled, styles pre-computed as static objects.
+- **Performance**: `MessageBubble` extracted as `memo` component, streaming uses `<pre>` instead of markdown, auto-scroll throttled, `chatInput` non-controlled.
+- **Component split (2026-03-28)**: DiscussionsPage split into 7 files: orchestrator (1218L) + ChatHeader, ChatInput, DiscussionSidebar, NewDiscussionForm, MessageBubble, SwipeableDiscItem.
+- **CSS system (2026-03-28)**: token-based CSS (`src/styles/tokens.css`, `utilities.css`, `components.css`) + per-page CSS. No CSS framework.
+- **Backend split (2026-03-28)**: `projects.rs` split into projects (1396L) + audit (1848L) + ai_docs (184L) + discover (426L).
 - **Vibe agent**: uses `vibe-runner.py` (calls `run_programmatic()` SDK directly, bypasses CLI stdin hang). Falls back to Mistral API if vibe not installed.
 - **Multi-line input**: `<textarea>` with auto-resize (Shift+Enter for newlines, Enter to send).
 - **Full access badge**: "Full access" indicator on agent messages when `full_access: true`.
+- **Multi-user (Phase 1 — contacts + Phase 2 — WebSocket sync)**: `contacts` table (migration 022) with CRUD API (`/api/contacts`). Invite code format `kronn:pseudo@host:port`. Sidebar section shows contacts with online/offline status via real-time WebSocket. Settings > Identity displays the invite code.
+  - **WebSocket server**: `GET /api/ws` — accepts connections from local frontend and remote Kronn peers. Auth via `?token=` query param. Messages dispatched through `AppState.ws_broadcast` (tokio broadcast channel).
+  - **WebSocket client manager**: background task (`core/ws_client.rs`) maintains outbound WS connections to all contacts. Reconnects with exponential backoff (1s → 60s). Emits presence online/offline events.
+  - **Frontend hook**: `useWebSocket.ts` — single WS connection to own backend, auto-reconnect, 30s heartbeat ping. Replaces HTTP polling for contact presence.
+  - **Protocol**: JSON tagged union `WsMessage` — variants: `presence`, `ping`, `pong`. Phase 3 (discussion sharing + pause IA) planned.
+- **Cross-platform**: `core/env.rs` provides `is_docker()` and `host_os_label()`. Docker-specific logic (chown, safe.directory, /host-home) is conditional. Agent uninstall commands use `#[cfg(unix)]`/`#[cfg(windows)]`. Tauri desktop app embeds the backend with `get_backend_url` command.
 
 ### Security & auth
 
@@ -149,6 +158,13 @@ All three axes are available in:
 - Discussions (profile/skill/directive selectors in new discussion form)
 - Workflow steps (per-step selectors)
 - AI audit pipeline (default profiles: Architect + Tech Lead + Mentor)
+
+**Native file sync (2026-03-27)**: Skills and profiles are also written as native agent files for progressive discovery:
+- Skills → `SKILL.md` in `.claude/skills/`, `.agents/skills/` (Codex), `.gemini/skills/` — agents load name+description at startup, full content on demand (~95% token savings vs prompt injection)
+- Profiles → agent files in `.claude/agents/`, `.gemini/agents/`, `.codex/agents/` — agents discover them as sub-agents
+- Vibe/Kiro: fallback to prompt injection (Vibe uses custom runner, Kiro headless unconfirmed)
+- Sync: additive per discussion (no cleanup), full cleanup at startup + project config change
+- Module: `core/native_files.rs`
 
 ### Workflows (implemented — replaces scheduled tasks)
 

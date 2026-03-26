@@ -51,12 +51,14 @@ pub async fn load() -> Result<Option<AppConfig>> {
         tracing::info!("Generated encryption secret for existing config");
     }
 
-    // Auth token is opt-in — user enables it from the Settings UI.
-    // Remove tokens from old auto-generation (before auth_enabled flag existed).
-    if config.server.auth_token.is_some() && !config.server.auth_enabled {
-        config.server.auth_token = None;
+    // Auto-generate auth token on first launch.
+    // Auth is on by default — localhost requests bypass it (see auth_middleware),
+    // but remote peers (multi-user) must provide the token.
+    if config.server.auth_token.is_none() {
+        config.server.auth_token = Some(uuid::Uuid::new_v4().to_string());
+        config.server.auth_enabled = true;
         needs_save = true;
-        tracing::info!("Removed legacy auto-generated auth token — re-enable from Settings UI");
+        tracing::info!("Generated auth token for API security (localhost exempt, peers require Bearer token)");
     }
 
     // Migrate legacy single-key fields to multi-key system

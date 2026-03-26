@@ -1,0 +1,447 @@
+import { useState, useEffect } from 'react';
+import '../pages/DiscussionsPage.css';
+import { skills as skillsApi, profiles as profilesApi, directives as directivesApi } from '../lib/api';
+import type { Project, AgentDetection, AgentType, AgentsConfig, Skill, AgentProfile, Directive } from '../types/generated';
+import { AGENT_LABELS, isAgentRestricted as isAgentRestrictedUtil, isUsable, isHiddenPath } from '../lib/constants';
+import {
+  Folder, ChevronRight, GitBranch,
+  MessageSquare, X, AlertTriangle,
+  Settings, Check, Zap, UserCircle, FileText,
+} from 'lucide-react';
+
+// ─── Public types ────────────────────────────────────────────────────────────
+
+export interface NewDiscConfig {
+  title: string;
+  agent: AgentType;
+  projectId: string | null;
+  prompt: string;
+  skillIds: string[];
+  profileIds: string[];
+  directiveIds: string[];
+  workspaceMode: 'Direct' | 'Isolated';
+  tier: 'economy' | 'default' | 'reasoning';
+  branchName: string;
+  baseBranch: string;
+}
+
+export interface NewDiscussionFormProps {
+  projects: Project[];
+  agents: AgentDetection[];
+  configLanguage: string | null;
+  agentAccess: AgentsConfig | null;
+  prefill?: { projectId: string; title: string; prompt: string; locked?: boolean } | null;
+  onSubmit: (config: NewDiscConfig) => void;
+  onClose: () => void;
+  onPrefillConsumed?: () => void;
+  onNavigate: (page: string) => void;
+  t: (key: string, ...args: any[]) => string;
+}
+
+// ─── Component ───────────────────────────────────────────────────────────────
+
+export function NewDiscussionForm({
+  projects,
+  agents,
+  agentAccess,
+  prefill,
+  onSubmit,
+  onClose,
+  onPrefillConsumed,
+  onNavigate,
+  t,
+}: NewDiscussionFormProps) {
+  // ─── Internal state ──────────────────────────────────────────────────────
+  const [newDiscTitle, setNewDiscTitle] = useState('');
+  const [newDiscAgent, setNewDiscAgent] = useState<AgentType | ''>('');
+  const [newDiscProjectId, setNewDiscProjectId] = useState<string>('');
+  const [newDiscPrompt, setNewDiscPrompt] = useState('');
+  const [newDiscPrefilled, setNewDiscPrefilled] = useState(false);
+  const [showAdvancedOptions, setShowAdvancedOptions] = useState(false);
+
+  const [availableSkills, setAvailableSkills] = useState<Skill[]>([]);
+  const [newDiscSkillIds, setNewDiscSkillIds] = useState<string[]>([]);
+  const [availableProfiles, setAvailableProfiles] = useState<AgentProfile[]>([]);
+  const [newDiscProfileIds, setNewDiscProfileIds] = useState<string[]>([]);
+  const [newDiscDirectiveIds, setNewDiscDirectiveIds] = useState<string[]>([]);
+  const [availableDirectives, setAvailableDirectives] = useState<Directive[]>([]);
+  const [newDiscWorkspaceMode, setNewDiscWorkspaceMode] = useState<'Direct' | 'Isolated'>('Direct');
+  const [newDiscTier, setNewDiscTier] = useState<'economy' | 'default' | 'reasoning'>('default');
+  const [newDiscBranchName, setNewDiscBranchName] = useState('');
+  const [newDiscBaseBranch, setNewDiscBaseBranch] = useState('main');
+
+  // ─── Derived ─────────────────────────────────────────────────────────────
+  const installedAgentsList = agents.filter(isUsable);
+
+  const isAgentRestricted = (agentType: AgentType): boolean =>
+    isAgentRestrictedUtil(agentAccess ?? undefined, agentType);
+
+  // ─── Effects ─────────────────────────────────────────────────────────────
+
+  // Fetch available skills, profiles, directives
+  useEffect(() => {
+    skillsApi.list().then(setAvailableSkills).catch(() => {});
+    profilesApi.list().then(setAvailableProfiles).catch(() => {});
+    directivesApi.list().then(setAvailableDirectives).catch(() => {});
+  }, []);
+
+  // Auto-select first installed agent if current selection is invalid
+  useEffect(() => {
+    if (installedAgentsList.length > 0 && !installedAgentsList.some(a => a.agent_type === newDiscAgent)) {
+      setNewDiscAgent(installedAgentsList[0].agent_type);
+    }
+  }, [installedAgentsList.length, newDiscAgent]);
+
+  // Handle prefill from parent (e.g. "validate audit" button on Projects page)
+  useEffect(() => {
+    if (prefill) {
+      // Lock fields only when explicitly requested (validation audit)
+      setNewDiscPrefilled(!!prefill.locked);
+      setNewDiscProjectId(prefill.projectId);
+      setNewDiscTitle(prefill.title);
+      setNewDiscPrompt(prefill.prompt);
+      // Auto-select mandatory profiles for audit validation
+      const validationProfileIds = ['architect', 'tech-lead', 'qa-engineer'];
+      setNewDiscProfileIds(validationProfileIds);
+      onPrefillConsumed?.();
+    }
+  }, [prefill, onPrefillConsumed]);
+
+  // ─── Callbacks ───────────────────────────────────────────────────────────
+
+  const handleClose = () => {
+    setNewDiscPrefilled(false);
+    setNewDiscWorkspaceMode('Direct');
+    setNewDiscBranchName('');
+    setNewDiscBaseBranch('main');
+    onClose();
+  };
+
+  const handleCreate = () => {
+    if (!newDiscPrompt.trim() || !newDiscAgent) return;
+    onSubmit({
+      title: newDiscTitle.trim() || newDiscPrompt.trim().slice(0, 60),
+      agent: newDiscAgent as AgentType,
+      projectId: newDiscProjectId || null,
+      prompt: newDiscPrompt.trim(),
+      skillIds: newDiscSkillIds,
+      profileIds: newDiscProfileIds,
+      directiveIds: newDiscDirectiveIds,
+      workspaceMode: newDiscWorkspaceMode,
+      tier: newDiscTier,
+      branchName: newDiscBranchName,
+      baseBranch: newDiscBaseBranch,
+    });
+  };
+
+  // ─── Render ──────────────────────────────────────────────────────────────
+
+  return (
+    <div className="disc-new-overlay">
+      <div
+        className="disc-new-card"
+        onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && newDiscPrompt.trim()) handleCreate(); }}
+      >
+        <div className="disc-new-header">
+          <span className="disc-new-title">{t('disc.newTitle')}</span>
+          <button className="disc-icon-btn" onClick={handleClose} aria-label="Close"><X size={14} /></button>
+        </div>
+
+        <div className="disc-new-grid">
+          <div>
+            <label className="disc-form-label">{t('disc.project')}</label>
+            <select className="disc-select-styled" data-locked={newDiscPrefilled} value={newDiscProjectId} onChange={e => {
+              const pid = e.target.value;
+              setNewDiscProjectId(pid);
+              const proj = projects.find(p => p.id === pid);
+              if (proj?.default_skill_ids?.length) setNewDiscSkillIds(proj.default_skill_ids);
+              setNewDiscWorkspaceMode('Direct');
+              setNewDiscBranchName('');
+              setNewDiscBaseBranch('main');
+            }} disabled={newDiscPrefilled}>
+              <option value="">{t('disc.noProject')}</option>
+              {projects.filter(p => !isHiddenPath(p.path)).map(p => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="disc-form-label">{t('disc.agent')}</label>
+            <select className="disc-select-styled" value={newDiscAgent} onChange={e => setNewDiscAgent(e.target.value as AgentType)}>
+              {installedAgentsList.map(a => (
+                <option key={a.name} value={a.agent_type}>{a.name}</option>
+              ))}
+              {installedAgentsList.length === 0 && (
+                <option value="" disabled>{t('disc.noAgent')}</option>
+              )}
+            </select>
+          </div>
+        </div>
+
+        {newDiscAgent && isAgentRestricted(newDiscAgent as AgentType) && (
+          <div className="disc-restricted-warn">
+            <AlertTriangle size={11} style={{ color: '#ffb400', flexShrink: 0 }} />
+            <span className="disc-restricted-warn-text">
+              {t('config.restrictedAgent', AGENT_LABELS[newDiscAgent] ?? newDiscAgent)}
+              {' — '}
+              <span style={{ cursor: 'pointer', textDecoration: 'underline' }} onClick={() => { onClose(); onNavigate('settings'); }}>{t('config.restrictedAgentLink')}</span>
+            </span>
+          </div>
+        )}
+
+        {/* Workspace mode toggle — only for git projects */}
+        {(() => {
+          const selectedProj = projects.find(p => p.id === newDiscProjectId);
+          if (!newDiscProjectId || !selectedProj?.repo_url) return null;
+          return (
+            <div style={{ marginBottom: 12 }}>
+              <label className="disc-form-label">{t('disc.workspaceDirect').replace(/.*/, 'Workspace')}</label>
+              <div className="disc-workspace-toggle">
+                <button
+                  type="button"
+                  className="disc-workspace-btn"
+                  data-active={newDiscWorkspaceMode === 'Direct'}
+                  data-mode="direct"
+                  onClick={() => { setNewDiscWorkspaceMode('Direct'); setNewDiscBranchName(''); }}
+                >
+                  <Folder size={12} />
+                  <div>
+                    <div className="disc-workspace-btn-title">{t('disc.workspaceDirect')}</div>
+                    <div className="disc-workspace-btn-desc">{t('disc.workspaceDirectDesc')}</div>
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setNewDiscWorkspaceMode('Isolated');
+                    if (!newDiscBranchName) {
+                      const title = newDiscTitle.trim();
+                      const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+                      setNewDiscBranchName(slug || `disc-${Date.now()}`);
+                    }
+                  }}
+                  className="disc-workspace-btn"
+                  data-active={newDiscWorkspaceMode === 'Isolated'}
+                  data-mode="isolated"
+                >
+                  <GitBranch size={12} />
+                  <div>
+                    <div className="disc-workspace-btn-title">{t('disc.workspaceIsolated')}</div>
+                    <div className="disc-workspace-btn-desc">{t('disc.workspaceIsolatedDesc')}</div>
+                  </div>
+                </button>
+              </div>
+              {newDiscWorkspaceMode === 'Isolated' && (
+                <div className="disc-workspace-branch-grid">
+                  <div>
+                    <label className="disc-form-label" data-size="xs">{t('disc.branchName')}</label>
+                    <input
+                      className="disc-input-styled"
+                      value={newDiscBranchName}
+                      onChange={e => setNewDiscBranchName(e.target.value)}
+                      placeholder="feature/my-branch"
+                    />
+                  </div>
+                  <div>
+                    <label className="disc-form-label" data-size="xs">{t('disc.baseBranch')}</label>
+                    <input
+                      className="disc-input-styled"
+                      value={newDiscBaseBranch}
+                      onChange={e => setNewDiscBaseBranch(e.target.value)}
+                      placeholder="main"
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
+        {/* Advanced options (collapsible) */}
+        {(availableSkills.length > 0 || availableProfiles.length > 0 || availableDirectives.length > 0) && (
+          <div style={{ marginBottom: 12 }}>
+            <button
+              type="button"
+              className="disc-advanced-toggle"
+              onClick={() => setShowAdvancedOptions(prev => !prev)}
+            >
+              <ChevronRight size={11} className="disc-chevron" data-expanded={showAdvancedOptions} />
+              <Settings size={10} />
+              {t('disc.advancedOptions')}
+              {(newDiscSkillIds.length > 0 || newDiscProfileIds.length > 0 || newDiscDirectiveIds.length > 0 || newDiscTier !== 'default') && (
+                <span className="disc-advanced-count">
+                  ({newDiscSkillIds.length + newDiscProfileIds.length + newDiscDirectiveIds.length}{newDiscTier !== 'default' ? ` · ${newDiscTier === 'economy' ? '⚡' : '🧠'}` : ''})
+                </span>
+              )}
+            </button>
+
+            {showAdvancedOptions && (
+              <div className="disc-advanced-panel">
+
+                {/* Model tier selector */}
+                <div className="disc-advanced-section">
+                  <div className="disc-advanced-section-label">{t('disc.modelTier')}</div>
+                  <div style={{ display: 'flex', gap: 4 }}>
+                    {(['economy', 'default', 'reasoning'] as const).map(tier => (
+                      <button key={tier} type="button" className="disc-tier-btn" data-active={newDiscTier === tier} data-tier={tier} onClick={() => setNewDiscTier(tier)}>
+                        {tier === 'economy' ? '⚡' : tier === 'reasoning' ? '🧠' : '⚙️'} {t(`disc.tier.${tier}`)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Skills selector */}
+                {availableSkills.length > 0 && (
+                  <div className="disc-advanced-section">
+                    <label className="disc-advanced-section-label"><Zap size={10} />{t('skills.selectSkills')}</label>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                      {availableSkills.map(skill => {
+                        const selected = newDiscSkillIds.includes(skill.id);
+                        return (
+                          <button
+                            key={skill.id}
+                            type="button"
+                            className="disc-chip"
+                            data-active={selected}
+                            data-color="accent"
+                            onClick={() => {
+                              setNewDiscSkillIds(prev =>
+                                selected ? prev.filter(id => id !== skill.id) : [...prev, skill.id]
+                              );
+                            }}
+                            title={skill.description || skill.name}
+                          >
+                            {selected && <Check size={9} />}
+                            {skill.name}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Profile selector */}
+                {availableProfiles.length > 0 && (
+                  <div className="disc-advanced-section">
+                    <label className="disc-advanced-section-label"><UserCircle size={10} />{t('profiles.select')}</label>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                      <button
+                        type="button"
+                        className="disc-chip"
+                        data-active={newDiscProfileIds.length === 0}
+                        data-color="purple"
+                        onClick={() => setNewDiscProfileIds([])}
+                      >
+                        {t('profiles.none')}
+                      </button>
+                      {availableProfiles.map(profile => {
+                        const selected = newDiscProfileIds.includes(profile.id);
+                        return (
+                          <button
+                            key={profile.id}
+                            type="button"
+                            className="disc-chip"
+                            data-active={selected}
+                            data-color="purple"
+                            onClick={() => setNewDiscProfileIds(prev => selected ? prev.filter(id => id !== profile.id) : [...prev, profile.id])}
+                            title={profile.role}
+                            style={selected && profile.color ? { borderColor: profile.color, background: `${profile.color}15`, color: profile.color } : undefined}
+                          >
+                            {selected && <Check size={9} />}
+                            {profile.avatar} {profile.persona_name || profile.name}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Directive selector */}
+                {availableDirectives.length > 0 && (
+                  <div>
+                    <label className="disc-advanced-section-label"><FileText size={10} />{t('directives.title')}</label>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                      {availableDirectives.map(directive => {
+                        const selected = newDiscDirectiveIds.includes(directive.id);
+                        return (
+                          <button
+                            key={directive.id}
+                            type="button"
+                            className="disc-chip"
+                            data-active={selected}
+                            data-color="warning"
+                            onClick={() => {
+                              setNewDiscDirectiveIds(prev =>
+                                selected ? prev.filter(id => id !== directive.id) : [...prev, directive.id]
+                              );
+                            }}
+                            title={directive.description || directive.name}
+                          >
+                            {selected && <Check size={9} />}
+                            {directive.icon} {directive.name}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        <label className="disc-form-label">{t('disc.title')}</label>
+        <input
+          className="disc-input-styled"
+          data-locked={newDiscPrefilled}
+          placeholder={t('disc.titlePlaceholder')}
+          value={newDiscTitle}
+          onChange={e => {
+            if (newDiscPrefilled) return;
+            const val = e.target.value;
+            setNewDiscTitle(val);
+            if (newDiscWorkspaceMode === 'Isolated') {
+              const slug = val.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+              setNewDiscBranchName(slug || `disc-${Date.now()}`);
+            }
+          }}
+          readOnly={newDiscPrefilled}
+        />
+
+        <label className="disc-form-label" style={{ marginTop: 12 }}>{t('disc.prompt')}</label>
+        <textarea
+          className="disc-textarea-styled"
+          data-locked={newDiscPrefilled}
+          placeholder={t('disc.promptPlaceholder')}
+          value={newDiscPrompt}
+          onChange={e => !newDiscPrefilled && setNewDiscPrompt(e.target.value)}
+          readOnly={newDiscPrefilled}
+          rows={4}
+          autoFocus={!newDiscPrefilled}
+        />
+
+        {/* Warnings for validation discussion */}
+        {newDiscPrefilled && (
+          <div className="disc-audit-warn">
+            <p className="disc-audit-warn-title">
+              <AlertTriangle size={11} /> {t('disc.auditWarn')}
+            </p>
+            <p className="disc-audit-warn-hint">
+              {t('disc.auditHint')}
+            </p>
+          </div>
+        )}
+
+        <button
+          className="disc-create-btn"
+          data-ready={!!newDiscPrompt.trim()}
+          onClick={handleCreate}
+          disabled={!newDiscPrompt.trim() || !newDiscAgent}
+        >
+          <MessageSquare size={14} /> {t('disc.start')}
+          <span className="disc-create-shortcut">Ctrl+Enter</span>
+        </button>
+      </div>
+    </div>
+  );
+}

@@ -38,9 +38,13 @@ kronn.toml
 .env
 docker-compose.override.yml
 .docker/data/
+
+#ai
 .mcp.json
 .vibe/
 .gemini/
+.agents/
+.codex/
 .ai/mcp/
 .kiro/settings/
 .env

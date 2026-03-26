@@ -1,0 +1,50 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   Kronn Reset & Global Styles
+   Moved from index.html <style> block for proper CSS file management.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Font faces (self-hosted, GDPR compliant) ───────────────────────────── */
+@font-face { font-family: 'Inter'; font-weight: 400; font-display: swap; src: url('/fonts/inter-400.ttf') format('truetype'); }
+@font-face { font-family: 'Inter'; font-weight: 500; font-display: swap; src: url('/fonts/inter-500.ttf') format('truetype'); }
+@font-face { font-family: 'Inter'; font-weight: 600; font-display: swap; src: url('/fonts/inter-600.ttf') format('truetype'); }
+@font-face { font-family: 'Inter'; font-weight: 700; font-display: swap; src: url('/fonts/inter-700.ttf') format('truetype'); }
+@font-face { font-family: 'JetBrains Mono'; font-weight: 400; font-display: swap; src: url('/fonts/jetbrains-mono-400.ttf') format('truetype'); }
+@font-face { font-family: 'JetBrains Mono'; font-weight: 500; font-display: swap; src: url('/fonts/jetbrains-mono-500.ttf') format('truetype'); }
+@font-face { font-family: 'JetBrains Mono'; font-weight: 600; font-display: swap; src: url('/fonts/jetbrains-mono-600.ttf') format('truetype'); }
+@font-face { font-family: 'JetBrains Mono'; font-weight: 700; font-display: swap; src: url('/fonts/jetbrains-mono-700.ttf') format('truetype'); }
+
+/* ── Reset ──────────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: var(--kr-font-sans);
+  background: var(--kr-bg-base);
+  color: var(--kr-text-primary);
+  -webkit-font-smoothing: antialiased;
+}
+
+code, .mono { font-family: var(--kr-font-mono); }
+
+/* ── Scrollbar ──────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--kr-border-medium); border-radius: var(--kr-r-xs); }
+
+/* ── Selection ──────────────────────────────────────────────────────────── */
+::selection { background: rgba(var(--kr-accent-rgb), 0.3); }
+
+/* ── Focus ──────────────────────────────────────────────────────────────── */
+*:focus-visible { outline: 2px solid var(--kr-accent); outline-offset: 2px; }
+
+/* ── Keyframes ──────────────────────────────────────────────────────────── */
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+/* ── Reduced motion ─────────────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

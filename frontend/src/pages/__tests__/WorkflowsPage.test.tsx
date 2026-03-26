@@ -75,6 +75,7 @@ const wrap = async (ui: React.ReactElement) => {
   await act(async () => {
     result = render(<I18nProvider>{ui}</I18nProvider>);
   });
+  await act(async () => { await new Promise(r => setTimeout(r, 0)); });
   return result!;
 };
 
@@ -195,11 +196,11 @@ describe('WorkflowsPage', () => {
 
     // Wait for the detail to load and click "Edit"
     await waitFor(() => {
-      expect(screen.getByText('Editer')).toBeDefined();
+      expect(screen.getByText('Éditer')).toBeDefined();
     });
 
     await act(async () => {
-      fireEvent.click(screen.getByText('Editer'));
+      fireEvent.click(screen.getByText('Éditer'));
     });
 
     // Navigate to wizard step 2 (Steps) — click "Suivant" twice (step 0 → 1 → 2)

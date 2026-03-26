@@ -63,6 +63,12 @@ RESET  := \033[0m
 		echo "KRONN_HOST_SYSBIN=$$sysbin" >> .env; \
 		echo "$(CYAN)  Host system binaries: $$sysbin$(RESET)"; \
 	fi
+	@# Auto-detect host network IPs for multi-user identity display
+	@host_ips=$$(ip -4 addr show 2>/dev/null | awk '/^[0-9]/{split($$2,a,/[:@]/); iface=a[1]} /inet /{split($$2,a,"/"); ip=a[1]; if(ip~/^127\./)next; if(iface~/^(lo|docker|br-|veth)/)next; printf "%s%s:%s",sep,iface,ip; sep=","}'); \
+	if [ -n "$$host_ips" ]; then \
+		echo "KRONN_HOST_IPS=$$host_ips" >> .env; \
+		echo "$(CYAN)  Host IPs: $$host_ips$(RESET)"; \
+	fi
 	@echo "# Add extra repo dirs (colon-separated) for rw access:" >> .env
 	@echo "# KRONN_EXTRA_REPOS=$$HOME/Desktop/projects:$$HOME/Work" >> .env
 	@# Ensure .claude.json exists as a file (Docker creates a directory if missing)

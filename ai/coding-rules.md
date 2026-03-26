@@ -6,7 +6,7 @@
 
 - Prefer smallest diffs. Avoid drive-by refactors.
 - Follow existing naming in adjacent code. Avoid generic names (`Helper`, `Utils`).
-- No CSS framework — all styles are inline React `style={{}}` objects.
+- No CSS framework. Styling via CSS tokens + utility classes + component classes (`src/styles/`). Inline `style={{}}` only for truly dynamic values (computed colors, transforms, animation).
 - No emojis in code unless user explicitly requests them.
 
 ## Rust (backend)
@@ -31,7 +31,7 @@
 - **Types**: import from `../types/generated` — never define API types manually. Use `type` imports (`import type { ... }`).
 - **API calls**: use functions from `../lib/api.ts` — never raw `fetch` in components.
 - **Shared constants**: agent colors, labels, types → `lib/constants.ts`. Do not duplicate in pages.
-- **Styling**: inline `style={{}}` objects. No CSS files, no Tailwind, no styled-components.
+- **Styling**: CSS tokens (`--kr-*`), utility classes (`.flex-row`, `.gap-*`, `.text-*`), and component classes (`.btn`, `.card`, `.input`, `.badge`) in `src/styles/`. Per-page CSS in `src/pages/*.css`. Inline `style={{}}` only for dynamic values. Import page CSS at the top: `import './PageName.css'`.
 - **State**: local `useState` / `useEffect` / `useMemo` / `useCallback`. No global state library.
 - **i18n**: use `useT()` hook from `I18nContext.tsx`. All user-visible strings must use `t('key.name')`. Translation keys in `lib/i18n.ts`. 3 UI locales: `fr`, `en`, `es`. Output languages (for agents) are separate and include `zh`, `br`.
 - **Error boundaries**: wrap lazy-loaded routes with `ErrorBoundary` (see App.tsx).

@@ -58,12 +58,14 @@ async fn main() -> anyhow::Result<()> {
     // Build state
     let config_arc = Arc::new(RwLock::new(app_config));
     let workflow_engine = Arc::new(WorkflowEngine::new(database.clone(), config_arc.clone()));
+    let (ws_tx, _) = tokio::sync::broadcast::channel::<kronn::models::WsMessage>(256);
     let state = AppState {
         config: config_arc,
         db: database,
         workflow_engine: workflow_engine.clone(),
         agent_semaphore: Arc::new(Semaphore::new(max_agents)),
         audit_tracker: Arc::new(std::sync::Mutex::new(AuditTracker::default())),
+        ws_broadcast: Arc::new(ws_tx),
     };
 
     // Auto-discover and import API keys from agent config files (~/.vibe/.env, ~/.codex/auth.json, etc.)
@@ -188,6 +190,10 @@ async fn main() -> anyhow::Result<()> {
     // Start workflow engine in background
     let engine = workflow_engine.clone();
     tokio::spawn(async move { engine.start().await });
+
+    // Start WebSocket client manager (outbound connections to contacts)
+    let ws_state = state.clone();
+    tokio::spawn(async move { kronn::core::ws_client::run(ws_state).await });
 
     // Build router
     let app = build_router(state);

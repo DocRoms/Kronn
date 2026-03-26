@@ -1,0 +1,234 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   Kronn Shared Component Classes
+   Reusable across all pages: buttons, cards, inputs, badges, labels.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Buttons ────────────────────────────────────────────────────────────── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-4) var(--kr-sp-6);
+  font-size: var(--kr-fs-sm);
+  font-weight: 600;
+  font-family: inherit;
+  border-radius: var(--kr-r-md);
+  border: 1px solid transparent;
+  cursor: pointer;
+  background: none;
+  color: inherit;
+  transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+}
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.btn-primary {
+  background: var(--kr-accent);
+  color: var(--kr-bg-base);
+  border-color: transparent;
+  font-weight: 700;
+}
+.btn-primary:hover:not(:disabled) { opacity: 0.9; }
+
+.btn-accent {
+  background: rgba(var(--kr-accent-rgb), 0.08);
+  color: var(--kr-accent);
+  border-color: var(--kr-accent-border-light);
+}
+.btn-accent:hover:not(:disabled) { background: rgba(var(--kr-accent-rgb), 0.15); }
+
+.btn-secondary {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--kr-text-secondary);
+  border-color: var(--kr-border-medium);
+}
+.btn-secondary:hover:not(:disabled) { background: rgba(255, 255, 255, 0.08); }
+
+.btn-danger {
+  background: rgba(var(--kr-error-rgb), 0.08);
+  color: var(--kr-error);
+  border-color: rgba(var(--kr-error-rgb), 0.2);
+}
+.btn-danger:hover:not(:disabled) { background: rgba(var(--kr-error-rgb), 0.15); }
+
+.btn-ghost {
+  background: transparent;
+  color: var(--kr-text-muted);
+  border-color: transparent;
+}
+.btn-ghost:hover:not(:disabled) { background: rgba(255, 255, 255, 0.05); color: var(--kr-text-secondary); }
+
+.btn-icon {
+  padding: var(--kr-sp-2) var(--kr-sp-3);
+  gap: var(--kr-sp-2);
+}
+
+.btn-sm {
+  padding: var(--kr-sp-2) var(--kr-sp-4);
+  font-size: var(--kr-fs-xs);
+}
+
+/* ── Cards ──────────────────────────────────────────────────────────────── */
+.card {
+  background: var(--kr-bg-surface);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-xl);
+  overflow: hidden;
+}
+.card-active {
+  border-color: var(--kr-accent-border);
+}
+.card-header {
+  padding: var(--kr-sp-8) var(--kr-sp-9);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+}
+.card-body {
+  padding: var(--kr-sp-8) var(--kr-sp-9);
+  border-top: 1px solid var(--kr-border-light);
+}
+.card-section {
+  padding: var(--kr-sp-8) var(--kr-sp-9);
+}
+
+/* ── Inputs ─────────────────────────────────────────────────────────────── */
+.input {
+  width: 100%;
+  padding: var(--kr-sp-5) var(--kr-sp-7);
+  font-size: var(--kr-fs-sm);
+  font-family: inherit;
+  color: var(--kr-text-primary);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-md);
+  outline: none;
+  transition: border-color 0.15s;
+}
+.input:focus { border-color: var(--kr-accent-border-light); }
+.input::placeholder { color: var(--kr-text-dim); }
+
+.input-sm {
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  font-size: var(--kr-fs-xs);
+}
+
+.textarea {
+  width: 100%;
+  padding: var(--kr-sp-5) var(--kr-sp-7);
+  font-size: var(--kr-fs-sm);
+  font-family: inherit;
+  color: var(--kr-text-primary);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-md);
+  outline: none;
+  resize: vertical;
+  min-height: 60px;
+}
+.textarea:focus { border-color: var(--kr-accent-border-light); }
+
+/* ── Badges ─────────────────────────────────────────────────────────────── */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-1);
+  padding: 1px var(--kr-sp-3);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 600;
+  border-radius: var(--kr-r-sm);
+  white-space: nowrap;
+}
+
+.badge-accent {
+  background: rgba(var(--kr-accent-rgb), 0.1);
+  color: var(--kr-accent);
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.2);
+}
+.badge-success {
+  background: rgba(var(--kr-success-rgb), 0.1);
+  color: var(--kr-success);
+  border: 1px solid rgba(var(--kr-success-rgb), 0.2);
+}
+.badge-error {
+  background: rgba(var(--kr-error-rgb), 0.1);
+  color: var(--kr-error);
+  border: 1px solid rgba(var(--kr-error-rgb), 0.2);
+}
+.badge-warning {
+  background: rgba(var(--kr-warning-rgb), 0.1);
+  color: var(--kr-warning);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.2);
+}
+.badge-info {
+  background: rgba(var(--kr-info-rgb), 0.1);
+  color: var(--kr-info);
+  border: 1px solid rgba(var(--kr-info-rgb), 0.2);
+}
+.badge-muted {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--kr-text-muted);
+  border: 1px solid var(--kr-border-light);
+}
+
+/* ── Code ───────────────────────────────────────────────────────────────── */
+.code {
+  font-family: var(--kr-font-mono);
+  font-size: var(--kr-fs-sm);
+  background: rgba(0, 0, 0, 0.3);
+  padding: var(--kr-sp-3) var(--kr-sp-5);
+  border-radius: var(--kr-r-md);
+  word-break: break-all;
+}
+
+/* ── Labels ─────────────────────────────────────────────────────────────── */
+.label {
+  display: block;
+  font-size: var(--kr-fs-base);
+  font-weight: 600;
+  color: var(--kr-text-secondary);
+  margin-bottom: var(--kr-sp-3);
+}
+.label-sm {
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-muted);
+}
+
+/* ── Section title ──────────────────────────────────────────────────────── */
+.section-title {
+  font-size: var(--kr-fs-xs);
+  font-weight: 700;
+  color: var(--kr-text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: var(--kr-sp-4);
+}
+
+/* ── Status dot ─────────────────────────────────────────────────────────── */
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--kr-r-full);
+  flex-shrink: 0;
+}
+.dot-on {
+  background: var(--kr-success);
+  box-shadow: 0 0 6px rgba(var(--kr-success-rgb), 0.4);
+}
+.dot-off {
+  background: var(--kr-text-ghost);
+}
+
+/* ── Hint text ──────────────────────────────────────────────────────────── */
+.hint {
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-faint);
+  margin-top: var(--kr-sp-2);
+}
+
+/* ── Divider ────────────────────────────────────────────────────────────── */
+.divider {
+  border: none;
+  border-top: 1px solid var(--kr-border-light);
+  margin: var(--kr-sp-8) 0;
+}

@@ -5,39 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Kronn</title>
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230a0c10'/%3E%3Ctext x='16' y='23' text-anchor='middle' font-family='system-ui' font-weight='700' font-size='20' fill='%23c8ff00'%3E⚡%3C/text%3E%3C/svg%3E" />
-    <!-- Self-hosted fonts (no external requests — GDPR compliant, air-gapped friendly) -->
-    <style>
-      @font-face { font-family: 'Inter'; font-weight: 400; font-display: swap; src: url('/fonts/inter-400.ttf') format('truetype'); }
-      @font-face { font-family: 'Inter'; font-weight: 500; font-display: swap; src: url('/fonts/inter-500.ttf') format('truetype'); }
-      @font-face { font-family: 'Inter'; font-weight: 600; font-display: swap; src: url('/fonts/inter-600.ttf') format('truetype'); }
-      @font-face { font-family: 'Inter'; font-weight: 700; font-display: swap; src: url('/fonts/inter-700.ttf') format('truetype'); }
-      @font-face { font-family: 'JetBrains Mono'; font-weight: 400; font-display: swap; src: url('/fonts/jetbrains-mono-400.ttf') format('truetype'); }
-      @font-face { font-family: 'JetBrains Mono'; font-weight: 500; font-display: swap; src: url('/fonts/jetbrains-mono-500.ttf') format('truetype'); }
-      @font-face { font-family: 'JetBrains Mono'; font-weight: 600; font-display: swap; src: url('/fonts/jetbrains-mono-600.ttf') format('truetype'); }
-      @font-face { font-family: 'JetBrains Mono'; font-weight: 700; font-display: swap; src: url('/fonts/jetbrains-mono-700.ttf') format('truetype'); }
-      *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-      body {
-        font-family: 'Inter', system-ui, sans-serif;
-        background: #0a0c10;
-        color: #e8eaed;
-        -webkit-font-smoothing: antialiased;
-      }
-      code, .mono { font-family: 'JetBrains Mono', monospace; }
-      ::-webkit-scrollbar { width: 6px; }
-      ::-webkit-scrollbar-track { background: transparent; }
-      ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
-      ::selection { background: rgba(200,255,0,0.3); }
-      *:focus-visible { outline: 2px solid #c8ff00; outline-offset: 2px; }
-      @keyframes spin { to { transform: rotate(360deg) } }
-      @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.3 } }
-      @media (prefers-reduced-motion: reduce) {
-        *, *::before, *::after {
-          animation-duration: 0.01ms !important;
-          animation-iteration-count: 1 !important;
-          transition-duration: 0.01ms !important;
-        }
-      }
-    </style>
+    <!-- Styles moved to src/styles/ — loaded via main.tsx import -->
   </head>
   <body>
     <div id="root"></div>

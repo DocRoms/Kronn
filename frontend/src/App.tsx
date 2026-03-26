@@ -2,6 +2,7 @@ import { useState, useEffect, lazy, Suspense } from 'react';
 import { setup as setupApi } from './lib/api';
 import type { SetupStatus } from './types/generated';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import './App.css';
 
 const SetupWizard = lazy(() => import('./pages/SetupWizard').then(m => ({ default: m.SetupWizard })));
 const Dashboard = lazy(() => import('./pages/Dashboard').then(m => ({ default: m.Dashboard })));
@@ -69,44 +70,15 @@ export function App() {
 
 function ApiErrorScreen({ onRetry }: { onRetry: () => void }) {
   return (
-    <div style={{
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      height: '100vh',
-      flexDirection: 'column',
-      gap: 16,
-    }}>
-      <div style={{
-        width: 48, height: 48,
-        borderRadius: '50%',
-        background: 'rgba(255,77,106,0.1)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        fontSize: 24,
-      }}>!</div>
-      <span style={{ color: '#ff4d6a', fontSize: 15, fontWeight: 600, fontFamily: 'JetBrains Mono, monospace' }}>
+    <div className="app-fullscreen">
+      <div className="app-error-icon">!</div>
+      <span className="app-error-title">
         Cannot connect to backend
       </span>
-      <span style={{ color: 'rgba(255,255,255,0.4)', fontSize: 12, textAlign: 'center', maxWidth: 320 }}>
+      <span className="app-error-desc">
         The API server is unreachable. Check that the backend is running and try again.
       </span>
-      <button
-        onClick={onRetry}
-        style={{
-          marginTop: 8,
-          padding: '8px 20px',
-          borderRadius: 6,
-          border: '1px solid rgba(200,255,0,0.3)',
-          background: 'rgba(200,255,0,0.08)',
-          color: '#c8ff00',
-          cursor: 'pointer',
-          fontSize: 13,
-          fontFamily: 'JetBrains Mono, monospace',
-          fontWeight: 500,
-        }}
-      >
+      <button onClick={onRetry} className="app-retry-btn">
         Retry
       </button>
       <style>{`@keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.3 } }
@@ -123,22 +95,9 @@ function ApiErrorScreen({ onRetry }: { onRetry: () => void }) {
 
 function LoadingScreen() {
   return (
-    <div style={{
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      height: '100vh',
-      flexDirection: 'column',
-      gap: 16,
-    }}>
-      <div style={{
-        width: 32, height: 32,
-        border: '3px solid rgba(200,255,0,0.2)',
-        borderTopColor: '#c8ff00',
-        borderRadius: '50%',
-        animation: 'spin 0.8s linear infinite',
-      }} />
-      <span style={{ color: 'rgba(255,255,255,0.4)', fontSize: 13, fontFamily: 'JetBrains Mono, monospace' }}>
+    <div className="app-fullscreen">
+      <div className="app-spinner" />
+      <span className="app-loading-text">
         Entering the grid...
       </span>
       {/* Keyframes (spin, pulse, reduced-motion) defined in index.html */}

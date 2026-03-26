@@ -49,20 +49,31 @@ pub struct AppState {
     pub workflow_engine: Arc<WorkflowEngine>,
     pub agent_semaphore: Arc<Semaphore>,
     pub audit_tracker: Arc<Mutex<AuditTracker>>,
+    /// Broadcast channel for WebSocket messages (presence, heartbeat, future: chat).
+    pub ws_broadcast: Arc<tokio::sync::broadcast::Sender<crate::models::WsMessage>>,
 }
 
 // ─── Auth Middleware ─────────────────────────────────────────────────────────
 
 /// Bearer token authentication middleware.
-/// Skips auth for /api/health (Docker healthcheck) and when no token is configured.
+/// - Skips auth for /api/health (Docker healthcheck)
+/// - Skips auth when no token is configured
+/// - Skips auth for localhost requests (self-hosted: the user is always on the same machine)
+/// - Requires Bearer token for remote requests (peers, external API calls)
 async fn auth_middleware(
     State(state): State<AppState>,
     headers: HeaderMap,
     request: axum::extract::Request,
     next: Next,
 ) -> Result<axum::response::Response, StatusCode> {
-    // Skip auth for health endpoint
+    // Skip auth for health endpoint (Docker healthcheck)
     if request.uri().path() == "/api/health" {
+        return Ok(next.run(request).await);
+    }
+
+    // Skip auth for WebSocket endpoint — ws.rs handles authentication
+    // via invite code verification in the first Presence message.
+    if request.uri().path() == "/api/ws" {
         return Ok(next.run(request).await);
     }
 
@@ -75,6 +86,15 @@ async fn auth_middleware(
         return Ok(next.run(request).await);
     };
 
+    // Skip auth for localhost requests (nginx sets X-Real-IP to the client's real IP).
+    // In Docker: localhost user → nginx sees 127.0.0.1 or Docker bridge IP (172.x.x.x).
+    // Peers connect from Tailscale/LAN IPs → those are NOT localhost.
+    if let Some(real_ip) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
+        if is_local_ip(real_ip) {
+            return Ok(next.run(request).await);
+        }
+    }
+
     // Check Authorization: Bearer <token>
     let authorized = headers
         .get("authorization")
@@ -84,10 +104,27 @@ async fn auth_middleware(
         .unwrap_or(false);
 
     if authorized {
-        Ok(next.run(request).await)
-    } else {
-        Err(StatusCode::UNAUTHORIZED)
+        return Ok(next.run(request).await);
     }
+
+    Err(StatusCode::UNAUTHORIZED)
+}
+
+/// Check if an IP address is local (localhost or Docker internal network).
+/// Docker bridge uses 172.16-31.x.x; the host accesses the gateway from
+/// an IP like 172.18.0.1. Peers connect from Tailscale (100.x), LAN (192.168.x),
+/// or public IPs — those are NOT local.
+fn is_local_ip(ip: &str) -> bool {
+    if ip == "127.0.0.1" || ip == "::1" || ip == "localhost" {
+        return true;
+    }
+    // Docker bridge: 172.16.0.0/12
+    if let Some(rest) = ip.strip_prefix("172.") {
+        if let Some(second) = rest.split('.').next().and_then(|s| s.parse::<u8>().ok()) {
+            return (16..=31).contains(&second);
+        }
+    }
+    false
 }
 
 // ─── CORS ────────────────────────────────────────────────────────────────────
@@ -169,25 +206,25 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/projects/scan", post(api::projects::scan))
         .route("/api/projects/bootstrap", post(api::projects::bootstrap))
         .route("/api/projects/clone", post(api::projects::clone_project))
-        .route("/api/projects/discover-repos", post(api::projects::discover_repos))
+        .route("/api/projects/discover-repos", post(api::discover::discover_repos))
         .route("/api/projects/:id", get(api::projects::get))
         .route("/api/projects/:id", delete(api::projects::delete))
         .route("/api/projects/:id/install-template", post(api::projects::install_template))
-        .route("/api/projects/:id/ai-audit", post(api::projects::run_audit))
-        .route("/api/projects/:id/audit-info", get(api::projects::audit_info))
-        .route("/api/projects/:id/drift", get(api::projects::check_drift))
-        .route("/api/projects/:id/partial-audit", post(api::projects::partial_audit))
-        .route("/api/projects/:id/validate-audit", post(api::projects::validate_audit))
-        .route("/api/projects/:id/mark-bootstrapped", post(api::projects::mark_bootstrapped))
-        .route("/api/projects/:id/full-audit", post(api::projects::full_audit))
-        .route("/api/projects/:id/cancel-audit", post(api::projects::cancel_audit))
+        .route("/api/projects/:id/ai-audit", post(api::audit::run_audit))
+        .route("/api/projects/:id/audit-info", get(api::audit::audit_info))
+        .route("/api/projects/:id/drift", get(api::audit::check_drift))
+        .route("/api/projects/:id/partial-audit", post(api::audit::partial_audit))
+        .route("/api/projects/:id/validate-audit", post(api::audit::validate_audit))
+        .route("/api/projects/:id/mark-bootstrapped", post(api::audit::mark_bootstrapped))
+        .route("/api/projects/:id/full-audit", post(api::audit::full_audit))
+        .route("/api/projects/:id/cancel-audit", post(api::audit::cancel_audit))
         .route("/api/projects/:id/default-skills", put(api::projects::set_default_skills))
         .route("/api/projects/:id/default-profile", put(api::projects::set_default_profile))
-        .route("/api/projects/:id/briefing", get(api::projects::get_briefing).put(api::projects::set_briefing))
-        .route("/api/projects/:id/start-briefing", post(api::projects::start_briefing))
-        .route("/api/projects/:id/ai-files", get(api::projects::list_ai_files))
-        .route("/api/projects/:id/ai-file", get(api::projects::read_ai_file))
-        .route("/api/projects/:id/ai-search", get(api::projects::search_ai_files))
+        .route("/api/projects/:id/briefing", get(api::audit::get_briefing).put(api::audit::set_briefing))
+        .route("/api/projects/:id/start-briefing", post(api::audit::start_briefing))
+        .route("/api/projects/:id/ai-files", get(api::ai_docs::list_ai_files))
+        .route("/api/projects/:id/ai-file", get(api::ai_docs::read_ai_file))
+        .route("/api/projects/:id/ai-search", get(api::ai_docs::search_ai_files))
         .route("/api/projects/:id/git-status", get(api::projects::git_status))
         .route("/api/projects/:id/git-diff", get(api::projects::git_diff))
         .route("/api/projects/:id/git-branch", post(api::projects::git_branch))
@@ -226,15 +263,24 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/discussions/:id/messages/last", delete(api::discussions::delete_last_agent_messages).patch(api::discussions::edit_last_user_message))
         .route("/api/discussions/:id/run", post(api::discussions::run_agent))
         .route("/api/discussions/:id/orchestrate", post(api::discussions::orchestrate))
-        .route("/api/discussions/:id/git-status", get(api::discussions::disc_git_status))
-        .route("/api/discussions/:id/git-diff", get(api::discussions::disc_git_diff))
-        .route("/api/discussions/:id/git-commit", post(api::discussions::disc_git_commit))
-        .route("/api/discussions/:id/git-push", post(api::discussions::disc_git_push))
-        .route("/api/discussions/:id/git-pr", post(api::discussions::disc_create_pr))
-        .route("/api/discussions/:id/pr-template", get(api::discussions::disc_pr_template))
-        .route("/api/discussions/:id/exec", post(api::discussions::disc_exec))
-        .route("/api/discussions/:id/worktree-unlock", post(api::discussions::worktree_unlock))
-        .route("/api/discussions/:id/worktree-lock", post(api::discussions::worktree_lock))
+        .route("/api/discussions/:id/share", post(api::discussions::share))
+        .route("/api/discussions/:id/git-status", get(api::disc_git::disc_git_status))
+        .route("/api/discussions/:id/git-diff", get(api::disc_git::disc_git_diff))
+        .route("/api/discussions/:id/git-commit", post(api::disc_git::disc_git_commit))
+        .route("/api/discussions/:id/git-push", post(api::disc_git::disc_git_push))
+        .route("/api/discussions/:id/git-pr", post(api::disc_git::disc_create_pr))
+        .route("/api/discussions/:id/pr-template", get(api::disc_git::disc_pr_template))
+        .route("/api/discussions/:id/exec", post(api::disc_git::disc_exec))
+        .route("/api/discussions/:id/worktree-unlock", post(api::disc_git::worktree_unlock))
+        .route("/api/discussions/:id/worktree-lock", post(api::disc_git::worktree_lock))
+        // ── WebSocket ──
+        .route("/api/ws", get(api::ws::ws_handler))
+        // ── Contacts ──
+        .route("/api/contacts", get(api::contacts::list).post(api::contacts::add))
+        .route("/api/contacts/invite-code", get(api::contacts::invite_code))
+        .route("/api/contacts/network-info", get(api::contacts::network_info))
+        .route("/api/contacts/:id", delete(api::contacts::delete))
+        .route("/api/contacts/:id/ping", get(api::contacts::ping))
         // ── Skills ──
         .route("/api/skills", get(api::skills::list).post(api::skills::create))
         .route("/api/skills/:id", put(api::skills::update).delete(api::skills::delete))

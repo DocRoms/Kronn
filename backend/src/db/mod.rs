@@ -1,5 +1,6 @@
 pub mod migrations;
 pub mod projects;
+pub mod contacts;
 pub mod discussions;
 pub mod mcps;
 pub mod workflows;

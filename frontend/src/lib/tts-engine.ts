@@ -30,12 +30,32 @@ function synthesizeSentence(worker: Worker, text: string, voiceId: string): Prom
 /** Play an audio blob and wait for it to finish */
 function playAudioBlob(blob: Blob): Promise<void> {
   return new Promise((resolve) => {
+    if (!blob || blob.size === 0) {
+      console.warn('TTS: empty audio blob, skipping');
+      resolve();
+      return;
+    }
+    const url = URL.createObjectURL(blob);
     const audio = new Audio();
-    audio.src = URL.createObjectURL(blob);
+    audio.src = url;
     currentAudio = audio;
-    audio.onended = () => { if (currentAudio === audio) currentAudio = null; resolve(); };
-    audio.onerror = () => { if (currentAudio === audio) currentAudio = null; resolve(); };
-    audio.play().catch(() => { if (currentAudio === audio) currentAudio = null; resolve(); });
+    audio.onended = () => {
+      URL.revokeObjectURL(url);
+      if (currentAudio === audio) currentAudio = null;
+      resolve();
+    };
+    audio.onerror = (e) => {
+      console.warn('TTS: audio playback error', e);
+      URL.revokeObjectURL(url);
+      if (currentAudio === audio) currentAudio = null;
+      resolve();
+    };
+    audio.play().catch((err) => {
+      console.warn('TTS: audio.play() rejected:', err);
+      URL.revokeObjectURL(url);
+      if (currentAudio === audio) currentAudio = null;
+      resolve();
+    });
   });
 }
 

@@ -46,6 +46,10 @@ Project-specific terms. For deep dives, follow the linked `ai/architecture/` fil
 
 **User Identity** — Config in `[server]`: `pseudo` (display name) and `avatar_email` (Gravatar, decoupled from git). Messages store `author_pseudo` and `author_avatar_email` (migration 021). UI: Settings card + avatar in user message bubbles. Gravatar uses SHA-256 hash.
 
+**Contact** — A remote Kronn instance (peer) stored in `contacts` table (migration 022). Fields: `pseudo`, `avatar_email`, `kronn_url`, `invite_code`, `status` (pending/accepted). API: `GET/POST/DELETE /api/contacts`, `GET /api/contacts/invite-code`, `GET /api/contacts/:id/ping`. Invite code format: `kronn:pseudo@host:port`.
+
+**is_docker()** — Runtime helper in `core/env.rs`. Returns true when `KRONN_DATA_DIR` env var is set (Docker container). Used to skip Docker-specific logic (chown, safe.directory) in native desktop mode.
+
 **CopyableBlock** — React component wrapping `<table>` and `<pre>` blocks in markdown with a copy-to-clipboard button. Extracts plain text (TSV for tables). Part of `MarkdownContent` in `DiscussionsPage.tsx`.
 
 **Vibe runner** — `backend/scripts/vibe-runner.py` — Python wrapper that calls Vibe's `run_programmatic()` SDK directly, bypassing the CLI (which hangs due to stdin blocking). Falls back to direct Mistral API streaming if vibe is not installed. See `backend/src/agents/runner.rs`.
