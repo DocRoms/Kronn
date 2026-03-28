@@ -1,4 +1,4 @@
-import { useState, useEffect, lazy, Suspense } from 'react';
+import { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import { setup as setupApi } from './lib/api';
 import type { SetupStatus } from './types/generated';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -7,21 +7,36 @@ import './App.css';
 const SetupWizard = lazy(() => import('./pages/SetupWizard').then(m => ({ default: m.SetupWizard })));
 const Dashboard = lazy(() => import('./pages/Dashboard').then(m => ({ default: m.Dashboard })));
 
+/** Auto-retry delay (ms) for backend connection. Exported for test override. */
+export let RETRY_DELAY = 2000;
+export function setRetryDelay(ms: number) { RETRY_DELAY = ms; }
+
 export function App() {
   const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [apiError, setApiError] = useState(false);
+  const retries = useRef(0);
 
   const fetchStatus = () => {
     setLoading(true);
     setApiError(false);
     setupApi.getStatus()
-      .then((status) => { setSetupStatus(status); setApiError(false); })
-      .catch(() => {
-        setSetupStatus(null);
-        setApiError(true);
+      .then((status) => {
+        retries.current = 0;
+        setSetupStatus(status);
+        setLoading(false);
       })
-      .finally(() => setLoading(false));
+      .catch(() => {
+        // Auto-retry up to 5 times with 2s delay (backend may still be starting)
+        if (retries.current < 5) {
+          retries.current += 1;
+          setTimeout(fetchStatus, RETRY_DELAY);
+        } else {
+          setSetupStatus(null);
+          setApiError(true);
+          setLoading(false);
+        }
+      });
   };
 
   useEffect(() => { fetchStatus(); }, []);

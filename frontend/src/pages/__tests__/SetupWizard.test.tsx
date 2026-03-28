@@ -174,17 +174,17 @@ describe('SetupWizard — step 0 (agents detection)', () => {
     expect(document.body.textContent).toContain('Claude Code');
   });
 
-  it('disables "Continuer" button when no agent is installed', async () => {
+  it('shows "Passer cette étape" when no agent is installed', async () => {
     vi.mocked(agentsApi.detect).mockResolvedValue([]);
     await wrap(<SetupWizard initialStatus={null} onComplete={vi.fn()} />);
 
     const buttons = Array.from(document.body.querySelectorAll('button'));
-    const continuerBtn = buttons.find(b => b.textContent?.includes('Continuer'));
-    expect(continuerBtn).toBeTruthy();
-    expect(continuerBtn!.disabled).toBe(true);
+    const skipBtn = buttons.find(b => b.textContent?.includes('Passer'));
+    expect(skipBtn).toBeTruthy();
+    expect(skipBtn!.disabled).toBe(false);
   });
 
-  it('enables "Continuer" button when at least one agent is installed', async () => {
+  it('shows "Continuer" when at least one agent is installed', async () => {
     const agent = makeAgent({ installed: true });
     vi.mocked(agentsApi.detect).mockResolvedValue([agent]);
 
