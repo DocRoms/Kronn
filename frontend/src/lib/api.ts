@@ -55,6 +55,7 @@ import type {
   ModelTier,
   ModelTiersConfig,
   DriftCheckResponse,
+  AddContactResult,
 } from '../types/generated';
 import type { DiscoverKeysResponse } from '../types/extensions';
 
@@ -273,7 +274,7 @@ export const config = {
 
 export const contacts = {
   list: () => api<Contact[]>('GET', '/contacts'),
-  add: (invite_code: string) => api<Contact>('POST', '/contacts', { invite_code }),
+  add: (invite_code: string) => api<AddContactResult>('POST', '/contacts', { invite_code }),
   delete: (id: string) => api<void>('DELETE', `/contacts/${id}`),
   inviteCode: () => api<string>('GET', '/contacts/invite-code'),
   ping: (id: string) => api<boolean>('GET', `/contacts/${id}/ping`),

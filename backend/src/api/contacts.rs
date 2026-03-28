@@ -1,7 +1,7 @@
 use axum::{extract::{Path, State}, Json};
 use chrono::Utc;
 
-use crate::models::{AddContactRequest, ApiResponse, Contact, NetworkInfo};
+use crate::models::{AddContactRequest, AddContactResult, ApiResponse, Contact, NetworkInfo};
 use crate::AppState;
 
 /// GET /api/contacts
@@ -16,7 +16,7 @@ pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<Vec<Contact
 pub async fn add(
     State(state): State<AppState>,
     Json(req): Json<AddContactRequest>,
-) -> Json<ApiResponse<Contact>> {
+) -> Json<ApiResponse<AddContactResult>> {
     let (pseudo, kronn_url) = match crate::db::contacts::parse_invite_code(&req.invite_code) {
         Some(parsed) => parsed,
         None => return Json(ApiResponse::err("Invalid invite code. Format: kronn:pseudo@host:port")),
@@ -33,13 +33,20 @@ pub async fn add(
 
     // Ping the peer to check reachability (non-blocking, 3s timeout)
     let health_url = format!("{}/api/health", &kronn_url);
-    let reachable = reqwest::Client::new()
+    let ping_error = reqwest::Client::new()
         .get(&health_url)
         .timeout(std::time::Duration::from_secs(3))
         .send()
-        .await
-        .map(|r| r.status().is_success())
-        .unwrap_or(false);
+        .await;
+
+    let (reachable, warning) = match &ping_error {
+        Ok(r) if r.status().is_success() => (true, None),
+        _ => {
+            // Diagnose WHY the peer is unreachable
+            let hint = diagnose_unreachable(&kronn_url).await;
+            (false, Some(hint))
+        }
+    };
 
     let status = if reachable { "accepted" } else { "pending" };
 
@@ -57,9 +64,52 @@ pub async fn add(
 
     let c = contact.clone();
     match state.db.with_conn(move |conn| crate::db::contacts::insert_contact(conn, &c)).await {
-        Ok(()) => Json(ApiResponse::ok(contact)),
+        Ok(()) => Json(ApiResponse::ok(AddContactResult { contact, warning })),
         Err(e) => Json(ApiResponse::err(format!("Failed to add contact: {}", e))),
     }
+}
+
+/// Diagnose why a peer is unreachable and return a user-friendly hint.
+async fn diagnose_unreachable(kronn_url: &str) -> String {
+    let peer_host = kronn_url
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .split(':')
+        .next()
+        .unwrap_or("");
+
+    let peer_is_tailscale = is_tailscale_ip(peer_host);
+    let local_tailscale = crate::core::tailscale::detect_ip().await;
+
+    if peer_is_tailscale && local_tailscale.is_none() {
+        return "TAILSCALE_MISSING".into();
+    }
+
+    if peer_is_tailscale && local_tailscale.is_some() {
+        return "TAILSCALE_UNREACHABLE".into();
+    }
+
+    let peer_is_lan = is_private_ip(peer_host);
+    if peer_is_lan {
+        return "LAN_UNREACHABLE".into();
+    }
+
+    "NETWORK_UNREACHABLE".into()
+}
+
+/// Check if an IP is in the Tailscale CGNAT range (100.64.0.0/10)
+fn is_tailscale_ip(ip: &str) -> bool {
+    let parts: Vec<u8> = ip.split('.').filter_map(|s| s.parse().ok()).collect();
+    parts.len() == 4 && parts[0] == 100 && (64..=127).contains(&parts[1])
+}
+
+/// Check if an IP is in a private range (10.x, 172.16-31.x, 192.168.x)
+fn is_private_ip(ip: &str) -> bool {
+    let parts: Vec<u8> = ip.split('.').filter_map(|s| s.parse().ok()).collect();
+    if parts.len() != 4 { return false; }
+    parts[0] == 10
+        || (parts[0] == 172 && (16..=31).contains(&parts[1]))
+        || (parts[0] == 192 && parts[1] == 168)
 }
 
 /// DELETE /api/contacts/:id

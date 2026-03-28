@@ -742,6 +742,11 @@ export interface Contact {
   updated_at: string;
 }
 
+export interface AddContactResult {
+  contact: Contact;
+  warning: string | null;
+}
+
 export type WsMessage =
   | { type: 'presence'; from_pseudo: string; from_invite_code: string; online: boolean }
   | { type: 'ping'; timestamp: number }
