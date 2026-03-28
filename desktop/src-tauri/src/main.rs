@@ -46,17 +46,19 @@ fn extract_frontend_dist() -> std::path::PathBuf {
 }
 
 /// Recursively extract an embedded directory to the filesystem.
-fn extract_dir(dir: &Dir<'_>, target: &std::path::Path) {
-    std::fs::create_dir_all(target).ok();
+/// `root_target` is always the top-level extraction directory — file.path()
+/// returns paths relative to the include_dir root (e.g. "assets/index.js"),
+/// so we always join with root_target to avoid doubled paths.
+fn extract_dir(dir: &Dir<'_>, root_target: &std::path::Path) {
     for file in dir.files() {
-        let path = target.join(file.path());
+        let path = root_target.join(file.path());
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
         std::fs::write(&path, file.contents()).ok();
     }
     for sub in dir.dirs() {
-        extract_dir(sub, &target.join(sub.path()));
+        extract_dir(sub, root_target);
     }
 }
 
