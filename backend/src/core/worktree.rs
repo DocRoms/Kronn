@@ -4,6 +4,7 @@
 //! changes without interfering with the main working tree or other discussions.
 
 use std::path::{Path, PathBuf};
+use super::cmd::sync_cmd;
 
 /// Fix worktree cross-references so they work from the host, not just inside Docker.
 ///
@@ -54,7 +55,7 @@ pub struct WorktreeInfo {
 
 /// Check if a branch is checked out in any worktree (including the main repo).
 fn branch_checked_out_at(repo_path: &Path, branch: &str) -> Option<PathBuf> {
-    let output = std::process::Command::new("git")
+    let output = sync_cmd("git")
         .args(["worktree", "list", "--porcelain"])
         .current_dir(repo_path)
         .output()
@@ -143,16 +144,16 @@ pub fn create_discussion_worktree(
 
     // Mark repo as safe directory (needed in Docker where mount owner differs)
     if crate::core::env::is_docker() {
-        let _ = std::process::Command::new("git")
+        let _ = sync_cmd("git")
             .args(["config", "--global", "--add", "safe.directory", &repo_path.to_string_lossy()])
             .output();
-        let _ = std::process::Command::new("git")
+        let _ = sync_cmd("git")
             .args(["config", "--global", "--add", "safe.directory", &worktree_path.to_string_lossy()])
             .output();
     }
 
     // Create the worktree with a new branch based on base_branch
-    let output = std::process::Command::new("git")
+    let output = sync_cmd("git")
         .args(["worktree", "add", "-b", &branch])
         .arg(&worktree_path)
         .arg(base_branch)
@@ -271,22 +272,22 @@ pub fn reattach_worktree(
     }
 
     if crate::core::env::is_docker() {
-        let _ = std::process::Command::new("git")
+        let _ = sync_cmd("git")
             .args(["config", "--global", "--add", "safe.directory", &repo_path.to_string_lossy()])
             .output();
-        let _ = std::process::Command::new("git")
+        let _ = sync_cmd("git")
             .args(["config", "--global", "--add", "safe.directory", &worktree_path.to_string_lossy()])
             .output();
     }
 
     // Prune stale worktree entries first (old /data/workspaces/ refs)
-    let _ = std::process::Command::new("git")
+    let _ = sync_cmd("git")
         .args(["worktree", "prune"])
         .current_dir(repo_path)
         .output();
 
     // Attach existing branch to new worktree path (no -b, branch already exists)
-    let output = std::process::Command::new("git")
+    let output = sync_cmd("git")
         .args(["worktree", "add"])
         .arg(&worktree_path)
         .arg(existing_branch)
@@ -316,7 +317,7 @@ pub fn reattach_worktree(
 
 /// Find the branch associated with a worktree path (before removal).
 fn find_branch_for_worktree(repo_path: &Path, worktree_path: &str) -> Option<String> {
-    let output = std::process::Command::new("git")
+    let output = sync_cmd("git")
         .args(["worktree", "list", "--porcelain"])
         .current_dir(repo_path)
         .output()
@@ -360,7 +361,7 @@ pub fn remove_discussion_worktree(
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
 
-    let output = std::process::Command::new("git")
+    let output = sync_cmd("git")
         .args(["worktree", "remove", "--force", worktree_path])
         .current_dir(repo_path)
         .output()
@@ -368,7 +369,7 @@ pub fn remove_discussion_worktree(
 
     if !output.status.success() && !wt_relative.is_empty() {
         // Git may know the worktree by relative path (due to relative gitdir refs)
-        let _ = std::process::Command::new("git")
+        let _ = sync_cmd("git")
             .args(["worktree", "remove", "--force", &wt_relative])
             .current_dir(repo_path)
             .output();
@@ -380,13 +381,13 @@ pub fn remove_discussion_worktree(
     }
 
     // Prune stale worktree entries before deleting branch
-    let _ = std::process::Command::new("git")
+    let _ = sync_cmd("git")
         .args(["worktree", "prune"])
         .current_dir(repo_path)
         .output();
 
     if let Some(branch) = branch_to_delete {
-        let _ = std::process::Command::new("git")
+        let _ = sync_cmd("git")
             .args(["branch", "-D", &branch])
             .current_dir(repo_path)
             .output();
@@ -399,7 +400,7 @@ pub fn remove_discussion_worktree(
 
 /// List all kronn worktrees for a project.
 pub fn list_project_worktrees(repo_path: &Path) -> Vec<WorktreeInfo> {
-    let output = match std::process::Command::new("git")
+    let output = match sync_cmd("git")
         .args(["worktree", "list", "--porcelain"])
         .current_dir(repo_path)
         .output()

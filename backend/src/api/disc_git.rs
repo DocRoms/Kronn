@@ -5,6 +5,7 @@ use axum::{
     Json,
 };
 
+use crate::core::cmd::sync_cmd;
 use crate::models::*;
 use crate::AppState;
 
@@ -356,7 +357,7 @@ pub async fn disc_pr_template(
         Err(e) => return Json(ApiResponse::err(e)),
     };
 
-    let branch = std::process::Command::new("git")
+    let branch = sync_cmd("git")
         .args(["branch", "--show-current"])
         .current_dir(&work_dir)
         .output()

@@ -7,6 +7,21 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.2.2] — 2026-03-28
+
+### Fixed
+- **Windows: console windows flashing** — every background command (git, agent detection, npx probes, etc.) spawned a visible cmd.exe window on the Tauri desktop app. New `core::cmd` module applies `CREATE_NO_WINDOW` flag to all 50+ `Command::new` calls across the codebase
+- **WSL agents not detected** — `wsl.exe -e which` doesn't load the user's login profile, so npm-installed agents (`~/.local/bin/claude`, etc.) were invisible. Now uses `bash -lc` for correct PATH resolution. Version detection also runs via `wsl.exe` for WSL binary paths
+- **WSL repositories not scanned** — git commands failed on `\\wsl.localhost\...` UNC paths because Windows `git.exe` doesn't handle them. Git now runs inside WSL via `wsl.exe -e bash -lc "git -C ..."` for WSL filesystem paths. Scan timeout increased from 10s to 30s for WSL paths (9P filesystem is slow)
+- **macOS CI codesign crash** — empty `APPLE_CERTIFICATE` secret was still exported as an env var, making Tauri attempt to import a null certificate. Signing env vars are now only exported when non-empty
+- **Stale installers in CI artifacts** — cargo cache persisted old `.exe`/`.msi`/`.dmg` files across builds. Bundle directory is now cleaned before each build
+
+### Changed
+- **`core::cmd` module** — centralized `async_cmd()` / `sync_cmd()` helpers replace raw `Command::new()` everywhere (agents, scanner, worktree, git ops, workflows, tailscale, checksums, audit). Single place to enforce cross-platform command behavior
+- **WSL host label** — agents found via WSL now show "WSL" instead of "Windows" in the setup wizard (new `via_wsl` flag on `BinaryLocation`)
+
+---
+
 ## [0.2.1] — 2026-03-28
 
 ### Fixed

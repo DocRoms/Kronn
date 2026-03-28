@@ -37,14 +37,20 @@ pub async fn get_status(
         default_scan_path().into_iter().collect()
     };
 
-    // Scan with a timeout to avoid blocking on slow filesystems (e.g. macOS Library via Docker)
+    // Use a longer timeout when WSL UNC paths are involved (9P filesystem is slow)
+    let has_wsl_paths = scan_paths.iter().any(|p| {
+        p.starts_with(r"\\wsl.localhost\") || p.starts_with(r"\\wsl$\")
+    });
+    let scan_timeout = if has_wsl_paths { 30 } else { 10 };
+
+    // Scan with a timeout to avoid blocking on slow filesystems
     let repos_detected = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(scan_timeout),
         scanner::scan_paths_with_depth(&scan_paths, &config.scan.ignore, config.scan.scan_depth),
     )
     .await
     .unwrap_or_else(|_| {
-        tracing::warn!("Repo scan timed out after 10s — returning empty list");
+        tracing::warn!("Repo scan timed out after {}s — returning empty list", scan_timeout);
         Ok(vec![])
     })
     .unwrap_or_default();

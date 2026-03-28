@@ -2,20 +2,23 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Instant;
 use anyhow::Result;
+use crate::core::cmd::async_cmd;
+#[cfg(target_os = "windows")]
+use crate::core::cmd::sync_cmd;
 use crate::models::{AgentDetection, AgentType};
 
 /// Run a shell command cross-platform (sh on Unix, cmd on Windows)
 async fn run_shell_cmd(cmd: &str) -> Result<std::process::Output> {
     #[cfg(unix)]
     {
-        Ok(tokio::process::Command::new("sh")
+        Ok(async_cmd("sh")
             .args(["-c", cmd])
             .output()
             .await?)
     }
     #[cfg(windows)]
     {
-        Ok(tokio::process::Command::new("cmd")
+        Ok(async_cmd("cmd")
             .args(["/C", cmd])
             .output()
             .await?)
@@ -109,6 +112,13 @@ async fn detect_agent(def: &AgentDef) -> AgentDetection {
     if let Some(loc) = found {
         // Version detection may fail if symlinks are broken inside container
         let version = get_version_from(&loc.path).await.ok();
+        let host_label = if loc.via_wsl {
+            Some("WSL".to_string())
+        } else if loc.host_managed {
+            Some(detect_host_label())
+        } else {
+            None
+        };
         AgentDetection {
             name: def.name.to_string(),
             agent_type: def.agent_type.clone(),
@@ -120,7 +130,7 @@ async fn detect_agent(def: &AgentDef) -> AgentDetection {
             origin: def.origin.to_string(),
             install_command: Some(def.install_cmd.to_string()),
             host_managed: loc.host_managed,
-            host_label: if loc.host_managed { Some(detect_host_label()) } else { None },
+            host_label,
             runtime_available: true,
         }
     } else {
@@ -169,14 +179,14 @@ async fn probe_runtime(def: &AgentDef) -> bool {
 
     // Probe: npx --yes <pkg> --version with 15s timeout
     tracing::info!("Probing runtime for {} via npx {}", def.name, pkg);
+    let mut cmd = async_cmd("npx");
+    cmd.args(["--yes", pkg, "--version"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(15),
-        tokio::process::Command::new("npx")
-            .args(["--yes", pkg, "--version"])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
+        cmd.output()
     ).await;
 
     let available = match result {
@@ -197,6 +207,8 @@ async fn probe_runtime(def: &AgentDef) -> bool {
 pub struct BinaryLocation {
     pub path: String,
     pub host_managed: bool,
+    /// True if the binary was found inside WSL (Windows only)
+    pub via_wsl: bool,
 }
 
 /// Find a binary in PATH or KRONN_HOST_BIN directories.
@@ -219,7 +231,7 @@ pub fn find_binary(name: &str) -> Option<BinaryLocation> {
         let host_managed = host_dirs.iter().any(|dir| {
             path.starts_with(dir)
         });
-        return Some(BinaryLocation { path: resolved, host_managed });
+        return Some(BinaryLocation { path: resolved, host_managed, via_wsl: false });
     }
 
     // Host-mounted bin directories — fallback when `which` fails (e.g. broken symlinks)
@@ -235,23 +247,24 @@ pub fn find_binary(name: &str) -> Option<BinaryLocation> {
                     return Some(BinaryLocation {
                         path: entry.path().to_string_lossy().to_string(),
                         host_managed: true,
+                        via_wsl: false,
                     });
                 }
             }
         }
     }
 
-    // On Windows native: try finding the binary inside WSL
+    // On Windows native: try finding the binary inside WSL.
+    // Use bash -lc to load the user's login profile (needed for npm global bins in PATH).
     #[cfg(target_os = "windows")]
     {
-        if let Ok(output) = std::process::Command::new("wsl.exe")
-            .args(["-e", "which", name])
-            .output()
-        {
+        let mut cmd = sync_cmd("wsl.exe");
+        cmd.args(["-e", "bash", "-lc", &format!("which {}", name)]);
+        if let Ok(output) = cmd.output() {
             if output.status.success() {
                 let wsl_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !wsl_path.is_empty() {
-                    return Some(BinaryLocation { path: wsl_path, host_managed: true });
+                    return Some(BinaryLocation { path: wsl_path, host_managed: true, via_wsl: true });
                 }
             }
         }
@@ -260,12 +273,31 @@ pub fn find_binary(name: &str) -> Option<BinaryLocation> {
     None
 }
 
-/// Try to get the version of an agent from its full path
+/// Try to get the version of an agent from its full path.
+/// On Windows, if the path is a WSL Linux path (starts with /), run via wsl.exe.
 async fn get_version_from(binary_path: &str) -> Result<String> {
-    let output = tokio::process::Command::new(binary_path)
-        .arg("--version")
-        .output()
-        .await?;
+    let output = {
+        #[cfg(target_os = "windows")]
+        {
+            if binary_path.starts_with('/') {
+                // WSL path — run via wsl.exe with login shell for correct PATH
+                async_cmd("wsl.exe")
+                    .args(["-e", "bash", "-lc", &format!("{} --version", binary_path)])
+                    .output().await?
+            } else {
+                async_cmd(binary_path)
+                    .arg("--version")
+                    .output().await?
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            async_cmd(binary_path)
+                .arg("--version")
+                .output()
+                .await?
+        }
+    };
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -434,5 +466,58 @@ mod tests {
     fn install_prerequisite_kiro_returns_none() {
         let result = super::install_prerequisite(&AgentType::Kiro);
         assert!(result.is_none(), "Kiro should have no prerequisite");
+    }
+
+    // ─── BinaryLocation via_wsl flag ────────────────────────────────────────
+
+    #[test]
+    fn binary_location_via_wsl_flag() {
+        let loc = BinaryLocation {
+            path: "/home/user/.local/bin/claude".to_string(),
+            host_managed: true,
+            via_wsl: true,
+        };
+        assert!(loc.via_wsl, "WSL-detected binary should have via_wsl=true");
+        assert!(loc.host_managed, "WSL binary should be host_managed");
+    }
+
+    #[test]
+    fn binary_location_local_not_wsl() {
+        let loc = BinaryLocation {
+            path: "/usr/local/bin/claude".to_string(),
+            host_managed: false,
+            via_wsl: false,
+        };
+        assert!(!loc.via_wsl, "Local binary should not have via_wsl");
+    }
+
+    // ─── detect_host_label ──────────────────────────────────────────────────
+
+    #[test]
+    #[serial]
+    fn detect_host_label_from_env() {
+        std::env::set_var("KRONN_HOST_OS", "WSL");
+        assert_eq!(detect_host_label(), "WSL");
+        std::env::remove_var("KRONN_HOST_OS");
+    }
+
+    #[test]
+    #[serial]
+    fn detect_host_label_ignores_empty_env() {
+        std::env::set_var("KRONN_HOST_OS", "");
+        let label = detect_host_label();
+        // Should fall through to platform detection, not return ""
+        assert!(!label.is_empty());
+        std::env::remove_var("KRONN_HOST_OS");
+    }
+
+    #[test]
+    #[serial]
+    fn detect_host_label_ignores_host_value() {
+        std::env::set_var("KRONN_HOST_OS", "host");
+        let label = detect_host_label();
+        // "host" is the unresolved default — should fall through
+        assert_ne!(label, "host");
+        std::env::remove_var("KRONN_HOST_OS");
     }
 }

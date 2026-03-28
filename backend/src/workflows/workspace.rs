@@ -6,8 +6,8 @@
 
 use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
-use tokio::process::Command;
 
+use crate::core::cmd::async_cmd;
 use crate::models::WorkspaceHooks;
 
 /// An active workspace (git worktree) for a workflow run.
@@ -66,17 +66,17 @@ impl Workspace {
 
         // Mark the repo and worktree as safe directories (needed in Docker where
         // the mounted volume owner differs from the container user)
-        let _ = Command::new("git")
+        let _ = async_cmd("git")
             .args(["config", "--global", "--add", "safe.directory", &repo_path.to_string_lossy()])
             .output()
             .await;
-        let _ = Command::new("git")
+        let _ = async_cmd("git")
             .args(["config", "--global", "--add", "safe.directory", &worktree_path.to_string_lossy()])
             .output()
             .await;
 
         // Create the worktree with a new branch
-        let output = Command::new("git")
+        let output = async_cmd("git")
             .args(["worktree", "add", "-b", &branch])
             .arg(&worktree_path)
             .current_dir(repo_path)
@@ -119,7 +119,7 @@ impl Workspace {
         self.run_hook("before_remove").await?;
 
         // Remove the worktree
-        let output = Command::new("git")
+        let output = async_cmd("git")
             .args(["worktree", "remove", "--force"])
             .arg(&self.path)
             .current_dir(&self.repo_path)
@@ -137,7 +137,7 @@ impl Workspace {
         }
 
         // Delete the branch
-        let _ = Command::new("git")
+        let _ = async_cmd("git")
             .args(["branch", "-D", &self.branch])
             .current_dir(&self.repo_path)
             .output()
@@ -159,7 +159,7 @@ impl Workspace {
 
         if let Some(cmd) = cmd {
             tracing::info!("Running workspace hook '{}': {}", hook_name, cmd);
-            let output = Command::new("sh")
+            let output = async_cmd("sh")
                 .args(["-c", cmd])
                 .current_dir(&self.path)
                 .output()

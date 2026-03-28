@@ -2,6 +2,7 @@
 
 use std::path::Path;
 use rusqlite::Connection;
+use crate::core::cmd::sync_cmd;
 use crate::models::*;
 
 /// Resolve a GitHub token from MCP configs in the database.
@@ -25,7 +26,7 @@ pub fn resolve_github_token(conn: &Connection, secret: &str) -> Option<String> {
 /// Run `git status` in the given repo directory and return structured status.
 pub fn run_git_status(repo_path: &Path) -> Result<GitStatusResponse, String> {
     let run = |args: &[&str]| -> Result<String, String> {
-        let output = std::process::Command::new("git")
+        let output = sync_cmd("git")
             .args(args)
             .current_dir(repo_path)
             .output()
@@ -34,7 +35,7 @@ pub fn run_git_status(repo_path: &Path) -> Result<GitStatusResponse, String> {
     };
 
     let run_with_status = |args: &[&str]| -> (String, bool) {
-        match std::process::Command::new("git")
+        match sync_cmd("git")
             .args(args)
             .current_dir(repo_path)
             .output()
@@ -169,7 +170,7 @@ pub fn run_git_status(repo_path: &Path) -> Result<GitStatusResponse, String> {
 /// Run `git diff` for a specific file in the given repo directory.
 pub fn run_git_diff(repo_path: &Path, file_path: &str) -> Result<GitDiffResponse, String> {
     let run_diff = |args: &[&str]| -> String {
-        std::process::Command::new("git")
+        sync_cmd("git")
             .args(args)
             .current_dir(repo_path)
             .output()
@@ -230,7 +231,7 @@ pub fn run_git_commit(repo_path: &Path, files: &[String], message: &str, amend: 
         let file_abs = repo_path.join(clean_file);
 
         if file_abs.exists() {
-            let add_output = std::process::Command::new("git")
+            let add_output = sync_cmd("git")
                 .args(["add", "--", clean_file])
                 .current_dir(repo_path)
                 .output()
@@ -242,7 +243,7 @@ pub fn run_git_commit(repo_path: &Path, files: &[String], message: &str, amend: 
                     String::from_utf8_lossy(&add_output.stderr).trim());
             }
         } else {
-            let rm_output = std::process::Command::new("git")
+            let rm_output = sync_cmd("git")
                 .args(["rm", "--cached", "--ignore-unmatch", "--", clean_file])
                 .current_dir(repo_path)
                 .output();
@@ -256,17 +257,17 @@ pub fn run_git_commit(repo_path: &Path, files: &[String], message: &str, amend: 
     }
 
     // Ensure git identity is set
-    let has_user = std::process::Command::new("git")
+    let has_user = sync_cmd("git")
         .args(["config", "user.name"])
         .current_dir(repo_path)
         .output()
         .map(|o| o.status.success() && !o.stdout.is_empty())
         .unwrap_or(false);
     if !has_user {
-        let _ = std::process::Command::new("git")
+        let _ = sync_cmd("git")
             .args(["config", "user.name", "Kronn"])
             .current_dir(repo_path).status();
-        let _ = std::process::Command::new("git")
+        let _ = sync_cmd("git")
             .args(["config", "user.email", "kronn@localhost"])
             .current_dir(repo_path).status();
     }
@@ -284,7 +285,7 @@ pub fn run_git_commit(repo_path: &Path, files: &[String], message: &str, amend: 
     commit_args.push("-m");
     commit_args.push(message);
 
-    let commit_output = std::process::Command::new("git")
+    let commit_output = sync_cmd("git")
         .args(&commit_args)
         .current_dir(repo_path)
         .output()
@@ -295,7 +296,7 @@ pub fn run_git_commit(repo_path: &Path, files: &[String], message: &str, amend: 
         return Err(format!("git commit failed: {}", stderr.trim()));
     }
 
-    let hash_output = std::process::Command::new("git")
+    let hash_output = sync_cmd("git")
         .args(["rev-parse", "--short", "HEAD"])
         .current_dir(repo_path)
         .output()
@@ -317,7 +318,7 @@ fn ssh_to_https_with_token(remote_url: &str, token: &str) -> Option<String> {
 
 /// Push the current branch to origin.
 pub fn run_git_push(repo_path: &Path, github_token: Option<&str>) -> Result<GitPushResponse, String> {
-    let branch_output = std::process::Command::new("git")
+    let branch_output = sync_cmd("git")
         .args(["branch", "--show-current"])
         .current_dir(repo_path)
         .output()
@@ -330,7 +331,7 @@ pub fn run_git_push(repo_path: &Path, github_token: Option<&str>) -> Result<GitP
 
     // Determine push target: if we have a token and the remote is SSH, use HTTPS with embedded token
     let push_target = if let Some(token) = github_token {
-        let remote_url = std::process::Command::new("git")
+        let remote_url = sync_cmd("git")
             .args(["remote", "get-url", "origin"])
             .current_dir(repo_path)
             .output()
@@ -341,7 +342,7 @@ pub fn run_git_push(repo_path: &Path, github_token: Option<&str>) -> Result<GitP
         None
     };
 
-    let mut cmd = std::process::Command::new("git");
+    let mut cmd = sync_cmd("git");
     if let Some(ref https_url) = push_target {
         // Push to HTTPS URL with embedded token (avoids SSH auth issues)
         cmd.args(["push", "-u", https_url, &branch]);
@@ -449,7 +450,7 @@ pub fn validate_exec_command(cmd: &str) -> Result<(), String> {
 /// Execute a shell command in the given directory.
 /// The caller MUST call `validate_exec_command` before this function.
 pub fn run_exec(repo_path: &Path, cmd: &str) -> Result<ExecResponse, String> {
-    let output = std::process::Command::new("sh")
+    let output = sync_cmd("sh")
         .args(["-c", cmd])
         .current_dir(repo_path)
         .output()
@@ -477,7 +478,7 @@ pub fn run_exec(repo_path: &Path, cmd: &str) -> Result<ExecResponse, String> {
 /// Detect the git hosting provider from the remote origin URL.
 /// Returns "github", "gitlab", or "unknown".
 pub fn detect_provider(repo_path: &Path) -> &'static str {
-    let output = std::process::Command::new("git")
+    let output = sync_cmd("git")
         .args(["remote", "get-url", "origin"])
         .current_dir(repo_path)
         .output();
@@ -503,7 +504,7 @@ pub fn detect_provider(repo_path: &Path) -> &'static str {
 /// Automatically pushes the current branch first if it has no upstream.
 pub fn run_create_pr(repo_path: &Path, title: &str, body: &str, base: &str, github_token: Option<&str>) -> Result<String, String> {
     // Ensure the branch is pushed before creating the PR
-    let has_upstream = std::process::Command::new("git")
+    let has_upstream = sync_cmd("git")
         .args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
         .current_dir(repo_path)
         .output()
@@ -526,7 +527,7 @@ pub fn run_create_pr(repo_path: &Path, title: &str, body: &str, base: &str, gith
                 args.push("--description");
                 args.push(body);
             }
-            std::process::Command::new("glab")
+            sync_cmd("glab")
                 .args(&args)
                 .current_dir(repo_path)
                 .output()
@@ -541,7 +542,7 @@ pub fn run_create_pr(repo_path: &Path, title: &str, body: &str, base: &str, gith
                 args.push("--body");
                 args.push(body);
             }
-            let mut cmd = std::process::Command::new("gh");
+            let mut cmd = sync_cmd("gh");
             cmd.args(&args).current_dir(repo_path);
             if let Some(token) = github_token {
                 cmd.env("GH_TOKEN", token);
@@ -566,13 +567,13 @@ pub fn check_pr_url(repo_path: &Path, branch: &str) -> Option<String> {
     let provider = detect_provider(repo_path);
     let output = match provider {
         "gitlab" => {
-            std::process::Command::new("glab")
+            sync_cmd("glab")
                 .args(["mr", "view", branch, "--json", "web_url", "--jq", ".web_url"])
                 .current_dir(repo_path)
                 .output().ok()?
         }
         _ => {
-            std::process::Command::new("gh")
+            sync_cmd("gh")
                 .args(["pr", "view", branch, "--json", "url", "--jq", ".url"])
                 .current_dir(repo_path)
                 .output().ok()?

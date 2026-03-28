@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use walkdir::WalkDir;
 
 use crate::models::{AiConfigType, DetectedRepo};
+use super::cmd::async_cmd;
 
 /// AI config file patterns to look for in repositories
 const AI_CONFIG_PATTERNS: &[(&str, AiConfigType)] = &[
@@ -38,12 +39,14 @@ pub async fn scan_paths_with_depth(
     for base_path in paths {
         let expanded = shellexpand(base_path);
         let base = resolve_host_path(&expanded);
+        tracing::info!("Scanning path: {} (resolved: {})", base_path, base.display());
         if !base.exists() {
-            tracing::warn!("Scan path does not exist: {}", base.display());
+            tracing::warn!("Scan path does not exist: {} (resolved: {})", base_path, base.display());
             continue;
         }
 
         let found = scan_directory(&base, ignore, depth).await?;
+        tracing::info!("Found {} repos in {}", found.len(), base.display());
         repos.extend(found);
     }
 
@@ -182,27 +185,66 @@ async fn detect_ai_configs(path: &Path) -> Vec<AiConfigType> {
     found
 }
 
+/// Check if a path is a WSL UNC path (\\wsl.localhost\... or \\wsl$\...)
+#[cfg(target_os = "windows")]
+fn is_wsl_unc_path(path: &Path) -> bool {
+    let s = path.to_string_lossy();
+    s.starts_with(r"\\wsl.localhost\") || s.starts_with(r"\\wsl$\")
+}
+
+/// Convert a WSL UNC path to a Linux path for use inside WSL.
+/// e.g. \\wsl.localhost\Ubuntu\home\user\repo → /home/user/repo
+#[cfg(target_os = "windows")]
+fn unc_to_wsl_linux_path(path: &Path) -> Option<String> {
+    let s = path.to_string_lossy();
+    // Strip \\wsl.localhost\<distro>\ or \\wsl$\<distro>\
+    let remainder = s.strip_prefix(r"\\wsl.localhost\")
+        .or_else(|| s.strip_prefix(r"\\wsl$\"))?;
+    // Skip distro name (first path component)
+    let linux_part = remainder.find('\\').map(|i| &remainder[i..])?;
+    Some(linux_part.replace('\\', "/"))
+}
+
+/// Run a git command, handling both local and WSL UNC paths on Windows.
+/// On Windows with WSL UNC paths, runs git via wsl.exe to avoid git.exe UNC issues.
+async fn run_git_command(path: &Path, args: &[&str]) -> Result<std::process::Output> {
+    #[cfg(target_os = "windows")]
+    {
+        if is_wsl_unc_path(path) {
+            // Run git inside WSL for WSL filesystem paths
+            if let Some(linux_path) = unc_to_wsl_linux_path(path) {
+                let git_cmd = format!("git -C '{}' {}", linux_path, args.join(" "));
+                return async_cmd("wsl.exe")
+                    .args(["-e", "bash", "-lc", &git_cmd])
+                    .output().await
+                    .context("Failed to run git via wsl.exe");
+            }
+        }
+        async_cmd("git")
+            .args(args).current_dir(path)
+            .output().await
+            .context("Failed to run git")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        async_cmd("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .await
+            .context("Failed to run git")
+    }
+}
+
 /// Read the git remote origin URL
 async fn read_git_remote(path: &Path) -> Result<String> {
-    let output = tokio::process::Command::new("git")
-        .args(["remote", "get-url", "origin"])
-        .current_dir(path)
-        .output()
-        .await
-        .context("Failed to run git")?;
-
+    let output = run_git_command(path, &["remote", "get-url", "origin"]).await?;
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// Read the current git branch
 async fn read_git_branch(path: &Path) -> Result<String> {
-    let output = tokio::process::Command::new("git")
-        .args(["branch", "--show-current"])
-        .current_dir(path)
-        .output()
-        .await
-        .context("Failed to run git")?;
-
+    let output = run_git_command(path, &["branch", "--show-current"]).await?;
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
@@ -318,4 +360,90 @@ fn dirs_home() -> Option<String> {
     std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .ok()
+}
+
+/// Check if a path looks like a WSL UNC path (for timeout and routing decisions).
+/// Works on all platforms (pure string check).
+pub fn is_wsl_unc_path_str(path: &str) -> bool {
+    path.starts_with(r"\\wsl.localhost\") || path.starts_with(r"\\wsl$\")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── shellexpand ────────────────────────────────────────────────────────
+
+    #[test]
+    fn shellexpand_tilde() {
+        std::env::set_var("HOME", "/home/testuser");
+        assert_eq!(shellexpand("~/repos"), "/home/testuser/repos");
+    }
+
+    #[test]
+    fn shellexpand_no_tilde() {
+        assert_eq!(shellexpand("/absolute/path"), "/absolute/path");
+    }
+
+    // ─── WSL UNC path detection ─────────────────────────────────────────────
+
+    #[test]
+    fn wsl_unc_detection_wsl_localhost() {
+        assert!(is_wsl_unc_path_str(r"\\wsl.localhost\Ubuntu\home\user\repos"));
+    }
+
+    #[test]
+    fn wsl_unc_detection_wsl_dollar() {
+        assert!(is_wsl_unc_path_str(r"\\wsl$\Ubuntu\home\user\repos"));
+    }
+
+    #[test]
+    fn wsl_unc_detection_local_path() {
+        assert!(!is_wsl_unc_path_str(r"C:\Users\user\repos"));
+        assert!(!is_wsl_unc_path_str("/home/user/repos"));
+    }
+
+    // ─── WSL UNC to Linux path conversion (Windows only) ────────────────────
+
+    // These functions are only compiled on Windows, but we can test the logic
+    // by extracting the conversion algorithm into a platform-independent test.
+
+    #[test]
+    fn unc_to_linux_path_conversion_logic() {
+        // Simulate what unc_to_wsl_linux_path does (platform-independent logic test)
+        let unc = r"\\wsl.localhost\Ubuntu\home\user\repos";
+        let remainder = unc.strip_prefix(r"\\wsl.localhost\").unwrap();
+        assert_eq!(remainder, r"Ubuntu\home\user\repos");
+
+        let linux_part = &remainder[remainder.find('\\').unwrap()..];
+        let linux_path = linux_part.replace('\\', "/");
+        assert_eq!(linux_path, "/home/user/repos");
+    }
+
+    #[test]
+    fn unc_wsl_dollar_to_linux_path_conversion_logic() {
+        let unc = r"\\wsl$\Ubuntu\home\user\repos";
+        let remainder = unc.strip_prefix(r"\\wsl$\").unwrap();
+        let linux_part = &remainder[remainder.find('\\').unwrap()..];
+        let linux_path = linux_part.replace('\\', "/");
+        assert_eq!(linux_path, "/home/user/repos");
+    }
+
+    // ─── restore_host_path ──────────────────────────────────────────────────
+
+    #[test]
+    fn restore_host_path_no_host_home() {
+        std::env::remove_var("KRONN_HOST_HOME");
+        let path = Path::new("/some/local/path");
+        assert_eq!(restore_host_path(path), "/some/local/path");
+    }
+
+    // ─── resolve_host_path ──────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_host_path_passthrough_without_env() {
+        std::env::remove_var("KRONN_HOST_HOME");
+        let result = resolve_host_path("/home/user/repos");
+        assert_eq!(result, PathBuf::from("/home/user/repos"));
+    }
 }
