@@ -703,9 +703,15 @@ export function DiscussionsPage({
   }, []);
 
   const handleContactAdd = useCallback(async (code: string) => {
-    const c = await contactsApi.add(code);
-    setContactsList(prev => [...prev, c]);
-    toast(t('contacts.added'), 'success');
+    const result = await contactsApi.add(code);
+    setContactsList(prev => [...prev, result.contact]);
+    if (result.warning) {
+      const warningKey = `contacts.warn.${result.warning}`;
+      const msg = t(warningKey);
+      toast(msg !== warningKey ? msg : t('contacts.warnGeneric'), 'info');
+    } else {
+      toast(t('contacts.added'), 'success');
+    }
   }, [toast, t]);
 
   const handleContactDelete = useCallback(async (id: string) => {

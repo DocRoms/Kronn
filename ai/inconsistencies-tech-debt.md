@@ -31,4 +31,5 @@
 | TD-20260314-home-mount | `$HOME` mounted read-only in container — security + portability risk | Infra | Low |
 | TD-20260328-localhost-exempt | Auth middleware skips localhost + Docker bridge IPs. Pragmatic for self-hosted but needs: (1) token rotation mechanism if leaked, (2) removal when TLS generalized. See `lib.rs:auth_middleware`. | Security | Low |
 | TD-20260328-discussions-backend | `discussions.rs` (2322L) — orchestration SSE tightly coupled with chat streaming. Extracting would require duplicating the streaming infrastructure. Low priority. | Backend | Low |
+| TD-20260329-toast-no-warning | Toast system only supports `success`, `error`, `info` — no `warning` type. Contact diagnostics use `info` as workaround. Low priority cosmetic. | Frontend | Low |
 

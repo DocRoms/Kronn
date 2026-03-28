@@ -6,5 +6,8 @@
     "dev": "tauri dev",
     "build": "tauri build",
     "build:frontend": "cd ../frontend && pnpm build"
+  },
+  "dependencies": {
+    "sharp": "^0.34.5"
   }
 }

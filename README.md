@@ -7,48 +7,13 @@ Orchestrate Claude Code, Codex, Vibe, Gemini CLI, and Kiro — with less waste.
 
 > **Early development** — Kronn is functional but actively evolving. Expect breaking changes.
 
-```
-  ╭──╮
-  │⚡│ Kronn v0.1.2
-  ╰──╯ Enter the grid.
-```
-
-![Kronn CLI startup](docs/screenshots/kronn_cli.png)
-
-## Prerequisites
-
-| Platform | Requirement |
-|----------|-------------|
-| **Linux** | Docker + Docker Compose |
-| **macOS** | Docker Desktop (or Docker Engine via Homebrew) |
-| **Windows** | **WSL2** + Docker + Docker Compose (see below) |
-
-> **Windows users**: Kronn requires WSL2 — it won't work with Docker alone on native Windows. Docker Desktop is **not required** — Docker Engine inside WSL works perfectly.
-
-**[Full installation guide (Linux / macOS / Windows)](docs/install.md)** — step-by-step instructions for each platform.
-
-## Quick Start
-
-```bash
-git clone https://github.com/DocRoms/kronn.git
-cd kronn
-./kronn start
-# → open http://localhost:3140
-```
-
-Three commands. The CLI detects your agents, offers CLI or web mode, and handles everything. First web launch opens the setup wizard.
-
-![Kronn Dashboard](docs/screenshots/kronn_dashboard.png)
-
 ---
 
 ## Why Kronn?
 
 You use AI coding agents. Maybe Claude Code, maybe Codex, maybe both. Each has its own config, its own MCP setup, its own context files scattered across your repos. You manage all of that... manually.
 
-**Kronn fixes that.** And every feature is designed to reduce unnecessary compute — document once instead of letting agents explore blindly every time, persist context instead of rebuilding it from scratch, frame agents with profiles and skills so they get it right on the first try.
-
-AI is powerful — but every wasted token is wasted energy, wasted hardware, wasted resources.
+**Kronn fixes that.** Every feature is designed to reduce unnecessary compute — document once instead of letting agents explore blindly, persist context instead of rebuilding it from scratch, frame agents with profiles and skills so they get it right on the first try.
 
 | | Without Kronn | With Kronn |
 |---|---|---|
@@ -64,17 +29,50 @@ AI is powerful — but every wasted token is wasted energy, wasted hardware, was
 
 ---
 
+## Get Started
+
+### Desktop App (recommended)
+
+Download, install, launch. No Docker, no CLI, no config.
+
+**[Download latest release](https://github.com/DocRoms/Kronn/releases/latest)** — `.msi` (Windows), `.dmg` (macOS), `.deb` / `.AppImage` (Linux).
+
+The setup wizard detects your agents and repositories automatically.
+
+### Self-hosted (Docker)
+
+For those who want full control, multi-user P2P sync, or server deployment.
+
+**Prerequisites:** Docker + Docker Compose. Windows requires WSL2.
+
+```bash
+git clone https://github.com/DocRoms/kronn.git
+cd kronn
+./kronn start
+# → open http://localhost:3140
+```
+
+**[Full installation guide (Linux / macOS / Windows)](docs/install.md)**
+
+![Kronn Dashboard](docs/screenshots/kronn_dashboard.png)
+
+---
+
 ## Core Features
 
-### 💬 Multi-Agent Discussions
+### Multi-Agent Discussions
 
-Chat with agents in project context. Use `@claude` or `@codex` to target specific agents. **Debate mode**: agents discuss in configurable rounds (1–3) and a primary agent synthesizes — get diverse perspectives, not just one model's opinion.
+Chat with agents in project context. Use `@claude` or `@codex` to target specific agents. **Debate mode**: agents discuss in configurable rounds (1-3) and a primary agent synthesizes.
 
-Persistent conversations backed by SQLite — no context rebuilt from scratch, every resumed conversation is compute saved. Full i18n support (French, English, Spanish). Claude Code responses streamed token-by-token with per-message token tracking. **Search and filter** discussions by title in the sidebar. Archive, retry, edit, swipe gestures, multi-line input with auto-resize. **Switch agent mid-conversation** — out of tokens or want a second opinion? Click the agent name to switch; the new agent auto-summarizes and continues.
+Persistent conversations backed by SQLite. Full i18n (French, English, Spanish). Claude Code streamed token-by-token with per-message tracking. **Switch agent mid-conversation** — click the agent name to switch; the new agent auto-summarizes and continues. Archive, retry, edit, search, swipe gestures, multi-line input.
 
 ![Multi-agent discussion with debate mode](docs/screenshots/kronn_multi-ai_discussion.png)
 
-### 🔌 MCP Management
+### Multi-User P2P
+
+Share discussions between Kronn instances via WebSocket. Replicated model: each peer stores a full copy, messages sync in real-time. Auto-detection of Tailscale, VPN, and LAN networks. Network diagnostics on connection failures.
+
+### MCP Management
 
 A 3-tier architecture with encrypted secrets:
 
@@ -84,18 +82,16 @@ Server (type)  →  Config (instance + secrets)  →  Project (N:N)
 
 **49 built-in servers** covering Git, databases, cloud & infra, browsers, monitoring, communication, project management, design, payments, knowledge bases, AI reasoning, SEO, code quality, IaC, and hosting. [Full list →](docs/mcps.md)
 
-Key capabilities:
 - **Auto-detection** from existing `.mcp.json` files across projects
-- **Disk sync for all agents** — `.mcp.json` (Claude), `.kiro/settings/mcp.json` (Kiro), `.gemini/settings.json` (Gemini), `.vibe/config.toml` (Vibe), `~/.codex/config.toml` (Codex) — secrets decrypted, `.gitignore` ensured
+- **Disk sync for all agents** — `.mcp.json` (Claude), `.kiro/settings/mcp.json` (Kiro), `.gemini/settings.json` (Gemini), `.vibe/config.toml` (Vibe), `~/.codex/config.toml` (Codex)
 - **Inline secret editing** with per-field visibility toggles and token generation links
-- **MCP context files** — per-MCP per-project instruction files (`ai/operations/mcp-servers/*.md`) auto-injected into agent prompts
 - **Global configs** — mark a config as global to deploy to all projects at once
 
 ![MCP management with encrypted secrets](docs/screenshots/mcps.png)
 
-### ⚙️ Workflows
+### Workflows
 
-One system for everything: cron jobs, multi-step pipelines, issue-to-PR automation, manual triggers. Created from a 5-step UI wizard or imported from a `WORKFLOW.md` file. MCP tools are automatically injected into agent prompts.
+One system for everything: cron jobs, multi-step pipelines, issue-to-PR automation, manual triggers. Created from a 5-step UI wizard or imported from a `WORKFLOW.md` file. MCP tools auto-injected into agent prompts.
 
 **Level 1 — Simple cron**: one agent, one prompt, on a schedule.
 ```yaml
@@ -135,7 +131,7 @@ Kronn reads [OpenAI Symphony](https://github.com/openai/symphony)'s `WORKFLOW.md
 
 </details>
 
-### 🎭 Agent Configuration (3-axis model)
+### Agent Configuration (3-axis model)
 
 Three independent axes shape how agents behave — all multi-selectable, all available in discussions and workflow steps:
 
@@ -159,7 +155,7 @@ Three independent axes shape how agents behave — all multi-selectable, all ava
 
 Custom profiles, skills, and directives are Markdown files with YAML frontmatter in `~/.config/kronn/`. Create, edit, and delete from the dashboard.
 
-### 🔍 AI Audit Pipeline
+### AI Audit Pipeline
 
 Generate, review, and validate AI context documentation for any project in 4 steps:
 
@@ -168,53 +164,33 @@ NoTemplate → TemplateInstalled → Audited → Validated
 ```
 
 1. **Install template** — one-click `ai/` skeleton with redirectors (`CLAUDE.md`, `.cursorrules`, `.windsurfrules`)
-2. **AI audit** — 10-step automated analysis (~20 min, SSE progress) with 3 expert profiles (Architect + Tech Lead + Mentor): project analysis, repo map, coding rules, testing, architecture, glossary, operations, MCP servers, tech debt, final review. Auto-detects project skills from config files.
+2. **AI audit** — 10-step automated analysis (~20 min, SSE progress) with 3 expert profiles: project analysis, repo map, coding rules, testing, architecture, glossary, operations, MCP servers, tech debt, final review
 3. **Validation** — interactive Q&A where the AI asks about ambiguities and updates docs in real-time
-4. **Mark as validated** — injects `<!-- KRONN:VALIDATED:date -->`, project is AI-ready
+4. **Mark as validated** — project is AI-ready
 
-> The audit costs tokens once. It saves tokens on every conversation that follows.
+Optional **pre-audit briefing**: 5 quick questions about purpose, stack, team, conventions, and watch points.
 
-Optional **pre-audit briefing**: 5 quick questions about purpose, stack, team, conventions, and watch points — written to `ai/briefing.md` and injected into every audit step.
+**Drift detection**: compares source file checksums against stored data, reports stale sections without consuming tokens. Partial re-audit re-runs only stale steps.
 
 ![AI audit pipeline in progress](docs/screenshots/audit.png)
 
-### 🎙️ Voice — TTS & STT (100% Local)
+### Voice — TTS & STT (100% Local)
 
-Talk to your agents. Literally. No cloud, no API, no data leaves your machine.
+Talk to your agents. No cloud, no API, no data leaves your machine.
 
-**Speech-to-Text (STT)** — Whisper WASM via `@huggingface/transformers`. Click the mic, speak, click stop (or press Enter/Space). Your speech is transcribed locally and appears in the textarea. Three model sizes: Tiny (~40MB), Base (~140MB), Small (~460MB) — configurable in Settings.
+- **Speech-to-Text** — Whisper WASM via `@huggingface/transformers`. Three model sizes (Tiny/Base/Small).
+- **Text-to-Speech** — Piper WASM via `@diffusionstudio/vits-web`. 9 voices across FR/EN/ES.
+- **Voice Conversation Mode** — hands-free loop: speak → send → agent responds → TTS reads → mic auto-starts.
 
-**Text-to-Speech (TTS)** — Piper WASM via `@diffusionstudio/vits-web`. Agent responses are read aloud with natural voices. Sentence-by-sentence pipelining (next sentence synthesizes while current one plays). Pause/resume per message. 9 voices across 3 languages, male and female:
+All models downloaded on first use and cached locally.
 
-| Language | Voices |
-|----------|--------|
-| Français | UPMC (M), Siwis (F), Tom (M) |
-| English | HFC Female (F), HFC Male (M), Lessac (F) |
-| Español | Sharvard (M), DaveFX (M), Ald MX (F) |
+![Audio Discussion mode](docs/screenshots/kronn_audio_discussion.png)
 
-**Voice Conversation Mode** — hands-free loop: speak → auto-send → agent responds → TTS reads → countdown 3-2-1 → mic auto-starts → repeat. Toggle with the phone icon in the composer toolbar.
+### More Features
 
-All models are downloaded on first use and cached in the browser (IndexedDB / OPFS). Configurable in Settings > Voice.
-
-![Audio Dicussion mode](docs/screenshots/kronn_audio_discussion.png)
-
-### 🛡️ Drift Detection & Partial Re-audit
-
-After an audit, Kronn tracks source file checksums in `ai/checksums.json`. The drift endpoint compares current files against stored checksums and reports stale sections — **without consuming tokens**. A partial re-audit re-runs only the stale steps (~3-5K tokens vs ~20K for a full audit). Stale projects show an amber badge with an update button.
-
-### 🚀 Project Bootstrap
-
-Create a new project from scratch: name it, describe it, and Kronn creates the directory, initializes git, installs the AI template, and opens a guided discussion with an AI architect + product owner + entrepreneur walking you through Vision → Architecture → Stack → MVP → Action Plan.
-
-### 🌿 Worktree Isolation
-
-Each discussion and workflow can run in its own isolated git worktree — multiple agents working in parallel on the same project without touching your local branch. Kronn creates a dedicated `kronn/{slug}` branch in `.kronn-worktrees/` inside your repo, visible from your IDE.
-
-**Lock / Unlock** — The worktree "locks" the branch so git doesn't conflict. When you need to test the agent's work locally, click the 🔓 button next to the branch name to **unlock** (removes the worktree, frees the branch for `git checkout`). When you resume the conversation, the worktree is automatically re-created. If the branch is still checked out in your repo, Kronn shows an error banner with a retry button.
-
-### 🧩 Agent Incompatibility System
-
-Some agents lack filesystem access or specific capabilities. Kronn tracks per-agent incompatibilities — for example, Vibe (direct Mistral API mode) is automatically excluded from steps that require filesystem access.
+- **Project Bootstrap** — create a new project from scratch with an AI architect guiding Vision → Architecture → Stack → MVP → Action Plan
+- **Worktree Isolation** — each discussion/workflow runs in its own git worktree. Lock/Unlock for local testing
+- **Agent Incompatibility** — Kronn tracks per-agent limitations and auto-excludes incompatible agents from steps
 
 ---
 
@@ -230,13 +206,13 @@ Some agents lack filesystem access or specific capabilities. Kronn tracks per-ag
 | DeepSeek | `deepseek` | Planned |
 | OpenCode | `opencode` | Planned |
 
-Auto-detected at setup with runtime probe fallback (npx). Spawned in non-interactive mode, responses streamed via SSE. Per-agent permissions toggle (`--dangerously-skip-permissions`, `--full-auto`, `--yolo`). Multiple named API keys per provider with one-click activation.
+Auto-detected at setup with runtime probe fallback (npx). Per-agent permissions toggle. Multiple named API keys per provider.
 
 ![Multi API key management per agent](docs/screenshots/multiApiKeyByAgent.png)
 
 ---
 
-## Usage
+## CLI Usage
 
 ```bash
 ./kronn start           # Interactive flow: detect agents, choose CLI or web
@@ -250,8 +226,6 @@ Auto-detected at setup with runtime probe fallback (npx). Spawned in non-interac
 ./kronn help            # Show help
 ```
 
-On first run, `kronn` offers to symlink itself into `~/.local/bin/`.
-
 <details>
 <summary><strong>Dev commands</strong></summary>
 
@@ -262,6 +236,7 @@ make logs           # Tail logs
 make dev-backend    # Rust hot reload
 make dev-frontend   # Vite dev server
 make typegen        # Sync Rust → TS types
+make bump V=x.y.z   # Bump version everywhere
 ```
 </details>
 
@@ -273,18 +248,17 @@ make typegen        # Sync Rust → TS types
 kronn/
 ├── backend/            # Rust (Axum) — API, workflows, agents, SQLite
 │   └── src/
-│       ├── api/            # setup, projects, agents, mcps, workflows, discussions, stats
-│       ├── core/           # config, scanner, registry, crypto, checksums, profiles, directives
+│       ├── api/            # setup, projects, agents, mcps, workflows, discussions, contacts
+│       ├── core/           # config, scanner, registry, crypto, cmd helpers, profiles, directives
 │       ├── agents/         # Agent runner (spawns CLIs, streams stdout)
 │       ├── workflows/      # Workflow engine, triggers, steps
 │       ├── skills/         # 22 built-in (Markdown + YAML frontmatter)
 │       ├── profiles/       # 11 built-in agent profiles
-│       ├── directives/     # Output directives
-│       └── scripts/        # vibe-runner.py (direct Mistral API mode)
+│       └── directives/     # Output directives
 ├── frontend/           # React 18 + TypeScript + Vite
 │   └── src/
 │       ├── pages/          # SetupWizard, Dashboard, Settings, Discussions, MCPs, Workflows
-│       ├── types/          # generated.ts (from Rust via ts-rs — DO NOT EDIT)
+│       ├── types/          # generated.ts (from Rust via ts-rs)
 │       └── lib/            # Typed API client + SSE + i18n (fr/en/es) + TTS/STT engines
 ├── desktop/            # Tauri desktop app (backend embedded, no Docker needed)
 ├── ai/                 # AI context (for agents working on Kronn itself)
@@ -323,8 +297,8 @@ scan_depth = 4
 <summary><strong>CI pipeline</strong></summary>
 
 GitHub Actions triggered by `ci-test` label on PRs:
-- **test-backend**: `cargo check` + `cargo clippy` + `cargo test` (~746 tests)
-- **test-frontend**: `tsc --noEmit` + `pnpm test` (~315 tests, 22 suites)
+- **test-backend**: `cargo check` + `cargo clippy` + `cargo test` (~890 tests)
+- **test-frontend**: `tsc --noEmit` + `pnpm test` (~350 tests, 24 suites)
 - **test-shell**: `make test-shell` (186 bats tests, 8 suites)
 - **desktop-build**: `.github/workflows/desktop-build.yml` — builds Tauri installers for Windows, macOS, and Linux
 </details>
@@ -333,9 +307,9 @@ GitHub Actions triggered by `ci-test` label on PRs:
 
 ## Security
 
-> **Kronn does not include TLS.** Do not expose port 3140 without a TLS reverse proxy (nginx, Caddy, Traefik…).
+> **Kronn does not include TLS.** Do not expose port 3140 without a TLS reverse proxy (nginx, Caddy, Traefik...).
 
-> **Authentication is opt-in.** Enable Bearer token auth in Settings. A warning banner is displayed when auth is disabled.
+> **Authentication is on by default.** A Bearer token is auto-generated at first launch. Localhost requests bypass auth. Remote peers require the token.
 
 ---
 
@@ -347,14 +321,7 @@ AI agents run on physical hardware with a finite lifespan. Every unnecessary inf
 
 The long-term vision: **de-agentify what doesn't need an agent.** MCPs are APIs — when a workflow step is mechanical (post to Slack, create a ticket), a direct API call costs zero tokens. Agent intelligence should be reserved for tasks that actually need reasoning.
 
-→ [Read the full story](https://medium.com/@doc.roms/les-agents-ia-gaspillent-du-compute-%C3%A0-grande-%C3%A9chelle-on-en-parle-6e428104675c) <!-- TODO: link to Real public article -->
-
 ---
-
-## Requirements
-
-- **Docker** & **Docker Compose**
-- **Bash** 3.2+ (macOS, Linux, WSL)
 
 ## Contributing
 

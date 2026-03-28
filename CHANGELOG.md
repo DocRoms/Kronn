@@ -7,7 +7,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [0.2.2] — 2026-03-28
+## [0.2.2] — 2026-03-29
+
+### Added
+- **Contact network diagnostics** — when adding a contact that's unreachable, the API now diagnoses the cause (Tailscale not active, LAN mismatch, peer offline) and returns a machine-readable code. Frontend shows a contextual toast instead of a generic error (i18n FR/EN/ES)
 
 ### Fixed
 - **Windows: console windows flashing** — every background command (git, agent detection, npx probes, etc.) spawned a visible cmd.exe window on the Tauri desktop app. New `core::cmd` module applies `CREATE_NO_WINDOW` flag to all 50+ `Command::new` calls across the codebase
@@ -19,6 +22,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 - **Setup wizard: all steps are now optional** — agents and repository detection steps can be skipped (button switches to "Passer cette étape"). Enables non-developer use cases: global discussions without projects, project creation without git repos
+- **App icon** — new Lucide Zap lightning bolt icon (`#c8ff00` on `#0a0c10`) matching the web UI. Generated via `cargo tauri icon` from SVG source. Replaces the old generic icon across all platforms (ICO, ICNS, PNG, Windows Store logos)
 - **`core::cmd` module** — centralized `async_cmd()` / `sync_cmd()` helpers replace raw `Command::new()` everywhere (agents, scanner, worktree, git ops, workflows, tailscale, checksums, audit). Single place to enforce cross-platform command behavior
 - **WSL host label** — agents found via WSL now show "WSL" instead of "Windows" in the setup wizard (new `via_wsl` flag on `BinaryLocation`)
 

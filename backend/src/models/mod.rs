@@ -1045,6 +1045,15 @@ pub struct AddContactRequest {
     pub invite_code: String,
 }
 
+/// Result of adding a contact, with optional diagnostic hint for unreachable peers.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct AddContactResult {
+    pub contact: Contact,
+    /// Human-readable hint explaining why the contact is pending (network mismatch, etc.)
+    pub warning: Option<String>,
+}
+
 /// Network info for multi-user connectivity.
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
