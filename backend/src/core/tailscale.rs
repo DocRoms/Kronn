@@ -7,6 +7,8 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
+use super::cmd::{async_cmd, sync_cmd};
+
 /// Cached Tailscale detection result with TTL.
 struct TailscaleCache {
     ip: Option<String>,
@@ -63,7 +65,7 @@ fn detect_via_host_env() -> Option<String> {
 
 /// Try `tailscale ip -4` command.
 async fn detect_via_cli() -> Option<String> {
-    let output = tokio::process::Command::new("tailscale")
+    let output = async_cmd("tailscale")
         .args(["ip", "-4"])
         .output()
         .await
@@ -103,7 +105,7 @@ fn detect_via_interface() -> Option<String> {
     // macOS/other: try parsing ifconfig output synchronously
     #[cfg(not(target_os = "linux"))]
     {
-        if let Ok(output) = std::process::Command::new("ifconfig").output() {
+        if let Ok(output) = sync_cmd("ifconfig").output() {
             let text = String::from_utf8_lossy(&output.stdout);
             for line in text.lines() {
                 let trimmed = line.trim();
@@ -215,7 +217,7 @@ fn scan_all_interfaces() -> Vec<(String, String, String)> {
     #[cfg(target_os = "linux")]
     {
         // Parse `ip -4 addr show` output
-        if let Ok(output) = std::process::Command::new("ip")
+        if let Ok(output) = sync_cmd("ip")
             .args(["-4", "addr", "show"])
             .output()
         {
@@ -242,7 +244,7 @@ fn scan_all_interfaces() -> Vec<(String, String, String)> {
 
     #[cfg(not(target_os = "linux"))]
     {
-        if let Ok(output) = std::process::Command::new("ifconfig").output() {
+        if let Ok(output) = sync_cmd("ifconfig").output() {
             let text = String::from_utf8_lossy(&output.stdout);
             let mut current_iface = String::new();
             for line in text.lines() {

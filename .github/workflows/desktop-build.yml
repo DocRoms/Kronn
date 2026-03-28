@@ -75,20 +75,38 @@ jobs:
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
 
+      # Clean old bundle artifacts from cargo cache to avoid uploading stale installers
+      - name: Clean old bundles
+        shell: bash
+        run: rm -rf desktop/src-tauri/target/${{ matrix.target }}/release/bundle
+
       - name: Build Tauri app
         working-directory: desktop/src-tauri
-        run: cargo tauri build --target ${{ matrix.target }}
+        shell: bash
+        run: |
+          # Only export Apple signing env vars if actually configured (non-empty).
+          # When secrets are unset, GitHub passes empty strings — Tauri interprets an
+          # empty APPLE_CERTIFICATE as "try to sign" and fails on certificate import.
+          if [ -n "$_APPLE_CERTIFICATE" ]; then
+            export APPLE_CERTIFICATE="$_APPLE_CERTIFICATE"
+            export APPLE_CERTIFICATE_PASSWORD="$_APPLE_CERTIFICATE_PASSWORD"
+            export APPLE_SIGNING_IDENTITY="$_APPLE_SIGNING_IDENTITY"
+            export APPLE_ID="$_APPLE_ID"
+            export APPLE_PASSWORD="$_APPLE_PASSWORD"
+            export APPLE_TEAM_ID="$_APPLE_TEAM_ID"
+          fi
+          cargo tauri build --target ${{ matrix.target }}
         env:
-          # Signing env vars — only set when GitHub Secrets are configured.
-          # When unset, Tauri builds unsigned (no codesign on macOS, no signtool on Windows).
+          # Tauri updater signing — safe to pass even if empty (Tauri ignores empty values)
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Apple signing — stored in prefixed vars, only exported when non-empty (see script above)
+          _APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          _APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          _APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          _APPLE_ID: ${{ secrets.APPLE_ID }}
+          _APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          _APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
       # ─── Upload artifacts ─────────────────────────────────────────
 

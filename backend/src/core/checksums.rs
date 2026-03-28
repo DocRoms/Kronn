@@ -3,6 +3,8 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use super::cmd::sync_cmd;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChecksumsFile {
     pub audited_at: String,
@@ -93,7 +95,7 @@ fn matches_simple_glob(pattern: &str, name: &str) -> bool {
 
 /// Run a git command in the given directory, returning stdout trimmed. Returns None on failure.
 fn run_git(project_path: &Path, args: &[&str]) -> Option<String> {
-    let mut cmd = std::process::Command::new("git");
+    let mut cmd = sync_cmd("git");
     cmd.arg("-C").arg(project_path);
     for arg in args {
         cmd.arg(arg);

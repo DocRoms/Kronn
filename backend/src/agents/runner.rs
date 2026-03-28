@@ -2,9 +2,9 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
 use tokio::sync::mpsc;
 
+use crate::core::cmd::{async_cmd, sync_cmd};
 use crate::models::{AgentType, ModelTier, ModelTiersConfig, TokensConfig};
 
 /// Detect if we're running inside WSL (vs Windows native).
@@ -149,7 +149,7 @@ pub fn fix_file_ownership(work_dir: &Path) {
 
     // Skip if container user already matches the desired UID (expected when
     // APP_UID build arg matches KRONN_HOST_UID — the normal case after the fix).
-    if let Ok(output) = std::process::Command::new("id").arg("-u")
+    if let Ok(output) = sync_cmd("id").arg("-u")
         .stdout(Stdio::piped()).stderr(Stdio::null()).output()
     {
         let current_uid = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -160,7 +160,7 @@ pub fn fix_file_ownership(work_dir: &Path) {
 
     let ownership = format!("{}:{}", uid, gid);
     // Only fix files in the work directory, not system files
-    let status = std::process::Command::new("chown")
+    let status = sync_cmd("chown")
         .args(["-R", &ownership])
         .arg(work_dir)
         .stdout(Stdio::null())
@@ -461,7 +461,7 @@ pub(crate) async fn ensure_kiro_cli_available() -> Result<(), String> {
     }
 
     tracing::info!("kiro-cli not found, installing Linux kiro-cli...");
-    let output = Command::new("sh")
+    let output = async_cmd("sh")
         .args([
             "-c",
             "command -v unzip >/dev/null 2>&1 || { echo 'Missing dependency: unzip' >&2; exit 127; }; \
@@ -765,7 +765,7 @@ fn try_spawn(
         (cmd_name.clone(), cmd_args.clone(), work_dir.to_path_buf())
     };
 
-    let mut cmd = Command::new(&final_cmd);
+    let mut cmd = async_cmd(&final_cmd);
     cmd.args(&final_args)
         .current_dir(&effective_work_dir)
         .stdin(Stdio::null())

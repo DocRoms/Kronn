@@ -6,6 +6,7 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use crate::agents::runner;
+use crate::core::cmd::sync_cmd;
 use crate::core::scanner;
 use crate::models::*;
 use crate::AppState;
@@ -197,7 +198,7 @@ pub async fn bootstrap(
                 .map_err(|e| format!("Failed to create directory: {}", e))?;
 
             // git init
-            let status = std::process::Command::new("git")
+            let status = sync_cmd("git")
                 .arg("init")
                 .current_dir(&project_path)
                 .stdout(std::process::Stdio::null())
@@ -672,7 +673,7 @@ pub async fn clone_project(
     let clone_path = host_path.clone();
     let clone_path2 = host_path.clone();
     let clone_result = tokio::task::spawn_blocking(move || {
-        std::process::Command::new("git")
+        sync_cmd("git")
             .args(["clone", &clone_url, &clone_path.to_string_lossy()])
             .output()
     }).await;
@@ -690,7 +691,7 @@ pub async fn clone_project(
     // Reset the remote URL to the original (without embedded token) so that
     // secrets don't persist in .git/config and don't leak via git remote scans.
     let _ = tokio::task::spawn_blocking(move || {
-        std::process::Command::new("git")
+        sync_cmd("git")
             .args(["remote", "set-url", "origin", &original_url])
             .current_dir(&clone_path2)
             .output()
@@ -1187,7 +1188,7 @@ pub async fn git_branch(
 
     let branch_name = req.name.clone();
     let result = tokio::task::spawn_blocking(move || -> Result<GitBranchResponse, String> {
-        let output = std::process::Command::new("git")
+        let output = sync_cmd("git")
             .args(["checkout", "-b", &branch_name])
             .current_dir(&repo_path)
             .output()
@@ -1346,7 +1347,7 @@ pub async fn pr_template(
         Err(e) => return Json(ApiResponse::err(e)),
     };
 
-    let branch = std::process::Command::new("git")
+    let branch = sync_cmd("git")
         .args(["branch", "--show-current"])
         .current_dir(&repo_path)
         .output()
