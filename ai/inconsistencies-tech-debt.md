@@ -29,5 +29,6 @@
 | TD-20260314-no-api-docs | No OpenAPI/Swagger API documentation | Docs | Medium |
 | TD-20260318-token-tracking-incomplete | Token usage returns 0 for Gemini CLI and Vibe — SDK doesn't expose token counts. Blocked by upstream. | Backend | Medium |
 | TD-20260314-home-mount | `$HOME` mounted read-only in container — security + portability risk | Infra | Low |
+| TD-20260328-localhost-exempt | Auth middleware skips localhost + Docker bridge IPs. Pragmatic for self-hosted but needs: (1) token rotation mechanism if leaked, (2) removal when TLS generalized. See `lib.rs:auth_middleware`. | Security | Low |
 | TD-20260328-discussions-backend | `discussions.rs` (2322L) — orchestration SSE tightly coupled with chat streaming. Extracting would require duplicating the streaming infrastructure. Low priority. | Backend | Low |
 

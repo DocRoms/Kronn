@@ -7,6 +7,16 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.2.1] — 2026-03-28
+
+### Fixed
+- **WS security: first message must be Presence** — non-Presence first messages are now rejected, preventing invite code verification bypass (found by multi-agent audit)
+- **Tauri desktop: blank page** — `extract_dir` doubled subdirectory paths (`assets/assets/index.js`). Fix: always use root target for path resolution
+- **macOS CI build** — removed `|| ''` fallback on Apple signing secrets that caused empty certificate import to fail
+- **Localhost exempt documented as tech debt** — `TD-20260328-localhost-exempt` with rotation plan
+
+---
+
 ## [0.2.0] — 2026-03-28
 
 ### Added

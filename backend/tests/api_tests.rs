@@ -1527,6 +1527,21 @@ async fn start_test_server(state: AppState) -> std::net::SocketAddr {
     addr
 }
 
+/// Send an initial Presence message to authenticate the WS connection.
+/// Required since the security fix: first message MUST be Presence.
+async fn ws_send_presence(sender: &mut futures::stream::SplitSink<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, tokio_tungstenite::tungstenite::Message>) {
+    let presence = WsMessage::Presence {
+        from_pseudo: "TestPeer".into(),
+        from_invite_code: "".into(), // Empty = local frontend (accepted)
+        online: true,
+    };
+    sender.send(tokio_tungstenite::tungstenite::Message::Text(
+        serde_json::to_string(&presence).unwrap().into(),
+    )).await.unwrap();
+    // Give handler time to verify
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+}
+
 /// WS upgrade succeeds and broadcast relay works (send → receive round-trip).
 #[tokio::test]
 async fn ws_broadcast_relay() {
@@ -1641,6 +1656,9 @@ async fn ws_ping_pong() {
         .expect("WS connect failed");
     let (mut sender, _receiver) = StreamExt::split(ws_stream);
 
+    // Authenticate first (required since security fix)
+    ws_send_presence(&mut sender).await;
+
     // Send a Ping
     let ping = WsMessage::Ping {
         timestamp: 1711000000,
@@ -1652,18 +1670,20 @@ async fn ws_ping_pong() {
         .await
         .unwrap();
 
-    // Should get a Pong on broadcast
-    let received = tokio::time::timeout(std::time::Duration::from_secs(2), broadcast_rx.recv())
-        .await
-        .expect("timeout")
-        .expect("recv error");
-
-    match received {
-        WsMessage::Pong { timestamp } => {
+    // Drain any Presence broadcast first, then expect Pong
+    let mut pong_found = false;
+    for _ in 0..5 {
+        let received = tokio::time::timeout(std::time::Duration::from_secs(2), broadcast_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("recv error");
+        if let WsMessage::Pong { timestamp } = received {
             assert_eq!(timestamp, 1711000000);
+            pong_found = true;
+            break;
         }
-        _ => panic!("Expected Pong, got {:?}", received),
     }
+    assert!(pong_found, "Expected Pong but never received it");
 }
 
 /// WS auto-adds unknown but valid invite code as pending contact and relays the message.
@@ -1758,6 +1778,48 @@ async fn ws_rejects_invalid_invite_code_format() {
     assert!(
         result.is_err(),
         "Message with invalid invite code should NOT be relayed, but got: {:?}",
+        result
+    );
+}
+
+/// WS rejects non-Presence as first message (security: prevent bypass of invite code check).
+#[tokio::test]
+async fn ws_rejects_non_presence_first_message() {
+    let state = test_state();
+    let addr = start_test_server(state.clone()).await;
+
+    let mut broadcast_rx = state.ws_broadcast.subscribe();
+
+    let url = format!("ws://{}/api/ws", addr);
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("WS connect failed");
+    let (mut sender, _receiver) = StreamExt::split(ws_stream);
+
+    // Send a ChatMessage as the FIRST message (bypassing Presence verification)
+    let msg = WsMessage::ChatMessage {
+        shared_discussion_id: "attack-disc".into(),
+        message_id: "attack-msg".into(),
+        from_pseudo: "Attacker".into(),
+        from_avatar_email: None,
+        from_invite_code: "kronn:Attacker@evil.com:666".into(),
+        content: "Injected message".into(),
+        timestamp: 0,
+    };
+    sender
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            serde_json::to_string(&msg).unwrap().into(),
+        ))
+        .await
+        .unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // The message should NOT have been relayed (non-Presence first message → rejected)
+    let result = broadcast_rx.try_recv();
+    assert!(
+        result.is_err(),
+        "Non-Presence first message should be rejected, but got: {:?}",
         result
     );
 }
@@ -1977,6 +2039,7 @@ async fn ws_chat_message_inserts_into_shared_discussion() {
     let url = format!("ws://{}/api/ws", addr);
     let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.expect("WS connect failed");
     let (mut sender, _receiver) = StreamExt::split(ws_stream);
+    ws_send_presence(&mut sender).await;
 
     let chat_msg = WsMessage::ChatMessage {
         shared_discussion_id: "shared-abc-123".into(),
@@ -2015,6 +2078,7 @@ async fn ws_discussion_invite_creates_local_discussion() {
     let url = format!("ws://{}/api/ws", addr);
     let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.expect("WS connect failed");
     let (mut sender, _receiver) = StreamExt::split(ws_stream);
+    ws_send_presence(&mut sender).await;
 
     let invite = WsMessage::DiscussionInvite {
         shared_discussion_id: "shared-invite-xyz".into(),
@@ -2087,6 +2151,7 @@ async fn ws_chat_message_idempotent() {
     let url = format!("ws://{}/api/ws", addr);
     let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.expect("WS connect failed");
     let (mut sender, _receiver) = StreamExt::split(ws_stream);
+    ws_send_presence(&mut sender).await;
 
     let chat_msg = WsMessage::ChatMessage {
         shared_discussion_id: "shared-idem-001".into(),

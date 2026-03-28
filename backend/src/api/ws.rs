@@ -52,8 +52,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         continue;
                     };
 
-                    // First message from a remote peer must be Presence with a valid invite code.
-                    // Local frontend connections (no invite code) are also accepted.
+                    // First message from a remote peer MUST be Presence with a valid invite code.
+                    // Local frontend connections send Presence with empty invite code (accepted).
+                    // Any other message type as first message → reject.
                     if !verified {
                         if let WsMessage::Presence {
                             ref from_invite_code,
@@ -73,8 +74,6 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
                                 if !matches!(&found, Ok(Some(_))) {
                                     // Unknown peer — auto-create as pending contact
-                                    // so the connection is accepted and ws_client can
-                                    // connect back to them.
                                     if let Some(contact) =
                                         auto_add_peer(&state, from_invite_code).await
                                     {
@@ -91,8 +90,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                     }
                                 }
                             }
+                            verified = true;
+                        } else {
+                            // First message is NOT Presence → reject
+                            tracing::warn!("WS: first message must be Presence, got {:?}", ws_msg);
+                            break;
                         }
-                        verified = true;
                     }
 
                     // Handle ping/pong at protocol level
