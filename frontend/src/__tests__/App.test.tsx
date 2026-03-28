@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
-import { App } from '../App';
+import { App, setRetryDelay } from '../App';
 
 // Mock the lazy-loaded pages to avoid loading the full component trees
 vi.mock('../pages/SetupWizard', () => ({
@@ -31,6 +31,7 @@ import { setup as setupApi } from '../lib/api';
 
 beforeEach(() => {
   vi.clearAllMocks();
+  setRetryDelay(0); // instant retries in tests
 });
 
 describe('App', () => {
@@ -68,24 +69,26 @@ describe('App', () => {
     await waitFor(() => expect(screen.getByTestId('dashboard')).toBeDefined());
   });
 
-  it('shows API error screen when API is down (not the wizard)', async () => {
+  it('shows API error screen after exhausting auto-retries', async () => {
     (setupApi.getStatus as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('Network error'));
 
     render(<App />);
+
     await waitFor(() => expect(screen.getByText('Cannot connect to backend')).toBeDefined());
-    // Should NOT show the wizard
     expect(screen.queryByTestId('setup-wizard')).toBeNull();
+    // 1 initial + 5 retries = 6 calls
+    expect(setupApi.getStatus).toHaveBeenCalledTimes(6);
   });
 
   it('retries connection when clicking Retry on API error screen', async () => {
     const mockGetStatus = setupApi.getStatus as ReturnType<typeof vi.fn>;
-    // First call: error
-    mockGetStatus.mockRejectedValueOnce(new Error('Network error'));
+    mockGetStatus.mockRejectedValue(new Error('Network error'));
 
     render(<App />);
+
     await waitFor(() => expect(screen.getByText('Cannot connect to backend')).toBeDefined());
 
-    // Second call: success
+    // Manual retry: success
     mockGetStatus.mockResolvedValueOnce({
       is_first_run: false,
       current_step: 'Complete',
@@ -97,6 +100,5 @@ describe('App', () => {
 
     fireEvent.click(screen.getByText('Retry'));
     await waitFor(() => expect(screen.getByTestId('dashboard')).toBeDefined());
-    expect(mockGetStatus).toHaveBeenCalledTimes(2);
   });
 });

@@ -216,9 +216,10 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
               <button
                 className="setup-btn-primary"
                 onClick={handleGoToRepos}
-                disabled={installedCount === 0}
               >
-                {t('setup.continue')} <ChevronRight size={16} />
+                {installedCount > 0
+                  ? <>{t('setup.continue')} <ChevronRight size={16} /></>
+                  : <>{t('setup.skip')} <ChevronRight size={16} /></>}
               </button>
             </div>
           )}
@@ -321,9 +322,10 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
               <button
                 className="setup-btn-primary"
                 onClick={() => setStep(2)}
-                disabled={visibleRepos.length === 0}
               >
-                {t('setup.continue')} <ChevronRight size={16} />
+                {visibleRepos.length > 0
+                  ? <>{t('setup.continue')} <ChevronRight size={16} /></>
+                  : <>{t('setup.skip')} <ChevronRight size={16} /></>}
               </button>
             </div>
             );

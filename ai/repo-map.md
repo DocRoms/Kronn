@@ -37,8 +37,8 @@ Kronn/
 │       │   ├── directives.rs   # Directives API: list, create, update, delete
 │       │   └── git_ops.rs      # Shared git helpers (838L) — used by projects + discussions
 │       ├── agents/             # Agent runner (CLI execution)
-│       │   ├── mod.rs          # Re-exports
-│       │   └── runner.rs       # Spawns agent CLIs, streams stdout as SSE. Two output modes: Text (line-by-line) and StreamJson (Claude Code stream-json with token tracking). Runtime probe (npx fallback, 5min cache). MCP contexts injected into prompts
+│       │   ├── mod.rs          # Agent detection: PATH → KRONN_HOST_BIN → WSL (via bash -lc). Version detection handles WSL paths. Runtime probe (npx fallback, 5min cache)
+│       │   └── runner.rs       # Spawns agent CLIs, streams stdout as SSE. Two output modes: Text (line-by-line) and StreamJson (Claude Code stream-json with token tracking). MCP contexts injected into prompts
 │       ├── db/                 # SQLite persistence layer
 │       │   ├── mod.rs          # Database struct (Mutex<Connection>), with_conn() async accessor, init
 │       │   ├── migrations.rs   # Versioned migration runner (run before Mutex wrap)
@@ -69,7 +69,7 @@ Kronn/
 │       ├── core/               # Business logic
 │       │   ├── mod.rs          # Re-exports
 │       │   ├── config.rs       # Config load/save (~/.config/kronn/)
-│       │   ├── scanner.rs      # Git repo scanner + AI audit detection (detect_audit_status, count_ai_todos)
+│       │   ├── scanner.rs      # Git repo scanner + AI audit detection (detect_audit_status, count_ai_todos). WSL UNC paths (\\wsl.localhost\...) run git via wsl.exe
 │       │   ├── registry.rs     # MCP registry (48 built-in official servers, grouped by category, with token_url/token_help)
 │       │   ├── mcp_scanner.rs  # Multi-agent MCP sync + MCP injection. read_all_mcp_contexts() reads .mcp.json + context files. Disk sync: .mcp.json (Claude), .vibe/config.toml (Vibe), ~/.codex/config.toml (Codex). .gitignore safety
 │       │   ├── native_files.rs # Native SKILL.md + agent file sync. Writes skills to .claude/skills/, .agents/skills/, .gemini/skills/. Profiles to .claude/agents/, .gemini/agents/, .codex/agents/. Additive sync for discussions, full cleanup at startup.
@@ -78,7 +78,8 @@ Kronn/
 │       │   ├── crypto.rs       # AES-256-GCM encryption for MCP secrets
 │       │   ├── skills.rs      # Skills loader: builtin (embedded .md) + custom (~/.config/kronn/skills/). Frontmatter parsing, build_skills_prompt()
 │       │   ├── profiles.rs   # Profiles loader: builtin (embedded .md) + custom (~/.config/kronn/profiles/). Persona override system, build_profiles_prompt()
-│       │   └── directives.rs # Directives loader: builtin (embedded .md) + custom (~/.config/kronn/directives/). build_directives_prompt()
+│       │   ├── directives.rs # Directives loader: builtin (embedded .md) + custom (~/.config/kronn/directives/). build_directives_prompt()
+│       │   └── cmd.rs        # Cross-platform command helpers: async_cmd()/sync_cmd() apply CREATE_NO_WINDOW on Windows. ALL Command::new() calls MUST use these helpers
 │       ├── profiles/          # Builtin profile Markdown files (8 profiles: architect, tech-lead, qa-engineer, product-owner, scrum-master, technical-writer, devils-advocate, mentor)
 │       ├── directives/        # Builtin directive Markdown files
 │       ├── skills/             # Builtin skill Markdown files (embedded at compile time)
