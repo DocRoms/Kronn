@@ -17,7 +17,8 @@ export function App() {
   const [apiError, setApiError] = useState(false);
   const retries = useRef(0);
 
-  const fetchStatus = () => {
+  const fetchStatus = (resetRetries = false) => {
+    if (resetRetries) retries.current = 0;
     setLoading(true);
     setApiError(false);
     setupApi.getStatus()
@@ -47,7 +48,7 @@ export function App() {
 
   // API unreachable — show error screen with retry, NOT the wizard
   if (apiError) {
-    return <ApiErrorScreen onRetry={fetchStatus} />;
+    return <ApiErrorScreen onRetry={() => fetchStatus(true)} />;
   }
 
   // First run or setup incomplete → show wizard
