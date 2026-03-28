@@ -173,7 +173,7 @@ async fn start_backend(port: u16, dist_dir: std::path::PathBuf) -> anyhow::Resul
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("Kronn ready on http://{}", addr);
 
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await?;
     Ok(())
 }
 
@@ -215,24 +215,13 @@ fn main() {
         });
     });
 
-    // Wait for backend to be fully ready (HTTP health check, not just TCP).
+    // Wait for backend to be ready (TCP check).
     // First launch on Windows can be slow (Defender scan, DB creation, key discovery).
     for i in 0..150 {
         // 150 × 100ms = 15 seconds max
-        if let Ok(mut stream) = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)) {
-            // TCP open — send a minimal HTTP request to verify the server is ready
-            use std::io::{Write, Read};
-            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
-            let req = format!("GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n", port);
-            if stream.write_all(req.as_bytes()).is_ok() {
-                let mut buf = [0u8; 64];
-                if let Ok(n) = stream.read(&mut buf) {
-                    if n > 0 && String::from_utf8_lossy(&buf[..n]).contains("200") {
-                        tracing::info!("Backend ready after {}ms", i * 100);
-                        break;
-                    }
-                }
-            }
+        if std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
+            tracing::info!("Backend ready after {}ms", i * 100);
+            break;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }

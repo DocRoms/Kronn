@@ -86,11 +86,17 @@ async fn auth_middleware(
         return Ok(next.run(request).await);
     };
 
-    // Skip auth for localhost requests (nginx sets X-Real-IP to the client's real IP).
-    // In Docker: localhost user → nginx sees 127.0.0.1 or Docker bridge IP (172.x.x.x).
-    // Peers connect from Tailscale/LAN IPs → those are NOT localhost.
+    // Skip auth for localhost requests.
+    // 1. Nginx proxy: check X-Real-IP header (Docker setup — nginx sets this to the real client IP)
+    // 2. Direct connection: check the actual peer address (Tauri desktop — no nginx, no proxy headers)
     if let Some(real_ip) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
         if is_local_ip(real_ip) {
+            return Ok(next.run(request).await);
+        }
+    }
+    // Fallback: check the direct connection IP (covers Tauri desktop and direct access without proxy)
+    if let Some(connect_info) = request.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>() {
+        if is_local_ip(&connect_info.0.ip().to_string()) {
             return Ok(next.run(request).await);
         }
     }
