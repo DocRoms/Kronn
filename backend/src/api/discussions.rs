@@ -882,10 +882,11 @@ async fn make_agent_stream(
                 // Detect error patterns in both stdout and stderr and add helpful guidance
                 if !success && !was_interrupted {
                     let all_output = format!("{}\n{}", full_response, stderr_text);
-                    let error_hint = detect_agent_error_hint(&all_output);
-                    if let Some(hint) = error_hint {
-                        // Replace raw agent output with clean error message
-                        full_response = hint;
+                    if let Some(hint) = detect_agent_error_hint(&all_output, Some(&agent_type)) {
+                        full_response = format!(
+                            "{}\n\n<details><summary>Sortie agent</summary>\n\n{}\n</details>",
+                            hint, full_response
+                        );
                     }
                 }
 
@@ -1167,8 +1168,11 @@ async fn run_agent_streaming(
 
     if !success {
         let all_output = format!("{}\n{}", full_response, stderr_text);
-        if let Some(hint) = detect_agent_error_hint(&all_output) {
-            full_response = hint;
+        if let Some(hint) = detect_agent_error_hint(&all_output, Some(agent_type)) {
+            full_response = format!(
+                "{}\n\n<details><summary>Sortie agent</summary>\n\n{}\n</details>",
+                hint, full_response
+            );
         }
     }
 
@@ -2381,7 +2385,7 @@ fn build_agent_prompt(disc: &Discussion, agent_type: &AgentType, extra_context_l
 }
 
 /// Detect common agent error patterns and return a user-friendly hint.
-pub(crate) fn detect_agent_error_hint(output: &str) -> Option<String> {
+pub(crate) fn detect_agent_error_hint(output: &str, agent_type: Option<&AgentType>) -> Option<String> {
     let lower = output.to_lowercase();
 
     // MCP configuration errors
@@ -2412,8 +2416,9 @@ pub(crate) fn detect_agent_error_hint(output: &str) -> Option<String> {
         );
     }
 
-    // Kiro / AWS Builder ID session expired
-    if lower.contains("session expired")
+    // Kiro / AWS Builder ID session expired — only for Kiro agent
+    if matches!(agent_type, Some(AgentType::Kiro)) && (
+        lower.contains("session expired")
         || lower.contains("token expired")
         || lower.contains("re-authenticate")
         || lower.contains("builder id")
@@ -2422,7 +2427,7 @@ pub(crate) fn detect_agent_error_hint(output: &str) -> Option<String> {
         || lower.contains("device flow")
         || lower.contains("login required")
         || lower.contains("opening browser")
-    {
+    ) {
         return Some(
             "⚠️ **Kiro session expired (AWS Builder ID).**\n\
              Re-authenticate with: `kronn auth kiro`\n\
@@ -2673,98 +2678,98 @@ mod tests {
 
     #[test]
     fn error_hint_auth_401() {
-        let hint = detect_agent_error_hint("Error: api error: 401 Unauthorized");
+        let hint = detect_agent_error_hint("Error: api error: 401 Unauthorized", None);
         assert!(hint.is_some());
         assert!(hint.unwrap().contains("Expired session"));
     }
 
     #[test]
     fn error_hint_auth_invalid_key() {
-        let hint = detect_agent_error_hint("invalid x-api-key provided");
+        let hint = detect_agent_error_hint("invalid x-api-key provided", None);
         assert!(hint.is_some());
         assert!(hint.unwrap().contains("/login"));
     }
 
     #[test]
     fn error_hint_auth_authentication_error() {
-        let hint = detect_agent_error_hint("authentication_error: invalid credentials");
+        let hint = detect_agent_error_hint("authentication_error: invalid credentials", None);
         assert!(hint.is_some());
     }
 
     #[test]
     fn error_hint_rate_limit_429() {
-        let hint = detect_agent_error_hint("Error 429: too many requests");
+        let hint = detect_agent_error_hint("Error 429: too many requests", None);
         assert!(hint.is_some());
         assert!(hint.unwrap().contains("Rate limit"));
     }
 
     #[test]
     fn error_hint_overloaded_529() {
-        let hint = detect_agent_error_hint("Server overloaded (529)");
+        let hint = detect_agent_error_hint("Server overloaded (529)", None);
         assert!(hint.is_some());
         assert!(hint.unwrap().contains("overloaded"));
     }
 
     #[test]
     fn error_hint_server_error_502() {
-        let hint = detect_agent_error_hint("502 Bad Gateway");
+        let hint = detect_agent_error_hint("502 Bad Gateway", None);
         assert!(hint.is_some());
         assert!(hint.unwrap().contains("unavailable"));
     }
 
     #[test]
     fn error_hint_server_error_500() {
-        let hint = detect_agent_error_hint("API error: 500 Internal Server Error");
+        let hint = detect_agent_error_hint("API error: 500 Internal Server Error", None);
         assert!(hint.is_some());
     }
 
     #[test]
     fn error_hint_billing_402() {
-        let hint = detect_agent_error_hint("Error 402 payment required");
+        let hint = detect_agent_error_hint("Error 402 payment required", None);
         assert!(hint.is_some());
         assert!(hint.unwrap().contains("Quota"));
     }
 
     #[test]
     fn error_hint_billing_insufficient_quota() {
-        let hint = detect_agent_error_hint("insufficient_quota: no credits remaining");
+        let hint = detect_agent_error_hint("insufficient_quota: no credits remaining", None);
         assert!(hint.is_some());
     }
 
     #[test]
     fn error_hint_network_econnrefused() {
-        let hint = detect_agent_error_hint("ECONNREFUSED: connection refused");
+        let hint = detect_agent_error_hint("ECONNREFUSED: connection refused", None);
         assert!(hint.is_some());
         assert!(hint.unwrap().contains("Network error"));
     }
 
     #[test]
     fn error_hint_network_timeout() {
-        let hint = detect_agent_error_hint("request timed out after 30s");
+        let hint = detect_agent_error_hint("request timed out after 30s", None);
         assert!(hint.is_some());
     }
 
     #[test]
     fn error_hint_network_dns() {
-        let hint = detect_agent_error_hint("ENOTFOUND api.anthropic.com");
+        let hint = detect_agent_error_hint("ENOTFOUND api.anthropic.com", None);
         assert!(hint.is_some());
     }
 
     #[test]
     fn error_hint_none_for_normal_output() {
-        let hint = detect_agent_error_hint("Here is your code:\n```rust\nfn main() {}\n```");
+        let hint = detect_agent_error_hint("Here is your code:\n```rust\nfn main() {}\n```", None);
         assert!(hint.is_none());
     }
 
     #[test]
     fn error_hint_none_for_empty() {
-        assert!(detect_agent_error_hint("").is_none());
+        assert!(detect_agent_error_hint("", None).is_none());
     }
 
     #[test]
     fn error_hint_case_insensitive() {
         // Checks that "UNAUTHORIZED" is detected (lowercased)
-        let hint = detect_agent_error_hint("UNAUTHORIZED ACCESS DENIED");
+        let hint = detect_agent_error_hint("UNAUTHORIZED ACCESS DENIED", None);
         assert!(hint.is_some());
     }
 
@@ -2772,7 +2777,8 @@ mod tests {
 
     #[test]
     fn error_hint_kiro_session_expired() {
-        let hint = detect_agent_error_hint("Your session expired, please re-authenticate");
+        let kiro = Some(&AgentType::Kiro);
+        let hint = detect_agent_error_hint("Your session expired, please re-authenticate", kiro);
         assert!(hint.is_some());
         let h = hint.unwrap();
         assert!(h.contains("Kiro session expired"));
@@ -2781,56 +2787,64 @@ mod tests {
 
     #[test]
     fn error_hint_kiro_opening_browser() {
-        let hint = detect_agent_error_hint("opening browser for authentication...");
+        let hint = detect_agent_error_hint("opening browser for authentication...", Some(&AgentType::Kiro));
         assert!(hint.is_some());
         assert!(hint.unwrap().contains("kronn auth kiro"));
     }
 
     #[test]
     fn error_hint_kiro_builder_id() {
-        let hint = detect_agent_error_hint("AWS Builder ID token refresh failed");
+        let hint = detect_agent_error_hint("AWS Builder ID token refresh failed", Some(&AgentType::Kiro));
         assert!(hint.is_some());
         assert!(hint.unwrap().contains("Kiro session expired"));
     }
 
     #[test]
     fn error_hint_kiro_sso_session() {
-        let hint = detect_agent_error_hint("SSO session is no longer valid");
+        let hint = detect_agent_error_hint("SSO session is no longer valid", Some(&AgentType::Kiro));
         assert!(hint.is_some());
         assert!(hint.unwrap().contains("kronn auth kiro"));
     }
 
     #[test]
     fn error_hint_kiro_device_flow() {
-        let hint = detect_agent_error_hint("Please complete the device flow login");
+        let hint = detect_agent_error_hint("Please complete the device flow login", Some(&AgentType::Kiro));
         assert!(hint.is_some());
     }
 
     #[test]
     fn error_hint_kiro_login_required() {
-        let hint = detect_agent_error_hint("login required to continue");
+        let hint = detect_agent_error_hint("login required to continue", Some(&AgentType::Kiro));
         assert!(hint.is_some());
         assert!(hint.unwrap().contains("Kiro session expired"));
     }
 
     #[test]
     fn error_hint_kiro_refresh_token() {
-        let hint = detect_agent_error_hint("refresh token is invalid or expired");
+        let hint = detect_agent_error_hint("refresh token is invalid or expired", Some(&AgentType::Kiro));
         assert!(hint.is_some());
+    }
+
+    #[test]
+    fn error_hint_kiro_patterns_ignored_for_other_agents() {
+        // "session expired" should NOT trigger Kiro hint for Claude
+        assert!(detect_agent_error_hint("session expired", Some(&AgentType::ClaudeCode)).is_none());
+        assert!(detect_agent_error_hint("opening browser", Some(&AgentType::Codex)).is_none());
+        assert!(detect_agent_error_hint("login required", None).is_none());
     }
 
     // ─── MCP configuration errors ─────────────────────────────────────────
 
     #[test]
     fn error_hint_mcp_config_error() {
-        let hint = detect_agent_error_hint("invalid mcp configuration in project");
+        let hint = detect_agent_error_hint("invalid mcp configuration in project", None);
         assert!(hint.is_some());
         assert!(hint.unwrap().contains("MCP configuration error"));
     }
 
     #[test]
     fn error_hint_mcp_server_failed() {
-        let hint = detect_agent_error_hint("mcp server 'filesystem' failed to start");
+        let hint = detect_agent_error_hint("mcp server 'filesystem' failed to start", None);
         assert!(hint.is_some());
         assert!(hint.unwrap().contains("MCP"));
     }
@@ -2839,7 +2853,7 @@ mod tests {
 
     #[test]
     fn error_hint_permission_denied() {
-        let hint = detect_agent_error_hint("permission denied: /home/user/project/src");
+        let hint = detect_agent_error_hint("permission denied: /home/user/project/src", None);
         assert!(hint.is_some());
         assert!(hint.unwrap().contains("Permission denied"));
     }
@@ -2848,7 +2862,7 @@ mod tests {
 
     #[test]
     fn error_hint_503_unavailable() {
-        let hint = detect_agent_error_hint("503 Service Unavailable");
+        let hint = detect_agent_error_hint("503 Service Unavailable", None);
         assert!(hint.is_some());
         assert!(hint.unwrap().contains("unavailable"));
     }

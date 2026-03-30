@@ -16,7 +16,7 @@ shutil.copy2(DB, BACKUP)
 print(f"✅ Backup → {BACKUP}")
 
 conn = sqlite3.connect(str(DB))
-cur = conn.execute("DELETE FROM auth_kv WHERE key = 'kirocli:odic:token'")
+cur = conn.execute("DELETE FROM auth_kv WHERE key = 'kirocli:oidc:token'")
 conn.commit()
 conn.close()
 
