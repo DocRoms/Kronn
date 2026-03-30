@@ -580,7 +580,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             description: "CDN management, cache purge, VCL, WAF, backends, domains, stats — official Fastly server".into(),
             transport: McpTransport::Stdio {
                 command: "npx".into(),
-                args: vec!["-y".into(), "fastly-mcp-server".into()],
+                args: vec!["-y".into(), "fastly-mcp-server@1.0.4".into()],
             },
             env_keys: vec!["FASTLY_API_TOKEN".into()],
             tags: vec!["cdn".into(), "cache".into(), "infrastructure".into(), "edge".into(), "waf".into()],
@@ -677,6 +677,11 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
     ]
 }
 
+/// Packages whose upstream switched runtime (e.g. to bun) and MUST stay pinned to a Node-compatible version.
+const PINNED_PACKAGES: &[(&str, &str)] = &[
+    ("fastly-mcp-server", "1.0.4"),
+];
+
 /// Search the registry by name or tag
 pub fn search(query: &str) -> Vec<McpDefinition> {
     let q = query.to_lowercase();
@@ -688,4 +693,60 @@ pub fn search(query: &str) -> Vec<McpDefinition> {
                 || m.tags.iter().any(|t| t.contains(&q))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn registry_ids_are_unique() {
+        let reg = builtin_registry();
+        let mut seen = HashSet::new();
+        for def in &reg {
+            assert!(
+                seen.insert(&def.id),
+                "Duplicate MCP registry id: {}",
+                def.id
+            );
+        }
+    }
+
+    #[test]
+    fn pinned_packages_are_respected() {
+        let reg = builtin_registry();
+        for (pkg, expected_version) in PINNED_PACKAGES {
+            let expected_arg = format!("{pkg}@{expected_version}");
+            let found = reg.iter().any(|def| {
+                if let McpTransport::Stdio { args, .. } = &def.transport {
+                    args.iter().any(|a| a == &expected_arg)
+                } else {
+                    false
+                }
+            });
+            assert!(
+                found,
+                "Pinned package {pkg} must use version @{expected_version} in the registry. \
+                 See PINNED_PACKAGES comment for why (upstream broke Node.js compat)."
+            );
+        }
+    }
+
+    #[test]
+    fn search_finds_fastly() {
+        let results = search("fastly");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "mcp-fastly");
+    }
+
+    #[test]
+    fn all_stdio_entries_have_nonempty_command() {
+        for def in builtin_registry() {
+            if let McpTransport::Stdio { command, args } = &def.transport {
+                assert!(!command.is_empty(), "MCP {} has empty command", def.id);
+                assert!(!args.is_empty(), "MCP {} has empty args", def.id);
+            }
+        }
+    }
 }
