@@ -29,7 +29,7 @@ RESET  := \033[0m
 			echo "KRONN_GLOBAL_BIN=/usr/local/bin" >> .env; \
 			echo "$(CYAN)  Detected macOS (Intel)$(RESET)"; \
 		fi; \
-	elif grep -qi "microsoft\|wsl" /proc/version 2>/dev/null; then \
+	elif grep -qiE "microsoft|wsl" /proc/version 2>/dev/null; then \
 		echo "KRONN_HOST_OS=WSL" >> .env; \
 		echo "$(CYAN)  Detected WSL2$(RESET)"; \
 	else \
@@ -48,7 +48,7 @@ RESET  := \033[0m
 	echo "$(CYAN)  Repos dir: $$repos_dir (rw mount)$(RESET)"
 	@# Docker socket GID (for docker compose access from container)
 	@if [ -S /var/run/docker.sock ]; then \
-		docker_gid=$$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo ""); \
+		docker_gid=$$(stat -c '%g' /var/run/docker.sock 2>/dev/null || stat -f '%g' /var/run/docker.sock 2>/dev/null || echo ""); \
 		if [ -n "$$docker_gid" ]; then \
 			echo "KRONN_DOCKER_GID=$$docker_gid" >> .env; \
 			echo "$(CYAN)  Docker socket GID: $$docker_gid$(RESET)"; \

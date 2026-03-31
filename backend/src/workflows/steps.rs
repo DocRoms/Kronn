@@ -202,6 +202,7 @@ async fn run_agent_with_timeout(
             .and_then(|s| s.tier)
             .unwrap_or_default(),
         model_tiers: None,
+        context_files_prompt: "",
     }).await.map_err(|e| anyhow::anyhow!(e))?;
 
     let mut output = String::new();

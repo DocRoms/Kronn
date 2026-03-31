@@ -15,10 +15,18 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Static pricing engine** — `core/pricing.rs` with per-provider token pricing (Anthropic, OpenAI, Google, Mistral, Amazon). Used when real cost is unavailable
 - **Daily usage history API** — `GET /api/stats/tokens` now returns `daily_history` with per-day token/cost breakdown by provider (last 30 days)
 - **Discussion deep-link from Usage** — clicking a discussion name in the Usage top-5 list navigates directly to the discussion page and opens it
+- **GitHub Copilot agent** — 7th supported agent (`copilot` CLI). Detected, installed, updated, and uninstalled via both web UI and Kronn CLI. Model tiers: economy (`gpt-4o-mini`), reasoning (`o4-mini`). Auth via `GH_TOKEN`, `COPILOT_GITHUB_TOKEN`, or `~/.copilot/config.json`. Full access flag: `--allow-all-tools`
+- **Context files** — upload files (text, xlsx, docx, pptx, pdf, images) as context for discussions. Drag & drop, clipboard paste, or file picker. Extracted text injected into agent prompt. Images saved to project dir for agent vision tools. Max 20 files, 500KB text / 10MB images
+- **User bio** — optional bio in Settings > Identity. Injected at the start of the first message in each new discussion so agents tailor responses to the user's profile
 
 ### Changed
 - **Usage centralized in Settings** — the per-agent "Estimated token usage" section in Config > Agents has been removed. All usage data is now in the dedicated Usage section with richer visualizations
 - **`StreamJsonEvent::Usage`** — `cost_usd: Option<f64>` integrated directly into the `Usage` variant; the separate `Cost` variant has been removed
+
+### Fixed
+- **Cross-platform audit** — 17 fixes for Windows/macOS/Linux/WSL/Docker compatibility: HOME/USERPROFILE resolution, `.cmd`/`.exe` binary detection, `WSL_DISTRO_NAME` detection, hostname fallback, Makefile BSD compatibility, UNC path normalization, conditional `SHELL` env var
+- **First message identity** — Gravatar and pseudo were missing from the first message of a discussion (create handler didn't load identity from config)
+- **AppImage removed** — Linux desktop builds now produce only `.deb` (19MB) instead of `.deb` + `.AppImage` (90MB)
 
 ---
 

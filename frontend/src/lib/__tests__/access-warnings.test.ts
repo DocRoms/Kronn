@@ -82,14 +82,16 @@ const defaultModelTiers = {
   gemini_cli: { economy: null, reasoning: null },
   kiro: { economy: null, reasoning: null },
   vibe: { economy: null, reasoning: null },
+  copilot_cli: { economy: null, reasoning: null },
 };
 
-const makeConfig = (overrides: Partial<Record<'claude' | 'codex' | 'gemini' | 'kiro' | 'vibe', boolean>>): AgentsConfig => ({
+const makeConfig = (overrides: Partial<Record<'claude' | 'codex' | 'gemini' | 'kiro' | 'vibe' | 'copilot', boolean>>): AgentsConfig => ({
   claude_code: { path: null, installed: true, version: null, full_access: overrides.claude ?? false },
   codex: { path: null, installed: true, version: null, full_access: overrides.codex ?? false },
   gemini_cli: { path: null, installed: true, version: null, full_access: overrides.gemini ?? false },
   kiro: { path: null, installed: false, version: null, full_access: overrides.kiro ?? false },
   vibe: { path: null, installed: false, version: null, full_access: overrides.vibe ?? false },
+  copilot_cli: { path: null, installed: false, version: null, full_access: overrides.copilot ?? false },
   model_tiers: defaultModelTiers,
 });
 

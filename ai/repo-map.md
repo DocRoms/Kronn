@@ -37,14 +37,14 @@ Kronn/
 │       │   ├── directives.rs   # Directives API: list, create, update, delete
 │       │   └── git_ops.rs      # Shared git helpers (838L) — used by projects + discussions
 │       ├── agents/             # Agent runner (CLI execution)
-│       │   ├── mod.rs          # Agent detection: PATH → KRONN_HOST_BIN → WSL (via bash -lc). Version detection handles WSL paths. Runtime probe (npx fallback, 5min cache)
-│       │   └── runner.rs       # Spawns agent CLIs, streams stdout as SSE. Two output modes: Text (line-by-line) and StreamJson (Claude Code stream-json with token tracking). MCP contexts injected into prompts
+│       │   ├── mod.rs          # Agent detection: PATH → KRONN_HOST_BIN (with .cmd/.exe extension matching) → WSL (via bash -lc). Version detection handles WSL paths. Runtime probe (npx fallback, 5min cache). 6 agents: Claude, Codex, Vibe, Gemini, Kiro, Copilot
+│       │   └── runner.rs       # Spawns agent CLIs, streams stdout as SSE. Two output modes: Text (line-by-line) and StreamJson (Claude Code stream-json with token tracking). Cross-platform HOME resolution (KRONN_HOST_HOME → HOME → USERPROFILE). COPILOT_HOME for Copilot CLI auth. MCP contexts injected into prompts
 │       ├── db/                 # SQLite persistence layer
 │       │   ├── mod.rs          # Database struct (Mutex<Connection>), with_conn() async accessor, init
 │       │   ├── migrations.rs   # Versioned migration runner (run before Mutex wrap)
 │       │   ├── projects.rs     # Project CRUD operations
 │       │   ├── discussions.rs  # Discussion + message CRUD (+ archive/rename via update_discussion)
-│       │   ├── discussions_test.rs # 18 tests (CRUD, archive, title, messages, AgentType round-trip)
+│       │   ├── discussions_test.rs # 21 tests (CRUD, archive, title, messages, AgentType round-trip for all 6 agents + Custom, DB string stability)
 │       │   ├── mcps.rs         # MCP servers/configs/linkages CRUD, encryption, hashing
 │       │   ├── workflows.rs    # Workflow + WorkflowRun CRUD, run deletion (individual + bulk)
 │       │   └── sql/

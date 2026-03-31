@@ -313,7 +313,7 @@ pub async fn run_audit(
                 prompt: &full_prompt, tokens: &tokens, full_access: true,
                 skill_ids: &[], directive_ids: &[], profile_ids: &[],
                 mcp_context_override: None,
-                tier: crate::models::ModelTier::Reasoning, model_tiers: None,
+                tier: crate::models::ModelTier::Reasoning, model_tiers: None, context_files_prompt: "",
             }).await {
                 Ok(mut process) => {
                     while let Some(line) = process.next_line().await {
@@ -519,7 +519,7 @@ pub async fn partial_audit(
                 prompt: &full_prompt, tokens: &tokens, full_access: true,
                 skill_ids: &[], directive_ids: &[], profile_ids: &[],
                 mcp_context_override: None,
-                tier: crate::models::ModelTier::Reasoning, model_tiers: None,
+                tier: crate::models::ModelTier::Reasoning, model_tiers: None, context_files_prompt: "",
             }).await {
                 Ok(mut process) => {
                     while let Some(line) = process.next_line().await {
@@ -1070,7 +1070,7 @@ pub async fn full_audit(
                 prompt: &full_prompt, tokens: &tokens, full_access: true,
                 skill_ids: &[], directive_ids: &[], profile_ids: &[],
                 mcp_context_override: None,
-                tier: crate::models::ModelTier::Reasoning, model_tiers: None,
+                tier: crate::models::ModelTier::Reasoning, model_tiers: None, context_files_prompt: "",
             }).await {
                 Ok(mut process) => {
                     // Register the child PID for cancellation

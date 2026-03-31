@@ -126,6 +126,7 @@ pub fn default_config() -> AppConfig {
             agent_stall_timeout_min: 5,
             pseudo: None,
             avatar_email: None,
+            bio: None,
         },
         tokens: TokensConfig {
             anthropic: None,
@@ -175,6 +176,7 @@ pub fn default_config() -> AppConfig {
             gemini_cli: AgentConfig::default(),
             kiro: AgentConfig::default(),
             vibe: AgentConfig::default(),
+            copilot_cli: AgentConfig::default(),
             model_tiers: Default::default(),
         },
         language: "fr".into(),

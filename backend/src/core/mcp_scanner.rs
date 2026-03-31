@@ -657,7 +657,10 @@ fn sync_codex_global_config(
             .map(|h| PathBuf::from(format!("{}/.codex", h)))
             .unwrap_or_else(|_| directories::BaseDirs::new()
                 .map(|d| d.home_dir().join(".codex"))
-                .unwrap_or_else(|| PathBuf::from("/home/kronn/.codex")))
+                .unwrap_or_else(|| {
+                    tracing::warn!("Cannot determine home directory for Codex config — using /tmp/.codex");
+                    PathBuf::from("/tmp/.codex")
+                }))
     };
     let codex_config = codex_dir.join("config.toml");
 

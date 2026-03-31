@@ -24,6 +24,8 @@ pub fn estimate_cost(agent_type: &str, tokens_used: u64) -> Option<f64> {
         "Vibe" => ModelPrice { input_per_m: 2.0, output_per_m: 6.0 },
         // Kiro — uses Bedrock (Claude), credits already converted
         "Kiro" => ModelPrice { input_per_m: 3.0, output_per_m: 15.0 },
+        // GitHub Copilot — uses GPT-4o by default
+        "CopilotCli" => ModelPrice { input_per_m: 2.5, output_per_m: 10.0 },
         _ => return None,
     };
 
@@ -61,5 +63,36 @@ mod tests {
     fn zero_tokens_returns_zero() {
         let cost = estimate_cost("ClaudeCode", 0).unwrap();
         assert_eq!(cost, 0.0);
+    }
+
+    #[test]
+    fn gemini_cost_estimation() {
+        let cost = estimate_cost("GeminiCli", 100_000).unwrap();
+        assert!(cost > 0.0 && cost < 1.0, "GeminiCli 100K tokens should cost < $1, got ${:.4}", cost);
+    }
+
+    #[test]
+    fn vibe_cost_estimation() {
+        let cost = estimate_cost("Vibe", 100_000).unwrap();
+        assert!(cost > 0.0 && cost < 1.0, "Vibe 100K tokens should cost < $1, got ${:.4}", cost);
+    }
+
+    #[test]
+    fn kiro_cost_estimation() {
+        let cost = estimate_cost("Kiro", 100_000).unwrap();
+        assert!(cost > 0.0 && cost < 1.0, "Kiro 100K tokens should cost < $1, got ${:.4}", cost);
+    }
+
+    #[test]
+    fn copilot_cost_estimation() {
+        let cost = estimate_cost("CopilotCli", 100_000).unwrap();
+        assert!(cost > 0.0 && cost < 1.0, "CopilotCli 100K tokens should cost < $1, got ${:.4}", cost);
+    }
+
+    #[test]
+    fn all_known_agents_have_pricing() {
+        for agent in &["ClaudeCode", "Codex", "GeminiCli", "Vibe", "Kiro", "CopilotCli"] {
+            assert!(estimate_cost(agent, 1000).is_some(), "Missing pricing for {}", agent);
+        }
     }
 }

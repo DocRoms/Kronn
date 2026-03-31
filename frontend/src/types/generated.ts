@@ -67,6 +67,7 @@ export interface AgentsConfig {
   gemini_cli: AgentConfig;
   kiro: AgentConfig;
   vibe: AgentConfig;
+  copilot_cli: AgentConfig;
   model_tiers: ModelTiersConfig;
 }
 
@@ -83,6 +84,7 @@ export interface ModelTiersConfig {
   gemini_cli: ModelTierConfig;
   kiro: ModelTierConfig;
   vibe: ModelTierConfig;
+  copilot_cli: ModelTierConfig;
 }
 
 export interface SetAgentAccessRequest {
@@ -126,7 +128,7 @@ export interface AgentDetection {
   runtime_available: boolean;
 }
 
-export type AgentType = "ClaudeCode" | "Codex" | "Vibe" | "GeminiCli" | "Kiro" | "Custom";
+export type AgentType = "ClaudeCode" | "Codex" | "Vibe" | "GeminiCli" | "Kiro" | "CopilotCli" | "Custom";
 
 // ─── AI Audit ────────────────────────────────────────────────────────────────
 
@@ -560,6 +562,7 @@ export interface DailyUsage {
   google: number;
   mistral: number;
   amazon: number;
+  github: number;
 }
 
 export interface AgentUsageSummary {
@@ -567,6 +570,24 @@ export interface AgentUsageSummary {
   total_tokens: number;
   message_count: number;
   by_project: AgentProjectUsage[];
+}
+
+// ─── Context Files ──────────────────────────────────────────────────────────
+
+export interface ContextFile {
+  id: string;
+  discussion_id: string;
+  filename: string;
+  mime_type: string;
+  original_size: number;
+  extracted_size: number;
+  disk_path?: string | null;
+  created_at: string;
+}
+
+export interface UploadContextFileResponse {
+  file: ContextFile;
+  suggested_skills: string[];
 }
 
 export interface AgentProjectUsage {
@@ -811,6 +832,7 @@ export interface ServerConfigPublic {
   auth_enabled: boolean;
   pseudo: string | null;
   avatar_email: string | null;
+  bio: string | null;
 }
 
 export interface DbInfo {

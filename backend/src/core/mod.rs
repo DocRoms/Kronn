@@ -1,5 +1,6 @@
 pub mod checksums;
 pub mod cmd;
+pub mod context_files;
 pub mod env;
 pub mod config;
 pub mod crypto;

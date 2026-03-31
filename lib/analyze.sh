@@ -162,6 +162,9 @@ _run_analysis_step() {
         vibe)
             (cd "$repo_dir" && vibe -p "$full_prompt" > /dev/null 2>&1)
             ;;
+        copilot)
+            (cd "$repo_dir" && copilot -p "$full_prompt" > /dev/null 2>&1)
+            ;;
     esac
 }
 
@@ -179,7 +182,7 @@ analyze_repo() {
 
     # Verify agent is installed and supports non-interactive mode
     case "$agent" in
-        claude|codex|vibe)
+        claude|codex|vibe|copilot)
             if ! command -v "$agent" >/dev/null 2>&1; then
                 fail "$agent is not installed or not in PATH."
                 return 1

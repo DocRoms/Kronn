@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import '../pages/DiscussionsPage.css';
-import type { Discussion, AgentDetection, AgentType, Skill, Directive } from '../types/generated';
+import type { Discussion, AgentDetection, AgentType, Skill, Directive, ContextFile } from '../types/generated';
 import { isUsable } from '../lib/constants';
 import { audioBufferToFloat32, transcribeAudio } from '../lib/stt-engine';
 import type { ToastFn } from '../hooks/useToast';
@@ -8,7 +8,7 @@ import {
   Send, X, AlertTriangle, Users,
   StopCircle, RotateCcw, Loader2,
   Cpu, Mic, MicOff, Phone, PhoneOff,
-  Volume2, VolumeX, Check, Zap, FileText,
+  Volume2, VolumeX, Check, Zap, FileText, Paperclip, Image,
 } from 'lucide-react';
 import { useIsMobile } from '../hooks/useMediaQuery';
 
@@ -18,6 +18,7 @@ const ALL_AGENT_MENTIONS: { trigger: string; type: AgentType; label: string }[] 
   { trigger: '@vibe', type: 'Vibe', label: 'Vibe' },
   { trigger: '@gemini', type: 'GeminiCli', label: 'Gemini CLI' },
   { trigger: '@kiro', type: 'Kiro', label: 'Kiro' },
+  { trigger: '@copilot', type: 'CopilotCli', label: 'GitHub Copilot' },
 ];
 
 let sttWorker: Worker | null = null;
@@ -48,6 +49,10 @@ export interface ChatInputProps {
   onWorktreeErrorDismiss: () => void;
   onWorktreeRetry: () => void;
   isAgentRestricted: (type: AgentType) => boolean;
+  contextFiles?: ContextFile[];
+  onUploadFiles?: (files: File[]) => void;
+  onDeleteContextFile?: (fileId: string) => void;
+  uploadingFiles?: boolean;
   toast: ToastFn;
   t: (key: string, ...args: any[]) => string;
 }
@@ -69,6 +74,10 @@ export function ChatInput({
   onWorktreeErrorDismiss,
   onWorktreeRetry,
   isAgentRestricted,
+  contextFiles = [],
+  onUploadFiles,
+  onDeleteContextFile,
+  uploadingFiles = false,
   toast: _toast,
   t,
 }: ChatInputProps) {
@@ -79,6 +88,7 @@ export function ChatInput({
   const chatInputValueRef = useRef('');
   const chatInputHasText = chatInput.trim().length > 0;
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const updateChatInput = useCallback((val: string) => {
     chatInputValueRef.current = val;
@@ -88,6 +98,8 @@ export function ChatInput({
 
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
+
+  const [dragOver, setDragOver] = useState(false);
 
   const [sttState, setSttState] = useState<'idle' | 'recording' | 'transcribing'>('idle');
   const [voiceMode, setVoiceMode] = useState(false);
@@ -342,8 +354,33 @@ export function ChatInput({
         </div>
       )}
 
-      {/* Composer container */}
-      <div className="disc-composer" data-recording={sttState === 'recording'}>
+      {/* Composer container — drag & drop + clipboard paste */}
+      <div
+        className={`disc-composer ${dragOver ? 'disc-composer-dragover' : ''}`}
+        data-recording={sttState === 'recording'}
+        onDragOver={e => { if (onUploadFiles) { e.preventDefault(); setDragOver(true); } }}
+        onDragEnter={e => { if (onUploadFiles) { e.preventDefault(); setDragOver(true); } }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={e => {
+          e.preventDefault();
+          setDragOver(false);
+          if (onUploadFiles && e.dataTransfer.files.length > 0) {
+            onUploadFiles(Array.from(e.dataTransfer.files));
+          }
+        }}
+        onPaste={e => {
+          if (!onUploadFiles) return;
+          const items = Array.from(e.clipboardData.items);
+          const files = items
+            .filter(item => item.kind === 'file')
+            .map(item => item.getAsFile())
+            .filter((f): f is File => f !== null);
+          if (files.length > 0) {
+            e.preventDefault();
+            onUploadFiles(files);
+          }
+        }}
+      >
         {/* @mention autocomplete dropdown */}
         {mentionQuery !== null && (() => {
           const filtered = AGENT_MENTIONS.filter(m => m.trigger.slice(1).startsWith(mentionQuery ?? ''));
@@ -386,6 +423,23 @@ export function ChatInput({
             <button className="disc-worktree-dismiss-btn" onClick={onWorktreeErrorDismiss}>
               <X size={12} />
             </button>
+          </div>
+        )}
+
+        {/* Context files badges */}
+        {contextFiles.length > 0 && (
+          <div className="disc-context-files">
+            {contextFiles.map(f => (
+              <span key={f.id} className={`disc-context-file-badge ${f.disk_path ? 'disc-context-file-image' : ''}`} title={`${f.filename} (${(f.original_size / 1024).toFixed(0)} KB)`}>
+                {f.disk_path ? <Image size={10} className="text-accent" /> : <FileText size={10} />}
+                <span className="disc-context-file-name">{f.filename}</span>
+                {onDeleteContextFile && (
+                  <button className="disc-context-file-remove" onClick={() => onDeleteContextFile(f.id)} aria-label="Remove file">
+                    <X size={9} />
+                  </button>
+                )}
+              </span>
+            ))}
           </div>
         )}
 
@@ -657,15 +711,42 @@ export function ChatInput({
               <StopCircle size={16} />
             </button>
           ) : (
-            <button
-              className="disc-send-btn"
-              data-active={chatInputHasText}
-              onClick={handleSendMessage}
-              disabled={!chatInputHasText}
-              aria-label="Send message"
-            >
-              <Send size={16} />
-            </button>
+            <>
+              {onUploadFiles && (
+                <>
+                  <input
+                    type="file"
+                    multiple
+                    style={{ display: 'none' }}
+                    ref={fileInputRef}
+                    onChange={e => {
+                      const files = Array.from(e.target.files ?? []);
+                      if (files.length > 0) onUploadFiles(files);
+                      e.target.value = '';
+                    }}
+                  />
+                  <button
+                    className="disc-attach-btn"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={uploadingFiles}
+                    aria-label={t('disc.attachFile')}
+                    title={t('disc.attachFile')}
+                  >
+                    {uploadingFiles ? <Loader2 size={14} className="set-spin" /> : <Paperclip size={14} />}
+                    {contextFiles.length > 0 && <span className="disc-attach-count">{contextFiles.length}</span>}
+                  </button>
+                </>
+              )}
+              <button
+                className="disc-send-btn"
+                data-active={chatInputHasText}
+                onClick={handleSendMessage}
+                disabled={!chatInputHasText}
+                aria-label="Send message"
+              >
+                <Send size={16} />
+              </button>
+            </>
           )}
         </div>
       </div>

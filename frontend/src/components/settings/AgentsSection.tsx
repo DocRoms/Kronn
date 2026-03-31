@@ -111,6 +111,7 @@ export function AgentsSection({
             ClaudeCode: { flag: '--dangerously-skip-permissions', descKey: 'config.fullAccess' },
             Codex: { flag: '--full-auto', descKey: 'config.autoApply' },
             GeminiCli: { flag: '--yolo', descKey: 'config.fullAccess' },
+            CopilotCli: { flag: '--allow-all-tools', descKey: 'config.fullAccess' },
           };
           const perm = permFlag[agent.agent_type];
           const tokenField: Record<string, { key: string; hint: string; url: string }> = {
@@ -118,6 +119,7 @@ export function AgentsSection({
             Codex: { key: 'openai', hint: 'OPENAI_API_KEY', url: 'https://platform.openai.com/api-keys' },
             GeminiCli: { key: 'google', hint: 'GEMINI_API_KEY', url: 'https://aistudio.google.com/apikey' },
             Vibe: { key: 'mistral', hint: 'MISTRAL_API_KEY', url: 'https://console.mistral.ai/api-keys' },
+            CopilotCli: { key: 'github', hint: 'GH_TOKEN', url: 'https://github.com/settings/tokens' },
           };
           const tf = tokenField[agent.agent_type];
           const isFullAccess = agent.agent_type === 'ClaudeCode'
@@ -128,7 +130,9 @@ export function AgentsSection({
                 ? agentAccess?.gemini_cli?.full_access ?? false
                 : agent.agent_type === 'Vibe'
                   ? agentAccess?.vibe?.full_access ?? false
-                  : false;
+                  : agent.agent_type === 'CopilotCli'
+                    ? agentAccess?.copilot_cli?.full_access ?? false
+                    : false;
 
           return (
           <div key={agent.name} className="set-agent-row">
@@ -435,6 +439,7 @@ export function AgentsSection({
                 },
                 kiro: { economy: [], reasoning: [], modelsUrl: '' },
                 vibe: { economy: [], reasoning: [], modelsUrl: '' },
+                copilot_cli: { economy: ['gpt-4o-mini'], reasoning: ['o4-mini'], modelsUrl: 'https://docs.github.com/en/copilot' },
               };
               const models = knownModels[agentKey];
 
@@ -447,6 +452,7 @@ export function AgentsSection({
                   gemini_cli: { economy: newEditing.gemini_cli?.economy || null, reasoning: newEditing.gemini_cli?.reasoning || null },
                   kiro: { economy: newEditing.kiro?.economy || null, reasoning: newEditing.kiro?.reasoning || null },
                   vibe: { economy: newEditing.vibe?.economy || null, reasoning: newEditing.vibe?.reasoning || null },
+                  copilot_cli: { economy: newEditing.copilot_cli?.economy || null, reasoning: newEditing.copilot_cli?.reasoning || null },
                 };
                 try { await configApi.setModelTiers(newTiers); toast(t('config.saved'), 'success'); } catch { toast(t('config.saveError'), 'error'); }
               };

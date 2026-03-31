@@ -10,6 +10,8 @@ export const AGENT_COLORS: Record<string, string> = {
   GeminiCli: '#4285f4',
   'Gemini CLI': '#4285f4',
   Kiro: '#7B61FF',
+  CopilotCli: '#238636',
+  'GitHub Copilot': '#238636',
 };
 
 export const AGENT_LABELS: Record<string, string> = {
@@ -18,9 +20,10 @@ export const AGENT_LABELS: Record<string, string> = {
   Vibe: 'Vibe',
   GeminiCli: 'Gemini CLI',
   Kiro: 'Kiro',
+  CopilotCli: 'GitHub Copilot',
 };
 
-export const ALL_AGENT_TYPES: AgentType[] = ['ClaudeCode', 'Codex', 'Vibe', 'GeminiCli', 'Kiro'];
+export const ALL_AGENT_TYPES: AgentType[] = ['ClaudeCode', 'Codex', 'Vibe', 'GeminiCli', 'Kiro', 'CopilotCli'];
 
 export const agentColor = (agentType: string | null | undefined): string =>
   AGENT_COLORS[agentType ?? ''] ?? '#8b5cf6';
@@ -34,6 +37,7 @@ export function isAgentRestricted(agentAccess: AgentsConfig | undefined, agentTy
     GeminiCli: agentAccess.gemini_cli?.full_access,
     Vibe: agentAccess.vibe?.full_access,
     Kiro: undefined,
+    CopilotCli: agentAccess.copilot_cli?.full_access,
   };
   return map[agentType] === false;
 }
@@ -59,6 +63,7 @@ export function hasAgentFullAccess(agentAccess: AgentsConfig | undefined, agentT
     GeminiCli: agentAccess.gemini_cli?.full_access,
     Vibe: agentAccess.vibe?.full_access,
     Kiro: undefined,
+    CopilotCli: agentAccess.copilot_cli?.full_access,
   };
   return map[agentType] === true;
 }

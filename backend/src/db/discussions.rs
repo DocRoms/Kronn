@@ -488,6 +488,7 @@ fn parse_agent_type(s: &str) -> AgentType {
         "Vibe" => AgentType::Vibe,
         "GeminiCli" => AgentType::GeminiCli,
         "Kiro" => AgentType::Kiro,
+        "CopilotCli" => AgentType::CopilotCli,
         _ => AgentType::Custom,
     }
 }
@@ -499,6 +500,7 @@ fn format_agent_type(a: &AgentType) -> String {
         AgentType::Vibe => "Vibe".into(),
         AgentType::GeminiCli => "GeminiCli".into(),
         AgentType::Kiro => "Kiro".into(),
+        AgentType::CopilotCli => "CopilotCli".into(),
         AgentType::Custom => "Custom".into(),
     }
 }
@@ -534,6 +536,83 @@ fn format_role(r: &MessageRole) -> &'static str {
         MessageRole::Agent => "Agent",
         MessageRole::System => "System",
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Context Files CRUD
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[allow(clippy::too_many_arguments)]
+pub fn insert_context_file(
+    conn: &Connection,
+    id: &str,
+    discussion_id: &str,
+    filename: &str,
+    mime_type: &str,
+    original_size: u64,
+    extracted_text: &str,
+    disk_path: Option<&str>,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO context_files (id, discussion_id, filename, mime_type, original_size, extracted_text, extracted_size, disk_path)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params![id, discussion_id, filename, mime_type, original_size as i64, extracted_text, extracted_text.len() as i64, disk_path],
+    )?;
+    Ok(())
+}
+
+pub fn list_context_files(conn: &Connection, discussion_id: &str) -> rusqlite::Result<Vec<crate::models::ContextFile>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, discussion_id, filename, mime_type, original_size, extracted_size, disk_path, created_at
+         FROM context_files WHERE discussion_id = ?1 ORDER BY created_at"
+    )?;
+    let rows = stmt.query_map(rusqlite::params![discussion_id], |row| {
+        Ok(crate::models::ContextFile {
+            id: row.get(0)?,
+            discussion_id: row.get(1)?,
+            filename: row.get(2)?,
+            mime_type: row.get(3)?,
+            original_size: row.get::<_, i64>(4).unwrap_or(0) as u64,
+            extracted_size: row.get::<_, i64>(5).unwrap_or(0) as u64,
+            disk_path: row.get(6)?,
+            created_at: row.get::<_, String>(7)
+                .map(|s| chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S")
+                    .unwrap_or_default().and_utc())
+                .unwrap_or_else(|_| Utc::now()),
+        })
+    })?.filter_map(|r| r.ok()).collect();
+    Ok(rows)
+}
+
+pub fn count_context_files(conn: &Connection, discussion_id: &str) -> rusqlite::Result<usize> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM context_files WHERE discussion_id = ?1",
+        rusqlite::params![discussion_id],
+        |row| row.get::<_, i64>(0).map(|n| n as usize),
+    )
+}
+
+pub fn delete_context_file(conn: &Connection, discussion_id: &str, file_id: &str) -> rusqlite::Result<bool> {
+    let affected = conn.execute(
+        "DELETE FROM context_files WHERE id = ?1 AND discussion_id = ?2",
+        rusqlite::params![file_id, discussion_id],
+    )?;
+    Ok(affected > 0)
+}
+
+/// Get all context files for prompt injection (text + image references).
+pub fn get_context_files_for_prompt(conn: &Connection, discussion_id: &str) -> rusqlite::Result<Vec<crate::core::context_files::ContextEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT filename, extracted_text, disk_path FROM context_files WHERE discussion_id = ?1 ORDER BY created_at"
+    )?;
+    let rows = stmt.query_map(rusqlite::params![discussion_id], |row| {
+        Ok(crate::core::context_files::ContextEntry {
+            filename: row.get(0)?,
+            text: row.get(1)?,
+            disk_path: row.get(2)?,
+        })
+    })?.filter_map(|r| r.ok()).collect();
+    Ok(rows)
 }
 
 #[cfg(test)]

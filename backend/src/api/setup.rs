@@ -405,6 +405,7 @@ pub async fn get_server_config(
         auth_enabled: config.server.auth_enabled && config.server.auth_token.is_some(),
         pseudo: config.server.pseudo.clone(),
         avatar_email: config.server.avatar_email.clone(),
+        bio: config.server.bio.clone(),
     }))
 }
 
@@ -428,6 +429,9 @@ pub async fn set_server_config(
     }
     if let Some(email) = req.avatar_email {
         config.server.avatar_email = if email.is_empty() { None } else { Some(email) };
+    }
+    if let Some(bio) = req.bio {
+        config.server.bio = if bio.is_empty() { None } else { Some(bio) };
     }
     match config::save(&config).await {
         Ok(_) => Json(ApiResponse::ok(())),

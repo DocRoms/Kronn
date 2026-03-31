@@ -44,6 +44,8 @@ pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> 
         ("022_contacts", include_str!("sql/022_contacts.sql")),
         ("023_shared_discussions", include_str!("sql/023_shared_discussions.sql")),
         ("024_message_cost", include_str!("sql/024_message_cost.sql")),
+        ("025_context_files", include_str!("sql/025_context_files.sql")),
+        // 026: idempotent column addition (handled below, not via SQL file)
     ];
 
     // Check if there are pending migrations before backing up
@@ -84,6 +86,10 @@ pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> 
             )?;
         }
     }
+
+    // Idempotent schema fixups (safe to run multiple times, handles upgrades from
+    // older 025 that didn't include disk_path)
+    let _ = conn.execute_batch("ALTER TABLE context_files ADD COLUMN disk_path TEXT;");
 
     Ok(())
 }
