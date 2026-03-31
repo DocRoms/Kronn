@@ -11,6 +11,17 @@ import './McpPage.css';
 
 const slugify = (label: string) => label.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
 
+/** Turn plain text with URLs into React nodes with clickable links */
+function linkify(text: string): React.ReactNode[] {
+  const urlRe = /(https?:\/\/[^\s)]+)/g;
+  const parts = text.split(urlRe);
+  return parts.map((part, i) =>
+    urlRe.test(part)
+      ? <a key={i} href={part} target="_blank" rel="noopener noreferrer" className="mcp-secrets-token-link" style={{ display: 'inline' }}>{part}</a>
+      : part
+  );
+}
+
 interface McpPageProps {
   projects: Project[];
   mcpOverview: McpOverview;
@@ -36,6 +47,8 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
   const [editingEnv, setEditingEnv] = useState<Record<string, string>>({});
   const [editingEnvLoading, setEditingEnvLoading] = useState(false);
   const [visibleFields, setVisibleFields] = useState<Set<string>>(new Set());
+  const [editingEnvError, setEditingEnvError] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
   // MCP context editor
   const [contextEditor, setContextEditor] = useState<{ projectId: string; projectName: string; slug: string; content: string } | null>(null);
   const [contextSaving, setContextSaving] = useState(false);
@@ -128,18 +141,28 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
     }
   };
 
-  const handleStartEditSecrets = async (configId: string) => {
-    if (editingEnvId === configId) { setEditingEnvId(null); return; }
+  const handleStartEditSecrets = async (configId: string): Promise<boolean> => {
+    if (editingEnvId === configId) { setEditingEnvId(null); return false; }
     setEditingEnvLoading(true);
     setVisibleFields(new Set());
+    setEditingEnvError(null);
     try {
       const entries = await mcpsApi.revealSecrets(configId);
       const env: Record<string, string> = {};
       entries.forEach(e => { env[e.key] = e.masked_value; });
       setEditingEnv(env);
       setEditingEnvId(configId);
+      return true;
     } catch (e) {
       console.warn('Failed to load secrets:', e);
+      // Enter edit mode with empty values so the user can re-enter tokens
+      const cfg = mcpOverview.configs.find(c => c.id === configId);
+      const env: Record<string, string> = {};
+      cfg?.env_keys.forEach(k => { env[k] = ''; });
+      setEditingEnv(env);
+      setEditingEnvId(configId);
+      setEditingEnvError(t('mcp.revealWarning'));
+      return true;
     } finally {
       setEditingEnvLoading(false);
     }
@@ -244,8 +267,8 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
           <button className="mcp-btn-action mcp-btn-action-primary" onClick={() => { setShowAddMcp(true); setAddMcpSelected(null); setAddMcpSearch(''); }} title={t('mcp.addTitle')}>
             <Plus size={14} /> {t('mcp.add')}
           </button>
-          <button className="mcp-btn-action" onClick={async () => { try { await mcpsApi.refresh(); refetchMcps(); } catch (e) { console.warn('Failed to refresh MCPs:', e); } }} title={t('mcp.detect')}>
-            <RefreshCw size={14} /> {t('mcp.detect')}
+          <button className="mcp-btn-action" disabled={syncing} onClick={async () => { setSyncing(true); try { await mcpsApi.refresh(); refetchMcps(); } catch (e) { console.warn('Failed to sync MCPs:', e); } finally { setSyncing(false); } }} title={t('mcp.detect')}>
+            <RefreshCw size={14} className={syncing ? 'spin' : ''} /> {syncing ? t('mcp.syncing') : t('mcp.detect')}
           </button>
         </div>
       </div>
@@ -346,11 +369,14 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                                   {alreadyAdded && <Check size={14} className="text-info" />}
                                 </div>
                                 <div className="mcp-registry-card-desc">{m.description}</div>
-                                {m.env_keys.length > 0 && (
-                                  <div className="mcp-registry-card-meta">
-                                    <Key size={9} /> {t('mcp.setupRequired')}
-                                  </div>
-                                )}
+                                <div className="mcp-registry-card-meta">
+                                  <span className={`mcp-origin-badge ${m.official ? 'mcp-origin-official' : 'mcp-origin-community'}`}>
+                                    {m.official ? t('mcp.official') : t('mcp.community')} — {m.publisher}
+                                  </span>
+                                  {(m.env_keys.length > 0 || m.token_help) && (
+                                    <span><Key size={9} /> {t('mcp.setupRequired')}</span>
+                                  )}
+                                </div>
                               </div>
                             );
                           })
@@ -485,6 +511,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                             : <span className="mcp-scope-badge mcp-scope-none">{t('wiz.noProject')}</span>
                         }
                         {cfg.env_keys.length > 0 && <span className="mcp-installed-keys"><Key size={9} /> {cfg.env_keys.length}</span>}
+                        {cfg.secrets_broken && <span className="mcp-scope-badge" style={{ color: 'var(--kr-warning, #f0a030)', borderColor: 'rgba(240,160,48,0.3)' }} title={t('mcp.secretsBroken')}>⚠ {t('mcp.secretsBrokenShort')}</span>}
                       </div>
                     </div>
                   </div>
@@ -508,6 +535,9 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                         <h2 className="mcp-detail-name" onClick={() => { setEditingLabelId(cfg.id); setEditingLabelText(cfg.label); }}>{cfg.label} <Pencil size={11} className="text-ghost" /></h2>
                       )}
                       {def?.description && <p className="mcp-detail-desc">{def.description}</p>}
+                      {def && <span className={`mcp-origin-badge ${def.official ? 'mcp-origin-official' : 'mcp-origin-community'}`}>
+                        {def.official ? t('mcp.official') : t('mcp.community')} — {def.publisher}
+                      </span>}
                       {serverIncomp.length > 0 && <span className="mcp-server-incompat">{serverIncomp.map(i => `⚠ ${i.agent}: ${i.reason}`).join(' · ')}</span>}
                     </div>
                     <div className="flex-row gap-3">
@@ -516,19 +546,28 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                     </div>
                   </div>
                   <div className="mcp-detail-body">
-                    {cfg.env_keys.length > 0 && (
+                    {(cfg.env_keys.length > 0 || def?.token_help) && (
                       <div className="mcp-detail-section">
-                        <h3 className="mcp-detail-section-title"><Key size={12} /> {t('mcp.envVars')}</h3>
-                        {def?.token_url && <a href={def.token_url} target="_blank" rel="noopener noreferrer" className="mcp-secrets-token-link mb-4"><ExternalLink size={10} /> {def.token_help ?? t('mcp.getToken')}</a>}
+                        <h3 className="mcp-detail-section-title"><Key size={12} /> {cfg.env_keys.length > 0 ? t('mcp.envVars') : t('mcp.setup')} {cfg.env_keys.length > 0 && editingEnvId !== cfg.id && <button className="mcp-icon-btn" style={{ marginLeft: 4 }} onClick={() => handleStartEditSecrets(cfg.id)} title={t('mcp.editKeys')}><Pencil size={11} style={{ color: 'rgba(255,255,255,0.3)' }} /></button>}</h3>
+                        {def?.token_help && (() => {
+                          const helpKey = `mcp.help.${def.id}`;
+                          const translated = t(helpKey);
+                          const helpText = translated !== helpKey ? translated : def.token_help;
+                          return <p className="mcp-detail-field-label" style={{ whiteSpace: 'pre-wrap' }}>{linkify(helpText)}</p>;
+                        })()}
+                        {def?.token_url && <a href={def.token_url} target="_blank" rel="noopener noreferrer" className="mcp-secrets-token-link mb-4"><ExternalLink size={10} /> {t('mcp.getToken')}</a>}
                         {cfg.env_keys.map(k => (
                           <div key={k} className="mcp-detail-field">
                             <label className="mcp-detail-field-label">{k}</label>
                             <div className="flex-row gap-3">
                               <input className="input mcp-input-mono flex-1" value={editingEnvId === cfg.id ? (editingEnv[k] ?? '') : '••••••••'} onChange={e => setEditingEnv(prev => ({ ...prev, [k]: e.target.value }))} type={editingEnvId === cfg.id && visibleFields.has(k) ? 'text' : 'password'} placeholder={t('mcp.value')} readOnly={editingEnvId !== cfg.id} onClick={() => { if (editingEnvId !== cfg.id) handleStartEditSecrets(cfg.id); }} />
-                              {editingEnvId === cfg.id && <button className="mcp-icon-btn" onClick={() => toggleFieldVisibility(k)} title={visibleFields.has(k) ? t('mcp.hide') : t('mcp.show')}><Eye size={12} style={{ color: visibleFields.has(k) ? 'var(--kr-accent)' : 'rgba(255,255,255,0.25)' }} /></button>}
+                              <button className="mcp-icon-btn" onClick={async () => { if (editingEnvId !== cfg.id) { const ok = await handleStartEditSecrets(cfg.id); if (!ok) return; setVisibleFields(prev => new Set(prev).add(k)); } else { toggleFieldVisibility(k); } }} title={visibleFields.has(k) ? t('mcp.hide') : t('mcp.show')}><Eye size={12} style={{ color: visibleFields.has(k) ? 'var(--kr-accent)' : 'rgba(255,255,255,0.25)' }} /></button>
                             </div>
                           </div>
                         ))}
+                        {editingEnvError && editingEnvId === cfg.id && (
+                          <div className="mcp-env-warning" style={{ color: 'var(--kr-warning, #f0a030)', fontSize: '0.8rem', marginTop: 6 }}>{editingEnvError}</div>
+                        )}
                         {editingEnvId === cfg.id && (
                           <div className="flex-row gap-3 mt-4">
                             <button className="mcp-btn-action mcp-btn-action-primary" onClick={handleSaveSecrets} disabled={editingEnvLoading}><Save size={12} /> {editingEnvLoading ? t('mcp.saving') : t('mcp.save')}</button>
@@ -556,11 +595,15 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                           return (<>
                             {visible.map(proj => {
                               const isLinked = cfg.is_global || cfg.project_ids.includes(proj.id);
+                              const projMcpCount = mcpOverview.configs.filter(c => c.is_global || c.project_ids.includes(proj.id)).length;
+                              const loadClass = projMcpCount <= 5 ? 'mcp-load-ok' : projMcpCount <= 10 ? 'mcp-load-warn' : 'mcp-load-danger';
+                              const loadTitle = projMcpCount <= 5 ? t('mcp.mcpLoadOk') : projMcpCount <= 10 ? t('mcp.mcpLoadWarn') : t('mcp.mcpLoadDanger');
                               return (
                                 <span key={proj.id} className="flex-row">
                                   <button className={`mcp-project-toggle ${isLinked ? 'mcp-project-toggle-on' : 'mcp-project-toggle-off'}`} onClick={() => handleToggleConfigProject(cfg.id, proj.id, isLinked)}>
                                     {isLinked ? <CheckSquare size={11} className="text-accent" /> : <Square size={11} />}
                                     {proj.name}
+                                    <span className={`mcp-load-badge ${loadClass}`} title={loadTitle}>{projMcpCount}</span>
                                   </button>
                                   {isLinked && (() => {
                                     const slug = slugify(cfg.label);

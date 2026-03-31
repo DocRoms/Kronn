@@ -1,7 +1,7 @@
 // Note: assertions use French strings because the default UI locale is 'fr'.
 // If the default locale changes, these assertions must be updated.
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, screen, cleanup, fireEvent } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, act } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
 
 // Mock API
@@ -22,6 +22,7 @@ vi.mock('../../lib/api', () => ({
 }));
 
 import { McpPage } from '../McpPage';
+import { mcps as mcpsApi } from '../../lib/api';
 import type { McpOverview, McpConfigDisplay, McpServer, McpDefinition, Project, AgentType } from '../../types/generated';
 
 // Use fake timers to prevent the setTimeout in handleAddDuplicateConfig (50ms
@@ -58,6 +59,7 @@ const makeConfig = (id: string, serverId: string, serverName: string, opts?: Par
   config_hash: 'abc123',
   project_ids: opts?.project_ids ?? [],
   project_names: opts?.project_names ?? [],
+  secrets_broken: opts?.secrets_broken ?? false,
 });
 
 const makeProject = (id: string, name: string): Project => ({
@@ -123,7 +125,7 @@ describe('McpPage', () => {
   it('"Add MCP" button opens the add form', () => {
     const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [] };
     const registry: McpDefinition[] = [
-      { id: 'test-mcp', name: 'Test MCP', description: 'A test server', transport: { Stdio: { command: 'node', args: [] } }, env_keys: [], tags: ['core'], token_url: null, token_help: null },
+      { id: 'test-mcp', name: 'Test MCP', description: 'A test server', transport: { Stdio: { command: 'node', args: [] } }, env_keys: [], tags: ['core'], token_url: null, token_help: null, publisher: 'Anthropic', official: false },
     ];
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={registry} refetchMcps={noop} />);
 
@@ -191,5 +193,254 @@ describe('McpPage', () => {
     // All cards are visible immediately (no accordion to expand)
     expect(container.textContent).toContain('Context7 Main');
     expect(container.textContent).toContain('Context7 Dev');
+  });
+
+  /* ── Edit button and eye icon regression tests ── */
+
+  it('shows env key count badge on card for configs with env_keys', () => {
+    const configs = [
+      makeConfig('c1', 'gitlab', 'GitLab', { env_keys: ['GITLAB_API_URL', 'GITLAB_TOKEN'] }),
+    ];
+    const overview: McpOverview = { servers: [makeServer('gitlab', 'GitLab')], configs, customized_contexts: [], incompatibilities: [] };
+    const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+
+    // Card shows key count (2 env keys)
+    expect(container.textContent).toContain('2');
+  });
+
+  it('shows env vars section with edit pencil button in detail panel', () => {
+    const configs = [
+      makeConfig('c1', 'gitlab', 'GitLab', { env_keys: ['GITLAB_TOKEN'] }),
+    ];
+    const overview: McpOverview = { servers: [makeServer('gitlab', 'GitLab')], configs, customized_contexts: [], incompatibilities: [] };
+    const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+
+    // Click card to expand detail panel
+    fireEvent.click(screen.getByText('GitLab'));
+
+    // Env vars section title should be visible
+    expect(container.textContent).toContain("Variables d'environnement");
+    // Edit pencil button should exist (title = "Modifier les clés")
+    const editBtn = container.querySelector('button[title="Modifier les clés"]');
+    expect(editBtn).toBeTruthy();
+  });
+
+  it('shows eye icon for each env field in detail panel (before entering edit mode)', () => {
+    const configs = [
+      makeConfig('c1', 'gitlab', 'GitLab', { env_keys: ['GITLAB_API_URL', 'GITLAB_TOKEN'] }),
+    ];
+    const overview: McpOverview = { servers: [makeServer('gitlab', 'GitLab')], configs, customized_contexts: [], incompatibilities: [] };
+    const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+
+    // Open detail panel
+    fireEvent.click(screen.getByText('GitLab'));
+
+    // Eye buttons should be present for each env field (title = "Afficher")
+    const eyeButtons = container.querySelectorAll('button[title="Afficher"]');
+    expect(eyeButtons.length).toBe(2);
+  });
+
+  it('pencil edit button enters edit mode and shows save/cancel buttons', async () => {
+    vi.mocked(mcpsApi.revealSecrets).mockResolvedValue([
+      { key: 'GITLAB_TOKEN', masked_value: 'glpat-secret123' },
+    ]);
+    const configs = [
+      makeConfig('c1', 'gitlab', 'GitLab', { env_keys: ['GITLAB_TOKEN'] }),
+    ];
+    const overview: McpOverview = { servers: [makeServer('gitlab', 'GitLab')], configs, customized_contexts: [], incompatibilities: [] };
+    const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+
+    // Open detail panel
+    fireEvent.click(screen.getByText('GitLab'));
+
+    // Click pencil edit button
+    const editBtn = container.querySelector('button[title="Modifier les clés"]') as HTMLElement;
+    await act(async () => { fireEvent.click(editBtn); });
+
+    // Save/cancel buttons should appear
+    expect(container.textContent).toContain('Sauvegarder');
+    expect(container.textContent).toContain('Annuler');
+
+    // Pencil button should be hidden while editing
+    const editBtnAfter = container.querySelector('button[title="Modifier les clés"]');
+    expect(editBtnAfter).toBeNull();
+  });
+
+  it('eye icon reveals token value when clicked', async () => {
+    vi.mocked(mcpsApi.revealSecrets).mockResolvedValue([
+      { key: 'GITLAB_TOKEN', masked_value: 'glpat-secret123' },
+    ]);
+    const configs = [
+      makeConfig('c1', 'gitlab', 'GitLab', { env_keys: ['GITLAB_TOKEN'] }),
+    ];
+    const overview: McpOverview = { servers: [makeServer('gitlab', 'GitLab')], configs, customized_contexts: [], incompatibilities: [] };
+    const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+
+    // Open detail panel
+    fireEvent.click(screen.getByText('GitLab'));
+
+    // All inputs should be password type initially
+    const inputBefore = container.querySelector('input.mcp-input-mono') as HTMLInputElement;
+    expect(inputBefore.type).toBe('password');
+
+    // Click eye button (triggers edit mode + toggle visibility)
+    const eyeBtn = container.querySelector('button[title="Afficher"]') as HTMLElement;
+    await act(async () => { fireEvent.click(eyeBtn); });
+
+    // Input should now be text (visible)
+    const input = container.querySelector('input.mcp-input-mono') as HTMLInputElement;
+    expect(input.type).toBe('text');
+  });
+
+  it('eye icon toggles between show and hide', async () => {
+    vi.mocked(mcpsApi.revealSecrets).mockResolvedValue([
+      { key: 'MY_KEY', masked_value: 'secret-value' },
+    ]);
+    const configs = [
+      makeConfig('c1', 'test', 'TestMCP', { env_keys: ['MY_KEY'] }),
+    ];
+    const overview: McpOverview = { servers: [makeServer('test', 'TestMCP')], configs, customized_contexts: [], incompatibilities: [] };
+    const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+
+    // Open detail panel
+    fireEvent.click(screen.getByText('TestMCP'));
+
+    // Click eye to reveal (enters edit mode + shows)
+    const eyeBtn = container.querySelector('button[title="Afficher"]') as HTMLElement;
+    await act(async () => { fireEvent.click(eyeBtn); });
+
+    const input = container.querySelector('input.mcp-input-mono') as HTMLInputElement;
+    expect(input.type).toBe('text');
+
+    // Click eye again to hide (title is now "Masquer")
+    const hideBtn = container.querySelector('button[title="Masquer"]') as HTMLElement;
+    fireEvent.click(hideBtn);
+
+    expect(input.type).toBe('password');
+  });
+
+  it('cancel button exits edit mode and hides save/cancel', async () => {
+    vi.mocked(mcpsApi.revealSecrets).mockResolvedValue([
+      { key: 'TOKEN', masked_value: 'val' },
+    ]);
+    const configs = [
+      makeConfig('c1', 'test', 'TestMCP', { env_keys: ['TOKEN'] }),
+    ];
+    const overview: McpOverview = { servers: [makeServer('test', 'TestMCP')], configs, customized_contexts: [], incompatibilities: [] };
+    const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+
+    // Open detail, enter edit mode
+    fireEvent.click(screen.getByText('TestMCP'));
+    const editBtn = container.querySelector('button[title="Modifier les clés"]') as HTMLElement;
+    await act(async () => { fireEvent.click(editBtn); });
+
+    expect(container.textContent).toContain('Annuler');
+
+    // Click cancel
+    fireEvent.click(screen.getByText('Annuler'));
+
+    // Save/cancel should disappear, pencil should reappear
+    expect(container.textContent).not.toContain('Sauvegarder');
+    const editBtnBack = container.querySelector('button[title="Modifier les clés"]');
+    expect(editBtnBack).toBeTruthy();
+  });
+
+  it('env field labels are visible in detail panel', () => {
+    const configs = [
+      makeConfig('c1', 'gitlab', 'GitLab', { env_keys: ['GITLAB_API_URL', 'GITLAB_PERSONAL_ACCESS_TOKEN'] }),
+    ];
+    const overview: McpOverview = { servers: [makeServer('gitlab', 'GitLab')], configs, customized_contexts: [], incompatibilities: [] };
+    const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+
+    // Open detail
+    fireEvent.click(screen.getByText('GitLab'));
+
+    // Field labels should be visible
+    expect(container.textContent).toContain('GITLAB_API_URL');
+    expect(container.textContent).toContain('GITLAB_PERSONAL_ACCESS_TOKEN');
+  });
+
+  it('shows warning and enters edit mode when revealSecrets fails', async () => {
+    vi.mocked(mcpsApi.revealSecrets).mockRejectedValue(new Error('Decryption failed'));
+    const configs = [
+      makeConfig('c1', 'gitlab', 'GitLab', { env_keys: ['GITLAB_TOKEN'] }),
+    ];
+    const overview: McpOverview = { servers: [makeServer('gitlab', 'GitLab')], configs, customized_contexts: [], incompatibilities: [] };
+    const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+
+    // Open detail panel
+    fireEvent.click(screen.getByText('GitLab'));
+
+    // Click pencil edit button
+    const editBtn = container.querySelector('button[title="Modifier les clés"]') as HTMLElement;
+    await act(async () => { fireEvent.click(editBtn); });
+
+    // Warning message should be visible
+    expect(container.textContent).toContain('déchiffr');
+    // Edit mode should still be active (save/cancel visible) so user can re-enter values
+    expect(container.textContent).toContain('Sauvegarder');
+    expect(container.textContent).toContain('Annuler');
+  });
+
+  it('eye icon enters edit mode with empty values when revealSecrets fails', async () => {
+    vi.mocked(mcpsApi.revealSecrets).mockRejectedValue(new Error('Decryption failed'));
+    const configs = [
+      makeConfig('c1', 'test', 'TestMCP', { env_keys: ['TOKEN'] }),
+    ];
+    const overview: McpOverview = { servers: [makeServer('test', 'TestMCP')], configs, customized_contexts: [], incompatibilities: [] };
+    const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+
+    // Open detail panel
+    fireEvent.click(screen.getByText('TestMCP'));
+
+    // Click eye button
+    const eyeBtn = container.querySelector('button[title="Afficher"]') as HTMLElement;
+    await act(async () => { fireEvent.click(eyeBtn); });
+
+    // Edit mode should be active (user can type new values)
+    expect(container.textContent).toContain('Sauvegarder');
+    // Input should be text (eye reveals) with empty value
+    const input = container.querySelector('input.mcp-input-mono') as HTMLInputElement;
+    expect(input.type).toBe('text');
+    expect(input.value).toBe('');
+    // Warning should be shown
+    expect(container.textContent).toContain('déchiffr');
+  });
+
+  /* ── Publisher / official badge tests ── */
+
+  it('shows official badge for vendor-built MCP in registry', () => {
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [] };
+    const registry: McpDefinition[] = [
+      { id: 'mcp-fastly', name: 'Fastly', description: 'CDN server', transport: { Stdio: { command: 'fastly-mcp', args: [] } }, env_keys: [], tags: ['cdn'], token_url: null, token_help: null, publisher: 'Fastly', official: true },
+    ];
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={registry} refetchMcps={noop} />);
+    fireEvent.click(screen.getByText('Ajouter'));
+    expect(document.body.textContent).toContain('Officiel');
+    expect(document.body.textContent).toContain('Fastly');
+  });
+
+  it('shows community badge for third-party MCP in registry', () => {
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [] };
+    const registry: McpDefinition[] = [
+      { id: 'mcp-github', name: 'GitHub', description: 'GitHub server', transport: { Stdio: { command: 'npx', args: ['-y', 'server'] } }, env_keys: ['TOKEN'], tags: ['git'], token_url: null, token_help: null, publisher: 'Anthropic', official: false },
+    ];
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={registry} refetchMcps={noop} />);
+    fireEvent.click(screen.getByText('Ajouter'));
+    expect(document.body.textContent).toContain('Communautaire');
+    expect(document.body.textContent).toContain('Anthropic');
+  });
+
+  it('shows publisher badge in detail panel of installed MCP', () => {
+    const servers = [makeServer('mcp-redis', 'Redis')];
+    const configs = [makeConfig('c1', 'mcp-redis', 'Redis')];
+    const overview: McpOverview = { servers, configs, customized_contexts: [], incompatibilities: [] };
+    const registry: McpDefinition[] = [
+      { id: 'mcp-redis', name: 'Redis', description: 'Cache server', transport: { Stdio: { command: 'uvx', args: ['redis-mcp'] } }, env_keys: [], tags: ['cache'], token_url: null, token_help: null, publisher: 'Redis Ltd', official: true },
+    ];
+    const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={registry} refetchMcps={noop} />);
+    fireEvent.click(screen.getByText('Redis'));
+    expect(container.textContent).toContain('Officiel');
+    expect(container.textContent).toContain('Redis Ltd');
   });
 });

@@ -284,6 +284,8 @@ export interface McpConfigDisplay {
   config_hash: string;
   project_ids: string[];
   project_names: string[];
+  /** True when env_keys exist but decryption fails (secrets need re-entry). */
+  secrets_broken: boolean;
 }
 
 export interface McpEnvEntry {
@@ -314,6 +316,8 @@ export interface McpDefinition {
   tags: string[];
   token_url: string | null;
   token_help: string | null;
+  publisher: string;
+  official: boolean;
 }
 
 // ─── Workflows ─────────────────────────────────────────────────────────────
@@ -610,6 +614,10 @@ export interface Skill {
   content: string;
   is_builtin: boolean;
   token_estimate: number;
+  /** agentskills.io: SPDX license identifier */
+  license: string | null;
+  /** agentskills.io: space-delimited list of pre-approved tools */
+  allowed_tools: string | null;
 }
 
 export interface CreateSkillRequest {
@@ -618,6 +626,8 @@ export interface CreateSkillRequest {
   icon: string;
   category: SkillCategory;
   content: string;
+  license?: string | null;
+  allowed_tools?: string | null;
 }
 
 // ─── Profiles (WHO — persona, multi-select) ────────────────────────────────

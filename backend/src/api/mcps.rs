@@ -28,9 +28,10 @@ pub async fn list_registry(
 pub async fn overview(
     State(state): State<AppState>,
 ) -> Json<ApiResponse<McpOverview>> {
-    match state.db.with_conn(|conn| {
+    let secret = state.config.read().await.encryption_secret.clone();
+    match state.db.with_conn(move |conn| {
         let servers = db::mcps::list_servers(conn)?;
-        let configs = db::mcps::list_configs_display(conn)?;
+        let configs = db::mcps::list_configs_display(conn, secret.as_deref())?;
         let projects = db::projects::list_projects(conn)?;
         let customized_contexts = build_customized_contexts(&configs, &projects);
         let incompatibilities = mcp_scanner::get_incompatibilities(&servers);
@@ -92,7 +93,7 @@ pub async fn create_config(
             db::mcps::set_config_projects(conn, &existing.id, &all_pids)?;
 
             // Return updated display
-            let configs = db::mcps::list_configs_display(conn)?;
+            let configs = db::mcps::list_configs_display(conn, None)?;
             let display = configs.into_iter().find(|c| c.id == existing.id)
                 .ok_or_else(|| anyhow::anyhow!("Config disappeared"))?;
             return Ok(display);
@@ -129,7 +130,7 @@ pub async fn create_config(
         }
         mcp_scanner::sync_affected_projects(conn, &sync_pids, &secret);
 
-        let configs = db::mcps::list_configs_display(conn)?;
+        let configs = db::mcps::list_configs_display(conn, None)?;
         let display = configs.into_iter().find(|c| c.id == config.id)
             .ok_or_else(|| anyhow::anyhow!("Config disappeared after insert"))?;
         Ok(display)
@@ -219,7 +220,7 @@ pub async fn update_config(
             mcp_scanner::sync_affected_projects(conn, &old_config.project_ids, &secret);
         }
 
-        let configs = db::mcps::list_configs_display(conn)?;
+        let configs = db::mcps::list_configs_display(conn, None)?;
         configs.into_iter().find(|c| c.id == config_id)
             .ok_or_else(|| anyhow::anyhow!("Config not found after update"))
     }).await;
@@ -484,7 +485,7 @@ pub async fn refresh(
 
         // Return updated overview
         let servers = db::mcps::list_servers(conn)?;
-        let configs = db::mcps::list_configs_display(conn)?;
+        let configs = db::mcps::list_configs_display(conn, None)?;
         let projects = db::projects::list_projects(conn)?;
         let customized_contexts = build_customized_contexts(&configs, &projects);
         let incompatibilities = mcp_scanner::get_incompatibilities(&servers);
@@ -593,35 +594,84 @@ fn build_customized_contexts(
     result
 }
 
-/// Merge duplicate configs (same config_hash) — keeps the first, merges project linkages, deletes the rest.
+/// Merge duplicate configs — deduplicates by config_hash AND by label+server_id
+/// (catches detected:X vs mcp-X pointing to the same MCP).
+/// Keeps the first (or the registry-backed one), merges project linkages, deletes the rest.
 fn dedup_configs(conn: &Connection) -> anyhow::Result<()> {
     let configs = db::mcps::list_configs(conn)?;
-    let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new(); // hash → keeper_id
     let mut to_delete: Vec<(String, String)> = vec![]; // (dup_id, keeper_id)
 
-    for config in &configs {
-        if let Some(keeper_id) = seen.get(&config.config_hash) {
-            to_delete.push((config.id.clone(), keeper_id.clone()));
-        } else {
-            seen.insert(config.config_hash.clone(), config.id.clone());
+    // Pass 1: same config_hash → exact duplicates
+    {
+        let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for config in &configs {
+            if let Some(keeper_id) = seen.get(&config.config_hash) {
+                to_delete.push((config.id.clone(), keeper_id.clone()));
+            } else {
+                seen.insert(config.config_hash.clone(), config.id.clone());
+            }
+        }
+    }
+
+    // Pass 2: same label (case-insensitive) + same server_id → duplicates.
+    // Covers: detected:X vs mcp-X (prefer registry), both detected (keep first),
+    // and both registry with same server_id (keep first — happens after migration).
+    {
+        // Key: (lowercase_label, server_id) → keeper config_id
+        let mut seen: std::collections::HashMap<(String, String), String> = std::collections::HashMap::new();
+        let already_deleted: std::collections::HashSet<String> = to_delete.iter().map(|(d, _)| d.clone()).collect();
+
+        for config in &configs {
+            if already_deleted.contains(&config.id) { continue; }
+            let key = (config.label.to_lowercase(), config.server_id.clone());
+            if let Some(keeper_id) = seen.get(&key) {
+                to_delete.push((config.id.clone(), keeper_id.clone()));
+            } else {
+                seen.insert(key, config.id.clone());
+            }
+        }
+
+        // Also merge detected:X into registry when label matches
+        let already_deleted: std::collections::HashSet<String> = to_delete.iter().map(|(d, _)| d.clone()).collect();
+        let mut label_to_registry: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
+        for config in &configs {
+            if already_deleted.contains(&config.id) { continue; }
+            if !config.server_id.starts_with("detected:") {
+                label_to_registry.entry(config.label.to_lowercase())
+                    .or_insert_with(|| config.id.clone());
+            }
+        }
+        for config in &configs {
+            if already_deleted.contains(&config.id) { continue; }
+            if config.server_id.starts_with("detected:") {
+                if let Some(keeper_id) = label_to_registry.get(&config.label.to_lowercase()) {
+                    to_delete.push((config.id.clone(), keeper_id.clone()));
+                }
+            }
         }
     }
 
     for (dup_id, keeper_id) in &to_delete {
-        // Merge project linkages from duplicate into keeper
-        // Safety: dup_id was collected from iterating configs, so it is guaranteed to be found
-        let dup = configs.iter().find(|c| c.id == *dup_id).expect("dup_id came from configs");
+        let dup = match configs.iter().find(|c| c.id == *dup_id) {
+            Some(d) => d,
+            None => continue, // already processed
+        };
         for pid in &dup.project_ids {
             db::mcps::link_config_project(conn, keeper_id, pid)?;
         }
-        // Preserve is_global flag
         if dup.is_global {
             conn.execute(
                 "UPDATE mcp_configs SET is_global = 1 WHERE id = ?1",
                 params![keeper_id],
             )?;
         }
-        // Delete duplicate
+        if dup.include_general {
+            conn.execute(
+                "UPDATE mcp_configs SET include_general = 1 WHERE id = ?1",
+                params![keeper_id],
+            )?;
+        }
         db::mcps::delete_config(conn, dup_id)?;
         tracing::info!("Deduped MCP config {} (merged into {})", dup_id, keeper_id);
     }
@@ -661,6 +711,8 @@ fn rehash_configs(conn: &Connection, secret: &str) -> anyhow::Result<()> {
 
 /// Match a detected .mcp.json entry against the built-in registry.
 /// Compares command + package name (first non-flag arg) to find the registry entry.
+/// Also checks `alt_packages` so that entries using a different runtime
+/// (e.g. npm `fastly-mcp-server` vs Go binary `fastly-mcp`) still match.
 fn match_registry_entry<'a>(
     entry: &mcp_scanner::McpServerEntry,
     reg: &'a [McpDefinition],
@@ -668,25 +720,38 @@ fn match_registry_entry<'a>(
     let cmd = entry.command.as_deref()?;
     let args = entry.args.as_deref().unwrap_or(&[]);
     // First non-flag arg is typically the package name
-    let pkg = args.iter().find(|a| !a.starts_with('-'))?.as_str();
+    let pkg = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str());
 
     reg.iter().find(|def| {
+        // 1. Check alt_packages: if the detected package matches any alt name,
+        //    this is the same MCP regardless of runtime (npx vs binary vs uvx).
+        if let Some(detected_pkg) = pkg {
+            let stripped = strip_version(detected_pkg);
+            if def.alt_packages.iter().any(|alt| {
+                stripped == alt.as_str() || strip_version(alt) == stripped
+            }) {
+                return true;
+            }
+        }
+
+        // 2. Standard match: same command + matching package name
         if let McpTransport::Stdio { command: ref reg_cmd, args: ref reg_args } = def.transport {
             if reg_cmd != cmd {
                 return false;
             }
-            // Match if the registry package appears in the detected args
+            let detected_pkg = match pkg {
+                Some(p) => p,
+                None => return reg_args.is_empty(), // both have no args
+            };
             let reg_pkg = reg_args.iter()
                 .find(|a| !a.starts_with('-'))
                 .map(|s| s.as_str())
                 .unwrap_or("");
-            // Exact match or detected pkg starts with registry pkg (handles @latest suffix)
             !reg_pkg.is_empty() && (
-                pkg == reg_pkg
-                || pkg.starts_with(&format!("{}@", reg_pkg))
-                || reg_pkg.starts_with(&format!("{}@", pkg))
-                // Also match base package name without version
-                || strip_version(pkg) == strip_version(reg_pkg)
+                detected_pkg == reg_pkg
+                || detected_pkg.starts_with(&format!("{}@", reg_pkg))
+                || reg_pkg.starts_with(&format!("{}@", detected_pkg))
+                || strip_version(detected_pkg) == strip_version(reg_pkg)
             )
         } else if let McpTransport::Sse { url: ref reg_url } = def.transport {
             entry.url.as_deref() == Some(reg_url.as_str())
@@ -718,8 +783,20 @@ fn migrate_detected_to_registry(conn: &Connection, reg: &[McpDefinition]) -> any
             continue;
         }
 
-        // Try to match this server's transport against registry
+        // Try to match this server's transport against registry.
+        // Also checks alt_packages for cross-runtime matches (npx pkg vs Go binary).
         let matched = reg.iter().find(|def| {
+            // First check alt_packages (handles cross-runtime: npx vs binary)
+            if let McpTransport::Stdio { args: ref sa, .. } = server.transport {
+                let s_pkg = sa.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("");
+                if !s_pkg.is_empty() {
+                    let stripped = strip_version(s_pkg);
+                    if def.alt_packages.iter().any(|alt| stripped == alt.as_str() || strip_version(alt) == stripped) {
+                        return true;
+                    }
+                }
+            }
+            // Standard transport match
             match (&server.transport, &def.transport) {
                 (
                     McpTransport::Stdio { command: ref sc, args: ref sa },
@@ -829,4 +906,90 @@ fn trigger_mcp_drift(state: &AppState, project_ids: Vec<String>) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::mcp_scanner::McpServerEntry;
+
+    fn make_entry(cmd: &str, args: &[&str]) -> McpServerEntry {
+        McpServerEntry {
+            command: Some(cmd.into()),
+            args: Some(args.iter().map(|s| s.to_string()).collect()),
+            url: None,
+            env: Default::default(),
+        }
+    }
+
+    fn make_def(id: &str, cmd: &str, args: &[&str], alt: &[&str]) -> McpDefinition {
+        McpDefinition {
+            id: id.into(),
+            name: id.into(),
+            description: String::new(),
+            transport: McpTransport::Stdio {
+                command: cmd.into(),
+                args: args.iter().map(|s| s.to_string()).collect(),
+            },
+            env_keys: vec![],
+            tags: vec![],
+            token_url: None,
+            token_help: None,
+            publisher: String::new(),
+            official: false,
+            alt_packages: alt.iter().map(|s| s.to_string()).collect(),
+            default_context: None,
+        }
+    }
+
+    #[test]
+    fn match_registry_exact_command_and_package() {
+        let reg = vec![make_def("mcp-github", "npx", &["-y", "@modelcontextprotocol/server-github"], &[])];
+        let entry = make_entry("npx", &["-y", "@modelcontextprotocol/server-github"]);
+        assert_eq!(match_registry_entry(&entry, &reg).unwrap().id, "mcp-github");
+    }
+
+    #[test]
+    fn match_registry_versioned_package() {
+        let reg = vec![make_def("mcp-github", "npx", &["-y", "@modelcontextprotocol/server-github"], &[])];
+        let entry = make_entry("npx", &["-y", "@modelcontextprotocol/server-github@latest"]);
+        assert_eq!(match_registry_entry(&entry, &reg).unwrap().id, "mcp-github");
+    }
+
+    #[test]
+    fn match_registry_alt_package_cross_runtime() {
+        // Registry uses Go binary, .mcp.json uses npm package
+        let reg = vec![make_def("mcp-fastly", "fastly-mcp", &[], &["fastly-mcp-server"])];
+        let entry = make_entry("npx", &["-y", "fastly-mcp-server@1.0.4"]);
+        assert_eq!(match_registry_entry(&entry, &reg).unwrap().id, "mcp-fastly");
+    }
+
+    #[test]
+    fn match_registry_alt_package_gitlab() {
+        // Registry uses glab CLI, .mcp.json uses npm package
+        let reg = vec![make_def("mcp-gitlab", "glab", &["mcp", "serve"], &["@modelcontextprotocol/server-gitlab"])];
+        let entry = make_entry("npx", &["-y", "@modelcontextprotocol/server-gitlab"]);
+        assert_eq!(match_registry_entry(&entry, &reg).unwrap().id, "mcp-gitlab");
+    }
+
+    #[test]
+    fn match_registry_no_match_different_package() {
+        let reg = vec![make_def("mcp-github", "npx", &["-y", "@modelcontextprotocol/server-github"], &[])];
+        let entry = make_entry("npx", &["-y", "some-other-server"]);
+        assert!(match_registry_entry(&entry, &reg).is_none());
+    }
+
+    #[test]
+    fn match_registry_uvx_exact() {
+        let reg = vec![make_def("mcp-docker", "uvx", &["mcp-server-docker"], &[])];
+        let entry = make_entry("uvx", &["mcp-server-docker"]);
+        assert_eq!(match_registry_entry(&entry, &reg).unwrap().id, "mcp-docker");
+    }
+
+    #[test]
+    fn strip_version_scoped_package() {
+        assert_eq!(strip_version("@upstash/context7-mcp@latest"), "@upstash/context7-mcp");
+        assert_eq!(strip_version("fastly-mcp-server@1.0.4"), "fastly-mcp-server");
+        assert_eq!(strip_version("@modelcontextprotocol/server-gitlab"), "@modelcontextprotocol/server-gitlab");
+    }
 }

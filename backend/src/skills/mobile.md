@@ -1,28 +1,33 @@
 ---
-name: Mobile
-description: React Native, Flutter, offline-first, push notifications, and mobile best practices
+name: mobile
+description: Use when building or reviewing React Native, Flutter, or native iOS/Android code. Covers offline-first, push notifications, navigation, and cross-platform patterns.
+license: AGPL-3.0
 category: domain
 icon: 📱
 builtin: true
 ---
 
-Mobile development expertise covering cross-platform and native patterns:
+## Procedure
 
-- Cross-platform: React Native for JavaScript teams, Flutter for performance-critical UIs. Evaluate native when platform-specific features dominate.
-- Offline-first: design for no network. Local database (SQLite, Realm, Hive) as source of truth. Sync when connectivity returns. Handle conflicts.
-- State management: keep UI state and server state separate. Use optimistic updates for responsiveness. Roll back on sync failure.
-- Push notifications: use FCM (Android) and APNs (iOS). Handle foreground, background, and killed states differently. Never spam — let users control preferences.
-- Navigation: stack-based navigation is the norm. Deep linking from day one — retrofit is painful. Handle back button correctly on Android.
-- Performance: avoid unnecessary re-renders. Use lazy loading for lists (FlatList, ListView.builder). Profile with platform tools (Flipper, DevTools).
-- Responsive layouts: design for multiple screen sizes. Use relative units, not fixed pixels. Test on small phones and tablets.
-- Native bridges: minimize bridge crossings (React Native) or platform channels (Flutter). Batch operations. Heavy computation on the native side.
-- App store guidelines: follow Apple HIG and Material Design. Handle review rejection gracefully. No hidden functionality. Respect privacy APIs.
-- Security: store secrets in Keychain/Keystore, not SharedPreferences. Certificate pinning for sensitive APIs. Obfuscate release builds.
+1. **Design offline-first**: local DB (SQLite, Realm, Hive) as source of truth. Sync on reconnect. Handle conflicts explicitly.
+2. **Set up navigation**: stack-based. Implement deep linking from day one — retrofitting is painful. Handle Android back button.
+3. **Virtualize lists**: use `FlatList`/`ListView.builder`. Never render unbounded items in a `ScrollView`.
+4. **Minimize bridge crossings**: batch native calls (RN bridge / Flutter platform channels). Move heavy computation to native side.
+5. **Handle push correctly**: FCM (Android) + APNs (iOS). Implement foreground, background, AND killed-state handlers separately.
+6. **Secure secrets**: Keychain (iOS) / Keystore (Android). Never `SharedPreferences` for tokens or keys. Certificate pinning for sensitive APIs.
 
-When reviewing mobile code, flag: synchronous network calls on main thread, missing offline handling, hardcoded dimensions, excessive bridge calls, and missing permission handling.
+## Gotchas
 
-Apply when: building or reviewing React Native, Flutter, or native iOS/Android code.
-Do NOT apply when: web-only SPAs, backend services, or desktop applications (use relevant skill instead).
+- React Native's `bridge` serializes JSON on every crossing. Passing large arrays kills performance — flatten or paginate.
+- `FlatList` with missing `keyExtractor` silently re-renders entire list on every state change.
+- Android `FLAG_SECURE` prevents screenshots but also breaks accessibility tools — test on both paths.
+- iOS rejects apps that request permissions without a clear usage string. Add `NSxxxUsageDescription` BEFORE the review, not after rejection.
+- `expo-updates` OTA bypasses app store review — Apple allows it for JS-only changes but rejects native-code OTA.
+- Hardcoded pixel dimensions break on foldables and tablets. Use relative units (`%`, `flex`, `Dimensions`).
 
-✓ Scenario: list uses `FlatList` with `keyExtractor`, lazy loading, and offline cache fallback.
-✗ Scenario: list renders 1000 items in a `ScrollView` with no virtualization, crashes on low-end devices.
+## Validation
+
+Profile with Flipper (RN) or DevTools (Flutter). Test on a low-end device. Verify offline flow: enable airplane mode, use the app, reconnect, confirm sync.
+
+✓ `FlatList` with `keyExtractor`, pagination, and offline cache fallback
+✗ 1000 items in `ScrollView`, no virtualization, crashes on low-end devices

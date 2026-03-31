@@ -276,7 +276,7 @@ export function ProjectCard({
           <div className="dash-proj-path">{proj.path}</div>
         </div>
         <div className={`dash-proj-meta${isMobile ? ' flex-wrap' : ''}`}>
-          <span className="dash-meta-item"><Puzzle size={12} /> {projMcps.length}</span>
+          <span className={`dash-meta-item ${projMcps.length <= 5 ? 'mcp-load-ok' : projMcps.length <= 10 ? 'mcp-load-warn' : 'mcp-load-danger'}`} title={projMcps.length <= 5 ? t('mcp.mcpLoadOk') : projMcps.length <= 10 ? t('mcp.mcpLoadWarn') : t('mcp.mcpLoadDanger')}><Puzzle size={12} /> {projMcps.length}</span>
           <span className="dash-meta-item"><MessageSquare size={12} /> {projDiscussions.length}</span>
         </div>
       </button>

@@ -97,6 +97,22 @@ async fn delete_json(app: Router, uri: &str) -> (StatusCode, Value) {
     (status, json)
 }
 
+/// Send a PATCH request with a JSON body and return (status, parsed JSON body).
+async fn patch_json(app: Router, uri: &str, body: Value) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method("PATCH")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    (status, json)
+}
+
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Health endpoint tests
@@ -526,7 +542,7 @@ async fn skills_list_returns_builtins() {
     let rust = skills.iter().find(|s| s["id"] == "rust");
     assert!(rust.is_some(), "rust skill not found");
     let rs = rust.unwrap();
-    assert_eq!(rs["name"], "Rust");
+    assert_eq!(rs["name"], "rust");
     assert_eq!(rs["icon"], "🦀");
     assert_eq!(rs["category"], "Language");
     assert_eq!(rs["is_builtin"], true);
@@ -2295,4 +2311,150 @@ async fn ws_chat_message_idempotent() {
     }).await.unwrap().unwrap();
 
     assert_eq!(updated.messages.len(), 1, "Duplicate message should not be inserted twice");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MCP API endpoint tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn mcp_overview_returns_servers_and_configs() {
+    let app = test_app();
+    let (status, json) = get_json(app, "/api/mcps").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+    assert!(json["data"]["servers"].is_array(), "overview must have servers array");
+    assert!(json["data"]["configs"].is_array(), "overview must have configs array");
+    assert!(json["data"]["incompatibilities"].is_array(), "overview must have incompatibilities array");
+}
+
+#[tokio::test]
+async fn mcp_create_config_and_reveal() {
+    let state = test_state();
+
+    // Step 1: Create config with env using registry server_id
+    let create_body = serde_json::json!({
+        "server_id": "mcp-github",
+        "label": "TestProject GitHub",
+        "env": {
+            "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_test_alpha_token_123"
+        },
+        "args_override": null,
+        "is_global": false,
+        "project_ids": []
+    });
+
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let (status, json) = post_json(app, "/api/mcps/configs", create_body).await;
+    assert_eq!(status, StatusCode::OK, "create_config failed: {:?}", json);
+    assert_eq!(json["success"], true, "create_config response: {:?}", json);
+
+    let config_id = json["data"]["id"].as_str().expect("config id should exist").to_string();
+    assert_eq!(json["data"]["label"], "TestProject GitHub");
+    assert_eq!(json["data"]["server_id"], "mcp-github");
+
+    // Step 2: Reveal secrets
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let (status, json) = post_json(
+        app,
+        &format!("/api/mcps/configs/{}/reveal", config_id),
+        serde_json::json!({}),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "reveal failed: {:?}", json);
+    assert_eq!(json["success"], true);
+
+    let entries = json["data"].as_array().expect("reveal should return array");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["key"], "GITHUB_PERSONAL_ACCESS_TOKEN");
+    assert_eq!(entries[0]["masked_value"], "ghp_test_alpha_token_123",
+        "Revealed value should match original plaintext");
+}
+
+#[tokio::test]
+async fn mcp_delete_config_removes_from_overview() {
+    let state = test_state();
+
+    // Create a config
+    let create_body = serde_json::json!({
+        "server_id": "mcp-github",
+        "label": "ToDelete Config",
+        "env": {},
+        "args_override": null,
+        "is_global": false,
+        "project_ids": []
+    });
+
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let (status, json) = post_json(app, "/api/mcps/configs", create_body).await;
+    assert_eq!(status, StatusCode::OK);
+    let config_id = json["data"]["id"].as_str().unwrap().to_string();
+
+    // Verify it appears in overview
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let (_, json) = get_json(app, "/api/mcps").await;
+    let configs = json["data"]["configs"].as_array().unwrap();
+    assert!(configs.iter().any(|c| c["id"] == config_id), "Config should appear in overview before delete");
+
+    // Delete
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let (status, json) = delete_json(app, &format!("/api/mcps/configs/{}", config_id)).await;
+    assert_eq!(status, StatusCode::OK, "delete failed: {:?}", json);
+    assert_eq!(json["success"], true);
+
+    // Verify gone from overview
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let (_, json) = get_json(app, "/api/mcps").await;
+    let configs = json["data"]["configs"].as_array().unwrap();
+    assert!(!configs.iter().any(|c| c["id"] == config_id), "Config should be gone from overview after delete");
+}
+
+#[tokio::test]
+async fn mcp_update_config_changes_env() {
+    let state = test_state();
+
+    // Create config with initial env
+    let create_body = serde_json::json!({
+        "server_id": "mcp-github",
+        "label": "UpdateTest Config",
+        "env": {
+            "GITHUB_PERSONAL_ACCESS_TOKEN": "old-token-alpha"
+        },
+        "args_override": null,
+        "is_global": false,
+        "project_ids": []
+    });
+
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let (status, json) = post_json(app, "/api/mcps/configs", create_body).await;
+    assert_eq!(status, StatusCode::OK);
+    let config_id = json["data"]["id"].as_str().unwrap().to_string();
+
+    // Update env
+    let update_body = serde_json::json!({
+        "env": {
+            "GITHUB_PERSONAL_ACCESS_TOKEN": "new-token-beta"
+        }
+    });
+
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let (status, json) = patch_json(app, &format!("/api/mcps/configs/{}", config_id), update_body).await;
+    assert_eq!(status, StatusCode::OK, "update failed: {:?}", json);
+    assert_eq!(json["success"], true);
+
+    // Reveal to verify new values
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let (status, json) = post_json(
+        app,
+        &format!("/api/mcps/configs/{}/reveal", config_id),
+        serde_json::json!({}),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+
+    let entries = json["data"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["key"], "GITHUB_PERSONAL_ACCESS_TOKEN");
+    assert_eq!(entries[0]["masked_value"], "new-token-beta",
+        "Revealed value should reflect the updated env");
 }

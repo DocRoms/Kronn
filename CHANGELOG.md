@@ -7,6 +7,30 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.3.2] — 2026-04-03
+
+### Added
+- **MCP default contexts** — new `default_context` field on `McpDefinition`. Registry MCPs can ship pre-filled context files (best practices, token-saving tips) written automatically to `ai/operations/mcp-servers/<slug>.md` on first install. Fastly is the first MCP with a default context (result pagination, JSON format, common commands)
+- **MCP setup help i18n** — MCP setup instructions (`token_help`) can now be overridden per-locale via `mcp.help.<id>` i18n keys. Fastly and GitLab have dedicated help texts in fr/en/es
+- **Claude Code settings sync** — `sync_claude_enabled_servers()` ensures Claude Code's `settings.local.json` whitelist (`enabledMcpjsonServers`) stays in sync with `.mcp.json`. MCPs added via Kronn are automatically added to the whitelist. Fixes a silent bug where Claude Code ignored MCPs not in its internal whitelist (bug #24657)
+- **MCP publisher & origin badges** — new `publisher` (string) and `official` (bool) fields on `McpDefinition`. Registry cards and detail panels show "Officiel — Fastly" (green) or "Communautaire — Anthropic" (orange). All 49 registry entries classified
+- **MCP load indicator** — per-project MCP count badge in scope toggles (green 1–5, orange 6–10, red 11+). Helps avoid agent slowdown from too many MCPs
+- **MCP alt_packages matching** — new `alt_packages` field on `McpDefinition` allows the registry to recognize alternative package names for the same MCP server (e.g. npm `fastly-mcp-server` → registry `fastly-mcp`). Prevents duplicate `detected:*` entries when users have a different runtime than the registry default
+
+### Changed
+- **Fastly MCP → official Go server** — replaced the community npm package (`fastly-mcp-server`, required Bun) with the official Fastly MCP binary (`fastly-mcp`). Auth via Fastly CLI profiles (`fastly profile create`), no env var needed
+- **GitLab MCP → official glab CLI** — replaced the archived Anthropic npm package (`@modelcontextprotocol/server-gitlab`, SDK 1.0.1 incompatible with modern Claude Code) with GitLab's official CLI (`glab mcp serve`). Auth via `GITLAB_TOKEN` + `GITLAB_HOST` env vars (stored encrypted in Kronn), supports self-hosted instances
+- **MCP plugin detail panel** — setup instructions (`token_help`) and token link (`token_url`) are now displayed separately. URLs in help text are clickable. Setup section shown even for MCPs without env vars (e.g. Fastly, GitLab, Docker)
+- **Codex MCP timeout** — npx/uvx-based MCP servers now get 60s startup timeout (was 30s). Fixes cold-start timeouts when packages are downloaded for the first time
+
+### Fixed
+- **GitLab MCP broken with Claude Code** — archived Anthropic package (`@modelcontextprotocol/server-gitlab`) uses SDK 1.0.1 which hangs on `notifications/initialized` sent by modern Claude Code. Replaced with `glab mcp serve` (official GitLab CLI)
+- **Fastly MCP 401** — community npm package required Bun runtime for `execute` tool. Migrated to official Go binary that works standalone
+- **MCP scan duplicate configs** — `match_registry_entry()` and `migrate_detected_to_registry()` now use `alt_packages` for cross-runtime matching (npx vs Go binary). `dedup_configs()` merges configs with same label+server_id (catches post-migration duplicates). Fixes 3x Fastly and 2x GitLab entries after sync
+- **Stale project-level Codex config** — removed orphan `front_euronews/.codex/config.toml` that overrode the Kronn-managed global config with stale names and missing MCPs
+
+---
+
 ## [0.3.1] — 2026-04-01
 
 ### Added

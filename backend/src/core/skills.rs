@@ -63,6 +63,8 @@ fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Skill> 
     let mut description = String::new();
     let mut icon = String::new();
     let mut category = SkillCategory::Domain;
+    let mut license: Option<String> = None;
+    let mut allowed_tools: Option<String> = None;
 
     for line in yaml_str.lines() {
         let line = line.trim();
@@ -79,6 +81,12 @@ fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Skill> 
                 "business" => SkillCategory::Business,
                 _ => SkillCategory::Domain,
             };
+        } else if let Some(val) = line.strip_prefix("license:") {
+            let v = val.trim().to_string();
+            if !v.is_empty() { license = Some(v); }
+        } else if let Some(val) = line.strip_prefix("allowed-tools:") {
+            let v = val.trim().to_string();
+            if !v.is_empty() { allowed_tools = Some(v); }
         }
     }
 
@@ -99,6 +107,8 @@ fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Skill> 
         content: body,
         is_builtin,
         token_estimate,
+        license,
+        allowed_tools,
     })
 }
 
@@ -195,16 +205,19 @@ pub fn build_skills_prompt_compact(skill_ids: &[String]) -> String {
 }
 
 /// Save a custom skill to disk. Returns the generated ID.
-pub fn save_custom_skill(name: &str, description: &str, icon: &str, category: &SkillCategory, content: &str) -> Result<String, String> {
+pub fn save_custom_skill(
+    name: &str, description: &str, icon: &str, category: &SkillCategory, content: &str,
+    license: Option<&str>, allowed_tools: Option<&str>,
+) -> Result<String, String> {
+    // Validate per agentskills.io spec
+    if name.is_empty() { return Err("Skill name is required".into()); }
+    if description.len() > 1024 { return Err("Description must be at most 1024 characters".into()); }
+
     let dir = custom_skills_dir().ok_or("Cannot determine config directory")?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot create skills dir: {}", e))?;
 
-    let slug: String = name.to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect::<String>()
-        .trim_matches('-')
-        .to_string();
+    let slug = super::native_files::slug(name);
+    if slug.is_empty() { return Err("Skill name must contain at least one alphanumeric character".into()); }
 
     let id = format!("custom-{}", slug);
     let cat_str = match category {
@@ -214,9 +227,11 @@ pub fn save_custom_skill(name: &str, description: &str, icon: &str, category: &S
     };
 
     let desc_line = if description.is_empty() { String::new() } else { format!("description: {}\n", description) };
+    let license_line = license.filter(|s| !s.is_empty()).map(|s| format!("license: {}\n", s)).unwrap_or_default();
+    let tools_line = allowed_tools.filter(|s| !s.is_empty()).map(|s| format!("allowed-tools: {}\n", s)).unwrap_or_default();
     let file_content = format!(
-        "---\nname: {}\n{}category: {}\nicon: {}\nbuiltin: false\n---\n{}",
-        name, desc_line, cat_str, icon, content
+        "---\nname: {}\n{}category: {}\nicon: {}\n{}{}builtin: false\n---\n{}",
+        name, desc_line, cat_str, icon, license_line, tools_line, content
     );
 
     let path = dir.join(format!("{}.md", slug));
@@ -252,7 +267,7 @@ mod tests {
         assert!(skills.len() >= 22, "Expected at least 22 builtin skills, got {}", skills.len());
 
         let rust = skills.iter().find(|s| s.id == "rust").unwrap();
-        assert_eq!(rust.name, "Rust");
+        assert_eq!(rust.name, "rust");
         assert_eq!(rust.icon, "🦀");
         assert_eq!(rust.category, SkillCategory::Language);
         assert!(rust.is_builtin);
@@ -301,7 +316,7 @@ mod tests {
     fn get_skill_found() {
         let skill = get_skill("typescript");
         assert!(skill.is_some());
-        assert_eq!(skill.unwrap().name, "TypeScript");
+        assert_eq!(skill.unwrap().name, "typescript");
     }
 
     #[test]
@@ -341,8 +356,8 @@ mod tests {
     #[test]
     fn build_skills_prompt_with_ids() {
         let prompt = build_skills_prompt(&["rust".into(), "typescript".into()]);
-        assert!(prompt.contains("Rust"));
-        assert!(prompt.contains("TypeScript"));
+        assert!(prompt.contains("rust"));
+        assert!(prompt.contains("typescript"));
         assert!(prompt.contains("=== Active Skills ==="));
     }
 
@@ -355,7 +370,7 @@ mod tests {
     #[test]
     fn build_skills_prompt_single_skill() {
         let prompt = build_skills_prompt(&["rust".into()]);
-        assert!(prompt.contains("Rust"));
+        assert!(prompt.contains("rust"));
         assert!(prompt.contains("=== Active Skills ==="));
     }
 
@@ -447,8 +462,8 @@ mod tests {
     fn build_skills_prompt_compact_with_ids() {
         let prompt = build_skills_prompt_compact(&["rust".into(), "typescript".into()]);
         assert!(prompt.contains("=== Skills ==="));
-        assert!(prompt.contains("Rust"));
-        assert!(prompt.contains("TypeScript"));
+        assert!(prompt.contains("rust"));
+        assert!(prompt.contains("typescript"));
     }
 
     #[test]
