@@ -632,6 +632,20 @@ pub enum TrackerSourceConfig {
     },
 }
 
+/// How a step's output is formatted and extracted.
+/// `FreeText` (default): raw text, passed as-is via `{{previous_step.output}}`.
+/// `Structured`: engine injects format instructions and extracts a JSON envelope
+///   (`{"data": ..., "status": "OK|NO_RESULTS|ERROR", "summary": "..."}`).
+///   Downstream steps can use `{{previous_step.data}}` and `{{previous_step.summary}}`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "type")]
+pub enum StepOutputFormat {
+    #[default]
+    FreeText,
+    Structured,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct WorkflowStep {
@@ -643,6 +657,8 @@ pub struct WorkflowStep {
     pub agent: AgentType,
     pub prompt_template: String,
     pub mode: StepMode,
+    #[serde(default)]
+    pub output_format: StepOutputFormat,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_config_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1257,6 +1273,22 @@ pub struct WorkflowRunSummary {
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
     pub tokens_used: u64,
+}
+
+// ─── Workflow suggestions ─────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WorkflowSuggestion {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub reason: String,
+    pub required_mcps: Vec<String>,
+    pub audience: String,
+    pub complexity: String,
+    pub trigger: WorkflowTrigger,
+    pub steps: Vec<WorkflowStep>,
 }
 
 #[allow(dead_code)]

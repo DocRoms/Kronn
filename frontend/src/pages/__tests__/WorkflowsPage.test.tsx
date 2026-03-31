@@ -218,7 +218,7 @@ describe('WorkflowsPage', () => {
 
   // ─── Wizard validation errors on summary page ───────────────────────────
 
-  it('shows validation error for missing prompt on summary step', async () => {
+  it('shows validation error for missing prompt on summary step (simple mode)', async () => {
     await wrap(
       <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />
     );
@@ -227,12 +227,13 @@ describe('WorkflowsPage', () => {
     const newBtn = screen.getByText(/Nouveau workflow/);
     await act(async () => { fireEvent.click(newBtn); });
 
-    // Fill workflow name on step 0 (required to navigate past step 0)
+    // Wizard starts in simple mode (3 steps: infos → task → summary)
+    // Fill workflow name on step 0
     const nameInput = screen.getByPlaceholderText('ex: Auto-fix 5xx errors');
     await act(async () => { fireEvent.change(nameInput, { target: { value: 'Test WF' } }); });
 
-    // Navigate to summary step (step 4): click "Suivant" 4 times (0→1→2→3→4)
-    for (let i = 0; i < 4; i++) {
+    // Navigate to summary step: click "Suivant" 2 times (0→1→2)
+    for (let i = 0; i < 2; i++) {
       const nextBtns = screen.getAllByText(/Suivant/);
       await act(async () => { fireEvent.click(nextBtns[nextBtns.length - 1]); });
     }
@@ -258,7 +259,7 @@ describe('WorkflowsPage', () => {
     expect(nextBtn.closest('button')!.disabled).toBe(true);
   });
 
-  it('creates a workflow through the wizard', async () => {
+  it('creates a workflow through the wizard in advanced mode', async () => {
     await wrap(
       <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />
     );
@@ -266,6 +267,10 @@ describe('WorkflowsPage', () => {
     // Click "Nouveau workflow" to open wizard
     const newBtn = screen.getByText(/Nouveau workflow/);
     await act(async () => { fireEvent.click(newBtn); });
+
+    // Switch to advanced mode (wizard starts in simple mode)
+    const advBtn = screen.getByText(/Avancé/);
+    await act(async () => { fireEvent.click(advBtn); });
 
     // Step 0: fill the workflow name
     const nameInput = screen.getByPlaceholderText('ex: Auto-fix 5xx errors');
@@ -303,5 +308,50 @@ describe('WorkflowsPage', () => {
 
     // Summary step should show the workflow name we entered
     expect(document.body.textContent).toContain('My CI Workflow');
+  });
+
+  it('creates a workflow in simple mode (3 steps)', async () => {
+    await wrap(
+      <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />
+    );
+
+    // Click "Nouveau workflow" to open wizard
+    const newBtn = screen.getByText(/Nouveau workflow/);
+    await act(async () => { fireEvent.click(newBtn); });
+
+    // Wizard starts in simple mode — should show "Simple" and "Avancé" toggles
+    expect(screen.getByText(/Simple/)).toBeDefined();
+    expect(screen.getByText(/Avancé/)).toBeDefined();
+
+    // Step 0: fill the workflow name
+    const nameInput = screen.getByPlaceholderText('ex: Auto-fix 5xx errors');
+    await act(async () => { fireEvent.change(nameInput, { target: { value: 'Quick Task' } }); });
+
+    // Navigate to step 1 (task)
+    let nextBtns = screen.getAllByText(/Suivant/);
+    await act(async () => { fireEvent.click(nextBtns[nextBtns.length - 1]); });
+
+    // Step 1 (simple task): should show agent selector, prompt, and trigger toggle
+    expect(document.body.textContent).toContain('Agent');
+    expect(document.body.textContent).toContain('Manuel');
+    expect(document.body.textContent).toContain('Programmer');
+
+    // Fill the prompt
+    const promptInput = screen.getByPlaceholderText(/Décrivez la tâche/);
+    await act(async () => { fireEvent.change(promptInput, { target: { value: 'Analyse ce projet' } }); });
+
+    // Switch to scheduled trigger
+    const scheduleBtn = screen.getByText(/Programmer/);
+    await act(async () => { fireEvent.click(scheduleBtn); });
+
+    // Should show frequency picker (the "Tous les" label)
+    expect(document.body.textContent).toContain('Tous les');
+
+    // Navigate to step 2 (summary)
+    nextBtns = screen.getAllByText(/Suivant/);
+    await act(async () => { fireEvent.click(nextBtns[nextBtns.length - 1]); });
+
+    // Summary should show the workflow name and cron info
+    expect(document.body.textContent).toContain('Quick Task');
   });
 });

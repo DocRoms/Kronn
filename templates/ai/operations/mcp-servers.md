@@ -4,10 +4,19 @@
 
 ## Available servers
 
-| Server | Package | Purpose | Credentials |
-|--------|---------|---------|-------------|
-| {{SERVER_1}} | {{PACKAGE}} | {{PURPOSE}} | {{CREDENTIALS}} |
-| {{SERVER_2}} | {{PACKAGE}} | {{PURPOSE}} | {{CREDENTIALS}} |
+| Server | Package | Purpose | Key capabilities | Credentials |
+|--------|---------|---------|-----------------|-------------|
+| {{SERVER_1}} | {{PACKAGE}} | {{PURPOSE}} | {{CAPABILITIES}} | {{CREDENTIALS}} |
+| {{SERVER_2}} | {{PACKAGE}} | {{PURPOSE}} | {{CAPABILITIES}} | {{CREDENTIALS}} |
+
+## Workflow automation hints
+
+> Combinations of MCP servers that enable useful automated workflows.
+> Used by Kronn to suggest workflow templates for this project.
+
+| MCP combination | Possible workflow | Target audience |
+|-----------------|-------------------|-----------------|
+| {{MCP_A}} + {{MCP_B}} | {{WORKFLOW_DESCRIPTION}} | {{DEV/PM/OPS}} |
 
 ## Per-MCP context files
 

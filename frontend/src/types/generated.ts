@@ -339,6 +339,10 @@ export type WorkflowTrigger =
 export type TrackerSourceConfig =
   | { type: "GitHub"; owner: string; repo: string };
 
+export type StepOutputFormat =
+  | { type: "FreeText" }
+  | { type: "Structured" };
+
 export interface WorkflowStep {
   name: string;
   step_type?: StepType;
@@ -346,6 +350,7 @@ export interface WorkflowStep {
   agent: AgentType;
   prompt_template: string;
   mode: StepMode;
+  output_format?: StepOutputFormat;
   mcp_config_ids?: string[];
   agent_settings?: AgentSettings | null;
   on_result?: StepConditionRule[];
@@ -451,6 +456,18 @@ export interface WorkflowRunSummary {
   started_at: string;
   finished_at: string | null;
   tokens_used: number;
+}
+
+export interface WorkflowSuggestion {
+  id: string;
+  title: string;
+  description: string;
+  reason: string;
+  required_mcps: string[];
+  audience: string;
+  complexity: string;
+  trigger: WorkflowTrigger;
+  steps: WorkflowStep[];
 }
 
 export interface CreateWorkflowRequest {

@@ -169,7 +169,7 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
               <div className="setup-agent-list">
                 {agents.map((agent) => (
                   <div key={agent.name} className="setup-agent-row">
-                    <div className={`dot ${agent.installed || agent.runtime_available ? 'dot-on' : 'dot-off'}`} />
+                    <div className={`dot ${agent.installed ? 'dot-on' : agent.runtime_available ? 'dot-warn' : 'dot-off'}`} />
                     <div className="flex-1">
                       <div className="flex-row gap-4">
                         <span className="setup-agent-name">{agent.name}</span>
@@ -206,8 +206,11 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
                         )}
                       </button>
                     )}
-                    {(agent.installed || agent.runtime_available) && (
+                    {agent.installed && (
                       <span className="setup-badge-ok"><Check size={12} /> OK</span>
+                    )}
+                    {!agent.installed && agent.runtime_available && (
+                      <span className="setup-badge-ok" style={{ background: 'rgba(255,165,0,0.15)', color: '#ffa500', borderColor: 'rgba(255,165,0,0.3)' }}>npx</span>
                     )}
                   </div>
                 ))}

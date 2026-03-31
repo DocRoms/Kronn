@@ -677,11 +677,6 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
     ]
 }
 
-/// Packages whose upstream switched runtime (e.g. to bun) and MUST stay pinned to a Node-compatible version.
-const PINNED_PACKAGES: &[(&str, &str)] = &[
-    ("fastly-mcp-server", "1.0.4"),
-];
-
 /// Search the registry by name or tag
 pub fn search(query: &str) -> Vec<McpDefinition> {
     let q = query.to_lowercase();
@@ -699,6 +694,11 @@ pub fn search(query: &str) -> Vec<McpDefinition> {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    /// Packages whose upstream switched runtime (e.g. to bun) and MUST stay pinned to a Node-compatible version.
+    const PINNED_PACKAGES: &[(&str, &str)] = &[
+        ("fastly-mcp-server", "1.0.4"),
+    ];
 
     #[test]
     fn registry_ids_are_unique() {

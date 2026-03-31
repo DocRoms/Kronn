@@ -1,11 +1,11 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { mcps as mcpsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { isHiddenPath } from '../lib/constants';
 import type { Project, McpConfigDisplay, McpDefinition, McpOverview } from '../types/generated';
 import {
-  Server, Plus, Trash2, Eye, Check, RefreshCw, Square, CheckSquare,
-  X, Key, Pencil, FileText, ExternalLink, Save, Search, ChevronRight,
+  Puzzle, Plus, Trash2, Eye, Check, RefreshCw, Square, CheckSquare,
+  X, Key, Pencil, FileText, ExternalLink, Save, Search,
 } from 'lucide-react';
 import './McpPage.css';
 
@@ -16,10 +16,12 @@ interface McpPageProps {
   mcpOverview: McpOverview;
   mcpRegistry: McpDefinition[];
   refetchMcps: () => void;
+  initialSelectedConfigId?: string | null;
 }
 
-export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: McpPageProps) {
+export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initialSelectedConfigId }: McpPageProps) {
   const { t } = useT();
+  const detailRef = useRef<HTMLDivElement>(null);
   const [editingLabelId, setEditingLabelId] = useState<string | null>(null);
   const [editingLabelText, setEditingLabelText] = useState('');
   const [showAddMcp, setShowAddMcp] = useState(false);
@@ -37,9 +39,23 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
   // MCP context editor
   const [contextEditor, setContextEditor] = useState<{ projectId: string; projectName: string; slug: string; content: string } | null>(null);
   const [contextSaving, setContextSaving] = useState(false);
-  // Search & collapse
+  // Search & detail panel
   const [mcpSearch, setMcpSearch] = useState('');
-  const [expandedServers, setExpandedServers] = useState<Set<string>>(new Set());
+  const [selectedConfigId, setSelectedConfigId] = useState<string | null>(initialSelectedConfigId ?? null);
+
+  // Open a specific config when navigated from another page (e.g. ProjectCard)
+  useEffect(() => {
+    if (initialSelectedConfigId) {
+      setSelectedConfigId(initialSelectedConfigId);
+    }
+  }, [initialSelectedConfigId]);
+
+  // Scroll to detail panel when a config is selected
+  useEffect(() => {
+    if (selectedConfigId && detailRef.current) {
+      detailRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [selectedConfigId]);
   // "Show more" for project toggles per config
   const [expandedProjectLists, setExpandedProjectLists] = useState<Set<string>>(new Set());
   const PROJECT_TOGGLE_LIMIT = 10;
@@ -78,22 +94,6 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
     } catch (e) {
       console.warn('Failed to add MCP config:', e);
     }
-  };
-
-  const handleAddDuplicateConfig = (serverId: string, serverName: string) => {
-    const def = mcpRegistry.find(m => m.id === serverId);
-    const existingConfigs = mcpOverview.configs.filter(c => c.server_id === serverId);
-    const existingCount = existingConfigs.length;
-    const envInit: Record<string, string> = {};
-    const keys = def?.env_keys ?? existingConfigs[0]?.env_keys ?? [];
-    keys.forEach(k => { envInit[k] = ''; });
-    setAddMcpSelected(serverId);
-    setAddMcpLabel(`${serverName} (${existingCount + 1})`);
-    setAddMcpEnv(envInit);
-    setAddMcpGlobal(false);
-    setShowAddMcp(true);
-    setAddMcpSearch('');
-    setTimeout(() => addMcpRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
   };
 
   const handleDeleteMcpConfig = async (configId: string) => {
@@ -229,21 +229,13 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
       }
     }
   }
-  const toggleServer = (name: string) => {
-    setExpandedServers(prev => {
-      const next = new Set(prev);
-      if (next.has(name)) next.delete(name); else next.add(name);
-      return next;
-    });
-  };
-
   // ── Render ──
 
   return (
     <div>
       <div className="mcp-page-header">
         <div>
-          <h1 className="mcp-h1">{t('mcp.title')}</h1>
+          <h1 className="mcp-h1">{t('mcp.title')} <span className="mcp-subtitle">{t('mcp.subtitle')}</span></h1>
           <p className="mcp-meta">
             {totalConfigs} {totalConfigs > 1 ? t('mcp.configPlural') : t('mcp.config')} · {servers.length} {servers.length > 1 ? t('mcp.serverPlural') : t('mcp.server')} · {globalConfigs.length} {globalConfigs.length > 1 ? t('mcp.globalPlural') : t('mcp.global')}
           </p>
@@ -279,63 +271,94 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
                 onChange={(e) => setAddMcpSearch(e.target.value)}
                 autoFocus
               />
-              <div className="mcp-registry-list">
-                {(() => {
-                  const categoryMap: Record<string, string> = {
-                    git: t('mcp.cat.gitCode'), code: t('mcp.cat.gitCode'),
-                    database: t('mcp.cat.databases'), sql: t('mcp.cat.databases'), cache: t('mcp.cat.databases'), embedded: t('mcp.cat.databases'),
-                    cloud: t('mcp.cat.cloud'), containers: t('mcp.cat.cloud'), devops: t('mcp.cat.cloud'),
-                    search: t('mcp.cat.search'), web: t('mcp.cat.search'), http: t('mcp.cat.search'), browser: t('mcp.cat.search'), scraping: t('mcp.cat.search'),
-                    monitoring: t('mcp.cat.monitoring'), analytics: t('mcp.cat.monitoring'), errors: t('mcp.cat.monitoring'),
-                    communication: t('mcp.cat.communication'), chat: t('mcp.cat.communication'), email: t('mcp.cat.communication'), mailing: t('mcp.cat.communication'),
-                    'project-management': t('mcp.cat.projectMgmt'), issues: t('mcp.cat.projectMgmt'),
-                    core: t('mcp.cat.utilities'), filesystem: t('mcp.cat.utilities'), docs: t('mcp.cat.utilities'), libraries: t('mcp.cat.utilities'),
-                  };
-                  const getCategory = (tags: string[]) => {
-                    for (const tag of tags) { if (categoryMap[tag]) return categoryMap[tag]; }
-                    return t('mcp.cat.other');
-                  };
-                  const categoryOrder = [t('mcp.cat.gitCode'), t('mcp.cat.databases'), t('mcp.cat.cloud'), t('mcp.cat.search'), t('mcp.cat.monitoring'), t('mcp.cat.communication'), t('mcp.cat.projectMgmt'), t('mcp.cat.utilities'), t('mcp.cat.other')];
-                  const grouped = new Map<string, typeof availableRegistry>();
-                  for (const m of availableRegistry) {
-                    const cat = getCategory(m.tags);
-                    if (!grouped.has(cat)) grouped.set(cat, []);
-                    grouped.get(cat)!.push(m);
-                  }
-                  return categoryOrder.filter(cat => grouped.has(cat)).map(cat => (
-                    <div key={cat}>
-                      <div className="mcp-category-header">{cat}</div>
-                      {grouped.get(cat)!.map(m => {
-                        const alreadyAdded = configuredServerIds.has(m.id);
-                        return (
-                          <div
-                            key={m.id}
-                            className="mcp-registry-item"
-                            onClick={() => {
-                              setAddMcpSelected(m.id);
-                              setAddMcpLabel(alreadyAdded ? `${m.name} (${configs.filter(c => c.server_name === m.name).length + 1})` : m.name);
-                              const envInit: Record<string, string> = {};
-                              m.env_keys.forEach(k => { envInit[k] = ''; });
-                              setAddMcpEnv(envInit);
-                            }}
-                          >
-                            <Server size={12} className={alreadyAdded ? 'text-info' : 'text-accent'} style={{ flexShrink: 0 }} />
-                            <div className="flex-1">
-                              <div className="flex-row gap-3">
-                                <span className="mcp-registry-item-name">{m.name}</span>
-                                {alreadyAdded && <span className="mcp-already-badge">{t('mcp.alreadyAdded')}</span>}
-                                {m.env_keys.length > 0 && <span className="mcp-registry-item-keys">{m.env_keys.length} {m.env_keys.length > 1 ? t('mcp.keysPlural') : t('mcp.keys')}</span>}
-                              </div>
-                              <div className="mcp-registry-item-desc">{m.description}</div>
-                            </div>
-                            <Plus size={14} className="text-ghost" />
-                          </div>
-                        );
-                      })}
+              {/* Category filter pills */}
+              {(() => {
+                const categoryMap: Record<string, string> = {
+                  git: t('mcp.cat.gitCode'), code: t('mcp.cat.gitCode'),
+                  database: t('mcp.cat.databases'), sql: t('mcp.cat.databases'), cache: t('mcp.cat.databases'), embedded: t('mcp.cat.databases'),
+                  cloud: t('mcp.cat.cloud'), containers: t('mcp.cat.cloud'), devops: t('mcp.cat.cloud'),
+                  search: t('mcp.cat.search'), web: t('mcp.cat.search'), http: t('mcp.cat.search'), browser: t('mcp.cat.search'), scraping: t('mcp.cat.search'),
+                  monitoring: t('mcp.cat.monitoring'), analytics: t('mcp.cat.monitoring'), errors: t('mcp.cat.monitoring'),
+                  communication: t('mcp.cat.communication'), chat: t('mcp.cat.communication'), email: t('mcp.cat.communication'), mailing: t('mcp.cat.communication'),
+                  'project-management': t('mcp.cat.projectMgmt'), issues: t('mcp.cat.projectMgmt'),
+                  core: t('mcp.cat.utilities'), filesystem: t('mcp.cat.utilities'), docs: t('mcp.cat.utilities'), libraries: t('mcp.cat.utilities'),
+                  design: t('mcp.cat.design'),
+                };
+                const getCategory = (tags: string[]) => {
+                  for (const tag of tags) { if (categoryMap[tag]) return categoryMap[tag]; }
+                  return t('mcp.cat.other');
+                };
+                const categoryOrder = [t('mcp.cat.gitCode'), t('mcp.cat.databases'), t('mcp.cat.cloud'), t('mcp.cat.search'), t('mcp.cat.monitoring'), t('mcp.cat.communication'), t('mcp.cat.projectMgmt'), t('mcp.cat.design'), t('mcp.cat.utilities'), t('mcp.cat.other')];
+                const grouped = new Map<string, typeof availableRegistry>();
+                for (const m of availableRegistry) {
+                  const cat = getCategory(m.tags);
+                  if (!grouped.has(cat)) grouped.set(cat, []);
+                  grouped.get(cat)!.push(m);
+                }
+                const catsWithItems = categoryOrder.filter(cat => grouped.has(cat));
+                return (
+                  <>
+                    <div className="mcp-cat-pills">
+                      <button
+                        className={`mcp-cat-pill${!addMcpSearch ? ' mcp-cat-pill-active' : ''}`}
+                        onClick={() => setAddMcpSearch('')}
+                      >
+                        {t('mcp.cat.all')}
+                      </button>
+                      {catsWithItems.map(cat => (
+                        <button
+                          key={cat}
+                          className={`mcp-cat-pill${addMcpSearch === cat ? ' mcp-cat-pill-active' : ''}`}
+                          onClick={() => setAddMcpSearch(addMcpSearch === cat ? '' : cat)}
+                        >
+                          {cat} <span className="mcp-cat-pill-count">{grouped.get(cat)!.length}</span>
+                        </button>
+                      ))}
                     </div>
-                  ));
-                })()}
-              </div>
+                    <div className="mcp-registry-grid">
+                      {catsWithItems.flatMap(cat =>
+                        grouped.get(cat)!
+                          .filter(() => !addMcpSearch || addMcpSearch === cat || availableRegistry.includes(grouped.get(cat)![0]))
+                          .map(m => {
+                            const alreadyAdded = configuredServerIds.has(m.id);
+                            // Only show if search matches or category pill matches
+                            if (addMcpSearch && addMcpSearch !== cat && !m.name.toLowerCase().includes(addMcpSearch.toLowerCase()) && !m.tags.some(tag => tag.includes(addMcpSearch.toLowerCase()))) return null;
+                            return (
+                              <div
+                                key={m.id}
+                                className={`mcp-registry-card${alreadyAdded ? ' mcp-registry-card-installed' : ''}`}
+                                onClick={() => {
+                                  setAddMcpSelected(m.id);
+                                  setAddMcpLabel(alreadyAdded ? `${m.name} (${configs.filter(c => c.server_name === m.name).length + 1})` : m.name);
+                                  const envInit: Record<string, string> = {};
+                                  m.env_keys.forEach(k => { envInit[k] = ''; });
+                                  setAddMcpEnv(envInit);
+                                }}
+                              >
+                                <div className="mcp-registry-card-top">
+                                  <div className="mcp-registry-card-icon">
+                                    <Puzzle size={16} />
+                                  </div>
+                                  <div className="flex-1">
+                                    <div className="mcp-registry-card-name">{m.name}</div>
+                                    <div className="mcp-registry-card-cat">{getCategory(m.tags)}</div>
+                                  </div>
+                                  {alreadyAdded && <Check size={14} className="text-info" />}
+                                </div>
+                                <div className="mcp-registry-card-desc">{m.description}</div>
+                                {m.env_keys.length > 0 && (
+                                  <div className="mcp-registry-card-meta">
+                                    <Key size={9} /> {t('mcp.setupRequired')}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })
+                      )}
+                    </div>
+                  </>
+                );
+              })()}
             </>
           ) : (
             <>
@@ -431,260 +454,137 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps }: Mcp
         </div>
       )}
 
-      {/* ── Configured MCPs ── */}
+      {/* ── Installed plugins grid (detail expands inline) ── */}
       {totalConfigs > 0 ? (
-        <>
-          {[...filteredConfigsByServer.entries()].map(([serverName, group]) => {
-            const isExpanded = expandedServers.has(serverName) || !!mcpSearch;
-            const linkedCount = group.configs.reduce((sum, c) => sum + (c.is_global ? projects.length : c.project_ids.length), 0);
-            return (
-            <div key={serverName} className="mcp-server-group">
-              <button
-                className="mcp-server-header"
-                onClick={() => toggleServer(serverName)}
-                aria-expanded={isExpanded}
-                style={isExpanded ? { marginBottom: 8 } : undefined}
-              >
-                <ChevronRight size={13} className={`mcp-server-chevron${isExpanded ? ' mcp-server-chevron-open' : ''}`} />
-                <Server size={13} className="text-accent" />
-                <h2 className="mcp-server-label">
-                  {serverName}
-                </h2>
-                <span className="mcp-server-meta">
-                  {group.configs.length} {group.configs.length > 1 ? t('mcp.configPlural') : t('mcp.config')}
-                  {!isExpanded && linkedCount > 0 && ` · ${linkedCount} ${linkedCount > 1 ? t('mcp.projectPlural') : t('mcp.project')}`}
-                </span>
-                {(() => {
-                  const serverIncomp = mcpOverview.incompatibilities.filter(i => i.server_id === group.serverId);
-                  return serverIncomp.length > 0 ? (
-                    <span
-                      title={serverIncomp.map(i => `⚠ ${i.agent}: ${i.reason}`).join('\n')}
-                      className="mcp-server-incompat"
-                    >
-                      ⚠ {serverIncomp.map(i => i.agent).join(', ')}
-                    </span>
-                  ) : null;
-                })()}
-                {group.configs.some(c => c.env_keys.length > 0) && (
-                  <button
-                    className="mcp-icon-btn"
-                    style={{ marginLeft: 4, color: 'rgba(255,255,255,0.3)' }}
-                    onClick={(e) => { e.stopPropagation(); handleAddDuplicateConfig(group.serverId, serverName); }}
-                    title={t('mcp.addAnother', serverName)}
-                    aria-label={t('mcp.addAnother', serverName)}
-                  >
-                    <Plus size={12} />
-                  </button>
-                )}
-              </button>
+        <div className="mcp-installed-grid">
+          {configs
+            .filter(cfg => {
+              if (!mcpSearch) return true;
+              const s = mcpSearch.toLowerCase();
+              return cfg.label.toLowerCase().includes(s) || cfg.server_name.toLowerCase().includes(s) || cfg.project_names.some(n => n.toLowerCase().includes(s));
+            })
+            .flatMap(cfg => {
+              const linkedProjects = cfg.is_global ? projects.filter(p => !isHiddenPath(p.path)).length : cfg.project_ids.length;
+              const isSelected = selectedConfigId === cfg.id;
 
-              {isExpanded && group.configs.map(cfg => {
-                const isEditingLabel = editingLabelId === cfg.id;
-                return (
-                  <div key={cfg.id} className="mcp-config-card">
-                    <div className="flex-start gap-5 flex-1">
-                      <div className={`mcp-config-dot ${cfg.is_global ? 'mcp-config-dot-global' : 'mcp-config-dot-project'}`} />
-                      <div className="flex-1">
-                        {/* Header: label (editable) + badges */}
-                        <div className="mcp-config-header">
-                          {isEditingLabel ? (
-                            <input
-                              className="input mcp-config-label-input"
-                              value={editingLabelText}
-                              onChange={(e) => setEditingLabelText(e.target.value)}
-                              onBlur={() => handleSaveLabel(cfg.id)}
-                              onKeyDown={(e) => { if (e.key === 'Enter') handleSaveLabel(cfg.id); if (e.key === 'Escape') setEditingLabelId(null); }}
-                              autoFocus
-                            />
-                          ) : (
-                            <span
-                              className="mcp-config-label"
-                              onClick={() => { setEditingLabelId(cfg.id); setEditingLabelText(cfg.label); }}
-                              title={t('mcp.clickToRename')}
-                            >
-                              {cfg.label}
-                              <Pencil size={9} className="text-ghost" style={{ marginLeft: 4 }} />
-                            </span>
-                          )}
-                          {cfg.project_names.length > 0 && (
-                            <span className="mcp-source-badge" title={cfg.project_names.join(', ')}>
-                              {cfg.project_names.length <= 3
-                                ? cfg.project_names.join(', ')
-                                : `${cfg.project_names.slice(0, 3).join(', ')} +${cfg.project_names.length - 3}`}
-                            </span>
-                          )}
-                        </div>
-
-                        {/* Env keys */}
-                        {cfg.env_keys.length > 0 && (
-                          <>
-                            <div className="mcp-env-keys-row">
-                              <Key size={10} className="text-dim" />
-                              {editingEnvId !== cfg.id && cfg.env_keys.map(k => (
-                                <span key={k} className="mcp-env-key-name">{k}</span>
-                              ))}
-                              <button
-                                className="mcp-icon-btn"
-                                style={{ marginLeft: 4 }}
-                                onClick={() => handleStartEditSecrets(cfg.id)}
-                                title={editingEnvId === cfg.id ? t('mcp.close') : t('mcp.editKeys')}
-                                aria-label={editingEnvId === cfg.id ? t('mcp.close') : t('mcp.editKeys')}
-                              >
-                                <Pencil size={11} style={{ color: editingEnvId === cfg.id ? 'var(--kr-accent)' : 'rgba(255,255,255,0.3)' }} />
-                              </button>
-                            </div>
-                            {/* Inline edit secrets form */}
-                            {editingEnvId === cfg.id && (() => {
-                              const def = mcpRegistry.find(m => m.id === cfg.server_id);
-                              return (
-                                <div className="mcp-secrets-editor">
-                                  {def?.token_url && (
-                                    <a
-                                      href={def.token_url}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      className="mcp-secrets-token-link"
-                                    >
-                                      <ExternalLink size={10} />
-                                      {def.token_help ?? t('mcp.getToken')}
-                                    </a>
-                                  )}
-                                  {!def?.token_url && def?.token_help && (
-                                    <p className="mcp-secrets-hint">{def.token_help}</p>
-                                  )}
-                                  {cfg.env_keys.map(k => (
-                                    <div key={k} className="flex-row gap-4 mb-2">
-                                      <span className="mcp-env-key-label">{k}</span>
-                                      <input
-                                        className="input mcp-input-mono"
-                                        value={editingEnv[k] ?? ''}
-                                        onChange={e => setEditingEnv(prev => ({ ...prev, [k]: e.target.value }))}
-                                        type={visibleFields.has(k) ? 'text' : 'password'}
-                                        placeholder={t('mcp.value')}
-                                      />
-                                      <button
-                                        className="mcp-icon-btn flex-shrink-0"
-                                        style={{ padding: '4px 6px' }}
-                                        onClick={() => toggleFieldVisibility(k)}
-                                        title={visibleFields.has(k) ? t('mcp.hide') : t('mcp.show')}
-                                        aria-label={visibleFields.has(k) ? t('mcp.hide') : t('mcp.show')}
-                                      >
-                                        <Eye size={11} style={{ color: visibleFields.has(k) ? 'var(--kr-accent)' : 'rgba(255,255,255,0.25)' }} />
-                                      </button>
-                                    </div>
-                                  ))}
-                                  <div className="flex-row gap-3 mt-4">
-                                    <button
-                                      className="mcp-btn-action mcp-btn-action-primary"
-                                      onClick={handleSaveSecrets}
-                                      disabled={editingEnvLoading}
-                                    >
-                                      <Save size={12} /> {editingEnvLoading ? t('mcp.saving') : t('mcp.save')}
-                                    </button>
-                                    <button className="mcp-btn-action" onClick={() => setEditingEnvId(null)}>{t('mcp.cancel')}</button>
-                                  </div>
-                                </div>
-                              );
-                            })()}
-                          </>
-                        )}
-
-                        {/* Global label + project toggles */}
-                        <div className="mcp-toggle-row">
-                          <span
-                            className={`mcp-toggle-label mcp-toggle-global${cfg.is_global ? ' mcp-toggle-global-active' : ''}`}
-                            onClick={() => handleToggleConfigGlobal(cfg)}
-                            title={cfg.is_global ? t('mcp.disableGlobal') : t('mcp.enableGlobal')}
-                          >
-                            Global
-                          </span>
-                          <span
-                            className={`mcp-toggle-label mcp-toggle-general${cfg.include_general ? ' mcp-toggle-general-active' : ''}`}
-                            onClick={async () => { try { await mcpsApi.updateConfig(cfg.id, { include_general: !cfg.include_general }); refetchMcps(); } catch (e) { console.warn('Failed to toggle general:', e); } }}
-                            title={cfg.include_general ? t('mcp.disableGeneral') : t('mcp.enableGeneral')}
-                          >
-                            {t('mcp.general')}
-                          </span>
-                          <span className="mcp-separator">|</span>
-                          {(() => {
-                            const sorted = projects.filter(p => !isHiddenPath(p.path)).sort((a, b) => {
-                              const aLinked = (cfg.is_global || cfg.project_ids.includes(a.id)) ? 0 : 1;
-                              const bLinked = (cfg.is_global || cfg.project_ids.includes(b.id)) ? 0 : 1;
-                              return aLinked - bLinked || a.name.localeCompare(b.name);
-                            });
-                            const showAll = expandedProjectLists.has(cfg.id);
-                            const visible = showAll ? sorted : sorted.slice(0, PROJECT_TOGGLE_LIMIT);
-                            const hiddenCount = sorted.length - visible.length;
-                            return (<>
-                              {visible.map(proj => {
-                                const isLinked = cfg.is_global || cfg.project_ids.includes(proj.id);
-                                return (
-                                  <span key={proj.id} className="flex-row">
-                                    <button
-                                      className={`mcp-project-toggle ${isLinked ? 'mcp-project-toggle-on' : 'mcp-project-toggle-off'}`}
-                                      onClick={() => handleToggleConfigProject(cfg.id, proj.id, isLinked)}
-                                    >
-                                      {isLinked ? <CheckSquare size={11} className="text-accent" /> : <Square size={11} />}
-                                      {proj.name}
-                                    </button>
-                                    {isLinked && (() => {
-                                      const slug = slugify(cfg.label);
-                                      const isCustomized = mcpOverview.customized_contexts.includes(`${slug}:${proj.id}`);
-                                      return (
-                                        <button
-                                          className="mcp-icon-btn mcp-context-btn"
-                                          onClick={() => handleOpenContext(proj.id, proj.name, cfg.label)}
-                                          title={`${t('mcp.editContext', cfg.label, proj.name)}${isCustomized ? ' ' + t('mcp.customized') : ' ' + t('mcp.default')}`}
-                                          aria-label={`${t('mcp.editContext', cfg.label, proj.name)}`}
-                                        >
-                                          <FileText size={10} style={{ color: isCustomized ? 'var(--kr-accent)' : 'rgba(255,255,255,0.2)' }} />
-                                        </button>
-                                      );
-                                    })()}
-                                  </span>
-                                );
-                              })}
-                              {hiddenCount > 0 && (
-                                <button
-                                  className="mcp-more-projects-btn"
-                                  onClick={() => setExpandedProjectLists(prev => { const n = new Set(prev); n.add(cfg.id); return n; })}
-                                >
-                                  {t('mcp.moreProjects', hiddenCount)}
-                                </button>
-                              )}
-                              {showAll && sorted.length > PROJECT_TOGGLE_LIMIT && (
-                                <button
-                                  className="mcp-less-projects-btn"
-                                  onClick={() => setExpandedProjectLists(prev => { const n = new Set(prev); n.delete(cfg.id); return n; })}
-                                >
-                                  {t('mcp.lessProjects')}
-                                </button>
-                              )}
-                            </>);
-                          })()}
-                        </div>
+              const card = (
+                <div
+                  key={cfg.id}
+                  className={`mcp-installed-card${isSelected ? ' mcp-installed-card-selected' : ''}`}
+                  onClick={() => setSelectedConfigId(isSelected ? null : cfg.id)}
+                >
+                  <div className="mcp-installed-top">
+                    <div className="mcp-registry-card-icon"><Puzzle size={16} /></div>
+                    <div className="flex-1" style={{ minWidth: 0 }}>
+                      <div className="mcp-installed-name">{cfg.label}</div>
+                      <div className="mcp-installed-scope">
+                        {cfg.is_global
+                          ? <span className="mcp-scope-badge mcp-scope-global">Global</span>
+                          : linkedProjects > 0
+                            ? <span className="mcp-scope-badge mcp-scope-projects">{linkedProjects} {linkedProjects > 1 ? t('mcp.projectPlural') : t('mcp.project')}</span>
+                            : <span className="mcp-scope-badge mcp-scope-none">{t('wiz.noProject')}</span>
+                        }
+                        {cfg.env_keys.length > 0 && <span className="mcp-installed-keys"><Key size={9} /> {cfg.env_keys.length}</span>}
                       </div>
-
-                      {/* Delete button */}
-                      <button
-                        className="mcp-icon-btn text-error"
-                        onClick={() => handleDeleteMcpConfig(cfg.id)}
-                        title={t('mcp.deleteConfig')}
-                        aria-label={t('mcp.deleteConfig')}
-                      >
-                        <Trash2 size={12} />
-                      </button>
                     </div>
                   </div>
-                );
-              })}
-            </div>
-          );
-          })}
-        </>
+                </div>
+              );
+
+              if (!isSelected) return [card];
+
+              /* ── Inline detail: spans full grid width, right after this card ── */
+              const def = mcpRegistry.find(m => m.id === cfg.server_id);
+              const isEditingLabel = editingLabelId === cfg.id;
+              const serverIncomp = mcpOverview.incompatibilities.filter(i => i.server_id === cfg.server_id);
+              const detail = (
+                <div key={`detail-${cfg.id}`} ref={detailRef} className="mcp-detail-inline" onClick={e => e.stopPropagation()}>
+                  <div className="mcp-detail-header">
+                    <div className="mcp-registry-card-icon" style={{ width: 40, height: 40 }}><Puzzle size={20} /></div>
+                    <div className="flex-1">
+                      {isEditingLabel ? (
+                        <input className="input mcp-detail-name-input" value={editingLabelText} onChange={e => setEditingLabelText(e.target.value)} onBlur={() => handleSaveLabel(cfg.id)} onKeyDown={e => { if (e.key === 'Enter') handleSaveLabel(cfg.id); if (e.key === 'Escape') setEditingLabelId(null); }} autoFocus />
+                      ) : (
+                        <h2 className="mcp-detail-name" onClick={() => { setEditingLabelId(cfg.id); setEditingLabelText(cfg.label); }}>{cfg.label} <Pencil size={11} className="text-ghost" /></h2>
+                      )}
+                      {def?.description && <p className="mcp-detail-desc">{def.description}</p>}
+                      {serverIncomp.length > 0 && <span className="mcp-server-incompat">{serverIncomp.map(i => `⚠ ${i.agent}: ${i.reason}`).join(' · ')}</span>}
+                    </div>
+                    <div className="flex-row gap-3">
+                      <button className="mcp-btn-action" style={{ color: 'var(--kr-error)', borderColor: 'rgba(255,77,106,0.3)' }} onClick={() => { handleDeleteMcpConfig(cfg.id); setSelectedConfigId(null); }}><Trash2 size={12} /> {t('mcp.deleteConfig')}</button>
+                      <button className="mcp-icon-btn" onClick={() => setSelectedConfigId(null)} aria-label="Close"><X size={14} /></button>
+                    </div>
+                  </div>
+                  <div className="mcp-detail-body">
+                    {cfg.env_keys.length > 0 && (
+                      <div className="mcp-detail-section">
+                        <h3 className="mcp-detail-section-title"><Key size={12} /> {t('mcp.envVars')}</h3>
+                        {def?.token_url && <a href={def.token_url} target="_blank" rel="noopener noreferrer" className="mcp-secrets-token-link mb-4"><ExternalLink size={10} /> {def.token_help ?? t('mcp.getToken')}</a>}
+                        {cfg.env_keys.map(k => (
+                          <div key={k} className="mcp-detail-field">
+                            <label className="mcp-detail-field-label">{k}</label>
+                            <div className="flex-row gap-3">
+                              <input className="input mcp-input-mono flex-1" value={editingEnvId === cfg.id ? (editingEnv[k] ?? '') : '••••••••'} onChange={e => setEditingEnv(prev => ({ ...prev, [k]: e.target.value }))} type={editingEnvId === cfg.id && visibleFields.has(k) ? 'text' : 'password'} placeholder={t('mcp.value')} readOnly={editingEnvId !== cfg.id} onClick={() => { if (editingEnvId !== cfg.id) handleStartEditSecrets(cfg.id); }} />
+                              {editingEnvId === cfg.id && <button className="mcp-icon-btn" onClick={() => toggleFieldVisibility(k)} title={visibleFields.has(k) ? t('mcp.hide') : t('mcp.show')}><Eye size={12} style={{ color: visibleFields.has(k) ? 'var(--kr-accent)' : 'rgba(255,255,255,0.25)' }} /></button>}
+                            </div>
+                          </div>
+                        ))}
+                        {editingEnvId === cfg.id && (
+                          <div className="flex-row gap-3 mt-4">
+                            <button className="mcp-btn-action mcp-btn-action-primary" onClick={handleSaveSecrets} disabled={editingEnvLoading}><Save size={12} /> {editingEnvLoading ? t('mcp.saving') : t('mcp.save')}</button>
+                            <button className="mcp-btn-action" onClick={() => setEditingEnvId(null)}>{t('mcp.cancel')}</button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    <div className="mcp-detail-section">
+                      <h3 className="mcp-detail-section-title">{t('mcp.scope')}</h3>
+                      <div className="mcp-toggle-row">
+                        <span className={`mcp-toggle-label mcp-toggle-global${cfg.is_global ? ' mcp-toggle-global-active' : ''}`} onClick={() => handleToggleConfigGlobal(cfg)} title={cfg.is_global ? t('mcp.disableGlobal') : t('mcp.enableGlobal')}>Global</span>
+                        <span className={`mcp-toggle-label mcp-toggle-general${cfg.include_general ? ' mcp-toggle-general-active' : ''}`} onClick={async () => { try { await mcpsApi.updateConfig(cfg.id, { include_general: !cfg.include_general }); refetchMcps(); } catch (e) { console.warn(e); } }} title={cfg.include_general ? t('mcp.disableGeneral') : t('mcp.enableGeneral')}>{t('mcp.general')}</span>
+                      </div>
+                      <div className="mcp-toggle-row">
+                        {(() => {
+                          const sorted = projects.filter(p => !isHiddenPath(p.path)).sort((a, b) => {
+                            const aL = (cfg.is_global || cfg.project_ids.includes(a.id)) ? 0 : 1;
+                            const bL = (cfg.is_global || cfg.project_ids.includes(b.id)) ? 0 : 1;
+                            return aL - bL || a.name.localeCompare(b.name);
+                          });
+                          const showAll = expandedProjectLists.has(cfg.id);
+                          const visible = showAll ? sorted : sorted.slice(0, PROJECT_TOGGLE_LIMIT);
+                          const hiddenCount = sorted.length - visible.length;
+                          return (<>
+                            {visible.map(proj => {
+                              const isLinked = cfg.is_global || cfg.project_ids.includes(proj.id);
+                              return (
+                                <span key={proj.id} className="flex-row">
+                                  <button className={`mcp-project-toggle ${isLinked ? 'mcp-project-toggle-on' : 'mcp-project-toggle-off'}`} onClick={() => handleToggleConfigProject(cfg.id, proj.id, isLinked)}>
+                                    {isLinked ? <CheckSquare size={11} className="text-accent" /> : <Square size={11} />}
+                                    {proj.name}
+                                  </button>
+                                  {isLinked && (() => {
+                                    const slug = slugify(cfg.label);
+                                    const isCustom = mcpOverview.customized_contexts.includes(`${slug}:${proj.id}`);
+                                    return <button className="mcp-icon-btn mcp-context-btn" onClick={() => handleOpenContext(proj.id, proj.name, cfg.label)} title={`${t('mcp.editContext', cfg.label, proj.name)}${isCustom ? ' ' + t('mcp.customized') : ' ' + t('mcp.default')}`}><FileText size={10} style={{ color: isCustom ? 'var(--kr-accent)' : 'rgba(255,255,255,0.2)' }} /></button>;
+                                  })()}
+                                </span>
+                              );
+                            })}
+                            {hiddenCount > 0 && <button className="mcp-more-projects-btn" onClick={() => setExpandedProjectLists(prev => { const n = new Set(prev); n.add(cfg.id); return n; })}>{t('mcp.moreProjects', hiddenCount)}</button>}
+                            {showAll && sorted.length > PROJECT_TOGGLE_LIMIT && <button className="mcp-less-projects-btn" onClick={() => setExpandedProjectLists(prev => { const n = new Set(prev); n.delete(cfg.id); return n; })}>{t('mcp.lessProjects')}</button>}
+                          </>);
+                        })()}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+              return [card, detail];
+            })}
+        </div>
       ) : !showAddMcp ? (
         <div className="mcp-card mcp-empty">
-          <Server size={32} className="text-ghost mb-6" />
+          <Puzzle size={32} className="text-ghost mb-6" />
           <p className="mcp-empty-text">
             {t('mcp.empty')}
           </p>

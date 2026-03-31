@@ -12,7 +12,7 @@ import {
   Plus, Trash2, Zap,
   Loader2,
   MessageSquare, AlertTriangle,
-  Play, FileCode, ShieldCheck, StopCircle, BookOpen, Rocket, Check, RefreshCw, Server,
+  Play, FileCode, ShieldCheck, StopCircle, BookOpen, Rocket, Check, RefreshCw, Puzzle,
 } from 'lucide-react';
 
 const STATUS_COLORS: Record<string, string> = {
@@ -276,7 +276,7 @@ export function ProjectCard({
           <div className="dash-proj-path">{proj.path}</div>
         </div>
         <div className={`dash-proj-meta${isMobile ? ' flex-wrap' : ''}`}>
-          <span className="dash-meta-item"><Server size={12} /> {projMcps.length}</span>
+          <span className="dash-meta-item"><Puzzle size={12} /> {projMcps.length}</span>
           <span className="dash-meta-item"><MessageSquare size={12} /> {projDiscussions.length}</span>
         </div>
       </button>
@@ -352,13 +352,13 @@ export function ProjectCard({
           <div className="dash-section">
             <button className="dash-collapsible-header" onClick={() => toggleSection('mcps')} aria-expanded={isSectionOpen('mcps')}>
               {isSectionOpen('mcps') ? <ChevronDown size={12} className="flex-shrink-0" /> : <ChevronRight size={12} className="flex-shrink-0" />}
-              <Server size={14} /> <span className="dash-section-title">MCP</span>
+              <Puzzle size={14} /> <span className="dash-section-title">Plugins</span>
               <span className="dash-count">{projMcps.length}</span>
             </button>
             {isSectionOpen('mcps') && (
               <>
                 {projMcps.map(cfg => (
-                  <div key={cfg.id} className="dash-row">
+                  <div key={cfg.id} className="dash-row" style={{ cursor: 'pointer' }} onClick={() => onNavigate(`mcps:${cfg.id}`)}>
                     <div className="relative">
                       <div aria-hidden="true" className="dash-dot" data-on="true" />
                       <span className="dash-sr-only">
@@ -370,14 +370,7 @@ export function ProjectCard({
                       <span className="dash-row-detail-sm">{cfg.label}</span>
                       {cfg.is_global && <span className="dash-row-global-tag">GLOBAL</span>}
                     </div>
-                    <button
-                      className="dash-icon-btn"
-                      onClick={() => onNavigate('mcps')}
-                      title={t('projects.manageMcps')}
-                      aria-label={t('projects.manageMcps')}
-                    >
-                      <ChevronRight size={12} />
-                    </button>
+                    <ChevronRight size={12} className="text-ghost" />
                   </div>
                 ))}
                 {projMcps.length === 0 && (

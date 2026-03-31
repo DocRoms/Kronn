@@ -7,12 +7,13 @@ import type {
   WorkflowStep, AgentType, WorkflowSafety,
   WorkspaceConfig, StepConditionRule,
   CreateWorkflowRequest, Skill, AgentProfile, Directive,
+  WorkflowSuggestion,
 } from '../../types/generated';
 import type { AgentsConfig } from '../../types/generated';
 import {
   Plus, Loader2, Check, X, ChevronRight, ChevronDown,
   Clock, GitBranch, Zap, HelpCircle, Settings, Shield,
-  AlertTriangle, UserCircle, FileText,
+  AlertTriangle, UserCircle, FileText, Sparkles,
 } from 'lucide-react';
 import '../../pages/WorkflowsPage.css';
 
@@ -45,6 +46,16 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     : ALL_AGENT_TYPES
   ).map(at => ({ type: at, label: AGENT_LABELS[at] ?? at }));
   const isEdit = !!editWorkflow;
+  // Detect if an existing workflow needs advanced mode (multi-step, cron, hooks, etc.)
+  const needsAdvanced = isEdit && (
+    (editWorkflow.steps?.length ?? 0) > 1 ||
+    editWorkflow.trigger?.type !== 'Manual' ||
+    editWorkflow.workspace_config ||
+    editWorkflow.safety?.sandbox ||
+    editWorkflow.safety?.require_approval
+  );
+  const [wizardMode, setWizardMode] = useState<'simple' | 'advanced'>(needsAdvanced ? 'advanced' : 'simple');
+  const isSimple = wizardMode === 'simple';
   const initTrigger = editWorkflow?.trigger;
   const initCron = initTrigger?.type === 'Cron' ? parseCronExpr(initTrigger.schedule) : null;
   const initTracker = initTrigger?.type === 'Tracker' ? initTrigger : null;
@@ -67,6 +78,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   const [safety, setSafety] = useState<WorkflowSafety>(editWorkflow?.safety ?? {
     sandbox: false, max_files: null, max_lines: null, require_approval: false,
   });
+
+  // Config page: show/hide expert options (hooks, concurrency)
+  const [showExpertConfig, setShowExpertConfig] = useState(false);
 
   // Workspace config state
   const initHooks = editWorkflow?.workspace_config?.hooks;
@@ -135,11 +149,46 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     });
   };
 
+  // Workflow suggestions from MCP introspection
+  const [suggestions, setSuggestions] = useState<WorkflowSuggestion[]>([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [suggestionsLoading, setSuggestionsLoading] = useState(false);
+
   useEffect(() => {
     skillsApi.list().then(setAvailableSkills).catch(() => {});
     profilesApi.list().then(setAvailableProfiles).catch(() => {});
     directivesApi.list().then(setAvailableDirectives).catch(() => {});
   }, []);
+
+  // Fetch suggestions when project changes
+  useEffect(() => {
+    if (!projectId) { setSuggestions([]); return; }
+    setSuggestionsLoading(true);
+    workflowsApi.suggestions(projectId)
+      .then(s => { setSuggestions(s); if (s.length > 0 && !isEdit) setShowSuggestions(true); })
+      .catch(() => setSuggestions([]))
+      .finally(() => setSuggestionsLoading(false));
+  }, [projectId, isEdit]);
+
+  const applySuggestion = (s: WorkflowSuggestion) => {
+    setName(s.title);
+    setSteps(s.steps);
+    setTriggerType(s.trigger.type as 'Cron' | 'Tracker' | 'Manual');
+    if (s.trigger.type === 'Cron') {
+      const parsed = parseCronExpr((s.trigger as { schedule: string }).schedule);
+      setCronEvery(parsed.every);
+      setCronUnit(parsed.unit);
+      setCronAt(parsed.at);
+    }
+    setShowSuggestions(false);
+    // Multi-step or advanced suggestions → force advanced mode
+    if (s.steps.length > 1 || s.complexity === 'advanced') {
+      setWizardMode('advanced');
+      setWizardStep(2); // Jump to Steps
+    } else {
+      setWizardStep(isSimple ? 1 : 2); // Jump to Task (simple) or Steps (advanced)
+    }
+  };
 
   const addStep = () => {
     setSteps([...steps, {
@@ -242,11 +291,79 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     }
   };
 
-  const WIZARD_STEPS = [t('wiz.infos'), t('wiz.trigger'), t('wiz.steps'), t('wiz.config'), t('wiz.summary')];
+  const WIZARD_STEPS_ADVANCED = [t('wiz.infos'), t('wiz.trigger'), t('wiz.steps'), t('wiz.config'), t('wiz.summary')];
+  const WIZARD_STEPS_SIMPLE = [t('wiz.infos'), t('wiz.task'), t('wiz.summary')];
+  const WIZARD_STEPS = isSimple ? WIZARD_STEPS_SIMPLE : WIZARD_STEPS_ADVANCED;
   const lastStep = WIZARD_STEPS.length - 1;
 
   return (
     <div className="wf-wizard-card">
+      {/* Mode toggle */}
+      {!isEdit && (
+        <div className="flex-row gap-2 mb-6" style={{ justifyContent: 'center' }}>
+          {(['simple', 'advanced'] as const).map(mode => (
+            <button
+              key={mode}
+              className="wf-trigger-btn"
+              data-selected={wizardMode === mode}
+              onClick={() => { setWizardMode(mode); setWizardStep(0); }}
+            >
+              {mode === 'simple' ? t('wiz.modeSimple') : t('wiz.modeAdvanced')}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Suggestions toggle */}
+      {suggestions.length > 0 && !showSuggestions && (
+        <button
+          className="wf-suggestions-toggle"
+          onClick={() => setShowSuggestions(true)}
+        >
+          <Sparkles size={12} />
+          {t('wiz.suggestionsCount', suggestions.length)}
+        </button>
+      )}
+
+      {/* Suggestions panel */}
+      {showSuggestions && suggestions.length > 0 && (
+        <div className="wf-suggestions-panel">
+          <div className="wf-suggestions-header">
+            <Sparkles size={14} className="text-accent" />
+            <span className="wf-suggestions-title">{t('wiz.suggestionsTitle')}</span>
+            <button className="mcp-icon-btn" onClick={() => setShowSuggestions(false)} aria-label="Close" style={{ marginLeft: 'auto' }}>
+              <X size={12} />
+            </button>
+          </div>
+          <div className="wf-suggestions-grid">
+            {suggestions.map(s => (
+              <div key={s.id} className="wf-suggestion-card">
+                <div className="wf-suggestion-top">
+                  <span className="wf-suggestion-name">{s.title}</span>
+                  <div className="flex-row gap-2">
+                    {s.complexity === 'advanced' && <span className="wf-suggestion-complexity">{t('wiz.modeAdvanced')}</span>}
+                    <span className={`wf-suggestion-audience wf-audience-${s.audience}`}>{s.audience}</span>
+                  </div>
+                </div>
+                <p className="wf-suggestion-desc">{s.description}</p>
+                <p className="wf-suggestion-reason">{s.reason}</p>
+                <div className="wf-suggestion-mcps">
+                  {s.required_mcps.map(m => <span key={m} className="wf-suggestion-mcp-tag">{m}</span>)}
+                  <span className="wf-suggestion-steps-count">{s.steps.length} step{s.steps.length > 1 ? 's' : ''}</span>
+                </div>
+                <button
+                  className="wf-suggestion-apply"
+                  onClick={() => applySuggestion(s)}
+                >
+                  <Zap size={10} /> {s.steps.length > 1 || s.complexity === 'advanced' ? t('wiz.importDraft') : t('wiz.activate')}
+                </button>
+              </div>
+            ))}
+          </div>
+          {suggestionsLoading && <div className="text-center"><Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /></div>}
+        </div>
+      )}
+
       {/* Progress bar */}
       <div className="flex-row gap-2 mb-9">
         {WIZARD_STEPS.map((label, i) => (
@@ -259,7 +376,11 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
         ))}
       </div>
 
-      {/* Step 0: Name + Project */}
+      {/* Logical step name for conditional rendering */}
+      {/* Simple: 0=infos, 1=task, 2=summary */}
+      {/* Advanced: 0=infos, 1=trigger, 2=steps, 3=config, 4=summary */}
+
+      {/* Step: Name + Project (both modes) */}
       {wizardStep === 0 && (
         <div>
           <label className="wf-label">{t('wiz.name')}</label>
@@ -287,8 +408,87 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
         </div>
       )}
 
-      {/* Step 1: Trigger */}
-      {wizardStep === 1 && (
+      {/* Step: Simple task (simple mode step 1) */}
+      {isSimple && wizardStep === 1 && (
+        <div>
+          <label className="wf-label">{t('wiz.agentLabel')}</label>
+          <select
+            className="wf-select mb-6"
+            value={steps[0]?.agent ?? 'ClaudeCode'}
+            onChange={e => updateStep(0, { agent: e.target.value as AgentType })}
+          >
+            {availableAgents.map(a => (
+              <option key={a.type} value={a.type}>{a.label}</option>
+            ))}
+          </select>
+
+          <label className="wf-label">{t('wiz.promptLabel')}</label>
+          <textarea
+            className="wf-textarea mb-6"
+            rows={6}
+            value={steps[0]?.prompt_template ?? ''}
+            onChange={e => updateStep(0, { prompt_template: e.target.value })}
+            placeholder={t('wiz.promptSimplePlaceholder')}
+          />
+
+          {/* Simple trigger: Manual or Scheduled */}
+          <label className="wf-label">{t('wiz.triggerLabel')}</label>
+          <div className="flex-row gap-4 mb-4">
+            <button
+              className="wf-trigger-btn"
+              data-selected={triggerType === 'Manual'}
+              onClick={() => setTriggerType('Manual')}
+            >
+              <Zap size={12} /> {t('wiz.triggerManual')}
+            </button>
+            <button
+              className="wf-trigger-btn"
+              data-selected={triggerType === 'Cron'}
+              onClick={() => setTriggerType('Cron')}
+            >
+              <Clock size={12} /> {t('wiz.triggerScheduled')}
+            </button>
+          </div>
+
+          {triggerType === 'Cron' && (
+            <div className="flex-row gap-4 mb-2" style={{ alignItems: 'center' }}>
+              <span className="text-base text-tertiary">{t('wiz.every')}</span>
+              <input
+                type="number" min={1} max={60}
+                className="wf-input"
+                style={{ width: 60, textAlign: 'center' }}
+                value={cronEvery}
+                onChange={e => setCronEvery(Math.max(1, parseInt(e.target.value) || 1))}
+              />
+              <select
+                className="wf-select"
+                style={{ width: 130 }}
+                value={cronUnit}
+                onChange={e => setCronUnit(e.target.value as typeof cronUnit)}
+              >
+                <option value="minutes">{t('wiz.minutes')}</option>
+                <option value="hours">{t('wiz.hours')}</option>
+                <option value="days">{t('wiz.days')}</option>
+              </select>
+              {cronUnit === 'days' && (
+                <>
+                  <span className="text-base text-tertiary">{t('wiz.at')}</span>
+                  <input
+                    type="time"
+                    className="wf-input"
+                    style={{ width: 100 }}
+                    value={cronAt}
+                    onChange={e => setCronAt(e.target.value)}
+                  />
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Step 1 (advanced): Trigger */}
+      {!isSimple && wizardStep === 1 && (
         <div>
           <label className="wf-label">{t('wiz.triggerType')}</label>
           <div className="flex-row gap-4 mb-6">
@@ -375,8 +575,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
         </div>
       )}
 
-      {/* Step 2: Steps (with advanced per-step config) */}
-      {wizardStep === 2 && (
+      {/* Step 2 (advanced): Steps (with advanced per-step config) */}
+      {!isSimple && wizardStep === 2 && (
         <div>
           {/* Variable help toggle */}
           <button
@@ -685,6 +885,26 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
 
                 {isAdvOpen && (
                   <div className="wf-advanced-panel">
+                    {/* Output format */}
+                    <div className="mb-5">
+                      <label className="wf-label">{t('wiz.outputFormat')}</label>
+                      <div className="flex-row gap-3">
+                        <button
+                          className="wf-step-type-btn"
+                          data-selected={!step.output_format || step.output_format.type === 'FreeText'}
+                          onClick={() => updateStep(i, { output_format: { type: 'FreeText' } })}
+                        >{t('wiz.outputFree')}</button>
+                        <button
+                          className="wf-step-type-btn"
+                          data-selected={step.output_format?.type === 'Structured'}
+                          onClick={() => updateStep(i, { output_format: { type: 'Structured' } })}
+                        >{t('wiz.outputStructured')}</button>
+                      </div>
+                      {step.output_format?.type === 'Structured' && (
+                        <p className="text-2xs text-ghost mt-2">{t('wiz.outputStructuredHint')}</p>
+                      )}
+                    </div>
+
                     {/* Agent settings */}
                     <div className="mb-5">
                       <label className="wf-label">{t('wiz.agentSettings')}</label>
@@ -864,8 +1084,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
         </div>
       )}
 
-      {/* Step 3: Config (Safety + Workspace + Concurrency) */}
-      {wizardStep === 3 && (
+      {/* Step 3 (advanced): Config (Safety + Workspace + Concurrency) */}
+      {!isSimple && wizardStep === 3 && (
         <div>
           {/* Safety */}
           <div className="mb-8">
@@ -911,51 +1131,66 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             </div>
           </div>
 
-          {/* Concurrency */}
-          <div className="mb-8">
-            <label className="wf-label">{t('wiz.concurrency')}</label>
-            <input
-              type="number" min={1} max={20}
-              className="wf-input"
-              style={{ width: 90 }}
-              value={concurrencyLimit}
-              onChange={e => setConcurrencyLimit(e.target.value)}
-              placeholder="illimite"
-            />
-          </div>
+          {/* Expert options toggle */}
+          <button
+            className="wf-advanced-toggle"
+            style={{ color: showExpertConfig ? '#c8ff00' : 'rgba(255,255,255,0.25)' }}
+            onClick={() => setShowExpertConfig(!showExpertConfig)}
+          >
+            <Settings size={10} />
+            {t('wiz.advanced')}
+            {showExpertConfig ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+          </button>
 
-          {/* Workspace hooks */}
-          <div>
-            <div className="flex-row gap-3 mb-4">
-              <GitBranch size={14} className="text-muted" />
-              <span className="text-md font-semibold text-secondary">{t('wiz.hooks')}</span>
-            </div>
-            <p className="text-xs text-faint" style={{ margin: '0 0 8px' }}>
-              {t('wiz.hooksHint')}
-            </p>
-
-            {([
-              ['after_create', t('wiz.hookAfterCreate'), wsHookAfterCreate, setWsHookAfterCreate, 'npm install'],
-              ['before_run', t('wiz.hookBeforeRun'), wsHookBeforeRun, setWsHookBeforeRun, 'git pull origin main'],
-              ['after_run', t('wiz.hookAfterRun'), wsHookAfterRun, setWsHookAfterRun, 'npm run lint'],
-              ['before_remove', t('wiz.hookBeforeRemove'), wsHookBeforeRemove, setWsHookBeforeRemove, 'git stash'],
-            ] as [string, string, string, (v: string) => void, string][]).map(([key, label, value, setter, placeholder]) => (
-              <div key={key} className="mb-3">
-                <label className="wf-label text-xs">{label} ({key})</label>
+          {showExpertConfig && (
+            <div className="wf-advanced-panel">
+              {/* Concurrency */}
+              <div className="mb-8">
+                <label className="wf-label">{t('wiz.concurrency')}</label>
                 <input
+                  type="number" min={1} max={20}
                   className="wf-input"
-                  value={value}
-                  onChange={e => setter(e.target.value)}
-                  placeholder={placeholder}
+                  style={{ width: 90 }}
+                  value={concurrencyLimit}
+                  onChange={e => setConcurrencyLimit(e.target.value)}
+                  placeholder="illimite"
                 />
               </div>
-            ))}
-          </div>
+
+              {/* Workspace hooks */}
+              <div>
+                <div className="flex-row gap-3 mb-4">
+                  <GitBranch size={14} className="text-muted" />
+                  <span className="text-md font-semibold text-secondary">{t('wiz.hooks')}</span>
+                </div>
+                <p className="text-xs text-faint" style={{ margin: '0 0 8px' }}>
+                  {t('wiz.hooksHint')}
+                </p>
+
+                {([
+                  ['after_create', t('wiz.hookAfterCreate'), wsHookAfterCreate, setWsHookAfterCreate, 'npm install'],
+                  ['before_run', t('wiz.hookBeforeRun'), wsHookBeforeRun, setWsHookBeforeRun, 'git pull origin main'],
+                  ['after_run', t('wiz.hookAfterRun'), wsHookAfterRun, setWsHookAfterRun, 'npm run lint'],
+                  ['before_remove', t('wiz.hookBeforeRemove'), wsHookBeforeRemove, setWsHookBeforeRemove, 'git stash'],
+                ] as [string, string, string, (v: string) => void, string][]).map(([key, label, value, setter, placeholder]) => (
+                  <div key={key} className="mb-3">
+                    <label className="wf-label text-xs">{label} ({key})</label>
+                    <input
+                      className="wf-input"
+                      value={value}
+                      onChange={e => setter(e.target.value)}
+                      placeholder={placeholder}
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
-      {/* Step 4: Summary */}
-      {wizardStep === 4 && (
+      {/* Step: Summary (last step in both modes) */}
+      {wizardStep === lastStep && (
         <div>
           <div className="wf-summary-row"><span className="wf-summary-label">Nom</span> {name}</div>
           <div className="wf-summary-row"><span className="wf-summary-label">Projet</span> {projects.find(p => p.id === projectId)?.name ?? 'Aucun'}</div>

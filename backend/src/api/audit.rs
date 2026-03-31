@@ -148,18 +148,37 @@ Fill ai/operations/debug-operations.md — replace ALL {{PLACEHOLDERS}}:\n\
         sources: &["docker-compose.yml", "Makefile", "Dockerfile"],
     },
 
-    // Step 8: MCP servers overview
+    // Step 8: MCP servers overview + capability introspection
     AnalysisStep {
         target_file: "ai/operations/mcp-servers.md",
         prompt: "\
 Read ai/index.md for context. Check if .mcp.json or .mcp.json.example or .env.mcp.example exists in the repo.\n\n\
-If MCP config exists:\n\
-- Document each configured MCP server in ai/operations/mcp-servers.md\n\
-- For each server: name, transport type, what it's used for, required env vars\n\
-- ONLY create a context file at ai/operations/mcp-servers/<slug>.md if you have \
-project-specific rules, constraints, or usage patterns to document for that MCP.\n\
-  Do NOT create empty or boilerplate context files — they add no value.\n\
-  A context file should contain: purpose in this project, specific rules, and usage examples.\n\n\
+If MCP config exists:\n\n\
+### A) Document each server in ai/operations/mcp-servers.md\n\
+Fill the table with: name, package, purpose, key capabilities (3-5 main tools), credentials.\n\n\
+### B) Introspect capabilities\n\
+For each MCP server that has tools available, use the MCP tools to discover:\n\
+1. **Tool inventory**: list the main tools exposed (via tools/list if available). \
+For each tool: name, one-line description, whether it is read-only or mutating, and a use-case.\n\
+2. **Project context**: call read-only tools to discover real project data. Examples:\n\
+   - Jira/Linear: project keys, open ticket count, labels in use, sprint cadence\n\
+   - GitHub/GitLab: repo names, open PRs count, branch strategy, CI status\n\
+   - Slack: channel names relevant to the project\n\
+   - CloudWatch: log groups, active alarms\n\
+   - Confluence: spaces, recent pages\n\
+   Only call read-only/list operations — never create, update, or delete anything.\n\
+   If a tool call fails or credentials are missing, note it and move on.\n\n\
+### C) Create per-MCP context files\n\
+For each server where you discovered capabilities or project context, \
+create ai/operations/mcp-servers/<slug>.md following the TEMPLATE.md structure:\n\
+- Fill the Capabilities table with discovered tools\n\
+- Fill Project context with real identifiers found via introspection\n\
+- Add rules and gotchas based on what you observed\n\
+Do NOT create empty or boilerplate context files — only if you have real data.\n\n\
+### D) Fill the workflow automation hints table\n\
+Based on the MCP combinations present, suggest 2-5 possible automated workflows.\n\
+For each: which MCPs are combined, what the workflow does, and who benefits (Dev/PM/Ops).\n\
+Only suggest workflows where all required MCPs are actually configured.\n\n\
 If no MCP config exists: replace ai/operations/mcp-servers.md content with:\n\
 '# MCP Servers\\n\\nNo MCP servers configured for this project.'",
         sources: &[".mcp.json"],

@@ -56,6 +56,7 @@ import type {
   ModelTiersConfig,
   DriftCheckResponse,
   AddContactResult,
+  WorkflowSuggestion,
 } from '../types/generated';
 import type { DiscoverKeysResponse } from '../types/extensions';
 
@@ -688,6 +689,7 @@ export const workflows = {
   getRun: (id: string, runId: string) => api<WorkflowRun>('GET', `/workflows/${id}/runs/${runId}`),
   deleteRun: (id: string, runId: string) => api<void>('DELETE', `/workflows/${id}/runs/${runId}`),
   deleteAllRuns: (id: string) => api<void>('DELETE', `/workflows/${id}/runs`),
+  suggestions: (projectId: string) => api<WorkflowSuggestion[]>('GET', `/projects/${projectId}/workflow-suggestions`),
 };
 
 // ─── Skills ─────────────────────────────────────────────────────────────────
