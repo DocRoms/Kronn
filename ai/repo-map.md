@@ -31,7 +31,7 @@ Kronn/
 │       │   ├── mcps.rs         # MCP 3-tier API: overview, configs CRUD, registry, refresh, secrets
 │       │   ├── workflows.rs    # Workflow CRUD + trigger + runs
 │       │   ├── agents.rs       # Agent detection + install + uninstall + toggle (enable/disable)
-│       │   ├── stats.rs        # Token usage stats
+│       │   ├── stats.rs        # Token usage & cost stats (by provider, project, daily history, top discussions/workflows)
 │       │   ├── skills.rs       # Skills API: list, create, update, delete
 │       │   ├── profiles.rs     # Profiles API: list, create, update, delete, persona-name override
 │       │   ├── directives.rs   # Directives API: list, create, update, delete
@@ -65,7 +65,12 @@ Kronn/
 │       │       ├── 016_message_model_tier.sql # Per-message model tier
 │       │       ├── 017_message_count.sql     # Message count tracking
 │       │       ├── 018_briefing_notes.sql    # Pre-audit briefing notes
-│       │       └── 019_pin_first_message.sql # Pin first message feature
+│       │       ├── 019_pin_first_message.sql # Pin first message feature
+│       │       ├── 020_fix_worktree_paths.sql # Fix worktree relative paths
+│       │       ├── 021_message_identity.sql # Author pseudo + avatar on messages
+│       │       ├── 022_contacts.sql         # Contacts table (multi-user)
+│       │       ├── 023_shared_discussions.sql # Shared discussions (multi-user)
+│       │       └── 024_message_cost.sql     # Per-message cost_usd column
 │       ├── core/               # Business logic
 │       │   ├── mod.rs          # Re-exports
 │       │   ├── config.rs       # Config load/save (~/.config/kronn/)
@@ -79,7 +84,8 @@ Kronn/
 │       │   ├── skills.rs      # Skills loader: builtin (embedded .md) + custom (~/.config/kronn/skills/). Frontmatter parsing, build_skills_prompt()
 │       │   ├── profiles.rs   # Profiles loader: builtin (embedded .md) + custom (~/.config/kronn/profiles/). Persona override system, build_profiles_prompt()
 │       │   ├── directives.rs # Directives loader: builtin (embedded .md) + custom (~/.config/kronn/directives/). build_directives_prompt()
-│       │   └── cmd.rs        # Cross-platform command helpers: async_cmd()/sync_cmd() apply CREATE_NO_WINDOW on Windows. ALL Command::new() calls MUST use these helpers
+│       │   ├── cmd.rs        # Cross-platform command helpers: async_cmd()/sync_cmd() apply CREATE_NO_WINDOW on Windows. ALL Command::new() calls MUST use these helpers
+│       │   └── pricing.rs    # Static token pricing table (per-provider $/1M tokens). estimate_cost() fallback when real cost unavailable
 │       ├── profiles/          # Builtin profile Markdown files (8 profiles: architect, tech-lead, qa-engineer, product-owner, scrum-master, technical-writer, devils-advocate, mentor)
 │       ├── directives/        # Builtin directive Markdown files
 │       ├── skills/             # Builtin skill Markdown files (embedded at compile time)
@@ -133,7 +139,12 @@ Kronn/
 │       │   ├── GitPanel.tsx      # Git file/branch panel
 │       │   ├── AiDocViewer.tsx   # AI doc viewer
 │       │   ├── ProjectList.tsx   # Project list with search, filter, group-by-org (234L)
-│       │   └── ProjectCard.tsx   # Single project accordion card — discussions, AI docs, MCPs, workflows, skills, audit (707L)
+│       │   ├── ProjectCard.tsx   # Single project accordion card — discussions, AI docs, MCPs, workflows, skills, audit (707L)
+│       │   └── settings/
+│       │       ├── AgentsSection.tsx  # Agent config (tokens, keys, model tiers, install/uninstall)
+│       │       ├── UsageSection.tsx   # Usage dashboard (summary cards, provider bar, project bars, daily chart, top-5 lists, tokens/cost toggle, disc/wf filter)
+│       │       ├── IdentitySection.tsx # User identity (pseudo, avatar, invite code)
+│       │       └── ProfilesSection.tsx # Profile management
 │       ├── styles/
 │       │   ├── tokens.css        # CSS custom properties (--kr-bg-*, --kr-text-*, --kr-accent-*, --kr-sp-*, --kr-r-*, --kr-fs-*)
 │       │   ├── reset.css         # Global reset + font-face (moved from index.html)

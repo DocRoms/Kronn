@@ -216,7 +216,7 @@ async fn run_agent_with_timeout(
                         StreamJsonEvent::Text(text) => {
                             output.push_str(&text);
                         }
-                        StreamJsonEvent::Usage { input_tokens, output_tokens } => {
+                        StreamJsonEvent::Usage { input_tokens, output_tokens, .. } => {
                             stream_json_tokens = input_tokens + output_tokens;
                         }
                         StreamJsonEvent::ToolStart(_) | StreamJsonEvent::ToolInputDelta(_) | StreamJsonEvent::ToolEnd | StreamJsonEvent::Skip => {}

@@ -6,6 +6,7 @@ pub mod crypto;
 pub mod directives;
 pub mod key_discovery;
 pub mod mcp_scanner;
+pub mod pricing;
 pub mod profiles;
 pub mod registry;
 pub mod scanner;

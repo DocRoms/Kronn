@@ -672,6 +672,7 @@ export function Dashboard({ onReset }: DashboardProps) {
             refetchProjects={refetch}
             refetchDiscussions={refetchDiscussions}
             onReset={onReset}
+            onNavigateDiscussion={(id) => { setOpenDiscussionId(id); setPage('discussions'); }}
             toast={toast}
           />
           </ErrorBoundary>

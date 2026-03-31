@@ -19,6 +19,7 @@ import { setAuthToken } from '../lib/api';
 import { AgentsSection } from '../components/settings/AgentsSection';
 import { IdentitySection } from '../components/settings/IdentitySection';
 import { ProfilesSection } from '../components/settings/ProfilesSection';
+import { UsageSection } from '../components/settings/UsageSection';
 import './SettingsPage.css';
 
 /** Output languages for agents (sent to backend, not related to UI i18n) */
@@ -41,6 +42,7 @@ interface SettingsPageProps {
   refetchProjects: () => void;
   refetchDiscussions: () => void;
   onReset: () => void;
+  onNavigateDiscussion?: (discussionId: string) => void;
   toast: ToastFn;
 }
 
@@ -54,6 +56,7 @@ export function SettingsPage({
   refetchProjects,
   refetchDiscussions,
   onReset,
+  onNavigateDiscussion,
   toast,
 }: SettingsPageProps) {
   const { t, locale, setLocale } = useT();
@@ -126,6 +129,7 @@ export function SettingsPage({
           { id: 'settings-directives', label: 'Directives' },
           { id: 'settings-identity', label: t('settings.identity') },
           { id: 'settings-server', label: 'Server' },
+          { id: 'settings-usage', label: t('config.usage') },
           { id: 'settings-database', label: 'Database' },
         ].map(s => (
           <button
@@ -877,6 +881,9 @@ export function SettingsPage({
           </div>
         </div>
       </div>
+
+      {/* Usage */}
+      <UsageSection onNavigateDiscussion={onNavigateDiscussion} />
 
       {/* Database */}
       <div id="settings-database" className="set-card">

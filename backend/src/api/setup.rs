@@ -773,3 +773,26 @@ pub async fn reset(
 
     Json(ApiResponse::ok(()))
 }
+
+// ── Open URL in system browser ─────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct OpenUrlRequest {
+    pub url: String,
+}
+
+/// POST /api/open-url — open a URL in the system default browser.
+/// Used by the Tauri desktop app where webview doesn't handle target="_blank".
+/// In Docker mode this is a no-op (no desktop to open).
+pub async fn open_url(Json(req): Json<OpenUrlRequest>) -> Json<ApiResponse<()>> {
+    if !req.url.starts_with("http://") && !req.url.starts_with("https://") {
+        return Json(ApiResponse::err("Only http/https URLs are allowed"));
+    }
+    match open::that(&req.url) {
+        Ok(()) => Json(ApiResponse::ok(())),
+        Err(e) => {
+            tracing::warn!("Failed to open URL '{}': {}", req.url, e);
+            Json(ApiResponse::err(format!("Failed to open URL: {}", e)))
+        }
+    }
+}

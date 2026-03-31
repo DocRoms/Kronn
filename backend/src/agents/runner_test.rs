@@ -25,9 +25,10 @@ mod tests {
     fn parse_stream_usage_from_message_delta() {
         let line = r#"{"type":"stream_event","event":{"type":"message_delta","usage":{"input_tokens":100,"output_tokens":50}}}"#;
         match parse_claude_stream_line(line) {
-            StreamJsonEvent::Usage { input_tokens, output_tokens } => {
+            StreamJsonEvent::Usage { input_tokens, output_tokens, cost_usd } => {
                 assert_eq!(input_tokens, 100);
                 assert_eq!(output_tokens, 50);
+                assert!(cost_usd.is_none());
             }
             _ => panic!("Expected Usage event"),
         }
@@ -37,9 +38,10 @@ mod tests {
     fn parse_stream_result_with_usage() {
         let line = r#"{"type":"result","subtype":"success","cost_usd":0.01,"usage":{"input_tokens":200,"output_tokens":100}}"#;
         match parse_claude_stream_line(line) {
-            StreamJsonEvent::Usage { input_tokens, output_tokens } => {
+            StreamJsonEvent::Usage { input_tokens, output_tokens, cost_usd } => {
                 assert_eq!(input_tokens, 200);
                 assert_eq!(output_tokens, 100);
+                assert!((cost_usd.unwrap() - 0.01).abs() < f64::EPSILON);
             }
             _ => panic!("Expected Usage event from result"),
         }

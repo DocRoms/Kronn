@@ -278,6 +278,14 @@ NoTemplate → TemplateInstalled → Audited → Validated
 - `POST /api/projects/:id/ai-audit` — SSE streaming 10-step audit
 - `POST /api/projects/:id/validate-audit` — mark audit as validated
 
+### Token usage & cost tracking
+
+- **Per-message cost**: `messages.cost_usd` column (migration 024). Real cost from Claude Code `result` stream event (`cost_usd` field). Fallback: static estimation via `core/pricing.rs` (per-provider pricing table: Anthropic, OpenAI, Google, Mistral, Amazon).
+- **`StreamJsonEvent::Usage`**: captures `input_tokens`, `output_tokens`, and `cost_usd: Option<f64>` from Claude Code's stream-json output. `cost_usd` is `Some` on the `result` line, `None` on intermediate `message_delta` events.
+- **Stats API**: `GET /api/stats/tokens` → `TokenUsageSummary` (total tokens/cost, by_provider, by_project, top_discussions, top_workflows, daily_history 30 days). `GET /api/stats/agent-usage` → per-agent breakdown with project detail.
+- **Frontend**: `UsageSection` component in Settings. Summary cards, provider bar, project bars, daily stacked chart (CSS-only), collapsible top-5 lists. Toggle tokens/cost view. Filter discussions/workflows. Discussion names are clickable (navigates to discussion page).
+- **Pricing fallback**: when `cost_usd` is null in DB, `pricing::estimate_cost(agent_type, tokens)` applies a 60/40 input/output split with provider-specific per-1M-token rates.
+
 ### DB management API
 - `GET /api/config/db-info` — returns DB size and record counts per table.
 - `GET /api/config/export` — full JSON dump of all data.

@@ -520,9 +520,21 @@ export interface AiSearchResult {
 
 export interface TokenUsageSummary {
   total_tokens: number;
+  total_cost_usd: number;
+  discussion_tokens: number;
+  workflow_tokens: number;
   by_provider: ProviderUsage[];
   by_project: ProjectUsage[];
+  top_discussions: UsageEntry[];
+  top_workflows: UsageEntry[];
   daily_history: DailyUsage[];
+}
+
+export interface UsageEntry {
+  id: string;
+  name: string;
+  tokens_used: number;
+  cost_usd: number;
 }
 
 export interface ProviderUsage {
@@ -536,13 +548,18 @@ export interface ProjectUsage {
   project_id: string;
   project_name: string;
   tokens_used: number;
+  cost_usd: number;
 }
 
 export interface DailyUsage {
   date: string;
+  tokens: number;
+  cost_usd: number;
   anthropic: number;
   openai: number;
+  google: number;
   mistral: number;
+  amazon: number;
 }
 
 export interface AgentUsageSummary {

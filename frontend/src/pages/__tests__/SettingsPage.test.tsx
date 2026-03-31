@@ -218,11 +218,14 @@ describe('SettingsPage', () => {
     expect(body).toContain('Patterns à ignorer');
   });
 
-  it('renders agent token usage when agents are detected', async () => {
+  it('renders the Usage section in settings', async () => {
     await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
     const body = document.body.textContent!;
-    expect(body).toContain('Estimation tokens');
-    expect(body).toContain('5,000 tok');
+    expect(body).toContain('Usage');
+    // Filter buttons should be present
+    expect(body).toContain('Tout');
+    expect(body).toContain('Disc.');
+    expect(body).toContain('Wf.');
   });
 
   it('renders the auto-detect button for API keys', async () => {
@@ -257,10 +260,11 @@ describe('SettingsPage', () => {
     expect(body).not.toContain('Default profile per project');
   });
 
-  it('shows usage dashboard link for Claude Code agent', async () => {
+  it('renders Usage nav button in settings navigation', async () => {
     await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
-    const links = document.querySelectorAll('a[href="https://claude.ai/settings/usage"]');
-    expect(links.length).toBeGreaterThanOrEqual(1);
+    const navButtons = document.querySelectorAll('.set-nav-btn');
+    const labels = Array.from(navButtons).map(b => b.textContent);
+    expect(labels).toContain('Usage');
   });
 
   it('shows add key form when clicking Ajouter une cle', async () => {
