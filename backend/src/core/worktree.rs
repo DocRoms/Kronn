@@ -24,6 +24,8 @@ fn fix_worktree_paths(repo_path: &Path, worktree_path: &Path) {
     // Worktree is always at <repo>/.kronn/worktrees/<name>, so relative paths are stable.
 
     // 1. Fix <worktree>/.git — point to ../../.git/worktrees/<name>
+    //    Use forward slashes (POSIX) because git always uses forward slashes in gitdir files,
+    //    even on Windows (git normalizes internally).
     let dot_git = worktree_path.join(".git");
     if dot_git.exists() {
         let content = format!("gitdir: ../../.git/worktrees/{}", wt_name);

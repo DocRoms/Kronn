@@ -33,17 +33,18 @@ describe('constants', () => {
   });
 
   describe('ALL_AGENT_TYPES', () => {
-    it('contains the 5 real agent types — Custom is intentionally excluded', () => {
+    it('contains the 6 real agent types — Custom is intentionally excluded', () => {
       // ALL_AGENT_TYPES lists only the concrete, installable agent types.
-      // AgentType (from generated.ts) also includes "Custom" (a 6th variant)
+      // AgentType (from generated.ts) also includes "Custom" (a 7th variant)
       // which is a generic escape-hatch type, not a selectable agent in the UI.
-      // Therefore ALL_AGENT_TYPES has 5 entries and Custom is excluded on purpose.
-      expect(ALL_AGENT_TYPES).toHaveLength(5);
+      // Therefore ALL_AGENT_TYPES has 6 entries and Custom is excluded on purpose.
+      expect(ALL_AGENT_TYPES).toHaveLength(6);
       expect(ALL_AGENT_TYPES).toContain('ClaudeCode');
       expect(ALL_AGENT_TYPES).toContain('Codex');
       expect(ALL_AGENT_TYPES).toContain('Vibe');
       expect(ALL_AGENT_TYPES).toContain('GeminiCli');
       expect(ALL_AGENT_TYPES).toContain('Kiro');
+      expect(ALL_AGENT_TYPES).toContain('CopilotCli');
       expect(ALL_AGENT_TYPES).not.toContain('Custom');
     });
   });

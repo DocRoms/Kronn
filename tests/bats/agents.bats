@@ -114,18 +114,25 @@ setup() {
     assert_output "2"
 }
 
-@test "_count_detected: returns 4 when all agents detected" {
-    _AGENT_PATHS=("/usr/bin/claude" "/usr/bin/codex" "/usr/bin/vibe" "/usr/bin/gemini")
+@test "_count_detected: returns 4 when original four agents detected" {
+    _AGENT_PATHS=("/usr/bin/claude" "/usr/bin/codex" "/usr/bin/vibe" "/usr/bin/gemini" "" "")
     run _count_detected
     assert_success
     assert_output "4"
 }
 
 @test "_count_detected: returns 5 when all agents including kiro detected" {
-    _AGENT_PATHS=("/usr/bin/claude" "/usr/bin/codex" "/usr/bin/vibe" "/usr/bin/gemini" "/usr/bin/kiro-cli")
+    _AGENT_PATHS=("/usr/bin/claude" "/usr/bin/codex" "/usr/bin/vibe" "/usr/bin/gemini" "/usr/bin/kiro-cli" "")
     run _count_detected
     assert_success
     assert_output "5"
+}
+
+@test "_count_detected: returns 6 when all agents including copilot detected" {
+    _AGENT_PATHS=("/usr/bin/claude" "/usr/bin/codex" "/usr/bin/vibe" "/usr/bin/gemini" "/usr/bin/kiro-cli" "/usr/bin/copilot")
+    run _count_detected
+    assert_success
+    assert_output "6"
 }
 
 # ─── Kiro agent support ─────────────────────────────────────────────────────
@@ -156,6 +163,36 @@ setup() {
     local idx
     idx=$(_agent_idx "kiro-cli")
     [ "${_AGENT_NODE_MINS[$idx]}" -eq 0 ]
+}
+
+# ─── GitHub Copilot agent support ──────────────────────────────────────────
+
+@test "_agent_idx: copilot is index 5" {
+    run _agent_idx "copilot"
+    assert_success
+    assert_output "5"
+}
+
+@test "_AGENT_NAMES contains copilot" {
+    [[ " ${_AGENT_NAMES[*]} " == *" copilot "* ]]
+}
+
+@test "_AGENT_LABELS: copilot label contains GitHub" {
+    local idx
+    idx=$(_agent_idx "copilot")
+    [[ "${_AGENT_LABELS[$idx]}" == *"GitHub"* ]]
+}
+
+@test "_AGENT_PKGS: copilot package is npm-based" {
+    local idx
+    idx=$(_agent_idx "copilot")
+    [[ "${_AGENT_PKGS[$idx]}" == "npm:"* ]]
+}
+
+@test "_AGENT_NODE_MINS: copilot requires Node.js >= 18" {
+    local idx
+    idx=$(_agent_idx "copilot")
+    [ "${_AGENT_NODE_MINS[$idx]}" -eq 18 ]
 }
 
 # ─── _format_agent_line ──────────────────────────────────────────────────────

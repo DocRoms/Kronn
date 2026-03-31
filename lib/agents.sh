@@ -3,17 +3,17 @@
 # Compatible Bash 3.2+ (macOS default)
 
 # Parallel arrays instead of associative arrays (bash 3 compat)
-# Index: 0=claude, 1=codex, 2=vibe, 3=gemini, 4=kiro-cli
-_AGENT_NAMES=(claude codex vibe gemini kiro-cli)
-_AGENT_ORIGINS=(US US EU US US)
-_AGENT_PKGS=("npm:@anthropic-ai/claude-code" "npm:@openai/codex" "pypi:mistral-vibe" "npm:@google/gemini-cli" "curl:kiro-cli")
-_AGENT_LABELS=("Claude Code (Anthropic)" "Codex (OpenAI)" "Vibe (Mistral)" "Gemini CLI (Google)" "Kiro (Amazon)")
-_AGENT_NODE_MINS=(18 18 0 18 0)
+# Index: 0=claude, 1=codex, 2=vibe, 3=gemini, 4=kiro-cli, 5=copilot
+_AGENT_NAMES=(claude codex vibe gemini kiro-cli copilot)
+_AGENT_ORIGINS=(US US EU US US US)
+_AGENT_PKGS=("npm:@anthropic-ai/claude-code" "npm:@openai/codex" "pypi:mistral-vibe" "npm:@google/gemini-cli" "curl:kiro-cli" "npm:@github/copilot")
+_AGENT_LABELS=("Claude Code (Anthropic)" "Codex (OpenAI)" "Vibe (Mistral)" "Gemini CLI (Google)" "Kiro (Amazon)" "Copilot (GitHub)")
+_AGENT_NODE_MINS=(18 18 0 18 0 18)
 
 # Detection results (populated by detect_agents)
-_AGENT_PATHS=("" "" "" "" "")
-_AGENT_VERSIONS=("" "" "" "" "")
-_AGENT_LATESTS=("" "" "" "" "")
+_AGENT_PATHS=("" "" "" "" "" "")
+_AGENT_VERSIONS=("" "" "" "" "" "")
+_AGENT_LATESTS=("" "" "" "" "" "")
 
 # ─── Index lookup ─────────────────────────────────────────────────────────────
 
@@ -73,9 +73,9 @@ _get_latest_version() {
 # ─── Detection ───────────────────────────────────────────────────────────────
 
 detect_agents() {
-    _AGENT_PATHS=("" "" "" "" "")
-    _AGENT_VERSIONS=("" "" "" "" "")
-    _AGENT_LATESTS=("" "" "" "" "")
+    _AGENT_PATHS=("" "" "" "" "" "")
+    _AGENT_VERSIONS=("" "" "" "" "" "")
+    _AGENT_LATESTS=("" "" "" "" "" "")
 
     local i cmd version
     for i in "${!_AGENT_NAMES[@]}"; do
@@ -240,6 +240,16 @@ install_agent() {
             fi
             curl -fsSL https://cli.kiro.dev/install | bash
             ;;
+        copilot)
+            step "Installing GitHub Copilot"
+            if ! command -v npm >/dev/null 2>&1; then
+                fail "npm required to install GitHub Copilot"
+                printf "  ${DIM}https://nodejs.org${RESET}\n"
+                return 1
+            fi
+            _check_node_version copilot || return 1
+            _npm_install_global @github/copilot
+            ;;
         *)
             fail "Unknown agent: $agent"
             return 1
@@ -355,6 +365,7 @@ manage_agents() {
                 local extra=""
                 [[ "$a" == "claude" ]] && extra=" ${DIM}— recommended${RESET}"
                 [[ "$a" == "vibe" ]] && extra=" ${DIM}— sovereign${RESET}"
+                [[ "$a" == "copilot" ]] && extra=" ${DIM}— GitHub native${RESET}"
                 options+=("${GREEN}+${RESET}  ${label} ${CYAN}[${origin}]${RESET}${extra} ${DIM}— install${RESET}")
                 actions+=("install:$a")
             fi

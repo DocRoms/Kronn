@@ -57,6 +57,8 @@ import type {
   DriftCheckResponse,
   AddContactResult,
   WorkflowSuggestion,
+  ContextFile,
+  UploadContextFileResponse,
 } from '../types/generated';
 import type { DiscoverKeysResponse } from '../types/extensions';
 
@@ -267,7 +269,7 @@ export const config = {
   exportData: () => api<DbExport>('GET', '/config/export'),
   importData: (data: DbExport) => api<void>('POST', '/config/import', data),
   getServerConfig: () => api<ServerConfigPublic>('GET', '/config/server'),
-  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; pseudo?: string; avatar_email?: string }) => api<void>('POST', '/config/server', req),
+  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string }) => api<void>('POST', '/config/server', req),
   regenerateAuthToken: () => api<string>('POST', '/config/auth-token/regenerate'),
 };
 
@@ -515,6 +517,22 @@ export const discussions = {
   exec: (id: string, command: string) => api<{ stdout: string; stderr: string; exit_code: number }>('POST', `/discussions/${id}/exec`, { command }),
   worktreeUnlock: (id: string) => api<string>('POST', `/discussions/${id}/worktree-unlock`, {}),
   worktreeLock: (id: string) => api<string>('POST', `/discussions/${id}/worktree-lock`, {}),
+
+  // ── Context Files ──
+  listContextFiles: (id: string) => api<ContextFile[]>('GET', `/discussions/${id}/context-files`),
+  deleteContextFile: (id: string, fileId: string) => api<void>('DELETE', `/discussions/${id}/context-files/${fileId}`),
+  uploadContextFile: async (id: string, file: File): Promise<UploadContextFileResponse> => {
+    const form = new FormData();
+    form.append('file', file);
+    const res = await fetch(`${_apiBase}/api/discussions/${id}/context-files`, {
+      method: 'POST',
+      headers: { ...authHeaders() },
+      body: form,
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error ?? 'Upload failed');
+    return json.data;
+  },
 
   /** Delete trailing agent/system messages (for retry/edit). */
   deleteLastAgentMessages: (id: string) => api<void>('DELETE', `/discussions/${id}/messages/last`),

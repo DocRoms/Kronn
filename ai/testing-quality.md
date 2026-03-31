@@ -3,7 +3,7 @@
 ## Rules
 
 - **Quality gate is non-negotiable**: code must compile and build after any change.
-- **All tests must pass**: `npm run test` (frontend, 333+ tests), `cargo test` (backend), `make test-shell` (186 bats tests).
+- **All tests must pass**: `npm run test` (frontend, 350+ tests), `cargo test` (backend, 980+ tests), `make test-shell` (192 bats tests).
 - **0 ESLint errors**: `npm run lint` must report 0 errors (warnings are tolerated for existing patterns).
 
 ## Build checks
@@ -30,12 +30,12 @@
 - **Setup file**: `frontend/src/test/setup.ts`
 - **Node requirement**: >= 23.6.0 (native TS support, latest tooling)
 
-### Test files (23 suites, 333+ tests)
+### Test files (24 suites, 350+ tests)
 
 | File | Tests | Covers |
 |------|-------|--------|
 | `src/lib/__tests__/i18n.test.ts` | 14 | Translations FR/EN/ES, interpolation, fallbacks, locale completeness |
-| `src/lib/__tests__/constants.test.ts` | 9 | AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES (5 agents incl. Kiro), agentColor() |
+| `src/lib/__tests__/constants.test.ts` | 9 | AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES (6 agents incl. CopilotCli), agentColor() |
 | `src/lib/__tests__/api.test.ts` | 11 | GET/POST/DELETE requests, error handling (API error, 502 HTML, null error), API structure |
 | `src/lib/__tests__/types.test.ts` | 10 | Generated types structure, union exhaustiveness, discriminated unions |
 | `src/lib/__tests__/I18nContext.test.tsx` | 4 | I18nProvider, locale switching, persistence |
@@ -46,7 +46,7 @@
 | `src/__tests__/ErrorBoundary.test.tsx` | 2 | Error catch + display, normal render |
 | `src/pages/__tests__/WorkflowsPage.test.tsx` | 3 | Render with undefined/restricted/full agentAccess |
 | `src/pages/__tests__/DiscussionsPage.test.tsx` | 26 | Render, prefill, sidebar (message_count, titles, archives, org groups, collapse, search filter), streaming (thinking loader, tab restore, SSE abort, refetch), TTS (toggle, persist, play, speech cancel), discussion creation, copy button, response time, overflow-wrap, agent switch (button, dropdown) |
-| `src/pages/__tests__/SettingsPage.test.tsx` | 3 | Render with minimal props, agentAccess, agents detected |
+| `src/pages/__tests__/SettingsPage.test.tsx` | 13 | Render, agents config, scan sections, API key management, model tiers, Usage section nav + filter buttons |
 | `src/pages/__tests__/McpPage.test.tsx` | 3 | Render with minimal props, configs, agents |
 
 ### Coverage status
@@ -66,11 +66,11 @@
 - **Test runner**: `make test-shell` or `bash tests/bats/run.sh`
 - **Helper**: `tests/bats/test_helper.bash` — `_load_lib()` function, pre-initialized color variables
 
-### Shell test files (8 suites, 186 tests)
+### Shell test files (8 suites, 192 tests)
 
 | File | Tests | Covers |
 |------|-------|--------|
-| `tests/bats/agents.bats` | 37 | `_parse_version`, `_agent_idx` (incl. kiro-cli), `_count_detected`, `_format_agent_line`, `_check_node_version`, Kiro metadata |
+| `tests/bats/agents.bats` | 42 | `_parse_version`, `_agent_idx` (6 agents incl. kiro-cli + copilot), `_count_detected` (0-6), `_format_agent_line`, `_check_node_version`, Kiro + Copilot metadata |
 | `tests/bats/mcps.bats` | 19 | `secret_get` (TOML parsing), `init_secrets` (creation, perms, idempotence), `secrets_configured` |
 | `tests/bats/tron.bats` | 32 | `_tron_format_elapsed`, `_tron_pad`, `tron_init/cleanup`, `tron_progress`, `tron_set_step/log/agent`, `tron_signal_done`, progress file in target dir, `_tron_write_progress_file` |
 | `tests/bats/ui.bats` | 28 | `info/success/warn/fail/step/banner`, color variables, return codes, empty messages, special characters |
@@ -83,7 +83,7 @@
 
 - **Page components**: Dashboard.tsx (~650 lines), SetupWizard.tsx — basic render tests exist for 4 sub-pages but deeper interaction/state tests still needed.
 - **SSE streaming logic** in api.ts — requires mocking ReadableStream, complex setup.
-- **Backend Rust**: `discussions_test.rs` (18 tests: CRUD, archive, title editing, message management, AgentType round-trip) + `runner_test.rs` (workspace/template tests). Run with `cargo test` inside Docker.
+- **Backend Rust**: 940+ tests across all modules. Key test suites: `discussions_test.rs` (21 tests: CRUD, archive, title editing, message management, AgentType round-trip for all 6 agents, DB string stability), `runner_test.rs` (agent commands, model tiers, token parsing, stream parsing for all agents), `pricing.rs` (cost estimation for all 6 providers), `key_discovery.rs` (cross-platform HOME resolution: KRONN_HOST_HOME, HOME, USERPROFILE), `mod.rs` (agent detection with .cmd/.exe extensions, WSL_DISTRO_NAME detection), `env.rs` (is_docker, host_os_label across platforms), `scanner.rs` (shellexpand ~/ and ~\, UNC paths). Run with `cargo test`.
 - **Shell interactive functions**: menu systems, agent installation/uninstall, terminal animation (require terminal I/O, tested indirectly via non-interactive helpers).
 
 ## ESLint configuration

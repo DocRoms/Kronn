@@ -28,15 +28,18 @@ Three Docker services behind nginx gateway:
 - `AbortController` + `signal` for cancellation. `finished` boolean guard prevents double `onDone`.
 
 ### Agent execution
-- `agents/runner.rs` spawns CLI processes (`claude`, `codex`, `vibe`, `gemini`, `kiro-cli`) with `--print` / non-interactive flags.
-- **Two output modes**: `Text` (line-by-line stdout, default for Codex/Vibe/Gemini) and `StreamJson` (Claude Code with `--output-format stream-json --verbose --include-partial-messages`). In StreamJson mode, each line is a JSON event parsed by `parse_claude_stream_line()` — text deltas from `stream_event` events, token usage from `result` event.
+- `agents/runner.rs` spawns CLI processes (`claude`, `codex`, `vibe`, `gemini`, `kiro-cli`, `copilot`) with `--print` / non-interactive flags.
+- **Two output modes**: `Text` (line-by-line stdout, default for Codex/Vibe/Gemini/Copilot) and `StreamJson` (Claude Code with `--output-format stream-json --verbose --include-partial-messages`). In StreamJson mode, each line is a JSON event parsed by `parse_claude_stream_line()` — text deltas from `stream_event` events, token usage from `result` event.
 - Agents run in the project's directory context (or temp dir for global discussions).
 - **Runtime probe**: if no local binary is found, `probe_runtime()` tests npx availability (15s timeout, 5min cache). `AgentDetection.runtime_available` distinguishes "installed locally" from "runnable via npx". Frontend uses `isUsable(agent) = (installed || runtime_available) && enabled`.
-- MCPs work with all 5 agents: Claude Code (`.mcp.json`), Kiro (`.kiro/settings/mcp.json`), Gemini CLI (`.gemini/settings.json`), Vibe (`.vibe/config.toml`), Codex (`~/.codex/config.toml`). Disk sync writes all formats simultaneously. Claude/Kiro/Gemini use identical JSON format (`mcpServers`). Kiro auth via AWS Builder ID.
+- MCPs work with all 6 agents: Claude Code (`.mcp.json`), Kiro (`.kiro/settings/mcp.json`), Gemini CLI (`.gemini/settings.json`), Vibe (`.vibe/config.toml`), Codex (`~/.codex/config.toml`), Copilot (prompt-injected). Disk sync writes all formats simultaneously. Claude/Kiro/Gemini use identical JSON format (`mcpServers`). Kiro auth via AWS Builder ID.
 - **Prompt injection order**: profiles → skills → directives → MCP context. All injected via `extra_context` parameter to `agent_command()`.
-- `AgentConfig` has `full_access: bool` field (persisted in config.toml). When enabled, runner adds `--dangerously-skip-permissions` (Claude), `--full-auto` (Codex), `--trust-all-tools` (Kiro).
+- `AgentConfig` has `full_access: bool` field (persisted in config.toml). When enabled, runner adds `--dangerously-skip-permissions` (Claude), `--full-auto` (Codex), `--trust-all-tools` (Kiro), `--allow-all-tools` (Copilot).
 - API: `GET/POST /api/config/agent-access` to read/set the full_access flag. UI toggle in Config > Agents card.
-- **Agent lifecycle**: agents can be uninstalled (`POST /api/agents/uninstall`) or toggled on/off (`POST /api/agents/toggle`). Disabled agents tracked in `AppConfig.disabled_agents: Vec<AgentType>`. `AgentDetection` includes `enabled: bool`. Uninstall uses platform-specific commands (npm for Claude/Codex, uv/pipx/pip3 for Vibe).
+- **Agent lifecycle**: agents can be uninstalled (`POST /api/agents/uninstall`) or toggled on/off (`POST /api/agents/toggle`). Disabled agents tracked in `AppConfig.disabled_agents: Vec<AgentType>`. `AgentDetection` includes `enabled: bool`. Uninstall uses platform-specific commands (npm for Claude/Codex/Copilot, uv/pipx/pip3 for Vibe).
+- **Cross-platform HOME resolution**: in Docker, `KRONN_HOST_HOME` overrides `HOME` for all spawned agents so they find their auth config (`~/.claude/`, `~/.codex/`, `~/.copilot/`, etc.). On native (Tauri desktop), HOME is already correct. `COPILOT_HOME` is also set explicitly for Copilot CLI.
+- **Windows binary detection**: `find_binary()` matches `.cmd`, `.exe`, `.ps1` extensions in addition to exact names (npm installs create `.cmd` wrappers on Windows).
+- **WSL detection**: uses `WSL_DISTRO_NAME` env var first (most reliable), then `/proc/version` fallback.
 - **File permissions (fixed)**: agents run as `root` inside Docker. `fix_ownership()` called after all agent executions (discussions, workflows, AI audit) to chown files back to `KRONN_HOST_UID:KRONN_HOST_GID` on host-mounted volumes.
 - **Path resolution**: `resolve_host_path` uses Docker mount priority (prefers /host-home over /home/priol).
 
@@ -296,6 +299,7 @@ NoTemplate → TemplateInstalled → Audited → Validated
 - Claude Code: `#D4714E` (terracotta)
 - Codex: `#10a37f` (OpenAI green)
 - Vibe: `#FF7000` (Mistral orange)
+- GitHub Copilot: `#238636` (GitHub green)
 - Gemini CLI: `#4285f4` (Google blue)
 - Kiro: `#7B61FF` (Kiro purple)
 

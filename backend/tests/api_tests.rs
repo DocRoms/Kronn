@@ -157,6 +157,125 @@ async fn stats_agent_usage_empty_db() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Context files endpoint tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Helper to create a discussion via the API, returns the discussion ID.
+async fn create_test_discussion(state: &kronn::AppState) -> String {
+    let disc_id = uuid::Uuid::new_v4().to_string();
+    state.db.with_conn({
+        let id = disc_id.clone();
+        move |conn| {
+            conn.execute(
+                "INSERT INTO discussions (id, title, agent, language, participants_json, created_at, updated_at)
+                 VALUES (?1, 'Test', 'ClaudeCode', 'en', '[]', datetime('now'), datetime('now'))",
+                rusqlite::params![id],
+            )?;
+            Ok(())
+        }
+    }).await.unwrap();
+    disc_id
+}
+
+#[tokio::test]
+async fn context_files_list_empty() {
+    let state = test_state();
+    let disc_id = create_test_discussion(&state).await;
+    let app = kronn::build_router(state);
+
+    let (status, json) = get_json(app, &format!("/api/discussions/{}/context-files", disc_id)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+    assert!(json["data"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn context_files_upload_text_file() {
+    let state = test_state();
+    let disc_id = create_test_discussion(&state).await;
+    let app = kronn::build_router(state);
+
+    // Build multipart body
+    let boundary = "----TestBoundary";
+    let body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"test.txt\"\r\nContent-Type: text/plain\r\n\r\nHello world\r\n--{boundary}--\r\n"
+    );
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/discussions/{}/context-files", disc_id))
+        .header("content-type", format!("multipart/form-data; boundary={}", boundary))
+        .body(Body::from(body))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+    assert_eq!(json["data"]["file"]["filename"], "test.txt");
+    assert_eq!(json["data"]["file"]["extracted_size"], 11); // "Hello world".len()
+    assert!(json["data"]["file"]["disk_path"].is_null());
+}
+
+#[tokio::test]
+async fn context_files_upload_unsupported_format() {
+    let state = test_state();
+    let disc_id = create_test_discussion(&state).await;
+    let app = kronn::build_router(state);
+
+    let boundary = "----TestBoundary";
+    let body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"binary.exe\"\r\nContent-Type: application/octet-stream\r\n\r\n\x00\x01\x02\r\n--{boundary}--\r\n"
+    );
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/discussions/{}/context-files", disc_id))
+        .header("content-type", format!("multipart/form-data; boundary={}", boundary))
+        .body(Body::from(body))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["success"], false);
+    assert!(json["error"].as_str().unwrap().contains("Unsupported"));
+}
+
+#[tokio::test]
+async fn context_files_delete() {
+    let state = test_state();
+    let disc_id = create_test_discussion(&state).await;
+
+    // Insert a context file directly via DB
+    state.db.with_conn({
+        let did = disc_id.clone();
+        move |conn| {
+            kronn::db::discussions::insert_context_file(conn, "cf-del", &did, "to_delete.txt", "text/plain", 10, "Test", None)
+                .map_err(|e| anyhow::anyhow!(e))
+        }
+    }).await.unwrap();
+
+    let app = kronn::build_router(state);
+    let (status, json) = delete_json(app, &format!("/api/discussions/{}/context-files/cf-del", disc_id)).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+}
+
+#[tokio::test]
+async fn context_files_delete_nonexistent_returns_error() {
+    let state = test_state();
+    let disc_id = create_test_discussion(&state).await;
+    let app = kronn::build_router(state);
+
+    let (_, json) = delete_json(app, &format!("/api/discussions/{}/context-files/nonexistent", disc_id)).await;
+    assert_eq!(json["success"], false);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Config endpoint tests
 // ═══════════════════════════════════════════════════════════════════════════════
 

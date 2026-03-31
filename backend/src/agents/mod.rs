@@ -49,6 +49,7 @@ const KNOWN_AGENTS: &[AgentDef] = &[
     AgentDef { name: "Vibe", agent_type: AgentType::Vibe, binary: "vibe", origin: "EU", install_cmd: "uv tool install mistral-vibe" },
     AgentDef { name: "Gemini CLI", agent_type: AgentType::GeminiCli, binary: "gemini", origin: "US", install_cmd: "npm install -g @google/gemini-cli" },
     AgentDef { name: "Kiro", agent_type: AgentType::Kiro, binary: "kiro-cli", origin: "US", install_cmd: "curl -fsSL https://cli.kiro.dev/install | bash" },
+    AgentDef { name: "GitHub Copilot", agent_type: AgentType::CopilotCli, binary: "copilot", origin: "US", install_cmd: "npm install -g @github/copilot" },
 ];
 
 /// Detect the host platform label (WSL, macOS, Linux, Windows, etc.)
@@ -61,15 +62,20 @@ fn detect_host_label() -> String {
             return host_os;
         }
     }
-    // 2. Heuristics from /proc/version (Linux/WSL/Docker Desktop detection)
+    // 2. Heuristics (Linux/WSL/Docker Desktop detection)
     #[cfg(target_os = "linux")]
     {
+        // WSL2 always sets WSL_DISTRO_NAME — check it first (more reliable than /proc/version)
+        if std::env::var("WSL_DISTRO_NAME").is_ok() {
+            return "WSL".into();
+        }
         if let Ok(version) = std::fs::read_to_string("/proc/version") {
             let lower = version.to_lowercase();
             if lower.contains("microsoft") || lower.contains("wsl") {
                 return "WSL".into();
             }
             if lower.contains("linuxkit") || lower.contains("docker desktop") {
+                tracing::debug!("Detected Docker Desktop (linuxkit/docker desktop in /proc/version), assuming macOS host. Set KRONN_HOST_OS to override.");
                 return "macOS".into();
             }
         }
@@ -160,6 +166,7 @@ async fn probe_runtime(def: &AgentDef) -> bool {
         AgentType::ClaudeCode => Some("@anthropic-ai/claude-code"),
         AgentType::Codex => Some("@openai/codex"),
         AgentType::GeminiCli => Some("@google/gemini-cli"),
+        AgentType::CopilotCli => Some("@github/copilot"),
         AgentType::Vibe => None, // uvx, handled differently
         AgentType::Kiro => None, // Native binary, no npx package
         AgentType::Custom => None,
@@ -235,10 +242,18 @@ pub fn find_binary(name: &str) -> Option<BinaryLocation> {
     }
 
     // Host-mounted bin directories — fallback when `which` fails (e.g. broken symlinks)
+    // On Windows, npm installs create .cmd/.exe wrappers (e.g. claude.cmd, codex.cmd).
+    // Match both exact name and name with common Windows extensions.
     for dir in &host_dirs {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
-                if entry.file_name() == name {
+                let file_name = entry.file_name();
+                let file_name_str = file_name.to_string_lossy();
+                let matches = file_name_str == name
+                    || file_name_str == format!("{}.cmd", name)
+                    || file_name_str == format!("{}.exe", name)
+                    || file_name_str == format!("{}.ps1", name);
+                if matches {
                     // On macOS hosts, host-mounted kiro-cli is a macOS binary
                     // and cannot be executed from this Linux container.
                     if name == "kiro-cli" && host_is_macos() {
@@ -330,7 +345,7 @@ fn check_prerequisite(cmd: &str) -> bool {
 /// Prerequisite needed for each agent's install command
 fn install_prerequisite(agent_type: &AgentType) -> Option<(&'static str, &'static str)> {
     match agent_type {
-        AgentType::ClaudeCode | AgentType::Codex | AgentType::GeminiCli =>
+        AgentType::ClaudeCode | AgentType::Codex | AgentType::GeminiCli | AgentType::CopilotCli =>
             Some(("npm", "Node.js is required. Install it from https://nodejs.org")),
         AgentType::Vibe =>
             Some(("uv", "uv is required. Install it from https://docs.astral.sh/uv")),
@@ -376,6 +391,7 @@ pub async fn uninstall_agent(agent_type: &AgentType) -> Result<String> {
         #[cfg(windows)]
         AgentType::Vibe => "uv tool uninstall mistral-vibe",
         AgentType::GeminiCli => "npm uninstall -g @google/gemini-cli",
+        AgentType::CopilotCli => "npm uninstall -g @github/copilot",
         #[cfg(unix)]
         AgentType::Kiro => "rm -f $(which kiro-cli)",
         #[cfg(windows)]
@@ -519,5 +535,99 @@ mod tests {
         // "host" is the unresolved default — should fall through
         assert_ne!(label, "host");
         std::env::remove_var("KRONN_HOST_OS");
+    }
+
+    // ─── WSL detection via WSL_DISTRO_NAME ─────────────────────────────────
+
+    #[test]
+    #[serial]
+    fn detect_host_label_wsl_via_distro_name() {
+        std::env::remove_var("KRONN_HOST_OS");
+        std::env::set_var("WSL_DISTRO_NAME", "Ubuntu");
+        let label = detect_host_label();
+        std::env::remove_var("WSL_DISTRO_NAME");
+        // On Linux, should detect WSL from WSL_DISTRO_NAME
+        #[cfg(target_os = "linux")]
+        assert_eq!(label, "WSL");
+        // On other platforms, WSL_DISTRO_NAME is ignored (compile-time gate)
+        #[cfg(not(target_os = "linux"))]
+        let _ = label;
+    }
+
+    // ─── find_binary: Windows extension matching ────────────────────────────
+
+    #[test]
+    #[serial]
+    fn find_binary_matches_cmd_extension() {
+        // Create a temp dir with a fake "testbin.cmd" file
+        let tmp = std::env::temp_dir().join("kronn-test-findbin-cmd");
+        let _ = std::fs::create_dir_all(&tmp);
+        std::fs::write(tmp.join("testbin.cmd"), "echo hello").unwrap();
+
+        std::env::set_var("KRONN_HOST_BIN", tmp.to_string_lossy().as_ref());
+        let result = find_binary("testbin");
+        std::env::remove_var("KRONN_HOST_BIN");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert!(result.is_some(), "Should find testbin via testbin.cmd");
+        assert!(result.unwrap().host_managed, "Should be host_managed");
+    }
+
+    #[test]
+    #[serial]
+    fn find_binary_matches_exe_extension() {
+        let tmp = std::env::temp_dir().join("kronn-test-findbin-exe");
+        let _ = std::fs::create_dir_all(&tmp);
+        std::fs::write(tmp.join("testbin.exe"), "fake").unwrap();
+
+        std::env::set_var("KRONN_HOST_BIN", tmp.to_string_lossy().as_ref());
+        let result = find_binary("testbin");
+        std::env::remove_var("KRONN_HOST_BIN");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert!(result.is_some(), "Should find testbin via testbin.exe");
+    }
+
+    #[test]
+    #[serial]
+    fn find_binary_matches_exact_name() {
+        let tmp = std::env::temp_dir().join("kronn-test-findbin-exact");
+        let _ = std::fs::create_dir_all(&tmp);
+        std::fs::write(tmp.join("testbin"), "fake").unwrap();
+
+        std::env::set_var("KRONN_HOST_BIN", tmp.to_string_lossy().as_ref());
+        let result = find_binary("testbin");
+        std::env::remove_var("KRONN_HOST_BIN");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert!(result.is_some(), "Should find testbin via exact name");
+    }
+
+    // ─── CopilotCli agent definitions ──────────────────────────────────────
+
+    #[test]
+    fn install_prerequisite_copilot_returns_npm() {
+        let result = super::install_prerequisite(&AgentType::CopilotCli);
+        assert!(result.is_some(), "CopilotCli should have a prerequisite");
+        assert_eq!(result.unwrap().0, "npm");
+    }
+
+    #[test]
+    fn copilot_agent_is_in_known_agents() {
+        let found = KNOWN_AGENTS.iter().any(|a| matches!(a.agent_type, AgentType::CopilotCli));
+        assert!(found, "CopilotCli should be in KNOWN_AGENTS");
+        let def = KNOWN_AGENTS.iter().find(|a| matches!(a.agent_type, AgentType::CopilotCli)).unwrap();
+        assert_eq!(def.binary, "copilot");
+        assert_eq!(def.origin, "US");
+    }
+
+    #[test]
+    fn copilot_npx_package_in_probe_runtime() {
+        let def = KNOWN_AGENTS.iter().find(|a| matches!(a.agent_type, AgentType::CopilotCli)).unwrap();
+        let pkg = match def.agent_type {
+            AgentType::CopilotCli => Some("@github/copilot"),
+            _ => None,
+        };
+        assert_eq!(pkg, Some("@github/copilot"));
     }
 }

@@ -8,7 +8,7 @@ import { ChatHeader } from '../components/ChatHeader';
 import { DiscussionSidebar } from '../components/DiscussionSidebar';
 import { NewDiscussionForm } from '../components/NewDiscussionForm';
 import type { NewDiscConfig } from '../components/NewDiscussionForm';
-import type { Project, AgentDetection, Discussion, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage } from '../types/generated';
+import type { Project, AgentDetection, Discussion, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile } from '../types/generated';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useT } from '../lib/I18nContext';
 import { AGENT_LABELS, agentColor, isAgentRestricted as isAgentRestrictedUtil, hasAgentFullAccess, getProjectGroup, isUsable } from '../lib/constants';
@@ -134,6 +134,8 @@ export function DiscussionsPage({
   const [availableDirectives, setAvailableDirectives] = useState<Directive[]>([]);
   const [expandedSummaryMsgId, setExpandedSummaryMsgId] = useState<string | null>(null);
   const [worktreeError, setWorktreeError] = useState<string | null>(null);
+  const [contextFilesMap, setContextFilesMap] = useState<Record<string, ContextFile[]>>({});
+  const [uploadingFiles, setUploadingFiles] = useState(false);
   const [contactsList, setContactsList] = useState<Contact[]>([]);
   const [contactsOnline, setContactsOnline] = useState<Record<string, boolean>>({});
   const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
@@ -518,6 +520,21 @@ export function DiscussionsPage({
     setActiveDiscussionId(disc.id);
     refetchDiscussions();
 
+    // Upload pending context files (from NewDiscussionForm) before running agent
+    if (config.pendingFiles?.length) {
+      for (const file of config.pendingFiles) {
+        try {
+          const resp = await discussionsApi.uploadContextFile(disc.id, file);
+          setContextFilesMap(prev => ({
+            ...prev,
+            [disc.id]: [...(prev[disc.id] ?? []), resp.file],
+          }));
+        } catch (e) {
+          toast(`${file.name}: ${String(e)}`, 'error');
+        }
+      }
+    }
+
     const discId = disc.id;
     const controller = new AbortController();
     abortControllers.current[discId] = controller;
@@ -617,6 +634,51 @@ export function DiscussionsPage({
       setWorktreeError(String(err));
     }
   }, [activeDiscussionId, reloadDiscussion, toast, t]);
+
+  // ── Context files ──────────────────────────────────────────────────────────
+  const loadContextFiles = useCallback(async (discId: string) => {
+    try {
+      const files = await discussionsApi.listContextFiles(discId);
+      setContextFilesMap(prev => ({ ...prev, [discId]: files }));
+    } catch { /* ignore */ }
+  }, []);
+
+  // Load context files when a discussion becomes active
+  useEffect(() => {
+    if (activeDiscussionId && !contextFilesMap[activeDiscussionId]) {
+      loadContextFiles(activeDiscussionId);
+    }
+  }, [activeDiscussionId, contextFilesMap, loadContextFiles]);
+
+  const handleUploadFiles = useCallback(async (files: File[]) => {
+    if (!activeDiscussionId) return;
+    setUploadingFiles(true);
+    for (const file of files) {
+      try {
+        const resp = await discussionsApi.uploadContextFile(activeDiscussionId, file);
+        setContextFilesMap(prev => ({
+          ...prev,
+          [activeDiscussionId]: [...(prev[activeDiscussionId] ?? []), resp.file],
+        }));
+      } catch (e) {
+        toast(String(e), 'error');
+      }
+    }
+    setUploadingFiles(false);
+  }, [activeDiscussionId, toast]);
+
+  const handleDeleteContextFile = useCallback(async (fileId: string) => {
+    if (!activeDiscussionId) return;
+    try {
+      await discussionsApi.deleteContextFile(activeDiscussionId, fileId);
+      setContextFilesMap(prev => ({
+        ...prev,
+        [activeDiscussionId]: (prev[activeDiscussionId] ?? []).filter(f => f.id !== fileId),
+      }));
+    } catch (e) {
+      toast(String(e), 'error');
+    }
+  }, [activeDiscussionId, toast]);
 
   const handleRetry = async () => {
     if (!activeDiscussionId || sending) return;
@@ -1212,6 +1274,10 @@ export function DiscussionsPage({
               onWorktreeErrorDismiss={() => setWorktreeError(null)}
               onWorktreeRetry={handleWorktreeRetry}
               isAgentRestricted={isAgentRestricted}
+              contextFiles={contextFilesMap[activeDiscussionId ?? ''] ?? []}
+              onUploadFiles={handleUploadFiles}
+              onDeleteContextFile={handleDeleteContextFile}
+              uploadingFiles={uploadingFiles}
               toast={toast}
               t={t}
             />

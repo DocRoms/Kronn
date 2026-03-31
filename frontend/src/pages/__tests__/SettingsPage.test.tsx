@@ -43,6 +43,7 @@ vi.mock('../../lib/api', () => ({
       gemini_cli: { economy: null, reasoning: null },
       kiro: { economy: null, reasoning: null },
       vibe: { economy: null, reasoning: null },
+      copilot_cli: { economy: null, reasoning: null },
     }),
     setModelTiers: vi.fn().mockResolvedValue(undefined),
     exportData: vi.fn(),
@@ -284,5 +285,33 @@ describe('SettingsPage', () => {
 
     const keyInput = document.querySelector('input[type="password"]') as HTMLInputElement;
     expect(keyInput).toBeTruthy();
+  });
+
+  it('renders Usage section with filter and toggle buttons', async () => {
+    await wrap(<SettingsPage {...defaultProps} />);
+    const body = document.body.textContent!;
+    // Usage section should have toggle buttons
+    expect(body).toContain('Tout');
+    expect(body).toContain('Disc.');
+    expect(body).toContain('Wf.');
+    // Should show empty state when no data
+    expect(body).toContain('Aucune donnée');
+  });
+
+  it('renders bio textarea in Identity section', async () => {
+    await wrap(<SettingsPage {...defaultProps} />);
+    const body = document.body.textContent!;
+    expect(body).toContain('Bio');
+  });
+
+  it('renders CopilotCli agent when detected', async () => {
+    const copilotAgent = {
+      ...sampleAgent,
+      name: 'GitHub Copilot',
+      agent_type: 'CopilotCli' as const,
+    };
+    await wrap(<SettingsPage {...defaultProps} agents={[copilotAgent]} />);
+    const body = document.body.textContent!;
+    expect(body).toContain('GitHub Copilot');
   });
 });

@@ -273,12 +273,14 @@ fn full_access_for_returns_per_agent_setting() {
         gemini_cli: AgentConfig { full_access: true, ..Default::default() },
         kiro: AgentConfig { full_access: false, ..Default::default() },
         vibe: AgentConfig { full_access: true, ..Default::default() },
+        copilot_cli: AgentConfig { full_access: false, ..Default::default() },
         model_tiers: Default::default(),
     };
     assert!(config.full_access_for(&AgentType::ClaudeCode));
     assert!(!config.full_access_for(&AgentType::Codex));
     assert!(config.full_access_for(&AgentType::GeminiCli));
     assert!(config.full_access_for(&AgentType::Vibe));
+    assert!(!config.full_access_for(&AgentType::CopilotCli));
     assert!(!config.full_access_for(&AgentType::Custom));
 }
 

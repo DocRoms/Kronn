@@ -829,4 +829,67 @@ mod tests {
         let line = r#"{"type":"stream_event","event":{"type":"content_block_stop","index":1}}"#;
         assert!(matches!(parse_claude_stream_line(line), StreamJsonEvent::ToolEnd));
     }
+
+    // ─── CopilotCli agent_command ─────────────────────────────────────────────
+
+    #[test]
+    fn copilot_agent_command_basic() {
+        let (bin, npx, args, env_key, _, _) = super::super::agent_command(
+            &AgentType::CopilotCli, "hello", false, "", None,
+        );
+        assert_eq!(bin, "copilot");
+        assert_eq!(npx, Some("@github/copilot"));
+        assert_eq!(env_key, "GH_TOKEN");
+        assert!(args.contains(&"-p".to_string()), "Should have -p flag");
+        assert!(args.contains(&"hello".to_string()), "Should contain prompt");
+        assert!(!args.contains(&"--allow-all-tools".to_string()), "Should not have full_access flag");
+    }
+
+    #[test]
+    fn copilot_agent_command_full_access() {
+        let (_, _, args, _, _, _) = super::super::agent_command(
+            &AgentType::CopilotCli, "hello", true, "", None,
+        );
+        assert!(args.contains(&"--allow-all-tools".to_string()), "Full access should add --allow-all-tools");
+    }
+
+    #[test]
+    fn copilot_agent_command_with_model() {
+        let (_, _, args, _, _, _) = super::super::agent_command(
+            &AgentType::CopilotCli, "hello", false, "", Some("gpt-4o-mini"),
+        );
+        assert!(args.contains(&"--model".to_string()));
+        assert!(args.contains(&"gpt-4o-mini".to_string()));
+    }
+
+    #[test]
+    fn copilot_agent_command_with_mcp_context() {
+        let (_, _, args, _, _, _) = super::super::agent_command(
+            &AgentType::CopilotCli, "hello", false, "MCP context here", None,
+        );
+        // MCP context should be prepended to prompt (no --append-system-prompt for Copilot)
+        let prompt = args.last().unwrap();
+        assert!(prompt.contains("MCP context here"), "Prompt should contain MCP context");
+        assert!(prompt.contains("hello"), "Prompt should contain user prompt");
+    }
+
+    // ─── Cross-platform: model tier resolution ─────────────────────────────
+
+    #[test]
+    fn copilot_model_tiers() {
+        let economy = super::super::resolve_model_flag(&AgentType::CopilotCli, ModelTier::Economy, None);
+        assert_eq!(economy, Some("gpt-4o-mini".into()));
+        let default = super::super::resolve_model_flag(&AgentType::CopilotCli, ModelTier::Default, None);
+        assert_eq!(default, None); // Use Copilot's default
+        let reasoning = super::super::resolve_model_flag(&AgentType::CopilotCli, ModelTier::Reasoning, None);
+        assert_eq!(reasoning, Some("o4-mini".into()));
+    }
+
+    // ─── Cross-platform: is_wsl detection ───────────────────────────────────
+
+    #[test]
+    fn is_wsl_returns_bool() {
+        // Just a smoke test — actual result depends on platform
+        let _ = super::super::is_wsl();
+    }
 }

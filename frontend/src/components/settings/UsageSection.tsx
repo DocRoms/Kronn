@@ -35,6 +35,7 @@ const PROVIDER_COLORS: Record<string, string> = {
   Google: '#8fa9d4',
   Mistral: '#d48f74',
   Amazon: '#c4a3d4',
+  GitHub: '#238636',
 };
 
 const PROVIDER_FIELDS: { key: keyof DailyUsage; provider: string }[] = [
@@ -43,6 +44,7 @@ const PROVIDER_FIELDS: { key: keyof DailyUsage; provider: string }[] = [
   { key: 'google', provider: 'Google' },
   { key: 'mistral', provider: 'Mistral' },
   { key: 'amazon', provider: 'Amazon' },
+  { key: 'github', provider: 'GitHub' },
 ];
 
 type ViewMode = 'tokens' | 'cost';

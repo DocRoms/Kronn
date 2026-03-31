@@ -21,6 +21,7 @@ interface IdentitySectionProps {
 export function IdentitySection({ toast, t }: IdentitySectionProps) {
   const [pseudo, setPseudo] = useState('');
   const [avatarEmail, setAvatarEmail] = useState('');
+  const [bio, setBio] = useState('');
   const [serverDomain, setServerDomain] = useState('');
   const [networkInfo, setNetworkInfo] = useState<NetworkInfo | null>(null);
 
@@ -31,6 +32,7 @@ export function IdentitySection({ toast, t }: IdentitySectionProps) {
         setServerDomain(cfg.domain ?? '');
         setPseudo(cfg.pseudo ?? '');
         setAvatarEmail(cfg.avatar_email ?? '');
+        setBio(cfg.bio ?? '');
       }
     }).catch(() => {});
   }, []);
@@ -80,6 +82,23 @@ export function IdentitySection({ toast, t }: IdentitySectionProps) {
               <div className="set-hint-xs">
                 {t('settings.avatarHint')}{' '}
                 <a href="https://gravatar.com" target="_blank" rel="noopener noreferrer" style={{ color: 'rgba(200,255,0,0.5)' }}>gravatar.com</a>
+              </div>
+            </div>
+            <div style={{ marginTop: 12 }}>
+              <span className="label">{t('settings.bio')}</span>
+              <textarea
+                value={bio}
+                placeholder={t('settings.bioPlaceholder')}
+                onChange={e => {
+                  setBio(e.target.value);
+                  configApi.setServerConfig({ bio: e.target.value });
+                }}
+                className="set-input"
+                rows={2}
+                style={{ resize: 'vertical' }}
+              />
+              <div className="set-hint-xs">
+                {t('settings.bioHint')}
               </div>
             </div>
           </div>

@@ -13,6 +13,10 @@ use crate::models::{AgentType, ModelTier, ModelTiersConfig, TokensConfig};
 fn is_wsl() -> bool {
     #[cfg(target_os = "linux")]
     {
+        // WSL2 always sets WSL_DISTRO_NAME — most reliable check
+        if std::env::var("WSL_DISTRO_NAME").is_ok() {
+            return true;
+        }
         std::fs::read_to_string("/proc/version")
             .map(|v| v.contains("microsoft") || v.contains("WSL"))
             .unwrap_or(false)
@@ -198,6 +202,8 @@ pub struct AgentStartConfig<'a> {
     pub tier: ModelTier,
     /// Per-agent model tier config (from global settings). Used to resolve tier to model name.
     pub model_tiers: Option<&'a ModelTiersConfig>,
+    /// Pre-built context files prompt (uploaded file contents for this discussion).
+    pub context_files_prompt: &'a str,
 }
 
 /// Resolve a ModelTier to a concrete --model flag value for a given agent.
@@ -211,6 +217,7 @@ pub(crate) fn resolve_model_flag(agent_type: &AgentType, tier: ModelTier, overri
             AgentType::GeminiCli => &cfg.gemini_cli,
             AgentType::Kiro => &cfg.kiro,
             AgentType::Vibe => &cfg.vibe,
+            AgentType::CopilotCli => &cfg.copilot_cli,
             AgentType::Custom => return None,
         };
         let override_val = match tier {
@@ -237,6 +244,9 @@ pub(crate) fn resolve_model_flag(agent_type: &AgentType, tier: ModelTier, overri
         (AgentType::GeminiCli, ModelTier::Economy)    => Some("gemini-2.5-flash".into()),
         (AgentType::GeminiCli, ModelTier::Default)    => None, // Gemini default is fine
         (AgentType::GeminiCli, ModelTier::Reasoning)  => Some("gemini-3.1-pro-preview".into()),
+        (AgentType::CopilotCli, ModelTier::Economy)   => Some("gpt-4o-mini".into()),
+        (AgentType::CopilotCli, ModelTier::Default)    => None, // Copilot default is fine
+        (AgentType::CopilotCli, ModelTier::Reasoning)  => Some("o4-mini".into()),
         // Kiro, Vibe: no --model flag support
         _ => None,
     }
@@ -256,6 +266,7 @@ pub async fn start_agent(
         mcp_context_override: None,
         tier: ModelTier::Default,
         model_tiers: None,
+        context_files_prompt: "",
     }).await
 }
 
@@ -323,6 +334,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     let mut parts = Vec::new();
     if !profiles_prompt.is_empty() { parts.push(format!("=== YOUR ROLE ===\n\n{}", profiles_prompt)); }
     if !skills_prompt.is_empty() { parts.push(format!("=== YOUR EXPERTISE ===\n\n{}", skills_prompt)); }
+    if !config.context_files_prompt.is_empty() { parts.push(format!("=== CONTEXT FILES ===\n\n{}", config.context_files_prompt)); }
     if !mcp_context.is_empty() { parts.push(format!("=== AVAILABLE TOOLS ===\n\n{}", mcp_context)); }
     if !directives_prompt.is_empty() { parts.push(format!("=== OUTPUT REQUIREMENTS ===\n\n{}", directives_prompt)); }
     let extra_context = parts.join("\n\n");
@@ -488,7 +500,7 @@ pub(crate) async fn ensure_kiro_cli_available() -> Result<(), String> {
 
     if super::find_binary("kiro-cli").is_none() {
         return Err(
-            "Kiro CLI installed but not found in PATH. Ensure /home/kronn/.local/bin is in PATH."
+            "Kiro CLI installed but not found in PATH. Ensure kiro-cli is accessible from your shell."
                 .into(),
         );
     }
@@ -497,25 +509,35 @@ pub(crate) async fn ensure_kiro_cli_available() -> Result<(), String> {
 }
 
 /// Resolve the path to vibe-runner.py.
-/// Searches: Docker bundle → next to executable → cargo manifest dir (dev).
+/// Searches: env override → Docker bundle → next to executable → Tauri resource → cargo manifest (dev).
 fn vibe_runner_path() -> String {
+    // 0. Explicit override (allows custom deployments)
+    if let Ok(custom) = std::env::var("KRONN_VIBE_RUNNER") {
+        if std::path::Path::new(&custom).exists() {
+            return custom;
+        }
+    }
     // 1. Docker: scripts are copied into /app/scripts/
     let docker_path = "/app/scripts/vibe-runner.py";
     if std::path::Path::new(docker_path).exists() {
         return docker_path.to_string();
     }
-    // 2. Native/Tauri: next to the running executable (or in ../scripts/)
+    // 2. Native/Tauri: next to the running executable
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            // Same directory as exe (Tauri resource bundling)
-            let beside = dir.join("scripts").join("vibe-runner.py");
-            if beside.exists() {
-                return beside.to_string_lossy().to_string();
-            }
-            // One level up (typical install layout)
-            let up = dir.join("..").join("scripts").join("vibe-runner.py");
-            if up.exists() {
-                return up.to_string_lossy().to_string();
+            // Candidate paths relative to the binary
+            let candidates = [
+                dir.join("scripts").join("vibe-runner.py"),
+                dir.join("..").join("scripts").join("vibe-runner.py"),
+                // macOS .app bundle: Contents/Resources/scripts/
+                dir.join("..").join("Resources").join("scripts").join("vibe-runner.py"),
+                // Windows: alongside the .exe
+                dir.join("vibe-runner.py"),
+            ];
+            for candidate in &candidates {
+                if candidate.exists() {
+                    return candidate.to_string_lossy().to_string();
+                }
             }
         }
     }
@@ -679,6 +701,33 @@ fn agent_command(agent_type: &AgentType, prompt: &str, full_access: bool, mcp_co
                 OutputMode::Text,
             )
         },
+        AgentType::CopilotCli => {
+            let mut args: Vec<String> = vec![
+                "-p".into(),
+            ];
+            if let Some(model) = model_flag {
+                args.push("--model".into());
+                args.push(model.into());
+            }
+            if full_access {
+                args.push("--allow-all-tools".into());
+            }
+            // Copilot has no system prompt flag — prepend context to prompt
+            let full_prompt = if mcp_context.is_empty() {
+                prompt.into()
+            } else {
+                format!("{}\n\n{}", mcp_context, prompt)
+            };
+            args.push(full_prompt);
+            (
+                "copilot",
+                Some("@github/copilot"),
+                args,
+                "GH_TOKEN",
+                StderrMode::StdoutOnly,
+                OutputMode::Text,
+            )
+        },
         AgentType::Custom => (
             "echo",
             None,
@@ -785,12 +834,48 @@ fn try_spawn(
     cmd.env("TEMP", &agent_tmpdir);
     cmd.env("TMP", &agent_tmpdir);
 
+    // In Docker, HOME is /home/kronn (the container user), but agents store their
+    // auth and config in the real user's home (KRONN_HOST_HOME). Override HOME so
+    // all agents (Claude, Codex, Copilot, Kiro, etc.) find their config files.
+    // On native (Tauri desktop, direct binary), HOME is already correct.
+    let real_home = std::env::var("KRONN_HOST_HOME").ok().filter(|rh| {
+        let exists = std::path::Path::new(rh).is_dir();
+        if !exists {
+            tracing::warn!("KRONN_HOST_HOME={} does not exist, ignoring", rh);
+        }
+        exists
+    });
+    if let Some(ref rh) = real_home {
+        cmd.env("HOME", rh);
+        cmd.env("USERPROFILE", rh); // Windows agents use USERPROFILE
+    }
+
+    // Resolve the effective home for agent config lookups (cross-platform).
+    let effective_home = real_home.clone()
+        .or_else(|| std::env::var("HOME").ok())
+        .or_else(|| std::env::var("USERPROFILE").ok());
+
+    // Copilot CLI supports COPILOT_HOME to override config location.
+    // Set it explicitly as a safety net (works on all platforms).
+    if (binary == "copilot" || npx_package == Some("@github/copilot"))
+        && std::env::var("COPILOT_HOME").is_err()
+    {
+        if let Some(ref home) = effective_home {
+            let copilot_dir = std::path::Path::new(home).join(".copilot");
+            if copilot_dir.exists() {
+                cmd.env("COPILOT_HOME", &copilot_dir);
+            }
+        }
+    }
+
     // Tell Claude Code we're in a containerized environment.
     // This bypasses the root/sudo check for --dangerously-skip-permissions.
     // Note: use CLAUDE_CODE_BUBBLEWRAP, not IS_SANDBOX — IS_SANDBOX also
     // suppresses 529 overloaded errors causing infinite silent retries.
     cmd.env("CLAUDE_CODE_BUBBLEWRAP", "1");
     // Hint shell-aware tools to use bash (dash does not support `-l`).
+    // Only on Unix — Windows doesn't use SHELL env var.
+    #[cfg(unix)]
     cmd.env("SHELL", "/bin/bash");
 
     // Only set API key env var if explicitly configured (override)
@@ -800,10 +885,33 @@ fn try_spawn(
     }
 
     // Forward GitHub token so agents can create branches, PRs, etc.
-    // Checks GH_TOKEN first (gh CLI convention), then GITHUB_TOKEN.
-    if let Ok(gh_token) = std::env::var("GH_TOKEN").or_else(|_| std::env::var("GITHUB_TOKEN")) {
-        cmd.env("GH_TOKEN", &gh_token);
-        cmd.env("GITHUB_TOKEN", &gh_token);
+    // Priority: env var GH_TOKEN/GITHUB_TOKEN > `gh auth token` (gh CLI config).
+    // Also sets COPILOT_GITHUB_TOKEN for GitHub Copilot CLI.
+    let gh_token = std::env::var("GH_TOKEN")
+        .or_else(|_| std::env::var("GITHUB_TOKEN"))
+        .or_else(|_| {
+            // Fallback: extract token from `gh auth token` (stored in ~/.config/gh/hosts.yml)
+            std::process::Command::new("gh")
+                .args(["auth", "token"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .and_then(|o| {
+                    let t = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                    if t.is_empty() { None } else { Some(t) }
+                })
+                .ok_or(std::env::VarError::NotPresent)
+        });
+    if let Ok(ref token) = gh_token {
+        cmd.env("GH_TOKEN", token);
+        cmd.env("GITHUB_TOKEN", token);
+        cmd.env("COPILOT_GITHUB_TOKEN", token);
+    }
+    // If an API key was explicitly set (e.g. for CopilotCli), also set COPILOT_GITHUB_TOKEN
+    if let Some(key) = api_key {
+        if env_key == "GH_TOKEN" {
+            cmd.env("COPILOT_GITHUB_TOKEN", key);
+        }
     }
 
     cmd.spawn()

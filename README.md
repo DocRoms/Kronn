@@ -204,6 +204,7 @@ All models downloaded on first use and cached locally.
 | Vibe | `vibe` | ✅ Supported (CLI + direct Mistral API) |
 | Gemini CLI | `gemini` | ✅ Supported |
 | Kiro | `kiro-cli` | ✅ Supported |
+| GitHub Copilot | `copilot` | ✅ Supported |
 | DeepSeek | `deepseek` | Planned |
 | OpenCode | `opencode` | Planned |
 

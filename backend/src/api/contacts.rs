@@ -234,6 +234,7 @@ mod tests {
             agent_stall_timeout_min: 5,
             pseudo: None,
             avatar_email: None,
+            bio: None,
         }
     }
 

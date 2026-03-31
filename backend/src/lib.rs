@@ -281,6 +281,9 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/discussions/:id/exec", post(api::disc_git::disc_exec))
         .route("/api/discussions/:id/worktree-unlock", post(api::disc_git::worktree_unlock))
         .route("/api/discussions/:id/worktree-lock", post(api::disc_git::worktree_lock))
+        // ── Context Files ──
+        .route("/api/discussions/:id/context-files", get(api::discussions::list_context_files).post(api::discussions::upload_context_file))
+        .route("/api/discussions/:id/context-files/:file_id", delete(api::discussions::delete_context_file))
         // ── WebSocket ──
         .route("/api/ws", get(api::ws::ws_handler))
         // ── Contacts ──

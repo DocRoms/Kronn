@@ -1276,6 +1276,125 @@
   color: rgba(255, 255, 255, 0.15);
 }
 
+/* ── Context files (attach) ────────────────────────────── */
+.disc-context-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 8px 0;
+}
+
+.disc-context-file-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: var(--kr-r-sm);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--kr-border-light);
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-muted);
+  max-width: 160px;
+}
+
+.disc-context-file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.disc-context-file-remove {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0 1px;
+  color: var(--kr-text-faint);
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.disc-context-file-remove:hover {
+  color: var(--kr-error);
+}
+
+.disc-attach-btn {
+  border-radius: var(--kr-r-lg);
+  padding: 6px 8px;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  background: transparent;
+  border: 1px solid var(--kr-border-light);
+  cursor: pointer;
+  color: var(--kr-text-muted);
+  transition: all 0.15s;
+  position: relative;
+}
+
+.disc-attach-btn:hover {
+  color: var(--kr-accent);
+  border-color: rgba(var(--kr-accent-rgb), 0.25);
+}
+
+.disc-composer-dragover {
+  outline: 2px dashed var(--kr-accent) !important;
+  outline-offset: -2px;
+  background: rgba(var(--kr-accent-rgb), 0.03) !important;
+}
+
+.disc-context-file-image {
+  border-color: rgba(var(--kr-accent-rgb), 0.2);
+  background: rgba(var(--kr-accent-rgb), 0.05);
+}
+
+.disc-new-files-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.disc-new-attach-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: var(--kr-r-sm);
+  border: 1px dashed var(--kr-border-medium);
+  background: transparent;
+  color: var(--kr-text-muted);
+  cursor: pointer;
+  font-size: var(--kr-fs-xs);
+  font-family: inherit;
+  transition: all 0.15s;
+}
+
+.disc-new-attach-btn:hover {
+  border-color: var(--kr-accent);
+  color: var(--kr-accent);
+}
+
+.disc-new-files-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.disc-attach-count {
+  font-size: 9px;
+  background: var(--kr-accent);
+  color: var(--kr-bg-base);
+  border-radius: 6px;
+  min-width: 14px;
+  height: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+}
+
 /* ── Mention autocomplete ─────────────────────────────── */
 .disc-mention-popover {
   position: absolute;

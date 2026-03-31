@@ -118,9 +118,13 @@ fn read_vibe_key() -> Option<String> {
     None
 }
 
-/// Resolve home directory.
+/// Resolve home directory (cross-platform: Linux, macOS, Windows).
 fn home_dir() -> Option<PathBuf> {
-    std::env::var("HOME").ok().map(PathBuf::from)
+    std::env::var("KRONN_HOST_HOME")
+        .or_else(|_| std::env::var("HOME"))
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()
+        .map(PathBuf::from)
 }
 
 /// Get a default name for discovered keys.
@@ -128,17 +132,29 @@ fn home_dir() -> Option<PathBuf> {
 /// Falls back to /etc/hostname, then "default".
 fn default_key_name() -> String {
     if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {
-        if let Some(name) = PathBuf::from(&host_home).file_name() {
-            let n = name.to_string_lossy().to_string();
-            if !n.is_empty() && n != "root" {
-                return n;
-            }
+        // Extract the last path component, handling both / and \ separators
+        // (Linux PathBuf doesn't parse backslashes, but Windows paths may contain them)
+        let name = host_home.rsplit(['/', '\\'])
+            .find(|s| !s.is_empty())
+            .unwrap_or("")
+            .to_string();
+        if !name.is_empty() && name != "root" {
+            return name;
         }
     }
+    // Cross-platform hostname: /etc/hostname (Linux), `hostname` command (macOS/Windows)
     if let Ok(h) = std::fs::read_to_string("/etc/hostname") {
         let h = h.trim().to_string();
         if !h.is_empty() {
             return h;
+        }
+    }
+    if let Ok(output) = std::process::Command::new("hostname").output() {
+        if output.status.success() {
+            let h = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !h.is_empty() {
+                return h;
+            }
         }
     }
     "default".into()
@@ -183,20 +199,24 @@ pub fn write_gemini_key(key: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
+    #[serial]
     fn default_key_name_returns_non_empty() {
         let name = default_key_name();
         assert!(!name.is_empty());
     }
 
     #[test]
+    #[serial]
     fn read_codex_key_returns_none_when_missing() {
         // Smoke test: verify no panic when file doesn't exist
         let _ = read_codex_key();
     }
 
     #[test]
+    #[serial]
     fn read_codex_key_parses_auth_json() {
         let tmp = std::env::temp_dir().join("kronn-test-codex-key");
         let _ = std::fs::create_dir_all(tmp.join(".codex"));
@@ -215,6 +235,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn read_codex_key_ignores_empty_value() {
         let tmp = std::env::temp_dir().join("kronn-test-codex-empty");
         let _ = std::fs::create_dir_all(tmp.join(".codex"));
@@ -233,12 +254,14 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn read_gemini_key_returns_none_when_missing() {
         // Smoke test: verify no panic when file doesn't exist
         let _ = read_gemini_key();
     }
 
     #[test]
+    #[serial]
     fn read_gemini_key_parses_settings_json() {
         let tmp = std::env::temp_dir().join("kronn-test-gemini-key");
         let _ = std::fs::create_dir_all(tmp.join(".gemini"));
@@ -257,6 +280,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn read_vibe_key_strips_quotes() {
         let tmp = std::env::temp_dir().join("kronn-test-vibe-quotes");
         let _ = std::fs::create_dir_all(tmp.join(".vibe"));
@@ -273,6 +297,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn read_vibe_key_parses_env_file() {
         let tmp = std::env::temp_dir().join("kronn-test-vibe-key");
         let _ = std::fs::create_dir_all(tmp.join(".vibe"));
@@ -289,13 +314,93 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn read_vibe_key_returns_none_when_missing() {
         let _ = read_vibe_key(); // Should not panic
     }
 
     #[tokio::test]
+    #[serial]
     async fn discover_keys_returns_vec() {
         let keys = discover_keys().await;
         assert!(keys.len() <= 10);
+    }
+
+    // ─── Cross-platform: home_dir resolution ────────────────────────────────
+
+    #[test]
+    #[serial]
+    fn home_dir_prefers_kronn_host_home() {
+        let old_host = std::env::var("KRONN_HOST_HOME").ok();
+        let old_home = std::env::var("HOME").ok();
+        std::env::set_var("KRONN_HOST_HOME", "/host/real-user");
+        std::env::set_var("HOME", "/container/fake");
+        let dir = home_dir();
+        // Restore
+        if let Some(h) = old_host { std::env::set_var("KRONN_HOST_HOME", h); } else { std::env::remove_var("KRONN_HOST_HOME"); }
+        if let Some(h) = old_home { std::env::set_var("HOME", h); }
+        assert_eq!(dir, Some(PathBuf::from("/host/real-user")));
+    }
+
+    #[test]
+    #[serial]
+    fn home_dir_falls_back_to_home() {
+        let old_host = std::env::var("KRONN_HOST_HOME").ok();
+        let old_home = std::env::var("HOME").ok();
+        std::env::remove_var("KRONN_HOST_HOME");
+        std::env::set_var("HOME", "/home/testuser");
+        let dir = home_dir();
+        if let Some(h) = old_host { std::env::set_var("KRONN_HOST_HOME", h); }
+        if let Some(h) = old_home { std::env::set_var("HOME", h); }
+        assert_eq!(dir, Some(PathBuf::from("/home/testuser")));
+    }
+
+    #[test]
+    #[serial]
+    fn home_dir_falls_back_to_userprofile() {
+        let old_host = std::env::var("KRONN_HOST_HOME").ok();
+        let old_home = std::env::var("HOME").ok();
+        let old_up = std::env::var("USERPROFILE").ok();
+        std::env::remove_var("KRONN_HOST_HOME");
+        std::env::remove_var("HOME");
+        std::env::set_var("USERPROFILE", r"C:\Users\TestUser");
+        let dir = home_dir();
+        if let Some(h) = old_host { std::env::set_var("KRONN_HOST_HOME", h); }
+        if let Some(h) = old_home { std::env::set_var("HOME", h); } else { std::env::remove_var("HOME"); }
+        if let Some(h) = old_up { std::env::set_var("USERPROFILE", h); } else { std::env::remove_var("USERPROFILE"); }
+        assert_eq!(dir, Some(PathBuf::from(r"C:\Users\TestUser")));
+    }
+
+    // ─── Cross-platform: default_key_name ───────────────────────────────────
+
+    #[test]
+    #[serial]
+    fn default_key_name_from_host_home() {
+        let old = std::env::var("KRONN_HOST_HOME").ok();
+        std::env::set_var("KRONN_HOST_HOME", "/home/alice");
+        let name = default_key_name();
+        if let Some(h) = old { std::env::set_var("KRONN_HOST_HOME", h); } else { std::env::remove_var("KRONN_HOST_HOME"); }
+        assert_eq!(name, "alice");
+    }
+
+    #[test]
+    #[serial]
+    fn default_key_name_from_windows_host_home_forward_slash() {
+        let old = std::env::var("KRONN_HOST_HOME").ok();
+        std::env::set_var("KRONN_HOST_HOME", "C:/Users/Bob");
+        let name = default_key_name();
+        if let Some(h) = old { std::env::set_var("KRONN_HOST_HOME", h); } else { std::env::remove_var("KRONN_HOST_HOME"); }
+        assert_eq!(name, "Bob");
+    }
+
+    #[test]
+    #[serial]
+    fn default_key_name_from_windows_host_home_backslash() {
+        // Backslash paths should also work (Windows native Tauri app)
+        let old = std::env::var("KRONN_HOST_HOME").ok();
+        std::env::set_var("KRONN_HOST_HOME", r"C:\Users\Alice");
+        let name = default_key_name();
+        if let Some(h) = old { std::env::set_var("KRONN_HOST_HOME", h); } else { std::env::remove_var("KRONN_HOST_HOME"); }
+        assert_eq!(name, "Alice");
     }
 }

@@ -50,6 +50,9 @@ pub struct ServerConfig {
     /// Email for Gravatar avatar (optional, decoupled from git)
     #[serde(default)]
     pub avatar_email: Option<String>,
+    /// Short bio — who the user is, their role, expertise. Injected at the start of first message in a discussion.
+    #[serde(default)]
+    pub bio: Option<String>,
 }
 
 fn default_max_agents() -> usize { 5 }
@@ -157,6 +160,8 @@ pub struct AgentsConfig {
     pub kiro: AgentConfig,
     #[serde(default)]
     pub vibe: AgentConfig,
+    #[serde(default)]
+    pub copilot_cli: AgentConfig,
     /// Per-agent model tier overrides (Economy/Reasoning model names).
     #[serde(default)]
     pub model_tiers: ModelTiersConfig,
@@ -171,6 +176,7 @@ impl AgentsConfig {
             AgentType::GeminiCli => self.gemini_cli.full_access,
             AgentType::Kiro => self.kiro.full_access,
             AgentType::Vibe => self.vibe.full_access,
+            AgentType::CopilotCli => self.copilot_cli.full_access,
             _ => false,
         }
     }
@@ -181,6 +187,7 @@ impl AgentsConfig {
             || self.gemini_cli.full_access
             || self.kiro.full_access
             || self.vibe.full_access
+            || self.copilot_cli.full_access
     }
 
     /// Returns true if at least one agent is marked as installed.
@@ -190,6 +197,7 @@ impl AgentsConfig {
             || self.gemini_cli.installed
             || self.kiro.installed
             || self.vibe.installed
+            || self.copilot_cli.installed
     }
 }
 
@@ -244,6 +252,8 @@ pub struct ModelTiersConfig {
     pub kiro: ModelTierConfig,
     #[serde(default)]
     pub vibe: ModelTierConfig,
+    #[serde(default)]
+    pub copilot_cli: ModelTierConfig,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -302,6 +312,7 @@ pub enum AgentType {
     Vibe,
     GeminiCli,
     Kiro,
+    CopilotCli,
     Custom,
 }
 
@@ -1057,6 +1068,7 @@ pub struct DailyUsage {
     pub google: u64,
     pub mistral: u64,
     pub amazon: u64,
+    pub github: u64,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1510,6 +1522,7 @@ pub struct ServerConfigPublic {
     pub auth_enabled: bool,
     pub pseudo: Option<String>,
     pub avatar_email: Option<String>,
+    pub bio: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1519,6 +1532,7 @@ pub struct UpdateServerConfigRequest {
     pub agent_stall_timeout_min: Option<u64>,
     pub pseudo: Option<String>,
     pub avatar_email: Option<String>,
+    pub bio: Option<String>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1717,6 +1731,35 @@ pub struct PaginationQuery {
 
 fn default_page() -> u32 { 1 }
 fn default_per_page() -> u32 { 50 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Context Files (uploaded file context for discussions)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// A file uploaded as context for a discussion.
+/// Content is extracted to text at upload time and stored in DB.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ContextFile {
+    pub id: String,
+    pub discussion_id: String,
+    pub filename: String,
+    pub mime_type: String,
+    pub original_size: u64,
+    pub extracted_size: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_path: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Response after uploading a context file.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UploadContextFileResponse {
+    pub file: ContextFile,
+    /// Suggested skill IDs based on file extension
+    pub suggested_skills: Vec<String>,
+}
 
 #[cfg(test)]
 #[path = "tests.rs"]

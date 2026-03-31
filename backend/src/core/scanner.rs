@@ -200,8 +200,9 @@ fn unc_to_wsl_linux_path(path: &Path) -> Option<String> {
     // Strip \\wsl.localhost\<distro>\ or \\wsl$\<distro>\
     let remainder = s.strip_prefix(r"\\wsl.localhost\")
         .or_else(|| s.strip_prefix(r"\\wsl$\"))?;
-    // Skip distro name (first path component)
-    let linux_part = remainder.find('\\').map(|i| &remainder[i..])?;
+    // Skip distro name (first path component) — handle both backslash and forward slash
+    let sep_idx = remainder.find('\\').or_else(|| remainder.find('/'))?;
+    let linux_part = &remainder[sep_idx..];
     Some(linux_part.replace('\\', "/"))
 }
 
@@ -348,7 +349,8 @@ pub fn count_ai_todos(project_path: &str) -> u32 {
 
 /// Expand ~ in paths
 fn shellexpand(path: &str) -> String {
-    if path.starts_with("~/") {
+    // Handle both Unix (~/) and Windows (~\) tilde expansion
+    if path.starts_with("~/") || path.starts_with("~\\") {
         if let Some(home) = dirs_home() {
             return format!("{}{}", home, &path[1..]);
         }
@@ -371,18 +373,31 @@ pub fn is_wsl_unc_path_str(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     // ─── shellexpand ────────────────────────────────────────────────────────
 
     #[test]
+    #[serial]
     fn shellexpand_tilde() {
+        let prev = std::env::var("HOME").ok();
         std::env::set_var("HOME", "/home/testuser");
         assert_eq!(shellexpand("~/repos"), "/home/testuser/repos");
+        if let Some(p) = prev { std::env::set_var("HOME", p); }
     }
 
     #[test]
     fn shellexpand_no_tilde() {
         assert_eq!(shellexpand("/absolute/path"), "/absolute/path");
+    }
+
+    #[test]
+    #[serial]
+    fn shellexpand_windows_backslash() {
+        let prev = std::env::var("HOME").ok();
+        std::env::set_var("HOME", r"C:\Users\testuser");
+        assert_eq!(shellexpand(r"~\repos"), r"C:\Users\testuser\repos");
+        if let Some(p) = prev { std::env::set_var("HOME", p); }
     }
 
     // ─── WSL UNC path detection ─────────────────────────────────────────────

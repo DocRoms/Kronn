@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Web framework
-axum = { version = "0.7", features = ["ws", "macros"] }
+axum = { version = "0.7", features = ["ws", "macros", "multipart"] }
 tower-http = { version = "0.5", features = ["cors", "fs", "trace"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "process", "sync", "time", "io-util", "signal"] }
 
@@ -63,6 +63,11 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 directories = "5"     # XDG paths
+
+# Document extraction (context files: xlsx, docx, pptx, pdf)
+calamine = "0.26"                                           # Excel spreadsheets
+zip = { version = "2", default-features = false, features = ["deflate"] }  # Office XML (docx, pptx)
+pdf-extract = "0.7"                                         # PDF text extraction
 
 # TypeScript type generation
 ts-rs = { version = "9", features = ["chrono-impl", "uuid-impl", "serde-json-impl"] }

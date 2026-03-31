@@ -48,6 +48,7 @@ const defaultModelTiers = {
   gemini_cli: { economy: null, reasoning: null },
   kiro: { economy: null, reasoning: null },
   vibe: { economy: null, reasoning: null },
+  copilot_cli: { economy: null, reasoning: null },
 };
 
 const restrictedConfig: AgentsConfig = {
@@ -56,6 +57,7 @@ const restrictedConfig: AgentsConfig = {
   gemini_cli: { path: null, installed: true, version: null, full_access: false },
   kiro: { path: null, installed: false, version: null, full_access: false },
   vibe: { path: null, installed: false, version: null, full_access: false },
+  copilot_cli: { path: null, installed: false, version: null, full_access: false },
   model_tiers: defaultModelTiers,
 };
 
@@ -65,6 +67,7 @@ const fullConfig: AgentsConfig = {
   gemini_cli: { path: null, installed: true, version: null, full_access: true },
   kiro: { path: null, installed: false, version: null, full_access: true },
   vibe: { path: null, installed: false, version: null, full_access: true },
+  copilot_cli: { path: null, installed: false, version: null, full_access: false },
   model_tiers: defaultModelTiers,
 };
 

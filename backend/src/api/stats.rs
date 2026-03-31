@@ -53,6 +53,7 @@ pub async fn token_usage(
                 Some("GeminiCli") => "Google",
                 Some("Vibe") => "Mistral",
                 Some("Kiro") => "Amazon",
+                Some("CopilotCli") => "GitHub",
                 _ => "Other",
             };
             let entry = provider_map.entry(provider.into()).or_insert((0, 0.0));
@@ -149,7 +150,7 @@ pub async fn token_usage(
         })?.filter_map(|r| r.ok()).for_each(|(day, agent_type, tokens, cost)| {
             let entry = daily_map.entry(day.clone()).or_insert_with(|| DailyUsage {
                 date: day, tokens: 0, cost_usd: 0.0,
-                anthropic: 0, openai: 0, google: 0, mistral: 0, amazon: 0,
+                anthropic: 0, openai: 0, google: 0, mistral: 0, amazon: 0, github: 0,
             });
             entry.tokens += tokens;
             entry.cost_usd += cost;
@@ -159,6 +160,7 @@ pub async fn token_usage(
                 Some("GeminiCli") => entry.google += tokens,
                 Some("Vibe") => entry.mistral += tokens,
                 Some("Kiro") => entry.amazon += tokens,
+                Some("CopilotCli") => entry.github += tokens,
                 _ => {}
             }
         });

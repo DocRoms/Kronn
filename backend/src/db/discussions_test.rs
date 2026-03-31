@@ -368,7 +368,7 @@ mod tests {
     fn agent_type_round_trips_through_db() {
         let conn = test_conn();
 
-        for agent in &[AgentType::ClaudeCode, AgentType::Codex, AgentType::Vibe, AgentType::GeminiCli] {
+        for agent in &[AgentType::ClaudeCode, AgentType::Codex, AgentType::Vibe, AgentType::GeminiCli, AgentType::Kiro, AgentType::CopilotCli] {
             let id = format!("d-{:?}", agent);
             let mut disc = make_discussion(&id);
             disc.agent = agent.clone();
@@ -377,6 +377,34 @@ mod tests {
             let loaded = get_discussion(&conn, &id).unwrap().unwrap();
             assert_eq!(loaded.agent, *agent);
         }
+    }
+
+    #[test]
+    fn agent_type_db_string_format_is_stable() {
+        // Ensure the DB string representation never changes (would break existing data)
+        let conn = test_conn();
+        let mut disc = make_discussion("d-format-check");
+        disc.agent = AgentType::CopilotCli;
+        insert_discussion(&conn, &disc).unwrap();
+
+        // Read raw string from DB to verify format
+        let raw: String = conn.query_row(
+            "SELECT agent FROM discussions WHERE id = 'd-format-check'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(raw, "CopilotCli", "DB string for CopilotCli must be 'CopilotCli'");
+    }
+
+    #[test]
+    fn unknown_agent_type_in_db_becomes_custom() {
+        let conn = test_conn();
+        conn.execute(
+            "INSERT INTO discussions (id, title, agent, language, participants_json, created_at, updated_at)
+             VALUES ('d-unknown', 'test', 'FutureAgent', 'en', '[]', datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+        let loaded = get_discussion(&conn, "d-unknown").unwrap().unwrap();
+        assert_eq!(loaded.agent, AgentType::Custom, "Unknown agent strings should map to Custom");
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -508,5 +536,118 @@ mod tests {
         let loaded = get_discussion(&conn, "switch-msg").unwrap().unwrap();
         assert_eq!(loaded.messages.len(), 1);
         assert!(loaded.messages[0].content.contains("Agent switch"));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Context files CRUD
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn insert_and_list_context_files() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-ctx")).unwrap();
+
+        insert_context_file(&conn, "cf1", "d-ctx", "notes.txt", "text/plain", 100, "Hello world", None).unwrap();
+        insert_context_file(&conn, "cf2", "d-ctx", "data.csv", "text/csv", 200, "a,b\n1,2", None).unwrap();
+
+        let files = list_context_files(&conn, "d-ctx").unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].filename, "notes.txt");
+        assert_eq!(files[1].filename, "data.csv");
+        assert_eq!(files[0].original_size, 100);
+        assert_eq!(files[1].extracted_size, 7); // "a,b\n1,2".len()
+    }
+
+    #[test]
+    fn count_context_files_accuracy() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-count")).unwrap();
+
+        assert_eq!(count_context_files(&conn, "d-count").unwrap(), 0);
+
+        insert_context_file(&conn, "cf1", "d-count", "a.txt", "text/plain", 10, "A", None).unwrap();
+        assert_eq!(count_context_files(&conn, "d-count").unwrap(), 1);
+
+        insert_context_file(&conn, "cf2", "d-count", "b.txt", "text/plain", 10, "B", None).unwrap();
+        assert_eq!(count_context_files(&conn, "d-count").unwrap(), 2);
+    }
+
+    #[test]
+    fn delete_context_file_removes_it() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-del")).unwrap();
+        insert_context_file(&conn, "cf1", "d-del", "test.txt", "text/plain", 50, "Test", None).unwrap();
+
+        let deleted = delete_context_file(&conn, "d-del", "cf1").unwrap();
+        assert!(deleted, "Should return true when file existed");
+
+        let files = list_context_files(&conn, "d-del").unwrap();
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn delete_context_file_wrong_discussion_returns_false() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-a")).unwrap();
+        insert_discussion(&conn, &make_discussion("d-b")).unwrap();
+        insert_context_file(&conn, "cf1", "d-a", "test.txt", "text/plain", 50, "Test", None).unwrap();
+
+        // Try deleting from wrong discussion
+        let deleted = delete_context_file(&conn, "d-b", "cf1").unwrap();
+        assert!(!deleted, "Should return false when file doesn't belong to discussion");
+
+        // File should still exist in d-a
+        assert_eq!(count_context_files(&conn, "d-a").unwrap(), 1);
+    }
+
+    #[test]
+    fn get_context_files_for_prompt_text_only() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-prompt")).unwrap();
+        insert_context_file(&conn, "cf1", "d-prompt", "code.rs", "text/plain", 100, "fn main() {}", None).unwrap();
+        insert_context_file(&conn, "cf2", "d-prompt", "data.sql", "text/plain", 50, "SELECT 1", None).unwrap();
+
+        let entries = get_context_files_for_prompt(&conn, "d-prompt").unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].filename, "code.rs");
+        assert_eq!(entries[0].text, "fn main() {}");
+        assert!(entries[0].disk_path.is_none());
+        assert_eq!(entries[1].filename, "data.sql");
+    }
+
+    #[test]
+    fn get_context_files_for_prompt_with_image() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-img")).unwrap();
+        insert_context_file(&conn, "cf1", "d-img", "screenshot.png", "image/png", 5000, "[Image: screenshot.png]", Some("/tmp/screenshot.png")).unwrap();
+
+        let entries = get_context_files_for_prompt(&conn, "d-img").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].filename, "screenshot.png");
+        assert_eq!(entries[0].disk_path, Some("/tmp/screenshot.png".to_string()));
+    }
+
+    #[test]
+    fn context_files_cascade_on_discussion_delete() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-cascade")).unwrap();
+        insert_context_file(&conn, "cf1", "d-cascade", "file.txt", "text/plain", 10, "X", None).unwrap();
+
+        // Delete the discussion
+        conn.execute("DELETE FROM discussions WHERE id = 'd-cascade'", []).unwrap();
+
+        // Context files should be gone (CASCADE)
+        assert_eq!(count_context_files(&conn, "d-cascade").unwrap(), 0);
+    }
+
+    #[test]
+    fn context_file_with_disk_path() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-disk")).unwrap();
+        insert_context_file(&conn, "cf1", "d-disk", "chart.png", "image/png", 50000, "[Image]", Some("/project/.kronn/context-files/abc_chart.png")).unwrap();
+
+        let files = list_context_files(&conn, "d-disk").unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].disk_path, Some("/project/.kronn/context-files/abc_chart.png".to_string()));
     }
 }

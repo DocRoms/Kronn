@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import '../pages/DiscussionsPage.css';
 import { skills as skillsApi, profiles as profilesApi, directives as directivesApi } from '../lib/api';
 import type { Project, AgentDetection, AgentType, AgentsConfig, Skill, AgentProfile, Directive } from '../types/generated';
@@ -6,7 +6,7 @@ import { AGENT_LABELS, isAgentRestricted as isAgentRestrictedUtil, isUsable, isH
 import {
   Folder, ChevronRight, GitBranch,
   MessageSquare, X, AlertTriangle,
-  Settings, Check, Zap, UserCircle, FileText,
+  Settings, Check, Zap, UserCircle, FileText, Paperclip, Image,
 } from 'lucide-react';
 
 // ─── Public types ────────────────────────────────────────────────────────────
@@ -23,6 +23,7 @@ export interface NewDiscConfig {
   tier: 'economy' | 'default' | 'reasoning';
   branchName: string;
   baseBranch: string;
+  pendingFiles?: File[];
 }
 
 export interface NewDiscussionFormProps {
@@ -69,6 +70,8 @@ export function NewDiscussionForm({
   const [newDiscTier, setNewDiscTier] = useState<'economy' | 'default' | 'reasoning'>('default');
   const [newDiscBranchName, setNewDiscBranchName] = useState('');
   const [newDiscBaseBranch, setNewDiscBaseBranch] = useState('main');
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const newDiscFileInputRef = useRef<HTMLInputElement>(null);
 
   // ─── Derived ─────────────────────────────────────────────────────────────
   const installedAgentsList = agents.filter(isUsable);
@@ -131,6 +134,7 @@ export function NewDiscussionForm({
       tier: newDiscTier,
       branchName: newDiscBranchName,
       baseBranch: newDiscBaseBranch,
+      pendingFiles: pendingFiles.length > 0 ? pendingFiles : undefined,
     });
   };
 
@@ -419,6 +423,43 @@ export function NewDiscussionForm({
           rows={4}
           autoFocus={!newDiscPrefilled}
         />
+
+        {/* Context files */}
+        <div className="disc-new-files-row">
+          <input
+            type="file"
+            multiple
+            style={{ display: 'none' }}
+            ref={newDiscFileInputRef}
+            onChange={e => {
+              const files = Array.from(e.target.files ?? []);
+              if (files.length > 0) {
+                setPendingFiles(prev => [...prev, ...files]);
+              }
+              e.target.value = '';
+            }}
+          />
+          <button
+            type="button"
+            className="disc-new-attach-btn"
+            onClick={() => newDiscFileInputRef.current?.click()}
+          >
+            <Paperclip size={12} /> {pendingFiles.length > 0 ? `${pendingFiles.length} ${t('disc.attachFile')}` : t('disc.attachFile')}
+          </button>
+          {pendingFiles.length > 0 && (
+            <div className="disc-new-files-list">
+              {pendingFiles.map((f, i) => (
+                <span key={i} className="disc-context-file-badge">
+                  {f.type.startsWith('image/') ? <Image size={10} /> : <FileText size={10} />}
+                  <span className="disc-context-file-name">{f.name}</span>
+                  <button className="disc-context-file-remove" onClick={() => setPendingFiles(prev => prev.filter((_, j) => j !== i))}>
+                    <X size={9} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
 
         {/* Warnings for validation discussion */}
         {newDiscPrefilled && (
