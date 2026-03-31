@@ -215,7 +215,7 @@ setup() {
     local tmpdir
     tmpdir=$(mktemp -d /tmp/kronn-tron-test-XXXXXX)
     tron_init "$tmpdir"
-    [ -f "$tmpdir/.kronn-progress.md" ]
+    [ -f "$tmpdir/.kronn/progress.md" ]
     tron_cleanup
     rm -rf "$tmpdir"
 }
@@ -224,9 +224,9 @@ setup() {
     local tmpdir
     tmpdir=$(mktemp -d /tmp/kronn-tron-test-XXXXXX)
     tron_init "$tmpdir"
-    [ -f "$tmpdir/.kronn-progress.md" ]
+    [ -f "$tmpdir/.kronn/progress.md" ]
     tron_cleanup
-    [ ! -f "$tmpdir/.kronn-progress.md" ]
+    [ ! -f "$tmpdir/.kronn/progress.md" ]
     rm -rf "$tmpdir"
 }
 
@@ -235,7 +235,7 @@ setup() {
     tmpdir=$(mktemp -d /tmp/kronn-tron-test-XXXXXX)
     tron_init "$tmpdir"
     tron_progress 50
-    run grep "50%" "$tmpdir/.kronn-progress.md"
+    run grep "50%" "$tmpdir/.kronn/progress.md"
     assert_success
     tron_cleanup
     rm -rf "$tmpdir"
@@ -248,9 +248,9 @@ setup() {
     tmpdir=$(mktemp -d /tmp/kronn-tron-test-XXXXXX)
     tron_init "$tmpdir"
     _tron_write_progress_file 30
-    run grep '\[x\]' "$tmpdir/.kronn-progress.md"
+    run grep '\[x\]' "$tmpdir/.kronn/progress.md"
     assert_success
-    run grep '\[ \]' "$tmpdir/.kronn-progress.md"
+    run grep '\[ \]' "$tmpdir/.kronn/progress.md"
     assert_success
     tron_cleanup
     rm -rf "$tmpdir"
@@ -263,7 +263,7 @@ setup() {
     _tron_write_progress_file 50
     # Steps at 10%, 20%, 30%, 40%, 50% should be checked
     local checked
-    checked=$(grep -c '\[x\]' "$tmpdir/.kronn-progress.md")
+    checked=$(grep -c '\[x\]' "$tmpdir/.kronn/progress.md")
     [ "$checked" -eq 5 ]
     tron_cleanup
     rm -rf "$tmpdir"

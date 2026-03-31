@@ -179,7 +179,7 @@ pub async fn worktree_unlock(
     };
 
     let wp = match &disc.workspace_path {
-        Some(p) if p.contains(".kronn-worktrees") => p.clone(),
+        Some(p) if p.contains(".kronn/worktrees") || p.contains(".kronn-worktrees") => p.clone(),
         Some(_) => return Json(ApiResponse::err("Workspace is not a worktree")),
         None => return Json(ApiResponse::err("No worktree to unlock")),
     };

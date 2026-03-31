@@ -55,12 +55,12 @@ impl Workspace {
 
         let branch = build_branch_name(workflow_name, run_id);
 
-        // Worktree path: alongside the repo, in a .kronn-worktrees directory
-        let worktree_base = repo_path.join(".kronn-worktrees");
+        // Worktree path: alongside the repo, in a .kronn/worktrees directory
+        let worktree_base = repo_path.join(".kronn/worktrees");
         std::fs::create_dir_all(&worktree_base)?;
-        // Ensure .kronn-worktrees/ is gitignored in the project
+        // Ensure .kronn/worktrees/ is gitignored in the project
         if let Some(p) = repo_path.to_str() {
-            crate::core::mcp_scanner::ensure_gitignore_public(p, ".kronn-worktrees/");
+            crate::core::mcp_scanner::ensure_gitignore_public(p, ".kronn/");
         }
         let worktree_path = worktree_base.join(build_worktree_dir_name(workflow_name, run_id));
 
@@ -265,16 +265,16 @@ mod tests {
     #[test]
     fn worktree_base_is_inside_repo() {
         let repo = PathBuf::from("/home/user/project");
-        let base = repo.join(".kronn-worktrees");
-        assert_eq!(base.to_str().unwrap(), "/home/user/project/.kronn-worktrees");
+        let base = repo.join(".kronn/worktrees");
+        assert_eq!(base.to_str().unwrap(), "/home/user/project/.kronn/worktrees");
     }
 
     #[test]
     fn worktree_path_combines_base_and_dir() {
         let repo = PathBuf::from("/repos/myapp");
-        let base = repo.join(".kronn-worktrees");
+        let base = repo.join(".kronn/worktrees");
         let dir_name = build_worktree_dir_name("audit", "aabbccdd-1234");
         let full = base.join(&dir_name);
-        assert_eq!(full.to_str().unwrap(), "/repos/myapp/.kronn-worktrees/audit-aabbccdd");
+        assert_eq!(full.to_str().unwrap(), "/repos/myapp/.kronn/worktrees/audit-aabbccdd");
     }
 }

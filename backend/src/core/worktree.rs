@@ -21,7 +21,7 @@ fn fix_worktree_paths(repo_path: &Path, worktree_path: &Path) {
     };
 
     // Use relative paths so worktrees work both inside Docker and on the host.
-    // Worktree is always at <repo>/.kronn-worktrees/<name>, so relative paths are stable.
+    // Worktree is always at <repo>/.kronn/worktrees/<name>, so relative paths are stable.
 
     // 1. Fix <worktree>/.git — point to ../../.git/worktrees/<name>
     let dot_git = worktree_path.join(".git");
@@ -35,7 +35,7 @@ fn fix_worktree_paths(repo_path: &Path, worktree_path: &Path) {
     // 2. Fix <repo>/.git/worktrees/<name>/gitdir — point back to worktree
     let gitdir_file = repo_path.join(".git").join("worktrees").join(&wt_name).join("gitdir");
     if gitdir_file.exists() {
-        let content = format!(".kronn-worktrees/{}/.git\n", wt_name);
+        let content = format!(".kronn/worktrees/{}/.git\n", wt_name);
         if let Err(e) = std::fs::write(&gitdir_file, &content) {
             tracing::warn!("Failed to fix repo gitdir for worktree: {}", e);
         }
@@ -76,9 +76,9 @@ fn branch_checked_out_at(repo_path: &Path, branch: &str) -> Option<PathBuf> {
     None
 }
 
-/// Base directory for worktrees: `.kronn-worktrees/` inside the repo.
+/// Base directory for worktrees: `.kronn/worktrees/` inside the repo.
 fn worktree_base_dir(repo_path: &Path) -> PathBuf {
-    repo_path.join(".kronn-worktrees")
+    repo_path.join(".kronn/worktrees")
 }
 
 /// Slugify a string for use in paths and branch names.
@@ -121,7 +121,7 @@ pub fn create_discussion_worktree(
                 branch
             ));
         }
-        // Already in a worktree (e.g. .kronn-worktrees/) — reuse it
+        // Already in a worktree (e.g. .kronn/worktrees/) — reuse it
         tracing::info!(
             "Branch {} already checked out at {}, reusing",
             branch, existing_path.display()
@@ -137,9 +137,9 @@ pub fn create_discussion_worktree(
     std::fs::create_dir_all(worktree_base_dir(repo_path))
         .map_err(|e| format!("Failed to create workspaces dir: {}", e))?;
 
-    // Ensure .kronn-worktrees/ is gitignored
+    // Ensure .kronn/worktrees/ is gitignored
     if let Some(p) = repo_path.to_str() {
-        crate::core::mcp_scanner::ensure_gitignore_public(p, ".kronn-worktrees/");
+        crate::core::mcp_scanner::ensure_gitignore_public(p, ".kronn/");
     }
 
     // Mark repo as safe directory (needed in Docker where mount owner differs)
@@ -233,7 +233,7 @@ pub fn create_discussion_worktree(
 }
 
 /// Re-attach an existing branch to a new worktree path.
-/// Used to migrate worktrees from /data/workspaces/ to .kronn-worktrees/.
+/// Used to migrate worktrees from /data/workspaces/ to .kronn/worktrees/.
 pub fn reattach_worktree(
     repo_path: &Path,
     project_slug: &str,
@@ -268,7 +268,7 @@ pub fn reattach_worktree(
         .map_err(|e| format!("Failed to create workspaces dir: {}", e))?;
 
     if let Some(p) = repo_path.to_str() {
-        crate::core::mcp_scanner::ensure_gitignore_public(p, ".kronn-worktrees/");
+        crate::core::mcp_scanner::ensure_gitignore_public(p, ".kronn/");
     }
 
     if crate::core::env::is_docker() {
@@ -537,7 +537,7 @@ mod tests {
     fn test_worktree_base_dir() {
         let repo = PathBuf::from("/home/user/project");
         let base = worktree_base_dir(&repo);
-        assert_eq!(base, PathBuf::from("/home/user/project/.kronn-worktrees"));
+        assert_eq!(base, PathBuf::from("/home/user/project/.kronn/worktrees"));
     }
 
     #[test]
@@ -571,7 +571,7 @@ mod tests {
     fn test_create_worktree_in_kronn_worktrees_dir() {
         let repo = make_test_repo("basedir");
         let result = create_discussion_worktree(repo.path(), "proj", "feat", "main").unwrap();
-        let expected_base = repo.path().join(".kronn-worktrees");
+        let expected_base = repo.path().join(".kronn/worktrees");
         assert!(result.path.starts_with(&expected_base.to_string_lossy().to_string()));
     }
 
@@ -595,7 +595,7 @@ mod tests {
             repo.path().join(".git").join("worktrees").join(wt_name.as_ref()).join("gitdir")
         ).unwrap();
         assert!(
-            gitdir_content.contains(".kronn-worktrees/"),
+            gitdir_content.contains(".kronn/worktrees/"),
             "Expected relative gitdir back-reference, got: {}",
             gitdir_content
         );
