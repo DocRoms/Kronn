@@ -42,6 +42,36 @@ export function App() {
 
   useEffect(() => { fetchStatus(); }, []);
 
+  // Intercept external link clicks in Tauri desktop only.
+  // Tauri webview doesn't handle target="_blank" — we call /api/open-url
+  // which uses the `open` crate to launch the system browser.
+  // In normal browser mode, links work natively — no interception needed.
+  useEffect(() => {
+    // Detect Tauri: the backend sets a response header or we check the port pattern.
+    // Simplest: Tauri loads from 127.0.0.1 with a random port, Docker/dev uses fixed ports.
+    const isTauri = window.location.hostname === '127.0.0.1'
+      && window.location.port !== '5173'   // not Vite dev
+      && window.location.port !== '3456';  // not Docker gateway
+    if (!isTauri) return;
+
+    const handler = (e: MouseEvent) => {
+      const anchor = (e.target as HTMLElement).closest('a');
+      if (!anchor) return;
+      const href = anchor.getAttribute('href');
+      if (!href || href.startsWith('#') || href.startsWith('/')) return;
+      if (href.startsWith('http://') || href.startsWith('https://')) {
+        e.preventDefault();
+        fetch('/api/open-url', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: href }),
+        }).catch(() => {});
+      }
+    };
+    document.addEventListener('click', handler);
+    return () => document.removeEventListener('click', handler);
+  }, []);
+
   if (loading) {
     return <LoadingScreen />;
   }

@@ -182,6 +182,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // ── Health (lightweight, used by Docker healthcheck — no auth) ──
         .route("/api/health", get(|| async { axum::Json(serde_json::json!({"ok": true})) }))
         // ── Setup wizard ──
+        .route("/api/open-url", post(api::setup::open_url))
         .route("/api/setup/status", get(api::setup::get_status))
         .route("/api/setup/scan-paths", post(api::setup::set_scan_paths))
         .route("/api/setup/install-agent", post(api::setup::install_agent))

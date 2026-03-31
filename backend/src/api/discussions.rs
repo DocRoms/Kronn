@@ -143,7 +143,7 @@ pub async fn create(
         timestamp: now,
         tokens_used: 0,
         auth_mode: None,
-        model_tier: None, author_pseudo: None, author_avatar_email: None,
+        model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None,
     };
 
     let workspace_mode = req.workspace_mode.unwrap_or_else(|| "Direct".into());
@@ -307,7 +307,7 @@ pub async fn update(
                 timestamp: chrono::Utc::now(),
                 tokens_used: 0,
                 auth_mode: None,
-                model_tier: None, author_pseudo: None, author_avatar_email: None,
+                model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None,
             };
             crate::db::discussions::insert_message(conn, &id, &switch_msg)?;
         }
@@ -472,7 +472,7 @@ pub async fn send_message(
         timestamp: Utc::now(),
         tokens_used: 0,
         auth_mode: None,
-        model_tier: None, author_pseudo, author_avatar_email,
+        model_tier: None, cost_usd: None, author_pseudo, author_avatar_email,
     };
     let disc_id = id.clone();
     let msg = user_msg.clone();
@@ -679,6 +679,7 @@ async fn make_agent_stream(
             Ok(mut process) => {
                 let mut full_response = String::new();
                 let mut stream_json_tokens: u64 = 0;
+                let mut stream_json_cost: Option<f64> = None;
                 let is_stream_json = process.output_mode == runner::OutputMode::StreamJson;
                 // Track current tool for rich log messages
                 let mut current_tool: Option<String> = None;
@@ -747,8 +748,11 @@ async fn make_agent_stream(
                                     let _ = tx.send(AgentStreamEvent::Chunk { data: chunk }).await;
                                 }
                             }
-                            runner::StreamJsonEvent::Usage { input_tokens, output_tokens } => {
+                            runner::StreamJsonEvent::Usage { input_tokens, output_tokens, cost_usd } => {
                                 stream_json_tokens = stream_json_tokens.max(input_tokens + output_tokens);
+                                if let Some(c) = cost_usd {
+                                    stream_json_cost = Some(c);
+                                }
                             }
                             runner::StreamJsonEvent::ToolStart(name) => {
                                 current_tool = Some(name);
@@ -861,6 +865,18 @@ async fn make_agent_stream(
                     crate::models::ModelTier::Reasoning => Some("reasoning".to_string()),
                     crate::models::ModelTier::Default => None, // Don't clutter with "default"
                 };
+                // Cost: use real cost from Claude Code if available, else estimate from pricing table
+                let cost_usd = stream_json_cost.or_else(|| {
+                    if tokens_used > 0 {
+                        {
+                            let at_str = serde_json::to_string(&agent_type).unwrap_or_default().trim_matches('"').to_string();
+                            crate::core::pricing::estimate_cost(&at_str, tokens_used)
+                        }
+                    } else {
+                        None
+                    }
+                });
+
                 let agent_msg = DiscussionMessage {
                     id: Uuid::new_v4().to_string(),
                     role: MessageRole::Agent,
@@ -870,6 +886,7 @@ async fn make_agent_stream(
                     tokens_used,
                     auth_mode: Some(auth_mode_str.clone()),
                     model_tier: tier_label,
+                    cost_usd,
                     author_pseudo: None, author_avatar_email: None,
                 };
 
@@ -939,7 +956,7 @@ async fn make_agent_stream(
                     timestamp: Utc::now(),
                     tokens_used: 0,
                     auth_mode: None,
-                    model_tier: None, author_pseudo: None, author_avatar_email: None,
+                    model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None,
                 };
 
                 let did = disc_id.clone();
@@ -1039,7 +1056,7 @@ async fn run_agent_streaming(
                                         let _ = tx.send(AgentStreamEvent::Chunk { data: chunk }).await;
                                     }
                                 }
-                                runner::StreamJsonEvent::Usage { input_tokens, output_tokens } => {
+                                runner::StreamJsonEvent::Usage { input_tokens, output_tokens, .. } => {
                                     stream_tokens = stream_tokens.max(input_tokens + output_tokens);
                                 }
                                 runner::StreamJsonEvent::ToolStart(name) => {
@@ -1328,7 +1345,7 @@ pub async fn orchestrate(
                 timestamp: Utc::now(),
                 tokens_used: 0,
                 auth_mode: None,
-            model_tier: None, author_pseudo: None, author_avatar_email: None,
+            model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None,
             };
             let did = disc_id.clone();
             if let Err(e) = state.db.with_conn(move |conn| {
@@ -1450,7 +1467,7 @@ pub async fn orchestrate(
                                 timestamp: Utc::now(),
                                 tokens_used: result.tokens_used,
                                 auth_mode: Some(auth_mode_for(agent_type, &tokens)),
-                                model_tier: None, author_pseudo: None, author_avatar_email: None,
+                                model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None,
                             };
                             let did = disc_id.clone();
                             if let Err(e) = state.db.with_conn(move |conn| {
@@ -1522,7 +1539,7 @@ pub async fn orchestrate(
                             timestamp: Utc::now(),
                             tokens_used: result.tokens_used,
                             auth_mode: Some(auth_mode_for(&primary_agent_type, &tokens)),
-                            model_tier: None, author_pseudo: None, author_avatar_email: None,
+                            model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None,
                         };
                         let did = disc_id.clone();
                         if let Err(e) = state.db.with_conn(move |conn| {
@@ -2048,7 +2065,7 @@ async fn maybe_generate_summary(
                             timestamp: chrono::Utc::now(),
                             tokens_used: 0,
                             auth_mode: None,
-                            model_tier: Some("economy".into()), author_pseudo: None, author_avatar_email: None,
+                            model_tier: Some("economy".into()), cost_usd: None, author_pseudo: None, author_avatar_email: None,
                         };
                         crate::db::discussions::insert_message(conn, &did2, &sys_msg)?;
                         Ok(())

@@ -1156,7 +1156,7 @@ pub async fn full_audit(
             timestamp: now,
             tokens_used: 0,
             auth_mode: None,
-            model_tier: None, author_pseudo: None, author_avatar_email: None,
+            model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None,
         };
 
         let discussion = Discussion {
@@ -1530,7 +1530,7 @@ pub async fn start_briefing(
         timestamp: now,
         tokens_used: 0,
         auth_mode: None,
-        model_tier: None, author_pseudo: None, author_avatar_email: None,
+        model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None,
     };
 
     let title = match language.as_str() {

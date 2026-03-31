@@ -1,25 +1,15 @@
 import { useState, useEffect } from 'react';
-import { config as configApi, agents as agentsApi, stats as statsApi } from '../../lib/api';
+import { config as configApi, agents as agentsApi } from '../../lib/api';
 import { useApi } from '../../hooks/useApi';
-import { AGENT_COLORS } from '../../lib/constants';
-import type { AgentDetection, AgentsConfig, ModelTiersConfig, AgentUsageSummary } from '../../types/generated';
+import type { AgentDetection, AgentsConfig, ModelTiersConfig } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
 import {
-  Cpu, Zap, Key, AlertTriangle, Save,
+  Cpu, Key, AlertTriangle, Save,
   Plus, Trash2, Download, Check,
   Loader2, RefreshCw, X, Eye, EyeOff, Play, StopCircle,
-  ExternalLink, ChevronRight, FolderSearch,
+  ExternalLink, FolderSearch,
 } from 'lucide-react';
 import '../../pages/SettingsPage.css';
-
-/** Provider usage dashboard URLs per agent type */
-const AGENT_USAGE_URLS: Record<string, string> = {
-  ClaudeCode: 'https://claude.ai/settings/usage',
-  Codex: 'https://platform.openai.com/usage',
-  GeminiCli: 'https://aistudio.google.com/usage',
-  Vibe: 'https://console.mistral.ai/usage',
-  Kiro: '',
-};
 
 interface AgentsSectionProps {
   agents: AgentDetection[];
@@ -43,12 +33,9 @@ export function AgentsSection({
   const [newKeyInputs, setNewKeyInputs] = useState<Record<string, { name: string; value: string }>>({});
   const [addingKeyFor, setAddingKeyFor] = useState<string | null>(null);
   const [tokenVisible, setTokenVisible] = useState<Set<string>>(new Set());
-  const [usageExpanded, setUsageExpanded] = useState<string | null>(null);
-  const [usageSearch, setUsageSearch] = useState('');
   const [tierEditing, setTierEditing] = useState<Record<string, { economy: string; reasoning: string }>>({});
 
   const { data: tokenConfig, refetch: refetchTokens } = useApi(() => configApi.getTokens(), []);
-  const { data: agentUsageData } = useApi(() => statsApi.agentUsage(), []);
 
   // Load model tiers once
   useEffect(() => {
@@ -506,79 +493,6 @@ export function AgentsSection({
               );
             })()}
 
-            {/* Estimated token usage per agent */}
-            {(agent.installed || agent.runtime_available) && (() => {
-              const agentUsage = agentUsageData?.find((a: AgentUsageSummary) => a.agent_type === agent.agent_type);
-              if (!agentUsage || agentUsage.total_tokens === 0) return null;
-              const color = AGENT_COLORS[agent.agent_type] ?? '#8b5cf6';
-              const isExpanded = usageExpanded === agent.agent_type;
-              const filteredProjects = isExpanded
-                ? agentUsage.by_project.filter(p => !usageSearch || p.project_name.toLowerCase().includes(usageSearch.toLowerCase()))
-                : [];
-              return (
-              <div className="set-agent-sub">
-                <button
-                  className="set-usage-btn"
-                  onClick={() => setUsageExpanded(isExpanded ? null : agent.agent_type)}
-                  aria-expanded={isExpanded}
-                >
-                  <ChevronRight size={10} className="text-tertiary" style={{ transform: isExpanded ? 'rotate(90deg)' : 'none', transition: 'transform .15s' }} />
-                  <Zap size={10} className="text-tertiary" />
-                  <span className="text-xs text-secondary">{t('config.estimateTokenUsage')}</span>
-                  <span className="text-xs" style={{ color, marginLeft: 'auto' }}>
-                    ~{agentUsage.total_tokens.toLocaleString()} tok
-                  </span>
-                  <span className="text-2xs text-tertiary">
-                    {agentUsage.message_count} msg
-                  </span>
-                </button>
-                {AGENT_USAGE_URLS[agent.agent_type] && (
-                  <a
-                    href={AGENT_USAGE_URLS[agent.agent_type]}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex-row gap-2 text-2xs text-faint"
-                    style={{ marginLeft: 28, marginTop: 2, textDecoration: 'none' }}
-                    title="Provider usage dashboard"
-                  >
-                    <ExternalLink size={9} />
-                    <span>Usage dashboard</span>
-                  </a>
-                )}
-                {isExpanded && (
-                  <div style={{ paddingLeft: 22, paddingBottom: 4 }}>
-                    {agentUsage.by_project.length > 5 && (
-                      <input
-                        type="text"
-                        placeholder={t('projects.search')}
-                        value={usageSearch}
-                        onChange={e => setUsageSearch(e.target.value)}
-                        className="set-input set-input-xs w-full mb-2"
-                      />
-                    )}
-                    {filteredProjects.map(p => (
-                      <div key={p.project_id} className="flex-row gap-3 text-xs" style={{ padding: '2px 0' }}>
-                        <span className="text-tertiary flex-1 truncate">
-                          {p.project_name}
-                        </span>
-                        <span className="text-ghost flex-shrink-0">
-                          ~{p.tokens_used.toLocaleString()} tok
-                        </span>
-                        <span className="text-2xs flex-shrink-0" style={{ color: 'rgba(255,255,255,0.15)' }}>
-                          {p.message_count} msg
-                        </span>
-                      </div>
-                    ))}
-                    {filteredProjects.length === 0 && usageSearch && (
-                      <div className="text-xs text-ghost" style={{ padding: '2px 0' }}>
-                        {t('projects.noResult')}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-              );
-            })()}
           </div>
           );
         })}

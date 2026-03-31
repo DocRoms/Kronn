@@ -315,7 +315,7 @@ pub async fn bootstrap(
         timestamp: now,
         tokens_used: 0,
         auth_mode: None,
-        model_tier: None, author_pseudo: None, author_avatar_email: None,
+        model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None,
     };
 
     let discussion = Discussion {

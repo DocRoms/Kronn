@@ -990,9 +990,24 @@ pub struct AiSearchResult {
 #[ts(export)]
 pub struct TokenUsageSummary {
     pub total_tokens: u64,
+    pub total_cost_usd: f64,
+    pub discussion_tokens: u64,
+    pub workflow_tokens: u64,
     pub by_provider: Vec<ProviderUsage>,
     pub by_project: Vec<ProjectUsage>,
+    pub top_discussions: Vec<UsageEntry>,
+    pub top_workflows: Vec<UsageEntry>,
     pub daily_history: Vec<DailyUsage>,
+}
+
+/// A ranked usage entry (for top N lists)
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UsageEntry {
+    pub id: String,
+    pub name: String,
+    pub tokens_used: u64,
+    pub cost_usd: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -1010,6 +1025,7 @@ pub struct ProjectUsage {
     pub project_id: String,
     pub project_name: String,
     pub tokens_used: u64,
+    pub cost_usd: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -1034,9 +1050,13 @@ pub struct AgentProjectUsage {
 #[ts(export)]
 pub struct DailyUsage {
     pub date: String,
+    pub tokens: u64,
+    pub cost_usd: f64,
     pub anthropic: u64,
     pub openai: u64,
+    pub google: u64,
     pub mistral: u64,
+    pub amazon: u64,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1194,6 +1214,9 @@ pub struct DiscussionMessage {
     /// Which model tier was used for this message (economy/default/reasoning).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_tier: Option<String>,
+    /// Cost in USD (real from Claude Code, estimated for other providers)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
     /// Author identity (for multi-user / display)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author_pseudo: Option<String>,

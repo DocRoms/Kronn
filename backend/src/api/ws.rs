@@ -208,6 +208,7 @@ fn handle_incoming_chat_message(
         tokens_used: 0,
         auth_mode: None,
         model_tier: None,
+        cost_usd: None,
         author_pseudo: Some(from_pseudo.to_string()),
         author_avatar_email: from_avatar_email.map(|s| s.to_string()),
     };

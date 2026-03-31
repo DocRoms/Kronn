@@ -22,7 +22,7 @@ You use AI coding agents. Maybe Claude Code, maybe Codex, maybe both. Each has i
 | **Architecture decisions** | Ask one model, get one opinion | Multi-agent debate: agents argue, then synthesize |
 | **Recurring tasks** | Run manually, forget, repeat | Cron workflows with multi-step, multi-agent pipelines |
 | **Legacy projects** | "Nobody knows how this works" | 20-min AI audit → fully documented, AI-ready codebase |
-| **Tokens** | No idea what you're spending | Per-message tracking, per-project visibility |
+| **Tokens** | No idea what you're spending | Per-message cost tracking, usage dashboard with daily history, provider breakdown, project-level visibility |
 | **API Keys** | One key per provider, no switching | Multiple named keys per provider with one-click activation |
 | **Security** | Tokens in plaintext in dotfiles | AES-256-GCM encrypted, self-hosted, nothing leaves your network |
 | **Waste** | Agents explore blindly, rebuild context daily, retry on bad answers | Document once, persist context, get it right first try |
@@ -188,6 +188,7 @@ All models downloaded on first use and cached locally.
 
 ### More Features
 
+- **Usage Dashboard** — real-time token consumption and cost estimation across all providers. Summary cards, provider breakdown bar, per-project horizontal bars, daily history chart (30 days, stacked by provider). Toggle between token count and USD cost view. Filter by discussions or workflows. Click a discussion name to navigate directly to it
 - **Project Bootstrap** — create a new project from scratch with an AI architect guiding Vision → Architecture → Stack → MVP → Action Plan
 - **Worktree Isolation** — each discussion/workflow runs in its own git worktree. Lock/Unlock for local testing
 - **Agent Incompatibility** — Kronn tracks per-agent limitations and auto-excludes incompatible agents from steps

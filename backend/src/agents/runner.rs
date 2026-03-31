@@ -58,8 +58,8 @@ pub enum OutputMode {
 pub enum StreamJsonEvent {
     /// A text chunk to stream to the user
     Text(String),
-    /// Token usage from a message_delta event (input_tokens, output_tokens)
-    Usage { input_tokens: u64, output_tokens: u64 },
+    /// Token usage from a message_delta event (input_tokens, output_tokens, optional cost)
+    Usage { input_tokens: u64, output_tokens: u64, cost_usd: Option<f64> },
     /// Tool use started — name of the tool
     ToolStart(String),
     /// Partial JSON input for the current tool (accumulated to build full input)
@@ -854,7 +854,7 @@ pub fn parse_claude_stream_line(line: &str) -> StreamJsonEvent {
                     let input = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
                     let output = usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
                     if input > 0 || output > 0 {
-                        return StreamJsonEvent::Usage { input_tokens: input, output_tokens: output };
+                        return StreamJsonEvent::Usage { input_tokens: input, output_tokens: output, cost_usd: None };
                     }
                 }
             }
@@ -889,12 +889,12 @@ pub fn parse_claude_stream_line(line: &str) -> StreamJsonEvent {
 
         // Final result line — contains token usage and cost
         "result" => {
-            // Try usage field first
+            let cost = json.get("cost_usd").and_then(|v| v.as_f64()).filter(|c| *c > 0.0);
             if let Some(usage) = json.get("usage") {
                 let input = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
                 let output = usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
                 if input > 0 || output > 0 {
-                    return StreamJsonEvent::Usage { input_tokens: input, output_tokens: output };
+                    return StreamJsonEvent::Usage { input_tokens: input, output_tokens: output, cost_usd: cost };
                 }
             }
             StreamJsonEvent::Skip

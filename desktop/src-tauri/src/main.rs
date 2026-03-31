@@ -373,6 +373,15 @@ fn get_backend_url(info: tauri::State<'_, BackendInfo>) -> String {
     format!("http://127.0.0.1:{}", info.port)
 }
 
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        open::that(&url).map_err(|e| format!("Failed to open URL: {}", e))
+    } else {
+        Err("Only http/https URLs are allowed".into())
+    }
+}
+
 // ── Main ───────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -420,7 +429,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(BackendInfo { port })
-        .invoke_handler(tauri::generate_handler![get_backend_url])
+        .invoke_handler(tauri::generate_handler![get_backend_url, open_url])
         .setup(move |app| {
             use tauri::Manager;
 

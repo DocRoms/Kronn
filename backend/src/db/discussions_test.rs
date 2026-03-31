@@ -51,7 +51,7 @@ mod tests {
             timestamp: Utc::now(),
             tokens_used: 0,
             auth_mode: None,
-            model_tier: None, author_pseudo: None, author_avatar_email: None,
+            model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None,
         }
     }
 
@@ -501,7 +501,7 @@ mod tests {
             timestamp: chrono::Utc::now(),
             tokens_used: 0,
             auth_mode: None,
-            model_tier: None, author_pseudo: None, author_avatar_email: None,
+            model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None,
         };
         insert_message(&conn, "switch-msg", &msg).unwrap();
 

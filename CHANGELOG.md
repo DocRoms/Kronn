@@ -7,6 +7,21 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.3.1] — 2026-04-01
+
+### Added
+- **Usage dashboard** — new "Usage" section in Settings with summary cards (total tokens, estimated cost, discussions, workflows), provider breakdown bar, per-project horizontal bars, and daily history chart (30 days, stacked by provider). Toggle between token count and USD cost view. Filter by discussions, workflows, or all
+- **Per-message cost tracking** — `cost_usd` column on `messages` table (migration 024). Real cost captured from Claude Code's `result` stream event; fallback to static pricing estimation for other providers
+- **Static pricing engine** — `core/pricing.rs` with per-provider token pricing (Anthropic, OpenAI, Google, Mistral, Amazon). Used when real cost is unavailable
+- **Daily usage history API** — `GET /api/stats/tokens` now returns `daily_history` with per-day token/cost breakdown by provider (last 30 days)
+- **Discussion deep-link from Usage** — clicking a discussion name in the Usage top-5 list navigates directly to the discussion page and opens it
+
+### Changed
+- **Usage centralized in Settings** — the per-agent "Estimated token usage" section in Config > Agents has been removed. All usage data is now in the dedicated Usage section with richer visualizations
+- **`StreamJsonEvent::Usage`** — `cost_usd: Option<f64>` integrated directly into the `Usage` variant; the separate `Cost` variant has been removed
+
+---
+
 ## [0.3.0] — 2026-03-31
 
 ### Added
