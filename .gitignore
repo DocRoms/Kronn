@@ -31,8 +31,7 @@ kronn.toml
 .DS_Store
 
 # Kronn runtime
-.kronn-tmp/
-.kronn-worktrees/
+.kronn/
 
 # Docker
 .env

@@ -12,8 +12,7 @@ fi
 KRONN_GITIGNORE="${HOME}/.kronn-gitignore"
 cat > "$KRONN_GITIGNORE" <<'GITIGNORE'
 # Kronn runtime (auto-generated — do not edit)
-.kronn-tmp/
-.kronn-worktrees/
+.kronn/
 GITIGNORE
 git config --global core.excludesFile "$KRONN_GITIGNORE"
 

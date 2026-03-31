@@ -19,9 +19,9 @@ _tron_start_time=""
 _tron_target_dir=""
 _tron_log_file=""
 _tron_agent_name=""
-_TRON_PROGRESS_FILE=".kronn-progress.md"
+_TRON_PROGRESS_FILE=".kronn/progress.md"
 
-# Analysis steps (label + percentage threshold) — used for .kronn-progress.md
+# Analysis steps (label + percentage threshold) — used for .kronn/progress.md
 _TRON_STEPS=(
     "10:ai/index.md"
     "20:ai/repo-map.md"
@@ -111,11 +111,12 @@ tron_cleanup() {
 
 # ─── Progress file ────────────────────────────────────────────────────────────
 
-# Write a .kronn-progress.md checklist in the target repo.
+# Write a .kronn/progress.md checklist in the target repo.
 # Shows completed steps (checked) and remaining steps (unchecked).
 _tron_write_progress_file() {
     local current_pct="${1:-0}"
     local file="$_tron_target_dir/$_TRON_PROGRESS_FILE"
+    mkdir -p "$(dirname "$file")"
 
     local elapsed=""
     if [[ -n "$_tron_start_time" ]]; then

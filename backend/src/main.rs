@@ -111,19 +111,16 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Ensure .kronn-tmp/ and .kronn-worktrees/ are gitignored in all projects
-    // (retroactive fix for projects created before these patterns were auto-added)
+    // Ensure .kronn/ is gitignored in all projects
+    // (retroactive fix — also migrates old .kronn-tmp/ and .kronn-worktrees/ patterns)
     {
         let db = state.db.clone();
         if let Err(e) = db.with_conn(|conn| {
             let projects = kronn::db::projects::list_projects(conn)?;
             for p in &projects {
                 let resolved = kronn::core::scanner::resolve_host_path(&p.path);
-                if resolved.join(".kronn-tmp").exists() {
-                    mcp_scanner::ensure_gitignore_public(&p.path, ".kronn-tmp/");
-                }
-                if resolved.join(".kronn-worktrees").exists() {
-                    mcp_scanner::ensure_gitignore_public(&p.path, ".kronn-worktrees/");
+                if resolved.join(".kronn").exists() || resolved.join(".kronn-tmp").exists() || resolved.join(".kronn-worktrees").exists() {
+                    mcp_scanner::ensure_gitignore_public(&p.path, ".kronn/");
                 }
             }
             Ok(())
@@ -132,7 +129,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Migrate worktrees from /data/workspaces/ to .kronn-worktrees/ inside each repo
+    // Migrate worktrees from /data/workspaces/ to .kronn/worktrees/ inside each repo
     {
         let db = state.db.clone();
         if let Err(e) = db.with_conn(|conn| {
