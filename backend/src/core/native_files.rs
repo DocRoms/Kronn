@@ -29,6 +29,7 @@ fn profile_dir(agent: &AgentType) -> Option<&'static str> {
         AgentType::ClaudeCode => Some(".claude/agents"),
         AgentType::GeminiCli  => Some(".gemini/agents"),
         AgentType::Codex      => Some(".codex/agents"),
+        AgentType::CopilotCli => Some(".copilot/agents"),
         AgentType::Kiro       => Some(".kiro/steering"),
         _ => None, // Vibe has no project-level agent file support
     }
@@ -44,22 +45,36 @@ fn profile_ext(agent: &AgentType) -> &'static str {
 
 // ─── Skill renderers ─────────────────────────────────────────────────────────
 
-/// Render a SKILL.md for Claude Code.
+/// Render optional agentskills.io frontmatter fields (license, allowed-tools).
+fn render_skill_optional_fields(skill: &Skill) -> String {
+    let mut extra = String::new();
+    if let Some(ref license) = skill.license {
+        extra.push_str(&format!("license: {}\n", license));
+    }
+    if let Some(ref tools) = skill.allowed_tools {
+        extra.push_str(&format!("allowed-tools: {}\n", tools));
+    }
+    extra
+}
+
+/// Render a SKILL.md for Claude Code (agentskills.io compliant).
 fn render_skill_claude(skill: &Skill) -> String {
     format!(
-        "---\nname: {}\ndescription: {}\nuser-invocable: true\n---\n\n{}",
+        "---\nname: {}\ndescription: {}\nuser-invocable: true\n{}---\n\n{}",
         slug(&skill.id),
         skill.description,
+        render_skill_optional_fields(skill),
         skill.content,
     )
 }
 
-/// Render a SKILL.md for Codex.
+/// Render a SKILL.md for Codex / Gemini / Kiro (minimal + optional fields).
 fn render_skill_codex(skill: &Skill) -> String {
     format!(
-        "---\nname: {}\ndescription: {}\n---\n\n{}",
+        "---\nname: {}\ndescription: {}\n{}---\n\n{}",
         slug(&skill.id),
         skill.description,
+        render_skill_optional_fields(skill),
         skill.content,
     )
 }
@@ -67,21 +82,22 @@ fn render_skill_codex(skill: &Skill) -> String {
 /// Render a SKILL.md for Vibe.
 fn render_skill_vibe(skill: &Skill) -> String {
     format!(
-        "---\nname: {}\ndescription: {}\nuser-invocable: true\n---\n\n{}",
+        "---\nname: {}\ndescription: {}\nuser-invocable: true\n{}---\n\n{}",
         slug(&skill.id),
         skill.description,
+        render_skill_optional_fields(skill),
         skill.content,
     )
 }
 
 /// Render a SKILL.md for Kiro.
 fn render_skill_kiro(skill: &Skill) -> String {
-    render_skill_codex(skill) // Same minimal format
+    render_skill_codex(skill)
 }
 
 /// Render a SKILL.md for Gemini CLI.
 fn render_skill_gemini(skill: &Skill) -> String {
-    render_skill_codex(skill) // Same minimal format
+    render_skill_codex(skill)
 }
 
 fn render_skill(agent: &AgentType, skill: &Skill) -> String {
@@ -135,6 +151,17 @@ fn render_profile_codex(profile: &AgentProfile) -> String {
     )
 }
 
+/// Render a Copilot CLI agent file (.copilot/agents/{name}.md).
+fn render_profile_copilot(profile: &AgentProfile) -> String {
+    format!(
+        "---\nname: {}\ndescription: {} — {}\n---\n\n{}",
+        slug(&profile.id),
+        profile.name,
+        profile.role,
+        profile.persona_prompt,
+    )
+}
+
 /// Render a Kiro steering file (.kiro/steering/{name}.md).
 fn render_profile_kiro(profile: &AgentProfile) -> String {
     format!(
@@ -151,6 +178,7 @@ fn render_profile(agent: &AgentType, profile: &AgentProfile) -> Option<String> {
         AgentType::ClaudeCode => Some(render_profile_claude(profile)),
         AgentType::GeminiCli  => Some(render_profile_gemini(profile)),
         AgentType::Codex      => Some(render_profile_codex(profile)),
+        AgentType::CopilotCli => Some(render_profile_copilot(profile)),
         AgentType::Kiro       => Some(render_profile_kiro(profile)),
         _ => None, // Vibe: no native agent files
     }
@@ -172,7 +200,7 @@ pub fn supports_native_skills(agent: &AgentType) -> bool {
 
 /// Returns true if this agent type discovers agent/profile files natively.
 pub fn supports_native_profiles(agent: &AgentType) -> bool {
-    matches!(agent, AgentType::ClaudeCode | AgentType::GeminiCli | AgentType::Codex)
+    matches!(agent, AgentType::ClaudeCode | AgentType::GeminiCli | AgentType::Codex | AgentType::CopilotCli)
 }
 
 // ─── Sync functions ──────────────────────────────────────────────────────────
@@ -191,6 +219,7 @@ const PROFILE_SYNC_AGENTS: &[AgentType] = &[
     AgentType::ClaudeCode,
     AgentType::GeminiCli,
     AgentType::Codex,
+    AgentType::CopilotCli,
     // Kiro steering: unconfirmed in headless
 ];
 
@@ -401,13 +430,27 @@ fn cleanup_stale_files(parent: &Path, ext: &str, active_slugs: &[String]) {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Convert an ID to a filename-safe slug (lowercase, hyphens).
-fn slug(id: &str) -> String {
-    id.to_lowercase()
+/// Convert an ID to an agentskills.io-compliant slug.
+/// Rules: lowercase a-z + 0-9 + hyphens, no leading/trailing/consecutive hyphens, max 64 chars.
+pub fn slug(id: &str) -> String {
+    let raw: String = id.to_lowercase()
         .chars()
         .map(|c| if c == ' ' || c == '_' { '-' } else { c })
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-        .collect()
+        .collect();
+    // Collapse consecutive hyphens
+    let mut result = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        if c == '-' && result.ends_with('-') { continue; }
+        result.push(c);
+    }
+    // Strip leading/trailing hyphens, truncate to 64 chars
+    let trimmed = result.trim_matches('-');
+    if trimmed.len() > 64 {
+        trimmed[..64].trim_end_matches('-').to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// Check if a directory contains at least one SKILL.md file (in any subdirectory).
@@ -448,6 +491,8 @@ mod tests {
             content: "Expert Rust knowledge. Prefer references over cloning.".into(),
             is_builtin: true,
             token_estimate: 150,
+            license: None,
+            allowed_tools: None,
         }
     }
 
@@ -524,12 +569,33 @@ mod tests {
     }
 
     #[test]
+    fn render_profile_copilot_md_format() {
+        let profile = sample_profile();
+        let content = render_profile_copilot(&profile);
+        assert!(content.contains("name: architect"));
+        assert!(content.contains("description: Architect — Software Architect"));
+        assert!(content.contains("You are a senior software architect"));
+        // Copilot uses same .md format as Gemini (no model: inherit)
+        assert!(!content.contains("model:"));
+    }
+
+    #[test]
+    fn copilot_in_profile_sync_agents() {
+        assert!(PROFILE_SYNC_AGENTS.contains(&AgentType::CopilotCli),
+            "CopilotCli must be in PROFILE_SYNC_AGENTS");
+        assert!(supports_native_profiles(&AgentType::CopilotCli),
+            "CopilotCli must support native profiles");
+        assert_eq!(profile_dir(&AgentType::CopilotCli), Some(".copilot/agents"),
+            "CopilotCli profile dir must be .copilot/agents");
+    }
+
+    #[test]
     fn render_profile_vibe_returns_none() {
         let profile = sample_profile();
         assert!(render_profile(&AgentType::Vibe, &profile).is_none());
     }
 
-    // ── Slug tests ──
+    // ── Slug tests (agentskills.io spec) ──
 
     #[test]
     fn slug_normalizes() {
@@ -538,15 +604,71 @@ mod tests {
         assert_eq!(slug("API Design!"), "api-design");
     }
 
+    #[test]
+    fn slug_collapses_consecutive_hyphens() {
+        assert_eq!(slug("C++ Expert"), "c-expert");
+        assert_eq!(slug("My -- Skill"), "my-skill");
+        assert_eq!(slug("a---b"), "a-b");
+    }
+
+    #[test]
+    fn slug_strips_leading_trailing_hyphens() {
+        assert_eq!(slug("--test--"), "test");
+        assert_eq!(slug("-abc-"), "abc");
+    }
+
+    #[test]
+    fn slug_truncates_to_64_chars() {
+        let long = "a".repeat(100);
+        let result = slug(&long);
+        assert!(result.len() <= 64, "Slug must be max 64 chars, got {}", result.len());
+    }
+
+    #[test]
+    fn slug_empty_input() {
+        assert_eq!(slug("!!!"), "");
+        assert_eq!(slug("---"), "");
+    }
+
+    // ── agentskills.io optional fields ──
+
+    #[test]
+    fn render_skill_without_optional_fields() {
+        let skill = sample_skill();
+        let content = render_skill_claude(&skill);
+        assert!(!content.contains("license:"));
+        assert!(!content.contains("allowed-tools:"));
+    }
+
+    #[test]
+    fn render_skill_with_license_and_allowed_tools() {
+        let mut skill = sample_skill();
+        skill.license = Some("MIT".into());
+        skill.allowed_tools = Some("Bash Read Grep".into());
+        let content = render_skill_claude(&skill);
+        assert!(content.contains("license: MIT"));
+        assert!(content.contains("allowed-tools: Bash Read Grep"));
+        assert!(content.contains("user-invocable: true"));
+    }
+
+    #[test]
+    fn render_skill_codex_with_optional_fields() {
+        let mut skill = sample_skill();
+        skill.license = Some("Apache-2.0".into());
+        let content = render_skill_codex(&skill);
+        assert!(content.contains("license: Apache-2.0"));
+        assert!(!content.contains("user-invocable"));
+    }
+
     // ── Reference prompt tests ──
 
     #[test]
     fn reference_prompt_with_known_skills() {
-        // Uses real builtin skills
+        // Uses real builtin skills (names are now lowercase slugs per agentskills.io spec)
         let ids = vec!["rust".into(), "security".into()];
         let prompt = build_skills_reference_prompt(&ids);
-        assert!(prompt.contains("Rust"));
-        assert!(prompt.contains("Security"));
+        assert!(prompt.contains("rust"));
+        assert!(prompt.contains("security"));
         assert!(prompt.contains("prioritize"));
         // Must be short (< 100 chars)
         assert!(prompt.len() < 100, "Reference prompt too long: {} chars", prompt.len());

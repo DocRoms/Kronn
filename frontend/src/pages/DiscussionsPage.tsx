@@ -341,11 +341,11 @@ export function DiscussionsPage({
     return () => { if (sendingTimerRef.current) clearInterval(sendingTimerRef.current); };
   }, [sending, activeDiscussionId, sendingStartMap]);
 
-  // Auto-scroll on new messages (instant) and streaming (throttled to avoid 60fps layout thrashing)
+  // Auto-scroll on new messages, sending state, and streaming (throttled to avoid 60fps layout thrashing)
   const lastScrollRef = useRef(0);
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [activeDiscussion?.messages.length]);
+  }, [activeDiscussion?.messages.length, sending]);
   useEffect(() => {
     if (!streamingText) return;
     const now = Date.now();

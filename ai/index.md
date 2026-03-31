@@ -170,8 +170,8 @@ After completing a task: if you discovered something non-obvious (a gotcha, a mi
 | Streaming | SSE (Server-Sent Events) for agent responses and workflow run updates |
 | Container | Docker Compose (backend + frontend + nginx gateway) |
 | Agents | Claude Code CLI, OpenAI Codex CLI, Vibe (Mistral), Gemini CLI (Google), Kiro (Amazon). Planned: OpenCode, DeepSeek |
-| MCP sync | 6 formats: `.mcp.json` (Claude), `.kiro/settings/mcp.json` (Kiro), `.ai/mcp/mcp.json` (Kiro new), `.gemini/settings.json` (Gemini CLI), `.vibe/config.toml` (Vibe), `~/.codex/config.toml` (Codex) |
-| Skills sync | Native SKILL.md files written to `.claude/skills/`, `.agents/skills/` (Codex), `.gemini/skills/` for progressive agent discovery. Profiles synced as agent files (`.claude/agents/`, `.gemini/agents/`, `.codex/agents/`). Vibe/Kiro: prompt injection fallback |
+| MCP sync | 7 formats: `.mcp.json` (Claude), `.kiro/settings/mcp.json` (Kiro), `.ai/mcp/mcp.json` (Kiro new), `.gemini/settings.json` (Gemini CLI), `.vibe/config.toml` (Vibe), `~/.codex/config.toml` (Codex), `~/.copilot/mcp-config.json` (Copilot CLI). Also syncs Claude Code's `.claude/settings.local.json` `enabledMcpjsonServers` whitelist |
+| Skills sync | Native SKILL.md files written to `.claude/skills/`, `.agents/skills/` (Codex), `.gemini/skills/` for progressive agent discovery. Profiles synced as agent files (`.claude/agents/`, `.gemini/agents/`, `.codex/agents/`, `.copilot/agents/`). Vibe/Kiro: prompt injection fallback |
 | API keys | Multi-key per provider (named keys, active selection), stored in `config.toml` as `[[tokens.keys]]` array. Agent auth files synced (e.g. `~/.codex/auth.json`). Override toggle per provider without deleting keys. |
 | Token tracking | Per-message `tokens_used` + `auth_mode` (override/local). Codex: parsed from stderr. Claude Code: `--output-format stream-json --verbose --include-partial-messages` (tokens from `result` event and `message_delta`). Gemini/Vibe: TODO. |
 
@@ -185,7 +185,7 @@ Dashboard tabs (current / planned):
 |-----|--------|---------|
 | Projets | Done | Project list, AI audit pipeline (template → audit → validation), project bootstrap (create from scratch), MCP overview, per-project workflows/skills/doc viewer |
 | Discussions | Done | Single/multi-agent chat, @mentions, orchestration, global discussions, archive/unarchive (swipe gestures), inline title editing, disabled agent detection. **Split into 7 components**: DiscussionsPage (orchestrator 1218L) + ChatHeader, ChatInput, DiscussionSidebar, NewDiscussionForm, MessageBubble, SwipeableDiscItem |
-| Plugins | Done | Plugin (MCP) registry with card grid + category pills, inline expand detail panel, per-project navigation. Renamed from "MCPs" — user-facing label is "Plugins (MCP / API)" |
+| Plugins | Done | Plugin (MCP) registry with card grid + category pills, inline expand detail panel, per-project navigation. Renamed from "MCPs" — user-facing label is "Plugins (MCP / API)". Publisher origin badges (official/community). Per-project MCP load indicator (green/orange/red) |
 | Workflows | Done | Workflow list (grouped by project), creation wizard (**simple** 3-step + **advanced** 5-step modes), detail + runs with live SSE progress, manual trigger, run deletion (individual + bulk). **MCP-based workflow suggestions** (10 template catalogue). **Structured inter-step contract** (`StepOutputFormat`: FreeText/Structured with `---STEP_OUTPUT---` envelope). MCP tools auto-injected into agent prompts. |
 | Config | Done | Multi-key API management (incl. Mistral/Vibe API keys), token usage tracking, language, agent detection + permissions, agent usage dashboard links, Directives CRUD with live cards, DB management (export/import). Skills/Profiles are now managed per-project on the Project page. |
 
@@ -264,4 +264,4 @@ Redirectors to this file: `CLAUDE.md`, `GEMINI.md`, `AGENTS.md`, `.kiro/steering
 
 ## 11. Last updated
 
-AI context last reviewed: **2026-03-31**.
+AI context last reviewed: **2026-04-03**.

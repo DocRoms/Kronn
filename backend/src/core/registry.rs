@@ -16,19 +16,27 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["git".into(), "ci".into(), "code".into()],
             token_url: Some("https://github.com/settings/tokens?type=beta".into()),
             token_help: Some("Fine-grained PAT with repo access".into()),
+            publisher: "Anthropic".into(),
+            official: false,
+            alt_packages: vec![],
+            default_context: None,
         },
         McpDefinition {
             id: "mcp-gitlab".into(),
             name: "GitLab".into(),
-            description: "Issues, MRs, pipelines, repos — official GitLab server".into(),
+            description: "Issues, MRs, pipelines, projects — official GitLab CLI MCP server (experimental)".into(),
             transport: McpTransport::Stdio {
-                command: "npx".into(),
-                args: vec!["-y".into(), "@modelcontextprotocol/server-gitlab".into()],
+                command: "glab".into(),
+                args: vec!["mcp".into(), "serve".into()],
             },
-            env_keys: vec!["GITLAB_PERSONAL_ACCESS_TOKEN".into(), "GITLAB_API_URL".into()],
+            env_keys: vec!["GITLAB_TOKEN".into(), "GITLAB_HOST".into()],
             tags: vec!["git".into(), "ci".into(), "code".into()],
             token_url: Some("https://gitlab.com/-/user_settings/personal_access_tokens".into()),
-            token_help: Some("PAT with api scope".into()),
+            token_help: Some("Requires glab CLI (brew install glab / winget install glab). GITLAB_TOKEN: PAT with api scope. GITLAB_HOST: your GitLab hostname (e.g. gitlab.company.com). Leave GITLAB_HOST empty for gitlab.com.".into()),
+            publisher: "GitLab".into(),
+            official: true,
+            alt_packages: vec!["@modelcontextprotocol/server-gitlab".into()],
+            default_context: None,
         },
         // ── Databases ───────────────────────────────────────────────────────
         McpDefinition {
@@ -43,6 +51,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["database".into(), "sql".into()],
             token_url: None,
             token_help: Some("Connection string: postgresql://user:pass@host:5432/db".into()),
+            publisher: "Anthropic".into(),
+            official: false,
+            alt_packages: vec![],
+            default_context: None,
         },
         McpDefinition {
             id: "mcp-sqlite".into(),
@@ -56,6 +68,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["database".into(), "embedded".into()],
             token_url: None,
             token_help: None,
+            publisher: "Anthropic".into(),
+            official: false,
+            alt_packages: vec![],
+            default_context: None,
         },
         McpDefinition {
             id: "mcp-redis".into(),
@@ -69,6 +85,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["cache".into(), "database".into()],
             token_url: None,
             token_help: Some("REDIS_HOST (default 127.0.0.1), REDIS_PORT (default 6379), REDIS_PWD. Optional: REDIS_SSL=true for TLS.".into()),
+            publisher: "Redis Ltd".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: None,
         },
         // ── Cloud & Infra ───────────────────────────────────────────────────
         McpDefinition {
@@ -83,6 +103,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["cloud".into(), "edge".into(), "deploy".into()],
             token_url: Some("https://dash.cloudflare.com/profile/api-tokens".into()),
             token_help: Some("API token with needed zone/account permissions".into()),
+            publisher: "Cloudflare".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: None,
         },
         McpDefinition {
             id: "mcp-aws-cloudwatch".into(),
@@ -96,6 +120,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["cloud".into(), "monitoring".into(), "aws".into()],
             token_url: Some("https://console.aws.amazon.com/iam/home#/security_credentials".into()),
             token_help: Some("IAM access keys with CloudWatchLogsReadOnlyAccess".into()),
+            publisher: "AWS Labs".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: None,
         },
         McpDefinition {
             id: "mcp-aws-api".into(),
@@ -109,6 +137,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["cloud".into(), "aws".into(), "infrastructure".into(), "devops".into()],
             token_url: Some("https://console.aws.amazon.com/iam/home#/security_credentials".into()),
             token_help: Some("IAM access keys, or set AWS_API_MCP_PROFILE_NAME to use a named profile. Single-user only.".into()),
+            publisher: "AWS Labs".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: None,
         },
         McpDefinition {
             id: "mcp-docker".into(),
@@ -122,6 +154,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["containers".into(), "devops".into()],
             token_url: None,
             token_help: None,
+            publisher: "Docker".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: None,
         },
         // ── Search & Web ────────────────────────────────────────────────────
         McpDefinition {
@@ -136,6 +172,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["search".into(), "web".into()],
             token_url: Some("https://brave.com/search/api/".into()),
             token_help: Some("Brave Search API key (free tier available)".into()),
+            publisher: "Anthropic".into(),
+            official: false,
+            alt_packages: vec![],
+            default_context: None,
         },
         McpDefinition {
             id: "mcp-fetch".into(),
@@ -149,6 +189,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["web".into(), "http".into()],
             token_url: None,
             token_help: None,
+            publisher: "Anthropic".into(),
+            official: false,
+            alt_packages: vec![],
+            default_context: None,
         },
         // ── Analytics & Monitoring ──────────────────────────────────────────
         McpDefinition {
@@ -163,6 +207,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["monitoring".into(), "errors".into()],
             token_url: Some("https://sentry.io/settings/auth-tokens/".into()),
             token_help: Some("Auth token with project:read scope".into()),
+            publisher: "Sentry".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: None,
         },
         McpDefinition {
             id: "mcp-grafana".into(),
@@ -176,6 +224,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["monitoring".into(), "dashboards".into(), "observability".into(), "prometheus".into(), "loki".into()],
             token_url: Some("https://grafana.com/docs/grafana/latest/administration/service-accounts/".into()),
             token_help: Some("Service account token with Viewer role minimum. Optional: GRAFANA_ORG_ID for multi-org".into()),
+            publisher: "Grafana Labs".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: None,
         },
         // ── Communication ───────────────────────────────────────────────────
         McpDefinition {
@@ -190,6 +242,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["communication".into(), "chat".into()],
             token_url: Some("https://api.slack.com/apps".into()),
             token_help: Some("Bot User OAuth Token (xoxb-...)".into()),
+            publisher: "Anthropic".into(),
+            official: false,
+            alt_packages: vec![],
+            default_context: None,
         },
         // ── Project Management ──────────────────────────────────────────────
         McpDefinition {
@@ -203,6 +259,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["project-management".into(), "issues".into()],
             token_url: Some("https://linear.app/settings/api".into()),
             token_help: Some("OAuth via browser on first connection — no API key needed".into()),
+            publisher: "Linear".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: None,
         },
         McpDefinition {
             id: "mcp-atlassian".into(),
@@ -219,6 +279,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["project-management".into(), "jira".into(), "confluence".into()],
             token_url: Some("https://id.atlassian.com/manage-profile/security/api-tokens".into()),
             token_help: Some("API token for Jira & Confluence (same token for both)".into()),
+            publisher: "Atlassian".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: None,
         },
         // ── Design ──────────────────────────────────────────────────────────
         McpDefinition {
@@ -233,6 +297,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["design".into(), "ui".into()],
             token_url: Some("https://www.figma.com/settings".into()),
             token_help: Some("Personal access token from Figma Settings > Personal access tokens".into()),
+            publisher: "Figma".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: None,
         },
         McpDefinition {
             id: "mcp-drawio".into(),
@@ -246,6 +314,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["design".into(), "diagrams".into(), "architecture".into()],
             token_url: None,
             token_help: None,
+            publisher: "jgraph".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: None,
         },
         // ── Files & Utilities ───────────────────────────────────────────────
         McpDefinition {
@@ -260,6 +332,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["core".into(), "filesystem".into()],
             token_url: None,
             token_help: None,
+            publisher: "Anthropic".into(),
+            official: false,
+            alt_packages: vec![],
+            default_context: None,
         },
         McpDefinition {
             id: "mcp-puppeteer".into(),
@@ -273,6 +349,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["browser".into(), "scraping".into()],
             token_url: None,
             token_help: None,
+            publisher: "Anthropic".into(),
+            official: false,
+            alt_packages: vec![],
+            default_context: None,
         },
         McpDefinition {
             id: "mcp-chrome-devtools".into(),
@@ -286,6 +366,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["browser".into(), "debug".into(), "devtools".into(), "testing".into()],
             token_url: None,
             token_help: Some("Requires Google Chrome (stable) installed. Use --headless for servers without display.".into()),
+            publisher: "Google".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: None,
         },
         McpDefinition {
             id: "mcp-playwright".into(),
@@ -299,6 +383,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["browser".into(), "testing".into(), "e2e".into()],
             token_url: None,
             token_help: Some("Run 'npx playwright install' first to download browser binaries".into()),
+            publisher: "Microsoft".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: None,
         },
         McpDefinition {
             id: "mcp-context7".into(),
@@ -312,6 +400,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["docs".into(), "libraries".into()],
             token_url: None,
             token_help: None,
+            publisher: "Upstash".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: None,
         },
         // ── Payments ───────────────────────────────────────────────────────
         McpDefinition {
@@ -326,6 +418,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["payments".into(), "billing".into(), "ecommerce".into()],
             token_url: Some("https://dashboard.stripe.com/apikeys".into()),
             token_help: Some("Secret key (sk_live_... or sk_test_...)".into()),
+            publisher: "Stripe".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: None,
         },
         // ── Knowledge & Docs ──────────────────────────────────────────────
         McpDefinition {
@@ -340,6 +436,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["docs".into(), "knowledge".into(), "wiki".into()],
             token_url: Some("https://www.notion.so/profile/integrations".into()),
             token_help: Some("Internal integration token (secret_...)".into()),
+            publisher: "Notion".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: None,
         },
         // ── BaaS ──────────────────────────────────────────────────────────
         McpDefinition {
@@ -354,6 +454,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["database".into(), "auth".into(), "cloud".into()],
             token_url: Some("https://supabase.com/dashboard/account/tokens".into()),
             token_help: Some("Personal access token from Supabase dashboard".into()),
+            publisher: "Supabase".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: None,
         },
         // ── SEO ───────────────────────────────────────────────────────────
         McpDefinition {
@@ -368,6 +472,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["seo".into(), "analytics".into(), "marketing".into()],
             token_url: Some("https://app.ahrefs.com/api".into()),
             token_help: Some("API v3 key (requires Ahrefs subscription)".into()),
+            publisher: "Ahrefs".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: None,
         },
         // ── Git (local) ──────────────────────────────────────────────────
         McpDefinition {
@@ -382,6 +490,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["git".into(), "code".into(), "vcs".into()],
             token_url: None,
             token_help: None,
+            publisher: "Anthropic".into(),
+            official: false,
+            alt_packages: vec![],
+            default_context: None,
         },
         // ── Email ─────────────────────────────────────────────────────────
         McpDefinition {
@@ -396,6 +508,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["email".into(), "mailing".into(), "communication".into()],
             token_url: Some("https://resend.com/api-keys".into()),
             token_help: Some("API key from Resend dashboard".into()),
+            publisher: "Resend".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: None,
         },
         // ── AI & Reasoning ───────────────────────────────────────────────
         McpDefinition {
@@ -410,6 +526,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["core".into(), "memory".into(), "knowledge".into()],
             token_url: None,
             token_help: Some("Stores data in memory.jsonl. Set MEMORY_FILE_PATH to customize location.".into()),
+            publisher: "Anthropic".into(),
+            official: false,
+            alt_packages: vec![],
+            default_context: None,
         },
         McpDefinition {
             id: "mcp-sequential-thinking".into(),
@@ -423,6 +543,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["core".into(), "reasoning".into(), "thinking".into()],
             token_url: None,
             token_help: None,
+            publisher: "Anthropic".into(),
+            official: false,
+            alt_packages: vec![],
+            default_context: None,
         },
         // ── Browser (cloud) ─────────────────────────────────────────────
         McpDefinition {
@@ -437,6 +561,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["browser".into(), "cloud".into(), "scraping".into(), "testing".into()],
             token_url: Some("https://www.browserbase.com/dashboard".into()),
             token_help: Some("API key + project ID from Browserbase dashboard (paid service)".into()),
+            publisher: "Browserbase".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: None,
         },
         // ── Cloud — Azure ───────────────────────────────────────────────
         McpDefinition {
@@ -451,6 +579,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["cloud".into(), "azure".into(), "microsoft".into(), "devops".into()],
             token_url: Some("https://portal.azure.com".into()),
             token_help: Some("Uses Azure CLI auth (az login). No API key needed if already authenticated.".into()),
+            publisher: "Microsoft".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: None,
         },
         // ── Search ──────────────────────────────────────────────────────
         McpDefinition {
@@ -465,6 +597,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["search".into(), "web".into(), "ai".into()],
             token_url: Some("https://dashboard.exa.ai/api-keys".into()),
             token_help: Some("API key from Exa dashboard (free tier available)".into()),
+            publisher: "Exa".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: None,
         },
         McpDefinition {
             id: "mcp-datagouv".into(),
@@ -477,6 +613,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["search".into(), "opendata".into(), "france".into()],
             token_url: Some("https://github.com/datagouv/datagouv-mcp".into()),
             token_help: Some("No API key needed. Run: docker compose up -d (from cloned repo)".into()),
+            publisher: "data.gouv.fr".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: None,
         },
         // ── Scraping ────────────────────────────────────────────────────
         McpDefinition {
@@ -491,6 +631,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["scraping".into(), "web".into(), "crawling".into()],
             token_url: Some("https://www.firecrawl.dev/app/api-keys".into()),
             token_help: Some("API key from Firecrawl dashboard".into()),
+            publisher: "Firecrawl".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: None,
         },
         // ── Sandbox ─────────────────────────────────────────────────────
         McpDefinition {
@@ -505,6 +649,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["sandbox".into(), "code-execution".into(), "cloud".into()],
             token_url: Some("https://e2b.dev/dashboard".into()),
             token_help: Some("API key from E2B dashboard".into()),
+            publisher: "E2B".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: None,
         },
         // ── Cloud — Google ────────────────────────────────────────────
         McpDefinition {
@@ -519,6 +667,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["cloud".into(), "gcp".into(), "google".into(), "devops".into()],
             token_url: Some("https://console.cloud.google.com".into()),
             token_help: Some("Uses gcloud CLI auth (gcloud auth login). No API key needed if already authenticated.".into()),
+            publisher: "Anthropic".into(),
+            official: false,
+            alt_packages: vec![],
+            default_context: None,
         },
         McpDefinition {
             id: "mcp-bigquery".into(),
@@ -532,6 +684,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["database".into(), "analytics".into(), "gcp".into(), "sql".into()],
             token_url: Some("https://console.cloud.google.com/bigquery".into()),
             token_help: Some("Requires gcloud auth + GOOGLE_PROJECT_ID env var".into()),
+            publisher: "Anthropic".into(),
+            official: false,
+            alt_packages: vec![],
+            default_context: None,
         },
         McpDefinition {
             id: "mcp-google-analytics".into(),
@@ -545,6 +701,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["analytics".into(), "google".into(), "seo".into(), "marketing".into()],
             token_url: Some("https://console.cloud.google.com/apis/credentials".into()),
             token_help: Some("Requires gcloud auth application-default login with analytics.readonly scope, or a service account JSON (GOOGLE_APPLICATION_CREDENTIALS). Enable Analytics Admin API + Analytics Data API in GCP console.".into()),
+            publisher: "Google".into(),
+            official: false,
+            alt_packages: vec![],
+            default_context: None,
         },
         // ── Database (serverless) ─────────────────────────────────────
         McpDefinition {
@@ -559,6 +719,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["database".into(), "postgres".into(), "serverless".into()],
             token_url: Some("https://console.neon.tech/app/settings/api-keys".into()),
             token_help: Some("API key from Neon console".into()),
+            publisher: "Neon".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: None,
         },
         // ── Observability ─────────────────────────────────────────────
         McpDefinition {
@@ -573,19 +737,53 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["monitoring".into(), "observability".into(), "logs".into(), "apm".into()],
             token_url: Some("https://app.datadoghq.com/organization-settings/api-keys".into()),
             token_help: Some("API key + Application key from Datadog settings".into()),
+            publisher: "Datadog".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: None,
         },
         McpDefinition {
             id: "mcp-fastly".into(),
             name: "Fastly".into(),
-            description: "CDN management, cache purge, VCL, WAF, backends, domains, stats — official Fastly server".into(),
+            description: "CDN management, cache purge, VCL, WAF, backends, domains, stats — official Fastly Go server (wraps Fastly CLI)".into(),
             transport: McpTransport::Stdio {
-                command: "npx".into(),
-                args: vec!["-y".into(), "fastly-mcp-server@1.0.4".into()],
+                command: "fastly-mcp".into(),
+                args: vec![],
             },
-            env_keys: vec!["FASTLY_API_TOKEN".into()],
+            env_keys: vec![],
             tags: vec!["cdn".into(), "cache".into(), "infrastructure".into(), "edge".into(), "waf".into()],
             token_url: Some("https://manage.fastly.com/account/personal/tokens".into()),
-            token_help: Some("Personal API token from Fastly dashboard".into()),
+            token_help: Some("Requires Fastly CLI installed (brew install fastly/tap/fastly or https://developer.fastly.com/reference/cli/). Then run: fastly profile create <name> and enter your API token. No env var needed — auth is read from CLI profiles.".into()),
+            publisher: "Fastly".into(),
+            official: true,
+            alt_packages: vec!["fastly-mcp-server".into()],
+            default_context: Some(r#"# Fastly — Usage Context
+
+> Instructions for AI agents using **Fastly** MCP in this project.
+
+**Server:** Official Fastly MCP (Go binary wrapping Fastly CLI)
+
+## Performance rules
+
+- **Results are often very large** (100K+ chars for service listings). Always use `fastly_result_read` with small `limit` (5-10) or `fastly_result_query` with filters to reduce output.
+- If a result exceeds token limits and gets saved to disk, parse the file with `jq` or `python3`:
+  ```
+  jq '.[0].text | fromjson | .data[] | {Name, ServiceID, ActiveVersion}' <file>
+  ```
+- The MCP result format is `[{"type": "text", "text": "<JSON_STRING>"}]` where the inner JSON has a `data` key containing the actual array.
+
+## Common operations
+
+- List services: `fastly_execute(command: "service", args: ["list"], flags: [{"name": "json"}])`
+- Purge all: `fastly_execute(command: "purge", args: ["--all"], flags: [{"name": "service-id", "value": "<ID>"}])`
+- Show domain: `fastly_execute(command: "domain", args: ["list"], flags: [{"name": "service-id", "value": "<ID>"}, {"name": "version", "value": "active"}])`
+
+## Rules
+
+- Always use `--json` flag when available to get structured output
+- Never purge without explicit user confirmation
+- Prefer `fastly_result_summary` to get an overview before reading full results
+"#.into()),
         },
         McpDefinition {
             id: "mcp-tavily".into(),
@@ -599,6 +797,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["search".into(), "web".into(), "rag".into(), "research".into()],
             token_url: Some("https://app.tavily.com/home".into()),
             token_help: Some("API key from Tavily dashboard".into()),
+            publisher: "Tavily".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: None,
         },
         McpDefinition {
             id: "mcp-google-colab".into(),
@@ -612,6 +814,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["compute".into(), "gpu".into(), "python".into(), "data-science".into(), "notebook".into()],
             token_url: None,
             token_help: Some("No API key needed — authenticates via Google account in browser".into()),
+            publisher: "Google".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: None,
         },
         // ── Code Quality & Security ──────────────────────────────────
         McpDefinition {
@@ -630,6 +836,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["quality".into(), "security".into(), "ci".into(), "code".into()],
             token_url: Some("https://sonarcloud.io/account/security".into()),
             token_help: Some("User token from SonarCloud or SonarQube. Set SONARQUBE_ORG for Cloud, or SONARQUBE_URL for self-hosted.".into()),
+            publisher: "SonarSource".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: None,
         },
         // ── Infrastructure as Code ──────────────────────────────────
         McpDefinition {
@@ -646,6 +856,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["infrastructure".into(), "iac".into(), "devops".into(), "cloud".into()],
             token_url: Some("https://app.terraform.io/app/settings/tokens".into()),
             token_help: Some("HCP Terraform API token. Optional: TFE_ADDRESS for self-hosted Terraform Enterprise.".into()),
+            publisher: "HashiCorp".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: None,
         },
         // ── Hosting & Deployment ────────────────────────────────────
         McpDefinition {
@@ -659,6 +873,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["deploy".into(), "hosting".into(), "cloud".into(), "frontend".into()],
             token_url: Some("https://vercel.com/account/tokens".into()),
             token_help: Some("OAuth via browser on first connection — no API key needed. Supports project-specific URLs: https://mcp.vercel.com/<team>/<project>".into()),
+            publisher: "Vercel".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: None,
         },
         // ── Data Federation ─────────────────────────────────────────
         McpDefinition {
@@ -673,6 +891,10 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             tags: vec!["database".into(), "data".into(), "ai".into(), "federation".into()],
             token_url: Some("https://mdb.ai/account/api-keys".into()),
             token_help: Some("API key from MindsDB Cloud dashboard".into()),
+            publisher: "MindsDB".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: None,
         },
     ]
 }
@@ -696,9 +918,7 @@ mod tests {
     use std::collections::HashSet;
 
     /// Packages whose upstream switched runtime (e.g. to bun) and MUST stay pinned to a Node-compatible version.
-    const PINNED_PACKAGES: &[(&str, &str)] = &[
-        ("fastly-mcp-server", "1.0.4"),
-    ];
+    const PINNED_PACKAGES: &[(&str, &str)] = &[];
 
     #[test]
     fn registry_ids_are_unique() {
@@ -743,9 +963,8 @@ mod tests {
     #[test]
     fn all_stdio_entries_have_nonempty_command() {
         for def in builtin_registry() {
-            if let McpTransport::Stdio { command, args } = &def.transport {
+            if let McpTransport::Stdio { command, .. } = &def.transport {
                 assert!(!command.is_empty(), "MCP {} has empty command", def.id);
-                assert!(!args.is_empty(), "MCP {} has empty args", def.id);
             }
         }
     }

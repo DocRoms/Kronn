@@ -127,3 +127,4 @@
 .leading-snug    { line-height: 1.4; }
 .leading-relaxed { line-height: 1.6; }
 .transition-colors { transition: background 0.15s, border-color 0.15s, color 0.15s; }
+.spin { animation: spin 1s linear infinite; }

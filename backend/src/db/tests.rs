@@ -1291,3 +1291,128 @@ fn workflow_update_steps_count() {
     assert_eq!(loaded.steps[1].name, "step2");
     assert_eq!(loaded.steps[1].prompt_template, "Second step");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MCP Config — secrets_broken detection
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn mcp_config_display_secrets_broken_when_decrypt_fails() {
+    let conn = test_db();
+    let secret_a = crate::core::crypto::generate_secret();
+    let secret_b = crate::core::crypto::generate_secret();
+
+    // Insert a server first
+    let server = McpServer {
+        id: "srv-broken-test".into(),
+        name: "TestServer".into(),
+        description: "Test server for secrets_broken".into(),
+        transport: McpTransport::Stdio {
+            command: "npx".into(),
+            args: vec!["-y".into(), "test-pkg".into()],
+        },
+        source: McpSource::Registry,
+    };
+    crate::db::mcps::upsert_server(&conn, &server).unwrap();
+
+    // Create env and encrypt with secret_a
+    let mut env = std::collections::HashMap::new();
+    env.insert("TOKEN".to_string(), "test-value-alpha".to_string());
+    let encrypted = crate::db::mcps::encrypt_env(&env, &secret_a).unwrap();
+
+    let config = McpConfig {
+        id: "cfg-broken-test".into(),
+        server_id: "srv-broken-test".into(),
+        label: "TestConfig".into(),
+        env_keys: vec!["TOKEN".into()],
+        env_encrypted: encrypted,
+        args_override: None,
+        is_global: false,
+        include_general: true,
+        config_hash: "hash-broken-test".into(),
+        project_ids: vec![],
+    };
+    crate::db::mcps::insert_config(&conn, &config).unwrap();
+
+    // Decrypt with wrong secret (secret_b) → secrets_broken should be true
+    let display = crate::db::mcps::list_configs_display(&conn, Some(&secret_b)).unwrap();
+    assert_eq!(display.len(), 1);
+    assert!(display[0].secrets_broken, "secrets_broken should be true when decryption fails with wrong key");
+}
+
+#[test]
+fn mcp_config_display_secrets_ok_when_decrypt_succeeds() {
+    let conn = test_db();
+    let secret_a = crate::core::crypto::generate_secret();
+
+    let server = McpServer {
+        id: "srv-ok-test".into(),
+        name: "TestServerOk".into(),
+        description: "Test".into(),
+        transport: McpTransport::Stdio {
+            command: "npx".into(),
+            args: vec!["-y".into(), "test-pkg".into()],
+        },
+        source: McpSource::Registry,
+    };
+    crate::db::mcps::upsert_server(&conn, &server).unwrap();
+
+    let mut env = std::collections::HashMap::new();
+    env.insert("SECRET_KEY".to_string(), "value-beta".to_string());
+    let encrypted = crate::db::mcps::encrypt_env(&env, &secret_a).unwrap();
+
+    let config = McpConfig {
+        id: "cfg-ok-test".into(),
+        server_id: "srv-ok-test".into(),
+        label: "OkConfig".into(),
+        env_keys: vec!["SECRET_KEY".into()],
+        env_encrypted: encrypted,
+        args_override: None,
+        is_global: false,
+        include_general: true,
+        config_hash: "hash-ok-test".into(),
+        project_ids: vec![],
+    };
+    crate::db::mcps::insert_config(&conn, &config).unwrap();
+
+    // Decrypt with correct secret → secrets_broken should be false
+    let display = crate::db::mcps::list_configs_display(&conn, Some(&secret_a)).unwrap();
+    assert_eq!(display.len(), 1);
+    assert!(!display[0].secrets_broken, "secrets_broken should be false when decryption succeeds");
+}
+
+#[test]
+fn mcp_config_display_secrets_broken_false_when_no_env() {
+    let conn = test_db();
+    let secret_a = crate::core::crypto::generate_secret();
+
+    let server = McpServer {
+        id: "srv-noenv-test".into(),
+        name: "TestServerNoEnv".into(),
+        description: "Test".into(),
+        transport: McpTransport::Stdio {
+            command: "npx".into(),
+            args: vec!["-y".into(), "test-pkg".into()],
+        },
+        source: McpSource::Registry,
+    };
+    crate::db::mcps::upsert_server(&conn, &server).unwrap();
+
+    let config = McpConfig {
+        id: "cfg-noenv-test".into(),
+        server_id: "srv-noenv-test".into(),
+        label: "NoEnvConfig".into(),
+        env_keys: vec![],        // no env keys
+        env_encrypted: String::new(), // no encrypted data
+        args_override: None,
+        is_global: false,
+        include_general: true,
+        config_hash: "hash-noenv-test".into(),
+        project_ids: vec![],
+    };
+    crate::db::mcps::insert_config(&conn, &config).unwrap();
+
+    let display = crate::db::mcps::list_configs_display(&conn, Some(&secret_a)).unwrap();
+    assert_eq!(display.len(), 1);
+    assert!(!display[0].secrets_broken, "secrets_broken should be false when no env keys exist");
+}

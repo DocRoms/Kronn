@@ -31,23 +31,23 @@ fn is_true(v: &bool) -> bool { *v }
 
 /// Vibe config.toml `[[mcp_servers]]` entry
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct VibeMcpEntry {
-    name: String,
-    transport: String,
+pub(crate) struct VibeMcpEntry {
+    pub(crate) name: String,
+    pub(crate) transport: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    command: Option<String>,
+    pub(crate) command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    args: Option<Vec<String>>,
+    pub(crate) args: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    url: Option<String>,
+    pub(crate) url: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    env: HashMap<String, String>,
+    pub(crate) env: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct VibeConfig {
+pub(crate) struct VibeConfig {
     #[serde(default)]
-    mcp_servers: Vec<VibeMcpEntry>,
+    pub(crate) mcp_servers: Vec<VibeMcpEntry>,
 }
 
 // ─── .mcp.json file format (Claude Code) ─────────────────────────────────────
@@ -129,6 +129,60 @@ pub(crate) fn atomic_write(target: &Path, content: &str) -> Result<(), String> {
         })
 }
 
+/// Ensure Claude Code's settings.local.json has all MCP server names in enabledMcpjsonServers.
+/// Claude Code uses this list as a whitelist — MCPs not listed are silently ignored,
+/// even when enableAllProjectMcpServers is true (known bug #24657).
+/// This function only ADDS missing entries, never removes user-configured ones.
+pub(crate) fn sync_claude_enabled_servers(project_path: &str, mcp_servers: &HashMap<String, McpServerEntry>) {
+    let resolved = resolve_host_path(project_path);
+    let settings_dir = Path::new(&resolved).join(".claude");
+    let settings_file = settings_dir.join("settings.local.json");
+
+    if !settings_file.exists() {
+        return; // No settings.local.json → Claude Code loads all MCPs by default
+    }
+
+    let content = match std::fs::read_to_string(&settings_file) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let mut settings: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    // Only act if enabledMcpjsonServers exists (don't create it if absent)
+    let enabled = match settings.get_mut("enabledMcpjsonServers").and_then(|v| v.as_array_mut()) {
+        Some(arr) => arr,
+        None => return,
+    };
+
+    let existing: std::collections::HashSet<String> = enabled.iter()
+        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+        .collect();
+
+    let mut added = Vec::new();
+    for name in mcp_servers.keys() {
+        if !existing.contains(name) {
+            enabled.push(serde_json::Value::String(name.clone()));
+            added.push(name.clone());
+        }
+    }
+
+    if added.is_empty() {
+        return; // All servers already listed
+    }
+
+    if let Ok(json) = serde_json::to_string_pretty(&settings) {
+        let _ = atomic_write(&settings_file, &json);
+        tracing::info!(
+            "Updated Claude settings.local.json for {} — added MCPs: {:?}",
+            project_path, added
+        );
+    }
+}
+
 /// Write a .mcp.json to `target_dir` with all MCP configs that have `include_general` set.
 /// Used for general discussions (no project) so agents still have access to global MCPs.
 pub fn write_general_mcp_json(
@@ -146,11 +200,6 @@ pub fn write_general_mcp_json(
     let server_map: HashMap<String, &crate::models::McpServer> = servers.iter()
         .map(|s| (s.id.clone(), s)).collect();
 
-    let mut configs_per_server: HashMap<String, usize> = HashMap::new();
-    for c in &general_configs {
-        *configs_per_server.entry(c.server_id.clone()).or_insert(0) += 1;
-    }
-
     let mut mcp_servers = HashMap::new();
     for config in &general_configs {
         let server = match server_map.get(&config.server_id) {
@@ -158,6 +207,7 @@ pub fn write_general_mcp_json(
             None => continue,
         };
         let env = db::mcps::decrypt_env(&config.env_encrypted, secret).unwrap_or_default();
+
         let entry = match &server.transport {
             McpTransport::Stdio { command, args } => {
                 if !is_command_available(command) { continue; }
@@ -168,11 +218,7 @@ pub fn write_general_mcp_json(
                 McpServerEntry { command: None, args: None, url: Some(url.clone()), env }
             }
         };
-        let key = if configs_per_server.get(&config.server_id).copied().unwrap_or(0) > 1 {
-            config.label.clone()
-        } else {
-            server.name.to_lowercase()
-        };
+        let key = config.label.clone();
         mcp_servers.insert(key, entry);
     }
 
@@ -192,12 +238,7 @@ pub fn write_general_mcp_json(
             .filter(|(key, _)| {
                 !general_configs.iter().any(|cfg| {
                     if let Some(srv) = server_map.get(&cfg.server_id) {
-                        let cfg_key = if configs_per_server.get(&cfg.server_id).copied().unwrap_or(0) > 1 {
-                            &cfg.label
-                        } else {
-                            &srv.name.to_lowercase()
-                        };
-                        cfg_key == key.as_str() && check_incompatibility(srv, &AgentType::Kiro).is_some()
+                            cfg.label.as_str() == key.as_str() && check_incompatibility(srv, &AgentType::Kiro).is_some()
                     } else { false }
                 })
             })
@@ -251,22 +292,28 @@ pub fn sync_project_mcps_to_disk(
     // Count configs per server to decide naming strategy:
     // - Single config for a server → use server.name (clean technical name)
     // - Multiple configs for same server → use config.label (to differentiate)
-    let mut configs_per_server: HashMap<String, usize> = HashMap::new();
-    for config in &configs {
-        *configs_per_server.entry(config.server_id.clone()).or_insert(0) += 1;
-    }
-
     // Build the McpJsonFile
     let mut mcp_servers = HashMap::new();
+    let mut synced_config_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     for config in &configs {
         let server = match server_map.get(&config.server_id) {
             Some(s) => s,
             None => continue,
         };
 
-        // Decrypt env
-        let env = db::mcps::decrypt_env(&config.env_encrypted, secret)
-            .unwrap_or_default();
+        // Decrypt env — skip MCP if decryption fails and keys are expected
+        let env = match db::mcps::decrypt_env(&config.env_encrypted, secret) {
+            Ok(e) => e,
+            Err(e) => {
+                if !config.env_keys.is_empty() {
+                    tracing::warn!(
+                        "MCP '{}' has {} env keys but decryption failed ({}) — writing without secrets",
+                        config.label, config.env_keys.len(), e
+                    );
+                }
+                HashMap::new()
+            }
+        };
 
         let entry = match &server.transport {
             McpTransport::Stdio { command, args } => {
@@ -297,13 +344,11 @@ pub fn sync_project_mcps_to_disk(
             }
         };
 
-        // Use server name when there's only one config, label when multiple
-        let key = if configs_per_server.get(&config.server_id).copied().unwrap_or(0) > 1 {
-            config.label.clone()
-        } else {
-            server.name.to_lowercase()
-        };
+        // Always use config label as key — avoids case mismatch between
+        // server.name (e.g. "Fastly") and lowercased variants ("fastly")
+        let key = config.label.clone();
         mcp_servers.insert(key, entry);
+        synced_config_ids.insert(config.id.clone());
     }
 
     if mcp_servers.is_empty() {
@@ -330,6 +375,9 @@ pub fn sync_project_mcps_to_disk(
         ensure_gitignore(&project.path, ".mcp.json");
         tracing::info!("Synced .mcp.json for {} ({} stdio MCPs)", project.path, claude_data.mcp_servers.len());
 
+        // ── Claude Code settings.local.json: keep enabledMcpjsonServers in sync ──
+        sync_claude_enabled_servers(&project.path, &claude_data.mcp_servers);
+
         // Full data — but filter out localhost SSE/Streamable (unreachable in Docker)
         let docker_safe: HashMap<String, McpServerEntry> = mcp_servers.into_iter()
             .filter(|(_, entry)| {
@@ -353,12 +401,7 @@ pub fn sync_project_mcps_to_disk(
                     // Find matching server in server_map by checking config labels/names
                     configs.iter().any(|cfg| {
                         if let Some(srv) = server_map.get(&cfg.server_id) {
-                            let cfg_key = if configs_per_server.get(&cfg.server_id).copied().unwrap_or(0) > 1 {
-                                &cfg.label
-                            } else {
-                                &srv.name.to_lowercase()
-                            };
-                            cfg_key == key.as_str() && check_incompatibility(srv, &AgentType::Kiro).is_some()
+                            cfg.label.as_str() == key.as_str() && check_incompatibility(srv, &AgentType::Kiro).is_some()
                         } else {
                             false
                         }
@@ -400,9 +443,28 @@ pub fn sync_project_mcps_to_disk(
             tracing::info!("Synced .ai/mcp/mcp.json for {}", project.path);
         }
 
-        // MCP context files are only created when the user explicitly writes
-        // custom instructions via the UI (write_mcp_context). No auto-creation
-        // of empty/template files — they add no value and pollute the project.
+        // Auto-create MCP context files from registry defaults (if available).
+        // Only writes when: (1) the config was actually synced (command available),
+        // (2) the registry provides a default_context, (3) no file exists yet.
+        // This prevents creating context for a registry server (e.g. Go binary)
+        // when the actually synced server is a different variant (e.g. npm package).
+        {
+            let registry = crate::core::registry::builtin_registry();
+            for config in &configs {
+                if !synced_config_ids.contains(&config.id) {
+                    continue;
+                }
+                let slug = slugify_label(&config.label);
+                if read_mcp_context(&project.path, &slug).is_none() {
+                    if let Some(def) = registry.iter().find(|d| d.id == config.server_id) {
+                        if let Some(ref ctx) = def.default_context {
+                            let _ = write_mcp_context(&project.path, &slug, ctx);
+                            tracing::info!("Created default MCP context for '{}' in {}", config.label, project.path);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // ── Native skill & profile files (SKILL.md, agent files) ──
@@ -490,11 +552,6 @@ fn sync_vibe_project_config(
     secret: &str,
 ) {
     let mut entries = Vec::new();
-    // Count configs per server for naming
-    let mut configs_per_server: HashMap<String, usize> = HashMap::new();
-    for config in configs {
-        *configs_per_server.entry(config.server_id.clone()).or_insert(0) += 1;
-    }
 
     for config in configs {
         let server = match server_map.get(&config.server_id) {
@@ -505,11 +562,7 @@ fn sync_vibe_project_config(
         let env = crate::db::mcps::decrypt_env(&config.env_encrypted, secret)
             .unwrap_or_default();
 
-        let name = if configs_per_server.get(&config.server_id).copied().unwrap_or(0) > 1 {
-            config.label.clone()
-        } else {
-            server.name.to_lowercase()
-        };
+        let name = config.label.clone();
 
         let entry = match &server.transport {
             McpTransport::Stdio { command, args } => {
@@ -599,12 +652,6 @@ fn sync_codex_global_config(
         .map(|s| (s.id.clone(), s))
         .collect();
 
-    // Count configs per server for naming
-    let mut configs_per_server: HashMap<String, usize> = HashMap::new();
-    for config in &all_configs {
-        *configs_per_server.entry(config.server_id.clone()).or_insert(0) += 1;
-    }
-
     // Build MCP entries (Codex only supports stdio transport)
     let mut mcp_entries: HashMap<String, CodexMcpEntry> = HashMap::new();
     for config in &all_configs {
@@ -630,19 +677,18 @@ fn sync_codex_global_config(
             .unwrap_or_default();
 
         // Codex requires names matching ^[a-zA-Z0-9_-]+$ — slugify
-        let raw_key = if configs_per_server.get(&config.server_id).copied().unwrap_or(0) > 1 {
-            config.label.clone()
-        } else {
-            server.name.to_lowercase()
-        };
+        let raw_key = config.label.clone();
         let key = slugify_label(&raw_key);
+
+        // npx/uvx MCPs need longer timeout for initial package download (cold start)
+        let timeout = if command == "npx" || command == "uvx" { 60 } else { 30 };
 
         mcp_entries.insert(key, CodexMcpEntry {
             command,
             args,
             env,
             enabled: true,
-            startup_timeout_sec: 30,
+            startup_timeout_sec: timeout,
         });
     }
 
@@ -709,6 +755,99 @@ fn sync_codex_global_config(
     }
 }
 
+/// Sync ~/.copilot/mcp-config.json — global config, same JSON format as Claude (.mcp.json).
+fn sync_copilot_global_config(
+    conn: &rusqlite::Connection,
+    secret: &str,
+) {
+    use crate::db;
+
+    let all_configs = match db::mcps::list_configs(conn) {
+        Ok(c) => c,
+        Err(e) => { tracing::warn!("Failed to list configs for Copilot sync: {}", e); return; }
+    };
+    let servers = match db::mcps::list_servers(conn) {
+        Ok(s) => s,
+        Err(e) => { tracing::warn!("Failed to list servers for Copilot sync: {}", e); return; }
+    };
+    let server_map: HashMap<String, &crate::models::McpServer> = servers.iter()
+        .map(|s| (s.id.clone(), s))
+        .collect();
+
+    // Build mcpServers entries (stdio only — Copilot CLI doesn't support SSE)
+    let mut mcp_servers: HashMap<String, McpServerEntry> = HashMap::new();
+    for config in &all_configs {
+        let server = match server_map.get(&config.server_id) {
+            Some(s) => s,
+            None => continue,
+        };
+
+        let (command, args) = match &server.transport {
+            McpTransport::Stdio { command, args } => {
+                let final_args = config.args_override.clone()
+                    .unwrap_or_else(|| args.clone());
+                (command.clone(), final_args)
+            }
+            _ => {
+                tracing::debug!("Skipping non-stdio MCP '{}' for Copilot (unsupported)", server.name);
+                continue;
+            }
+        };
+
+        let env = db::mcps::decrypt_env(&config.env_encrypted, secret)
+            .unwrap_or_default();
+
+        let key = config.label.clone();
+        mcp_servers.insert(key, McpServerEntry {
+            command: Some(command),
+            args: Some(args),
+            url: None,
+            env,
+        });
+    }
+
+    let copilot_dir = if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {
+        PathBuf::from(format!("{}/.copilot", host_home))
+    } else {
+        std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .map(|h| PathBuf::from(format!("{}/.copilot", h)))
+            .unwrap_or_else(|_| directories::BaseDirs::new()
+                .map(|d| d.home_dir().join(".copilot"))
+                .unwrap_or_else(|| {
+                    tracing::warn!("Cannot determine home directory for Copilot config — using /tmp/.copilot");
+                    PathBuf::from("/tmp/.copilot")
+                }))
+    };
+    let config_path = copilot_dir.join("mcp-config.json");
+
+    if mcp_servers.is_empty() {
+        // Remove config file if no MCPs
+        if config_path.exists() {
+            let _ = std::fs::remove_file(&config_path);
+            tracing::info!("Removed empty Copilot MCP config");
+        }
+        return;
+    }
+
+    if let Err(e) = std::fs::create_dir_all(&copilot_dir) {
+        tracing::warn!("Failed to create Copilot config dir: {}", e);
+        return;
+    }
+
+    let data = McpJsonFile { mcp_servers };
+    match serde_json::to_string_pretty(&data) {
+        Ok(content) => {
+            if let Err(e) = atomic_write(&config_path, &content) {
+                tracing::warn!("Failed to write Copilot MCP config: {}", e);
+            } else {
+                tracing::info!("Synced Copilot global config ({} MCP servers)", data.mcp_servers.len());
+            }
+        }
+        Err(e) => tracing::warn!("Failed to serialize Copilot MCP config: {}", e),
+    }
+}
+
 /// Sync .mcp.json for all projects that are affected by a config change.
 /// Pass the config to determine which projects need updating.
 pub fn sync_affected_projects(
@@ -722,8 +861,9 @@ pub fn sync_affected_projects(
             tracing::warn!("Failed to sync MCP configs for project {}: {}", pid, e);
         }
     }
-    // Sync Codex global config (once, not per-project)
+    // Sync global configs (once, not per-project)
     sync_codex_global_config(conn, secret);
+    sync_copilot_global_config(conn, secret);
 }
 
 /// Sync ALL projects (used when global flag changes)

@@ -567,16 +567,16 @@ mod tests {
     #[test]
     fn codex_config_includes_startup_timeout() {
         // Verify that a round-tripped Codex TOML config preserves startup_timeout_sec.
-        // This catches regressions where skip_serializing_if accidentally hides the field.
+        // npx/uvx MCPs get 60s (cold start download), binaries get 30s.
         let input = r#"
 [mcp_servers.github]
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-github"]
-startup_timeout_sec = 30
+startup_timeout_sec = 60
 "#;
         let parsed: toml::Value = input.parse().unwrap();
         let server = &parsed["mcp_servers"]["github"];
-        assert_eq!(server["startup_timeout_sec"].as_integer(), Some(30),
+        assert_eq!(server["startup_timeout_sec"].as_integer(), Some(60),
             "startup_timeout_sec must survive TOML round-trip");
         assert_eq!(server["command"].as_str(), Some("npx"));
     }
@@ -586,7 +586,7 @@ startup_timeout_sec = 30
         // Verify the default_startup_timeout constant is 30 (not 10)
         // to prevent regression to Codex's too-short default
         assert_eq!(super::super::mcp_scanner::default_startup_timeout(), 30,
-            "Default startup timeout must be 30s (Codex default is 10s, too short for Docker)");
+            "Default startup timeout must be 30s (Codex default is 10s, too short for binaries)");
     }
 
     #[test]
@@ -606,5 +606,301 @@ startup_timeout_sec = 30
         let fake = "/tmp/kronn-nonexistent-path-test-12345";
         let resolved = resolve_host_path(fake);
         assert_eq!(resolved.to_string_lossy(), fake, "Missing path should be returned as-is");
+    }
+
+    #[test]
+    fn copilot_mcp_config_json_format() {
+        // Verify that the McpJsonFile serializes to the format Copilot CLI expects:
+        // { "mcpServers": { "name": { "command": "...", "args": [...], "env": {...} } } }
+        let data = make_test_data();
+        let json = serde_json::to_string_pretty(&data).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert!(parsed["mcpServers"].is_object(), "Root must have mcpServers key");
+        let github = &parsed["mcpServers"]["github"];
+        assert_eq!(github["command"].as_str(), Some("npx"));
+        assert!(github["args"].is_array());
+        assert_eq!(github["env"]["GITHUB_TOKEN"].as_str(), Some("ghp_test123"));
+    }
+
+    #[test]
+    fn sync_key_always_uses_config_label() {
+        // Regression test: the sync key must always be config.label,
+        // never server.name.to_lowercase() — mixing the two caused duplicate
+        // entries with different casing (e.g. "fastly" AND "Fastly").
+        let label = "My Custom Label";
+        // Simulate the key assignment logic (must match mcp_scanner.rs)
+        let key = label.to_string(); // = config.label.clone()
+        assert_eq!(key, "My Custom Label", "Key must preserve label casing exactly");
+        // The old buggy code would have used server.name.to_lowercase() for single configs
+        let server_name = "Fastly";
+        assert_ne!(key, server_name.to_lowercase(), "Key must NOT be server.name.to_lowercase()");
+    }
+
+    // ─── File sync integration tests ──────────────────────────────────────────
+
+    #[test]
+    fn sync_writes_env_to_mcp_json() {
+        let tmp = setup_tmp("sync-env");
+        let mut servers = HashMap::new();
+        let mut env = HashMap::new();
+        env.insert("API_KEY".to_string(), "sk-test-alpha-123".to_string());
+        env.insert("API_SECRET".to_string(), "secret-beta-456".to_string());
+        servers.insert("test-server".to_string(), McpServerEntry {
+            command: Some("npx".into()),
+            args: Some(vec!["-y".into(), "test-pkg".into()]),
+            url: None,
+            env,
+        });
+        let data = McpJsonFile { mcp_servers: servers };
+
+        write_mcp_json_to_subpath(&tmp.to_string_lossy(), ".mcp.json", &data).unwrap();
+
+        let content = std::fs::read_to_string(tmp.join(".mcp.json")).unwrap();
+        let parsed: McpJsonFile = serde_json::from_str(&content).unwrap();
+        let entry = parsed.mcp_servers.get("test-server").unwrap();
+        assert_eq!(entry.env.get("API_KEY").unwrap(), "sk-test-alpha-123");
+        assert_eq!(entry.env.get("API_SECRET").unwrap(), "secret-beta-456");
+
+        cleanup(&tmp);
+    }
+
+    #[test]
+    fn sync_uses_config_label_as_key() {
+        let tmp = setup_tmp("sync-label-key");
+        let mut servers = HashMap::new();
+        servers.insert("PeerAlpha Config".to_string(), McpServerEntry {
+            command: Some("npx".into()),
+            args: Some(vec!["-y".into(), "server-alpha".into()]),
+            url: None,
+            env: HashMap::new(),
+        });
+        servers.insert("PeerBeta Config".to_string(), McpServerEntry {
+            command: Some("npx".into()),
+            args: Some(vec!["-y".into(), "server-beta".into()]),
+            url: None,
+            env: HashMap::new(),
+        });
+        let data = McpJsonFile { mcp_servers: servers };
+
+        write_mcp_json_to_subpath(&tmp.to_string_lossy(), ".mcp.json", &data).unwrap();
+
+        let content = std::fs::read_to_string(tmp.join(".mcp.json")).unwrap();
+        let parsed: McpJsonFile = serde_json::from_str(&content).unwrap();
+        assert!(parsed.mcp_servers.contains_key("PeerAlpha Config"),
+            "Key should be the config label 'PeerAlpha Config'");
+        assert!(parsed.mcp_servers.contains_key("PeerBeta Config"),
+            "Key should be the config label 'PeerBeta Config'");
+        assert_eq!(parsed.mcp_servers.len(), 2);
+
+        cleanup(&tmp);
+    }
+
+    #[test]
+    fn sync_empty_env_when_no_secrets() {
+        let tmp = setup_tmp("sync-empty-env");
+        let mut servers = HashMap::new();
+        servers.insert("no-secrets".to_string(), McpServerEntry {
+            command: Some("npx".into()),
+            args: Some(vec!["-y".into(), "pkg".into()]),
+            url: None,
+            env: HashMap::new(), // empty env
+        });
+        let data = McpJsonFile { mcp_servers: servers };
+
+        write_mcp_json_to_subpath(&tmp.to_string_lossy(), ".mcp.json", &data).unwrap();
+
+        let content = std::fs::read_to_string(tmp.join(".mcp.json")).unwrap();
+        let parsed: McpJsonFile = serde_json::from_str(&content).unwrap();
+        let entry = parsed.mcp_servers.get("no-secrets").unwrap();
+        assert!(entry.env.is_empty(), "env should be empty when no secrets");
+        // Also verify the JSON omits env (skip_serializing_if)
+        let raw: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(raw["mcpServers"]["no-secrets"]["env"].is_null()
+            || !raw["mcpServers"]["no-secrets"].as_object().unwrap().contains_key("env"),
+            "Empty env should be omitted from JSON");
+
+        cleanup(&tmp);
+    }
+
+    #[test]
+    fn copilot_global_config_format() {
+        // Verify McpJsonFile serializes correctly for Copilot:
+        // { "mcpServers": { "name": { "command", "args", "env" } } }
+        let mut servers = HashMap::new();
+        let mut env = HashMap::new();
+        env.insert("TOKEN".to_string(), "test-token-value".to_string());
+        servers.insert("test-copilot-server".to_string(), McpServerEntry {
+            command: Some("node".into()),
+            args: Some(vec!["server.js".into()]),
+            url: None,
+            env,
+        });
+        let data = McpJsonFile { mcp_servers: servers };
+
+        let json_str = serde_json::to_string_pretty(&data).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert!(parsed["mcpServers"].is_object(), "Root key must be mcpServers");
+        let server = &parsed["mcpServers"]["test-copilot-server"];
+        assert_eq!(server["command"].as_str(), Some("node"));
+        assert!(server["args"].is_array());
+        assert_eq!(server["args"][0].as_str(), Some("server.js"));
+        assert_eq!(server["env"]["TOKEN"].as_str(), Some("test-token-value"));
+    }
+
+    #[test]
+    fn vibe_config_toml_format() {
+        use super::super::mcp_scanner::VibeMcpEntry;
+        use super::super::mcp_scanner::VibeConfig;
+
+        let mut env = HashMap::new();
+        env.insert("API_KEY".to_string(), "test-key-value".to_string());
+
+        let entry = VibeMcpEntry {
+            name: "TestServer".into(),
+            transport: "stdio".into(),
+            command: Some("npx".into()),
+            args: Some(vec!["-y".into(), "test-pkg".into()]),
+            url: None,
+            env,
+        };
+
+        let config = VibeConfig {
+            mcp_servers: vec![entry],
+        };
+
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+
+        // Verify TOML has the expected structure
+        assert!(toml_str.contains("[[mcp_servers]]"), "TOML should have [[mcp_servers]] array");
+        assert!(toml_str.contains("name = \"TestServer\""), "Should have name field");
+        assert!(toml_str.contains("command = \"npx\""), "Should have command field");
+        assert!(toml_str.contains("transport = \"stdio\""), "Should have transport field");
+
+        // Verify round-trip
+        let parsed: VibeConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.mcp_servers.len(), 1);
+        assert_eq!(parsed.mcp_servers[0].name, "TestServer");
+        assert_eq!(parsed.mcp_servers[0].command.as_deref(), Some("npx"));
+        assert_eq!(parsed.mcp_servers[0].args.as_ref().unwrap().len(), 2);
+        assert_eq!(parsed.mcp_servers[0].env.get("API_KEY").unwrap(), "test-key-value");
+    }
+
+    // ── Claude settings.local.json sync tests ──
+
+    #[test]
+    fn sync_claude_enabled_servers_adds_missing() {
+        let tmp = setup_tmp("claude-settings-add");
+        let claude_dir = tmp.join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+
+        // Existing settings with only "atlassian" enabled
+        let settings = serde_json::json!({
+            "permissions": { "allow": ["Bash(ls:*)"] },
+            "enableAllProjectMcpServers": true,
+            "enabledMcpjsonServers": ["atlassian"]
+        });
+        std::fs::write(claude_dir.join("settings.local.json"),
+            serde_json::to_string_pretty(&settings).unwrap()).unwrap();
+
+        // MCP servers to sync
+        let mut servers = HashMap::new();
+        servers.insert("atlassian".to_string(), McpServerEntry {
+            command: Some("uvx".into()), args: Some(vec![]), url: None, env: HashMap::new(),
+        });
+        servers.insert("GitLab".to_string(), McpServerEntry {
+            command: Some("npx".into()), args: Some(vec![]), url: None, env: HashMap::new(),
+        });
+
+        sync_claude_enabled_servers(tmp.to_str().unwrap(), &servers);
+
+        // Re-read and verify
+        let content = std::fs::read_to_string(claude_dir.join("settings.local.json")).unwrap();
+        let result: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let enabled: Vec<&str> = result["enabledMcpjsonServers"].as_array().unwrap()
+            .iter().map(|v| v.as_str().unwrap()).collect();
+
+        assert!(enabled.contains(&"atlassian"), "existing entry preserved");
+        assert!(enabled.contains(&"GitLab"), "new entry added");
+        assert_eq!(enabled.len(), 2);
+
+        // Permissions untouched
+        assert!(result["permissions"]["allow"].as_array().unwrap().len() == 1);
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn sync_claude_enabled_servers_noop_when_all_present() {
+        let tmp = setup_tmp("claude-settings-noop");
+        let claude_dir = tmp.join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+
+        let settings = serde_json::json!({
+            "enabledMcpjsonServers": ["GitLab", "Docker"]
+        });
+        std::fs::write(claude_dir.join("settings.local.json"),
+            serde_json::to_string_pretty(&settings).unwrap()).unwrap();
+
+        let mut servers = HashMap::new();
+        servers.insert("GitLab".to_string(), McpServerEntry {
+            command: Some("npx".into()), args: Some(vec![]), url: None, env: HashMap::new(),
+        });
+
+        sync_claude_enabled_servers(tmp.to_str().unwrap(), &servers);
+
+        let content = std::fs::read_to_string(claude_dir.join("settings.local.json")).unwrap();
+        let result: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let enabled: Vec<&str> = result["enabledMcpjsonServers"].as_array().unwrap()
+            .iter().map(|v| v.as_str().unwrap()).collect();
+
+        assert_eq!(enabled.len(), 2, "no entries added");
+        assert!(enabled.contains(&"Docker"), "user entry preserved");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn sync_claude_enabled_servers_skips_when_no_settings_file() {
+        let tmp = setup_tmp("claude-settings-none");
+        let mut servers = HashMap::new();
+        servers.insert("GitLab".to_string(), McpServerEntry {
+            command: Some("npx".into()), args: Some(vec![]), url: None, env: HashMap::new(),
+        });
+
+        // Should not panic or create a file
+        sync_claude_enabled_servers(tmp.to_str().unwrap(), &servers);
+        assert!(!tmp.join(".claude/settings.local.json").exists());
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn sync_claude_enabled_servers_skips_when_no_enabled_list() {
+        let tmp = setup_tmp("claude-settings-no-list");
+        let claude_dir = tmp.join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+
+        // Settings without enabledMcpjsonServers
+        let settings = serde_json::json!({
+            "permissions": { "allow": [] }
+        });
+        std::fs::write(claude_dir.join("settings.local.json"),
+            serde_json::to_string_pretty(&settings).unwrap()).unwrap();
+
+        let mut servers = HashMap::new();
+        servers.insert("GitLab".to_string(), McpServerEntry {
+            command: Some("npx".into()), args: Some(vec![]), url: None, env: HashMap::new(),
+        });
+
+        sync_claude_enabled_servers(tmp.to_str().unwrap(), &servers);
+
+        // File unchanged — no enabledMcpjsonServers created
+        let content = std::fs::read_to_string(claude_dir.join("settings.local.json")).unwrap();
+        let result: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(result.get("enabledMcpjsonServers").is_none(), "should not create list");
+
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

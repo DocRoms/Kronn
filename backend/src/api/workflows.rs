@@ -563,7 +563,7 @@ pub async fn suggestions(
     let mcp_names: Vec<String> = match state.db.with_conn({
         let pid = project_id.clone();
         move |conn| {
-            let configs = crate::db::mcps::list_configs_display(conn)?;
+            let configs = crate::db::mcps::list_configs_display(conn, None)?;
             let names: Vec<String> = configs.into_iter()
                 .filter(|c| c.is_global || c.project_ids.contains(&pid))
                 .map(|c| normalize_mcp_name(&c.server_name))

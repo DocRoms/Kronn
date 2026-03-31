@@ -724,6 +724,7 @@ pub async fn import_data(
     for skill in &data.custom_skills {
         let _ = crate::core::skills::save_custom_skill(
             &skill.name, &skill.description, &skill.icon, &skill.category, &skill.content,
+            skill.license.as_deref(), skill.allowed_tools.as_deref(),
         );
     }
     for directive in &data.custom_directives {

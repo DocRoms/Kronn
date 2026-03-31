@@ -713,3 +713,17 @@
   line-height: 1.6;
   white-space: pre-wrap;
 }
+
+
+/* Origin badges + MCP load indicators: see styles/components.css (shared) */
+
+/* MCP load badge (Plugins page specific — inline in scope toggles) */
+.mcp-load-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.7rem;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-weight: 500;
+}

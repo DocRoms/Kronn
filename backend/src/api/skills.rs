@@ -20,7 +20,7 @@ pub async fn create(
     _state: State<AppState>,
     Json(req): Json<CreateSkillRequest>,
 ) -> Json<ApiResponse<Skill>> {
-    match skills::save_custom_skill(&req.name, &req.description, &req.icon, &req.category, &req.content) {
+    match skills::save_custom_skill(&req.name, &req.description, &req.icon, &req.category, &req.content, req.license.as_deref(), req.allowed_tools.as_deref()) {
         Ok(id) => {
             match skills::get_skill(&id) {
                 Some(skill) => Json(ApiResponse::ok(skill)),
@@ -43,7 +43,7 @@ pub async fn update(
 
     let _ = skills::delete_custom_skill(&id);
 
-    match skills::save_custom_skill(&req.name, &req.description, &req.icon, &req.category, &req.content) {
+    match skills::save_custom_skill(&req.name, &req.description, &req.icon, &req.category, &req.content, req.license.as_deref(), req.allowed_tools.as_deref()) {
         Ok(new_id) => {
             match skills::get_skill(&new_id) {
                 Some(skill) => Json(ApiResponse::ok(skill)),

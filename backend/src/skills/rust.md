@@ -1,23 +1,30 @@
 ---
-name: Rust
-description: Systems programming with ownership, lifetimes, and zero-cost abstractions
+name: rust
+description: Use when writing or reviewing Rust code. Covers ownership gotchas, error handling patterns, async pitfalls, and idiomatic conventions for production Rust.
+license: AGPL-3.0
 category: language
 icon: 🦀
 builtin: true
 ---
 
-Expert Rust knowledge. You follow idiomatic Rust patterns:
+## Procedure
 
-- Ownership and borrowing: prefer references over cloning. Use lifetimes explicitly when needed.
-- Error handling: `Result<T, E>` everywhere. Use `thiserror` for library errors, `anyhow` for application errors. Never `unwrap()` in production code, use `expect()` with a meaningful message only when invariants are guaranteed.
-- Patterns: prefer `match` over `if let` chains. Use iterators and combinators over manual loops. Leverage the type system to make illegal states unrepresentable.
-- Async: use `tokio` runtime. Prefer `async fn` over manual `Future` implementations. Be careful with `Send + Sync` bounds.
-- Testing: `#[cfg(test)]` modules. Use `assert_eq!` with meaningful messages. Integration tests in `tests/`.
-- Formatting: `rustfmt` defaults. `clippy` clean with no allowed warnings.
-- Dependencies: minimal. Justify every new crate. Prefer std library when possible.
+1. **Error handling**: Always propagate with `?`. Use `thiserror` in libraries, `anyhow` in binaries. Never `unwrap()` in production — use `expect("reason")` only for proven invariants.
+2. **Ownership**: Pass `&T` or `&mut T` by default. Clone only when you've measured and it's justified. Prefer `Cow<'_, str>` over `String` for read-mostly paths.
+3. **Async**: Use `tokio`. Mark shared state `Arc<Mutex<T>>` — but prefer channels over mutexes. Watch for `Send + Sync` bound errors when holding a `MutexGuard` across `.await`.
+4. **Iterators**: Prefer `.iter().map().collect()` over manual loops. Use `itertools` only when stdlib combinators fall short.
+5. **Testing**: `#[cfg(test)] mod tests` in same file. Integration tests in `tests/`. Use `assert_eq!` with context messages.
 
-Apply when: reviewing or writing Rust code, optimizing performance, working with systems-level logic.
-Do NOT apply when: modifying frontend TypeScript/React code, writing shell scripts, or editing config files.
+## Gotchas
+
+- Holding a `MutexGuard` across an `.await` point makes the future `!Send` — extract the value before awaiting.
+- `impl Trait` in return position is opaque — it hides the concrete type, breaks dynamic dispatch, and prevents naming the future for storage.
+- `cargo clippy -- -D warnings` catches issues `rustc` misses. Run it before every commit.
+- `#[derive(Clone)]` on large structs silently adds expensive copies — audit derive usage on hot paths.
+
+## Validation
+
+Run `cargo clippy -- -D warnings && cargo test` before considering work done.
 
 `✓ let config = std::fs::read_to_string(path)?;`
 `✗ let config = std::fs::read_to_string(path).unwrap();`

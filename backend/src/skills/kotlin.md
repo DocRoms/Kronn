@@ -1,24 +1,36 @@
 ---
-name: Kotlin
-description: Android development, coroutines, null safety, and Spring Boot with Kotlin
+name: kotlin
+description: "Use when writing or reviewing Kotlin code, Android apps, or Kotlin Spring Boot services. Covers coroutines, null safety, Compose, and Kotlin-specific gotchas."
+license: AGPL-3.0
 category: language
 icon: 🟣
 builtin: true
 ---
 
-Expert Kotlin knowledge with modern patterns:
+## Procedures
 
-- Null safety: leverage the type system. Use `?.`, `?:`, `let`, `require`, `checkNotNull`. Never use `!!` without justification.
-- Coroutines: structured concurrency with `CoroutineScope`. Use `Flow` for reactive streams. `suspend` functions for async operations.
-- Android: Jetpack Compose for UI, ViewModel with StateFlow, Hilt for DI, Room for persistence.
-- Data classes: use for DTOs and value objects. Prefer `copy()` over mutation. Destructuring for readability.
-- Extensions: use extension functions to keep APIs clean. Avoid overuse — they should feel natural.
-- Spring Boot: Kotlin-first Spring apps. Use `@ConfigurationProperties` with data classes, coroutine-based controllers.
-- Testing: JUnit 5 with backtick test names, MockK for Kotlin-native mocking, Turbine for Flow testing.
-- Idioms: `when` expressions, scope functions (`let`, `apply`, `also`, `run`), sealed classes for state modeling.
+1. **Null safety** — use `?.`, `?:`, `let`, `requireNotNull`. Reserve `!!` for genuinely impossible nulls with a comment.
+2. **Coroutines** — launch from a `CoroutineScope` (viewModelScope, lifecycleScope). Use `Flow` for streams, `suspend` for one-shot.
+3. **Android UI** — Jetpack Compose with `StateFlow` in ViewModel. Hilt for DI, Room for persistence.
+4. **Testing** — JUnit 5 with backtick names, MockK for mocking, Turbine for Flow assertions.
 
-Apply when: reviewing or writing Kotlin code, Android apps, Kotlin-based Spring Boot services.
-Do NOT apply when: working with pure Java codebases, iOS/Swift projects, or frontend code.
+## Gotchas
 
-`✓ val name = user?.name ?: "Anonymous"`
-`✗ val name = user!!.name // NullPointerException risk`
+- `data class copy()` is shallow — nested mutable objects share references.
+- `Flow` is cold: nothing executes until collected. Forgetting `.collect()` = silent no-op.
+- `GlobalScope.launch` leaks coroutines — always use structured concurrency with a bounded scope.
+- Kotlin `Int` boxes to `java.lang.Integer` in generics — causes `===` identity failures in collections.
+- Spring `@Transactional` on Kotlin requires `open` class/methods (or `allopen` plugin) — final by default breaks proxies.
+- `when` without `else` on non-sealed types: compiles but crashes at runtime if new enum values are added.
+
+## Validation
+
+- Zero `!!` usages without justifying comment.
+- Coroutine launches tied to a lifecycle scope (never `GlobalScope`).
+
+## Do/Don't
+
+✓ `val name = user?.name ?: "Anonymous"`
+✗ `val name = user!!.name // NPE risk`
+✓ `viewModelScope.launch { repo.fetch() }`
+✗ `GlobalScope.launch { repo.fetch() } // leaked coroutine`

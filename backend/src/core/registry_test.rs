@@ -70,14 +70,12 @@ mod tests {
     #[test]
     fn registry_all_stdio_have_valid_command() {
         let reg = builtin_registry();
-        let valid_commands = ["npx", "uvx", "node", "python", "docker"];
+        let valid_commands = ["npx", "uvx", "node", "python", "docker", "fastly-mcp", "glab"];
         for m in &reg {
-            if let McpTransport::Stdio { command, args } = &m.transport {
+            if let McpTransport::Stdio { command, .. } = &m.transport {
                 assert!(valid_commands.contains(&command.as_str()),
                     "MCP {} uses unknown command '{}' (expected one of {:?})",
                     m.id, command, valid_commands);
-                assert!(!args.is_empty(),
-                    "MCP {} has Stdio transport but no args", m.id);
             }
         }
     }
@@ -359,9 +357,11 @@ mod tests {
         let m = reg.iter().find(|m| m.id == "mcp-fastly").unwrap();
         assert_eq!(m.name, "Fastly");
         assert!(m.description.contains("CDN"), "Fastly MCP should mention CDN");
-        assert!(m.env_keys.contains(&"FASTLY_API_TOKEN".to_string()));
+        assert!(m.env_keys.is_empty(), "Official Fastly MCP uses CLI profiles, not env vars");
         assert!(m.tags.contains(&"cdn".to_string()));
         assert!(m.token_url.is_some());
+        assert!(m.token_help.as_ref().unwrap().contains("fastly profile create"),
+            "token_help should guide users to create a Fastly CLI profile");
     }
 
     #[test]
@@ -493,5 +493,57 @@ mod tests {
         assert_eq!(m.name, "MindsDB");
         assert!(m.env_keys.contains(&"MINDS_API_KEY".to_string()));
         assert!(m.tags.contains(&"database".to_string()));
+    }
+
+    // ── Publisher / official tests ──
+
+    #[test]
+    fn all_entries_have_publisher() {
+        for m in builtin_registry() {
+            assert!(!m.publisher.is_empty(), "MCP {} has empty publisher", m.id);
+        }
+    }
+
+    #[test]
+    fn official_mcps_are_by_vendor() {
+        let reg = builtin_registry();
+        // Fastly MCP should be official by Fastly
+        let fastly = reg.iter().find(|m| m.id == "mcp-fastly").unwrap();
+        assert!(fastly.official);
+        assert_eq!(fastly.publisher, "Fastly");
+
+        // GitLab MCP should be official by GitLab
+        let gitlab = reg.iter().find(|m| m.id == "mcp-gitlab").unwrap();
+        assert!(gitlab.official);
+        assert_eq!(gitlab.publisher, "GitLab");
+
+        // GitHub MCP is by Anthropic, not official by vendor
+        let github = reg.iter().find(|m| m.id == "mcp-github").unwrap();
+        assert!(!github.official);
+        assert_eq!(github.publisher, "Anthropic");
+    }
+
+    #[test]
+    fn vendor_official_mcps_exist() {
+        let reg = builtin_registry();
+        let official_count = reg.iter().filter(|m| m.official).count();
+        let community_count = reg.iter().filter(|m| !m.official).count();
+        // Most MCPs should be vendor-official
+        assert!(official_count > community_count,
+            "Expected more official ({}) than community ({}) MCPs",
+            official_count, community_count);
+    }
+
+    #[test]
+    fn anthropic_mcps_are_not_vendor_official() {
+        // Anthropic-built MCPs for third-party services should NOT be marked official
+        let reg = builtin_registry();
+        let anthropic = reg.iter().filter(|m| m.publisher == "Anthropic").collect::<Vec<_>>();
+        assert!(!anthropic.is_empty(), "Should have Anthropic-published MCPs");
+        for m in &anthropic {
+            assert!(!m.official,
+                "MCP {} is by Anthropic but marked official — only the service vendor should be official",
+                m.id);
+        }
     }
 }

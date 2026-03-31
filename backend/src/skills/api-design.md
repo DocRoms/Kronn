@@ -1,28 +1,34 @@
 ---
-name: API Design
-description: REST, GraphQL, gRPC, versioning, OpenAPI, and API best practices
+name: api-design
+description: Use when designing, reviewing, or modifying REST/GraphQL/gRPC endpoints, API contracts, or OpenAPI specs. Covers versioning, pagination, error envelopes, and rate limiting.
+license: AGPL-3.0
 category: domain
 icon: 🔌
 builtin: true
 ---
 
-API design expertise covering protocols, conventions, and best practices:
+## Procedures
 
-- REST: use nouns for resources, HTTP verbs for actions. GET is safe and idempotent. PUT is idempotent. POST is not.
-- Status codes: 200 OK, 201 Created, 204 No Content, 400 Bad Request, 401 Unauthorized, 403 Forbidden, 404 Not Found, 409 Conflict, 422 Unprocessable Entity, 429 Too Many Requests, 500 Internal Server Error.
-- Versioning: prefer URL path versioning (`/v1/`) for public APIs. Header versioning for internal. Never break existing clients.
-- Pagination: use cursor-based pagination for large datasets. Offset-based is fine for small, stable collections. Always return `total_count` or `has_next`.
-- Error handling: consistent error envelope `{ "error": { "code": "...", "message": "...", "details": [...] } }`. Machine-readable codes, human-readable messages.
-- Rate limiting: return `429` with `Retry-After` header. Use token bucket or sliding window. Document limits in API docs.
-- OpenAPI/Swagger: spec-first design. Generate server stubs and client SDKs from the spec. Keep spec in sync with implementation.
-- GraphQL: use for flexible client queries. Define clear types and resolvers. Watch for N+1 queries — use DataLoader.
-- gRPC: use for internal service-to-service. Define `.proto` files first. Use streaming for large payloads.
-- Authentication: use Bearer tokens (OAuth2/JWT). API keys for server-to-server. Never pass credentials in query strings.
+1. **Define the contract first** — write OpenAPI/proto spec before implementation. Generate stubs from spec.
+2. **Pick the right protocol** — REST for public CRUD, gRPC for internal service-to-service, GraphQL for flexible client queries.
+3. **Version from day one** — URL path (`/v1/`) for public, header for internal. Never ship unversioned.
+4. **Paginate all collections** — cursor-based for large/mutable sets, offset for small/stable. Always return `has_next` or `next_cursor`.
+5. **Wrap errors consistently** — `{ "error": { "code": "...", "message": "...", "details": [...] } }`. Machine codes + human messages.
+6. **Rate limit and document it** — return `429` with `Retry-After`. Document limits in spec.
 
-When reviewing APIs, flag: inconsistent naming, missing pagination, no error envelope, breaking changes without versioning, missing rate limiting, and undocumented endpoints.
+## Gotchas
 
-Apply when: designing, reviewing, or modifying REST/GraphQL/gRPC endpoints or API contracts.
-Do NOT apply when: working on internal function signatures, CLI tools, or frontend-only components.
+- `PUT` is idempotent, `POST` is not — mixing them up causes duplicate-creation bugs.
+- GraphQL N+1: every resolver that touches DB needs DataLoader or batching. No exceptions.
+- `GET` query params for filtering are fine, but never pass credentials in query strings (they leak into logs/referers).
+- Cursor pagination breaks if you expose raw DB IDs — encode cursors opaquely.
+- OpenAPI codegen drifts silently — CI must validate spec matches implementation.
 
-✓ Scenario: `GET /v1/users?cursor=abc123` returns `{ "data": [...], "next_cursor": "def456" }`
-✗ Scenario: `GET /users` returns raw array with no pagination, no versioning, no error envelope.
+## Validation
+
+- Every collection endpoint has pagination params and envelope.
+- Every mutation returns the created/updated resource or a standard error envelope.
+- Breaking changes only land behind a new version prefix.
+
+✓ `GET /v1/users?cursor=abc` → `{ "data": [...], "next_cursor": "def" }`
+✗ `GET /users` → raw array, no pagination, no version, no envelope.

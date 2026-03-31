@@ -1,23 +1,31 @@
 ---
-name: Accessibility
-description: WCAG 2.1 AA compliance, semantic HTML, keyboard nav, and screen readers
+name: accessibility
+description: Use when building or reviewing UI components, forms, navigation, or any user-facing HTML. Ensures WCAG 2.1 AA compliance with semantic HTML, keyboard navigation, and screen reader support.
+license: AGPL-3.0
 category: business
 icon: ♿
 builtin: true
 ---
 
-Web accessibility expertise following WCAG 2.1 AA standards:
+## Procedure
 
-- Semantic HTML: correct heading hierarchy, landmark regions (nav, main, aside), lists for lists, buttons for actions, links for navigation.
-- Keyboard: everything operable with keyboard alone. Visible focus indicators. Logical tab order. No keyboard traps.
-- Screen readers: meaningful alt text for images. aria-label for icon buttons. aria-live for dynamic updates. Test with NVDA/VoiceOver.
-- Color: contrast ratio 4.5:1 for normal text, 3:1 for large text. Never convey meaning through color alone.
-- Forms: associated labels. Error messages linked to fields. Required field indicators. Autocomplete attributes.
-- Motion: respect prefers-reduced-motion. No auto-playing animations longer than 5 seconds.
-- Testing: axe DevTools in CI. Manual keyboard testing. Screen reader testing on key flows.
+1. **Check semantic structure**: correct heading hierarchy (single H1), landmark regions (`nav`, `main`, `aside`), `<button>` for actions, `<a>` for navigation.
+2. **Verify keyboard access**: tab through the entire flow. Confirm visible focus indicators, logical tab order, no keyboard traps. Every interactive element must be reachable.
+3. **Add screen reader support**: `alt` on images, `aria-label` on icon-only buttons, `aria-live` for dynamic content updates.
+4. **Validate color contrast**: 4.5:1 for normal text, 3:1 for large text. Never convey meaning through color alone.
+5. **Wire up forms**: every input has an associated `<label>`. Error messages linked via `aria-describedby`. Required fields marked. `autocomplete` attributes set.
+6. **Respect motion**: check `prefers-reduced-motion`. No auto-playing animations > 5 seconds.
 
-Apply when: building or reviewing UI components, forms, navigation, or any user-facing HTML.
-Do NOT apply when: backend API code, database changes, or infrastructure/DevOps work.
+## Gotchas
 
-✓ Scenario: `<button aria-label="Close dialog">X</button>` with visible focus ring.
-✗ Scenario: `<div onclick="close()">X</div>` with no keyboard support, no label.
+- `role="button"` on a `<div>` is NOT enough — you also need `tabindex="0"` and `keydown` handlers for Enter/Space. Just use `<button>`.
+- `aria-label` overrides visible text for screen readers — don't use it on elements that already have visible text.
+- `aria-live="assertive"` interrupts the user. Use `"polite"` unless it's an error or urgent alert.
+- Lighthouse accessibility score misses ~60% of real issues. Always complement with manual keyboard + screen reader testing.
+
+## Validation
+
+Run axe-core or Lighthouse. Then manually: Tab through the page, activate every control with keyboard, verify with NVDA/VoiceOver on one key flow.
+
+✓ `<button aria-label="Close dialog">X</button>` with visible focus ring
+✗ `<div onclick="close()">X</div>` — no keyboard support, no role, no label

@@ -262,8 +262,9 @@ pub fn configs_for_project(conn: &Connection, project_id: &str) -> Result<Vec<Mc
 
 // ─── Display helpers ─────────────────────────────────────────────────────────
 
-/// Build McpConfigDisplay list with masked secrets and server names
-pub fn list_configs_display(conn: &Connection) -> Result<Vec<McpConfigDisplay>> {
+/// Build McpConfigDisplay list with masked secrets and server names.
+/// Pass `secret` to detect broken encryption (secrets_broken flag).
+pub fn list_configs_display(conn: &Connection, secret: Option<&str>) -> Result<Vec<McpConfigDisplay>> {
     let configs = list_configs(conn)?;
     let servers = list_servers(conn)?;
 
@@ -288,6 +289,17 @@ pub fn list_configs_display(conn: &Connection) -> Result<Vec<McpConfigDisplay>> 
             .filter_map(|pid| project_map.get(pid).cloned())
             .collect();
 
+        // Detect broken encryption: env_keys exist but decryption fails
+        let secrets_broken = if !c.env_keys.is_empty() && !c.env_encrypted.is_empty() {
+            if let Some(s) = secret {
+                decrypt_env(&c.env_encrypted, s).is_err()
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
         McpConfigDisplay {
             id: c.id,
             server_id: c.server_id.clone(),
@@ -301,6 +313,7 @@ pub fn list_configs_display(conn: &Connection) -> Result<Vec<McpConfigDisplay>> 
             config_hash: c.config_hash,
             project_ids: c.project_ids,
             project_names,
+            secrets_broken,
         }
     }).collect())
 }

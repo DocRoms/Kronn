@@ -1050,10 +1050,7 @@
   padding: var(--kr-sp-2) var(--kr-sp-5);
 }
 
-/* ── Spin keyframes (referenced by inline style) ───────── */
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
+/* keyframes spin defined globally in reset.css */
 
 /* ── Reduced motion ────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {

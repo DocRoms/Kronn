@@ -1,24 +1,35 @@
 ---
-name: C#
-description: .NET ecosystem, ASP.NET, Entity Framework, and Unity game development
+name: csharp
+description: "Use when writing or reviewing C#/.NET code, ASP.NET APIs, Entity Framework, or Unity projects. Covers async patterns, LINQ, DI, and .NET-specific gotchas."
+license: AGPL-3.0
 category: language
 icon: 🔷
 builtin: true
 ---
 
-Expert C# knowledge with .NET patterns:
+## Procedures
 
-- C# 12+ features: primary constructors, collection expressions, `required` members, raw string literals, pattern matching.
-- ASP.NET Core: minimal APIs or controllers. Dependency injection built-in. Middleware pipeline. Use `IOptions<T>` for configuration.
-- Entity Framework Core: code-first migrations, LINQ queries, lazy vs eager loading trade-offs. Avoid N+1 queries.
-- Async: `async/await` everywhere for I/O. Use `ValueTask` for hot paths. Never `Task.Result` or `.Wait()` — deadlock risk.
-- LINQ: prefer method syntax for complex queries. Use `Select`, `Where`, `GroupBy` over manual loops.
-- Testing: xUnit with `[Fact]` and `[Theory]`. NSubstitute or Moq for mocking. `WebApplicationFactory` for integration tests.
-- Unity: MonoBehaviour lifecycle, ScriptableObjects for data, coroutines for async in Unity. Avoid `Find` methods at runtime.
-- Patterns: nullable reference types enabled. Records for immutable data. `Span<T>` for performance-critical code.
+1. **Async I/O** — always `async/await`. Use `ValueTask` on hot paths.
+2. **EF Core queries** — eager-load with `.Include()`, check for N+1 via logging. Prefer `AsNoTracking()` for read-only.
+3. **DI** — register services in `Program.cs`. Use `IOptions<T>` for config. Prefer constructor injection.
+4. **Testing** — xUnit `[Fact]`/`[Theory]`, `WebApplicationFactory` for integration, NSubstitute for mocks.
 
-Apply when: reviewing or writing C# code, ASP.NET APIs, Entity Framework, Unity projects.
-Do NOT apply when: working with Java/Spring, frontend JavaScript, or non-.NET backends.
+## Gotchas
 
-`✓ var result = await httpClient.GetAsync(url);`
-`✗ var result = httpClient.GetAsync(url).Result; // deadlock risk`
+- `Task.Result` / `.Wait()` deadlocks in ASP.NET — synchronization context blocks. Always await.
+- `IQueryable` vs `IEnumerable` — calling `.ToList()` too early pulls entire table into memory.
+- Nullable reference types: enable `<Nullable>enable</Nullable>` — compiler warns but does NOT enforce at runtime.
+- Unity: `MonoBehaviour` cannot use constructors for DI — use `[SerializeField]` or `Zenject`.
+- `record` equality is structural, `class` equality is referential — mixing them in collections causes subtle bugs.
+
+## Validation
+
+- Run `dotnet build --warnaserror` — zero warnings.
+- Check async chains: no `.Result`, no `.Wait()`, no `Task.Run` wrapping async calls.
+
+## Do/Don't
+
+✓ `var result = await httpClient.GetAsync(url);`
+✗ `var result = httpClient.GetAsync(url).Result; // deadlock`
+✓ `users.Where(u => u.Active).Select(u => u.Name)` — server-side filter
+✗ `users.ToList().Where(u => u.Active)` — loads all rows first

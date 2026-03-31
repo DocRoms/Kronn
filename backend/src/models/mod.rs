@@ -571,6 +571,9 @@ pub struct McpConfigDisplay {
     pub config_hash: String,
     pub project_ids: Vec<String>,
     pub project_names: Vec<String>,
+    /// True when env_keys exist but decryption fails (secrets need re-entry).
+    #[serde(default)]
+    pub secrets_broken: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -594,6 +597,23 @@ pub struct McpDefinition {
     pub token_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_help: Option<String>,
+    /// Who built this MCP server (e.g. "Anthropic", "Redis Labs", "Fastly").
+    pub publisher: String,
+    /// True when the MCP is built by the vendor of the service it connects to
+    /// (e.g. Fastly MCP by Fastly = official, GitHub MCP by Anthropic = not official by vendor).
+    pub official: bool,
+    /// Alternative package names that map to this same MCP server.
+    /// Used during scan to match detected .mcp.json entries that use a different
+    /// runtime (e.g. npm package vs Go binary) to the canonical registry entry.
+    /// Example: Fastly registry uses `fastly-mcp` (Go) but users may have `fastly-mcp-server` (npm).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(skip)]
+    pub alt_packages: Vec<String>,
+    /// Pre-filled MCP context content (best practices, token-saving tips).
+    /// Written to ai/operations/mcp-servers/<slug>.md on first install instead of empty template.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(skip)]
+    pub default_context: Option<String>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -868,6 +888,12 @@ pub struct Skill {
     pub is_builtin: bool,
     /// Estimated token cost when injected into an agent prompt (~4 chars = 1 token).
     pub token_estimate: u32,
+    /// agentskills.io: SPDX license identifier or reference to bundled LICENSE file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+    /// agentskills.io: space-delimited list of pre-approved tools (e.g. "Bash Read Grep").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_tools: Option<String>,
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -878,6 +904,10 @@ pub struct CreateSkillRequest {
     pub icon: String,
     pub category: SkillCategory,
     pub content: String,
+    #[serde(default)]
+    pub license: Option<String>,
+    #[serde(default)]
+    pub allowed_tools: Option<String>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

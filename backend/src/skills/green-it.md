@@ -1,23 +1,32 @@
 ---
-name: Green IT
-description: Eco-design, digital sobriety, and sustainable development practices
+name: green-it
+description: Use when adding features, dependencies, heavy assets, or infrastructure that increases resource usage. Applies eco-design and digital sobriety to reduce environmental impact.
+license: AGPL-3.0
 category: business
 icon: 🌱
 builtin: true
 ---
 
-Sustainable development and eco-design expertise:
+## Procedure
 
-- Eco-design: minimize page weight, reduce HTTP requests, optimize assets aggressively.
-- Digital sobriety: do we need this feature? Does it justify the energy cost? Question every animation, autoplay, and heavy asset.
-- Infrastructure: right-size servers. Use spot instances. Choose low-carbon regions. Shutdown dev environments at night.
-- Frontend: lazy load everything below the fold. Dark mode reduces OLED energy. Reduce JavaScript payload.
-- Backend: optimize queries to reduce CPU time. Cache aggressively. Batch operations over individual calls.
-- Dependencies: fewer dependencies = less to download, build, and run. Audit bundle size impact of every new lib.
-- Measurement: estimate CO2 with tools like Website Carbon, EcoIndex, GreenFrame. Track trends, not just snapshots.
+1. **Question the need**: does this feature justify its energy cost? Challenge every animation, autoplay video, and heavy asset.
+2. **Minimize payload**: compress images (WebP/AVIF), lazy load below-the-fold, reduce JS bundle size. Target < 500KB total page weight for content pages.
+3. **Optimize backend**: batch operations over individual calls, cache aggressively, optimize DB queries to cut CPU time.
+4. **Audit dependencies**: check bundle-size impact BEFORE adding a lib. Fewer deps = less to download, build, and run.
+5. **Right-size infra**: use spot instances, choose low-carbon regions, shut down dev environments at night.
+6. **Measure**: use Website Carbon, EcoIndex, or GreenFrame. Track trends over time, not just snapshots.
 
-Apply when: adding new features, dependencies, heavy assets, or infrastructure that increases resource usage.
-Do NOT apply when: fixing critical bugs, security patches, or removing code/features (already reducing footprint).
+## Gotchas
 
-✓ Scenario: hero image served as 80KB WebP with lazy loading for below-the-fold content.
-✗ Scenario: 3MB autoplay video background on every page, loaded eagerly on mobile too.
+- Dark mode saves energy on OLED screens only — on LCD it makes zero difference. Still worth offering for UX, but don't claim green savings on LCD.
+- A single autoplay video on a landing page can emit more CO2 per visit than the entire rest of the page combined.
+- Lazy loading images that are in the initial viewport HURTS both performance and energy (delays LCP, then loads anyway).
+- Tree shaking only works with ES modules. CJS dependencies ship entire bundles regardless.
+- CDN cache misses are expensive — verify cache-hit ratios, don't just assume CDN = green.
+
+## Validation
+
+Check total page weight (Network tab). Verify lazy loading is only on below-fold assets. Run `npx bundlephobia <pkg>` before adding deps.
+
+✓ Hero image: 80KB WebP, below-fold images lazy-loaded
+✗ 3MB autoplay video background on every page, eagerly loaded on mobile

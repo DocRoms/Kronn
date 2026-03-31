@@ -83,7 +83,8 @@ Server (type)  →  Config (instance + secrets)  →  Project (N:N)
 **49 built-in servers** covering Git, databases, cloud & infra, browsers, monitoring, communication, project management, design, payments, knowledge bases, AI reasoning, SEO, code quality, IaC, and hosting. [Full list →](docs/mcps.md)
 
 - **Auto-detection** from existing `.mcp.json` files across projects
-- **Disk sync for all agents** — `.mcp.json` (Claude), `.kiro/settings/mcp.json` (Kiro), `.gemini/settings.json` (Gemini), `.vibe/config.toml` (Vibe), `~/.codex/config.toml` (Codex)
+- **Disk sync for all agents** — `.mcp.json` (Claude), `.kiro/settings/mcp.json` (Kiro), `.gemini/settings.json` (Gemini), `.vibe/config.toml` (Vibe), `~/.codex/config.toml` (Codex), `~/.copilot/mcp-config.json` (Copilot)
+- **Smart dedup** — detects when the same MCP uses different runtimes (e.g. npm package vs Go binary) and merges them automatically
 - **Inline secret editing** with per-field visibility toggles and token generation links
 - **Global configs** — mark a config as global to deploy to all projects at once
 

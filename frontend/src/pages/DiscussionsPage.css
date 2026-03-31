@@ -2339,13 +2339,4 @@
   color: var(--kr-text-muted);
 }
 
-/* ── Keyframe animations (fallback — may already exist) ── */
-@keyframes spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
-}
-
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
-}
+/* keyframes spin + pulse defined globally in reset.css */
