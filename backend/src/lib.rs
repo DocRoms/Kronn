@@ -239,6 +239,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/projects/:id/git-pr", post(api::projects::create_pr))
         .route("/api/projects/:id/pr-template", get(api::projects::pr_template))
         .route("/api/projects/:id/exec", post(api::projects::project_exec))
+        .route("/api/projects/:id/workflow-suggestions", get(api::workflows::suggestions))
         // ── Agents ──
         .route("/api/agents", get(api::agents::detect))
         .route("/api/agents/install", post(api::agents::install))

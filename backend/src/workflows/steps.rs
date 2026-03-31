@@ -57,6 +57,11 @@ pub async fn execute_step(
         }
     };
 
+    // Auto-inject structured output format instructions when output_format = Structured
+    if step.output_format == crate::models::StepOutputFormat::Structured {
+        prompt.push_str(crate::workflows::template::STRUCTURED_OUTPUT_INSTRUCTIONS);
+    }
+
     // Auto-inject on_result signal instructions into the prompt
     let valid_rules: Vec<_> = step.on_result.iter().filter(|r| !r.contains.is_empty()).collect();
     if !valid_rules.is_empty() {
@@ -92,9 +97,39 @@ pub async fn execute_step(
         match run_agent_with_timeout(step, project_path, work_dir, &prompt, tokens_config, full_access).await {
             Ok(agent_output) => {
                 let duration_ms = start.elapsed().as_millis() as u64;
+                let mut final_output = agent_output.text.clone();
+                let mut total_tokens = agent_output.tokens_used;
 
-                // Evaluate on_result conditions
-                let condition_action = evaluate_conditions(&step.on_result, &agent_output.text);
+                // For Structured steps: verify envelope exists, try repair if missing
+                if step.output_format == crate::models::StepOutputFormat::Structured
+                    && crate::workflows::template::extract_step_envelope(&final_output).is_none()
+                {
+                        tracing::info!("Step '{}': structured output missing envelope, attempting repair", step.name);
+                        let truncated = if final_output.len() > 2000 { &final_output[..2000] } else { &final_output };
+                        let repair_prompt = crate::workflows::template::REPAIR_PROMPT_TEMPLATE
+                            .replace("{PREVIOUS_OUTPUT}", truncated);
+                    if let Ok(repair_output) = run_agent_with_timeout(step, project_path, work_dir, &repair_prompt, tokens_config, full_access).await {
+                        total_tokens += repair_output.tokens_used;
+                        if crate::workflows::template::extract_step_envelope(&repair_output.text).is_some() {
+                            final_output = repair_output.text;
+                            tracing::info!("Step '{}': repair succeeded", step.name);
+                        } else {
+                            tracing::warn!("Step '{}': repair failed, using raw output", step.name);
+                        }
+                    }
+                }
+
+                // Evaluate on_result conditions (check signals + structured status)
+                let mut condition_action = evaluate_conditions(&step.on_result, &final_output);
+
+                // For Structured: also check status field for NO_RESULTS
+                if condition_action.is_none() && step.output_format == crate::models::StepOutputFormat::Structured {
+                    if let Some(env) = crate::workflows::template::extract_step_envelope(&final_output) {
+                        if env.status == "NO_RESULTS" && step.on_result.iter().any(|r| r.contains == "NO_RESULTS") {
+                            condition_action = Some(ConditionAction::Stop);
+                        }
+                    }
+                }
 
                 let condition_result = condition_action.as_ref().map(|a| match a {
                     ConditionAction::Stop => "Stop".to_string(),
@@ -106,8 +141,8 @@ pub async fn execute_step(
                     result: StepResult {
                         step_name: step.name.clone(),
                         status: RunStatus::Success,
-                        output: agent_output.text,
-                        tokens_used: agent_output.tokens_used,
+                        output: final_output,
+                        tokens_used: total_tokens,
                         duration_ms,
                         condition_result,
                     },

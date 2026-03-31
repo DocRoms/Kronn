@@ -198,7 +198,7 @@ describe('SettingsPage', () => {
     expect(body).toContain('Projets');
     expect(body).toContain('Discussions');
     expect(body).toContain('Messages');
-    expect(body).toContain('MCPs');
+    expect(body).toContain('Plugins');
     expect(body).toContain('Workflows');
     expect(body).toContain('Skills custom');
     expect(body).toContain('Profils custom');

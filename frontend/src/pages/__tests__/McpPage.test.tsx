@@ -79,9 +79,9 @@ describe('McpPage', () => {
   it('renders empty state when no configs exist', () => {
     const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [] };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
-    // Empty state message (mcp.empty in FR: "Aucun MCP configure...") should be visible
+    // Empty state message (mcp.empty in FR: "Aucun plugin configure...") should be visible
     const body = document.body.textContent!;
-    expect(body).toContain('Aucun MCP');
+    expect(body).toContain('Aucun plugin');
   });
 
   it('renders server names as group headers', () => {
@@ -96,7 +96,7 @@ describe('McpPage', () => {
     expect(screen.getByText('Slack')).toBeTruthy();
   });
 
-  it('renders config labels inside expanded server groups', () => {
+  it('renders config labels as cards', () => {
     const configs = [
       makeConfig('c1', 'github', 'GitHub', { label: 'GitHub Main' }),
       makeConfig('c2', 'github', 'GitHub', { label: 'GitHub Secondary' }),
@@ -104,25 +104,19 @@ describe('McpPage', () => {
     const overview: McpOverview = { servers: [makeServer('github', 'GitHub')], configs, customized_contexts: [], incompatibilities: [] };
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
-    // Click the server group header to expand it
-    const header = screen.getByText('GitHub');
-    fireEvent.click(header);
-
+    // Cards are always visible (no accordion)
     expect(container.textContent).toContain('GitHub Main');
     expect(container.textContent).toContain('GitHub Secondary');
   });
 
-  it('shows global toggle state correctly', () => {
+  it('shows global scope badge on global config', () => {
     const configs = [
       makeConfig('c1', 'github', 'GitHub', { is_global: true }),
     ];
     const overview: McpOverview = { servers: [makeServer('github', 'GitHub')], configs, customized_contexts: [], incompatibilities: [] };
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
-    // Expand the server group
-    fireEvent.click(screen.getByText('GitHub'));
-
-    // Global label should be rendered
+    // Global badge should be rendered on the card
     expect(container.textContent).toContain('Global');
   });
 
@@ -142,7 +136,7 @@ describe('McpPage', () => {
     expect(document.body.textContent).toContain('A test server');
   });
 
-  it('shows incompatibility badge on server header', () => {
+  it('shows incompatibility badge in detail panel when card is clicked', () => {
     const servers = [makeServer('mcp-gitlab', 'GitLab')];
     const configs = [makeConfig('c1', 'mcp-gitlab', 'GitLab')];
     const overview: McpOverview = {
@@ -151,7 +145,10 @@ describe('McpPage', () => {
     };
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
-    // The incompatibility badge should show the agent name
+    // Click the plugin card to open the detail panel
+    fireEvent.click(screen.getByText('GitLab'));
+
+    // The incompatibility badge should show the agent name in the detail panel
     expect(container.textContent).toContain('Kiro');
   });
 
@@ -170,7 +167,7 @@ describe('McpPage', () => {
     expect(container.textContent).not.toContain('Kiro');
   });
 
-  it('shows project names as badges when linked', () => {
+  it('shows project count badge when linked to projects', () => {
     const projects = [makeProject('p1', 'my-app'), makeProject('p2', 'my-api')];
     const configs = [
       makeConfig('c1', 'github', 'GitHub', { project_ids: ['p1'], project_names: ['my-app'] }),
@@ -178,13 +175,11 @@ describe('McpPage', () => {
     const overview: McpOverview = { servers: [makeServer('github', 'GitHub')], configs, customized_contexts: [], incompatibilities: [] };
     const { container } = wrap(<McpPage projects={projects} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
-    // Expand to see config details
-    fireEvent.click(screen.getByText('GitHub'));
-
-    expect(container.textContent).toContain('my-app');
+    // Card shows project count badge
+    expect(container.textContent).toContain('1 projet');
   });
 
-  it('expands server group on click', () => {
+  it('shows all plugin cards without needing to expand', () => {
     const servers = [makeServer('context7', 'Context7')];
     const configs = [
       makeConfig('c1', 'context7', 'Context7', { label: 'Context7 Main' }),
@@ -193,14 +188,7 @@ describe('McpPage', () => {
     const overview: McpOverview = { servers, configs, customized_contexts: [], incompatibilities: [] };
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
-    // Before clicking, config labels should not be visible (group is collapsed)
-    expect(container.textContent).not.toContain('Context7 Main');
-    expect(container.textContent).not.toContain('Context7 Dev');
-
-    // Click the server group header to expand it
-    fireEvent.click(screen.getByText('Context7'));
-
-    // After clicking, config labels should be visible
+    // All cards are visible immediately (no accordion to expand)
     expect(container.textContent).toContain('Context7 Main');
     expect(container.textContent).toContain('Context7 Dev');
   });

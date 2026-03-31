@@ -185,11 +185,11 @@ Dashboard tabs (current / planned):
 |-----|--------|---------|
 | Projets | Done | Project list, AI audit pipeline (template → audit → validation), project bootstrap (create from scratch), MCP overview, per-project workflows/skills/doc viewer |
 | Discussions | Done | Single/multi-agent chat, @mentions, orchestration, global discussions, archive/unarchive (swipe gestures), inline title editing, disabled agent detection. **Split into 7 components**: DiscussionsPage (orchestrator 1218L) + ChatHeader, ChatInput, DiscussionSidebar, NewDiscussionForm, MessageBubble, SwipeableDiscItem |
-| MCPs | Done | MCP registry and management |
-| Workflows | Done | Workflow list (grouped by project), creation wizard (5-step: infos → trigger → steps → config → resume), detail + runs with live SSE progress, manual trigger, run deletion (individual + bulk). MCP tools auto-injected into agent prompts. Symphony import planned. |
+| Plugins | Done | Plugin (MCP) registry with card grid + category pills, inline expand detail panel, per-project navigation. Renamed from "MCPs" — user-facing label is "Plugins (MCP / API)" |
+| Workflows | Done | Workflow list (grouped by project), creation wizard (**simple** 3-step + **advanced** 5-step modes), detail + runs with live SSE progress, manual trigger, run deletion (individual + bulk). **MCP-based workflow suggestions** (10 template catalogue). **Structured inter-step contract** (`StepOutputFormat`: FreeText/Structured with `---STEP_OUTPUT---` envelope). MCP tools auto-injected into agent prompts. |
 | Config | Done | Multi-key API management (incl. Mistral/Vibe API keys), token usage tracking, language, agent detection + permissions, agent usage dashboard links, Directives CRUD with live cards, DB management (export/import). Skills/Profiles are now managed per-project on the Project page. |
 
-Note: the old "Agents" tab has been merged into Config. Nav order: Projets → Discussions → MCPs → Workflows → Config.
+Note: the old "Agents" tab has been merged into Config. Nav order: Projets → Discussions → Plugins → Workflows → Config.
 
 ### Project Bootstrap (create from scratch)
 
@@ -229,6 +229,29 @@ Projects display 3 badges next to the title: `[FileCode] AI context`, `[Cpu] AI 
 
 `GET /api/projects/:id/drift` — compares source file checksums against `ai/checksums.json` (generated during audit). Returns stale sections without consuming tokens. `POST /api/projects/:id/partial-audit` re-runs only stale steps (~3-5K tokens vs ~20K for full audit). UI shows an amber badge on stale projects with a "Mettre à jour" button.
 
+**MCP drift auto-detection**: adding/removing/relinking a plugin on an audited project automatically invalidates the `.mcp.json` checksum, flagging drift for step 8 (MCP introspection) re-run.
+
+### Workflow suggestions
+
+`GET /api/projects/:id/workflow-suggestions` — matches installed MCPs against a hardcoded catalogue of 10 workflow templates. Returns suggestions with multi-step prompts, pre-filled triggers, and audience tags (dev/pm/ops). Suggestions use structured inter-step contracts for reliable data passing between collection and synthesis steps.
+
+### Structured inter-step contract
+
+Workflow steps can declare `output_format: Structured` (default: `FreeText`). When structured:
+1. Engine auto-injects `---STEP_OUTPUT---` envelope instructions into the prompt
+2. After execution, extracts JSON envelope `{"data": ..., "status": "OK|NO_RESULTS|ERROR", "summary": "..."}`
+3. If extraction fails, sends a repair prompt (truncated to 2000 chars) for reformatting
+4. Downstream steps access `{{previous_step.data}}`, `{{previous_step.summary}}`, `{{previous_step.status}}`
+5. `status: "NO_RESULTS"` is detected by the condition system (replaces `[SIGNAL: NO_RESULTS]` for structured steps)
+
+### Desktop app (Tauri)
+
+- **System tray**: closing the window hides to tray, backend + scheduler keep running. Tray menu: "Ouvrir Kronn" / "Quitter". Double-click to reopen.
+- **Wake lock**: when cron workflows are active, prevents OS sleep (Windows: `SetThreadExecutionState`, macOS: `caffeinate -w`). Auto-releases when no cron workflows remain.
+- **PATH enrichment**: GUI apps on macOS inherit minimal PATH. `enrich_path()` at startup adds homebrew, npm global, cargo, nvm, fnm, bun, uv directories if they exist.
+- **Ad-hoc codesigning**: macOS builds are signed with `codesign --force --deep -s -` when no Apple Developer certificate is configured. Users may need `xattr -cr /Applications/Kronn.app`.
+- **Agent detection**: uses native PATH (enriched) + npx probe fallback. Agents found via npx only show as "npx" (orange badge) not "installed" (green badge).
+
 ---
 
 ## 10. Multi-agent configuration
@@ -241,4 +264,4 @@ Redirectors to this file: `CLAUDE.md`, `GEMINI.md`, `AGENTS.md`, `.kiro/steering
 
 ## 11. Last updated
 
-AI context last reviewed: **2026-03-29**.
+AI context last reviewed: **2026-03-31**.

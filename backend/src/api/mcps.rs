@@ -136,9 +136,26 @@ pub async fn create_config(
     }).await;
 
     match result {
-        Ok(display) => Json(ApiResponse::ok(display)),
+        Ok(display) => {
+            // Trigger drift detection for affected audited projects
+            let pids = if display.is_global {
+                projects_for_global(&state).await
+            } else {
+                display.project_ids.clone()
+            };
+            trigger_mcp_drift(&state, pids);
+            Json(ApiResponse::ok(display))
+        }
         Err(e) => Json(ApiResponse::err(format!("{}", e))),
     }
+}
+
+/// Helper: get all project IDs (for global MCP changes)
+async fn projects_for_global(state: &AppState) -> Vec<String> {
+    state.db.with_conn(|conn| {
+        Ok(crate::db::projects::list_projects(conn)?
+            .into_iter().map(|p| p.id).collect::<Vec<_>>())
+    }).await.unwrap_or_default()
 }
 
 /// PUT /api/mcps/configs/:id — update config
@@ -225,12 +242,26 @@ pub async fn delete_config(
     };
     drop(config_read);
 
+    // Get affected project IDs before deleting
+    let affected_pids = state.db.with_conn({
+        let cid = config_id.clone();
+        move |conn| {
+            Ok(db::mcps::get_config(conn, &cid)?
+                .map(|c| if c.is_global {
+                    crate::db::projects::list_projects(conn).ok()
+                        .map(|ps| ps.into_iter().map(|p| p.id).collect::<Vec<_>>())
+                        .unwrap_or_default()
+                } else {
+                    c.project_ids
+                })
+                .unwrap_or_default())
+        }
+    }).await.unwrap_or_default();
+
     match state.db.with_conn(move |conn| {
-        // Get config before deleting to know affected projects
         let config = db::mcps::get_config(conn, &config_id)?;
         let result = db::mcps::delete_config(conn, &config_id)?;
 
-        // Sync affected projects
         if let Some(cfg) = config {
             if cfg.is_global {
                 mcp_scanner::sync_all_projects(conn, &secret);
@@ -241,7 +272,10 @@ pub async fn delete_config(
 
         Ok(result)
     }).await {
-        Ok(true) => Json(ApiResponse::ok(())),
+        Ok(true) => {
+            trigger_mcp_drift(&state, affected_pids);
+            Json(ApiResponse::ok(()))
+        }
         Ok(false) => Json(ApiResponse::err("Config not found")),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
@@ -261,13 +295,11 @@ pub async fn set_config_projects(
     drop(config_read);
 
     match state.db.with_conn(move |conn| {
-        // Get old project_ids before update
         let old_config = db::mcps::get_config(conn, &config_id)?;
         let old_pids = old_config.map(|c| c.project_ids).unwrap_or_default();
 
         db::mcps::set_config_projects(conn, &config_id, &req.project_ids)?;
 
-        // Sync all affected projects (old ones that lost the config + new ones that got it)
         let mut all_pids: Vec<String> = old_pids;
         for pid in &req.project_ids {
             if !all_pids.contains(pid) {
@@ -276,9 +308,12 @@ pub async fn set_config_projects(
         }
         mcp_scanner::sync_affected_projects(conn, &all_pids, &secret);
 
-        Ok(())
+        Ok(all_pids)
     }).await {
-        Ok(()) => Json(ApiResponse::ok(())),
+        Ok(all_pids) => {
+            trigger_mcp_drift(&state, all_pids);
+            Json(ApiResponse::ok(()))
+        }
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
 }
@@ -738,4 +773,60 @@ fn migrate_detected_to_registry(conn: &Connection, reg: &[McpDefinition]) -> any
     }
 
     Ok(())
+}
+
+// ── MCP change → auto-reaudit ──────────────────────────────────────────────
+
+/// When an MCP config changes on an audited project, invalidate the .mcp.json
+/// checksum so drift detection triggers a step 8 reaudit.
+/// Fire-and-forget: spawns a background task, does not block the caller.
+fn trigger_mcp_drift(state: &AppState, project_ids: Vec<String>) {
+    if project_ids.is_empty() {
+        return;
+    }
+    let db = state.db.clone();
+    tokio::spawn(async move {
+        let audited = match db.with_conn({
+            let pids = project_ids;
+            move |conn| {
+                let mut result = Vec::new();
+                for pid in &pids {
+                    if let Ok(Some(p)) = crate::db::projects::get_project(conn, pid) {
+                        if p.audit_status == crate::models::AiAuditStatus::Audited || p.audit_status == crate::models::AiAuditStatus::Validated {
+                            result.push(p);
+                        }
+                    }
+                }
+                Ok(result)
+            }
+        }).await {
+            Ok(ps) => ps,
+            Err(e) => { tracing::warn!("MCP drift: failed to query projects: {}", e); return; }
+        };
+
+        for project in audited {
+            let project_path = crate::core::scanner::resolve_host_path(&project.path);
+            let checksums_path = project_path.join("ai/checksums.json");
+            if !checksums_path.exists() {
+                continue;
+            }
+            if let Ok(content) = std::fs::read_to_string(&checksums_path) {
+                if let Ok(mut checksums) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(obj) = checksums.as_object_mut() {
+                        obj.insert(
+                            ".mcp.json".to_string(),
+                            serde_json::Value::String("invalidated-by-mcp-change".to_string()),
+                        );
+                        if let Ok(updated) = serde_json::to_string_pretty(&checksums) {
+                            let _ = std::fs::write(&checksums_path, updated);
+                            tracing::info!(
+                                "MCP change → drift flagged for '{}' (step 8 will re-run on next check)",
+                                project.name
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    });
 }

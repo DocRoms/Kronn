@@ -892,6 +892,7 @@ fn sample_workflow(id: &str) -> Workflow {
         trigger: WorkflowTrigger::Manual,
         steps: vec![WorkflowStep {
             step_type: StepType::default(),
+            output_format: StepOutputFormat::default(),
             description: None,
             name: "step1".into(),
             agent: AgentType::ClaudeCode,
@@ -1173,6 +1174,7 @@ fn workflow_multi_step_roundtrip() {
         steps: vec![
             WorkflowStep {
                 step_type: StepType::default(),
+                output_format: StepOutputFormat::default(),
                 description: None,
                 name: "analyze".into(),
                 agent: AgentType::ClaudeCode,
@@ -1190,6 +1192,7 @@ fn workflow_multi_step_roundtrip() {
             },
             WorkflowStep {
                 step_type: StepType::default(),
+                output_format: StepOutputFormat::default(),
                 description: None,
                 name: "fix".into(),
                 agent: AgentType::Codex,
@@ -1210,6 +1213,7 @@ fn workflow_multi_step_roundtrip() {
             },
             WorkflowStep {
                 step_type: StepType::default(),
+                output_format: StepOutputFormat::default(),
                 description: None,
                 name: "review".into(),
                 agent: AgentType::GeminiCli,
@@ -1264,6 +1268,7 @@ fn workflow_update_steps_count() {
     // Add a second step
     wf.steps.push(WorkflowStep {
         step_type: StepType::default(),
+        output_format: StepOutputFormat::default(),
         description: None,
         name: "step2".into(),
         agent: AgentType::ClaudeCode,

@@ -7,6 +7,38 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.3.0] — 2026-03-31
+
+### Added
+- **Workflow suggestions from MCP introspection** — `GET /api/projects/:id/workflow-suggestions` matches installed MCPs against a catalogue of 10 workflow templates (orphan PR detection, sprint digest, changelog, stale PRs, bug reports, PR quality, 5xx correlation, sprint brief, perf monitoring, doc sync). Each suggestion includes multi-step prompts, pre-filled trigger, and audience tag (dev/pm/ops)
+- **Suggestion panel in workflow wizard** — sparkle button shows contextual workflow suggestions when a project with MCPs is selected. "Activate" (simple mode) or "Import as draft" (advanced mode). Multi-step or advanced suggestions auto-switch to advanced mode
+- **Workflow wizard: simple mode** — new 3-step wizard (Infos, Task, Summary) alongside the existing 5-step advanced mode. Toggle at the top of the wizard. Simple mode: one agent, one prompt, manual or scheduled trigger
+- **Scheduled trigger in simple mode** — "Manual" or "Schedule" toggle with visual frequency picker (every X minutes/hours/days). Converts to cron behind the scenes
+- **System tray (desktop)** — closing the window hides to tray instead of quitting. Backend + workflow scheduler keep running. Double-click tray icon to reopen. "Quit" in tray menu for real exit
+- **Wake lock (desktop)** — when cron workflows are active, prevents OS sleep. Windows: `SetThreadExecutionState`. macOS: `caffeinate -w`. Auto-releases when no cron workflows remain
+- **MCP audit introspection (step 8)** — audit now calls read-only MCP tools to discover capabilities (tool inventory, project context: Jira projects, GitHub repos, Slack channels, etc.) and documents them in `ai/operations/mcp-servers/`. Generates workflow automation hints table
+- **MCP drift auto-detection** — adding/removing/relinking a plugin on an audited project invalidates the `.mcp.json` checksum, flagging drift for step 8 re-run
+- **Ad-hoc codesigning for macOS** — CI applies `codesign --force --deep -s -` when no Apple Developer certificate is configured. Release notes include `xattr -cr` instructions
+
+### Changed
+- **MCP renamed to "Plugins"** — all user-facing labels (FR/EN/ES), nav tab, page title ("Plugins (MCP / API)"), icons (Server -> Puzzle). Internal code keys unchanged
+- **Plugin registry: card grid with category pills** — replaces the flat scrollable list. Cards with icon, name, description (2-line clamp), "Setup required" label. Category filter pills matching Config tab style (border-radius: 20px)
+- **Installed plugins: inline expand** — click a plugin card to expand the detail panel in-place (grid-column: 1/-1), no CLS. Shows tokens, scope toggles, project links. Replaces the old accordion-by-server and the above/below detail panel
+- **Plugin detail from project page** — clicking a plugin in ProjectCard navigates to Plugins tab and opens the detail panel for that specific config
+- **Workflow wizard: advanced options hidden** — concurrency, workspace hooks moved behind "Advanced" toggle in the Config step. Per-step settings (model, retry, stall timeout) were already behind a toggle
+- **Audit templates enriched** — `TEMPLATE.md` adds Capabilities table (tools, read-only flag, use-cases) and Project context section. `mcp-servers.md` adds Key capabilities column and Workflow automation hints table
+
+### Breaking (internal)
+- **Structured inter-step contract** — new `StepOutputFormat` enum (`FreeText` | `Structured`) on `WorkflowStep`. When `Structured`: engine auto-injects `---STEP_OUTPUT---` envelope instructions, extracts JSON envelope (`{data, status, summary}`) from output, exposes `{{previous_step.data}}`, `{{previous_step.summary}}`, `{{previous_step.status}}` in addition to raw `{{previous_step.output}}`. Includes repair prompt fallback when LLM doesn't comply. Existing workflows unaffected (default = `FreeText`)
+- **Catalogue multi-step prompts** — all 10 workflow templates now have 2-4 specialized steps. Collection steps use `Structured` format with explicit data schema in the prompt. Synthesis steps use `FreeText`. Steps reference `{{previous_step.data}}` for structured data instead of raw output
+
+### Fixed
+- **Fastly MCP broken** — `fastly-mcp-server` v2.0.x switched to bun runtime. Pinned to v1.0.4 (Node.js) in registry + all 21 `.mcp.json` files across 7 repos. Backend test `pinned_packages_are_respected` prevents regression
+- **`PINNED_PACKAGES` dead_code warning** — moved constant into `#[cfg(test)]` module
+- **ProjectCard: Server icon → Puzzle** — consistent with Plugins rename
+
+---
+
 ## [0.2.2] — 2026-03-29
 
 ### Added

@@ -108,6 +108,25 @@ jobs:
           _APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           _APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
+      # Ad-hoc sign macOS .app when no Apple Developer certificate is configured.
+      # This removes the "app is damaged" error for most users. Without a paid
+      # Apple Developer ID ($99/yr), full notarization is not possible — users
+      # may still need to run: xattr -cr /Applications/Kronn.app
+      - name: Ad-hoc sign macOS app
+        if: startsWith(matrix.os, 'macos')
+        shell: bash
+        run: |
+          APP_PATH=$(find desktop/src-tauri/target/${{ matrix.target }}/release/bundle -name "*.app" -maxdepth 3 | head -1)
+          if [ -n "$APP_PATH" ] && [ -z "$_APPLE_CERTIFICATE" ]; then
+            echo "No Apple Developer certificate — applying ad-hoc signature"
+            codesign --force --deep -s - "$APP_PATH"
+            echo "Ad-hoc signed: $APP_PATH"
+          else
+            echo "Skipping ad-hoc sign (Apple certificate configured or no .app found)"
+          fi
+        env:
+          _APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+
       # ─── Upload artifacts ─────────────────────────────────────────
 
       - name: Upload Windows artifacts
@@ -157,6 +176,27 @@ jobs:
         with:
           draft: true
           generate_release_notes: true
+          body: |
+            ## Installation
+
+            | OS | File |
+            |----|------|
+            | Windows | `.exe` (NSIS) or `.msi` |
+            | macOS Apple Silicon | `aarch64.dmg` |
+            | macOS Intel | `x64.dmg` |
+            | Linux | `.deb` or `.AppImage` |
+
+            ### macOS — "app is damaged" warning
+
+            Kronn is open-source and not signed with an Apple Developer certificate.
+            macOS Gatekeeper may show _"Kronn is damaged and can't be opened"_.
+
+            **Fix** — run this once after installing:
+            ```bash
+            xattr -cr /Applications/Kronn.app
+            ```
+            Then open the app normally.
+
           files: |
             artifacts/**/*.exe
             artifacts/**/*.msi

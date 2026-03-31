@@ -14,7 +14,7 @@ import { SettingsPage } from './SettingsPage';
 import { DiscussionsPage } from './DiscussionsPage';
 import { ProjectList } from '../components/ProjectList';
 import {
-  Folder, Server,
+  Folder, Puzzle,
   Plus, Search, Zap, Settings,
   Loader2,
   MessageSquare, X,
@@ -38,6 +38,7 @@ export function Dashboard({ onReset }: DashboardProps) {
   const isMobile = useIsMobile();
   const { toast, ToastContainer } = useToast();
   const [page, setPage] = useState<Page>('projects');
+  const [mcpSelectedConfigId, setMcpSelectedConfigId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   // Cross-page prefill for discussion creation (e.g. "validate audit" from Projects)
   const [discPrefill, setDiscPrefill] = useState<{ projectId: string; title: string; prompt: string; locked?: boolean } | null>(null);
@@ -294,11 +295,11 @@ export function Dashboard({ onReset }: DashboardProps) {
         {([
           ['projects', Folder, t('nav.projects')],
           ['discussions', MessageSquare, t('nav.discussions')],
-          ['mcps', Server, t('nav.mcps')],
+          ['mcps', Puzzle, t('nav.mcps')],
           ['workflows', Workflow, t('nav.workflows')],
           ['settings', Settings, t('nav.config')],
         ] as [string, typeof Folder, string][]).map(([id, Icon, label]) => (
-          <button key={id} className="dash-nav-btn" data-active={page === id} data-mobile={isMobile} onClick={() => setPage(id as Page)} title={label}>
+          <button key={id} className="dash-nav-btn" data-active={page === id} data-mobile={isMobile} onClick={() => { setPage(id as Page); if (id !== 'mcps') setMcpSelectedConfigId(null); }} title={label}>
             {id === 'workflows' && runningWorkflows > 0
               ? <Loader2 size={isMobile ? 16 : 14} style={{ animation: 'spin 1s linear infinite' }} className="text-accent" />
               : <Icon size={isMobile ? 16 : 14} />
@@ -383,7 +384,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                 {mcpOverview.configs.length > 0 && (
                   <div className="dash-mcp-selector">
                     <div className="dash-mcp-label">
-                      <Server size={12} className="text-muted" />
+                      <Puzzle size={12} className="text-muted" />
                       <span className="text-base text-secondary">{t('projects.bootstrap.mcps')}</span>
                       {bootstrapMcpIds.length > 0 && (
                         <span className="dash-mcp-count">({bootstrapMcpIds.length})</span>
@@ -573,7 +574,14 @@ export function Dashboard({ onReset }: DashboardProps) {
             workflows={workflowList ?? []}
             configLanguage={configLanguage ?? null}
             toast={toast}
-            onNavigate={(p) => setPage(p as Page)}
+            onNavigate={(p) => {
+              if (p.startsWith('mcps:')) {
+                setMcpSelectedConfigId(p.split(':')[1]);
+                setPage('mcps');
+              } else {
+                setPage(p as Page);
+              }
+            }}
             onSetDiscPrefill={setDiscPrefill}
             onAutoRunDiscussion={setAutoRunDiscussionId}
             onOpenDiscussion={setOpenDiscussionId}
@@ -586,10 +594,10 @@ export function Dashboard({ onReset }: DashboardProps) {
           />
         </ErrorBoundary>)}
 
-        {/* ════════ MCPs ════════ */}
+        {/* ════════ Plugins ════════ */}
         {page === 'mcps' && (
-          <ErrorBoundary mode="zone" label="MCPs">
-            <McpPage projects={projects} mcpOverview={mcpOverview} mcpRegistry={mcpRegistry} refetchMcps={refetchMcps} />
+          <ErrorBoundary mode="zone" label="Plugins">
+            <McpPage projects={projects} mcpOverview={mcpOverview} mcpRegistry={mcpRegistry} refetchMcps={refetchMcps} initialSelectedConfigId={mcpSelectedConfigId} />
           </ErrorBoundary>
         )}
 
