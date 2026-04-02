@@ -50,3 +50,4 @@ docker-compose.override.yml
 .env
 /node_modules/
 .kronn-tmp/
+.kronn/tmp/

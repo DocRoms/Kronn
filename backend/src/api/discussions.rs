@@ -2879,6 +2879,9 @@ mod tests {
             tokens_used: 0,
             auth_mode: None,
             model_tier: None,
+            cost_usd: None,
+            author_pseudo: None,
+            author_avatar_email: None,
         }
     }
 
@@ -2904,6 +2907,8 @@ mod tests {
             pin_first_message: false,
             summary_cache: None,
             summary_up_to_msg_idx: None,
+            shared_id: None,
+            shared_with: vec![],
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }
