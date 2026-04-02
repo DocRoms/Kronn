@@ -319,6 +319,7 @@ fn classify_ip(ip: &str, iface: &str) -> Option<(String, String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn is_tailscale_ip_valid() {
@@ -392,6 +393,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn parse_host_ips_env_valid() {
         std::env::set_var("KRONN_HOST_IPS", "eth0:192.168.1.50,tailscale0:100.100.50.1,tun0:10.8.0.5");
         let ips = parse_host_ips_env().unwrap();
@@ -406,6 +408,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn parse_host_ips_env_empty() {
         std::env::set_var("KRONN_HOST_IPS", "");
         assert!(parse_host_ips_env().is_none());
@@ -413,12 +416,14 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn parse_host_ips_env_unset() {
         std::env::remove_var("KRONN_HOST_IPS");
         assert!(parse_host_ips_env().is_none());
     }
 
     #[test]
+    #[serial]
     fn parse_host_ips_env_skips_localhost_and_docker() {
         std::env::set_var("KRONN_HOST_IPS", "lo:127.0.0.1,docker0:172.17.0.1,eth0:192.168.1.10");
         let ips = parse_host_ips_env().unwrap();

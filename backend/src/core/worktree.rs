@@ -63,13 +63,15 @@ fn branch_checked_out_at(repo_path: &Path, branch: &str) -> Option<PathBuf> {
         .output()
         .ok()?;
     let text = String::from_utf8_lossy(&output.stdout);
-    let mut current_path: Option<String> = None;
+    let mut current_path: Option<PathBuf> = None;
     for line in text.lines() {
         if let Some(path) = line.strip_prefix("worktree ") {
-            current_path = Some(path.to_string());
+            // Canonicalize to resolve symlinks (e.g. macOS /private/tmp vs /tmp)
+            let p = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+            current_path = Some(p);
         } else if let Some(b) = line.strip_prefix("branch refs/heads/") {
             if b == branch {
-                return current_path.map(PathBuf::from);
+                return current_path;
             }
         } else if line.is_empty() {
             current_path = None;
@@ -117,7 +119,8 @@ pub fn create_discussion_worktree(
     // branches before the agent can work. This avoids the agent modifying files under
     // a running dev environment.
     if let Some(existing_path) = branch_checked_out_at(repo_path, &branch) {
-        if existing_path == repo_path {
+        let canonical_repo = std::fs::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
+        if existing_path == canonical_repo {
             return Err(format!(
                 "Branch {} is currently checked out in the main repo. Please switch to another branch before continuing.",
                 branch
@@ -249,7 +252,8 @@ pub fn reattach_worktree(
 
     // Block if branch is checked out in the main repo (user is testing)
     if let Some(existing_path) = branch_checked_out_at(repo_path, existing_branch) {
-        if existing_path == repo_path {
+        let canonical_repo = std::fs::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
+        if existing_path == canonical_repo {
             return Err(format!(
                 "Branch {} is currently checked out in the main repo. Please switch to another branch first.",
                 existing_branch
@@ -708,7 +712,8 @@ mod tests {
         let repo = make_test_repo("checkout-at");
         let result = branch_checked_out_at(repo.path(), "main");
         assert!(result.is_some(), "main should be found as checked out");
-        assert_eq!(result.unwrap(), repo.path());
+        let expected = std::fs::canonicalize(repo.path()).unwrap_or_else(|_| repo.path().to_path_buf());
+        assert_eq!(result.unwrap(), expected);
     }
 
     #[test]

@@ -259,6 +259,29 @@ cmd_logs() {
     (cd "$KRONN_DIR" && make logs)
 }
 
+cmd_auth() {
+    local agent="${1:-}"
+    case "$agent" in
+        kiro)
+            step "Kiro authentication (device flow)"
+            if ! (cd "$KRONN_DIR" && docker compose ps --status running backend --quiet 2>/dev/null | grep -q .); then
+                fail "Backend container is not running. Start Kronn first: kronn web"
+                return 1
+            fi
+            (cd "$KRONN_DIR" && make kiro-login)
+            ;;
+        "")
+            echo "Usage: kronn auth <agent>"
+            echo
+            printf "  ${CYAN}kiro${RESET}    Re-authenticate Kiro (AWS Builder ID device flow)\n"
+            ;;
+        *)
+            fail "Unknown agent: $agent"
+            echo "Available: kiro"
+            ;;
+    esac
+}
+
 cmd_help() {
     banner
     printf "${BOLD}Usage:${RESET} kronn [command]\n"
@@ -273,6 +296,7 @@ cmd_help() {
     printf "  ${CYAN}mcp check${RESET}      Check MCP prerequisites\n"
     printf "  ${CYAN}web${RESET}            Launch web interface directly\n"
     printf "  ${CYAN}mcp secrets${RESET}    Configure tokens\n"
+    printf "  ${CYAN}auth <agent>${RESET}  Re-authenticate an agent (e.g. kronn auth kiro)\n"
     printf "  ${CYAN}help${RESET}           This help\n"
     echo
 }
@@ -373,6 +397,7 @@ main() {
         status)      cmd_status ;;
         init)        cmd_init "$@" ;;
         mcp)         cmd_mcp "$@" ;;
+        auth)        cmd_auth "$@" ;;
         web)         cmd_web ;;
         help|--help|-h) cmd_help ;;
         *)
