@@ -180,12 +180,15 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
 
               <div className="setup-agent-list">
                 {agents.map((agent) => (
-                  <div key={agent.name} className="setup-agent-row">
-                    <div className={`dot ${agent.installed ? 'dot-on' : agent.runtime_available ? 'dot-warn' : 'dot-off'}`} />
+                  <div key={agent.name} className="setup-agent-row" data-disabled={!agent.enabled}>
+                    <div className={`dot ${!agent.enabled ? 'dot-off' : agent.installed ? 'dot-on' : agent.runtime_available ? 'dot-warn' : 'dot-off'}`} />
                     <div className="flex-1">
                       <div className="flex-row gap-4">
                         <span className="setup-agent-name">{agent.name}</span>
                         <span className="setup-badge-origin">{agent.origin}</span>
+                        {agent.host_managed && agent.host_label && (
+                          <span className="setup-badge-host">{agent.host_label}</span>
+                        )}
                       </div>
                       {agent.installed ? (
                         <div className="setup-agent-meta">
@@ -205,25 +208,35 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
                         </div>
                       )}
                     </div>
-                    {!agent.installed && !agent.runtime_available && (
-                      <button
-                        className="btn btn-accent btn-sm"
-                        onClick={() => handleInstallAgent(agent)}
-                        disabled={installing !== null}
-                      >
-                        {installing === agent.name ? (
-                          <><Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> ...</>
-                        ) : (
-                          <><Download size={14} /> {t('setup.install')}</>
-                        )}
-                      </button>
-                    )}
-                    {agent.installed && (
-                      <span className="setup-badge-ok"><Check size={12} /> OK</span>
-                    )}
-                    {!agent.installed && agent.runtime_available && (
-                      <span className="setup-badge-ok" style={{ background: 'rgba(255,165,0,0.15)', color: '#ffa500', borderColor: 'rgba(255,165,0,0.3)' }}>npx</span>
-                    )}
+                    <div className="flex-row gap-3">
+                      {(agent.installed || agent.runtime_available) && (
+                        <button
+                          className="setup-toggle-btn"
+                          data-on={agent.enabled}
+                          onClick={async () => {
+                            try {
+                              await agentsApi.toggle(agent.agent_type);
+                              await refreshAgents();
+                            } catch { /* ignore */ }
+                          }}
+                        >
+                          {agent.enabled ? t('setup.enabled') : t('setup.disabled')}
+                        </button>
+                      )}
+                      {!agent.installed && !agent.runtime_available && (
+                        <button
+                          className="btn btn-accent btn-sm"
+                          onClick={() => handleInstallAgent(agent)}
+                          disabled={installing !== null}
+                        >
+                          {installing === agent.name ? (
+                            <><Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> ...</>
+                          ) : (
+                            <><Download size={14} /> {t('setup.install')}</>
+                          )}
+                        </button>
+                      )}
+                    </div>
                   </div>
                 ))}
               </div>

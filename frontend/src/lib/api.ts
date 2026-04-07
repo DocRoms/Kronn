@@ -59,6 +59,7 @@ import type {
   ContextFile,
   UploadContextFileResponse,
   ImportResult,
+  TestStepRequest,
 } from '../types/generated';
 import type { DiscoverKeysResponse } from '../types/extensions';
 
@@ -727,6 +728,41 @@ export const workflows = {
   deleteRun: (id: string, runId: string) => api<void>('DELETE', `/workflows/${id}/runs/${runId}`),
   deleteAllRuns: (id: string) => api<void>('DELETE', `/workflows/${id}/runs`),
   suggestions: (projectId: string) => api<WorkflowSuggestion[]>('GET', `/projects/${projectId}/workflow-suggestions`),
+
+  /** Test a single step with mock context (SSE streaming, dry-run by default) */
+  testStepStream: async (
+    req: TestStepRequest,
+    onStepStart: (data: { step_name: string; step_index: number; total_steps: number }) => void,
+    onStepDone: (data: StepResult) => void,
+    onRunDone: (data: { status: string }) => void,
+    onError: (error: string) => void,
+    signal?: AbortSignal,
+    onProgress?: (text: string) => void,
+  ) => {
+    const res = await fetch(`${_apiBase}/api/workflows/test-step`, {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(req),
+      signal,
+    }).catch(e => {
+      if (e.name !== 'AbortError') onError(String(e));
+      return null;
+    });
+    if (!res) return;
+    if (!res.ok || !res.body) { onError(`HTTP ${res.status}`); return; }
+
+    await parseSSEStream(res, {
+      onEvent: (type, data) => {
+        if (type === 'step_start') onStepStart(data as { step_name: string; step_index: number; total_steps: number });
+        else if (type === 'step_progress' && onProgress) onProgress((data as { text: string }).text);
+        else if (type === 'step_done') onStepDone(data as StepResult);
+        else if (type === 'run_done') onRunDone(data as { status: string });
+        else if (type === 'error') onError((data as { error: string }).error ?? 'Unknown error');
+      },
+      onDone: () => {},
+      onError,
+    });
+  },
 };
 
 // ─── Skills ─────────────────────────────────────────────────────────────────

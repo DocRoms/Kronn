@@ -26,22 +26,46 @@ fn default_scan_path() -> Option<String> {
 }
 
 /// GET /api/setup/status
-/// Returns current setup state with auto-detected repos
+/// Returns current setup state with auto-detected repos.
+/// Fast path: if config exists and scan_paths are set, skip the expensive
+/// agent detection + filesystem scan — setup is already complete.
 pub async fn get_status(
     State(state): State<AppState>,
 ) -> Json<ApiResponse<SetupStatus>> {
     let is_first = config::is_first_run().await.unwrap_or(true);
-    let agents_detected = agents::detect_all().await;
 
     let config = state.config.read().await;
     let scan_paths_set = !config.scan.paths.is_empty();
 
-    // Auto-scan: use configured paths, or default scan path
+    // Fast path: setup already completed — skip expensive scan & agent detection.
+    // This makes the wizard→dashboard transition instant on Windows/WSL.
+    if !is_first && scan_paths_set {
+        // Light agent detection: reuse cached results or run in background.
+        // For the status check we only need to know if at least one is installed,
+        // so we still detect but the scan is skipped entirely.
+        drop(config);
+        let agents_detected = agents::detect_all().await;
+        return Json(ApiResponse::ok(SetupStatus {
+            is_first_run: false,
+            current_step: SetupStep::Complete,
+            agents_detected,
+            scan_paths_set: true,
+            repos_detected: vec![], // Skip scan — projects page will load them
+            default_scan_path: default_scan_path(),
+        }));
+    }
+
+    // Full path: first run or scan paths not yet configured
     let scan_paths = if scan_paths_set {
         config.scan.paths.clone()
     } else {
         default_scan_path().into_iter().collect()
     };
+    let scan_ignore = config.scan.ignore.clone();
+    let scan_depth = config.scan.scan_depth;
+    drop(config);
+
+    let agents_detected = agents::detect_all().await;
 
     // Use a longer timeout when WSL UNC paths are involved (9P filesystem is slow)
     let has_wsl_paths = scan_paths.iter().any(|p| {
@@ -52,7 +76,7 @@ pub async fn get_status(
     // Scan with a timeout to avoid blocking on slow filesystems
     let repos_detected = tokio::time::timeout(
         std::time::Duration::from_secs(scan_timeout),
-        scanner::scan_paths_with_depth(&scan_paths, &config.scan.ignore, config.scan.scan_depth),
+        scanner::scan_paths_with_depth(&scan_paths, &scan_ignore, scan_depth),
     )
     .await
     .unwrap_or_else(|_| {

@@ -145,7 +145,7 @@ pub async fn update(
     let updated = Workflow {
         id: existing.id,
         name: req.name.unwrap_or(existing.name),
-        project_id: existing.project_id,
+        project_id: req.project_id.unwrap_or(existing.project_id),
         trigger: req.trigger.unwrap_or(existing.trigger),
         steps: req.steps.unwrap_or(existing.steps),
         actions: req.actions.unwrap_or(existing.actions),
@@ -273,6 +273,9 @@ pub async fn trigger(
                     });
                     yield Event::default().event("step_start").data(data.to_string());
                 }
+                crate::workflows::runner::RunEvent::StepProgress { .. } => {
+                    // Progress events not streamed for full workflow runs (only test-step)
+                }
                 crate::workflows::runner::RunEvent::StepDone { step_result } => {
                     let data = serde_json::to_value(step_result).unwrap_or_default();
                     yield Event::default().event("step_done").data(data.to_string());
@@ -301,6 +304,136 @@ fn sse_error(msg: impl Into<String>) -> Sse<SseStream> {
             )
         )
     }));
+    Sse::new(stream)
+}
+
+/// POST /api/workflows/test-step — Test a single step with mock context (SSE)
+pub async fn test_step(
+    State(state): State<AppState>,
+    Json(req): Json<TestStepRequest>,
+) -> Sse<SseStream> {
+    let cfg = state.config.read().await;
+    let tokens = cfg.tokens.clone();
+    let agents = cfg.agents.clone();
+    drop(cfg);
+
+    // Resolve project path (for MCP context)
+    let project_path = if let Some(pid) = &req.project_id {
+        let id = pid.clone();
+        match state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &id)).await {
+            Ok(Some(p)) => p.path,
+            _ => std::env::temp_dir().to_string_lossy().to_string(),
+        }
+    } else {
+        std::env::temp_dir().to_string_lossy().to_string()
+    };
+    let work_dir = project_path.clone();
+
+    // Build template context with mock data
+    let mut ctx = crate::workflows::template::TemplateContext::new();
+    if let Some(prev_output) = &req.mock_previous_output {
+        ctx.set_step_output("previous", prev_output);
+    }
+    if let Some(vars) = &req.mock_variables {
+        for (k, v) in vars {
+            ctx.set(k.clone(), v.clone());
+        }
+    }
+
+    // Determine full_access from agent config
+    let full_access = match req.step.agent {
+        AgentType::ClaudeCode => agents.claude_code.full_access,
+        AgentType::Codex => agents.codex.full_access,
+        AgentType::GeminiCli => agents.gemini_cli.full_access,
+        AgentType::Kiro => agents.kiro.full_access,
+        AgentType::Vibe => agents.vibe.full_access,
+        AgentType::CopilotCli => agents.copilot_cli.full_access,
+        AgentType::Custom => false,
+    };
+
+    // In dry_run mode, prepend a simulation preamble to the prompt
+    let mut step = req.step.clone();
+    if req.dry_run {
+        step.prompt_template = format!(
+            "⚠️ MODE SIMULATION (dry-run) — RÈGLES STRICTES :\n\
+            - Tu ne dois RIEN exécuter, RIEN modifier, RIEN écrire, RIEN créer.\n\
+            - Tu ne dois PAS appeler de tool qui modifie des données (pas de create, update, delete, write, post, comment).\n\
+            - Tu peux LIRE des données (get, list, search, read) pour analyser la situation.\n\
+            - Tu dois DÉCRIRE précisément ce que tu FERAIS en mode réel : quelles actions, sur quels éléments, avec quel contenu.\n\
+            - Formate ta réponse comme un plan d'exécution détaillé.\n\n\
+            ---\n\n{}",
+            step.prompt_template
+        );
+    }
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::workflows::runner::RunEvent>(64);
+
+    tokio::spawn(async move {
+        let _ = tx.send(crate::workflows::runner::RunEvent::StepStart {
+            step_name: step.name.clone(),
+            step_index: 0,
+            total_steps: 1,
+        }).await;
+
+        // Create a progress channel to stream partial output
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<String>(256);
+        let tx_progress = tx.clone();
+        // Forward progress chunks as StepProgress events
+        tokio::spawn(async move {
+            while let Some(text) = progress_rx.recv().await {
+                let _ = tx_progress.send(crate::workflows::runner::RunEvent::StepProgress {
+                    text,
+                }).await;
+            }
+        });
+
+        let outcome = crate::workflows::steps::execute_step(
+            &step, &project_path, &work_dir, &tokens, full_access, &ctx,
+            Some(progress_tx),
+        ).await;
+
+        let _ = tx.send(crate::workflows::runner::RunEvent::StepDone {
+            step_result: outcome.result.clone(),
+        }).await;
+
+        let status = outcome.result.status.clone();
+        let _ = tx.send(crate::workflows::runner::RunEvent::RunDone { status }).await;
+    });
+
+    let stream: SseStream = Box::pin(async_stream::try_stream! {
+        yield Event::default().event("run_start").data(
+            serde_json::json!({ "run_id": "test", "test_mode": true }).to_string()
+        );
+        while let Some(evt) = rx.recv().await {
+            match &evt {
+                crate::workflows::runner::RunEvent::StepStart { step_name, step_index, total_steps } => {
+                    yield Event::default().event("step_start").data(
+                        serde_json::json!({ "step_name": step_name, "step_index": step_index, "total_steps": total_steps }).to_string()
+                    );
+                }
+                crate::workflows::runner::RunEvent::StepProgress { text } => {
+                    yield Event::default().event("step_progress").data(
+                        serde_json::json!({ "text": text }).to_string()
+                    );
+                }
+                crate::workflows::runner::RunEvent::StepDone { step_result } => {
+                    yield Event::default().event("step_done").data(
+                        serde_json::to_value(step_result).unwrap_or_default().to_string()
+                    );
+                }
+                crate::workflows::runner::RunEvent::RunDone { status } => {
+                    yield Event::default().event("run_done").data(
+                        serde_json::json!({ "status": status }).to_string()
+                    );
+                }
+                crate::workflows::runner::RunEvent::RunError { error } => {
+                    yield Event::default().event("error").data(
+                        serde_json::json!({ "error": error }).to_string()
+                    );
+                }
+            }
+        }
+    });
+
     Sse::new(stream)
 }
 

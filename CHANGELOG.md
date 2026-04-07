@@ -7,6 +7,33 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.3.3] — 2026-04-07
+
+### Added
+- **Export/Import ZIP cross-OS** — export as ZIP (data.json + config.toml sans secrets), import with config merge (pseudo, bio, language, scan_paths), path remapping for invalid project paths, contacts included in export (version 3). Retrocompatible with JSON v2 imports
+- **Project path remapping** — `POST /api/projects/:id/remap-path` to fix project paths after cross-OS migration. Invalid paths flagged with warning toast after import
+- **Workflow AI Architect** — new builtin skill `workflow-architect` + "Create with AI" button on Workflows page. Opens an interactive discussion where the AI designs, optimizes, and deploys a workflow. Agent emits `KRONN:WORKFLOW_READY` signal → one-click CTA creates the workflow
+- **Test individual workflow steps** — `POST /api/workflows/test-step` with dry-run mode (agent reads but doesn't write). Live streaming output in the UI with elapsed timer. "Tester" button on each step card
+- **Workflow starter templates** — 6 clickable examples in the simple wizard (Code Review, Changelog, Tech Debt, Test Coverage, Doc Update, Security Scan). Pre-fill name + prompt on click
+- **MCP env var placeholders** — realistic hints for 30+ common env vars (Jira, GitHub, Slack, etc.) + eye toggle visibility on the add form
+- **Setup wizard improvements** — WSL/Windows host label badge on agents, enable/disable toggle per agent
+- **Stale-while-revalidate** — `useApi` hook keeps previous data visible during refetches, new `initialLoading` flag for first-load skeleton
+
+### Changed
+- **Export format** — now ZIP instead of raw JSON. Version bumped to 3. Includes `config.toml` (without auth_token/encryption_secret/API key values)
+- **Workflow project_id** — can now be changed on existing workflows (was locked)
+- **Workflow step prompts** — expandable with "Show more/less" toggle (was truncated to 200 chars)
+- **Raw cron editor** — complex cron expressions (e.g. `0 7,10,13,16,19 * * 1-5`) preserved as raw strings instead of being mangled by the simple parser
+
+### Fixed
+- **Setup wizard completion loop** — clicking "Go to Dashboard" after skipping repos no longer loops back (setScanPaths with default path)
+- **Setup status performance** — fast path skips filesystem scan when setup is already complete (10-30s → <1s on WSL paths)
+- **Workflow project_id persistence** — SQL UPDATE was missing project_id column + serde double-Option deserialization fix
+- **WSL agent detection fallback** — probe `~/.local/bin`, `~/.kiro/bin` when `bash -lc which` fails (non-interactive shell guard)
+- **Flash of empty state** — projects/discussions no longer flash empty during refetches
+
+---
+
 ## [0.3.2] — 2026-04-03
 
 ### Added

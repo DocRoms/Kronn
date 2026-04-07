@@ -20,14 +20,15 @@ import '../../pages/WorkflowsPage.css';
 const checkAgentRestricted = isAgentRestricted;
 
 /** Parse a cron expression back into visual builder values */
-function parseCronExpr(expr: string): { every: number; unit: 'minutes' | 'hours' | 'days' | 'weeks' | 'months'; at: string } {
+function parseCronExpr(expr: string): { every: number; unit: 'minutes' | 'hours' | 'days' | 'weeks' | 'months'; at: string; raw?: string } {
   const parts = expr.split(' ');
   if (parts.length !== 5) return { every: 5, unit: 'minutes', at: '00:00' };
-  const [min, hour, dom, , ] = parts;
+  const [min, hour, dom] = parts;
   if (min.startsWith('*/')) return { every: parseInt(min.slice(2)) || 5, unit: 'minutes', at: '00:00' };
   if (hour.startsWith('*/')) return { every: parseInt(hour.slice(2)) || 1, unit: 'hours', at: `00:${min.padStart(2, '0')}` };
   if (dom.startsWith('*/')) return { every: parseInt(dom.slice(2)) || 1, unit: 'days', at: `${hour.padStart(2, '0')}:${min.padStart(2, '0')}` };
-  return { every: 1, unit: 'days', at: `${hour.padStart(2, '0')}:${min.padStart(2, '0')}` };
+  // Complex expression (e.g. "0 7,10,13,16,19 * * 1-5") — preserve raw
+  return { every: 1, unit: 'days', at: `${hour.padStart(2, '0')}:${min.padStart(2, '0')}`, raw: expr };
 }
 
 export interface WorkflowWizardProps {
@@ -67,6 +68,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   const [cronEvery, setCronEvery] = useState(initCron?.every ?? 5);
   const [cronUnit, setCronUnit] = useState<'minutes' | 'hours' | 'days' | 'weeks' | 'months'>(initCron?.unit ?? 'minutes');
   const [cronAt, setCronAt] = useState(initCron?.at ?? '00:00');
+  const [cronRaw, setCronRaw] = useState(initCron?.raw ?? '');
+  const cronIsRaw = !!cronRaw;
   const [trackerOwner, setTrackerOwner] = useState(initTracker?.source?.owner ?? '');
   const [trackerRepo, setTrackerRepo] = useState(initTracker?.source?.repo ?? '');
   const [trackerLabels, setTrackerLabels] = useState(initTracker?.labels?.join(', ') ?? '');
@@ -92,8 +95,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   // Concurrency
   const [concurrencyLimit, setConcurrencyLimit] = useState<string>(editWorkflow?.concurrency_limit?.toString() ?? '');
 
-  // Build cron expression from visual inputs
+  // Build cron expression from visual inputs (or raw if complex)
   const buildCronExpr = (): string => {
+    if (cronRaw) return cronRaw;
     const [hh, mm] = cronAt.split(':').map(Number);
     const h = isNaN(hh) ? 0 : hh;
     const m = isNaN(mm) ? 0 : mm;
@@ -179,6 +183,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
       setCronEvery(parsed.every);
       setCronUnit(parsed.unit);
       setCronAt(parsed.at);
+      setCronRaw(parsed.raw ?? '');
     }
     setShowSuggestions(false);
     // Multi-step or advanced suggestions → force advanced mode
@@ -263,6 +268,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
       if (isEdit && editWorkflow) {
         await workflowsApi.update(editWorkflow.id, {
           name,
+          project_id: projectId || null,
           trigger,
           steps,
           actions: [],
@@ -399,7 +405,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             if (proj?.default_skill_ids?.length) {
               setSteps(prev => prev.map(s => ({ ...s, skill_ids: s.skill_ids?.length ? s.skill_ids : proj.default_skill_ids })));
             }
-          }} disabled={isEdit}>
+          }}>
             <option value="">{t('wiz.noProject')}</option>
             {projects.map(p => (
               <option key={p.id} value={p.id}>{p.name}</option>
@@ -423,6 +429,33 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           </select>
 
           <label className="wf-label">{t('wiz.promptLabel')}</label>
+          {!isEdit && !(steps[0]?.prompt_template) && (
+            <div className="wf-starters">
+              <span className="wf-starters-label">{t('wiz.starterLabel')}</span>
+              <div className="wf-starters-grid">
+                {[
+                  { icon: '📊', title: t('wiz.starter.codeReview'), prompt: t('wiz.starter.codeReviewPrompt') },
+                  { icon: '📝', title: t('wiz.starter.changelog'), prompt: t('wiz.starter.changelogPrompt') },
+                  { icon: '🔍', title: t('wiz.starter.techDebt'), prompt: t('wiz.starter.techDebtPrompt') },
+                  { icon: '🧪', title: t('wiz.starter.testCoverage'), prompt: t('wiz.starter.testCoveragePrompt') },
+                  { icon: '📋', title: t('wiz.starter.docUpdate'), prompt: t('wiz.starter.docUpdatePrompt') },
+                  { icon: '🛡️', title: t('wiz.starter.securityScan'), prompt: t('wiz.starter.securityScanPrompt') },
+                ].map(s => (
+                  <button
+                    key={s.title}
+                    className="wf-starter-card"
+                    onClick={() => {
+                      setName(s.title);
+                      updateStep(0, { prompt_template: s.prompt });
+                    }}
+                  >
+                    <span className="wf-starter-icon">{s.icon}</span>
+                    <span className="wf-starter-title">{s.title}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           <textarea
             className="wf-textarea mb-6"
             rows={6}
@@ -450,7 +483,28 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             </button>
           </div>
 
-          {triggerType === 'Cron' && (
+          {triggerType === 'Cron' && (cronIsRaw ? (
+            <div className="mb-2">
+              <label className="text-xs text-muted mb-1" style={{ display: 'block' }}>Cron expression</label>
+              <div className="flex-row gap-4" style={{ alignItems: 'center' }}>
+                <input
+                  className="wf-input"
+                  style={{ flex: 1, fontFamily: 'var(--kr-font-mono)' }}
+                  value={cronRaw}
+                  onChange={e => setCronRaw(e.target.value)}
+                  placeholder="0 7,10,13,16,19 * * 1-5"
+                />
+                <button
+                  type="button"
+                  className="text-xs text-muted"
+                  style={{ background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}
+                  onClick={() => { setCronRaw(''); setCronEvery(5); setCronUnit('minutes'); setCronAt('00:00'); }}
+                >
+                  {t('wiz.cronSwitchSimple')}
+                </button>
+              </div>
+            </div>
+          ) : (
             <div className="flex-row gap-4 mb-2" style={{ alignItems: 'center' }}>
               <span className="text-base text-tertiary">{t('wiz.every')}</span>
               <input
@@ -483,7 +537,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                 </>
               )}
             </div>
-          )}
+          ))}
         </div>
       )}
 
@@ -510,43 +564,65 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           {triggerType === 'Cron' && (
             <>
               <label className="wf-label">{t('wiz.frequency')}</label>
-              <div className="flex-row gap-4 mb-4">
-                <span className="text-base text-tertiary">{t('wiz.every')}</span>
-                <input
-                  type="number" min={1} max={60}
-                  className="wf-input"
-                  style={{ width: 60, textAlign: 'center' }}
-                  value={cronEvery}
-                  onChange={e => setCronEvery(Math.max(1, parseInt(e.target.value) || 1))}
-                />
-                <select
-                  className="wf-select"
-                  style={{ width: 130 }}
-                  value={cronUnit}
-                  onChange={e => setCronUnit(e.target.value as typeof cronUnit)}
-                >
-                  <option value="minutes">{t('wiz.minutes')}</option>
-                  <option value="hours">{t('wiz.hours')}</option>
-                  <option value="days">{t('wiz.days')}</option>
-                  <option value="weeks">{t('wiz.weeks')}</option>
-                  <option value="months">{t('wiz.months')}</option>
-                </select>
-                {(cronUnit === 'days' || cronUnit === 'weeks' || cronUnit === 'months') && (
-                  <>
-                    <span className="text-base text-tertiary">{t('wiz.at')}</span>
+              {cronIsRaw ? (
+                <div className="mb-4">
+                  <div className="flex-row gap-4" style={{ alignItems: 'center' }}>
                     <input
-                      type="time"
                       className="wf-input"
-                      style={{ width: 100 }}
-                      value={cronAt}
-                      onChange={e => setCronAt(e.target.value)}
+                      style={{ flex: 1, fontFamily: 'var(--kr-font-mono)' }}
+                      value={cronRaw}
+                      onChange={e => setCronRaw(e.target.value)}
+                      placeholder="0 7,10,13,16,19 * * 1-5"
                     />
-                  </>
-                )}
-              </div>
+                    <button
+                      type="button"
+                      className="text-xs text-muted"
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}
+                      onClick={() => { setCronRaw(''); setCronEvery(5); setCronUnit('minutes'); setCronAt('00:00'); }}
+                    >
+                      {t('wiz.cronSwitchSimple')}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex-row gap-4 mb-4">
+                  <span className="text-base text-tertiary">{t('wiz.every')}</span>
+                  <input
+                    type="number" min={1} max={60}
+                    className="wf-input"
+                    style={{ width: 60, textAlign: 'center' }}
+                    value={cronEvery}
+                    onChange={e => setCronEvery(Math.max(1, parseInt(e.target.value) || 1))}
+                  />
+                  <select
+                    className="wf-select"
+                    style={{ width: 130 }}
+                    value={cronUnit}
+                    onChange={e => setCronUnit(e.target.value as typeof cronUnit)}
+                  >
+                    <option value="minutes">{t('wiz.minutes')}</option>
+                    <option value="hours">{t('wiz.hours')}</option>
+                    <option value="days">{t('wiz.days')}</option>
+                    <option value="weeks">{t('wiz.weeks')}</option>
+                    <option value="months">{t('wiz.months')}</option>
+                  </select>
+                  {(cronUnit === 'days' || cronUnit === 'weeks' || cronUnit === 'months') && (
+                    <>
+                      <span className="text-base text-tertiary">{t('wiz.at')}</span>
+                      <input
+                        type="time"
+                        className="wf-input"
+                        style={{ width: 100 }}
+                        value={cronAt}
+                        onChange={e => setCronAt(e.target.value)}
+                      />
+                    </>
+                  )}
+                </div>
+              )}
               <div className="wf-cron-preview">
                 <Clock size={12} className="text-accent flex-shrink-0" />
-                <span className="text-sm text-tertiary">{cronHumanLabel()}</span>
+                <span className="text-sm text-tertiary">{cronIsRaw ? cronRaw : cronHumanLabel()}</span>
                 <span className="text-xs text-ghost mono" style={{ marginLeft: 'auto' }}>
                   {buildCronExpr()}
                 </span>

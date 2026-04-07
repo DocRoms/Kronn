@@ -37,6 +37,7 @@ const BUILTIN_SKILLS: &[BuiltinSkill] = &[
     BuiltinSkill { id: "testing", content: include_str!("../skills/testing.md") },
     BuiltinSkill { id: "api-design", content: include_str!("../skills/api-design.md") },
     BuiltinSkill { id: "mobile", content: include_str!("../skills/mobile.md") },
+    BuiltinSkill { id: "workflow-architect", content: include_str!("../skills/workflow-architect.md") },
     // Business
     BuiltinSkill { id: "seo", content: include_str!("../skills/seo.md") },
     BuiltinSkill { id: "web-performance", content: include_str!("../skills/web-performance.md") },

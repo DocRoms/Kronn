@@ -124,7 +124,7 @@ describe('SetupWizard — step 0 (agents detection)', () => {
 
     const body = document.body.textContent!;
     expect(body).toContain('Claude Code');
-    expect(body).toContain('OK');
+    expect(body).toContain('Activé');
   });
 
   it('shows install button for agents that are not installed', async () => {

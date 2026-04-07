@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import './DiscussionsPage.css';
 import { MessageBubble, MarkdownContent } from '../components/MessageBubble';
 import { ChatInput } from '../components/ChatInput';
-import { discussions as discussionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, contacts as contactsApi } from '../lib/api';
+import { discussions as discussionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, contacts as contactsApi, workflows as workflowsApi } from '../lib/api';
 import { GitPanel } from '../components/GitPanel';
 import { ChatHeader } from '../components/ChatHeader';
 import { DiscussionSidebar } from '../components/DiscussionSidebar';
@@ -16,7 +16,7 @@ import type { ToastFn } from '../hooks/useToast';
 import {
   ChevronRight, Cpu, Loader2,
   MessageSquare, AlertTriangle,
-  ShieldCheck, Check, Rocket, Play,
+  ShieldCheck, Check, Rocket, Play, Zap,
   Menu,
 } from 'lucide-react';
 import { useIsMobile } from '../hooks/useMediaQuery';
@@ -1233,6 +1233,40 @@ export function DiscussionsPage({
                     </p>
                     <button className="disc-cta-btn" data-variant="accent" onClick={async () => { await projectsApi.markBootstrapped(proj.id); refetchProjects(); refetchDiscussions(); }}>
                       <Check size={12} /> {t('audit.markBootstrapped')}
+                    </button>
+                  </div>
+                );
+              })()}
+
+              {/* Workflow ready banner */}
+              {(() => {
+                const agentMsgs = activeDiscussion.messages.filter((m, idx) => m.role === 'Agent' && idx > 0);
+                const readyMsg = [...agentMsgs].reverse().find(m => m.content.toUpperCase().includes('KRONN:WORKFLOW_READY'));
+                if (!readyMsg) return null;
+                const jsonMatch = readyMsg.content.match(/```json\s*\n([\s\S]*?)\n```/);
+                if (!jsonMatch) return null;
+                let parsedPayload: unknown = null;
+                try { parsedPayload = JSON.parse(jsonMatch[1]); } catch { return null; }
+                if (!parsedPayload || typeof parsedPayload !== 'object' || !('steps' in (parsedPayload as Record<string, unknown>))) return null;
+                // Inject project_id from discussion context if the agent left it null
+                const payload = parsedPayload as Record<string, unknown>;
+                if (!payload.project_id && activeDiscussion.project_id) {
+                  payload.project_id = activeDiscussion.project_id;
+                }
+                return (
+                  <div className="disc-cta-banner" data-variant="accent">
+                    <p className="disc-cta-text" data-variant="accent">
+                      <Zap size={14} /> {t('wf.aiWorkflowReady')}
+                    </p>
+                    <button className="disc-cta-btn" data-variant="accent" onClick={async () => {
+                      try {
+                        await workflowsApi.create(payload as unknown as Parameters<typeof workflowsApi.create>[0]);
+                        onNavigate('workflows');
+                      } catch (e) {
+                        console.warn('Failed to create workflow:', e);
+                      }
+                    }}>
+                      <Check size={12} /> {t('wf.createThisWorkflow')}
                     </button>
                   </div>
                 );

@@ -260,6 +260,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // ── Workflows ──
         .route("/api/workflows", get(api::workflows::list).post(api::workflows::create))
         .route("/api/workflows/:id", get(api::workflows::get).put(api::workflows::update).delete(api::workflows::delete))
+        .route("/api/workflows/test-step", post(api::workflows::test_step))
         .route("/api/workflows/:id/trigger", post(api::workflows::trigger))
         .route("/api/workflows/:id/runs", get(api::workflows::list_runs).delete(api::workflows::delete_all_runs))
         .route("/api/workflows/:id/runs/:run_id", get(api::workflows::get_run).delete(api::workflows::delete_run))

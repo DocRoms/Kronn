@@ -1,6 +1,6 @@
 [package]
 name = "kronn"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2021"
 description = "Self-hosted AI dev workflow control plane"
 license = "AGPL-3.0-only"
