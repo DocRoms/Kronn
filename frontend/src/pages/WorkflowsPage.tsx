@@ -1,7 +1,7 @@
 import { useState, useRef, useMemo } from 'react';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { useT } from '../lib/I18nContext';
-import { workflows as workflowsApi } from '../lib/api';
+import { workflows as workflowsApi, discussions as discussionsApi } from '../lib/api';
 import { useApi } from '../hooks/useApi';
 import type {
   Project, WorkflowSummary, Workflow, WorkflowRun,
@@ -20,6 +20,8 @@ interface WorkflowsPageProps {
   projects: Project[];
   installedAgentTypes?: AgentType[];
   agentAccess?: AgentsConfig;
+  configLanguage?: string;
+  onNavigateDiscussion?: (discId: string) => void;
 }
 
 const TRIGGER_LABELS: Record<string, string> = {
@@ -37,7 +39,7 @@ const STATUS_COLORS: Record<string, string> = {
   WaitingApproval: '#c8ff00',
 };
 
-export function WorkflowsPage({ projects, installedAgentTypes, agentAccess }: WorkflowsPageProps) {
+export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, configLanguage, onNavigateDiscussion }: WorkflowsPageProps) {
   const { t } = useT();
   const isMobile = useIsMobile();
   const { data: workflowList, refetch } = useApi(() => workflowsApi.list(), []);
@@ -191,9 +193,39 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess }: Wo
           <h1 className="wf-h1">{t('wf.title')}</h1>
           <p className="wf-meta">{t('wf.subtitle')}</p>
         </div>
-        <button className="wf-create-btn" onClick={() => setShowCreate(true)}>
-          <Plus size={14} /> {t('wf.new')}
-        </button>
+        <div className="flex-row gap-3">
+          {onNavigateDiscussion && (
+            <button className="wf-create-ai-btn" onClick={async () => {
+              try {
+                // Inject project list as compact lookup table (max 20, saves tokens)
+                const shown = projects.slice(0, 20);
+                const projectContext = shown.length > 0
+                  ? '\n\n---\nProjets[name=id]: ' + shown.map(p => `${p.name}=${p.id}`).join(' | ')
+                    + (projects.length > 20 ? ` (+${projects.length - 20})` : '')
+                  : '';
+                const disc = await discussionsApi.create({
+                  project_id: null,
+                  title: 'Workflow Architect',
+                  agent: 'ClaudeCode',
+                  language: configLanguage || 'fr',
+                  initial_prompt: t('wf.aiArchitectPrompt') + projectContext,
+                  skill_ids: ['workflow-architect'],
+                  profile_ids: [],
+                  directive_ids: [],
+                  tier: 'reasoning',
+                });
+                onNavigateDiscussion(disc.id);
+              } catch (e) {
+                console.warn('Failed to create AI discussion:', e);
+              }
+            }}>
+              <Zap size={14} /> {t('wf.createWithAI')}
+            </button>
+          )}
+          <button className="wf-create-btn" onClick={() => setShowCreate(true)}>
+            <Plus size={14} /> {t('wf.new')}
+          </button>
+        </div>
       </div>
 
       {/* Create wizard */}

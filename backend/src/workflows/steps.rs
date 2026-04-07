@@ -25,10 +25,14 @@ struct AgentOutput {
     tokens_used: u64,
 }
 
+/// Optional sender for streaming partial agent output during step execution.
+pub type ProgressSender = tokio::sync::mpsc::Sender<String>;
+
 /// Execute a single workflow step.
 ///
 /// - `project_path`: original project path for MCP context resolution
 /// - `work_dir`: agent's working directory (may be a worktree)
+/// - `progress_tx`: if Some, partial output text is streamed as it arrives
 pub async fn execute_step(
     step: &WorkflowStep,
     project_path: &str,
@@ -36,6 +40,7 @@ pub async fn execute_step(
     tokens_config: &TokensConfig,
     full_access: bool,
     ctx: &TemplateContext,
+    progress_tx: Option<ProgressSender>,
 ) -> StepOutcome {
     let start = Instant::now();
 
@@ -94,7 +99,7 @@ pub async fn execute_step(
             tokio::time::sleep(delay).await;
         }
 
-        match run_agent_with_timeout(step, project_path, work_dir, &prompt, tokens_config, full_access).await {
+        match run_agent_with_timeout(step, project_path, work_dir, &prompt, tokens_config, full_access, progress_tx.as_ref()).await {
             Ok(agent_output) => {
                 let duration_ms = start.elapsed().as_millis() as u64;
                 let mut final_output = agent_output.text.clone();
@@ -108,7 +113,7 @@ pub async fn execute_step(
                         let truncated = if final_output.len() > 2000 { &final_output[..2000] } else { &final_output };
                         let repair_prompt = crate::workflows::template::REPAIR_PROMPT_TEMPLATE
                             .replace("{PREVIOUS_OUTPUT}", truncated);
-                    if let Ok(repair_output) = run_agent_with_timeout(step, project_path, work_dir, &repair_prompt, tokens_config, full_access).await {
+                    if let Ok(repair_output) = run_agent_with_timeout(step, project_path, work_dir, &repair_prompt, tokens_config, full_access, None).await {
                         total_tokens += repair_output.tokens_used;
                         if crate::workflows::template::extract_step_envelope(&repair_output.text).is_some() {
                             final_output = repair_output.text;
@@ -182,6 +187,7 @@ async fn run_agent_with_timeout(
     prompt: &str,
     tokens_config: &TokensConfig,
     full_access: bool,
+    progress_tx: Option<&ProgressSender>,
 ) -> Result<AgentOutput> {
     let stall_timeout = step.stall_timeout_secs
         .map(Duration::from_secs)
@@ -216,6 +222,9 @@ async fn run_agent_with_timeout(
                     match runner::parse_claude_stream_line(&line) {
                         StreamJsonEvent::Text(text) => {
                             output.push_str(&text);
+                            if let Some(tx) = progress_tx {
+                                let _ = tx.send(text).await;
+                            }
                         }
                         StreamJsonEvent::Usage { input_tokens, output_tokens, .. } => {
                             stream_json_tokens = input_tokens + output_tokens;
@@ -223,10 +232,16 @@ async fn run_agent_with_timeout(
                         StreamJsonEvent::ToolStart(_) | StreamJsonEvent::ToolInputDelta(_) | StreamJsonEvent::ToolEnd | StreamJsonEvent::Skip => {}
                     }
                 } else {
-                    if !output.is_empty() {
+                    let chunk = if output.is_empty() {
+                        line.clone()
+                    } else {
                         output.push('\n');
-                    }
+                        format!("\n{}", &line)
+                    };
                     output.push_str(&line);
+                    if let Some(tx) = progress_tx {
+                        let _ = tx.send(chunk).await;
+                    }
                 }
             }
             Ok(None) => {

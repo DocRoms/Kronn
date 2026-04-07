@@ -11,6 +11,54 @@ import './McpPage.css';
 
 const slugify = (label: string) => label.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
 
+/** Placeholder hints for common MCP env vars — helps non-dev users understand what to enter */
+const ENV_PLACEHOLDERS: Record<string, string> = {
+  // Atlassian / Jira / Confluence
+  JIRA_URL: 'https://your-company.atlassian.net',
+  JIRA_USERNAME: 'prenom.nom@company.com',
+  JIRA_API_TOKEN: 'ATATT3x... (from id.atlassian.com)',
+  CONFLUENCE_URL: 'https://your-company.atlassian.net/wiki',
+  CONFLUENCE_USERNAME: 'prenom.nom@company.com',
+  CONFLUENCE_API_TOKEN: 'ATATT3x... (same as Jira token)',
+  // GitHub
+  GITHUB_PERSONAL_ACCESS_TOKEN: 'ghp_xxxxxxxxxxxx',
+  GITHUB_TOKEN: 'ghp_xxxxxxxxxxxx',
+  // GitLab
+  GITLAB_PERSONAL_ACCESS_TOKEN: 'glpat-xxxxxxxxxxxx',
+  GITLAB_URL: 'https://gitlab.com',
+  // Slack
+  SLACK_BOT_TOKEN: 'xoxb-xxxxxxxxxxxx',
+  SLACK_TEAM_ID: 'T0XXXXXXX',
+  // Linear
+  LINEAR_API_KEY: 'lin_api_xxxxxxxxxxxx',
+  // Notion
+  NOTION_API_KEY: 'ntn_xxxxxxxxxxxx',
+  // OpenAI
+  OPENAI_API_KEY: 'sk-xxxxxxxxxxxx',
+  // Anthropic
+  ANTHROPIC_API_KEY: 'sk-ant-xxxxxxxxxxxx',
+  // Google
+  GOOGLE_API_KEY: 'AIzaXXXXXXXXXX',
+  // Sentry
+  SENTRY_AUTH_TOKEN: 'sntrys_xxxxxxxxxxxx',
+  SENTRY_ORG: 'your-organization-slug',
+  SENTRY_PROJECT: 'your-project-slug',
+  // Brave
+  BRAVE_API_KEY: 'BSA_xxxxxxxxxxxx',
+  // Exa
+  EXA_API_KEY: 'exa-xxxxxxxxxxxx',
+  // Redis
+  REDIS_URL: 'redis://localhost:6379',
+  // PostgreSQL
+  DATABASE_URL: 'postgresql://user:pass@localhost:5432/db',
+  POSTGRES_CONNECTION_STRING: 'postgresql://user:pass@localhost:5432/db',
+  // Generic patterns
+  API_KEY: 'your-api-key',
+  API_TOKEN: 'your-api-token',
+  API_SECRET: 'your-api-secret',
+  BASE_URL: 'https://api.example.com',
+};
+
 /** Turn plain text with URLs into React nodes with clickable links */
 function linkify(text: string): React.ReactNode[] {
   const urlRe = /(https?:\/\/[^\s)]+)/g;
@@ -41,6 +89,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
   const [addMcpLabel, setAddMcpLabel] = useState('');
   const [addMcpEnv, setAddMcpEnv] = useState<Record<string, string>>({});
   const [addMcpGlobal, setAddMcpGlobal] = useState(false);
+  const [addVisibleFields, setAddVisibleFields] = useState<Set<string>>(new Set());
   const addMcpRef = useRef<HTMLDivElement>(null);
   // Edit secrets
   const [editingEnvId, setEditingEnvId] = useState<string | null>(null);
@@ -420,18 +469,38 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                       <span className="mcp-token-hint">{selectedDef.token_help}</span>
                     )}
                   </div>
-                  {envKeys.map(k => (
-                    <div key={k} className="flex-row gap-4 mb-2">
-                      <span className="mcp-env-key-label">{k}</span>
-                      <input
-                        className="input mcp-input-mono"
-                        value={addMcpEnv[k] ?? ''}
-                        onChange={(e) => setAddMcpEnv(prev => ({ ...prev, [k]: e.target.value }))}
-                        placeholder={t('mcp.value')}
-                        type="password"
-                      />
-                    </div>
-                  ))}
+                  {envKeys.map(k => {
+                    const isVisible = addVisibleFields.has(k);
+                    const hint = ENV_PLACEHOLDERS[k]
+                      ?? ENV_PLACEHOLDERS[k.replace(/^.*_/, '')] // fallback: match suffix (e.g. _API_KEY → API_KEY)
+                      ?? t('mcp.value');
+                    return (
+                      <div key={k} className="flex-row gap-4 mb-2">
+                        <span className="mcp-env-key-label">{k}</span>
+                        <div className="mcp-env-input-wrap">
+                          <input
+                            className="input mcp-input-mono mcp-input-with-eye"
+                            value={addMcpEnv[k] ?? ''}
+                            onChange={(e) => setAddMcpEnv(prev => ({ ...prev, [k]: e.target.value }))}
+                            placeholder={hint}
+                            type={isVisible ? 'text' : 'password'}
+                          />
+                          <button
+                            type="button"
+                            className="mcp-eye-btn"
+                            onClick={() => setAddVisibleFields(prev => {
+                              const next = new Set(prev);
+                              next.has(k) ? next.delete(k) : next.add(k);
+                              return next;
+                            })}
+                            tabIndex={-1}
+                          >
+                            <Eye size={12} style={{ color: isVisible ? 'var(--kr-accent)' : 'rgba(255,255,255,0.25)' }} />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               ) : null; })()}
               {/* Global toggle */}

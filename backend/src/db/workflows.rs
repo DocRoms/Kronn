@@ -96,13 +96,14 @@ pub fn insert_workflow(conn: &Connection, wf: &Workflow) -> Result<()> {
 
 pub fn update_workflow(conn: &Connection, wf: &Workflow) -> Result<()> {
     conn.execute(
-        "UPDATE workflows SET name = ?2, trigger_json = ?3, steps_json = ?4,
-         actions_json = ?5, safety_json = ?6, workspace_config_json = ?7,
-         concurrency_limit = ?8, enabled = ?9, updated_at = ?10
+        "UPDATE workflows SET name = ?2, project_id = ?3, trigger_json = ?4, steps_json = ?5,
+         actions_json = ?6, safety_json = ?7, workspace_config_json = ?8,
+         concurrency_limit = ?9, enabled = ?10, updated_at = ?11
          WHERE id = ?1",
         params![
             wf.id,
             wf.name,
+            wf.project_id,
             serde_json::to_string(&wf.trigger)?,
             serde_json::to_string(&wf.steps)?,
             serde_json::to_string(&wf.actions)?,

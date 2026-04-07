@@ -251,6 +251,30 @@
   font-family: var(--kr-font-mono);
   font-size: var(--kr-fs-sm);
 }
+.mcp-env-input-wrap {
+  flex: 1;
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.mcp-input-with-eye {
+  padding-right: 30px !important;
+}
+.mcp-eye-btn {
+  position: absolute;
+  right: 6px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px;
+  display: flex;
+  align-items: center;
+  opacity: 0.6;
+  transition: opacity 0.15s;
+}
+.mcp-eye-btn:hover {
+  opacity: 1;
+}
 
 /* ── Search bar ─────────────────────────────────────────── */
 .mcp-search-wrap {

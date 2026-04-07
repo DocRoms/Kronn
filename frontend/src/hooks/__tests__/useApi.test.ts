@@ -53,6 +53,56 @@ describe('useApi', () => {
     await waitFor(() => expect(result.current.data).toBe('result-2'));
   });
 
+  it('initialLoading is true only on first fetch, false during refetch', async () => {
+    const fetcher = vi.fn().mockResolvedValue('data');
+    const { result } = renderHook(() => useApi(fetcher, []));
+
+    // First load: initialLoading = true
+    expect(result.current.initialLoading).toBe(true);
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.initialLoading).toBe(false);
+
+    // Refetch: initialLoading stays false (stale data visible)
+    act(() => { result.current.refetch(); });
+    expect(result.current.initialLoading).toBe(false);
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.initialLoading).toBe(false);
+  });
+
+  it('keeps stale data during refetch (stale-while-revalidate)', async () => {
+    let callCount = 0;
+    const fetcher = vi.fn().mockImplementation(() => {
+      callCount++;
+      return Promise.resolve(`result-${callCount}`);
+    });
+
+    const { result } = renderHook(() => useApi(fetcher, []));
+    await waitFor(() => expect(result.current.data).toBe('result-1'));
+
+    // Trigger refetch — data should stay 'result-1' during loading
+    act(() => { result.current.refetch(); });
+    expect(result.current.data).toBe('result-1'); // Stale data preserved
+    expect(result.current.loading).toBe(true);
+
+    await waitFor(() => expect(result.current.data).toBe('result-2'));
+  });
+
+  it('keeps stale data on error (no flash of empty)', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce('initial-data')
+      .mockRejectedValueOnce(new Error('transient'));
+
+    const { result } = renderHook(() => useApi(fetcher, []));
+    await waitFor(() => expect(result.current.data).toBe('initial-data'));
+
+    act(() => { result.current.refetch(); });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    // Data preserved despite error
+    expect(result.current.data).toBe('initial-data');
+    expect(result.current.error).toBe('transient');
+  });
+
   it('only applies latest result (race condition protection)', async () => {
     const resolvers: Array<(value: string) => void> = [];
     const fetcher = vi.fn().mockImplementation(() => {

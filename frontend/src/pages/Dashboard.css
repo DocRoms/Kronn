@@ -133,6 +133,17 @@
   padding: var(--kr-sp-9) var(--kr-sp-8);
 }
 
+.dash-loading-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-5) var(--kr-sp-6);
+  margin-bottom: var(--kr-sp-4);
+  border-radius: var(--kr-br-md);
+  background: var(--kr-bg-card);
+  border: 1px solid var(--kr-border);
+}
+
 /* ── Page header ───────────────────────────────────────── */
 .dash-page-header {
   display: flex;

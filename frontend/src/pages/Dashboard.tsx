@@ -68,7 +68,7 @@ export function Dashboard({ onReset }: DashboardProps) {
     delete abortControllers.current[discId];
   }, []);
 
-  const { data: projectList, refetch } = useApi(() => projectsApi.list(), []);
+  const { data: projectList, initialLoading: projectsLoading, refetch } = useApi(() => projectsApi.list(), []);
   const { data: registry } = useApi(() => mcpsApi.registry(), []);
   const { data: mcpOverviewData, refetch: refetchMcps } = useApi(() => mcpsApi.overview(), []);
   const { data: agentList, refetch: refetchAgents } = useApi(() => agentsApi.detect(), []);
@@ -563,6 +563,12 @@ export function Dashboard({ onReset }: DashboardProps) {
 
         {/* ════════ PROJETS ════════ */}
         {page === 'projects' && (<ErrorBoundary mode="zone" label="Projects">
+          {projectsLoading && (
+            <div className="dash-loading-bar">
+              <Loader2 size={14} className="spin" />
+              <span className="text-sm text-muted">{t('projects.loading')}</span>
+            </div>
+          )}
           <ProjectList
             projects={projects}
             discussions={allDiscussions}
@@ -604,7 +610,7 @@ export function Dashboard({ onReset }: DashboardProps) {
         {/* ════════ WORKFLOWS ════════ */}
         {page === 'workflows' && (
           <ErrorBoundary mode="zone" label="Workflows">
-            <WorkflowsPage projects={projects} installedAgentTypes={agents.filter(isUsable).map(a => a.agent_type)} agentAccess={agentAccess ?? undefined} />
+            <WorkflowsPage projects={projects} installedAgentTypes={agents.filter(isUsable).map(a => a.agent_type)} agentAccess={agentAccess ?? undefined} configLanguage={configLanguage ?? undefined} onNavigateDiscussion={(discId) => { setAutoRunDiscussionId(discId); setPage('discussions'); }} />
           </ErrorBoundary>
         )}
 

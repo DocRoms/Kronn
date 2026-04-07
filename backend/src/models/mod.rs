@@ -1,6 +1,17 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use ts_rs::TS;
+
+/// Deserialize an optional field that distinguishes between absent, null, and present.
+/// - Absent key → `None` (outer Option is None → use existing value)
+/// - Explicit null → `Some(None)` (set to null)
+/// - Present value → `Some(Some(value))` (set to value)
+fn deserialize_optional_field<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Some(Option::deserialize(deserializer)?))
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Setup & Configuration
@@ -1307,6 +1318,8 @@ pub struct CreateWorkflowRequest {
 #[ts(export)]
 pub struct UpdateWorkflowRequest {
     pub name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub project_id: Option<Option<String>>,
     pub trigger: Option<WorkflowTrigger>,
     pub steps: Option<Vec<WorkflowStep>>,
     pub actions: Option<Vec<WorkflowAction>>,
@@ -1362,6 +1375,22 @@ pub struct WorkflowSuggestion {
 pub struct ImportWorkflowRequest {
     pub content: String,
     pub project_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct TestStepRequest {
+    pub step: WorkflowStep,
+    pub project_id: Option<String>,
+    /// Mock previous step output (raw text or structured JSON)
+    #[serde(default)]
+    pub mock_previous_output: Option<String>,
+    /// Additional mock variables: {"issue.title": "...", "steps.collect.data": "..."}
+    #[serde(default)]
+    pub mock_variables: Option<std::collections::HashMap<String, String>>,
+    /// Dry run: agent describes what it would do without executing any write actions
+    #[serde(default)]
+    pub dry_run: bool,
 }
 
 // ─── MCP API requests ────────────────────────────────────────────────────

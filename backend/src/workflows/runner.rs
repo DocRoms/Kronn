@@ -20,6 +20,8 @@ use super::steps::{execute_step, StepOutcome};
 pub enum RunEvent {
     /// A step is about to start executing.
     StepStart { step_name: String, step_index: usize, total_steps: usize },
+    /// Partial output from the agent (streamed in real-time).
+    StepProgress { text: String },
     /// A step has finished executing.
     StepDone { step_result: StepResult },
     /// The entire run has finished.
@@ -151,6 +153,7 @@ pub async fn execute_run(
             tokens_config,
             full_access,
             &ctx,
+            None,
         ).await;
 
         // Record step output for template chaining

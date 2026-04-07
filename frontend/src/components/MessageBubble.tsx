@@ -143,7 +143,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             </div>
           </div>
         ) : (
-          <MarkdownContent content={msg.content.replace(/KRONN:(BRIEFING_COMPLETE|VALIDATION_COMPLETE|BOOTSTRAP_COMPLETE)/gi, '').trim()} />
+          <MarkdownContent content={msg.content.replace(/KRONN:(BRIEFING_COMPLETE|VALIDATION_COMPLETE|BOOTSTRAP_COMPLETE|WORKFLOW_READY)/gi, '').trim()} />
         )}
         {msg.role === 'Agent' && (
           <button

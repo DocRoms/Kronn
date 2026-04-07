@@ -2694,3 +2694,123 @@ async fn remap_project_path_invalid() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["success"], false, "Remap to nonexistent path should fail");
 }
+
+#[tokio::test]
+async fn workflow_update_project_id_persists() {
+    let state = test_state();
+
+    // Create a real project first (FK constraint)
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let (status, json) = post_json(app, "/api/projects", serde_json::json!({
+        "name": "WfProject",
+        "path": "/tmp/wf-project",
+        "remote_url": null,
+        "branch": "main",
+        "ai_configs": [],
+        "has_project": false,
+        "hidden": false
+    })).await;
+    assert_eq!(status, StatusCode::OK);
+    let project_id = json["data"]["id"].as_str().unwrap().to_string();
+
+    // Create a workflow without project
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let (status, json) = post_json(app, "/api/workflows", serde_json::json!({
+        "name": "ProjectIdTest",
+        "trigger": {"type": "Manual"},
+        "steps": [{"name": "s1", "agent": "ClaudeCode", "prompt_template": "test", "mode": {"type": "Normal"}}],
+        "actions": []
+    })).await;
+    assert_eq!(status, StatusCode::OK);
+    let wf_id = json["data"]["id"].as_str().unwrap().to_string();
+    assert_eq!(json["data"]["project_id"], serde_json::Value::Null);
+
+    // Update with project_id
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let req = Request::builder()
+        .method("PUT")
+        .uri(format!("/api/workflows/{}", wf_id))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&serde_json::json!({
+            "project_id": project_id
+        })).unwrap()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let update_json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(update_json["success"], true, "Update should succeed: {:?}", update_json);
+    assert_eq!(update_json["data"]["project_id"], project_id, "Update response should contain new project_id");
+
+    // GET to verify persistence
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let (status, json) = get_json(app, &format!("/api/workflows/{}", wf_id)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["data"]["project_id"], project_id, "project_id must persist after update");
+
+    // Update back to null (detach project)
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let req = Request::builder()
+        .method("PUT")
+        .uri(format!("/api/workflows/{}", wf_id))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&serde_json::json!({
+            "project_id": null
+        })).unwrap()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let detach_json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(detach_json["success"], true, "Detach should succeed");
+    assert_eq!(detach_json["data"]["project_id"], serde_json::Value::Null, "project_id should be null after detach");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Workflow test-step endpoint
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn test_step_returns_sse_stream() {
+    let state = test_state();
+    let app = kronn::build_router_with_auth(state, false);
+
+    // Minimal test-step request — will fail (no agent binary) but should return SSE events
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/workflows/test-step")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&serde_json::json!({
+            "step": {
+                "name": "test-step",
+                "agent": "ClaudeCode",
+                "prompt_template": "Say hello",
+                "mode": { "type": "Normal" }
+            },
+            "dry_run": true
+        })).unwrap()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    // Should return 200 with SSE content-type (stream starts immediately)
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+    assert!(ct.contains("text/event-stream"), "Should be SSE stream, got: {}", ct);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Builtin skill: workflow-architect
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn skills_list_includes_workflow_architect() {
+    let app = test_app();
+    let (status, json) = get_json(app, "/api/skills").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let skills = json["data"].as_array().unwrap();
+    let wf_skill = skills.iter().find(|s| s["id"] == "workflow-architect");
+    assert!(wf_skill.is_some(), "workflow-architect skill must be in the list");
+    let skill = wf_skill.unwrap();
+    assert_eq!(skill["category"], "Domain");
+    assert!(skill["is_builtin"].as_bool().unwrap(), "Must be builtin");
+    assert!(skill["content"].as_str().unwrap().contains("KRONN:WORKFLOW_READY"), "Skill must mention the signal");
+}

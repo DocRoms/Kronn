@@ -489,6 +489,7 @@ export interface CreateWorkflowRequest {
 
 export interface UpdateWorkflowRequest {
   name?: string;
+  project_id?: string | null;
   trigger?: WorkflowTrigger;
   steps?: WorkflowStep[];
   actions?: WorkflowAction[];
@@ -875,4 +876,12 @@ export interface DbExport {
 export interface ImportResult {
   warnings: string[];
   invalid_paths: string[];
+}
+
+export interface TestStepRequest {
+  step: WorkflowStep;
+  project_id?: string | null;
+  mock_previous_output?: string | null;
+  mock_variables?: Record<string, string>;
+  dry_run?: boolean;
 }

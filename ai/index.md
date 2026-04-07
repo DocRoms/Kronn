@@ -186,8 +186,8 @@ Dashboard tabs (current / planned):
 | Projets | Done | Project list, AI audit pipeline (template → audit → validation), project bootstrap (create from scratch), MCP overview, per-project workflows/skills/doc viewer |
 | Discussions | Done | Single/multi-agent chat, @mentions, orchestration, global discussions, archive/unarchive (swipe gestures), inline title editing, disabled agent detection. **Split into 7 components**: DiscussionsPage (orchestrator 1218L) + ChatHeader, ChatInput, DiscussionSidebar, NewDiscussionForm, MessageBubble, SwipeableDiscItem |
 | Plugins | Done | Plugin (MCP) registry with card grid + category pills, inline expand detail panel, per-project navigation. Renamed from "MCPs" — user-facing label is "Plugins (MCP / API)". Publisher origin badges (official/community). Per-project MCP load indicator (green/orange/red) |
-| Workflows | Done | Workflow list (grouped by project), creation wizard (**simple** 3-step + **advanced** 5-step modes), detail + runs with live SSE progress, manual trigger, run deletion (individual + bulk). **MCP-based workflow suggestions** (10 template catalogue). **Structured inter-step contract** (`StepOutputFormat`: FreeText/Structured with `---STEP_OUTPUT---` envelope). MCP tools auto-injected into agent prompts. |
-| Config | Done | Multi-key API management (incl. Mistral/Vibe API keys), token usage tracking, language, agent detection + permissions, agent usage dashboard links, Directives CRUD with live cards, DB management (export/import). Skills/Profiles are now managed per-project on the Project page. |
+| Workflows | Done | Workflow list (grouped by project), creation wizard (**simple** 3-step + **advanced** 5-step modes), detail + runs with live SSE progress, manual trigger, run deletion (individual + bulk). **MCP-based workflow suggestions** (10 template catalogue). **Structured inter-step contract** (`StepOutputFormat`: FreeText/Structured with `---STEP_OUTPUT---` envelope). MCP tools auto-injected into agent prompts. **AI Architect**: "Create with AI" button opens a guided discussion (skill `workflow-architect`) → designs, validates, deploys workflow via `KRONN:WORKFLOW_READY` signal. **Test step**: dry-run individual steps with mock data + live streaming output. **Starter templates**: 6 clickable examples in the simple wizard. **Raw cron editor** for complex expressions. |
+| Config | Done | Multi-key API management (incl. Mistral/Vibe API keys), token usage tracking, language, agent detection + permissions, agent usage dashboard links, Directives CRUD with live cards, DB management (**export ZIP** with data.json + config.toml, **import ZIP/JSON** with config merge + path remapping). Skills/Profiles are now managed per-project on the Project page. |
 
 Note: the old "Agents" tab has been merged into Config. Nav order: Projets → Discussions → Plugins → Workflows → Config.
 
@@ -221,7 +221,7 @@ Projects display 3 badges next to the title: `[FileCode] AI context`, `[Cpu] AI 
 - **Template install**: copies `ai/` skeleton + redirector files (CLAUDE.md, .cursorrules, etc.) + injects bootstrap prompt
 - **AI audit**: 10-step SSE streaming, ~20 min. **Token cost: ~50K–150K tokens per audit** (depends on project size and agent model). With Claude Sonnet API pricing, expect ~$0.50–$2.00 per audit. Fills all `ai/` files.
 - **Validation**: opens a prefilled discussion (locked title/prompt) where the AI asks questions about ambiguities. AI updates `ai/` files after each answer. Project page shows "validation en cours" + link to discussion (no validate button on project page).
-- When the AI finishes all questions, it includes `KRONN:VALIDATION_COMPLETE` in its last message. This triggers a green banner in the discussion with a "Marquer l'audit comme valide" button. Similarly, `KRONN:BRIEFING_COMPLETE` signals the end of a pre-audit briefing discussion.
+- When the AI finishes all questions, it includes `KRONN:VALIDATION_COMPLETE` in its last message. This triggers a green banner in the discussion with a "Marquer l'audit comme valide" button. Similarly, `KRONN:BRIEFING_COMPLETE` signals the end of a pre-audit briefing discussion. `KRONN:WORKFLOW_READY` signals the AI Architect has produced a deployable workflow JSON (extracted from ```json block → one-click creation).
 - **Mark as validated**: injects `<!-- KRONN:VALIDATED:date -->` marker into `ai/index.md`.
 - AI config file badges (CLAUDE.md, .cursorrules, etc.) shown on a second line below the status badges.
 
@@ -264,4 +264,4 @@ Redirectors to this file: `CLAUDE.md`, `GEMINI.md`, `AGENTS.md`, `.kiro/steering
 
 ## 11. Last updated
 
-AI context last reviewed: **2026-04-03**.
+AI context last reviewed: **2026-04-07**.
