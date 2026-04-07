@@ -225,6 +225,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/projects/:id/mark-bootstrapped", post(api::audit::mark_bootstrapped))
         .route("/api/projects/:id/full-audit", post(api::audit::full_audit))
         .route("/api/projects/:id/cancel-audit", post(api::audit::cancel_audit))
+        .route("/api/projects/:id/remap-path", post(api::projects::remap_path))
         .route("/api/projects/:id/default-skills", put(api::projects::set_default_skills))
         .route("/api/projects/:id/default-profile", put(api::projects::set_default_profile))
         .route("/api/projects/:id/briefing", get(api::audit::get_briefing).put(api::audit::set_briefing))

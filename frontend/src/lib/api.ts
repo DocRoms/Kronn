@@ -23,7 +23,6 @@ import type {
   NetworkInfo,
   TokenUsageSummary,
   DbInfo,
-  DbExport,
   SetAgentAccessRequest,
   AgentsConfig,
   McpContextEntry,
@@ -59,6 +58,7 @@ import type {
   WorkflowSuggestion,
   ContextFile,
   UploadContextFileResponse,
+  ImportResult,
 } from '../types/generated';
 import type { DiscoverKeysResponse } from '../types/extensions';
 
@@ -266,8 +266,26 @@ export const config = {
   getModelTiers: () => api<ModelTiersConfig>('GET', '/config/model-tiers'),
   setModelTiers: (tiers: ModelTiersConfig) => api<void>('POST', '/config/model-tiers', tiers),
   dbInfo: () => api<DbInfo>('GET', '/config/db-info'),
-  exportData: () => api<DbExport>('GET', '/config/export'),
-  importData: (data: DbExport) => api<void>('POST', '/config/import', data),
+  exportData: async (): Promise<Blob> => {
+    const res = await fetch(`${_apiBase}/api/config/export`, {
+      headers: authHeaders(),
+    });
+    if (!res.ok) throw new Error(`Export failed: ${res.status}`);
+    return res.blob();
+  },
+  importData: async (file: File): Promise<ImportResult> => {
+    const form = new FormData();
+    form.append('file', file);
+    const res = await fetch(`${_apiBase}/api/config/import`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: form,
+    });
+    if (!res.ok) throw new Error(`Import failed: ${res.status}`);
+    const json = await res.json();
+    if (json.error) throw new Error(json.error);
+    return json.data;
+  },
   getServerConfig: () => api<ServerConfigPublic>('GET', '/config/server'),
   setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string }) => api<void>('POST', '/config/server', req),
   regenerateAuthToken: () => api<string>('POST', '/config/auth-token/regenerate'),
@@ -317,6 +335,7 @@ export const projects = {
   createPr: (id: string, req: { title: string; body?: string; base?: string }) => api<{ url: string }>('POST', `/projects/${id}/git-pr`, req),
   prTemplate: (id: string) => api<{ template: string; source: string }>('GET', `/projects/${id}/pr-template`),
   exec: (id: string, command: string) => api<{ stdout: string; stderr: string; exit_code: number }>('POST', `/projects/${id}/exec`, { command }),
+  remapPath: (id: string, path: string) => api<void>('POST', `/projects/${id}/remap-path`, { path }),
 
   /** Stream the AI audit progress via SSE */
   auditStream: async (

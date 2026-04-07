@@ -1416,3 +1416,61 @@ fn mcp_config_display_secrets_broken_false_when_no_env() {
     assert_eq!(display.len(), 1);
     assert!(!display[0].secrets_broken, "secrets_broken should be false when no env keys exist");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Project path remapping
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn update_project_path_success() {
+    let conn = test_db();
+    let p = sample_project("p-remap", "RemapTest");
+    crate::db::projects::insert_project(&conn, &p).unwrap();
+
+    let updated = crate::db::projects::update_project_path(&conn, "p-remap", "/new/path").unwrap();
+    assert!(updated, "update_project_path should return true for existing project");
+
+    let project = crate::db::projects::get_project(&conn, "p-remap").unwrap().unwrap();
+    assert_eq!(project.path, "/new/path");
+}
+
+#[test]
+fn update_project_path_nonexistent() {
+    let conn = test_db();
+    let updated = crate::db::projects::update_project_path(&conn, "nonexistent", "/any").unwrap();
+    assert!(!updated, "update_project_path should return false for nonexistent project");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Contact export/import round-trip
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn contacts_export_import_roundtrip() {
+    let conn = test_db();
+    let now = Utc::now();
+    let contact = Contact {
+        id: "c1".into(),
+        pseudo: "PeerAlpha".into(),
+        avatar_email: Some("alpha@test.dev".into()),
+        kronn_url: "http://localhost:3140".into(),
+        invite_code: "abc123".into(),
+        status: "accepted".into(),
+        created_at: now,
+        updated_at: now,
+    };
+    crate::db::contacts::insert_contact(&conn, &contact).unwrap();
+
+    let contacts = crate::db::contacts::list_contacts(&conn).unwrap();
+    assert_eq!(contacts.len(), 1);
+    assert_eq!(contacts[0].pseudo, "PeerAlpha");
+
+    // Simulate import: clear and re-insert
+    conn.execute_batch("DELETE FROM contacts;").unwrap();
+    assert_eq!(crate::db::contacts::list_contacts(&conn).unwrap().len(), 0);
+
+    crate::db::contacts::insert_contact(&conn, &contact).unwrap();
+    let reimported = crate::db::contacts::list_contacts(&conn).unwrap();
+    assert_eq!(reimported.len(), 1);
+    assert_eq!(reimported[0].id, "c1");
+}

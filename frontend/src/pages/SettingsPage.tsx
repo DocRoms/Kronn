@@ -920,21 +920,23 @@ export function SettingsPage({
             </div>
           )}
 
+          <div className="set-warning-banner" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', borderRadius: 6, background: 'var(--color-warning-bg, #fff3cd)', border: '1px solid var(--color-warning-border, #ffc107)', marginBottom: 8, fontSize: 13 }}>
+            <AlertTriangle size={14} style={{ color: 'var(--color-warning, #856404)', flexShrink: 0 }} />
+            <span style={{ color: 'var(--color-warning, #856404)' }}>{t('config.exportApiWarning')}</span>
+          </div>
           <div className="flex-row gap-4">
             <button
               className="set-action-btn"
               onClick={async () => {
                 try {
-                  const data = await configApi.exportData();
-                  if (!data) return;
-                  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+                  const blob = await configApi.exportData();
                   const url = URL.createObjectURL(blob);
                   const a = document.createElement('a');
                   a.href = url;
-                  a.download = `kronn-export-${new Date().toISOString().slice(0, 10)}.json`;
+                  a.download = `kronn-export-${new Date().toISOString().slice(0, 10)}.zip`;
                   a.click();
                   URL.revokeObjectURL(url);
-                } catch (err) { console.warn('Settings action failed:', err); }
+                } catch (err) { console.warn('Export failed:', err); }
               }}
             >
               <Download size={12} /> {t('config.export')}
@@ -944,22 +946,40 @@ export function SettingsPage({
               onClick={() => {
                 const input = document.createElement('input');
                 input.type = 'file';
-                input.accept = '.json';
+                input.accept = '.zip,.json';
                 input.onchange = async () => {
                   const file = input.files?.[0];
                   if (!file) return;
-                  try {
-                    const text = await file.text();
-                    const data = JSON.parse(text);
-                    if (!data.version || !data.projects || !data.discussions) {
+                  // Validate JSON files (legacy) — ZIP files are validated server-side
+                  if (file.name.endsWith('.json')) {
+                    try {
+                      const text = await file.text();
+                      const data = JSON.parse(text);
+                      if (!data.version || !data.projects || !data.discussions) {
+                        toast(t('config.importInvalid'), 'error');
+                        return;
+                      }
+                    } catch {
                       toast(t('config.importInvalid'), 'error');
                       return;
                     }
-                    if (!confirm(t('config.importConfirm'))) return;
-                    await configApi.importData(data);
+                  }
+                  if (!confirm(t('config.importConfirm'))) return;
+                  try {
+                    const result = await configApi.importData(file);
                     refetchProjects();
                     refetchDiscussions();
                     refetchDbInfo();
+                    // Show post-import warnings
+                    if (result.warnings.length > 0) {
+                      for (const w of result.warnings) {
+                        toast(w, 'info');
+                      }
+                    }
+                    if (result.invalid_paths.length > 0) {
+                      toast(t('config.importPathWarning', result.invalid_paths.length), 'info');
+                    }
+                    toast(t('config.importSuccess'), 'success');
                   } catch {
                     toast(t('config.importError'), 'error');
                   }

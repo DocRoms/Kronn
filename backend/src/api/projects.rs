@@ -1369,6 +1369,31 @@ pub async fn pr_template(
     })))
 }
 
+/// POST /api/projects/:id/remap-path
+pub async fn remap_path(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<serde_json::Value>,
+) -> Json<ApiResponse<()>> {
+    let new_path = match req.get("path").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => return Json(ApiResponse::err("Missing 'path' field".to_string())),
+    };
+
+    // Validate path exists
+    if !std::path::Path::new(&new_path).exists() {
+        return Json(ApiResponse::err("Path does not exist".to_string()));
+    }
+
+    let pid = id.clone();
+    let np = new_path.clone();
+    match state.db.with_conn(move |conn| crate::db::projects::update_project_path(conn, &pid, &np)).await {
+        Ok(true) => Json(ApiResponse::ok(())),
+        Ok(false) => Json(ApiResponse::err("Project not found".to_string())),
+        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
 #[cfg(test)]
 mod prompt_tests {
     use super::*;
