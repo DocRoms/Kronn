@@ -101,6 +101,18 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
 
   const handleComplete = async () => {
     try {
+      // Ensure scan paths are set so backend marks setup as Complete.
+      // Without this, skipping repo selection leaves scan_paths empty
+      // and the wizard loops back to the ScanPaths step.
+      const effectivePaths = paths.length > 0
+        ? paths
+        : initialStatus?.default_scan_path
+          ? [initialStatus.default_scan_path]
+          : [];
+      if (effectivePaths.length > 0) {
+        await setupApi.setScanPaths({ paths: effectivePaths });
+      }
+
       await setupApi.complete();
       for (const repo of repos.filter(r => !r.hidden)) {
         try {

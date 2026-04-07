@@ -1,4 +1,10 @@
-use axum::{extract::{Path, State}, Json};
+use axum::{
+    body::Body,
+    extract::{Multipart, Path, State},
+    http::{header, StatusCode},
+    response::{IntoResponse, Response},
+    Json,
+};
 use chrono::Utc;
 use crate::models::*;
 use crate::core::{config, scanner};
@@ -610,31 +616,21 @@ pub async fn db_info(
     }
 }
 
-/// GET /api/config/export
-pub async fn export_data(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<DbExport>> {
-    let projects = match state.db.with_conn(crate::db::projects::list_projects).await {
-        Ok(p) => p,
-        Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
-    };
-
-    let discussions = match state.db.with_conn(crate::db::discussions::list_discussions_with_messages).await {
-        Ok(d) => d,
-        Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
-    };
-
-    let (workflows, mcp_servers, mcp_configs) = match state.db.with_conn(|conn| {
+/// Build the DbExport from current state
+async fn build_export(state: &AppState) -> Result<DbExport, String> {
+    let projects = state.db.with_conn(crate::db::projects::list_projects).await
+        .map_err(|e| format!("DB error: {}", e))?;
+    let discussions = state.db.with_conn(crate::db::discussions::list_discussions_with_messages).await
+        .map_err(|e| format!("DB error: {}", e))?;
+    let (workflows, mcp_servers, mcp_configs) = state.db.with_conn(|conn| {
         let wf = crate::db::workflows::list_workflows(conn)?;
         let servers = crate::db::mcps::list_servers(conn)?;
         let configs = crate::db::mcps::list_configs(conn)?;
         Ok((wf, servers, configs))
-    }).await {
-        Ok(data) => data,
-        Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
-    };
+    }).await.map_err(|e| format!("DB error: {}", e))?;
+    let contacts = state.db.with_conn(crate::db::contacts::list_contacts).await
+        .map_err(|e| format!("DB error: {}", e))?;
 
-    // Custom skills/directives/profiles (file-based)
     let custom_skills: Vec<_> = crate::core::skills::list_all_skills()
         .into_iter().filter(|s| !s.is_builtin).collect();
     let custom_directives: Vec<_> = crate::core::directives::list_all_directives()
@@ -642,8 +638,8 @@ pub async fn export_data(
     let custom_profiles: Vec<_> = crate::core::profiles::list_all_profiles()
         .into_iter().filter(|p| !p.is_builtin).collect();
 
-    Json(ApiResponse::ok(DbExport {
-        version: 2,
+    Ok(DbExport {
+        version: 3,
         exported_at: Utc::now(),
         projects,
         discussions,
@@ -653,32 +649,107 @@ pub async fn export_data(
         custom_skills,
         custom_directives,
         custom_profiles,
-    }))
+        contacts,
+    })
 }
 
-/// POST /api/config/import
-pub async fn import_data(
+/// Build an exportable config.toml (without auth_token, encryption_secret, and API key values)
+fn build_export_config(config: &AppConfig) -> AppConfig {
+    let mut export_cfg = config.clone();
+    // Strip secrets
+    export_cfg.server.auth_token = None;
+    export_cfg.server.auth_enabled = false;
+    export_cfg.encryption_secret = None;
+    // Strip API key values (keep metadata for reference)
+    for key in &mut export_cfg.tokens.keys {
+        key.value = String::new();
+    }
+    export_cfg
+}
+
+/// GET /api/config/export — returns a ZIP containing data.json + config.toml
+pub async fn export_data(
     State(state): State<AppState>,
-    Json(data): Json<DbExport>,
-) -> Json<ApiResponse<()>> {
+) -> Response {
+    let db_export = match build_export(&state).await {
+        Ok(e) => e,
+        Err(msg) => return (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response(),
+    };
+
+    let data_json = match serde_json::to_string_pretty(&db_export) {
+        Ok(j) => j,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("JSON error: {}", e)).into_response(),
+    };
+
+    let config = state.config.read().await;
+    let export_cfg = build_export_config(&config);
+    let config_toml = match toml::to_string_pretty(&export_cfg) {
+        Ok(t) => t,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("TOML error: {}", e)).into_response(),
+    };
+    drop(config);
+
+    // Build ZIP in memory
+    let mut buf = std::io::Cursor::new(Vec::new());
+    {
+        let mut zip = zip::ZipWriter::new(&mut buf);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+
+        if let Err(e) = zip.start_file("data.json", options) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("ZIP error: {}", e)).into_response();
+        }
+        if let Err(e) = std::io::Write::write_all(&mut zip, data_json.as_bytes()) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("ZIP write error: {}", e)).into_response();
+        }
+
+        if let Err(e) = zip.start_file("config.toml", options) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("ZIP error: {}", e)).into_response();
+        }
+        if let Err(e) = std::io::Write::write_all(&mut zip, config_toml.as_bytes()) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("ZIP write error: {}", e)).into_response();
+        }
+
+        if let Err(e) = zip.finish() {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("ZIP finish error: {}", e)).into_response();
+        }
+    }
+
+    let bytes = buf.into_inner();
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/zip")
+        .header(header::CONTENT_DISPOSITION, "attachment; filename=\"kronn-export.zip\"")
+        .body(Body::from(bytes))
+        .unwrap()
+}
+
+/// Import DB data from a DbExport struct. Returns warnings and invalid paths.
+async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult, String> {
+    let mut warnings = Vec::new();
+    let mut invalid_paths = Vec::new();
+
     // Clear existing data
-    if let Err(e) = state.db.with_conn(|conn| {
+    state.db.with_conn(|conn| {
         conn.execute_batch(
             "DELETE FROM messages; DELETE FROM discussions; \
              DELETE FROM mcp_config_projects; DELETE FROM mcp_configs; DELETE FROM mcp_servers; \
              DELETE FROM workflow_runs; DELETE FROM workflows; \
+             DELETE FROM contacts; \
              DELETE FROM projects;"
         )?;
         Ok(())
-    }).await {
-        return Json(ApiResponse::err(format!("Failed to clear DB: {}", e)));
-    }
+    }).await.map_err(|e| format!("Failed to clear DB: {}", e))?;
 
-    // Import projects
+    // Import projects (check path validity)
     for project in &data.projects {
         let p = project.clone();
+        let path = project.path.clone();
         if let Err(e) = state.db.with_conn(move |conn| crate::db::projects::insert_project(conn, &p)).await {
             tracing::warn!("Import project error: {}", e);
+        }
+        if !std::path::Path::new(&path).exists() {
+            invalid_paths.push(path);
         }
     }
 
@@ -705,8 +776,8 @@ pub async fn import_data(
             tracing::error!("Failed to import MCP server: {e}");
         }
     }
-    for config in &data.mcp_configs {
-        let c = config.clone();
+    for config_entry in &data.mcp_configs {
+        let c = config_entry.clone();
         if let Err(e) = state.db.with_conn(move |conn| crate::db::mcps::insert_config(conn, &c)).await {
             tracing::error!("Failed to import MCP config: {e}");
         }
@@ -748,7 +819,148 @@ pub async fn import_data(
         );
     }
 
-    Json(ApiResponse::ok(()))
+    // Import contacts
+    for contact in &data.contacts {
+        let c = contact.clone();
+        if let Err(e) = state.db.with_conn(move |conn| crate::db::contacts::insert_contact(conn, &c)).await {
+            tracing::warn!("Import contact error: {}", e);
+        }
+    }
+
+    if !invalid_paths.is_empty() {
+        warnings.push(format!("{} project(s) have invalid paths — remap them in the Projects page", invalid_paths.len()));
+    }
+
+    Ok(ImportResult { warnings, invalid_paths })
+}
+
+/// Merge imported config into current config (language, pseudo, bio, scan_paths — keep existing keys)
+async fn merge_import_config(state: &AppState, imported: &AppConfig) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let mut config = state.config.write().await;
+
+    // Merge user identity
+    if imported.server.pseudo.is_some() {
+        config.server.pseudo = imported.server.pseudo.clone();
+    }
+    if imported.server.avatar_email.is_some() {
+        config.server.avatar_email = imported.server.avatar_email.clone();
+    }
+    if imported.server.bio.is_some() {
+        config.server.bio = imported.server.bio.clone();
+    }
+
+    // Merge language
+    if !imported.language.is_empty() {
+        config.language = imported.language.clone();
+    }
+
+    // Merge scan paths (union)
+    for path in &imported.scan.paths {
+        if !config.scan.paths.contains(path) {
+            config.scan.paths.push(path.clone());
+        }
+    }
+
+    // Check for MCP secrets warning: if imported config has any MCP-related env vars,
+    // the encryption_secret is different so they need reconfiguration
+    warnings.push("MCP secrets are encrypted with a different key — reconfigure them in the Plugins page".to_string());
+
+    if let Err(e) = config::save(&config).await {
+        tracing::error!("Failed to save merged config: {}", e);
+        warnings.push(format!("Failed to save config: {}", e));
+    }
+
+    warnings
+}
+
+/// Extract data.json and config.toml from a ZIP file (synchronous, no await)
+fn extract_zip(file_bytes: &[u8]) -> Result<(DbExport, Option<AppConfig>), String> {
+    let cursor = std::io::Cursor::new(file_bytes);
+    let mut archive = zip::ZipArchive::new(cursor)
+        .map_err(|e| format!("Invalid ZIP: {}", e))?;
+
+    // Read data.json (required)
+    let data: DbExport = {
+        let mut f = archive.by_name("data.json")
+            .map_err(|e| format!("data.json not found in ZIP: {}", e))?;
+        let mut contents = String::new();
+        std::io::Read::read_to_string(&mut f, &mut contents)
+            .map_err(|e| format!("Failed to read data.json: {}", e))?;
+        serde_json::from_str(&contents)
+            .map_err(|e| format!("Invalid data.json: {}", e))?
+    };
+
+    // Read config.toml (optional)
+    let imported_config = if let Ok(mut f) = archive.by_name("config.toml") {
+        let mut contents = String::new();
+        if std::io::Read::read_to_string(&mut f, &mut contents).is_ok() {
+            toml::from_str::<AppConfig>(&contents).ok()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Ok((data, imported_config))
+}
+
+/// POST /api/config/import — accepts ZIP (multipart) or JSON (legacy)
+pub async fn import_data(
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> Json<ApiResponse<ImportResult>> {
+    // Read the uploaded file
+    let file_bytes = match multipart.next_field().await {
+        Ok(Some(field)) => {
+            match field.bytes().await {
+                Ok(b) => b,
+                Err(e) => return Json(ApiResponse::err(format!("Failed to read upload: {}", e))),
+            }
+        }
+        Ok(None) => return Json(ApiResponse::err("No file uploaded".to_string())),
+        Err(e) => return Json(ApiResponse::err(format!("Multipart error: {}", e))),
+    };
+
+    // Detect format: ZIP (starts with PK\x03\x04) or JSON legacy
+    let is_zip = file_bytes.len() >= 4 && file_bytes[0] == b'P' && file_bytes[1] == b'K'
+        && file_bytes[2] == 0x03 && file_bytes[3] == 0x04;
+
+    if is_zip {
+        // Extract ZIP (sync — no await needed, avoids Send issues with zip reader)
+        let (data, imported_config) = match extract_zip(&file_bytes) {
+            Ok(r) => r,
+            Err(e) => return Json(ApiResponse::err(e)),
+        };
+
+        // Import DB data
+        let mut result = match do_import_db(&state, &data).await {
+            Ok(r) => r,
+            Err(e) => return Json(ApiResponse::err(e)),
+        };
+
+        // Merge config if present
+        if let Some(cfg) = imported_config {
+            let config_warnings = merge_import_config(&state, &cfg).await;
+            result.warnings.extend(config_warnings);
+        }
+
+        Json(ApiResponse::ok(result))
+    } else {
+        // Legacy JSON import (v2 compat)
+        let data: DbExport = match serde_json::from_slice(&file_bytes) {
+            Ok(d) => d,
+            Err(e) => return Json(ApiResponse::err(format!("Invalid JSON: {}", e))),
+        };
+
+        let result = match do_import_db(&state, &data).await {
+            Ok(r) => r,
+            Err(e) => return Json(ApiResponse::err(e)),
+        };
+
+        Json(ApiResponse::ok(result))
+    }
 }
 
 /// POST /api/setup/reset
@@ -799,5 +1011,133 @@ pub async fn open_url(Json(req): Json<OpenUrlRequest>) -> Json<ApiResponse<()>> 
             tracing::warn!("Failed to open URL '{}': {}", req.url, e);
             Json(ApiResponse::err(format!("Failed to open URL: {}", e)))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::config;
+
+    #[test]
+    fn build_export_config_strips_secrets() {
+        let mut cfg = config::default_config();
+        cfg.server.auth_token = Some("secret-token".into());
+        cfg.encryption_secret = Some("secret-key".into());
+        cfg.server.auth_enabled = true;
+        cfg.tokens.keys.push(ApiKey {
+            id: "k1".into(),
+            name: "TestKey".into(),
+            provider: "anthropic".into(),
+            value: "sk-ant-real-key".into(),
+            active: true,
+        });
+        cfg.server.pseudo = Some("TestUser".into());
+        cfg.language = "fr".into();
+
+        let exported = build_export_config(&cfg);
+
+        // Secrets stripped
+        assert!(exported.server.auth_token.is_none());
+        assert!(exported.encryption_secret.is_none());
+        assert!(!exported.server.auth_enabled);
+
+        // API key values cleared but metadata kept
+        assert_eq!(exported.tokens.keys.len(), 1);
+        assert_eq!(exported.tokens.keys[0].name, "TestKey");
+        assert_eq!(exported.tokens.keys[0].value, "");
+
+        // User data preserved
+        assert_eq!(exported.server.pseudo, Some("TestUser".into()));
+        assert_eq!(exported.language, "fr");
+    }
+
+    #[test]
+    fn extract_zip_roundtrip() {
+        let data = DbExport {
+            version: 3,
+            exported_at: Utc::now(),
+            projects: vec![],
+            discussions: vec![],
+            workflows: vec![],
+            mcp_servers: vec![],
+            mcp_configs: vec![],
+            custom_skills: vec![],
+            custom_directives: vec![],
+            custom_profiles: vec![],
+            contacts: vec![],
+        };
+        let data_json = serde_json::to_string(&data).unwrap();
+
+        let cfg = config::default_config();
+        let config_toml = toml::to_string_pretty(&cfg).unwrap();
+
+        // Build ZIP
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut buf);
+            let opts = zip::write::SimpleFileOptions::default();
+            zip.start_file("data.json", opts).unwrap();
+            std::io::Write::write_all(&mut zip, data_json.as_bytes()).unwrap();
+            zip.start_file("config.toml", opts).unwrap();
+            std::io::Write::write_all(&mut zip, config_toml.as_bytes()).unwrap();
+            zip.finish().unwrap();
+        }
+        let bytes = buf.into_inner();
+
+        // Extract
+        let (extracted_data, extracted_config) = extract_zip(&bytes).unwrap();
+        assert_eq!(extracted_data.version, 3);
+        assert!(extracted_config.is_some());
+    }
+
+    #[test]
+    fn extract_zip_missing_data_json() {
+        // Build a ZIP without data.json
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut buf);
+            let opts = zip::write::SimpleFileOptions::default();
+            zip.start_file("other.txt", opts).unwrap();
+            std::io::Write::write_all(&mut zip, b"hello").unwrap();
+            zip.finish().unwrap();
+        }
+        let bytes = buf.into_inner();
+
+        let result = extract_zip(&bytes);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("data.json not found"));
+    }
+
+    #[test]
+    fn extract_zip_without_config_toml() {
+        let data = DbExport {
+            version: 3,
+            exported_at: Utc::now(),
+            projects: vec![],
+            discussions: vec![],
+            workflows: vec![],
+            mcp_servers: vec![],
+            mcp_configs: vec![],
+            custom_skills: vec![],
+            custom_directives: vec![],
+            custom_profiles: vec![],
+            contacts: vec![],
+        };
+        let data_json = serde_json::to_string(&data).unwrap();
+
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut buf);
+            let opts = zip::write::SimpleFileOptions::default();
+            zip.start_file("data.json", opts).unwrap();
+            std::io::Write::write_all(&mut zip, data_json.as_bytes()).unwrap();
+            zip.finish().unwrap();
+        }
+        let bytes = buf.into_inner();
+
+        let (extracted_data, extracted_config) = extract_zip(&bytes).unwrap();
+        assert_eq!(extracted_data.version, 3);
+        assert!(extracted_config.is_none(), "config.toml should be optional");
     }
 }

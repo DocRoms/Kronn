@@ -160,6 +160,14 @@ pub fn update_project_default_skills(conn: &Connection, id: &str, skill_ids: &[S
     Ok(affected > 0)
 }
 
+pub fn update_project_path(conn: &Connection, id: &str, new_path: &str) -> Result<bool> {
+    let affected = conn.execute(
+        "UPDATE projects SET path = ?1, updated_at = ?2 WHERE id = ?3",
+        params![new_path, Utc::now().to_rfc3339(), id],
+    )?;
+    Ok(affected > 0)
+}
+
 pub fn update_project_default_profile(conn: &Connection, id: &str, profile_id: Option<&str>) -> Result<bool> {
     let affected = conn.execute(
         "UPDATE projects SET default_profile_id = ?1, updated_at = ?2 WHERE id = ?3",

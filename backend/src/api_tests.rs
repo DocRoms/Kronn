@@ -1147,16 +1147,23 @@ mod tests {
     // ─── Q16: Export/Import API ───────────────────────────────────────────────
 
     #[tokio::test]
-    async fn config_export_returns_data() {
+    async fn config_export_returns_zip() {
         let state = test_state();
+        let app = build_router_with_auth(state, false);
         let req = Request::builder()
             .method("GET").uri("/api/config/export")
             .body(Body::empty()).unwrap();
-        let (status, body) = send(state, false, req).await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(body["success"].as_bool().unwrap());
-        // Export should contain at least the data key
-        assert!(body["data"].is_object(), "Export should return an object");
+        let resp = app.oneshot(req).await.expect("oneshot failed");
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap().to_str().unwrap(),
+            "application/zip"
+        );
+        let bytes = resp.into_body().collect().await.expect("body collect").to_bytes();
+        // ZIP magic bytes
+        assert!(bytes.len() > 4);
+        assert_eq!(bytes[0], b'P');
+        assert_eq!(bytes[1], b'K');
     }
 
     // ─── Q17: Agent usage stats ───────────────────────────────────────────────

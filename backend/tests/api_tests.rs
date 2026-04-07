@@ -511,16 +511,40 @@ async fn workflows_list_empty() {
 #[tokio::test]
 async fn config_export_empty_db() {
     let app = test_app();
-    let (status, json) = get_json(app, "/api/config/export").await;
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/config/export")
+        .body(Body::empty())
+        .unwrap();
 
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(json["success"], true);
-    assert_eq!(json["data"]["version"], 2);
-    assert!(json["data"]["projects"].as_array().unwrap().is_empty());
-    assert!(json["data"]["discussions"].as_array().unwrap().is_empty());
-    assert!(json["data"]["workflows"].as_array().unwrap().is_empty());
-    assert!(json["data"]["mcp_servers"].as_array().unwrap().is_empty());
-    assert!(json["data"]["mcp_configs"].as_array().unwrap().is_empty());
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get("content-type").unwrap().to_str().unwrap(),
+        "application/zip"
+    );
+
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let cursor = std::io::Cursor::new(&bytes[..]);
+    let mut archive = zip::ZipArchive::new(cursor).unwrap();
+
+    // Verify data.json contains version 3 with empty collections
+    {
+        let mut data_file = archive.by_name("data.json").unwrap();
+        let mut contents = String::new();
+        std::io::Read::read_to_string(&mut data_file, &mut contents).unwrap();
+        let data: Value = serde_json::from_str(&contents).unwrap();
+        assert_eq!(data["version"], 3);
+        assert!(data["projects"].as_array().unwrap().is_empty());
+        assert!(data["discussions"].as_array().unwrap().is_empty());
+        assert!(data["workflows"].as_array().unwrap().is_empty());
+        assert!(data["mcp_servers"].as_array().unwrap().is_empty());
+        assert!(data["mcp_configs"].as_array().unwrap().is_empty());
+        assert!(data["contacts"].as_array().unwrap().is_empty());
+    }
+
+    // Verify config.toml exists
+    assert!(archive.by_name("config.toml").is_ok());
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2457,4 +2481,216 @@ async fn mcp_update_config_changes_env() {
     assert_eq!(entries[0]["key"], "GITHUB_PERSONAL_ACCESS_TOKEN");
     assert_eq!(entries[0]["masked_value"], "new-token-beta",
         "Revealed value should reflect the updated env");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Export/Import ZIP tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn export_returns_zip() {
+    let app = test_app();
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/config/export")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get("content-type").unwrap().to_str().unwrap(),
+        "application/zip"
+    );
+
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    // ZIP magic bytes: PK\x03\x04
+    assert!(body.len() > 4);
+    assert_eq!(body[0], b'P');
+    assert_eq!(body[1], b'K');
+    assert_eq!(body[2], 0x03);
+    assert_eq!(body[3], 0x04);
+
+    // Verify ZIP contains data.json and config.toml
+    let cursor = std::io::Cursor::new(&body[..]);
+    let mut archive = zip::ZipArchive::new(cursor).unwrap();
+    assert!(archive.by_name("data.json").is_ok(), "ZIP must contain data.json");
+    assert!(archive.by_name("config.toml").is_ok(), "ZIP must contain config.toml");
+
+    // Verify data.json has version 3
+    let mut data_file = archive.by_name("data.json").unwrap();
+    let mut contents = String::new();
+    std::io::Read::read_to_string(&mut data_file, &mut contents).unwrap();
+    let data: Value = serde_json::from_str(&contents).unwrap();
+    assert_eq!(data["version"], 3);
+}
+
+#[tokio::test]
+async fn import_zip_roundtrip() {
+    let state = test_state();
+
+    // Create a project first
+    {
+        let app = kronn::build_router_with_auth(state.clone(), false);
+        let (status, _) = post_json(app, "/api/projects", serde_json::json!({
+            "name": "TestProject",
+            "path": "/tmp/test-project",
+            "remote_url": null,
+            "branch": "main",
+            "ai_configs": [],
+            "has_project": false,
+            "hidden": false
+        })).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    // Export
+    let zip_bytes = {
+        let app = kronn::build_router_with_auth(state.clone(), false);
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/config/export")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        resp.into_body().collect().await.unwrap().to_bytes()
+    };
+
+    // Build multipart body with the ZIP
+    let boundary = "----TestBoundary123";
+    let mut multipart_body = Vec::new();
+    multipart_body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+    multipart_body.extend_from_slice(b"Content-Disposition: form-data; name=\"file\"; filename=\"export.zip\"\r\n");
+    multipart_body.extend_from_slice(b"Content-Type: application/zip\r\n\r\n");
+    multipart_body.extend_from_slice(&zip_bytes);
+    multipart_body.extend_from_slice(format!("\r\n--{}--\r\n", boundary).as_bytes());
+
+    // Import
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/config/import")
+        .header("content-type", format!("multipart/form-data; boundary={}", boundary))
+        .body(Body::from(multipart_body))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(status, StatusCode::OK, "Import failed: {:?}", json);
+    assert_eq!(json["success"], true, "Import should succeed: {:?}", json);
+
+    // Verify project was restored
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let (status, json) = get_json(app, "/api/projects").await;
+    assert_eq!(status, StatusCode::OK);
+    let projects = json["data"].as_array().unwrap();
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0]["name"], "TestProject");
+}
+
+#[tokio::test]
+async fn import_legacy_json_via_multipart() {
+    let state = test_state();
+
+    // Build a legacy v2 JSON export
+    let legacy_json = serde_json::json!({
+        "version": 2,
+        "exported_at": "2026-01-01T00:00:00Z",
+        "projects": [],
+        "discussions": [],
+        "workflows": [],
+        "mcp_servers": [],
+        "mcp_configs": []
+    });
+    let json_bytes = serde_json::to_vec(&legacy_json).unwrap();
+
+    // Build multipart body with JSON file
+    let boundary = "----TestBoundary456";
+    let mut multipart_body = Vec::new();
+    multipart_body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+    multipart_body.extend_from_slice(b"Content-Disposition: form-data; name=\"file\"; filename=\"export.json\"\r\n");
+    multipart_body.extend_from_slice(b"Content-Type: application/json\r\n\r\n");
+    multipart_body.extend_from_slice(&json_bytes);
+    multipart_body.extend_from_slice(format!("\r\n--{}--\r\n", boundary).as_bytes());
+
+    let app = kronn::build_router_with_auth(state, false);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/config/import")
+        .header("content-type", format!("multipart/form-data; boundary={}", boundary))
+        .body(Body::from(multipart_body))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(status, StatusCode::OK, "Legacy JSON import failed: {:?}", json);
+    assert_eq!(json["success"], true);
+}
+
+#[tokio::test]
+async fn remap_project_path() {
+    let state = test_state();
+
+    // Create a project
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let (status, json) = post_json(app, "/api/projects", serde_json::json!({
+        "name": "RemapProject",
+        "path": "/nonexistent/old/path",
+        "remote_url": null,
+        "branch": "main",
+        "ai_configs": [],
+        "has_project": false,
+        "hidden": false
+    })).await;
+    assert_eq!(status, StatusCode::OK);
+    let project_id = json["data"]["id"].as_str().unwrap().to_string();
+
+    // Remap to /tmp (which exists)
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let (status, json) = post_json(
+        app,
+        &format!("/api/projects/{}/remap-path", project_id),
+        serde_json::json!({ "path": "/tmp" }),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "Remap failed: {:?}", json);
+    assert_eq!(json["success"], true);
+
+    // Verify path changed
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let (status, json) = get_json(app, &format!("/api/projects/{}", project_id)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["data"]["path"], "/tmp");
+}
+
+#[tokio::test]
+async fn remap_project_path_invalid() {
+    let state = test_state();
+
+    // Create a project
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let (status, json) = post_json(app, "/api/projects", serde_json::json!({
+        "name": "InvalidRemap",
+        "path": "/tmp/test",
+        "remote_url": null,
+        "branch": "main",
+        "ai_configs": [],
+        "has_project": false,
+        "hidden": false
+    })).await;
+    assert_eq!(status, StatusCode::OK);
+    let project_id = json["data"]["id"].as_str().unwrap().to_string();
+
+    // Remap to nonexistent path should fail
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let (status, json) = post_json(
+        app,
+        &format!("/api/projects/{}/remap-path", project_id),
+        serde_json::json!({ "path": "/this/path/does/not/exist/at/all" }),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], false, "Remap to nonexistent path should fail");
 }

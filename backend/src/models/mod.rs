@@ -1621,6 +1621,15 @@ pub struct DbExport {
     pub custom_directives: Vec<Directive>,
     #[serde(default)]
     pub custom_profiles: Vec<AgentProfile>,
+    #[serde(default)]
+    pub contacts: Vec<Contact>,
+}
+
+#[derive(Debug, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ImportResult {
+    pub warnings: Vec<String>,
+    pub invalid_paths: Vec<String>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

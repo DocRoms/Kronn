@@ -869,4 +869,10 @@ export interface DbExport {
   custom_skills?: Skill[];
   custom_directives?: Directive[];
   custom_profiles?: AgentProfile[];
+  contacts?: Contact[];
+}
+
+export interface ImportResult {
+  warnings: string[];
+  invalid_paths: string[];
 }

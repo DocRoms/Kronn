@@ -270,11 +270,38 @@ pub fn find_binary(name: &str) -> Option<BinaryLocation> {
     }
 
     // On Windows native: try finding the binary inside WSL.
-    // Use bash -lc to load the user's login profile (needed for npm global bins in PATH).
+    // 1. Use bash -lc (login shell) to pick up the user's full PATH.
+    // 2. Fallback: probe common install locations directly, because some distros
+    //    guard PATH modifications behind an interactive-shell check in .bashrc,
+    //    which means a login-only shell (-l without -i) may miss them.
     #[cfg(target_os = "windows")]
     {
+        // Login-shell lookup
         let mut cmd = sync_cmd("wsl.exe");
         cmd.args(["-e", "bash", "-lc", &format!("which {}", name)]);
+        if let Ok(output) = cmd.output() {
+            if output.status.success() {
+                let wsl_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !wsl_path.is_empty() {
+                    return Some(BinaryLocation { path: wsl_path, host_managed: true, via_wsl: true });
+                }
+            }
+        }
+
+        // Fallback: probe well-known directories inside WSL
+        let probe_paths = [
+            format!("$HOME/.local/bin/{}", name),
+            format!("$HOME/.kiro/bin/{}", name),
+            format!("/usr/local/bin/{}", name),
+            // npm global on common distros
+            format!("$HOME/.npm-global/bin/{}", name),
+        ];
+        let test_script = probe_paths.iter()
+            .map(|p| format!("test -x {} && echo {}", p, p))
+            .collect::<Vec<_>>()
+            .join(" || ");
+        let mut cmd = sync_cmd("wsl.exe");
+        cmd.args(["-e", "bash", "-c", &test_script]);
         if let Ok(output) = cmd.output() {
             if output.status.success() {
                 let wsl_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
