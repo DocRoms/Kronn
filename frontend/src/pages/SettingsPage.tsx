@@ -1003,7 +1003,10 @@ export function SettingsPage({
             <p className="set-hint">
               {t('config.resetHint')}
             </p>
-            <button className="set-danger-btn" onClick={onReset}>
+            <button className="set-danger-btn" onClick={() => {
+              if (!confirm(t('config.resetConfirm'))) return;
+              onReset();
+            }}>
               <Trash2 size={12} /> {t('config.reset')}
             </button>
           </div>

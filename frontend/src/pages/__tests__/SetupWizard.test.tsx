@@ -10,6 +10,7 @@ vi.mock('../../lib/api', () => ({
   agents: {
     detect: vi.fn().mockResolvedValue([]),
     install: vi.fn().mockResolvedValue('installed'),
+    toggle: vi.fn().mockResolvedValue(true),
   },
   setup: {
     getStatus: vi.fn().mockResolvedValue({ repos_detected: [], agents_detected: [], is_first_run: true, current_step: 'Agents' }),
@@ -361,5 +362,74 @@ describe('SetupWizard — error display', () => {
     await act(async () => { closeBtn!.click(); });
 
     expect(document.body.textContent).not.toContain('Temporary failure');
+  });
+});
+
+describe('SetupWizard — skeleton during detection', () => {
+  it('shows skeleton loader while agents are being detected', async () => {
+    // detect() never resolves → component stays in detecting state
+    vi.mocked(agentsApi.detect).mockReturnValue(new Promise(() => {}));
+
+    await wrap(<SetupWizard initialStatus={null} onComplete={vi.fn()} />);
+
+    // Should show detecting hint, not "no agent"
+    const body = document.body.textContent!;
+    expect(body).toContain('Analyse de votre système');
+  });
+});
+
+describe('SetupWizard — optimistic toggle', () => {
+  it('toggles agent enabled state immediately without rescan', async () => {
+    const agents = [
+      makeAgent({ name: 'Claude Code', agent_type: 'ClaudeCode', installed: true, enabled: true }),
+      makeAgent({ name: 'Codex', agent_type: 'Codex', installed: true, enabled: true }),
+    ];
+    vi.mocked(agentsApi.detect).mockResolvedValue(agents);
+
+    await wrap(<SetupWizard initialStatus={null} onComplete={vi.fn()} />);
+
+    // Find "Activé" buttons
+    const toggleBtns = Array.from(document.body.querySelectorAll('button'))
+      .filter(b => b.textContent === 'Activé');
+    expect(toggleBtns.length).toBe(2);
+
+    // Click first toggle
+    await act(async () => { toggleBtns[0].click(); });
+
+    // Should now show "Désactivé" for first agent without calling detect() again
+    const afterToggle = Array.from(document.body.querySelectorAll('button'))
+      .filter(b => b.textContent === 'Désactivé');
+    expect(afterToggle.length).toBe(1);
+    // detect() was called once on mount, NOT again after toggle
+    expect(agentsApi.detect).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('SetupWizard — completing state', () => {
+  it('shows preparing dashboard spinner when completing', async () => {
+    const agent = makeAgent({ installed: true });
+    vi.mocked(agentsApi.detect).mockResolvedValue([agent]);
+    vi.mocked(setupApi.getStatus).mockResolvedValue(makeStatus({ repos_detected: [] }));
+    const onComplete = vi.fn();
+    // Make complete() hang so we can observe the completing state
+    vi.mocked(setupApi.complete).mockReturnValue(new Promise(() => {}));
+
+    await wrap(<SetupWizard initialStatus={null} onComplete={onComplete} />);
+
+    // Navigate to step 1 (repos)
+    const continuerBtn = Array.from(document.body.querySelectorAll('button')).find(b => b.textContent?.includes('Continuer'));
+    await act(async () => { continuerBtn!.click(); });
+
+    // Navigate to step 2 (done)
+    const skipBtn = Array.from(document.body.querySelectorAll('button')).find(b => b.textContent?.includes('Continuer') || b.textContent?.includes('Passer'));
+    if (skipBtn) await act(async () => { skipBtn.click(); });
+
+    // Click "Accéder au dashboard"
+    const dashBtn = Array.from(document.body.querySelectorAll('button')).find(b => b.textContent?.includes('dashboard'));
+    if (dashBtn) {
+      await act(async () => { dashBtn.click(); });
+      // Should show preparing state
+      expect(document.body.textContent).toContain('Préparation du dashboard');
+    }
   });
 });

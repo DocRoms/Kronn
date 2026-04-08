@@ -55,8 +55,9 @@ pub async fn get_status(
         }));
     }
 
-    // Full path: first run or scan paths not yet configured
-    let scan_paths = if scan_paths_set {
+    // Full path: first run or scan paths not yet configured.
+    // Run agent detection and repo scan IN PARALLEL to halve the wait time.
+    let scan_paths: Vec<String> = if scan_paths_set {
         config.scan.paths.clone()
     } else {
         default_scan_path().into_iter().collect()
@@ -65,25 +66,26 @@ pub async fn get_status(
     let scan_depth = config.scan.scan_depth;
     drop(config);
 
-    let agents_detected = agents::detect_all().await;
-
-    // Use a longer timeout when WSL UNC paths are involved (9P filesystem is slow)
     let has_wsl_paths = scan_paths.iter().any(|p| {
         p.starts_with(r"\\wsl.localhost\") || p.starts_with(r"\\wsl$\")
     });
-    let scan_timeout = if has_wsl_paths { 30 } else { 10 };
+    let scan_timeout = if has_wsl_paths { 15 } else { 5 };
 
-    // Scan with a timeout to avoid blocking on slow filesystems
-    let repos_detected = tokio::time::timeout(
-        std::time::Duration::from_secs(scan_timeout),
-        scanner::scan_paths_with_depth(&scan_paths, &scan_ignore, scan_depth),
-    )
-    .await
-    .unwrap_or_else(|_| {
-        tracing::warn!("Repo scan timed out after {}s — returning empty list", scan_timeout);
-        Ok(vec![])
-    })
-    .unwrap_or_default();
+    // Parallel: detect agents + scan repos simultaneously
+    let (agents_detected, repos_result) = tokio::join!(
+        agents::detect_all(),
+        tokio::time::timeout(
+            std::time::Duration::from_secs(scan_timeout),
+            scanner::scan_paths_with_depth(&scan_paths, &scan_ignore, scan_depth),
+        )
+    );
+
+    let repos_detected = repos_result
+        .unwrap_or_else(|_| {
+            tracing::warn!("Repo scan timed out after {}s — returning empty list", scan_timeout);
+            Ok(vec![])
+        })
+        .unwrap_or_default();
 
     let current_step = if agents_detected.iter().all(|a| !a.installed) {
         SetupStep::Agents

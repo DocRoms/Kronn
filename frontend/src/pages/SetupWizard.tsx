@@ -27,6 +27,7 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
   const [scanning, setScanning] = useState(false);
   const [installing, setInstalling] = useState<string | null>(null);
   const [detecting, setDetecting] = useState(false);
+  const [completing, setCompleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showManualPath, setShowManualPath] = useState(false);
   const [showHidden, setShowHidden] = useState(false);
@@ -100,6 +101,7 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
   };
 
   const handleComplete = async () => {
+    setCompleting(true);
     try {
       // Ensure scan paths are set so backend marks setup as Complete.
       // Without this, skipping repo selection leaves scan_paths empty
@@ -172,6 +174,26 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
                   <RefreshCw size={14} style={detecting ? { animation: 'spin 1s linear infinite' } : undefined} />
                 </button>
               </div>
+              {detecting && agents.length === 0 ? (
+                <>
+                  <div className="setup-detecting-banner">
+                    <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} />
+                    <div>
+                      <p className="setup-desc mb-0">{t('setup.detecting')}</p>
+                      <p className="setup-detecting-hint">{t('setup.detectingHint')}</p>
+                    </div>
+                  </div>
+                  <div className="setup-agent-list">
+                    {[1,2,3,4,5,6].map(i => (
+                      <div key={i} className="setup-agent-row setup-skeleton">
+                        <div className="dot dot-off" />
+                        <div className="flex-1"><div className="setup-skeleton-bar" /></div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <>
               <p className="setup-desc">
                 {installedCount > 0
                   ? t('setup.agentsDetected', installedCount, installedCount > 1 ? 's' : '', installedCount > 1 ? 's' : '')
@@ -215,9 +237,17 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
                           data-on={agent.enabled}
                           onClick={async () => {
                             try {
+                              // Optimistic toggle — update local state immediately, no rescan
+                              setAgents(prev => prev.map(a =>
+                                a.agent_type === agent.agent_type ? { ...a, enabled: !a.enabled } : a
+                              ));
                               await agentsApi.toggle(agent.agent_type);
-                              await refreshAgents();
-                            } catch { /* ignore */ }
+                            } catch {
+                              // Revert on error
+                              setAgents(prev => prev.map(a =>
+                                a.agent_type === agent.agent_type ? { ...a, enabled: !a.enabled } : a
+                              ));
+                            }
                           }}
                         >
                           {agent.enabled ? t('setup.enabled') : t('setup.disabled')}
@@ -249,6 +279,8 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
                   ? <>{t('setup.continue')} <ChevronRight size={16} /></>
                   : <>{t('setup.skip')} <ChevronRight size={16} /></>}
               </button>
+                </>
+              )}
             </div>
           )}
 
@@ -362,14 +394,28 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
           {/* ── STEP 2: Done ── */}
           {step === 2 && (
             <div className="text-center py-8">
-              <div className="setup-done-icon">&#x2713;</div>
-              <h2 className="setup-h2">{t('setup.configDone')}</h2>
-              <p className="setup-desc">
-                {t('setup.summary', installedCount, installedCount > 1 ? 's' : '', repos.length, repos.length > 1 ? 's' : '', repos.length > 1 ? 's' : '')}
-              </p>
-              <button className="setup-btn-primary" onClick={handleComplete}>
-                {t('setup.goToDashboard')} <ChevronRight size={16} />
-              </button>
+              {completing ? (
+                <>
+                  <Loader2 size={32} className="setup-completing-spinner" style={{ animation: 'spin 1s linear infinite' }} />
+                  <h2 className="setup-h2">{t('setup.preparingDashboard')}</h2>
+                  <div className="setup-completing-steps">
+                    <p className="setup-completing-step">{t('setup.completingStep1')}</p>
+                    <p className="setup-completing-step">{t('setup.completingStep2')}</p>
+                    <p className="setup-completing-step">{t('setup.completingStep3')}</p>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="setup-done-icon">&#x2713;</div>
+                  <h2 className="setup-h2">{t('setup.configDone')}</h2>
+                  <p className="setup-desc">
+                    {t('setup.summary', installedCount, installedCount > 1 ? 's' : '', repos.length, repos.length > 1 ? 's' : '', repos.length > 1 ? 's' : '')}
+                  </p>
+                  <button className="setup-btn-primary" onClick={handleComplete}>
+                    {t('setup.goToDashboard')} <ChevronRight size={16} />
+                  </button>
+                </>
+              )}
             </div>
           )}
         </div>
