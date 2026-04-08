@@ -11,18 +11,39 @@ use crate::core::{config, scanner};
 use crate::agents;
 use crate::AppState;
 
-/// Resolve the default scan path.
-/// In Docker: use KRONN_HOST_HOME parent (= host's ~/.. = where repos live).
-/// Otherwise: parent of current working dir.
+/// Resolve default scan paths (best candidate for the wizard).
+/// In Docker: KRONN_HOST_HOME.
+/// On Windows native: first WSL user home (most repos live there) or Windows home.
+/// On Linux/macOS: user home.
 fn default_scan_path() -> Option<String> {
-    // In Docker, KRONN_HOST_HOME points to the mounted host home
+    // Docker: mounted host home
     if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {
         return Some(host_home);
     }
-    // Fallback: parent of cwd
-    std::env::current_dir()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_string_lossy().to_string()))
+
+    // On Windows: prefer WSL home over Windows home (most dev repos are in WSL)
+    #[cfg(target_os = "windows")]
+    {
+        for distro_path in &["\\\\wsl.localhost", "\\\\wsl$"] {
+            let wsl_root = std::path::Path::new(distro_path);
+            if let Ok(entries) = std::fs::read_dir(wsl_root) {
+                for entry in entries.flatten() {
+                    let home = entry.path().join("home");
+                    if let Ok(users) = std::fs::read_dir(&home) {
+                        for user in users.flatten() {
+                            if user.path().is_dir() {
+                                return Some(user.path().to_string_lossy().to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: native user home
+    directories::UserDirs::new()
+        .map(|d| d.home_dir().to_string_lossy().to_string())
 }
 
 /// GET /api/setup/status

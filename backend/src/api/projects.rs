@@ -67,9 +67,39 @@ pub async fn scan(State(state): State<AppState>) -> Json<ApiResponse<Vec<Detecte
     let config = state.config.read().await;
 
     let scan_paths = if config.scan.paths.is_empty() {
-        std::env::var("KRONN_HOST_HOME")
-            .into_iter()
-            .collect::<Vec<_>>()
+        // Fallback: Docker host home, or user home, or cwd parent
+        let mut paths: Vec<String> = Vec::new();
+        if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {
+            paths.push(host_home);
+        }
+        if paths.is_empty() {
+            if let Some(home) = directories::UserDirs::new().map(|d| d.home_dir().to_string_lossy().to_string()) {
+                paths.push(home);
+            }
+        }
+        // On Windows: also probe WSL home directories
+        #[cfg(target_os = "windows")]
+        {
+            for distro_path in &["\\\\wsl.localhost", "\\\\wsl$"] {
+                let wsl_root = std::path::Path::new(distro_path);
+                if let Ok(entries) = std::fs::read_dir(wsl_root) {
+                    for entry in entries.flatten() {
+                        let home = entry.path().join("home");
+                        if home.is_dir() {
+                            if let Ok(users) = std::fs::read_dir(&home) {
+                                for user in users.flatten() {
+                                    let user_home = user.path().to_string_lossy().to_string();
+                                    if !paths.contains(&user_home) {
+                                        paths.push(user_home);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        paths
     } else {
         config.scan.paths.clone()
     };
