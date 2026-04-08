@@ -29,6 +29,19 @@ const ENV_PLACEHOLDERS: Record<string, string> = {
   // Slack
   SLACK_BOT_TOKEN: 'xoxb-xxxxxxxxxxxx',
   SLACK_TEAM_ID: 'T0XXXXXXX',
+  // Microsoft 365 (optional — leave empty to use default app)
+  MS365_MCP_TENANT_ID: 'e59fa28a-... (ID annuaire, optionnel)',
+  MS365_MCP_CLIENT_ID: '2ac5e4f9-... (ID application, optionnel)',
+  // MongoDB
+  MDB_MCP_CONNECTION_STRING: 'mongodb+srv://user:pass@cluster.mongodb.net/db',
+  MDB_MCP_ATLAS_CLIENT_ID: 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx',
+  MDB_MCP_ATLAS_CLIENT_SECRET: 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+  // Qdrant
+  QDRANT_URL: 'http://localhost:6333',
+  COLLECTION_NAME: 'my-collection',
+  EMBEDDING_MODEL: 'sentence-transformers/all-MiniLM-L6-v2',
+  // Perplexity
+  PERPLEXITY_API_KEY: 'pplx-xxxxxxxxxxxx',
   // Linear
   LINEAR_API_KEY: 'lin_api_xxxxxxxxxxxx',
   // Notion
@@ -85,6 +98,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
   const [editingLabelText, setEditingLabelText] = useState('');
   const [showAddMcp, setShowAddMcp] = useState(false);
   const [addMcpSearch, setAddMcpSearch] = useState('');
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const [addMcpSelected, setAddMcpSelected] = useState<string | null>(null);
   const [addMcpLabel, setAddMcpLabel] = useState('');
   const [addMcpEnv, setAddMcpEnv] = useState<Record<string, string>>({});
@@ -280,7 +294,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
 
   const configuredServerIds = new Set(configs.map(c => c.server_id));
   const availableRegistry = mcpRegistry.filter(m =>
-    (!addMcpSearch || m.name.toLowerCase().includes(addMcpSearch.toLowerCase()) || m.tags.some(tag => tag.includes(addMcpSearch.toLowerCase())))
+    (!addMcpSearch || m.name.toLowerCase().includes(addMcpSearch.toLowerCase()) || m.tags.some(tag => tag.toLowerCase().includes(addMcpSearch.toLowerCase())))
   );
   const selectedDef = mcpRegistry.find(m => m.id === addMcpSelected);
 
@@ -372,16 +386,16 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                   <>
                     <div className="mcp-cat-pills">
                       <button
-                        className={`mcp-cat-pill${!addMcpSearch ? ' mcp-cat-pill-active' : ''}`}
-                        onClick={() => setAddMcpSearch('')}
+                        className={`mcp-cat-pill${!selectedCategory ? ' mcp-cat-pill-active' : ''}`}
+                        onClick={() => setSelectedCategory(null)}
                       >
                         {t('mcp.cat.all')}
                       </button>
                       {catsWithItems.map(cat => (
                         <button
                           key={cat}
-                          className={`mcp-cat-pill${addMcpSearch === cat ? ' mcp-cat-pill-active' : ''}`}
-                          onClick={() => setAddMcpSearch(addMcpSearch === cat ? '' : cat)}
+                          className={`mcp-cat-pill${selectedCategory === cat ? ' mcp-cat-pill-active' : ''}`}
+                          onClick={() => setSelectedCategory(selectedCategory === cat ? null : cat)}
                         >
                           {cat} <span className="mcp-cat-pill-count">{grouped.get(cat)!.length}</span>
                         </button>
@@ -390,11 +404,15 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                     <div className="mcp-registry-grid">
                       {catsWithItems.flatMap(cat =>
                         grouped.get(cat)!
-                          .filter(() => !addMcpSearch || addMcpSearch === cat || availableRegistry.includes(grouped.get(cat)![0]))
+                          .filter(m => {
+                            // Category filter
+                            if (selectedCategory && selectedCategory !== cat) return false;
+                            // Text search filter
+                            if (addMcpSearch && !m.name.toLowerCase().includes(addMcpSearch.toLowerCase()) && !m.tags.some(tag => tag.toLowerCase().includes(addMcpSearch.toLowerCase()))) return false;
+                            return true;
+                          })
                           .map(m => {
                             const alreadyAdded = configuredServerIds.has(m.id);
-                            // Only show if search matches or category pill matches
-                            if (addMcpSearch && addMcpSearch !== cat && !m.name.toLowerCase().includes(addMcpSearch.toLowerCase()) && !m.tags.some(tag => tag.includes(addMcpSearch.toLowerCase()))) return null;
                             return (
                               <div
                                 key={m.id}

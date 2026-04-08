@@ -143,6 +143,7 @@ export interface BootstrapProjectRequest {
   description: string;
   agent: AgentType;
   mcp_config_ids?: string[];
+  skill_ids?: string[];
 }
 
 export interface BootstrapProjectResponse {
@@ -884,4 +885,35 @@ export interface TestStepRequest {
   mock_previous_output?: string | null;
   mock_variables?: Record<string, string>;
   dry_run?: boolean;
+}
+
+export interface PromptVariable {
+  name: string;
+  label: string;
+  placeholder: string;
+}
+
+export interface QuickPrompt {
+  id: string;
+  name: string;
+  icon: string;
+  prompt_template: string;
+  variables: PromptVariable[];
+  agent: AgentType;
+  project_id?: string | null;
+  skill_ids?: string[];
+  tier?: ModelTier;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateQuickPromptRequest {
+  name: string;
+  icon?: string | null;
+  prompt_template: string;
+  variables?: PromptVariable[];
+  agent?: AgentType | null;
+  project_id?: string | null;
+  skill_ids?: string[];
+  tier?: ModelTier;
 }

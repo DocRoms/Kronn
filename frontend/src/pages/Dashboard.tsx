@@ -18,7 +18,7 @@ import {
   Plus, Search, Zap, Settings,
   Loader2,
   MessageSquare, X,
-  Rocket, Check, Workflow,
+  Rocket, Check, Workflow, FileText,
 } from 'lucide-react';
 
 type Page = 'projects' | 'mcps' | 'workflows' | 'discussions' | 'settings';
@@ -171,6 +171,9 @@ export function Dashboard({ onReset }: DashboardProps) {
   const [bootstrapDesc, setBootstrapDesc] = useState('');
   const [bootstrapLoading, setBootstrapLoading] = useState(false);
   const [bootstrapMcpIds, setBootstrapMcpIds] = useState<string[]>([]);
+  const [bootstrapFiles, setBootstrapFiles] = useState<File[]>([]);
+  const [bootstrapRepoMcp, setBootstrapRepoMcp] = useState('');       // MCP config ID for repo creation
+  const [bootstrapTrackerMcp, setBootstrapTrackerMcp] = useState(''); // MCP config ID for issue tracker
   const [newProjectMode, setNewProjectMode] = useState<'bootstrap' | 'clone'>('bootstrap');
   const [cloneUrl, setCloneUrl] = useState('');
   const [cloneName, setCloneName] = useState('');
@@ -189,11 +192,37 @@ export function Dashboard({ onReset }: DashboardProps) {
     if (!agent) { toast('No usable agent found', 'error'); return; }
     setBootstrapLoading(true);
     try {
-      const res = await projectsApi.bootstrap({ name: bootstrapName.trim(), description: bootstrapDesc.trim(), agent, mcp_config_ids: bootstrapMcpIds });
+      // Build description with bootstrap++ instructions
+      let desc = bootstrapDesc.trim();
+      const instructions: string[] = [];
+      const repoMcpLabel = bootstrapRepoMcp ? mcpOverview.configs.find(c => c.id === bootstrapRepoMcp)?.label : null;
+      const trackerMcpLabel = bootstrapTrackerMcp ? mcpOverview.configs.find(c => c.id === bootstrapTrackerMcp)?.label : null;
+      if (repoMcpLabel) instructions.push(`Create a Git repository for this project via "${repoMcpLabel}" MCP.`);
+      if (trackerMcpLabel) instructions.push(`After architecture validation, generate a full project plan and create issues via "${trackerMcpLabel}" MCP.`);
+      if (bootstrapFiles.length > 0) instructions.push(`${bootstrapFiles.length} document(s) uploaded as context — read them carefully before starting.`);
+      if (instructions.length > 0) desc += '\n\n---\nBootstrap instructions:\n' + instructions.map(i => `- ${i}`).join('\n');
+
+      // Include selected MCPs in the config
+      const allMcpIds = [...bootstrapMcpIds];
+      if (bootstrapRepoMcp && !allMcpIds.includes(bootstrapRepoMcp)) allMcpIds.push(bootstrapRepoMcp);
+      if (bootstrapTrackerMcp && !allMcpIds.includes(bootstrapTrackerMcp)) allMcpIds.push(bootstrapTrackerMcp);
+
+      const res = await projectsApi.bootstrap({ name: bootstrapName.trim(), description: desc, agent, mcp_config_ids: allMcpIds, skill_ids: ['bootstrap-architect'] });
+      // Upload context files to the bootstrap discussion
+      for (const file of bootstrapFiles) {
+        try {
+          await discussionsApi.uploadContextFile(res.discussion_id, file);
+        } catch (e) {
+          console.warn('Failed to upload context file:', e);
+        }
+      }
       setShowBootstrap(false);
       setBootstrapName('');
       setBootstrapDesc('');
       setBootstrapMcpIds([]);
+      setBootstrapFiles([]);
+      setBootstrapRepoMcp('');
+      setBootstrapTrackerMcp('');
       await refetch();
       // Navigate to discussions with auto-run on the bootstrap discussion
       setAutoRunDiscussionId(res.discussion_id);
@@ -425,6 +454,92 @@ export function Dashboard({ onReset }: DashboardProps) {
                     </div>
                   </div>
                 )}
+
+                {/* Document upload */}
+                <div className="dash-file-upload" style={{ marginBottom: 16 }}>
+                  <span className="dash-field-label">{t('projects.bootstrap.docs')}</span>
+                  <div
+                    className="dash-drop-zone"
+                    onDragOver={e => { e.preventDefault(); e.currentTarget.dataset.dragover = 'true'; }}
+                    onDragLeave={e => { e.currentTarget.dataset.dragover = 'false'; }}
+                    onDrop={e => {
+                      e.preventDefault();
+                      e.currentTarget.dataset.dragover = 'false';
+                      const files = Array.from(e.dataTransfer.files);
+                      setBootstrapFiles(prev => [...prev, ...files]);
+                    }}
+                    onClick={() => {
+                      const input = document.createElement('input');
+                      input.type = 'file';
+                      input.multiple = true;
+                      input.accept = '.md,.txt,.pdf,.json,.yaml,.yml,.toml,.csv,.docx,.pptx';
+                      input.onchange = () => {
+                        if (input.files) setBootstrapFiles(prev => [...prev, ...Array.from(input.files!)]);
+                      };
+                      input.click();
+                    }}
+                  >
+                    <FileText size={16} className="text-muted" />
+                    <span className="text-sm text-muted">{t('projects.bootstrap.docsHint')}</span>
+                  </div>
+                  {bootstrapFiles.length > 0 && (
+                    <div className="dash-file-list">
+                      {bootstrapFiles.map((f, i) => (
+                        <div key={i} className="dash-file-chip">
+                          <FileText size={10} />
+                          <span>{f.name}</span>
+                          <button type="button" onClick={() => setBootstrapFiles(prev => prev.filter((_, j) => j !== i))} className="dash-file-remove">&times;</button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Bootstrap++ options (MCP-aware) */}
+                {(() => {
+                  const gitMcps = mcpOverview.configs.filter(c =>
+                    c.server_id === 'mcp-github' || c.server_id === 'mcp-gitlab'
+                  );
+                  const trackerMcps = mcpOverview.configs.filter(c =>
+                    c.server_id === 'mcp-github' || c.server_id === 'mcp-atlassian' || c.server_id === 'mcp-linear'
+                  );
+                  if (!gitMcps.length && !trackerMcps.length) return null;
+                  return (
+                    <div className="dash-bootstrap-options" style={{ marginBottom: 16 }}>
+                      <span className="dash-field-label">{t('projects.bootstrap.options')}</span>
+                      {gitMcps.length > 0 && (
+                        <div className="dash-bootstrap-option">
+                          <select
+                            className="dash-field-input"
+                            value={bootstrapRepoMcp}
+                            onChange={e => setBootstrapRepoMcp(e.target.value)}
+                            style={{ flex: 1 }}
+                          >
+                            <option value="">{t('projects.bootstrap.noCreateRepo')}</option>
+                            {gitMcps.map(c => (
+                              <option key={c.id} value={c.id}>{t('projects.bootstrap.createRepoVia')} {c.label}</option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+                      {trackerMcps.length > 0 && (
+                        <div className="dash-bootstrap-option">
+                          <select
+                            className="dash-field-input"
+                            value={bootstrapTrackerMcp}
+                            onChange={e => setBootstrapTrackerMcp(e.target.value)}
+                            style={{ flex: 1 }}
+                          >
+                            <option value="">{t('projects.bootstrap.noGeneratePlan')}</option>
+                            {trackerMcps.map(c => (
+                              <option key={c.id} value={c.id}>{t('projects.bootstrap.generatePlanVia')} {c.label}</option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
 
                 <button
                   onClick={handleBootstrap}

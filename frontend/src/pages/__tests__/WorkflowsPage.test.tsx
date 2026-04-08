@@ -86,7 +86,7 @@ describe('WorkflowsPage', () => {
   it('renders with various agentAccess configs and shows create button', async () => {
     // Without agentAccess
     const { unmount: u1 } = await wrap(<WorkflowsPage projects={[]} />);
-    expect(screen.getByText('Workflows')).toBeDefined();
+    expect(screen.getByText('Automatisation')).toBeDefined();
     expect(screen.getByText('Nouveau workflow')).toBeDefined();
     u1();
 
@@ -98,7 +98,7 @@ describe('WorkflowsPage', () => {
         agentAccess={restrictedConfig}
       />
     );
-    expect(screen.getByText('Workflows')).toBeDefined();
+    expect(screen.getByText('Automatisation')).toBeDefined();
     expect(screen.getByText('Nouveau workflow')).toBeDefined();
     u2();
 
@@ -110,7 +110,7 @@ describe('WorkflowsPage', () => {
         agentAccess={fullConfig}
       />
     );
-    expect(screen.getByText('Workflows')).toBeDefined();
+    expect(screen.getByText('Automatisation')).toBeDefined();
     expect(screen.getByText('Nouveau workflow')).toBeDefined();
   });
 
@@ -132,7 +132,7 @@ describe('WorkflowsPage', () => {
     );
 
     // Page title and create button should still render on mobile
-    expect(screen.getByText('Workflows')).toBeDefined();
+    expect(screen.getByText('Automatisation')).toBeDefined();
     expect(screen.getByText('Nouveau workflow')).toBeDefined();
 
     // The layout should use column direction on mobile (flex-direction: column)

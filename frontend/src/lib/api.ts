@@ -60,6 +60,8 @@ import type {
   UploadContextFileResponse,
   ImportResult,
   TestStepRequest,
+  QuickPrompt,
+  CreateQuickPromptRequest,
 } from '../types/generated';
 import type { DiscoverKeysResponse } from '../types/extensions';
 
@@ -763,6 +765,15 @@ export const workflows = {
       onError,
     });
   },
+};
+
+// ─── Quick Prompts ─────────────────────────────────────────────────────────
+
+export const quickPrompts = {
+  list: () => api<QuickPrompt[]>('GET', '/quick-prompts'),
+  create: (req: CreateQuickPromptRequest) => api<QuickPrompt>('POST', '/quick-prompts', req),
+  update: (id: string, req: CreateQuickPromptRequest) => api<QuickPrompt>('PUT', `/quick-prompts/${id}`, req),
+  delete: (id: string) => api<void>('DELETE', `/quick-prompts/${id}`),
 };
 
 // ─── Skills ─────────────────────────────────────────────────────────────────

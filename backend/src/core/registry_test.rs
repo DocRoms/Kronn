@@ -126,14 +126,14 @@ mod tests {
             // Git & Code
             "mcp-github", "mcp-gitlab", "mcp-git",
             // Databases
-            "mcp-postgres", "mcp-sqlite", "mcp-redis", "mcp-neon",
+            "mcp-postgres", "mcp-sqlite", "mcp-redis", "mcp-neon", "mcp-mongodb", "mcp-qdrant",
             // Monitoring
             "mcp-sentry", "mcp-grafana", "mcp-datadog",
             // Cloud & Analytics
             "mcp-cloudflare", "mcp-aws-cloudwatch", "mcp-aws-api", "mcp-azure", "mcp-gcloud", "mcp-bigquery",
             "mcp-google-analytics",
             // Browser & Testing
-            "mcp-playwright", "mcp-chrome-devtools", "mcp-puppeteer",
+            "mcp-playwright", "mcp-chrome-devtools",
             // CDN & Edge
             "mcp-fastly",
             // Code Quality & IaC
@@ -146,8 +146,12 @@ mod tests {
             "mcp-google-colab",
             // Data Federation
             "mcp-mindsdb",
+            // Cloud — containers
+            "mcp-kubernetes",
+            // Search
+            "mcp-perplexity",
             // Communication & PM
-            "mcp-slack", "mcp-linear", "mcp-atlassian",
+            "mcp-slack", "mcp-linear", "mcp-atlassian", "mcp-microsoft-365",
             // Design
             "mcp-figma", "mcp-drawio",
             // Knowledge & Docs
@@ -532,6 +536,85 @@ mod tests {
         assert!(official_count > community_count,
             "Expected more official ({}) than community ({}) MCPs",
             official_count, community_count);
+    }
+
+    // ─── New MCPs (0.3.3+) ───────────────────────────────────────────────────
+
+    #[test]
+    fn puppeteer_removed_from_registry() {
+        let reg = builtin_registry();
+        assert!(reg.iter().all(|m| m.id != "mcp-puppeteer"),
+            "Puppeteer should be removed — use Playwright instead");
+    }
+
+    #[test]
+    fn mongodb_mcp_configuration() {
+        let reg = builtin_registry();
+        let m = reg.iter().find(|m| m.id == "mcp-mongodb").expect("mcp-mongodb missing");
+        assert_eq!(m.publisher, "MongoDB");
+        assert!(m.official);
+        assert!(m.env_keys.contains(&"MDB_MCP_CONNECTION_STRING".into()));
+        match &m.transport { McpTransport::Stdio { command, .. } => assert_eq!(command, "npx"), _ => panic!("expected Stdio") }
+    }
+
+    #[test]
+    fn kubernetes_mcp_configuration() {
+        let reg = builtin_registry();
+        let m = reg.iter().find(|m| m.id == "mcp-kubernetes").expect("mcp-kubernetes missing");
+        assert_eq!(m.publisher, "Red Hat");
+        assert!(m.official);
+        assert!(m.tags.contains(&"containers".into()));
+    }
+
+    #[test]
+    fn qdrant_mcp_configuration() {
+        let reg = builtin_registry();
+        let m = reg.iter().find(|m| m.id == "mcp-qdrant").expect("mcp-qdrant missing");
+        assert_eq!(m.publisher, "Qdrant");
+        assert!(m.official);
+        assert!(m.env_keys.contains(&"QDRANT_URL".into()));
+        match &m.transport { McpTransport::Stdio { command, .. } => assert_eq!(command, "uvx"), _ => panic!("expected Stdio") }
+    }
+
+    #[test]
+    fn perplexity_mcp_configuration() {
+        let reg = builtin_registry();
+        let m = reg.iter().find(|m| m.id == "mcp-perplexity").expect("mcp-perplexity missing");
+        assert_eq!(m.publisher, "Perplexity");
+        assert!(m.official);
+        assert!(m.env_keys.contains(&"PERPLEXITY_API_KEY".into()));
+    }
+
+    #[test]
+    fn microsoft_365_mcp_configuration() {
+        let reg = builtin_registry();
+        let m = reg.iter().find(|m| m.id == "mcp-microsoft-365").expect("mcp-microsoft-365 missing");
+        assert_eq!(m.publisher, "Softeria (community)");
+        assert!(!m.official);
+        assert!(m.tags.contains(&"email".into()));
+        assert!(m.tags.contains(&"teams".into()));
+    }
+
+    #[test]
+    fn google_analytics_publisher_is_community() {
+        let reg = builtin_registry();
+        let m = reg.iter().find(|m| m.id == "mcp-google-analytics").unwrap();
+        assert_eq!(m.publisher, "Community", "GA4 MCP is not by Google — should be Community");
+        assert!(!m.official);
+    }
+
+    #[test]
+    fn docker_required_mcps_mention_docker_in_help() {
+        let reg = builtin_registry();
+        for id in &["mcp-sonarqube", "mcp-terraform"] {
+            let m = reg.iter().find(|m| m.id == *id).unwrap();
+            match &m.transport {
+                McpTransport::Stdio { command, .. } => assert_eq!(command, "docker", "{} should use docker", id),
+                _ => panic!("{} should be Stdio", id),
+            }
+            assert!(m.token_help.as_ref().map(|h| h.contains("Docker")).unwrap_or(false),
+                "{} help should mention Docker requirement", id);
+        }
     }
 
     #[test]

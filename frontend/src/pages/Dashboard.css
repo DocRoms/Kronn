@@ -1073,3 +1073,73 @@
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ── Bootstrap file upload ─────────────────────────── */
+.dash-drop-zone {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-6);
+  border: 2px dashed var(--kr-border);
+  border-radius: var(--kr-r-lg);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.dash-drop-zone:hover,
+.dash-drop-zone[data-dragover="true"] {
+  border-color: var(--kr-accent);
+  background: rgba(var(--kr-accent-rgb), 0.04);
+}
+.dash-file-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--kr-sp-2);
+  margin-top: var(--kr-sp-3);
+}
+.dash-file-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px var(--kr-sp-3);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-hover);
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-secondary);
+}
+.dash-file-remove {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--kr-text-faint);
+  font-size: 14px;
+  padding: 0 2px;
+  line-height: 1;
+}
+.dash-file-remove:hover { color: var(--kr-text-danger, #f87171); }
+
+/* ── Bootstrap options ─────────────────────────────── */
+.dash-bootstrap-options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-3);
+}
+.dash-bootstrap-option {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  cursor: pointer;
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-secondary);
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  border-radius: var(--kr-r-md);
+  border: 1px solid var(--kr-border);
+  background: var(--kr-bg-subtle);
+  transition: border-color 0.15s;
+}
+.dash-bootstrap-option:hover {
+  border-color: var(--kr-accent-border);
+}
+.dash-bootstrap-option input[type="checkbox"] {
+  accent-color: var(--kr-accent);
+}

@@ -1,11 +1,11 @@
 import { useState, useRef, useMemo } from 'react';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { useT } from '../lib/I18nContext';
-import { workflows as workflowsApi, discussions as discussionsApi } from '../lib/api';
+import { workflows as workflowsApi, discussions as discussionsApi, quickPrompts as quickPromptsApi } from '../lib/api';
 import { useApi } from '../hooks/useApi';
 import type {
   Project, WorkflowSummary, Workflow, WorkflowRun,
-  AgentType, AgentsConfig, StepResult,
+  AgentType, AgentsConfig, StepResult, QuickPrompt, CreateQuickPromptRequest,
 } from '../types/generated';
 import {
   Plus, Trash2, Play, Loader2, ChevronLeft, ChevronRight, ChevronDown,
@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { WorkflowDetail } from '../components/workflows/WorkflowDetail';
 import { WorkflowWizard } from '../components/workflows/WorkflowWizard';
+import { QuickPromptForm } from '../components/workflows/QuickPromptForm';
 import './WorkflowsPage.css';
 
 interface WorkflowsPageProps {
@@ -42,8 +43,15 @@ const STATUS_COLORS: Record<string, string> = {
 export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, configLanguage, onNavigateDiscussion }: WorkflowsPageProps) {
   const { t } = useT();
   const isMobile = useIsMobile();
+  const [tab, setTab] = useState<'workflows' | 'quickPrompts'>('workflows');
   const { data: workflowList, refetch } = useApi(() => workflowsApi.list(), []);
+  const { data: quickPromptList, refetch: refetchQP } = useApi(() => quickPromptsApi.list(), []);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [showCreateQP, setShowCreateQP] = useState(false);
+  const [editingQP, setEditingQP] = useState<QuickPrompt | null>(null);
+  const [launchingQP, setLaunchingQP] = useState<QuickPrompt | null>(null);
+  const [launchVars, setLaunchVars] = useState<Record<string, string>>({});
+  const [launching, setLaunching] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [editingWorkflow, setEditingWorkflow] = useState<Workflow | null>(null);
   const [detailWorkflow, setDetailWorkflow] = useState<Workflow | null>(null);
@@ -186,13 +194,63 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     }
   };
 
+  const handleSaveQP = async (req: CreateQuickPromptRequest) => {
+    if (editingQP) {
+      await quickPromptsApi.update(editingQP.id, req);
+    } else {
+      await quickPromptsApi.create(req);
+    }
+    setShowCreateQP(false);
+    setEditingQP(null);
+    refetchQP();
+  };
+
+  const renderTemplate = (template: string, vars: Record<string, string>): string => {
+    let rendered = template;
+    // 1. Process conditional sections: {{#var}}content{{/var}} — removed if var is empty
+    rendered = rendered.replace(/\{\{#(\w+)\}\}([\s\S]*?)\{\{\/\1\}\}/g, (_, name, content) => {
+      return vars[name]?.trim() ? content : '';
+    });
+    // 2. Replace remaining {{var}} placeholders
+    rendered = rendered.replace(/\{\{(\w+)\}\}/g, (_, name) => vars[name] ?? '');
+    // 3. Clean up double spaces/commas from removed sections
+    rendered = rendered.replace(/  +/g, ' ').replace(/, ,/g, ',').trim();
+    return rendered;
+  };
+
+  const handleLaunchQP = async (qp: QuickPrompt) => {
+    setLaunching(true);
+    try {
+      const rendered = renderTemplate(qp.prompt_template, launchVars);
+      // Build dynamic title with first non-empty variable value
+      const firstVal = qp.variables.map(v => launchVars[v.name]).find(v => v?.trim());
+      const title = firstVal ? `${qp.name} — ${firstVal}` : qp.name;
+      const disc = await discussionsApi.create({
+        project_id: qp.project_id ?? null,
+        title,
+        agent: qp.agent,
+        language: configLanguage || 'fr',
+        initial_prompt: rendered,
+        skill_ids: qp.skill_ids?.length ? qp.skill_ids : undefined,
+        tier: qp.tier !== 'default' ? qp.tier : undefined,
+      });
+      setLaunchingQP(null);
+      setLaunchVars({});
+      onNavigateDiscussion?.(disc.id);
+    } catch (e) {
+      console.warn('Launch failed:', e);
+    } finally {
+      setLaunching(false);
+    }
+  };
+
   return (
     <div>
-      <div className="flex-between mb-9">
+      <div className="flex-between mb-4">
         <div>
           <h1 className="wf-h1">{t('wf.title')}</h1>
-          <p className="wf-meta">{t('wf.subtitle')}</p>
         </div>
+        {tab === 'workflows' ? (
         <div className="flex-row gap-3">
           {onNavigateDiscussion && (
             <button className="wf-create-ai-btn" onClick={async () => {
@@ -226,7 +284,25 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
             <Plus size={14} /> {t('wf.new')}
           </button>
         </div>
+        ) : (
+        <button className="wf-create-btn" onClick={() => { setShowCreateQP(true); setEditingQP(null); }}>
+          <Plus size={14} /> {t('qp.new')}
+        </button>
+        )}
       </div>
+
+      {/* Tab bar */}
+      <div className="dash-tab-bar mb-6">
+        <button className="dash-tab" data-active={tab === 'workflows'} onClick={() => setTab('workflows')}>
+          {t('wf.tabWorkflows')} {workflowList ? `(${workflowList.length})` : ''}
+        </button>
+        <button className="dash-tab" data-active={tab === 'quickPrompts'} onClick={() => setTab('quickPrompts')}>
+          {t('wf.tabQuickPrompts')} {quickPromptList ? `(${quickPromptList.length})` : ''}
+        </button>
+      </div>
+
+      {/* ═══ WORKFLOWS TAB ═══ */}
+      {tab === 'workflows' && (<>
 
       {/* Create wizard */}
       {showCreate && (
@@ -398,6 +474,104 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
               </div>
             )}
           </div>
+        </div>
+      )}
+      </>)}
+
+      {/* ═══ QUICK PROMPTS TAB ═══ */}
+      {tab === 'quickPrompts' && (
+        <div>
+          {/* Create/Edit form */}
+          {(showCreateQP || editingQP) && (
+            <QuickPromptForm
+              editPrompt={editingQP ?? undefined}
+              projects={projects}
+              onSave={handleSaveQP}
+              onCancel={() => { setShowCreateQP(false); setEditingQP(null); }}
+            />
+          )}
+
+          {/* Quick prompt list */}
+          {!showCreateQP && !editingQP && (
+            <>
+              {(!quickPromptList || quickPromptList.length === 0) ? (
+                <div className="wf-empty">
+                  <p className="wf-empty-title">{t('qp.empty')}</p>
+                  <p className="wf-empty-hint">{t('qp.emptyHint')}</p>
+                </div>
+              ) : (
+                <div className="qp-list">
+                  {quickPromptList.map(qp => (
+                    <div key={qp.id} className="qp-card">
+                      <div className="qp-card-header">
+                        <span className="qp-card-icon">{qp.icon}</span>
+                        <span className="qp-card-name">{qp.name}</span>
+                        {qp.variables.length > 0 && (
+                          <span className="qp-card-vars">{t('qp.vars', qp.variables.length)}</span>
+                        )}
+                        <div className="qp-card-actions">
+                          <button className="wf-icon-btn" onClick={() => setEditingQP(qp)} title="Edit">
+                            <Eye size={12} />
+                          </button>
+                          <button className="wf-icon-btn" onClick={async () => {
+                            if (!confirm(t('qp.deleteConfirm'))) return;
+                            await quickPromptsApi.delete(qp.id);
+                            refetchQP();
+                          }} title={t('qp.delete')}>
+                            <Trash2 size={12} />
+                          </button>
+                          <button
+                            className="qp-launch-btn"
+                            onClick={() => {
+                              if (qp.variables.length === 0) {
+                                // No variables — launch directly
+                                setLaunchingQP(qp);
+                                setLaunchVars({});
+                                // Immediate launch
+                                handleLaunchQP(qp);
+                              } else {
+                                setLaunchingQP(launchingQP?.id === qp.id ? null : qp);
+                                setLaunchVars({});
+                              }
+                            }}
+                          >
+                            <Play size={12} /> {t('qp.launch')}
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Launch form with variable inputs */}
+                      {launchingQP?.id === qp.id && qp.variables.length > 0 && (
+                        <div className="qp-launch-form">
+                          {qp.variables.map(v => (
+                            <div key={v.name} className="qp-launch-field">
+                              <label className="qp-launch-label">{v.label || v.name}</label>
+                              <input
+                                className="wf-input flex-1"
+                                value={launchVars[v.name] ?? ''}
+                                onChange={e => setLaunchVars(prev => ({ ...prev, [v.name]: e.target.value }))}
+                                placeholder={v.placeholder}
+                                autoFocus={qp.variables.indexOf(v) === 0}
+                                onKeyDown={e => { if (e.key === 'Enter') handleLaunchQP(qp); }}
+                              />
+                            </div>
+                          ))}
+                          <button
+                            className="qp-launch-go-btn"
+                            onClick={() => handleLaunchQP(qp)}
+                            disabled={launching}
+                          >
+                            {launching ? <Loader2 size={14} className="spin" /> : <Play size={14} />}
+                            {launching ? '...' : t('qp.launch')}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
         </div>
       )}
     </div>
