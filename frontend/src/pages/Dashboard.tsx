@@ -271,14 +271,27 @@ export function Dashboard({ onReset }: DashboardProps) {
     }
   };
 
+  const [scanning, setScanning] = useState(false);
   const handleScan = async () => {
-    const repos = await projectsApi.scan();
-    for (const repo of repos) {
-      if (!repo.has_project && !repo.hidden) {
-        await projectsApi.create(repo);
+    if (scanning) return;
+    setScanning(true);
+    try {
+      const repos = await projectsApi.scan();
+      let added = 0;
+      for (const repo of repos) {
+        if (!repo.has_project && !repo.hidden) {
+          await projectsApi.create(repo);
+          added++;
+        }
       }
+      refetch();
+      if (added > 0) toast(t('projects.scanFound', added), 'success');
+      else toast(t('projects.scanNone'), 'info');
+    } catch {
+      toast(t('projects.scanError'), 'error');
+    } finally {
+      setScanning(false);
     }
-    refetch();
   };
 
   return (
@@ -318,8 +331,9 @@ export function Dashboard({ onReset }: DashboardProps) {
         <button className="dash-scan-btn" onClick={() => setShowBootstrap(true)} title={t('projects.bootstrap')}>
           <Plus size={14} /> {!isMobile && t('projects.bootstrap')}
         </button>
-        <button className="dash-scan-btn" onClick={handleScan} title={t('nav.scan')}>
-          <Search size={14} /> {!isMobile && t('nav.scan')}
+        <button className="dash-scan-btn" onClick={handleScan} disabled={scanning} title={t('nav.scan')}>
+          {scanning ? <Loader2 size={14} className="spin" /> : <Search size={14} />}
+          {!isMobile && (scanning ? t('projects.scanning') : t('nav.scan'))}
         </button>
       </nav>
 
