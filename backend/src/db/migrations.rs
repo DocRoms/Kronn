@@ -46,6 +46,7 @@ pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> 
         ("024_message_cost", include_str!("sql/024_message_cost.sql")),
         ("025_context_files", include_str!("sql/025_context_files.sql")),
         // 026: idempotent column addition (handled below, not via SQL file)
+        ("027_quick_prompts", include_str!("sql/026_quick_prompts.sql")),
     ];
 
     // Check if there are pending migrations before backing up

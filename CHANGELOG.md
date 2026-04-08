@@ -7,6 +7,30 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.3.4] — 2026-04-08
+
+### Added
+- **Quick Prompts** — reusable prompt templates with `{{variables}}` and conditional sections `{{#var}}text{{/var}}`. New tab "Quick Prompts" in the Automation page. Launch creates a discussion with rendered prompt and dynamic title. Full CRUD API + DB migration
+- **MCP registry: 4 new MCPs** — MongoDB (official), Kubernetes (Red Hat), Qdrant (vector DB), Perplexity (AI search)
+- **MCP Microsoft 365** — Outlook, Teams, OneDrive, OneNote via Softeria community server (device code flow auth)
+- **MCP env var placeholders** — realistic hints for 30+ env vars + eye toggle on add form
+- **Bootstrap++** — enhanced project creation with gated validation. New skill `bootstrap-architect` guides through 3 stages: architecture analysis → project plan → issue creation. Each stage requires user validation via CTA banner. Drag & drop document upload in the bootstrap modal (architecture docs, specs, PRDs). Uploaded files injected as context for the agent
+- **WSL project discovery** — Windows Tauri app now auto-discovers WSL home directories for repo scanning
+
+### Changed
+- **Page title** — "Workflows" renamed to "Automatisation" (the page now contains Workflows + Quick Prompts tabs)
+- **MCP registry** — Puppeteer removed (use Playwright), Google Analytics publisher corrected to "Community", Docker MCPs mention Docker requirement in help
+- **MCP category pills** — fixed: filtering by category now works correctly (separated category selection from text search)
+- **Setup wizard** — skeleton loader during agent detection, optimistic toggle (no rescan), animated completing state, parallel agent detection + repo scan (tokio::join)
+- **Scan button** — loading state + toast feedback ("N new projects detected")
+- **Reset config** — confirmation dialog with data loss warning
+
+### Fixed
+- **WSL scan paths** — `default_scan_path()` now returns WSL home on Windows native, scan always includes WSL homes
+- **Setup wizard completion loop** — fast path for setup/status when already complete
+
+---
+
 ## [0.3.3] — 2026-04-07
 
 ### Added

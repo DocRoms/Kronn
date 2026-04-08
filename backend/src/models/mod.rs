@@ -421,6 +421,8 @@ pub struct BootstrapProjectRequest {
     pub agent: AgentType,
     #[serde(default)]
     pub mcp_config_ids: Vec<String>,
+    #[serde(default)]
+    pub skill_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -625,6 +627,52 @@ pub struct McpDefinition {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(skip)]
     pub default_context: Option<String>,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Quick Prompts (reusable prompt templates with variables)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PromptVariable {
+    pub name: String,
+    pub label: String,
+    pub placeholder: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct QuickPrompt {
+    pub id: String,
+    pub name: String,
+    pub icon: String,
+    pub prompt_template: String,
+    pub variables: Vec<PromptVariable>,
+    pub agent: AgentType,
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub skill_ids: Vec<String>,
+    #[serde(default)]
+    pub tier: ModelTier,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct CreateQuickPromptRequest {
+    pub name: String,
+    pub icon: Option<String>,
+    pub prompt_template: String,
+    #[serde(default)]
+    pub variables: Vec<PromptVariable>,
+    pub agent: Option<AgentType>,
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub skill_ids: Vec<String>,
+    #[serde(default)]
+    pub tier: ModelTier,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1652,6 +1700,8 @@ pub struct DbExport {
     pub custom_profiles: Vec<AgentProfile>,
     #[serde(default)]
     pub contacts: Vec<Contact>,
+    #[serde(default)]
+    pub quick_prompts: Vec<QuickPrompt>,
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]

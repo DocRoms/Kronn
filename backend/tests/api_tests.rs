@@ -541,6 +541,7 @@ async fn config_export_empty_db() {
         assert!(data["mcp_servers"].as_array().unwrap().is_empty());
         assert!(data["mcp_configs"].as_array().unwrap().is_empty());
         assert!(data["contacts"].as_array().unwrap().is_empty());
+        assert!(data["quick_prompts"].as_array().unwrap().is_empty());
     }
 
     // Verify config.toml exists
@@ -2765,6 +2766,44 @@ async fn workflow_update_project_id_persists() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Quick Prompts CRUD
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn quick_prompt_crud_api() {
+    let state = test_state();
+
+    // Create
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let (status, json) = post_json(app, "/api/quick-prompts", serde_json::json!({
+        "name": "Test QP",
+        "prompt_template": "Analyse {{ticket}}",
+        "variables": [{"name": "ticket", "label": "Ticket", "placeholder": "PROJ-123"}]
+    })).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+    let qp_id = json["data"]["id"].as_str().unwrap().to_string();
+    assert_eq!(json["data"]["name"], "Test QP");
+    assert_eq!(json["data"]["variables"].as_array().unwrap().len(), 1);
+
+    // List
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let (status, json) = get_json(app, "/api/quick-prompts").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["data"].as_array().unwrap().len(), 1);
+
+    // Delete
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let (status, _) = delete_json(app, &format!("/api/quick-prompts/{}", qp_id)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Verify deleted
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let (_, json) = get_json(app, "/api/quick-prompts").await;
+    assert_eq!(json["data"].as_array().unwrap().len(), 0);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Workflow test-step endpoint
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -2813,4 +2852,46 @@ async fn skills_list_includes_workflow_architect() {
     assert_eq!(skill["category"], "Domain");
     assert!(skill["is_builtin"].as_bool().unwrap(), "Must be builtin");
     assert!(skill["content"].as_str().unwrap().contains("KRONN:WORKFLOW_READY"), "Skill must mention the signal");
+}
+
+#[tokio::test]
+async fn skills_list_includes_bootstrap_architect() {
+    let app = test_app();
+    let (status, json) = get_json(app, "/api/skills").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let skills = json["data"].as_array().unwrap();
+    let skill = skills.iter().find(|s| s["id"] == "bootstrap-architect");
+    assert!(skill.is_some(), "bootstrap-architect skill must be in the list");
+    let skill = skill.unwrap();
+    assert_eq!(skill["category"], "Domain");
+    assert!(skill["is_builtin"].as_bool().unwrap());
+    // Must mention all 3 gated signals
+    let content = skill["content"].as_str().unwrap();
+    assert!(content.contains("KRONN:ARCHITECTURE_READY"), "Must mention ARCHITECTURE_READY");
+    assert!(content.contains("KRONN:PLAN_READY"), "Must mention PLAN_READY");
+    assert!(content.contains("KRONN:ISSUES_CREATED"), "Must mention ISSUES_CREATED");
+}
+
+#[tokio::test]
+async fn bootstrap_request_accepts_skill_ids() {
+    // Verify the endpoint accepts skill_ids without deserialization error.
+    // The actual bootstrap creates directories so it will fail in test (no scan paths),
+    // but the important thing is that the request is parsed correctly.
+    let state = test_state();
+    let app = kronn::build_router_with_auth(state, false);
+
+    let (status, json) = post_json(app, "/api/projects/bootstrap", serde_json::json!({
+        "name": "TestBootstrap",
+        "description": "A test project",
+        "agent": "ClaudeCode",
+        "skill_ids": ["bootstrap-architect"]
+    })).await;
+    // Will fail because no scan paths configured, but should NOT return 422 (deserialization error)
+    assert_eq!(status, StatusCode::OK, "Should not be a deserialization error: {:?}", json);
+    // The error should be about scan paths, not about unknown field "skill_ids"
+    if json["success"] == false {
+        let err = json["error"].as_str().unwrap_or("");
+        assert!(!err.contains("skill_ids"), "skill_ids should be accepted by the schema");
+    }
 }

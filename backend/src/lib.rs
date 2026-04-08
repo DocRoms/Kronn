@@ -264,6 +264,9 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/workflows/:id/trigger", post(api::workflows::trigger))
         .route("/api/workflows/:id/runs", get(api::workflows::list_runs).delete(api::workflows::delete_all_runs))
         .route("/api/workflows/:id/runs/:run_id", get(api::workflows::get_run).delete(api::workflows::delete_run))
+        // ── Quick Prompts ──
+        .route("/api/quick-prompts", get(api::quick_prompts::list).post(api::quick_prompts::create))
+        .route("/api/quick-prompts/:id", put(api::quick_prompts::update).delete(api::quick_prompts::delete))
         // ── Discussions ──
         .route("/api/discussions", get(api::discussions::list))
         .route("/api/discussions", post(api::discussions::create))

@@ -15,3 +15,4 @@ pub mod profiles;
 pub mod directives;
 pub mod git_ops;
 pub mod ws;
+pub mod quick_prompts;

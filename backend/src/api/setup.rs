@@ -78,11 +78,17 @@ pub async fn get_status(
 
     // Full path: first run or scan paths not yet configured.
     // Run agent detection and repo scan IN PARALLEL to halve the wait time.
-    let scan_paths: Vec<String> = if scan_paths_set {
+    let mut scan_paths: Vec<String> = if scan_paths_set {
         config.scan.paths.clone()
     } else {
         default_scan_path().into_iter().collect()
     };
+    // On Windows: always include WSL home directories
+    for wsl_home in crate::api::projects::discover_wsl_homes() {
+        if !scan_paths.contains(&wsl_home) {
+            scan_paths.push(wsl_home);
+        }
+    }
     let scan_ignore = config.scan.ignore.clone();
     let scan_depth = config.scan.scan_depth;
     drop(config);
@@ -677,6 +683,8 @@ async fn build_export(state: &AppState) -> Result<DbExport, String> {
     }).await.map_err(|e| format!("DB error: {}", e))?;
     let contacts = state.db.with_conn(crate::db::contacts::list_contacts).await
         .map_err(|e| format!("DB error: {}", e))?;
+    let quick_prompts = state.db.with_conn(crate::db::quick_prompts::list_quick_prompts).await
+        .map_err(|e| format!("DB error: {}", e))?;
 
     let custom_skills: Vec<_> = crate::core::skills::list_all_skills()
         .into_iter().filter(|s| !s.is_builtin).collect();
@@ -697,6 +705,7 @@ async fn build_export(state: &AppState) -> Result<DbExport, String> {
         custom_directives,
         custom_profiles,
         contacts,
+        quick_prompts,
     })
 }
 
@@ -783,6 +792,7 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
              DELETE FROM mcp_config_projects; DELETE FROM mcp_configs; DELETE FROM mcp_servers; \
              DELETE FROM workflow_runs; DELETE FROM workflows; \
              DELETE FROM contacts; \
+             DELETE FROM quick_prompts; \
              DELETE FROM projects;"
         )?;
         Ok(())
@@ -871,6 +881,14 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
         let c = contact.clone();
         if let Err(e) = state.db.with_conn(move |conn| crate::db::contacts::insert_contact(conn, &c)).await {
             tracing::warn!("Import contact error: {}", e);
+        }
+    }
+
+    // Import quick prompts
+    for qp in &data.quick_prompts {
+        let q = qp.clone();
+        if let Err(e) = state.db.with_conn(move |conn| crate::db::quick_prompts::insert_quick_prompt(conn, &q)).await {
+            tracing::warn!("Import quick prompt error: {}", e);
         }
     }
 
@@ -1113,6 +1131,7 @@ mod tests {
             custom_directives: vec![],
             custom_profiles: vec![],
             contacts: vec![],
+            quick_prompts: vec![],
         };
         let data_json = serde_json::to_string(&data).unwrap();
 
@@ -1170,6 +1189,7 @@ mod tests {
             custom_directives: vec![],
             custom_profiles: vec![],
             contacts: vec![],
+            quick_prompts: vec![],
         };
         let data_json = serde_json::to_string(&data).unwrap();
 

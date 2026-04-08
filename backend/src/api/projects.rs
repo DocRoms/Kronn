@@ -63,11 +63,41 @@ pub async fn get(
 }
 
 /// POST /api/projects/scan
+/// Discover WSL user home directories (Windows only).
+/// Returns paths like `\\wsl.localhost\Ubuntu\home\username`.
+pub fn discover_wsl_homes() -> Vec<String> {
+    let mut homes = Vec::new();
+    #[cfg(target_os = "windows")]
+    {
+        for distro_path in &["\\\\wsl.localhost", "\\\\wsl$"] {
+            let wsl_root = std::path::Path::new(distro_path);
+            if let Ok(entries) = std::fs::read_dir(wsl_root) {
+                for entry in entries.flatten() {
+                    let home = entry.path().join("home");
+                    if let Ok(users) = std::fs::read_dir(&home) {
+                        for user in users.flatten() {
+                            if user.path().is_dir() {
+                                homes.push(user.path().to_string_lossy().to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // On non-Windows, also try if running inside WSL (wsl paths are native Linux paths)
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = &mut homes; // suppress unused warning
+    }
+    homes
+}
+
 pub async fn scan(State(state): State<AppState>) -> Json<ApiResponse<Vec<DetectedRepo>>> {
     let config = state.config.read().await;
 
-    let scan_paths = if config.scan.paths.is_empty() {
-        // Fallback: Docker host home, or user home, or cwd parent
+    let mut scan_paths = if config.scan.paths.is_empty() {
+        // Fallback: Docker host home, or user home
         let mut paths: Vec<String> = Vec::new();
         if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {
             paths.push(host_home);
@@ -77,32 +107,19 @@ pub async fn scan(State(state): State<AppState>) -> Json<ApiResponse<Vec<Detecte
                 paths.push(home);
             }
         }
-        // On Windows: also probe WSL home directories
-        #[cfg(target_os = "windows")]
-        {
-            for distro_path in &["\\\\wsl.localhost", "\\\\wsl$"] {
-                let wsl_root = std::path::Path::new(distro_path);
-                if let Ok(entries) = std::fs::read_dir(wsl_root) {
-                    for entry in entries.flatten() {
-                        let home = entry.path().join("home");
-                        if home.is_dir() {
-                            if let Ok(users) = std::fs::read_dir(&home) {
-                                for user in users.flatten() {
-                                    let user_home = user.path().to_string_lossy().to_string();
-                                    if !paths.contains(&user_home) {
-                                        paths.push(user_home);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
         paths
     } else {
         config.scan.paths.clone()
     };
+
+    // On Windows: always include WSL home directories (most dev repos live there)
+    let wsl_homes = discover_wsl_homes();
+    for wsl_home in &wsl_homes {
+        if !scan_paths.contains(wsl_home) {
+            scan_paths.push(wsl_home.clone());
+        }
+    }
+
     let ignore = config.scan.ignore.clone();
     let depth = config.scan.scan_depth;
     drop(config);
@@ -334,7 +351,13 @@ pub async fn bootstrap(
     };
 
     // 5. Build bootstrap discussion prompt
-    let bootstrap_prompt = build_bootstrap_prompt(&language, &project_name, &description);
+    let bootstrap_prompt = if req.skill_ids.contains(&"bootstrap-architect".to_string()) {
+        // Bootstrap++ mode: short prompt, the skill handles the gated flow
+        build_bootstrap_plus_prompt(&language, &project_name, &description)
+    } else {
+        // Classic bootstrap: 6-step prompt with KRONN:BOOTSTRAP_COMPLETE
+        build_bootstrap_prompt(&language, &project_name, &description)
+    };
 
     let discussion_id = Uuid::new_v4().to_string();
     let initial_message = DiscussionMessage {
@@ -357,7 +380,7 @@ pub async fn bootstrap(
         participants: vec![agent_type],
         messages: vec![initial_message.clone()],
         message_count: 1,
-        skill_ids: vec![],
+        skill_ids: req.skill_ids.clone(),
         profile_ids: vec![
             "architect".into(),
             "product-owner".into(),
@@ -367,7 +390,11 @@ pub async fn bootstrap(
         archived: false,
         workspace_mode: "Direct".into(),
         workspace_path: None,
-        tier: crate::models::ModelTier::Default,
+        tier: if req.skill_ids.contains(&"bootstrap-architect".to_string()) {
+            crate::models::ModelTier::Reasoning
+        } else {
+            crate::models::ModelTier::Default
+        },
         pin_first_message: true,
         worktree_branch: None,
         summary_cache: None,
@@ -395,6 +422,46 @@ pub async fn bootstrap(
 }
 
 /// Build the bootstrap discussion prompt
+/// Bootstrap++ prompt: short user message that defers to the bootstrap-architect skill.
+/// The skill (injected as system context) handles the gated validation flow.
+fn build_bootstrap_plus_prompt(language: &str, project_name: &str, description: &str) -> String {
+    match language {
+        "en" => format!(
+r#"# Bootstrap for project "{project_name}"
+
+Respond in English.
+
+## Project description
+{description}
+
+---
+
+Follow the **Bootstrap Architect** skill instructions. Start with **Stage 1 — Architecture Analysis**: read all uploaded documents and context, then produce a structured architecture summary. Emit `KRONN:ARCHITECTURE_READY` when done and wait for my validation before continuing."#),
+        "es" => format!(
+r#"# Bootstrap del proyecto "{project_name}"
+
+Responde en español.
+
+## Descripción del proyecto
+{description}
+
+---
+
+Sigue las instrucciones del skill **Bootstrap Architect**. Comienza con la **Etapa 1 — Análisis de arquitectura**: lee todos los documentos y el contexto, luego produce un resumen estructurado de la arquitectura. Emite `KRONN:ARCHITECTURE_READY` cuando termines y espera mi validación antes de continuar."#),
+        _ => format!(
+r#"# Bootstrap du projet "{project_name}"
+
+Réponds en français.
+
+## Description du projet
+{description}
+
+---
+
+Suis les instructions du skill **Bootstrap Architect**. Commence par l'**Étape 1 — Analyse de l'architecture** : lis tous les documents et le contexte uploadés, puis produis un résumé structuré de l'architecture. Émets `KRONN:ARCHITECTURE_READY` quand tu as terminé et attends ma validation avant de continuer."#),
+    }
+}
+
 fn build_bootstrap_prompt(language: &str, project_name: &str, description: &str) -> String {
     match language {
         "en" => format!(
@@ -1448,6 +1515,25 @@ mod prompt_tests {
             let prompt = build_bootstrap_prompt(lang, "P", "d");
             assert!(prompt.contains("KRONN:BOOTSTRAP_COMPLETE"),
                 "Bootstrap prompt ({}) must contain completion signal", lang);
+        }
+    }
+
+    #[test]
+    fn bootstrap_plus_prompt_defers_to_skill() {
+        for lang in ["fr", "en", "es"] {
+            let prompt = build_bootstrap_plus_prompt(lang, "MyApp", "A cool app");
+            // Must contain the project info
+            assert!(prompt.contains("MyApp"), "Plus prompt ({}) must contain project name", lang);
+            assert!(prompt.contains("A cool app"), "Plus prompt ({}) must contain description", lang);
+            // Must reference the ARCHITECTURE_READY signal (first gate)
+            assert!(prompt.contains("KRONN:ARCHITECTURE_READY"),
+                "Plus prompt ({}) must mention ARCHITECTURE_READY", lang);
+            // Must NOT contain old 6-step instructions or BOOTSTRAP_COMPLETE
+            assert!(!prompt.contains("KRONN:BOOTSTRAP_COMPLETE"),
+                "Plus prompt ({}) must NOT mention BOOTSTRAP_COMPLETE (handled by skill)", lang);
+            // Must reference the skill
+            assert!(prompt.contains("Bootstrap Architect"),
+                "Plus prompt ({}) must reference the skill", lang);
         }
     }
 

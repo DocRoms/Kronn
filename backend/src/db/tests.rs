@@ -1474,3 +1474,104 @@ fn contacts_export_import_roundtrip() {
     assert_eq!(reimported.len(), 1);
     assert_eq!(reimported[0].id, "c1");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Quick Prompts CRUD
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn quick_prompt_crud() {
+    let conn = test_db();
+    let now = Utc::now();
+
+    // Insert
+    let qp = QuickPrompt {
+        id: "qp1".into(),
+        name: "Analyse ticket".into(),
+        icon: "🔍".into(),
+        prompt_template: "Analyse le ticket {{ticket}} sur le projet {{project}}".into(),
+        variables: vec![
+            crate::models::PromptVariable { name: "ticket".into(), label: "Ticket".into(), placeholder: "PROJ-123".into() },
+            crate::models::PromptVariable { name: "project".into(), label: "Projet".into(), placeholder: "front_euronews".into() },
+        ],
+        agent: crate::models::AgentType::ClaudeCode,
+        project_id: None,
+        skill_ids: vec![],
+        tier: crate::models::ModelTier::Default,
+        created_at: now,
+        updated_at: now,
+    };
+    crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
+
+    // List
+    let all = crate::db::quick_prompts::list_quick_prompts(&conn).unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].name, "Analyse ticket");
+    assert_eq!(all[0].variables.len(), 2);
+    assert_eq!(all[0].variables[0].name, "ticket");
+
+    // Get
+    let found = crate::db::quick_prompts::get_quick_prompt(&conn, "qp1").unwrap();
+    assert!(found.is_some());
+    assert_eq!(found.unwrap().prompt_template, "Analyse le ticket {{ticket}} sur le projet {{project}}");
+
+    // Update
+    let mut updated = qp.clone();
+    updated.name = "Analyse ticket v2".into();
+    updated.updated_at = Utc::now();
+    crate::db::quick_prompts::update_quick_prompt(&conn, &updated).unwrap();
+    let found2 = crate::db::quick_prompts::get_quick_prompt(&conn, "qp1").unwrap().unwrap();
+    assert_eq!(found2.name, "Analyse ticket v2");
+
+    // Delete
+    crate::db::quick_prompts::delete_quick_prompt(&conn, "qp1").unwrap();
+    let all2 = crate::db::quick_prompts::list_quick_prompts(&conn).unwrap();
+    assert_eq!(all2.len(), 0);
+}
+
+#[test]
+fn quick_prompt_not_found() {
+    let conn = test_db();
+    let found = crate::db::quick_prompts::get_quick_prompt(&conn, "nonexistent").unwrap();
+    assert!(found.is_none());
+}
+
+#[test]
+fn quick_prompt_variables_roundtrip() {
+    let conn = test_db();
+    let now = Utc::now();
+    let qp = QuickPrompt {
+        id: "qp-vars".into(),
+        name: "Test vars".into(),
+        icon: "🔍".into(),
+        prompt_template: "{{#jira}}Ticket {{jira}}, {{/jira}}{{#pr}}PR #{{pr}}{{/pr}}".into(),
+        variables: vec![
+            crate::models::PromptVariable { name: "jira".into(), label: "Ticket Jira".into(), placeholder: "PROJ-123".into() },
+            crate::models::PromptVariable { name: "pr".into(), label: "PR".into(), placeholder: "42".into() },
+        ],
+        agent: crate::models::AgentType::ClaudeCode,
+        project_id: None,
+        skill_ids: vec!["security".into()],
+        tier: crate::models::ModelTier::Reasoning,
+        created_at: now,
+        updated_at: now,
+    };
+    crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
+    let loaded = crate::db::quick_prompts::get_quick_prompt(&conn, "qp-vars").unwrap().unwrap();
+
+    // Variables preserved
+    assert_eq!(loaded.variables.len(), 2);
+    assert_eq!(loaded.variables[0].name, "jira");
+    assert_eq!(loaded.variables[0].placeholder, "PROJ-123");
+    assert_eq!(loaded.variables[1].name, "pr");
+
+    // Skill IDs preserved
+    assert_eq!(loaded.skill_ids, vec!["security"]);
+
+    // Tier preserved
+    assert_eq!(loaded.tier, crate::models::ModelTier::Reasoning);
+
+    // Template with conditional sections preserved
+    assert!(loaded.prompt_template.contains("{{#jira}}"));
+    assert!(loaded.prompt_template.contains("{{/pr}}"));
+}

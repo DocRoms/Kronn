@@ -1224,7 +1224,10 @@ export function DiscussionsPage({
                 if (!proj || proj.audit_status !== 'TemplateInstalled') return null;
                 const bootAgentMsgs = activeDiscussion.messages.filter((m, idx) => m.role === 'Agent' && idx > 0);
                 const lastAgentMsg = bootAgentMsgs.length > 0 ? bootAgentMsgs[bootAgentMsgs.length - 1] : null;
-                const isComplete = lastAgentMsg && lastAgentMsg.content.toUpperCase().includes('KRONN:BOOTSTRAP_COMPLETE');
+                // Also check streamingMap for the signal (may not be in messages yet)
+                const streamedText = streamingMap[activeDiscussion.id] ?? '';
+                const isComplete = (lastAgentMsg && lastAgentMsg.content.toUpperCase().includes('KRONN:BOOTSTRAP_COMPLETE'))
+                  || streamedText.toUpperCase().includes('KRONN:BOOTSTRAP_COMPLETE');
                 if (!isComplete) return null;
                 return (
                   <div className="disc-cta-banner" data-variant="accent">
@@ -1241,7 +1244,9 @@ export function DiscussionsPage({
               {/* Workflow ready banner */}
               {(() => {
                 const agentMsgs = activeDiscussion.messages.filter((m, idx) => m.role === 'Agent' && idx > 0);
-                const readyMsg = [...agentMsgs].reverse().find(m => m.content.toUpperCase().includes('KRONN:WORKFLOW_READY'));
+                const wfStreamedText = streamingMap[activeDiscussion.id] ?? '';
+                const readyMsg = [...agentMsgs].reverse().find(m => m.content.toUpperCase().includes('KRONN:WORKFLOW_READY'))
+                  || (wfStreamedText.toUpperCase().includes('KRONN:WORKFLOW_READY') ? { content: wfStreamedText } : null);
                 if (!readyMsg) return null;
                 const jsonMatch = readyMsg.content.match(/```json\s*\n([\s\S]*?)\n```/);
                 if (!jsonMatch) return null;
@@ -1270,6 +1275,65 @@ export function DiscussionsPage({
                     </button>
                   </div>
                 );
+              })()}
+
+              {/* Bootstrap++ gated validation banners */}
+              {(() => {
+                if (!isBootstrapDisc(activeDiscussion.title)) return null;
+                const bAgentMsgs = activeDiscussion.messages.filter((m, idx) => m.role === 'Agent' && idx > 0);
+                const lastBMsg = bAgentMsgs.length > 0 ? bAgentMsgs[bAgentMsgs.length - 1] : null;
+                const bStreamedText = streamingMap[activeDiscussion.id] ?? '';
+                const lastContent = (lastBMsg?.content ?? '') + bStreamedText;
+                if (!lastContent) return null;
+                const upper = lastContent.toUpperCase();
+
+                if (upper.includes('KRONN:ARCHITECTURE_READY')) {
+                  return (
+                    <div className="disc-cta-banner" data-variant="info">
+                      <p className="disc-cta-text" data-variant="info">
+                        <Check size={14} /> {t('bootstrap.architectureReady')}
+                      </p>
+                      <button className="disc-cta-btn" data-variant="info" onClick={() => {
+                        handleSendMessage(t('bootstrap.architectureValidated'));
+                      }}>
+                        <Play size={12} /> {t('bootstrap.generatePlan')}
+                      </button>
+                    </div>
+                  );
+                }
+
+                if (upper.includes('KRONN:PLAN_READY')) {
+                  return (
+                    <div className="disc-cta-banner" data-variant="accent">
+                      <p className="disc-cta-text" data-variant="accent">
+                        <Check size={14} /> {t('bootstrap.planReady')}
+                      </p>
+                      <button className="disc-cta-btn" data-variant="accent" onClick={() => {
+                        handleSendMessage(t('bootstrap.planValidated'));
+                      }}>
+                        <Play size={12} /> {t('bootstrap.createIssues')}
+                      </button>
+                    </div>
+                  );
+                }
+
+                if (upper.includes('KRONN:ISSUES_CREATED')) {
+                  const proj = projects.find(p => p.id === activeDiscussion.project_id);
+                  return (
+                    <div className="disc-cta-banner" data-variant="accent">
+                      <p className="disc-cta-text" data-variant="accent">
+                        <Check size={14} /> {t('bootstrap.issuesCreated')}
+                      </p>
+                      <button className="disc-cta-btn" data-variant="accent" onClick={() => {
+                        if (proj) onNavigate('projects', { projectId: proj.id });
+                      }}>
+                        <Check size={12} /> {t('bootstrap.viewProject')}
+                      </button>
+                    </div>
+                  );
+                }
+
+                return null;
               })()}
 
               <div ref={chatEndRef} />
