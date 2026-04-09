@@ -860,13 +860,19 @@ async fn make_agent_stream(
                     );
                     if stderr_text.is_empty() {
                         // No output at all — likely auth/session issue
-                        full_response = format!(
-                            "[Agent exited with error] ({})\n\n\
-                            ⚠️ **No output captured.** Possible causes:\n\
+                        let agent_hint = if agent_type == AgentType::Kiro {
+                            "⚠️ **Kiro session expired.**\n\
+                            Re-authenticate with: `kronn auth kiro`\n\
+                            (or `make kiro-login` from the Kronn directory)"
+                        } else {
+                            "⚠️ **No output captured.** Possible causes:\n\
                             - Expired session → run `/login` in the terminal\n\
                             - Invalid API key → check Config > Tokens\n\
-                            - Agent not installed or not found",
-                            exit_info
+                            - Agent not installed or not found"
+                        };
+                        full_response = format!(
+                            "[Agent exited with error] ({})\n\n{}",
+                            exit_info, agent_hint
                         );
                     } else {
                         full_response = format!("[Agent exited with error] ({})\n\n{}", exit_info, stderr_text);
@@ -876,9 +882,11 @@ async fn make_agent_stream(
                 // Detect error patterns in both stdout and stderr and add helpful guidance
                 if !success && !was_interrupted {
                     let all_output = format!("{}\n{}", full_response, stderr_text);
-                    let error_hint = detect_agent_error_hint(&all_output);
-                    if let Some(hint) = error_hint {
-                        full_response.push_str(&format!("\n\n{}", hint));
+                    if let Some(hint) = detect_agent_error_hint(&all_output, Some(&agent_type)) {
+                        full_response = format!(
+                            "{}\n\n<details><summary>Sortie agent</summary>\n\n{}\n</details>",
+                            hint, full_response
+                        );
                     }
                 }
 
@@ -1160,8 +1168,11 @@ async fn run_agent_streaming(
 
     if !success {
         let all_output = format!("{}\n{}", full_response, stderr_text);
-        if let Some(hint) = detect_agent_error_hint(&all_output) {
-            full_response.push_str(&format!("\n\n{}", hint));
+        if let Some(hint) = detect_agent_error_hint(&all_output, Some(agent_type)) {
+            full_response = format!(
+                "{}\n\n<details><summary>Sortie agent</summary>\n\n{}\n</details>",
+                hint, full_response
+            );
         }
     }
 
@@ -2374,7 +2385,7 @@ fn build_agent_prompt(disc: &Discussion, agent_type: &AgentType, extra_context_l
 }
 
 /// Detect common agent error patterns and return a user-friendly hint.
-pub(crate) fn detect_agent_error_hint(output: &str) -> Option<String> {
+pub(crate) fn detect_agent_error_hint(output: &str, agent_type: Option<&AgentType>) -> Option<String> {
     let lower = output.to_lowercase();
 
     // MCP configuration errors
@@ -2402,6 +2413,25 @@ pub(crate) fn detect_agent_error_hint(output: &str) -> Option<String> {
             "⚠️ **Expired session or invalid API key.**\n\
              Re-authenticate by running `/login` in the agent's CLI.\n\
              Also check your API keys in Config > Tokens.".to_string()
+        );
+    }
+
+    // Kiro / AWS Builder ID session expired — only for Kiro agent
+    if matches!(agent_type, Some(AgentType::Kiro)) && (
+        lower.contains("session expired")
+        || lower.contains("token expired")
+        || lower.contains("re-authenticate")
+        || lower.contains("builder id")
+        || lower.contains("sso session")
+        || lower.contains("refresh token")
+        || lower.contains("device flow")
+        || lower.contains("login required")
+        || lower.contains("opening browser")
+    ) {
+        return Some(
+            "⚠️ **Kiro session expired (AWS Builder ID).**\n\
+             Re-authenticate with: `kronn auth kiro`\n\
+             (or `make kiro-login` from the Kronn directory)".to_string()
         );
     }
 
@@ -2642,3 +2672,927 @@ pub async fn delete_context_file(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_hint_auth_401() {
+        let hint = detect_agent_error_hint("Error: api error: 401 Unauthorized", None);
+        assert!(hint.is_some());
+        assert!(hint.unwrap().contains("Expired session"));
+    }
+
+    #[test]
+    fn error_hint_auth_invalid_key() {
+        let hint = detect_agent_error_hint("invalid x-api-key provided", None);
+        assert!(hint.is_some());
+        assert!(hint.unwrap().contains("/login"));
+    }
+
+    #[test]
+    fn error_hint_auth_authentication_error() {
+        let hint = detect_agent_error_hint("authentication_error: invalid credentials", None);
+        assert!(hint.is_some());
+    }
+
+    #[test]
+    fn error_hint_rate_limit_429() {
+        let hint = detect_agent_error_hint("Error 429: too many requests", None);
+        assert!(hint.is_some());
+        assert!(hint.unwrap().contains("Rate limit"));
+    }
+
+    #[test]
+    fn error_hint_overloaded_529() {
+        let hint = detect_agent_error_hint("Server overloaded (529)", None);
+        assert!(hint.is_some());
+        assert!(hint.unwrap().contains("overloaded"));
+    }
+
+    #[test]
+    fn error_hint_server_error_502() {
+        let hint = detect_agent_error_hint("502 Bad Gateway", None);
+        assert!(hint.is_some());
+        assert!(hint.unwrap().contains("unavailable"));
+    }
+
+    #[test]
+    fn error_hint_server_error_500() {
+        let hint = detect_agent_error_hint("API error: 500 Internal Server Error", None);
+        assert!(hint.is_some());
+    }
+
+    #[test]
+    fn error_hint_billing_402() {
+        let hint = detect_agent_error_hint("Error 402 payment required", None);
+        assert!(hint.is_some());
+        assert!(hint.unwrap().contains("Quota"));
+    }
+
+    #[test]
+    fn error_hint_billing_insufficient_quota() {
+        let hint = detect_agent_error_hint("insufficient_quota: no credits remaining", None);
+        assert!(hint.is_some());
+    }
+
+    #[test]
+    fn error_hint_network_econnrefused() {
+        let hint = detect_agent_error_hint("ECONNREFUSED: connection refused", None);
+        assert!(hint.is_some());
+        assert!(hint.unwrap().contains("Network error"));
+    }
+
+    #[test]
+    fn error_hint_network_timeout() {
+        let hint = detect_agent_error_hint("request timed out after 30s", None);
+        assert!(hint.is_some());
+    }
+
+    #[test]
+    fn error_hint_network_dns() {
+        let hint = detect_agent_error_hint("ENOTFOUND api.anthropic.com", None);
+        assert!(hint.is_some());
+    }
+
+    #[test]
+    fn error_hint_none_for_normal_output() {
+        let hint = detect_agent_error_hint("Here is your code:\n```rust\nfn main() {}\n```", None);
+        assert!(hint.is_none());
+    }
+
+    #[test]
+    fn error_hint_none_for_empty() {
+        assert!(detect_agent_error_hint("", None).is_none());
+    }
+
+    #[test]
+    fn error_hint_case_insensitive() {
+        // Checks that "UNAUTHORIZED" is detected (lowercased)
+        let hint = detect_agent_error_hint("UNAUTHORIZED ACCESS DENIED", None);
+        assert!(hint.is_some());
+    }
+
+    // ─── Kiro / AWS Builder ID session expired ────────────────────────────
+
+    #[test]
+    fn error_hint_kiro_session_expired() {
+        let kiro = Some(&AgentType::Kiro);
+        let hint = detect_agent_error_hint("Your session expired, please re-authenticate", kiro);
+        assert!(hint.is_some());
+        let h = hint.unwrap();
+        assert!(h.contains("Kiro session expired"));
+        assert!(h.contains("kronn auth kiro"));
+    }
+
+    #[test]
+    fn error_hint_kiro_opening_browser() {
+        let hint = detect_agent_error_hint("opening browser for authentication...", Some(&AgentType::Kiro));
+        assert!(hint.is_some());
+        assert!(hint.unwrap().contains("kronn auth kiro"));
+    }
+
+    #[test]
+    fn error_hint_kiro_builder_id() {
+        let hint = detect_agent_error_hint("AWS Builder ID token refresh failed", Some(&AgentType::Kiro));
+        assert!(hint.is_some());
+        assert!(hint.unwrap().contains("Kiro session expired"));
+    }
+
+    #[test]
+    fn error_hint_kiro_sso_session() {
+        let hint = detect_agent_error_hint("SSO session is no longer valid", Some(&AgentType::Kiro));
+        assert!(hint.is_some());
+        assert!(hint.unwrap().contains("kronn auth kiro"));
+    }
+
+    #[test]
+    fn error_hint_kiro_device_flow() {
+        let hint = detect_agent_error_hint("Please complete the device flow login", Some(&AgentType::Kiro));
+        assert!(hint.is_some());
+    }
+
+    #[test]
+    fn error_hint_kiro_login_required() {
+        let hint = detect_agent_error_hint("login required to continue", Some(&AgentType::Kiro));
+        assert!(hint.is_some());
+        assert!(hint.unwrap().contains("Kiro session expired"));
+    }
+
+    #[test]
+    fn error_hint_kiro_refresh_token() {
+        let hint = detect_agent_error_hint("refresh token is invalid or expired", Some(&AgentType::Kiro));
+        assert!(hint.is_some());
+    }
+
+    #[test]
+    fn error_hint_kiro_patterns_ignored_for_other_agents() {
+        // "session expired" should NOT trigger Kiro hint for Claude
+        assert!(detect_agent_error_hint("session expired", Some(&AgentType::ClaudeCode)).is_none());
+        assert!(detect_agent_error_hint("opening browser", Some(&AgentType::Codex)).is_none());
+        assert!(detect_agent_error_hint("login required", None).is_none());
+    }
+
+    // ─── MCP configuration errors ─────────────────────────────────────────
+
+    #[test]
+    fn error_hint_mcp_config_error() {
+        let hint = detect_agent_error_hint("invalid mcp configuration in project", None);
+        assert!(hint.is_some());
+        assert!(hint.unwrap().contains("MCP configuration error"));
+    }
+
+    #[test]
+    fn error_hint_mcp_server_failed() {
+        let hint = detect_agent_error_hint("mcp server 'filesystem' failed to start", None);
+        assert!(hint.is_some());
+        assert!(hint.unwrap().contains("MCP"));
+    }
+
+    // ─── Permission denied ────────────────────────────────────────────────
+
+    #[test]
+    fn error_hint_permission_denied() {
+        let hint = detect_agent_error_hint("permission denied: /home/user/project/src", None);
+        assert!(hint.is_some());
+        assert!(hint.unwrap().contains("Permission denied"));
+    }
+
+    // ─── Server errors ────────────────────────────────────────────────────
+
+    #[test]
+    fn error_hint_503_unavailable() {
+        let hint = detect_agent_error_hint("503 Service Unavailable", None);
+        assert!(hint.is_some());
+        assert!(hint.unwrap().contains("unavailable"));
+    }
+
+    // ─── Helpers ──────────────────────────────────────────────────────────────
+
+    fn make_msg(role: MessageRole, content: &str) -> DiscussionMessage {
+        DiscussionMessage {
+            id: uuid::Uuid::new_v4().to_string(),
+            role,
+            content: content.to_string(),
+            agent_type: Some(AgentType::ClaudeCode),
+            timestamp: chrono::Utc::now(),
+            tokens_used: 0,
+            auth_mode: None,
+            model_tier: None,
+            cost_usd: None,
+            author_pseudo: None,
+            author_avatar_email: None,
+        }
+    }
+
+    fn make_discussion(messages: Vec<DiscussionMessage>) -> Discussion {
+        let msg_count = messages.len() as u32;
+        Discussion {
+            id: "test-disc-id".to_string(),
+            project_id: None,
+            title: "Test discussion".to_string(),
+            agent: AgentType::ClaudeCode,
+            language: "en".to_string(),
+            participants: vec![AgentType::ClaudeCode],
+            message_count: msg_count,
+            messages,
+            skill_ids: vec![],
+            profile_ids: vec![],
+            directive_ids: vec![],
+            archived: false,
+            workspace_mode: "Direct".to_string(),
+            workspace_path: None,
+            worktree_branch: None,
+            tier: crate::models::ModelTier::Default,
+            pin_first_message: false,
+            summary_cache: None,
+            summary_up_to_msg_idx: None,
+            shared_id: None,
+            shared_with: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    // ─── build_agent_prompt tests ─────────────────────────────────────────────
+
+    /// Test 1: summary_covers_up_to correctly filters messages.
+    ///
+    /// Build a discussion with exactly 15 non-System messages at indices 0..14 plus 2 System
+    /// messages (ignored by the indexing). Set summary_up_to_msg_idx = 10 so that messages at
+    /// non-System indices 0..9 are covered and must NOT appear in the prompt, while messages
+    /// at non-System indices 10+ MUST appear.
+    ///
+    /// Marker strings use `[NSIDXnn]` syntax to avoid substring collisions between e.g.
+    /// `[NSIDX1]` and `[NSIDX10]`.
+    #[test]
+    fn summary_filters_covered_messages() {
+        // Build messages with unique, non-overlapping markers using zero-padded two-digit indices.
+        // Non-System messages get marker [NSIDXnn]; System messages get [SYS].
+        // We produce 15 non-System messages (indices 00..14) interleaved with 2 System messages.
+        let mut messages = Vec::new();
+        let mut ns_idx: usize = 0;
+        let total_slots = 17; // 15 non-System + 2 System slots
+        for slot in 0..total_slots {
+            if slot == 4 || slot == 9 {
+                // System messages at these slots
+                messages.push(make_msg(
+                    MessageRole::System,
+                    &format!("[SYS-SLOT-{:02}]", slot),
+                ));
+            } else {
+                let role = if ns_idx.is_multiple_of(2) { MessageRole::User } else { MessageRole::Agent };
+                let marker = format!("[NSIDX{:02}]", ns_idx);
+                messages.push(make_msg(role, &marker));
+                ns_idx += 1;
+            }
+        }
+        // ns_idx should now be 15 (indices 00..14)
+
+        let mut disc = make_discussion(messages);
+        disc.summary_cache = Some("Previous summary text".to_string());
+        // Cover non-System messages at indices 0..9 (i.e., the first 10)
+        disc.summary_up_to_msg_idx = Some(10);
+
+        let prompt = build_agent_prompt(&disc, &AgentType::ClaudeCode, 0);
+
+        // Must contain the summary block
+        assert!(
+            prompt.contains("Summary of earlier conversation"),
+            "Prompt must contain summary block header"
+        );
+        assert!(
+            prompt.contains("Previous summary text"),
+            "Prompt must contain actual summary text"
+        );
+
+        // Non-System messages at indices 0..9 are covered — must NOT appear
+        for i in 0..10usize {
+            let marker = format!("[NSIDX{:02}]", i);
+            assert!(
+                !prompt.contains(&marker),
+                "Prompt must not contain covered message marker: {}", marker
+            );
+        }
+
+        // Non-System messages at indices 10..14 are NOT covered — must appear
+        for i in 10..15usize {
+            let marker = format!("[NSIDX{:02}]", i);
+            assert!(
+                prompt.contains(&marker),
+                "Prompt must contain uncovered message marker: {}", marker
+            );
+        }
+    }
+
+    /// Test 2: Index domain is non-System count, not total message count.
+    /// 14 total messages, 2 are System → 12 non-System.
+    /// summary_up_to_msg_idx = 12 covers all non-System messages.
+    /// The prompt should contain the summary but NOT skip all messages (old bug).
+    #[test]
+    fn summary_index_domain_is_non_system_count() {
+        // 12 non-System messages (6 User + 6 Agent) + 2 System = 14 total
+        let mut messages = Vec::new();
+        for i in 0..6usize {
+            messages.push(make_msg(MessageRole::User, &format!("user-msg-{}", i)));
+            messages.push(make_msg(MessageRole::Agent, &format!("agent-msg-{}", i)));
+        }
+        // Insert 2 System messages in the middle and at the end
+        messages.insert(4, make_msg(MessageRole::System, "sys-event-A"));
+        messages.push(make_msg(MessageRole::System, "sys-event-B"));
+
+        // Add one final User message that comes AFTER the summary coverage
+        // (so there are >1 user messages and the function uses the history path)
+        messages.push(make_msg(MessageRole::User, "final-user-message"));
+
+        // summary covers all 12 non-System messages (0-based range 0..12)
+        let mut disc = make_discussion(messages);
+        disc.summary_cache = Some("Full history summary".to_string());
+        disc.summary_up_to_msg_idx = Some(12);
+
+        let prompt = build_agent_prompt(&disc, &AgentType::ClaudeCode, 0);
+
+        // Summary block must be present
+        assert!(
+            prompt.contains("Full history summary"),
+            "Summary block must be present in prompt"
+        );
+
+        // The final user message (index 12 in non-System space) should be included
+        assert!(
+            prompt.contains("final-user-message"),
+            "Message at non-System index 12 (after coverage) must be included"
+        );
+
+        // Messages 0..11 in non-System space are covered by the summary — must NOT appear
+        for i in 0..6usize {
+            assert!(
+                !prompt.contains(&format!("user-msg-{}", i)),
+                "Covered user message {} must not appear", i
+            );
+            assert!(
+                !prompt.contains(&format!("agent-msg-{}", i)),
+                "Covered agent message {} must not appear", i
+            );
+        }
+    }
+
+    /// Test 3: No summary → all non-System messages are included (budget permitting).
+    #[test]
+    fn no_summary_includes_all_messages() {
+        let mut messages = Vec::new();
+        for i in 0..5usize {
+            messages.push(make_msg(MessageRole::User, &format!("user-{}", i)));
+            messages.push(make_msg(MessageRole::Agent, &format!("agent-{}", i)));
+        }
+        // Add a System message — it must be filtered out
+        messages.push(make_msg(MessageRole::System, "system-noise"));
+        // Final user message
+        messages.push(make_msg(MessageRole::User, "latest-user-prompt"));
+
+        let disc = make_discussion(messages); // no summary_cache
+
+        let prompt = build_agent_prompt(&disc, &AgentType::ClaudeCode, 0);
+
+        // All user and agent messages must appear
+        for i in 0..5usize {
+            assert!(
+                prompt.contains(&format!("user-{}", i)),
+                "Non-System user message {} must be included", i
+            );
+            assert!(
+                prompt.contains(&format!("agent-{}", i)),
+                "Non-System agent message {} must be included", i
+            );
+        }
+        assert!(
+            prompt.contains("latest-user-prompt"),
+            "Latest user message must be present"
+        );
+
+        // System message must never appear
+        assert!(
+            !prompt.contains("system-noise"),
+            "System messages must be filtered out"
+        );
+
+        // No summary block
+        assert!(
+            !prompt.contains("Summary of earlier conversation"),
+            "Prompt must not contain summary block when no summary exists"
+        );
+    }
+
+    /// Test 4: Budget truncation with summary (Kiro's 16 000-char budget).
+    /// - Summary block is included.
+    /// - Recent messages are included (walking backwards from end).
+    /// - Older messages beyond the budget are omitted.
+    /// - Omission notice is NOT shown when a summary exists.
+    #[test]
+    fn budget_truncation_with_summary_no_omission_notice() {
+        // Kiro budget = 16 000 chars. Fill older messages with enough text to overflow the budget.
+        let old_content = "x".repeat(2000); // 2000 chars each
+        let mut messages = Vec::new();
+
+        // 5 old User/Agent pairs covered by summary (non-System indices 0..9)
+        for _i in 0..5usize {
+            messages.push(make_msg(MessageRole::User, &old_content));
+            messages.push(make_msg(MessageRole::Agent, &old_content));
+        }
+
+        // 3 recent messages NOT covered by summary (non-System indices 10..12)
+        messages.push(make_msg(MessageRole::User, "recent-user-A"));
+        messages.push(make_msg(MessageRole::Agent, "recent-agent-B"));
+        messages.push(make_msg(MessageRole::User, "latest-question"));
+
+        let mut disc = make_discussion(messages);
+        disc.summary_cache = Some("Short summary".to_string());
+        disc.summary_up_to_msg_idx = Some(10); // covers 10 non-System messages
+
+        // Use Kiro (16 000-char budget) with no extra context
+        let prompt = build_agent_prompt(&disc, &AgentType::Kiro, 0);
+
+        // Summary block must be present
+        assert!(
+            prompt.contains("Short summary"),
+            "Summary block must be present"
+        );
+
+        // Latest user message must always be present
+        assert!(
+            prompt.contains("latest-question"),
+            "Latest user message must be present"
+        );
+
+        // Omission notice must NOT appear (summary covers older messages)
+        assert!(
+            !prompt.contains("earlier messages omitted"),
+            "Omission notice must not appear when summary is present"
+        );
+    }
+
+    /// Test 5: UTF-8 safe truncation — ceil_char_boundary logic.
+    /// Verify that building a discussion with multi-byte chars in messages doesn't panic.
+    /// This exercises the summary injection path and the message formatting path.
+    #[test]
+    fn utf8_multibyte_content_does_not_panic() {
+        // Multi-byte UTF-8 strings: CJK, emoji, diacritics
+        let multi_byte_contents = [
+            "日本語テスト: 人工知能の会話",
+            "Émojis 🌟🦀🔥 et accents: café, résumé, naïve",
+            "Ελληνικά: πολυγλωσσική συνομιλία",
+            "Русский: тест многобайтовой кодировки",
+        ];
+
+        let mut messages = Vec::new();
+        for content in &multi_byte_contents {
+            messages.push(make_msg(MessageRole::User, content));
+            messages.push(make_msg(MessageRole::Agent, content));
+        }
+        // One final user message to trigger the multi-message path
+        messages.push(make_msg(MessageRole::User, "final 🚀"));
+
+        let mut disc = make_discussion(messages);
+        // Add a multi-byte summary to also test summary injection
+        disc.summary_cache = Some("Résumé: 日本語 содержание 🌍".to_string());
+        disc.summary_up_to_msg_idx = Some(4);
+
+        // Should not panic on any agent type
+        let _ = build_agent_prompt(&disc, &AgentType::ClaudeCode, 0);
+        let _ = build_agent_prompt(&disc, &AgentType::Kiro, 0);
+        let _ = build_agent_prompt(&disc, &AgentType::GeminiCli, 0);
+    }
+
+    /// Summary threshold/cooldown are now adaptive functions, not constants.
+    /// Verify they return sensible values for all agent types.
+    #[test]
+    fn summary_thresholds_are_sensible() {
+        for agent in [AgentType::ClaudeCode, AgentType::Codex, AgentType::GeminiCli,
+                      AgentType::Kiro, AgentType::Vibe] {
+            let t = summary_msg_threshold(&agent);
+            let c = summary_cooldown(&agent);
+            assert!(t >= 2, "Threshold for {:?} ({}) too low", agent, t);
+            assert!(t <= 20, "Threshold for {:?} ({}) too high", agent, t);
+            assert!(c >= 2, "Cooldown for {:?} ({}) too low", agent, c);
+            assert!(c <= 10, "Cooldown for {:?} ({}) too high", agent, c);
+        }
+    }
+
+    /// Single user message → short-circuit path, no conversation history section.
+    #[test]
+    fn single_user_message_no_history_section() {
+        let disc = make_discussion(vec![
+            make_msg(MessageRole::User, "only-prompt"),
+        ]);
+        let prompt = build_agent_prompt(&disc, &AgentType::ClaudeCode, 0);
+        assert!(prompt.contains("only-prompt"));
+        assert!(!prompt.contains("Previous conversation:"));
+    }
+
+    // ─── language instruction tests ─────────────────────────────────────────────
+
+    fn make_discussion_with_lang(messages: Vec<DiscussionMessage>, lang: &str) -> Discussion {
+        let mut disc = make_discussion(messages);
+        disc.language = lang.to_string();
+        disc
+    }
+
+    #[test]
+    fn language_instruction_is_dynamic_per_discussion() {
+        let disc_fr = make_discussion_with_lang(
+            vec![make_msg(MessageRole::User, "salut")], "fr",
+        );
+        let disc_en = make_discussion_with_lang(
+            vec![make_msg(MessageRole::User, "hello")], "en",
+        );
+        let disc_es = make_discussion_with_lang(
+            vec![make_msg(MessageRole::User, "hola")], "es",
+        );
+
+        let prompt_fr = build_agent_prompt(&disc_fr, &AgentType::ClaudeCode, 0);
+        let prompt_en = build_agent_prompt(&disc_en, &AgentType::ClaudeCode, 0);
+        let prompt_es = build_agent_prompt(&disc_es, &AgentType::ClaudeCode, 0);
+
+        assert!(prompt_fr.contains("français"), "FR prompt must contain French instruction");
+        assert!(prompt_en.contains("English"), "EN prompt must contain English instruction");
+        assert!(prompt_es.contains("español"), "ES prompt must contain Spanish instruction");
+
+        // Must NOT leak other languages
+        assert!(!prompt_fr.contains("English"), "FR prompt must not contain English instruction");
+        assert!(!prompt_en.contains("français"), "EN prompt must not contain French instruction");
+    }
+
+    #[test]
+    fn single_message_language_instruction_at_end() {
+        let disc = make_discussion_with_lang(
+            vec![make_msg(MessageRole::User, "test prompt")], "fr",
+        );
+        let prompt = build_agent_prompt(&disc, &AgentType::Vibe, 0);
+
+        // Language instruction at end only (LLMs weight recent text more, saves tokens)
+        assert!(prompt.ends_with("français."), "Language reminder must be at end of prompt");
+        // The instruction block should appear exactly once (end only)
+        assert_eq!(prompt.matches("[IMPORTANT]").count(), 1,
+            "Language instruction block should appear once (end only) to save tokens");
+    }
+
+    #[test]
+    fn multi_message_footer_includes_language_reminder() {
+        let disc = make_discussion_with_lang(vec![
+            make_msg(MessageRole::User, "first message"),
+            make_msg(MessageRole::Agent, "agent reply"),
+            make_msg(MessageRole::User, "second message"),
+        ], "fr");
+        let prompt = build_agent_prompt(&disc, &AgentType::ClaudeCode, 0);
+
+        // Footer should contain language reminder
+        assert!(prompt.contains("Répondez au dernier message"), "Footer must be in French");
+        assert!(prompt.contains("francais"), "Footer must include language reminder");
+        // No duplicate language instruction at start (saves tokens)
+        assert!(!prompt.starts_with("[IMPORTANT]"), "Language instruction should not be duplicated at start");
+    }
+
+    #[test]
+    fn multi_message_footer_language_matches_discussion() {
+        let disc_en = make_discussion_with_lang(vec![
+            make_msg(MessageRole::User, "msg1"),
+            make_msg(MessageRole::Agent, "reply"),
+            make_msg(MessageRole::User, "msg2"),
+        ], "en");
+        let prompt = build_agent_prompt(&disc_en, &AgentType::GeminiCli, 0);
+
+        assert!(prompt.contains("Respond in English"), "EN footer must have English reminder");
+        assert!(!prompt.contains("français"), "EN prompt must not contain French");
+    }
+
+    #[test]
+    fn unknown_language_defaults_to_english() {
+        let disc = make_discussion_with_lang(
+            vec![make_msg(MessageRole::User, "test")], "xx",
+        );
+        let prompt = build_agent_prompt(&disc, &AgentType::ClaudeCode, 0);
+        assert!(prompt.contains("English"), "Unknown language should default to English");
+    }
+
+    // ─── Budget and summary threshold tests ─────────────────────────────────
+
+    #[test]
+    fn kiro_budget_matches_bedrock_context() {
+        // Kiro uses Claude via AWS Bedrock (200K context window)
+        // Budget must be large enough for audit validation conversations
+        let budget = agent_prompt_budget(&AgentType::Kiro);
+        assert!(budget >= 200_000,
+            "Kiro budget ({}) must be >= 200K to match Bedrock context window", budget);
+    }
+
+    #[test]
+    fn claude_code_budget_is_large() {
+        let budget = agent_prompt_budget(&AgentType::ClaudeCode);
+        assert!(budget >= 200_000);
+    }
+
+    #[test]
+    fn codex_budget_matches_gpt5_context() {
+        let budget = agent_prompt_budget(&AgentType::Codex);
+        assert!(budget >= 100_000,
+            "Codex uses GPT-5 (128K+ context), budget ({}) should be >= 100K", budget);
+    }
+
+    #[test]
+    fn summary_threshold_adapts_to_budget() {
+        // Large-budget agents wait longer before summarizing than medium-budget
+        let large = summary_msg_threshold(&AgentType::ClaudeCode);
+        let medium = summary_msg_threshold(&AgentType::Vibe);
+        assert!(large > medium,
+            "Large-budget agents ({}) should have higher threshold than medium-budget ({})",
+            large, medium);
+    }
+
+    #[test]
+    fn summary_threshold_medium_budget_triggers_earlier() {
+        // Vibe (medium budget) should trigger earlier than large-budget agents
+        let vibe = summary_msg_threshold(&AgentType::Vibe);
+        let claude = summary_msg_threshold(&AgentType::ClaudeCode);
+        assert!(vibe < claude,
+            "Medium-budget Vibe ({}) should trigger before large-budget Claude ({})",
+            vibe, claude);
+    }
+
+    #[test]
+    fn summary_cooldown_adapts_to_budget() {
+        let large = summary_cooldown(&AgentType::Kiro);
+        let small = summary_cooldown(&AgentType::Codex);
+        assert!(large >= small,
+            "Large-budget cooldown ({}) should be >= small-budget ({})", large, small);
+    }
+
+    #[test]
+    fn all_agents_have_reasonable_budgets() {
+        for agent in [AgentType::ClaudeCode, AgentType::Codex, AgentType::GeminiCli,
+                      AgentType::Kiro, AgentType::Vibe, AgentType::Custom] {
+            let budget = agent_prompt_budget(&agent);
+            assert!(budget >= 8_000, "Agent {:?} budget {} is too small", agent, budget);
+            assert!(budget <= 2_000_000, "Agent {:?} budget {} is unreasonably large", agent, budget);
+        }
+    }
+
+    /// When summary_cache is set, the summary text appears in the prompt
+    /// and old messages covered by the summary are skipped.
+    #[test]
+    fn build_agent_prompt_with_summary_cache() {
+        let mut messages = Vec::new();
+        // 6 old messages covered by summary (non-System indices 0..5)
+        for i in 0..3usize {
+            messages.push(make_msg(MessageRole::User, &format!("old-user-{}", i)));
+            messages.push(make_msg(MessageRole::Agent, &format!("old-agent-{}", i)));
+        }
+        // 2 recent messages NOT covered (non-System indices 6..7)
+        messages.push(make_msg(MessageRole::User, "recent-question"));
+        messages.push(make_msg(MessageRole::Agent, "recent-answer"));
+        // Final user message (non-System index 8)
+        messages.push(make_msg(MessageRole::User, "latest-user-msg"));
+
+        let mut disc = make_discussion(messages);
+        disc.summary_cache = Some("Summarized: discussed old topics".to_string());
+        disc.summary_up_to_msg_idx = Some(6); // covers indices 0..5
+
+        let prompt = build_agent_prompt(&disc, &AgentType::ClaudeCode, 0);
+
+        // Summary must appear
+        assert!(prompt.contains("Summarized: discussed old topics"),
+            "Summary cache text must appear in the prompt");
+        assert!(prompt.contains("Summary of earlier conversation"),
+            "Summary block header must be present");
+
+        // Old messages must be skipped
+        for i in 0..3usize {
+            assert!(!prompt.contains(&format!("old-user-{}", i)),
+                "Old user message {} must be skipped (covered by summary)", i);
+            assert!(!prompt.contains(&format!("old-agent-{}", i)),
+                "Old agent message {} must be skipped (covered by summary)", i);
+        }
+
+        // Recent messages must appear
+        assert!(prompt.contains("recent-question"), "Recent uncovered messages must appear");
+        assert!(prompt.contains("latest-user-msg"), "Latest user message must appear");
+    }
+
+    /// A large conversation gets truncated to fit the agent's budget.
+    /// When extra_context_len eats into the budget, older messages are dropped.
+    #[test]
+    fn build_agent_prompt_respects_budget() {
+        // Create a conversation with many large messages
+        let big_content = "A".repeat(5000); // 5000 chars per message
+        let mut messages = Vec::new();
+        for _ in 0..20usize {
+            messages.push(make_msg(MessageRole::User, &big_content));
+            messages.push(make_msg(MessageRole::Agent, &big_content));
+        }
+        messages.push(make_msg(MessageRole::User, "final-question-marker"));
+
+        let disc = make_discussion(messages);
+
+        // Pass a large extra_context_len to severely limit the budget
+        let budget = agent_prompt_budget(&AgentType::ClaudeCode);
+        let extra = budget.saturating_sub(15_000); // leave only ~15K chars for the prompt
+        let prompt = build_agent_prompt(&disc, &AgentType::ClaudeCode, extra);
+
+        // The prompt must contain the latest user message (always included)
+        assert!(prompt.contains("final-question-marker"),
+            "Latest user message must always be included regardless of budget");
+
+        // The prompt must be smaller than the remaining budget (with some margin for overhead)
+        assert!(prompt.len() <= 20_000,
+            "Prompt length ({}) should be within the remaining budget", prompt.len());
+
+        // Not all 40 messages can fit in ~15K chars (each is 5000+ chars)
+        // so some must have been truncated
+        let big_count = prompt.matches(&big_content).count();
+        assert!(big_count < 40,
+            "Budget truncation should drop some messages: found {} of 40", big_count);
+    }
+
+    // ─── pin_first_message tests ────────────────────────────────────────────
+
+    /// When pin_first_message is true, message 0 content appears in the prompt
+    /// even when summary_cache covers it.
+    #[test]
+    fn build_agent_prompt_pins_first_message() {
+        let mut messages = Vec::new();
+        // Message 0 = protocol prompt (pinned)
+        messages.push(make_msg(MessageRole::User, "PROTOCOL: Phase 1 = Audit. Phase 2 = Review. Phase 3 = Fix."));
+        // 6 old messages covered by summary (non-System indices 1..6)
+        for i in 0..3usize {
+            messages.push(make_msg(MessageRole::User, &format!("old-user-{}", i)));
+            messages.push(make_msg(MessageRole::Agent, &format!("old-agent-{}", i)));
+        }
+        // Recent messages NOT covered
+        messages.push(make_msg(MessageRole::User, "recent-question"));
+        messages.push(make_msg(MessageRole::Agent, "recent-answer"));
+        messages.push(make_msg(MessageRole::User, "latest-user-msg"));
+
+        let mut disc = make_discussion(messages);
+        disc.pin_first_message = true;
+        disc.summary_cache = Some("Summarized: discussed old topics".to_string());
+        disc.summary_up_to_msg_idx = Some(7); // covers indices 0..6
+
+        let prompt = build_agent_prompt(&disc, &AgentType::ClaudeCode, 0);
+
+        // Pinned message must appear with wrapper
+        assert!(prompt.contains("PROTOCOL: Phase 1 = Audit"),
+            "Pinned protocol message must appear in prompt");
+        assert!(prompt.contains("[INSTRUCTIONS DU PROTOCOLE"),
+            "Pinned message must be wrapped with protocol header");
+        assert!(prompt.contains("[FIN INSTRUCTIONS]"),
+            "Pinned message must have closing marker");
+
+        // Summary must also appear
+        assert!(prompt.contains("Summarized: discussed old topics"),
+            "Summary cache text must still appear in the prompt");
+
+        // Old messages must be skipped (covered by summary)
+        for i in 0..3usize {
+            assert!(!prompt.contains(&format!("old-user-{}", i)),
+                "Old user message {} must be skipped (covered by summary)", i);
+        }
+
+        // Pinned message should NOT appear as a regular "User:" message
+        // (it's already pinned above, so index 0 is skipped in formatted_msgs)
+        let user_protocol_count = prompt.matches("User: PROTOCOL:").count();
+        assert_eq!(user_protocol_count, 0,
+            "Pinned message must not be duplicated as a regular User: message");
+
+        // Recent messages must appear
+        assert!(prompt.contains("recent-question"), "Recent messages must appear");
+        assert!(prompt.contains("latest-user-msg"), "Latest user message must appear");
+    }
+
+    /// When pin_first_message is true, message 0 is excluded from summary input.
+    #[test]
+    fn pinned_message_excluded_from_summary_input() {
+        // This test verifies the skip logic used in maybe_generate_summary.
+        // We simulate the same filtering that maybe_generate_summary does.
+        let messages = [
+            make_msg(MessageRole::User, "PINNED_PROTOCOL_MSG"),
+            make_msg(MessageRole::User, "normal-msg-1"),
+            make_msg(MessageRole::Agent, "normal-reply-1"),
+            make_msg(MessageRole::User, "normal-msg-2"),
+        ];
+
+        let non_system_msgs: Vec<&DiscussionMessage> = messages.iter()
+            .filter(|m| !matches!(m.role, MessageRole::System))
+            .collect();
+
+        // Simulate pin_first_message = true
+        let pin_first_message = true;
+        let last_summary_non_sys: usize = 0; // no previous summary
+        let skip_pinned = if pin_first_message { 1 } else { 0 };
+        let new_msgs: Vec<String> = non_system_msgs.iter()
+            .skip(last_summary_non_sys.max(skip_pinned))
+            .map(|m| m.content.clone())
+            .collect();
+
+        assert!(!new_msgs.contains(&"PINNED_PROTOCOL_MSG".to_string()),
+            "Pinned message must be excluded from summary input");
+        assert!(new_msgs.contains(&"normal-msg-1".to_string()),
+            "Non-pinned messages must be included in summary input");
+        assert!(new_msgs.contains(&"normal-msg-2".to_string()),
+            "Non-pinned messages must be included in summary input");
+
+        // Simulate pin_first_message = false — message 0 should be included
+        let skip_pinned_off = 0usize;
+        let all_msgs: Vec<String> = non_system_msgs.iter()
+            .skip(last_summary_non_sys.max(skip_pinned_off))
+            .map(|m| m.content.clone())
+            .collect();
+        assert!(all_msgs.contains(&"PINNED_PROTOCOL_MSG".to_string()),
+            "Without pin, message 0 should be included in summary input");
+    }
+
+    // ─── smart_truncate tests ───────────────────────────────────────────────
+
+    #[test]
+    fn smart_truncate_short_text_unchanged() {
+        assert_eq!(smart_truncate("hello", 100), "hello");
+    }
+
+    #[test]
+    fn smart_truncate_cuts_at_sentence() {
+        let text = "First sentence. Second sentence. Third sentence.";
+        let result = smart_truncate(text, 25);
+        assert_eq!(result, "First sentence.");
+    }
+
+    #[test]
+    fn smart_truncate_cuts_at_word() {
+        let text = "one two three four five six";
+        let result = smart_truncate(text, 15);
+        assert!(result.ends_with('…'), "Should end with ellipsis: {}", result);
+        assert!(!result.contains("four"), "Should not include words past boundary");
+    }
+
+    #[test]
+    fn smart_truncate_handles_utf8_accents() {
+        // French text with accents — must NOT panic
+        let text = "Les reponses en francais contiennent des accents : e, a, u, o, c.";
+        let result = smart_truncate(text, 30);
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn smart_truncate_handles_emoji() {
+        // Emoji are 4 bytes — cutting at byte 3 would panic without floor_char_boundary
+        let text = "Hello 🎮🎨🚀 world";
+        let result = smart_truncate(text, 9); // "Hello 🎮" is 10 bytes, cut at 9
+        assert!(!result.is_empty(), "Should not panic on emoji boundary");
+    }
+
+    #[test]
+    fn smart_truncate_handles_cjk() {
+        // CJK characters are 3 bytes each
+        let text = "日本語テスト文字列";
+        let result = smart_truncate(text, 7); // Mid-character cut
+        assert!(!result.is_empty(), "Should not panic on CJK boundary");
+    }
+
+    #[test]
+    fn vibe_mcp_budget_is_zero() {
+        // Vibe in API mode should not reserve MCP budget
+        let len = estimate_extra_context_len(&[], &[], &[], "/some/path", None, &AgentType::Vibe);
+        let len_claude = estimate_extra_context_len(&[], &[], &[], "/some/path", None, &AgentType::ClaudeCode);
+        // Both should be the same (just separators) since no skills/profiles/directives
+        assert_eq!(len, len_claude, "Vibe and Claude with no extras should have same overhead");
+    }
+
+    // ─── auth_mode_for tests ────────────────────────────────────────────────
+
+    #[test]
+    fn auth_mode_vibe_maps_to_mistral() {
+        use crate::models::ApiKey;
+        let mut tokens = TokensConfig { anthropic: None, openai: None, google: None, keys: vec![], disabled_overrides: vec![] };
+        // No key → local
+        assert_eq!(auth_mode_for(&AgentType::Vibe, &tokens), "local");
+        // With active mistral key → override
+        tokens.keys.push(ApiKey { id: "k1".into(), name: "t".into(), provider: "mistral".into(), value: "x".into(), active: true });
+        assert_eq!(auth_mode_for(&AgentType::Vibe, &tokens), "override");
+    }
+
+    #[test]
+    fn auth_mode_kiro_maps_to_aws() {
+        let tokens = TokensConfig { anthropic: None, openai: None, google: None, keys: vec![], disabled_overrides: vec![] };
+        // Kiro uses AWS — no key configured → local
+        assert_eq!(auth_mode_for(&AgentType::Kiro, &tokens), "local");
+    }
+
+    #[test]
+    fn auth_mode_all_agents_have_provider() {
+        let tokens = TokensConfig { anthropic: None, openai: None, google: None, keys: vec![], disabled_overrides: vec![] };
+        // None should panic
+        for agent in [AgentType::ClaudeCode, AgentType::Codex, AgentType::GeminiCli,
+                      AgentType::Vibe, AgentType::Kiro, AgentType::Custom] {
+            let mode = auth_mode_for(&agent, &tokens);
+            assert!(mode == "local" || mode == "override", "Agent {:?} auth mode should be local or override", agent);
+        }
+    }
+
+}

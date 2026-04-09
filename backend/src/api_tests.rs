@@ -1201,7 +1201,8 @@ mod tests {
     async fn detect_error_hint_mcp_config() {
         use crate::api::discussions::detect_agent_error_hint;
         let hint = detect_agent_error_hint(
-            "Error: Invalid MCP configuration: MCP config file not found: /host-home/Repositories/test/"
+            "Error: Invalid MCP configuration: MCP config file not found: /host-home/Repositories/test/",
+            None
         );
         assert!(hint.is_some(), "Should detect MCP config error");
         assert!(hint.unwrap().contains("MCP"), "Hint should mention MCP");
@@ -1210,14 +1211,14 @@ mod tests {
     #[tokio::test]
     async fn detect_error_hint_auth() {
         use crate::api::discussions::detect_agent_error_hint;
-        let hint = detect_agent_error_hint("authentication_error: invalid API key");
+        let hint = detect_agent_error_hint("authentication_error: invalid API key", None);
         assert!(hint.is_some(), "Should detect auth error");
     }
 
     #[tokio::test]
     async fn detect_error_hint_no_match() {
         use crate::api::discussions::detect_agent_error_hint;
-        let hint = detect_agent_error_hint("Everything is fine, no errors here");
+        let hint = detect_agent_error_hint("Everything is fine, no errors here", None);
         assert!(hint.is_none(), "Should not detect error in normal output");
     }
 

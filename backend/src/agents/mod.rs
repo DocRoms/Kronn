@@ -469,6 +469,7 @@ mod tests {
 
     #[test]
     #[serial]
+    #[cfg(not(target_os = "macos"))]
     fn host_is_not_macos_when_unset() {
         std::env::remove_var("KRONN_HOST_OS");
         assert!(!host_is_macos(), "Should not be macOS when env is unset on Linux");
