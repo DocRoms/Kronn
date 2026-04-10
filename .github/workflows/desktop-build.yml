@@ -38,8 +38,26 @@ jobs:
       - name: Install Linux dependencies
         if: matrix.os == 'ubuntu-22.04'
         run: |
+          # Tauri 2 requires webkit2gtk-4.1 (vs Tauri 1 / webkit2gtk-4.0).
+          # Ubuntu 22.04 ships 4.1 in the universe repository (enabled by
+          # default on desktop installs). We also pull libsoup-3.0-dev and
+          # libjavascriptcoregtk-4.1-dev explicitly: webkit2gtk-4.1 transitively
+          # depends on them but on minimal images (CI containers, server
+          # installs) the dev headers are not always pulled in automatically.
+          # patchelf is required by tauri-bundler to fix RPATHs in the AppImage.
+          sudo add-apt-repository -y universe
           sudo apt-get update
-          sudo apt-get install -y pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libssl-dev
+          sudo apt-get install -y \
+            pkg-config \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libsoup-3.0-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            patchelf \
+            file
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -179,12 +197,27 @@ jobs:
           body: |
             ## Installation
 
-            | OS | File |
-            |----|------|
-            | Windows | `.exe` (NSIS) or `.msi` |
-            | macOS Apple Silicon | `aarch64.dmg` |
-            | macOS Intel | `x64.dmg` |
-            | Linux | `.deb` or `.AppImage` |
+            | OS | File | Min version |
+            |----|------|-------------|
+            | Windows | `.exe` (NSIS) or `.msi` | Windows 10+ |
+            | macOS Apple Silicon | `aarch64.dmg` | macOS 11+ |
+            | macOS Intel | `x64.dmg` | macOS 11+ |
+            | Linux | `.deb` or `.AppImage` | Ubuntu 22.04+ / Debian 12+ / Fedora 38+ |
+
+            ### Linux — webkit2gtk-4.1 requirement
+
+            Kronn uses Tauri 2 which requires **`libwebkit2gtk-4.1-0`** at runtime.
+            On Ubuntu 22.04 it lives in the `universe` repository (enabled by
+            default on desktop installs). On minimal/server installs you may need:
+            ```bash
+            sudo add-apt-repository universe
+            sudo apt update
+            sudo apt install -y libwebkit2gtk-4.1-0
+            sudo dpkg -i kronn_*.deb
+            sudo apt-get -f install   # resolves any remaining deps
+            ```
+            On older distros (Ubuntu 20.04, RHEL 8) the `.deb` will not install —
+            use the AppImage instead, or upgrade.
 
             ### macOS — "app is damaged" warning
 

@@ -269,6 +269,36 @@ pub fn find_binary(name: &str) -> Option<BinaryLocation> {
         }
     }
 
+    // On Linux native: probe non-PATH package manager locations.
+    // `which::which` only checks $PATH, but Snap/Flatpak/Nix install binaries
+    // outside the standard PATH on minimal Tauri-launched sessions. We probe
+    // explicitly so users with `snap install …` or NixOS profiles get
+    // proper detection without having to fix their shell rc files.
+    #[cfg(target_os = "linux")]
+    {
+        let mut linux_dirs: Vec<std::path::PathBuf> = vec![
+            std::path::PathBuf::from("/snap/bin"),
+            std::path::PathBuf::from("/var/lib/flatpak/exports/bin"),
+            std::path::PathBuf::from("/run/current-system/sw/bin"),
+        ];
+        if let Ok(home) = std::env::var("HOME") {
+            linux_dirs.push(std::path::PathBuf::from(format!("{}/.local/share/flatpak/exports/bin", home)));
+            linux_dirs.push(std::path::PathBuf::from(format!("{}/.nix-profile/bin", home)));
+            linux_dirs.push(std::path::PathBuf::from(format!("{}/.asdf/shims", home)));
+            linux_dirs.push(std::path::PathBuf::from(format!("{}/.local/bin", home)));
+        }
+        for dir in &linux_dirs {
+            let candidate = dir.join(name);
+            if candidate.exists() {
+                return Some(BinaryLocation {
+                    path: candidate.to_string_lossy().to_string(),
+                    host_managed: false,
+                    via_wsl: false,
+                });
+            }
+        }
+    }
+
     // On Windows native: try finding the binary inside WSL.
     // 1. Use bash -lc (login shell) to pick up the user's full PATH.
     // 2. Fallback: probe common install locations directly, because some distros
@@ -276,9 +306,20 @@ pub fn find_binary(name: &str) -> Option<BinaryLocation> {
     //    which means a login-only shell (-l without -i) may miss them.
     #[cfg(target_os = "windows")]
     {
-        // Login-shell lookup
+        // SECURITY: `name` is interpolated into a shell command. Reject anything
+        // that isn't a plain executable identifier so a future caller can never
+        // turn this into a command-injection sink. Agent names are static
+        // strings (claude, codex, gemini, …) so this is purely defensive.
+        if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            tracing::warn!("Refusing WSL binary lookup for suspicious name: {:?}", name);
+            return None;
+        }
+
+        // Login-shell lookup. We pass the binary name through `command -v` rather
+        // than `which` so it works even when which is not installed inside the
+        // WSL distro. Single-quoted to avoid shell interpolation surprises.
         let mut cmd = sync_cmd("wsl.exe");
-        cmd.args(["-e", "bash", "-lc", &format!("which {}", name)]);
+        cmd.args(["-e", "bash", "-lc", &format!("command -v '{}'", name)]);
         if let Ok(output) = cmd.output() {
             if output.status.success() {
                 let wsl_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -288,13 +329,15 @@ pub fn find_binary(name: &str) -> Option<BinaryLocation> {
             }
         }
 
-        // Fallback: probe well-known directories inside WSL
+        // Fallback: probe well-known directories inside WSL.
+        // Each path is double-quoted in the shell so spaces in $HOME (rare on
+        // WSL but possible with custom usernames) cannot break the test out of
+        // its argument; the binary name is constrained above to safe ASCII.
         let probe_paths = [
-            format!("$HOME/.local/bin/{}", name),
-            format!("$HOME/.kiro/bin/{}", name),
-            format!("/usr/local/bin/{}", name),
-            // npm global on common distros
-            format!("$HOME/.npm-global/bin/{}", name),
+            format!("\"$HOME/.local/bin/{}\"", name),
+            format!("\"$HOME/.kiro/bin/{}\"", name),
+            format!("\"/usr/local/bin/{}\"", name),
+            format!("\"$HOME/.npm-global/bin/{}\"", name),
         ];
         let test_script = probe_paths.iter()
             .map(|p| format!("test -x {} && echo {}", p, p))

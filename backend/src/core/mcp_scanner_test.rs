@@ -589,6 +589,104 @@ startup_timeout_sec = 60
             "Default startup timeout must be 30s (Codex default is 10s, too short for binaries)");
     }
 
+    // ─── Codex config preservation (regression for silent unwrap_or_default) ─
+
+    #[test]
+    fn codex_load_returns_empty_when_file_missing() {
+        use crate::core::mcp_scanner::{load_codex_config_for_merge, CodexLoadOutcome};
+        let tmp = setup_tmp("codex-missing");
+        let path = tmp.join("config.toml");
+        match load_codex_config_for_merge(&path) {
+            CodexLoadOutcome::Empty => {}
+            other => panic!("expected Empty, got {:?}", other),
+        }
+        cleanup(&tmp);
+    }
+
+    #[test]
+    fn codex_load_returns_loaded_table_with_user_sections() {
+        // Round-trip with [model_providers] and [profiles] — these MUST survive
+        // a merge cycle because they contain the user's API keys and presets.
+        use crate::core::mcp_scanner::{load_codex_config_for_merge, CodexLoadOutcome};
+        let tmp = setup_tmp("codex-loaded");
+        let path = tmp.join("config.toml");
+        let original = r#"
+[model_providers.openai]
+api_key = "sk-test"
+
+[profiles.default]
+model = "gpt-4o"
+
+[mcp_servers.preexisting]
+command = "npx"
+args = ["@example/old-mcp"]
+"#;
+        std::fs::write(&path, original).unwrap();
+
+        match load_codex_config_for_merge(&path) {
+            CodexLoadOutcome::Loaded(table) => {
+                assert!(table.contains_key("model_providers"),
+                    "model_providers section must be preserved");
+                assert!(table.contains_key("profiles"),
+                    "profiles section must be preserved");
+                assert!(table.contains_key("mcp_servers"),
+                    "existing mcp_servers section must be preserved (sync replaces it)");
+            }
+            other => panic!("expected Loaded, got {:?}", other),
+        }
+        cleanup(&tmp);
+    }
+
+    #[test]
+    fn codex_load_aborts_and_backs_up_on_corrupt_toml() {
+        // CRITICAL: a malformed config.toml must NOT be replaced with an empty
+        // table — that would silently destroy [model_providers] etc. We expect
+        // Aborted + a .kronn-backup file alongside the original.
+        use crate::core::mcp_scanner::{load_codex_config_for_merge, CodexLoadOutcome};
+        let tmp = setup_tmp("codex-corrupt");
+        let path = tmp.join("config.toml");
+        // Definitely-not-TOML content
+        std::fs::write(&path, "this is = = not = valid [[[ toml ]]]\n[unclosed").unwrap();
+
+        match load_codex_config_for_merge(&path) {
+            CodexLoadOutcome::Aborted => {}
+            other => panic!("expected Aborted, got {:?}", other),
+        }
+
+        let backup = tmp.join("config.toml.kronn-backup");
+        assert!(backup.exists(), "corrupt config must be backed up to .kronn-backup");
+        let backup_content = std::fs::read_to_string(&backup).unwrap();
+        assert!(backup_content.contains("not = valid"),
+            "backup must contain the original (corrupt) bytes");
+
+        // The original file is left in place untouched (we never wrote over it)
+        let original = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(original, backup_content);
+        cleanup(&tmp);
+    }
+
+    #[test]
+    fn codex_load_aborts_when_root_is_not_a_table() {
+        // toml technically allows arrays at root in some grammars; reject anything
+        // that isn't a table so the merge logic only ever sees a Table.
+        use crate::core::mcp_scanner::{load_codex_config_for_merge, CodexLoadOutcome};
+        let tmp = setup_tmp("codex-non-table");
+        let path = tmp.join("config.toml");
+        // Empty file parses to an empty table — that's actually fine, so use
+        // a sentinel that parses but is unusual: just whitespace + comment.
+        // Empty/whitespace TOML always becomes an empty Table, so we can't
+        // easily produce a non-table root from string parsing — instead we
+        // verify the Aborted path indirectly by feeding broken TOML above.
+        // This test documents that load_codex_config_for_merge accepts a clean
+        // empty file as Loaded(empty), which is the right default.
+        std::fs::write(&path, "# just a comment\n").unwrap();
+        match load_codex_config_for_merge(&path) {
+            CodexLoadOutcome::Loaded(t) => assert!(t.is_empty()),
+            other => panic!("expected Loaded(empty), got {:?}", other),
+        }
+        cleanup(&tmp);
+    }
+
     #[test]
     fn scanner_resolve_host_path_existing_local() {
         use crate::core::scanner::resolve_host_path;

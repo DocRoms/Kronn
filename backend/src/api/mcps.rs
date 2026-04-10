@@ -400,6 +400,20 @@ pub async fn refresh(
             for (name, entry) in &parsed.mcp_servers {
                 // Determine transport
                 let transport = if let Some(cmd) = &entry.command {
+                    // SECURITY: a `.mcp.json` from an imported repo can declare ANY
+                    // command (e.g. `bash -c '…'`). Kronn syncs this verbatim into
+                    // every agent's MCP config and the agent will execute it. We
+                    // can't safely block here without breaking custom in-house
+                    // MCP servers, but we MUST surface untrusted commands so the
+                    // user notices supply-chain risk in their logs.
+                    if !is_well_known_mcp_command(cmd) {
+                        tracing::warn!(
+                            "MCP '{}' in project '{}' uses non-standard command '{}' — \
+                             ensure this binary is trusted; .mcp.json from imported repos \
+                             can introduce arbitrary code execution.",
+                            name, project.name, cmd
+                        );
+                    }
                     McpTransport::Stdio {
                         command: cmd.clone(),
                         args: entry.args.clone().unwrap_or_default(),
@@ -771,6 +785,81 @@ fn strip_version(pkg: &str) -> &str {
         }
     }
     pkg
+}
+
+/// Returns true if `command` is a well-known MCP launcher (npx, uvx, python, …).
+/// Anything else is allowed but logged as a supply-chain warning so the user
+/// notices when an imported `.mcp.json` declares an unusual binary.
+///
+/// Strips a directory path so absolute commands like `/usr/bin/python3` still
+/// match `python3`. Handles both Unix (`/`) and Windows (`\`) separators
+/// because the .mcp.json may have been authored on the other platform.
+fn is_well_known_mcp_command(cmd: &str) -> bool {
+    // Manually find the last path separator — `Path::file_name` only knows
+    // about the host OS separator, so on Linux it can't extract the basename
+    // from "C:\\Program Files\\nodejs\\node.exe".
+    let basename_start = cmd
+        .rfind(['/', '\\'])
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let basename = &cmd[basename_start..];
+    let basename = basename
+        .trim_end_matches(".exe")
+        .trim_end_matches(".cmd")
+        .trim_end_matches(".bat")
+        .trim_end_matches(".ps1");
+
+    matches!(
+        basename,
+        "npx"
+            | "node"
+            | "uvx"
+            | "uv"
+            | "python"
+            | "python3"
+            | "python3.10"
+            | "python3.11"
+            | "python3.12"
+            | "python3.13"
+            | "pipx"
+            | "deno"
+            | "bun"
+            | "bunx"
+            | "docker"
+            | "podman"
+    )
+}
+
+#[cfg(test)]
+mod command_safety_tests {
+    use super::is_well_known_mcp_command;
+
+    #[test]
+    fn well_known_launchers_are_accepted() {
+        for cmd in ["npx", "uvx", "python3", "node", "deno", "bun"] {
+            assert!(is_well_known_mcp_command(cmd), "{} should be well-known", cmd);
+        }
+    }
+
+    #[test]
+    fn absolute_paths_match_basename() {
+        assert!(is_well_known_mcp_command("/usr/local/bin/uvx"));
+        assert!(is_well_known_mcp_command("/opt/homebrew/bin/python3"));
+    }
+
+    #[test]
+    fn windows_extensions_are_stripped() {
+        assert!(is_well_known_mcp_command("npx.cmd"));
+        assert!(is_well_known_mcp_command("C:\\Program Files\\nodejs\\node.exe"));
+    }
+
+    #[test]
+    fn arbitrary_commands_are_flagged() {
+        assert!(!is_well_known_mcp_command("bash"));
+        assert!(!is_well_known_mcp_command("sh"));
+        assert!(!is_well_known_mcp_command("curl"));
+        assert!(!is_well_known_mcp_command("/tmp/evil-binary"));
+    }
 }
 
 /// Migrate old `detected:*` servers to registry IDs.

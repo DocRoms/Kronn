@@ -15,6 +15,9 @@ fn row_to_quick_prompt(row: &rusqlite::Row) -> QuickPrompt {
     let agent_str: String = row.get(5).unwrap_or_default();
     let skill_ids_json: String = row.get(7).unwrap_or_default();
     let tier_str: String = row.get(8).unwrap_or_default();
+    // Column 11: description — added in migration 028. Defaults to empty
+    // string for legacy rows that existed before the column was added.
+    let description: String = row.get(11).unwrap_or_default();
 
     QuickPrompt {
         id: row.get(0).unwrap_or_default(),
@@ -26,6 +29,7 @@ fn row_to_quick_prompt(row: &rusqlite::Row) -> QuickPrompt {
         project_id: row.get(6).unwrap_or(None),
         skill_ids: serde_json::from_str(&skill_ids_json).unwrap_or_default(),
         tier: serde_json::from_str(&format!("\"{}\"", tier_str)).unwrap_or(ModelTier::Default),
+        description,
         created_at: parse_dt(&row.get::<_, String>(9).unwrap_or_default()),
         updated_at: parse_dt(&row.get::<_, String>(10).unwrap_or_default()),
     }
@@ -33,7 +37,7 @@ fn row_to_quick_prompt(row: &rusqlite::Row) -> QuickPrompt {
 
 pub fn list_quick_prompts(conn: &Connection) -> Result<Vec<QuickPrompt>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, icon, prompt_template, variables_json, agent, project_id, skill_ids_json, tier, created_at, updated_at
+        "SELECT id, name, icon, prompt_template, variables_json, agent, project_id, skill_ids_json, tier, created_at, updated_at, description
          FROM quick_prompts ORDER BY updated_at DESC"
     )?;
     let items = stmt.query_map([], |row| Ok(row_to_quick_prompt(row)))?
@@ -44,7 +48,7 @@ pub fn list_quick_prompts(conn: &Connection) -> Result<Vec<QuickPrompt>> {
 
 pub fn get_quick_prompt(conn: &Connection, id: &str) -> Result<Option<QuickPrompt>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, icon, prompt_template, variables_json, agent, project_id, skill_ids_json, tier, created_at, updated_at
+        "SELECT id, name, icon, prompt_template, variables_json, agent, project_id, skill_ids_json, tier, created_at, updated_at, description
          FROM quick_prompts WHERE id = ?1"
     )?;
     let item = stmt.query_row(params![id], |row| Ok(row_to_quick_prompt(row))).ok();
@@ -55,8 +59,8 @@ pub fn insert_quick_prompt(conn: &Connection, qp: &QuickPrompt) -> Result<()> {
     let agent_str = serde_json::to_string(&qp.agent)?;
     let tier_str = serde_json::to_string(&qp.tier)?;
     conn.execute(
-        "INSERT INTO quick_prompts (id, name, icon, prompt_template, variables_json, agent, project_id, skill_ids_json, tier, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        "INSERT INTO quick_prompts (id, name, icon, prompt_template, variables_json, agent, project_id, skill_ids_json, tier, created_at, updated_at, description)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             qp.id,
             qp.name,
@@ -69,6 +73,7 @@ pub fn insert_quick_prompt(conn: &Connection, qp: &QuickPrompt) -> Result<()> {
             tier_str.trim_matches('"'),
             qp.created_at.to_rfc3339(),
             qp.updated_at.to_rfc3339(),
+            qp.description,
         ],
     )?;
     Ok(())
@@ -79,7 +84,7 @@ pub fn update_quick_prompt(conn: &Connection, qp: &QuickPrompt) -> Result<()> {
     let tier_str = serde_json::to_string(&qp.tier)?;
     conn.execute(
         "UPDATE quick_prompts SET name = ?2, icon = ?3, prompt_template = ?4, variables_json = ?5,
-         agent = ?6, project_id = ?7, skill_ids_json = ?8, tier = ?9, updated_at = ?10
+         agent = ?6, project_id = ?7, skill_ids_json = ?8, tier = ?9, updated_at = ?10, description = ?11
          WHERE id = ?1",
         params![
             qp.id,
@@ -92,6 +97,7 @@ pub fn update_quick_prompt(conn: &Connection, qp: &QuickPrompt) -> Result<()> {
             serde_json::to_string(&qp.skill_ids)?,
             tier_str.trim_matches('"'),
             qp.updated_at.to_rfc3339(),
+            qp.description,
         ],
     )?;
     Ok(())

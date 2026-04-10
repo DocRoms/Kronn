@@ -13,6 +13,7 @@ pub mod registry;
 pub mod scanner;
 pub mod skills;
 pub mod native_files;
+pub mod sse_limits;
 pub mod worktree;
 pub mod tailscale;
 pub mod ws_client;

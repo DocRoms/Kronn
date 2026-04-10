@@ -2,6 +2,8 @@ import { useState, useRef, memo } from 'react';
 import { ShieldCheck, Zap, Rocket, GitBranch, Loader2, Users, Users2 } from 'lucide-react';
 import type { Discussion } from '../types/generated';
 import { isValidationDisc } from '../lib/constants';
+import { formatRelativeTime } from '../lib/relativeTime';
+import { useT } from '../lib/I18nContext';
 import '../pages/DiscussionsPage.css';
 
 const isBootstrapDisc = (title: string) => title.startsWith('Bootstrap: ');
@@ -28,6 +30,11 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
   const [swiping, setSwiping] = useState(false);
   const startX = useRef(0);
   const currentX = useRef(0);
+  // Read the active UI locale so the relative time is rendered in the
+  // right language. memo() guards against needless re-renders when the
+  // locale is unchanged.
+  const { locale } = useT();
+  const relativeWhen = formatRelativeTime(disc.updated_at, locale);
 
   const handlePointerDown = (e: React.PointerEvent) => {
     startX.current = e.clientX;
@@ -103,6 +110,16 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
               <Users size={8} style={{ color: '#8b5cf6' }} />
             )}
             {disc.message_count ?? disc.messages.length} msg · {disc.agent}
+            {relativeWhen && (
+              <>
+                {' · '}
+                {/* Dates relatives — évite de confondre plusieurs
+                    discussions avec le même titre (quick prompts répétés). */}
+                <span className="disc-item-relative-time" title={new Date(disc.updated_at).toLocaleString(locale)}>
+                  {relativeWhen}
+                </span>
+              </>
+            )}
           </div>
         </div>
       </div>

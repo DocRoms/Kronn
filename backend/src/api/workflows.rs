@@ -207,6 +207,12 @@ pub async fn trigger(
         workspace_path: None,
         started_at: now,
         finished_at: None,
+        // Legacy linear runs — batch fields stay at their defaults.
+        run_type: "linear".into(),
+        batch_total: 0,
+        batch_completed: 0,
+        batch_failed: 0,
+        batch_name: None,
     };
 
     let r = run.clone();
@@ -292,7 +298,7 @@ pub async fn trigger(
         }
     });
 
-    Sse::new(stream)
+    Sse::new(crate::core::sse_limits::bounded(stream))
 }
 
 fn sse_error(msg: impl Into<String>) -> Sse<SseStream> {
@@ -434,7 +440,7 @@ pub async fn test_step(
         }
     });
 
-    Sse::new(stream)
+    Sse::new(crate::core::sse_limits::bounded(stream))
 }
 
 /// GET /api/workflows/:id/runs

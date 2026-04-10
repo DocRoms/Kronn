@@ -25,7 +25,7 @@ pub fn list_discussions_paginated(conn: &Connection, limit: Option<u32>, offset:
                 d.workspace_mode, d.workspace_path, d.worktree_branch,
                 d.summary_cache, d.summary_up_to_msg_idx, d.model_tier,
                 d.pin_first_message,
-                d.shared_id, d.shared_with_json
+                d.shared_id, d.shared_with_json, d.workflow_run_id
          FROM discussions d ORDER BY d.updated_at DESC{}",
         match (limit, offset) {
             (Some(l), Some(o)) => format!(" LIMIT {} OFFSET {}", l, o),
@@ -64,6 +64,7 @@ pub fn list_discussions_paginated(conn: &Connection, limit: Option<u32>, offset:
             summary_up_to_msg_idx: row.get::<_, Option<u32>>(17).unwrap_or(None),
             shared_id: row.get::<_, Option<String>>(20).unwrap_or(None),
             shared_with: serde_json::from_str(&row.get::<_, String>(21).unwrap_or_else(|_| "[]".into())).unwrap_or_default(),
+            workflow_run_id: row.get::<_, Option<String>>(22).unwrap_or(None),
             created_at: parse_dt(row.get::<_, String>(6)?),
             updated_at: parse_dt(row.get::<_, String>(7)?),
         })
@@ -99,7 +100,7 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
                 created_at, updated_at, archived, skill_ids_json, profile_ids_json, directive_ids_json,
                 workspace_mode, workspace_path, worktree_branch,
                 summary_cache, summary_up_to_msg_idx, model_tier, pin_first_message,
-                shared_id, shared_with_json
+                shared_id, shared_with_json, workflow_run_id
          FROM discussions WHERE id = ?1"
     )?;
 
@@ -132,6 +133,7 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
             summary_up_to_msg_idx: row.get::<_, Option<u32>>(16).unwrap_or(None),
             shared_id: row.get::<_, Option<String>>(19).unwrap_or(None),
             shared_with: serde_json::from_str(&row.get::<_, String>(20).unwrap_or_else(|_| "[]".into())).unwrap_or_default(),
+            workflow_run_id: row.get::<_, Option<String>>(21).unwrap_or(None),
             created_at: parse_dt(row.get::<_, String>(6)?),
             updated_at: parse_dt(row.get::<_, String>(7)?),
         })
@@ -148,8 +150,8 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
 
 pub fn insert_discussion(conn: &Connection, disc: &Discussion) -> Result<()> {
     conn.execute(
-        "INSERT INTO discussions (id, project_id, title, agent, language, participants_json, created_at, updated_at, archived, skill_ids_json, profile_ids_json, directive_ids_json, workspace_mode, workspace_path, worktree_branch, model_tier, pin_first_message, shared_id, shared_with_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+        "INSERT INTO discussions (id, project_id, title, agent, language, participants_json, created_at, updated_at, archived, skill_ids_json, profile_ids_json, directive_ids_json, workspace_mode, workspace_path, worktree_branch, model_tier, pin_first_message, shared_id, shared_with_json, workflow_run_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
         params![
             disc.id,
             disc.project_id,
@@ -170,6 +172,7 @@ pub fn insert_discussion(conn: &Connection, disc: &Discussion) -> Result<()> {
             disc.pin_first_message as i32,
             disc.shared_id,
             serde_json::to_string(&disc.shared_with)?,
+            disc.workflow_run_id,
         ],
     )?;
     Ok(())

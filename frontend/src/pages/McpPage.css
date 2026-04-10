@@ -279,6 +279,9 @@
 /* ── Search bar ─────────────────────────────────────────── */
 .mcp-search-wrap {
   position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
   margin-bottom: var(--kr-sp-8);
 }
 
@@ -293,12 +296,14 @@
 
 .mcp-search-input {
   padding-left: 32px;
-  width: 100%;
+  flex: 1;
+  min-width: 0;
 }
 
 .mcp-search-clear {
   position: absolute;
-  right: var(--kr-sp-4);
+  /* Sits to the left of the sort toggle button (40px wide + gap). */
+  right: calc(40px + var(--kr-sp-4));
   top: 50%;
   transform: translateY(-50%);
   background: none;
@@ -306,6 +311,14 @@
   cursor: pointer;
   color: var(--kr-text-dim);
   padding: 2px;
+}
+
+.mcp-sort-toggle {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 10px;
 }
 
 /* ── Installed plugins grid ─────────────────────────────── */

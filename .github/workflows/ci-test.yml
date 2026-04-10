@@ -36,6 +36,63 @@ jobs:
         # No sccache for clippy — cached artifacts can replay stale lint warnings
         # even when the source has changed (sccache hashes deps/flags, not source content)
 
+      # ── Anti-regression lints ─────────────────────────────────────────
+      #
+      # These grep-based checks catch patterns that clippy can't:
+      #
+      # 1. std::process::Command::new — On Windows, every Command::new
+      #    spawns a visible console window. All production code MUST use
+      #    crate::core::cmd::{sync_cmd, async_cmd} which apply
+      #    CREATE_NO_WINDOW. Test code (#[cfg(test)]) is exempt.
+      #
+      # 2. .unwrap_or_default() after .parse::<toml::Value>() — This
+      #    was the root cause of a critical bug where Codex config.toml
+      #    was silently replaced with an empty table on parse error,
+      #    destroying [model_providers] and user auth. Use explicit error
+      #    handling (see load_codex_config_for_merge pattern).
+      - name: Lint — no raw Command::new in prod code
+        run: |
+          # On Windows every Command::new flashes a console window. Production
+          # code must use crate::core::cmd::{sync_cmd, async_cmd}.
+          #
+          # Strategy: for each .rs file (excluding cmd.rs and *_test.rs),
+          # find the first #[cfg(test)] line. Any Command::new BEFORE that
+          # line is production code → violation. Lines AFTER it are test
+          # helpers and are exempt.
+          #
+          # Note: we use LINE_NUM instead of LINENO because LINENO is a
+          # bash builtin (current script line number).
+          FAIL=0
+          for file in $(grep -rl 'Command::new' src/ --include='*.rs' \
+                        | grep -v 'src/core/cmd.rs' \
+                        | grep -v '_test.rs'); do
+            TEST_LINE=$(grep -n '#\[cfg(test)\]' "$file" | head -1 | cut -d: -f1)
+            TEST_LINE=${TEST_LINE:-999999}
+            while IFS=: read -r LINE_NUM rest; do
+              if [ "$LINE_NUM" -lt "$TEST_LINE" ]; then
+                echo "::error file=$file,line=$LINE_NUM::Raw Command::new in prod code (use cmd::sync_cmd/async_cmd)"
+                echo "  $file:$LINE_NUM:$rest"
+                FAIL=1
+              fi
+            done < <(grep -n 'Command::new' "$file")
+          done
+          if [ "$FAIL" -eq 1 ]; then exit 1; fi
+          echo "✓ No raw Command::new in production code"
+
+      - name: Lint — no silent TOML unwrap_or_default
+        run: |
+          # Catch the dangerous pattern: .parse::<toml::Value>() ... .unwrap_or_default()
+          # which silently drops user config on parse errors.
+          VIOLATIONS=$(grep -rn 'parse.*toml.*Value' src/ --include='*.rs' -A3 \
+            | grep 'unwrap_or_default' \
+            || true)
+          if [ -n "$VIOLATIONS" ]; then
+            echo "::error::Found .unwrap_or_default() on TOML parse result — handle errors explicitly:"
+            echo "$VIOLATIONS"
+            exit 1
+          fi
+          echo "✓ No silent TOML unwrap_or_default"
+
       - name: cargo test
         run: cargo test
         env:

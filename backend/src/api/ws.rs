@@ -1,5 +1,6 @@
 use axum::{
     extract::{
+        connect_info::ConnectInfo,
         ws::{Message, WebSocket},
         State, WebSocketUpgrade,
     },
@@ -7,8 +8,137 @@ use axum::{
 };
 use chrono::Utc;
 use futures::{SinkExt, StreamExt};
+use std::net::{IpAddr, SocketAddr};
 
 use crate::{models::WsMessage, AppState};
+
+// ── Invite-code brute-force protection ─────────────────────────────────────
+//
+// A peer that wants to talk to this Kronn instance must send a Presence
+// message with a valid invite code as its first WS payload. Without rate
+// limiting, an attacker could open many WebSocket connections and brute-force
+// invite codes by spraying random values until one matches a contact in the
+// local DB.
+//
+// We track failed invite-code attempts per remote IP in a process-local map
+// (no DB, no shared state between restarts — fine for a desktop app where the
+// process lives a few hours at most). After `MAX_FAILED_ATTEMPTS` failures
+// inside `WINDOW`, the IP is rejected for `BAN_DURATION`.
+mod rate_limit {
+    use std::collections::HashMap;
+    use std::net::IpAddr;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+
+    /// How many failed invite-code attempts an IP can make before being banned.
+    const MAX_FAILED_ATTEMPTS: u32 = 10;
+    /// Sliding window over which failed attempts are counted.
+    const WINDOW: Duration = Duration::from_secs(60);
+    /// How long an IP stays banned after exceeding the threshold.
+    const BAN_DURATION: Duration = Duration::from_secs(300);
+
+    #[derive(Debug, Default)]
+    struct AttemptState {
+        first_failure: Option<Instant>,
+        failure_count: u32,
+        banned_until: Option<Instant>,
+    }
+
+    fn state() -> &'static Mutex<HashMap<IpAddr, AttemptState>> {
+        static STATE: OnceLock<Mutex<HashMap<IpAddr, AttemptState>>> = OnceLock::new();
+        STATE.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    /// Returns true if `ip` is currently banned.
+    pub fn is_banned(ip: IpAddr) -> bool {
+        let now = Instant::now();
+        let mut map = match state().lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        // Opportunistic GC: drop entries that are neither banned nor in-window
+        map.retain(|_, s| {
+            s.banned_until.is_some_and(|until| until > now)
+                || s.first_failure.is_some_and(|t| now.duration_since(t) < WINDOW)
+        });
+        map.get(&ip)
+            .and_then(|s| s.banned_until)
+            .is_some_and(|until| until > now)
+    }
+
+    /// Record one failed invite-code attempt from `ip`. Returns true when the
+    /// IP has just crossed the ban threshold (caller should log).
+    pub fn record_failure(ip: IpAddr) -> bool {
+        let now = Instant::now();
+        let mut map = match state().lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let entry = map.entry(ip).or_default();
+
+        // Reset window if it has elapsed since the first counted failure
+        if let Some(first) = entry.first_failure {
+            if now.duration_since(first) >= WINDOW {
+                entry.first_failure = Some(now);
+                entry.failure_count = 0;
+            }
+        } else {
+            entry.first_failure = Some(now);
+        }
+
+        entry.failure_count += 1;
+        if entry.failure_count >= MAX_FAILED_ATTEMPTS && entry.banned_until.is_none() {
+            entry.banned_until = Some(now + BAN_DURATION);
+            return true;
+        }
+        false
+    }
+
+    /// Clear bookkeeping for a specific IP (used by tests).
+    #[cfg(test)]
+    pub fn reset(ip: IpAddr) {
+        if let Ok(mut map) = state().lock() {
+            map.remove(&ip);
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::net::Ipv4Addr;
+
+        #[test]
+        fn ban_after_threshold() {
+            let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+            reset(ip);
+            assert!(!is_banned(ip));
+            for i in 0..MAX_FAILED_ATTEMPTS - 1 {
+                let crossed = record_failure(ip);
+                assert!(!crossed, "should not ban before threshold (iter {})", i);
+                assert!(!is_banned(ip));
+            }
+            let crossed = record_failure(ip);
+            assert!(crossed, "the threshold-crossing call must signal ban");
+            assert!(is_banned(ip), "ip must be banned after threshold");
+            reset(ip);
+        }
+
+        #[test]
+        fn other_ip_not_affected_by_ban() {
+            let bad = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+            let good = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+            reset(bad);
+            reset(good);
+            for _ in 0..MAX_FAILED_ATTEMPTS {
+                record_failure(bad);
+            }
+            assert!(is_banned(bad));
+            assert!(!is_banned(good), "ban must be per-IP");
+            reset(bad);
+            reset(good);
+        }
+    }
+}
 
 /// GET /api/ws — WebSocket upgrade handler.
 ///
@@ -18,14 +148,34 @@ use crate::{models::WsMessage, AppState};
 ///
 /// All inbound WsMessages are forwarded to the broadcast channel,
 /// and all broadcast events are forwarded to the WebSocket client.
+///
+/// `ConnectInfo` is wrapped in `Option` so the handler also works in tests
+/// that build the router without `into_make_service_with_connect_info`. When
+/// the connect-info extension is missing we treat the connection as
+/// loopback (rate limiting bypass) — this is safe because real production
+/// servers in `main.rs` and `desktop/src-tauri/src/main.rs` always wire it.
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+    let peer_ip = connect_info
+        .map(|ci| ci.0.ip())
+        .unwrap_or_else(|| IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    ws.on_upgrade(move |socket| handle_socket(socket, state, peer_ip))
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState) {
+async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: IpAddr) {
+    // Reject up-front if this peer is currently banned for invite-code
+    // brute-force. Local-loopback IPs (127.0.0.1, ::1) are exempt because
+    // they're the desktop frontend's own connection, which never sends an
+    // invite code anyway.
+    let is_local = peer_ip.is_loopback();
+    if !is_local && rate_limit::is_banned(peer_ip) {
+        tracing::warn!("WS: rejecting banned peer {}", peer_ip);
+        return;
+    }
+
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let mut broadcast_rx = state.ws_broadcast.subscribe();
     let broadcast_tx = state.ws_broadcast.clone();
@@ -82,9 +232,21 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                             contact.pseudo
                                         );
                                     } else {
+                                        // Invalid invite code — count this attempt against
+                                        // the remote IP (loopback exempted because the
+                                        // local frontend never has an invalid code).
+                                        if !is_local {
+                                            let crossed = rate_limit::record_failure(peer_ip);
+                                            if crossed {
+                                                tracing::warn!(
+                                                    "WS: peer {} hit invite-code failure threshold and is now banned",
+                                                    peer_ip
+                                                );
+                                            }
+                                        }
                                         tracing::warn!(
-                                            "WS: rejected invalid invite code: {}",
-                                            from_invite_code
+                                            "WS: rejected invalid invite code from {}: {}",
+                                            peer_ip, from_invite_code
                                         );
                                         break;
                                     }
@@ -254,6 +416,7 @@ fn handle_discussion_invite(
         summary_up_to_msg_idx: None,
         shared_id: Some(shared_discussion_id.to_string()),
         shared_with: vec![],
+        workflow_run_id: None,
         created_at: now,
         updated_at: now,
     };

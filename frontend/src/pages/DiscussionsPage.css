@@ -26,6 +26,25 @@
   background: var(--kr-bg-surface);
 }
 
+/* ── Collapsed rail (desktop only) ───────────────────── */
+.disc-sidebar-rail {
+  width: 32px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 16px;
+  border-right: 1px solid var(--kr-border);
+  background: var(--kr-bg-raised);
+  cursor: pointer;
+  color: var(--kr-text-tertiary);
+  transition: background 0.15s, color 0.15s;
+}
+.disc-sidebar-rail:hover {
+  background: var(--kr-bg-surface);
+  color: var(--kr-text-primary);
+}
+
 .disc-sidebar-header {
   display: flex;
   justify-content: space-between;
@@ -143,10 +162,49 @@
   color: var(--kr-text-tertiary);
 }
 
+/* Batch group header — slightly accented so the user immediately notices
+   it's a group, not a regular discussion item. */
+.disc-group-btn[data-variant="batch"] {
+  color: var(--kr-accent, #c8ff00);
+  font-weight: 600;
+  border-top: 1px solid rgba(200, 255, 0, 0.08);
+}
+
 .disc-group-count {
   font-weight: 400;
   opacity: 0.5;
   margin-left: auto;
+}
+
+/* Live status pill on the batch group header (⏳ 7/12, ✓ 12/12). */
+.disc-group-count[data-batch-status="running"] {
+  color: var(--kr-warning, #ffc800);
+  opacity: 1;
+  font-variant-numeric: tabular-nums;
+}
+.disc-group-count[data-batch-status="done"] {
+  color: var(--kr-success, #4ade80);
+  opacity: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Batch children wrapper — tree-view indent + left border so the
+   contained discussions visually read as "inside" the 📦 group,
+   not as siblings of the loose discussions below. */
+.disc-batch-wrap {
+  margin-bottom: 4px;
+}
+.disc-batch-children {
+  margin-left: 24px;
+  padding-left: 8px;
+  border-left: 2px solid rgba(200, 255, 0, 0.12);
+  /* Slight breathing room so the tree-line doesn't touch the items. */
+  padding-top: 2px;
+  padding-bottom: 4px;
+  /* Subtle background tint for the batch area — optional but helps the
+     eye notice the boundary at a glance. */
+  background: rgba(200, 255, 0, 0.015);
+  border-radius: 0 0 var(--kr-r-sm) 0;
 }
 
 .disc-chevron {
@@ -246,6 +304,15 @@
   display: flex;
   align-items: center;
   gap: 4px;
+}
+
+/* Relative time in the sidebar meta row — slightly dimmer so it doesn't
+   compete with the message count, and italic to read as metadata. */
+.disc-item-relative-time {
+  color: var(--kr-text-tertiary);
+  font-style: italic;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .disc-unseen-badge {
@@ -412,6 +479,9 @@
   flex-direction: column;
   min-width: 0;
   background: var(--kr-bg-base);
+  /* Positioning context for the floating "↓ New content" pill which
+     appears when the user is scrolled up while new content arrives. */
+  position: relative;
 }
 
 .disc-chat-header {
@@ -585,6 +655,117 @@
 
 .disc-separator {
   color: rgba(255, 255, 255, 0.15);
+}
+
+/* ── Clickable header badges — inline info popover ─────
+ *
+ * Each profile/skill/directive badge is wrapped in `.disc-badge-wrap`
+ * (position: relative) so the popover can anchor to it with
+ * position: absolute. Clicking the badge toggles the popover.
+ * Click-outside and Escape close it (handled in ChatHeader.tsx).
+ */
+.disc-badge-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.disc-header-profile-badge,
+.disc-header-skill-badge,
+.disc-header-directive-badge {
+  /* these elements are now <button> — reset default browser styling */
+  font-family: inherit;
+  appearance: none;
+  -webkit-appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.disc-header-profile-badge:hover,
+.disc-header-skill-badge:hover,
+.disc-header-directive-badge:hover {
+  filter: brightness(1.2);
+}
+
+.disc-badge-info-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: var(--kr-z-popover, 50);
+  min-width: 280px;
+  max-width: 380px;
+  padding: 12px 14px;
+  background: var(--kr-bg-surface);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-md);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-sm);
+  /* Prevent the popover from being clipped by disc-chat-header overflow. */
+  pointer-events: auto;
+  white-space: normal;
+  line-height: 1.45;
+}
+.disc-badge-info-header {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin-bottom: 8px;
+}
+.disc-badge-info-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.06);
+  font-size: 16px;
+  flex-shrink: 0;
+}
+.disc-badge-info-title {
+  font-weight: 600;
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-primary);
+}
+.disc-badge-info-subtitle {
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-tertiary);
+  margin-top: 2px;
+}
+.disc-badge-info-kind {
+  font-size: var(--kr-fs-2xs);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--kr-text-tertiary);
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+.disc-badge-info-body {
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-secondary);
+  line-height: 1.5;
+  max-height: 180px;
+  overflow-y: auto;
+  padding: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: var(--kr-r-sm);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+.disc-badge-info-footer {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-tertiary);
+}
+.disc-badge-info-pill {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(200, 255, 0, 0.08);
+  color: rgba(200, 255, 0, 0.7);
+  border: 1px solid rgba(200, 255, 0, 0.2);
+  font-weight: 600;
 }
 
 /* ── MCP popover ──────────────────────────────────────── */
@@ -819,6 +1000,38 @@
   flex: 1;
   overflow-y: auto;
   padding: 20px 20px 10px;
+}
+
+/* Streaming chunk renderer — uses MarkdownContent so headings/code/tables
+   appear progressively, not just at the end of the stream. */
+.disc-streaming-md {
+  font-size: var(--kr-fs-sm);
+  line-height: 1.5;
+}
+
+/* Floating jump-to-bottom pill shown when the user has scrolled up while
+   new content is arriving. Positioned over the messages container, just
+   above the ChatInput. */
+.disc-jump-to-bottom {
+  position: absolute;
+  bottom: 90px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
+  background: var(--kr-accent);
+  color: var(--kr-bg-base);
+  border: none;
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: var(--kr-fs-sm);
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+.disc-jump-to-bottom:hover {
+  transform: translateX(-50%) translateY(-2px);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.3);
 }
 
 .disc-messages-col {

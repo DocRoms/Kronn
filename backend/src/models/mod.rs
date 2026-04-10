@@ -639,7 +639,19 @@ pub struct PromptVariable {
     pub name: String,
     pub label: String,
     pub placeholder: String,
+    /// Optional human description of what this variable means. Shown in
+    /// the batch-workflow UI so the user mapping tracker fields to QP
+    /// variables knows what each one is for.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Whether the variable must be filled before the QP can run.
+    /// Defaults to `true` for backward compatibility — existing QP
+    /// variables are treated as required.
+    #[serde(default = "default_variable_required")]
+    pub required: bool,
 }
+
+fn default_variable_required() -> bool { true }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -655,6 +667,11 @@ pub struct QuickPrompt {
     pub skill_ids: Vec<String>,
     #[serde(default)]
     pub tier: ModelTier,
+    /// Optional human description of what this Quick Prompt does. Shown
+    /// in the batch-workflow picker so the user knows which QP fits their
+    /// use case. Empty string = legacy QP created before 2026-04-10.
+    #[serde(default)]
+    pub description: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -673,6 +690,8 @@ pub struct CreateQuickPromptRequest {
     pub skill_ids: Vec<String>,
     #[serde(default)]
     pub tier: ModelTier,
+    #[serde(default)]
+    pub description: String,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -897,7 +916,26 @@ pub struct WorkflowRun {
     pub workspace_path: Option<String>,
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
+    /// Linear workflow run vs batch fan-out. Default "linear" for backward
+    /// compatibility with existing runs created before Phase 1b.
+    #[serde(default = "default_run_type")]
+    pub run_type: String,
+    /// For batch runs: target number of child discussions. 0 for linear runs.
+    #[serde(default)]
+    pub batch_total: u32,
+    /// For batch runs: number of successfully-completed child discussions.
+    #[serde(default)]
+    pub batch_completed: u32,
+    /// For batch runs: number of child discussions that ended with an error.
+    #[serde(default)]
+    pub batch_failed: u32,
+    /// For batch runs: display name shown in the sidebar group header.
+    /// Example: "Cadrage to-Frame — 10 avr 14:00".
+    #[serde(default)]
+    pub batch_name: Option<String>,
 }
+
+fn default_run_type() -> String { "linear".to_string() }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -1243,6 +1281,32 @@ pub enum WsMessage {
         from_pseudo: String,
         from_invite_code: String,
     },
+    /// A batch WorkflowRun finished (all child discussions are done).
+    /// Sent by the backend to the frontend so the sidebar badge and any
+    /// open batch monitors update live.
+    BatchRunFinished {
+        run_id: String,
+        /// Id of the child discussion whose completion triggered the final tick.
+        /// The frontend uses it to clear its per-disc `sendingMap` spinner, since
+        /// batch children are fire-and-forget (no SSE stream consumer on the client
+        /// to drive the usual cleanup path).
+        discussion_id: String,
+        batch_name: Option<String>,
+        batch_total: u32,
+        batch_completed: u32,
+        batch_failed: u32,
+    },
+    /// Progress update for a running batch (child disc just finished).
+    /// Fires on every child completion so the sidebar pill can tick live.
+    BatchRunProgress {
+        run_id: String,
+        /// Id of the child discussion that just completed — frontend uses it to
+        /// clear the per-disc sendingMap indicator.
+        discussion_id: String,
+        batch_total: u32,
+        batch_completed: u32,
+        batch_failed: u32,
+    },
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1294,6 +1358,11 @@ pub struct Discussion {
     /// Contact IDs this discussion is shared with.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shared_with: Vec<String>,
+    /// ID of the batch WorkflowRun that spawned this discussion, if any.
+    /// Used for sidebar grouping under the project ("Cadrage to-Frame — 10 avr").
+    /// Null for manual discussions created outside of a batch workflow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_run_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

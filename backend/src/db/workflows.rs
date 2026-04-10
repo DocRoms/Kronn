@@ -40,12 +40,21 @@ fn run_status_str(s: &RunStatus) -> &'static str {
 
 // ─── Workflows CRUD ─────────────────────────────────────────────────────────
 
+/// Prefix used for batch-placeholder workflow rows (Phase 1b).
+/// Batch runs live in `workflow_runs` which has a NOT NULL FK on
+/// `workflows.id`. Rather than relaxing the constraint we insert a minimal
+/// placeholder workflow row per Quick Prompt and filter it out of the
+/// user-facing workflow list.
+pub const BATCH_WORKFLOW_PREFIX: &str = "qp:";
+
 pub fn list_workflows(conn: &Connection) -> Result<Vec<Workflow>> {
+    // Filter out batch placeholders (prefix "qp:") — they shouldn't show
+    // up in the Workflows page, they're a plumbing detail for the FK.
     let mut stmt = conn.prepare(
         "SELECT id, name, project_id, trigger_json, steps_json, actions_json,
                 safety_json, workspace_config_json, concurrency_limit, enabled,
                 created_at, updated_at
-         FROM workflows ORDER BY updated_at DESC"
+         FROM workflows WHERE id NOT LIKE 'qp:%' ORDER BY updated_at DESC"
     )?;
 
     let workflows = stmt.query_map([], |row| {
@@ -69,6 +78,35 @@ pub fn get_workflow(conn: &Connection, id: &str) -> Result<Option<Workflow>> {
     }).ok();
 
     Ok(wf)
+}
+
+/// Ensure a placeholder workflow row exists for a Quick Prompt, used as the
+/// FK target for batch workflow runs. Idempotent — returns the placeholder
+/// workflow id (always `qp:<qp_id>`) whether it was created or already existed.
+///
+/// The placeholder is filtered out of `list_workflows` so it doesn't pollute
+/// the Workflows page UI.
+pub fn ensure_batch_placeholder_workflow(
+    conn: &Connection,
+    qp_id: &str,
+    qp_name: &str,
+    project_id: Option<&str>,
+) -> Result<String> {
+    let placeholder_id = format!("{}{}", BATCH_WORKFLOW_PREFIX, qp_id);
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT OR IGNORE INTO workflows (id, name, project_id, trigger_json, steps_json,
+         actions_json, safety_json, workspace_config_json, concurrency_limit, enabled,
+         created_at, updated_at)
+         VALUES (?1, ?2, ?3, '\"Manual\"', '[]', '[]', '{}', NULL, NULL, 0, ?4, ?4)",
+        params![
+            placeholder_id,
+            format!("[batch placeholder] {}", qp_name),
+            project_id,
+            now,
+        ],
+    )?;
+    Ok(placeholder_id)
 }
 
 pub fn insert_workflow(conn: &Connection, wf: &Workflow) -> Result<()> {
@@ -138,10 +176,9 @@ pub fn list_runs(conn: &Connection, workflow_id: &str) -> Result<Vec<WorkflowRun
 
 pub fn list_runs_paginated(conn: &Connection, workflow_id: &str, limit: Option<u32>, offset: Option<u32>) -> Result<Vec<WorkflowRun>> {
     let sql = format!(
-        "SELECT id, workflow_id, status, trigger_context, step_results_json,
-                tokens_used, workspace_path, started_at, finished_at
-         FROM workflow_runs WHERE workflow_id = ?1
+        "SELECT {} FROM workflow_runs WHERE workflow_id = ?1
          ORDER BY started_at DESC{}",
+        WORKFLOW_RUN_COLS,
         match (limit, offset) {
             (Some(l), Some(o)) => format!(" LIMIT {} OFFSET {}", l, o),
             (Some(l), None) => format!(" LIMIT {}", l),
@@ -159,11 +196,8 @@ pub fn list_runs_paginated(conn: &Connection, workflow_id: &str, limit: Option<u
 }
 
 pub fn get_run(conn: &Connection, run_id: &str) -> Result<Option<WorkflowRun>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, workflow_id, status, trigger_context, step_results_json,
-                tokens_used, workspace_path, started_at, finished_at
-         FROM workflow_runs WHERE id = ?1"
-    )?;
+    let sql = format!("SELECT {} FROM workflow_runs WHERE id = ?1", WORKFLOW_RUN_COLS);
+    let mut stmt = conn.prepare(&sql)?;
 
     let run = stmt.query_row(params![run_id], |row| {
         Ok(row_to_run(row))
@@ -175,8 +209,9 @@ pub fn get_run(conn: &Connection, run_id: &str) -> Result<Option<WorkflowRun>> {
 pub fn insert_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
     conn.execute(
         "INSERT INTO workflow_runs (id, workflow_id, status, trigger_context,
-         step_results_json, tokens_used, workspace_path, started_at, finished_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+         step_results_json, tokens_used, workspace_path, started_at, finished_at,
+         run_type, batch_total, batch_completed, batch_failed, batch_name)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             run.id,
             run.workflow_id,
@@ -187,9 +222,51 @@ pub fn insert_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
             run.workspace_path,
             run.started_at.to_rfc3339(),
             run.finished_at.map(|d| d.to_rfc3339()),
+            run.run_type,
+            run.batch_total as i64,
+            run.batch_completed as i64,
+            run.batch_failed as i64,
+            run.batch_name,
         ],
     )?;
     Ok(())
+}
+
+/// Atomically increment batch_completed or batch_failed on a batch run, and
+/// mark the run as Success/Failed when all children are accounted for.
+/// Returns the updated run if the transition happened (either progress tick
+/// or final completion), so the caller can broadcast the right WS event.
+pub fn increment_batch_progress(
+    conn: &Connection,
+    run_id: &str,
+    child_succeeded: bool,
+) -> Result<Option<WorkflowRun>> {
+    let column = if child_succeeded { "batch_completed" } else { "batch_failed" };
+    conn.execute(
+        &format!("UPDATE workflow_runs SET {0} = {0} + 1 WHERE id = ?1 AND run_type = 'batch'", column),
+        params![run_id],
+    )?;
+
+    // Re-read the run to check if we've reached batch_total.
+    let Some(mut run) = get_run(conn, run_id)? else { return Ok(None); };
+    if run.run_type != "batch" { return Ok(None); }
+
+    let done = run.batch_completed + run.batch_failed;
+    if done >= run.batch_total && run.status == RunStatus::Running {
+        // All children done — mark the run final. Success if at least one
+        // succeeded, Failed if ALL failed. This matches user intuition:
+        // "the batch did something useful" vs "the batch accomplished nothing".
+        let final_status = if run.batch_completed > 0 { RunStatus::Success } else { RunStatus::Failed };
+        let finished = chrono::Utc::now();
+        conn.execute(
+            "UPDATE workflow_runs SET status = ?2, finished_at = ?3 WHERE id = ?1",
+            params![run_id, run_status_str(&final_status), finished.to_rfc3339()],
+        )?;
+        run.status = final_status;
+        run.finished_at = Some(finished);
+    }
+
+    Ok(Some(run))
 }
 
 pub fn update_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
@@ -252,9 +329,12 @@ pub fn delete_all_runs(conn: &Connection, workflow_id: &str) -> Result<()> {
 /// Get the last run for a workflow (for summaries).
 /// Batch-load the last run for every workflow in one query (avoids N+1).
 pub fn get_last_runs_all(conn: &Connection) -> Result<std::collections::HashMap<String, WorkflowRun>> {
+    // Must alias columns with wr. prefix since we join to `latest` — can't
+    // reuse the WORKFLOW_RUN_COLS constant directly. Keep the list in sync.
     let mut stmt = conn.prepare(
         "SELECT wr.id, wr.workflow_id, wr.status, wr.trigger_context, wr.step_results_json,
-                wr.tokens_used, wr.workspace_path, wr.started_at, wr.finished_at
+                wr.tokens_used, wr.workspace_path, wr.started_at, wr.finished_at,
+                wr.run_type, wr.batch_total, wr.batch_completed, wr.batch_failed, wr.batch_name
          FROM workflow_runs wr
          INNER JOIN (
              SELECT workflow_id, MAX(started_at) AS max_started
@@ -273,12 +353,11 @@ pub fn get_last_runs_all(conn: &Connection) -> Result<std::collections::HashMap<
 }
 
 pub fn get_last_run(conn: &Connection, workflow_id: &str) -> Result<Option<WorkflowRun>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, workflow_id, status, trigger_context, step_results_json,
-                tokens_used, workspace_path, started_at, finished_at
-         FROM workflow_runs WHERE workflow_id = ?1
-         ORDER BY started_at DESC LIMIT 1"
-    )?;
+    let sql = format!(
+        "SELECT {} FROM workflow_runs WHERE workflow_id = ?1 ORDER BY started_at DESC LIMIT 1",
+        WORKFLOW_RUN_COLS
+    );
+    let mut stmt = conn.prepare(&sql)?;
 
     let run = stmt.query_row(params![workflow_id], |row| {
         Ok(row_to_run(row))
@@ -349,6 +428,14 @@ fn row_to_run(row: &rusqlite::Row) -> WorkflowRun {
     let status_str: String = row.get(2).unwrap_or_default();
     let ctx_str: Option<String> = row.get(3).unwrap_or(None);
     let results_str: String = row.get(4).unwrap_or_default();
+    // Batch columns 9..13 were added in migration 029. If the query only
+    // selected the legacy 9 columns we fall back to sane defaults via
+    // unwrap_or (row.get returns Err on missing index).
+    let run_type: String = row.get(9).unwrap_or_else(|_| "linear".to_string());
+    let batch_total: i64 = row.get(10).unwrap_or(0);
+    let batch_completed: i64 = row.get(11).unwrap_or(0);
+    let batch_failed: i64 = row.get(12).unwrap_or(0);
+    let batch_name: Option<String> = row.get(13).unwrap_or(None);
 
     WorkflowRun {
         id: row.get(0).unwrap_or_default(),
@@ -360,5 +447,16 @@ fn row_to_run(row: &rusqlite::Row) -> WorkflowRun {
         workspace_path: row.get(6).unwrap_or(None),
         started_at: parse_dt(row.get::<_, String>(7).unwrap_or_default()),
         finished_at: row.get::<_, Option<String>>(8).unwrap_or(None).map(parse_dt),
+        run_type,
+        batch_total: batch_total as u32,
+        batch_completed: batch_completed as u32,
+        batch_failed: batch_failed as u32,
+        batch_name,
     }
 }
+
+/// The batch column list used in every SELECT that wants the full WorkflowRun.
+/// Centralized so adding/removing columns doesn't drift between queries.
+const WORKFLOW_RUN_COLS: &str = "id, workflow_id, status, trigger_context, step_results_json, \
+    tokens_used, workspace_path, started_at, finished_at, \
+    run_type, batch_total, batch_completed, batch_failed, batch_name";

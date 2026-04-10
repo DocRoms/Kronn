@@ -267,6 +267,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // ── Quick Prompts ──
         .route("/api/quick-prompts", get(api::quick_prompts::list).post(api::quick_prompts::create))
         .route("/api/quick-prompts/:id", put(api::quick_prompts::update).delete(api::quick_prompts::delete))
+        .route("/api/quick-prompts/:id/batch", post(api::quick_prompts::batch_run))
         // ── Discussions ──
         .route("/api/discussions", get(api::discussions::list))
         .route("/api/discussions", post(api::discussions::create))

@@ -518,6 +518,7 @@ mod tests {
                 summary_up_to_msg_idx: None,
             shared_id: None,
             shared_with: vec![],
+        workflow_run_id: None,
                 created_at: now,
                 updated_at: now,
             };
@@ -646,6 +647,7 @@ mod tests {
                 summary_cache: None, summary_up_to_msg_idx: None,
             shared_id: None,
             shared_with: vec![],
+        workflow_run_id: None,
                 created_at: now, updated_at: now,
             };
             crate::db::discussions::insert_discussion(conn, &disc)?;
@@ -872,6 +874,7 @@ mod tests {
                     summary_cache: None, summary_up_to_msg_idx: None,
             shared_id: None,
             shared_with: vec![],
+        workflow_run_id: None,
                     created_at: now, updated_at: now,
                 };
                 crate::db::discussions::insert_discussion(conn, &disc)?;
@@ -1528,6 +1531,7 @@ mod tests {
                 summary_cache: None, summary_up_to_msg_idx: None,
             shared_id: None,
             shared_with: vec![],
+        workflow_run_id: None,
                 created_at: now, updated_at: now,
             };
             crate::db::discussions::insert_discussion(conn, &disc)?;

@@ -98,19 +98,43 @@ pub async fn load() -> Result<Option<AppConfig>> {
     Ok(Some(config))
 }
 
-/// Save config to disk
+/// Save config to disk.
+///
+/// On Unix the config directory and `config.toml` file are tightened to
+/// `0700`/`0600` so other users on the host cannot read the auth token,
+/// encryption secret, or stored API keys. On Windows we rely on the standard
+/// per-user `%APPDATA%` ACLs (no chmod equivalent — Windows ACLs already
+/// restrict the user profile dir to its owner).
 pub async fn save(config: &AppConfig) -> Result<()> {
     let dir = config_dir()?;
     fs::create_dir_all(&dir).await?;
+    restrict_permissions(&dir, true).await;
 
     let content = toml::to_string_pretty(config)
         .context("Failed to serialize config")?;
 
     let path = config_path()?;
     fs::write(&path, content).await?;
+    restrict_permissions(&path, false).await;
 
     tracing::info!("Config saved to {}", path.display());
     Ok(())
+}
+
+/// Restrict a path to owner-only access on Unix; no-op on Windows.
+async fn restrict_permissions(path: &std::path::Path, is_dir: bool) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if is_dir { 0o700 } else { 0o600 };
+        if let Err(e) = fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).await {
+            tracing::warn!("Failed to chmod {} to {:o}: {}", path.display(), mode, e);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, is_dir); // suppress unused warning
+    }
 }
 
 /// Create default config (used during setup wizard)
@@ -223,5 +247,42 @@ mod tests {
             "config path should end in config.toml, got: {}",
             p.display()
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn save_chmods_dir_700_and_file_600_on_unix() {
+        // Real save() round-trip via KRONN_DATA_DIR override so we don't
+        // touch the user's real ~/.config/kronn during tests.
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = std::env::temp_dir().join(format!(
+            "kronn-config-perms-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+
+        let cfg = default_config();
+        save(&cfg).await.expect("save must succeed");
+
+        let dir_meta = std::fs::metadata(&tmp).unwrap();
+        let dir_mode = dir_meta.permissions().mode() & 0o777;
+        assert_eq!(
+            dir_mode, 0o700,
+            "config dir must be 0700 on Unix, got {:o}",
+            dir_mode
+        );
+
+        let file_meta = std::fs::metadata(tmp.join("config.toml")).unwrap();
+        let file_mode = file_meta.permissions().mode() & 0o777;
+        assert_eq!(
+            file_mode, 0o600,
+            "config.toml must be 0600 on Unix (contains auth_token + encryption_secret), got {:o}",
+            file_mode
+        );
+
+        std::env::remove_var("KRONN_DATA_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
