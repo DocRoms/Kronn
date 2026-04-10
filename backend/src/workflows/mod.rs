@@ -162,6 +162,12 @@ impl WorkflowEngine {
             workspace_path: None,
             started_at: now,
             finished_at: None,
+            // Scheduled/tracker-triggered runs are linear by construction.
+            run_type: "linear".into(),
+            batch_total: 0,
+            batch_completed: 0,
+            batch_failed: 0,
+            batch_name: None,
         };
 
         // Persist the run
@@ -209,6 +215,11 @@ mod tests {
             workspace_path: None,
             started_at: now,
             finished_at: None,
+            run_type: "linear".into(),
+            batch_total: 0,
+            batch_completed: 0,
+            batch_failed: 0,
+            batch_name: None,
         };
 
         assert_eq!(run.status, RunStatus::Pending);
@@ -243,6 +254,11 @@ mod tests {
             workspace_path: None,
             started_at: Utc::now(),
             finished_at: None,
+            run_type: "linear".into(),
+            batch_total: 0,
+            batch_completed: 0,
+            batch_failed: 0,
+            batch_name: None,
         };
         let tc = run.trigger_context.unwrap();
         assert_eq!(tc["type"], "tracker");

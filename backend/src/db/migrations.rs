@@ -47,6 +47,8 @@ pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> 
         ("025_context_files", include_str!("sql/025_context_files.sql")),
         // 026: idempotent column addition (handled below, not via SQL file)
         ("027_quick_prompts", include_str!("sql/026_quick_prompts.sql")),
+        ("028_quick_prompt_descriptions", include_str!("sql/027_quick_prompt_descriptions.sql")),
+        ("029_batch_workflow_runs", include_str!("sql/028_batch_workflow_runs.sql")),
     ];
 
     // Check if there are pending migrations before backing up

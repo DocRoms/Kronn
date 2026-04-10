@@ -37,6 +37,7 @@ mod tests {
             summary_up_to_msg_idx: None,
             shared_id: None,
             shared_with: vec![],
+        workflow_run_id: None,
             created_at: now,
             updated_at: now,
         }

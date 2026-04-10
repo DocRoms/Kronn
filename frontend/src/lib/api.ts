@@ -769,11 +769,37 @@ export const workflows = {
 
 // ─── Quick Prompts ─────────────────────────────────────────────────────────
 
+export interface BatchItem {
+  title: string;
+  prompt: string;
+}
+
+export interface BatchRunRequest {
+  items: BatchItem[];
+  batch_name: string;
+  project_id?: string | null;
+}
+
+export interface BatchRunResponse {
+  run_id: string;
+  discussion_ids: string[];
+  batch_total: number;
+}
+
 export const quickPrompts = {
   list: () => api<QuickPrompt[]>('GET', '/quick-prompts'),
   create: (req: CreateQuickPromptRequest) => api<QuickPrompt>('POST', '/quick-prompts', req),
   update: (id: string, req: CreateQuickPromptRequest) => api<QuickPrompt>('PUT', `/quick-prompts/${id}`, req),
   delete: (id: string) => api<void>('DELETE', `/quick-prompts/${id}`),
+  /**
+   * Create N child discussions from a Quick Prompt + list of rendered prompts.
+   * The frontend pre-renders each template (via the existing renderTemplate
+   * helper) and posts a flat list of {title, prompt} tuples. Returns the
+   * batch run id + the list of child discussion ids — the caller then fires
+   * `POST /discussions/:id/run` on each one to start the agents.
+   */
+  batchRun: (qpId: string, req: BatchRunRequest) =>
+    api<BatchRunResponse>('POST', `/quick-prompts/${qpId}/batch`, req),
 };
 
 // ─── Skills ─────────────────────────────────────────────────────────────────

@@ -25,6 +25,7 @@ export function QuickPromptForm({ editPrompt, projects, onSave, onCancel }: Prop
   const { t } = useT();
   const [name, setName] = useState(editPrompt?.name ?? '');
   const [icon, setIcon] = useState(editPrompt?.icon ?? '');
+  const [description, setDescription] = useState(editPrompt?.description ?? '');
   const [template, setTemplate] = useState(editPrompt?.prompt_template ?? '');
   const [variables, setVariables] = useState<PromptVariable[]>(editPrompt?.variables ?? []);
   const [agent, setAgent] = useState<AgentType>(editPrompt?.agent ?? 'ClaudeCode');
@@ -32,12 +33,16 @@ export function QuickPromptForm({ editPrompt, projects, onSave, onCancel }: Prop
   const [saving, setSaving] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Auto-sync variables from template
+  // Auto-sync variables from template. We preserve any description /
+  // required flag / label the user already set — only the `name` field
+  // is authoritative from the template.
   useEffect(() => {
     const detected = extractVars(template);
     setVariables(prev => {
       const existing = new Map(prev.map(v => [v.name, v]));
-      return detected.map(name => existing.get(name) ?? { name, label: name, placeholder: '' });
+      return detected.map(n => existing.get(n) ?? {
+        name: n, label: n, placeholder: '', description: null, required: true,
+      });
     });
   }, [template]);
 
@@ -70,6 +75,7 @@ export function QuickPromptForm({ editPrompt, projects, onSave, onCancel }: Prop
         project_id: projectId || null,
         skill_ids: editPrompt?.skill_ids ?? [],
         tier: editPrompt?.tier ?? 'default',
+        description,
       });
     } finally {
       setSaving(false);
@@ -110,23 +116,54 @@ export function QuickPromptForm({ editPrompt, projects, onSave, onCancel }: Prop
         </select>
       </div>
 
-      {/* Variables */}
+      {/* Prompt description — documents what this QP does.
+          Used by the batch-workflow picker to help the user pick the
+          right QP for their use case. Optional but strongly encouraged. */}
+      <label className="wf-label">{t('qp.descriptionLabel')}</label>
+      <textarea
+        className="wf-textarea mb-4"
+        rows={2}
+        value={description}
+        onChange={e => setDescription(e.target.value)}
+        placeholder={t('qp.descriptionPlaceholder')}
+      />
+
+      {/* Variables — each can now have an optional description + a
+          required flag. Required is ON by default (legacy behaviour). */}
       {variables.length > 0 && (
         <div className="qp-vars mb-4">
+          <label className="wf-label">{t('qp.variables')}</label>
           {variables.map((v, i) => (
-            <div key={v.name} className="qp-var-row">
-              <code className="qp-var-name">{`{{${v.name}}}`}</code>
+            <div key={v.name} className="qp-var-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 6 }}>
+              <div className="flex-row gap-4" style={{ alignItems: 'center' }}>
+                <code className="qp-var-name">{`{{${v.name}}}`}</code>
+                <input
+                  className="wf-input flex-1"
+                  value={v.label}
+                  onChange={e => setVariables(prev => prev.map((pv, j) => j === i ? { ...pv, label: e.target.value } : pv))}
+                  placeholder={t('qp.varLabel')}
+                />
+                <input
+                  className="wf-input flex-1"
+                  value={v.placeholder}
+                  onChange={e => setVariables(prev => prev.map((pv, j) => j === i ? { ...pv, placeholder: e.target.value } : pv))}
+                  placeholder={t('qp.varPlaceholder')}
+                />
+                <label className="flex-row gap-2" style={{ fontSize: 12, whiteSpace: 'nowrap', cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={v.required ?? true}
+                    onChange={e => setVariables(prev => prev.map((pv, j) => j === i ? { ...pv, required: e.target.checked } : pv))}
+                  />
+                  {t('qp.varRequired')}
+                </label>
+              </div>
               <input
-                className="wf-input flex-1"
-                value={v.label}
-                onChange={e => setVariables(prev => prev.map((pv, j) => j === i ? { ...pv, label: e.target.value } : pv))}
-                placeholder={t('qp.varLabel')}
-              />
-              <input
-                className="wf-input flex-1"
-                value={v.placeholder}
-                onChange={e => setVariables(prev => prev.map((pv, j) => j === i ? { ...pv, placeholder: e.target.value } : pv))}
-                placeholder={t('qp.varPlaceholder')}
+                className="wf-input"
+                value={v.description ?? ''}
+                onChange={e => setVariables(prev => prev.map((pv, j) => j === i ? { ...pv, description: e.target.value || null } : pv))}
+                placeholder={t('qp.varDescriptionPlaceholder')}
+                style={{ fontSize: 12, opacity: 0.85 }}
               />
             </div>
           ))}

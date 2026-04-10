@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 
 // Test the signal stripping regex (same as MessageBubble.tsx)
-const SIGNAL_REGEX = /KRONN:(BRIEFING_COMPLETE|VALIDATION_COMPLETE|BOOTSTRAP_COMPLETE|WORKFLOW_READY|ARCHITECTURE_READY|PLAN_READY|ISSUES_CREATED)/gi;
+const SIGNAL_REGEX = /KRONN:(BRIEFING_COMPLETE|VALIDATION_COMPLETE|BOOTSTRAP_COMPLETE|WORKFLOW_READY|REPO_READY|ARCHITECTURE_READY|PLAN_READY|STRUCTURE_READY|ISSUES_READY|ISSUES_CREATED)/gi;
 
 describe('Bootstrap++ signal detection', () => {
   it('strips ARCHITECTURE_READY from message content', () => {
@@ -40,6 +40,7 @@ describe('Bootstrap++ signal detection', () => {
       'KRONN:VALIDATION_COMPLETE',
       'KRONN:BOOTSTRAP_COMPLETE',
       'KRONN:WORKFLOW_READY',
+      'KRONN:REPO_READY',
       'KRONN:ARCHITECTURE_READY',
       'KRONN:PLAN_READY',
       'KRONN:ISSUES_CREATED',
@@ -48,6 +49,30 @@ describe('Bootstrap++ signal detection', () => {
       const cleaned = `Text.\n${signal}`.replace(SIGNAL_REGEX, '').trim();
       expect(cleaned).toBe('Text.');
     }
+  });
+
+  it('strips REPO_READY from message content', () => {
+    const content = 'Repo created at github.com/foo/bar.\nKRONN:REPO_READY';
+    const cleaned = content.replace(SIGNAL_REGEX, '').trim();
+    expect(cleaned).toBe('Repo created at github.com/foo/bar.');
+  });
+
+  it('strips ISSUES_READY (LLM hallucinates this variant)', () => {
+    // Real bug: agent emitted KRONN:ISSUES_READY instead of ISSUES_CREATED
+    // because the *_READY family (REPO_READY, ARCHITECTURE_READY, PLAN_READY)
+    // makes Claude "harmonize" the last signal name. Both must be recognized.
+    const content = 'Created 13 epics.\nKRONN:ISSUES_READY';
+    const cleaned = content.replace(SIGNAL_REGEX, '').trim();
+    expect(cleaned).toBe('Created 13 epics.');
+  });
+
+  it('strips STRUCTURE_READY (LLM hallucinates this PLAN_READY variant)', () => {
+    // Same hallucination pattern: when Stage 2 produces a "structure" /
+    // "modules / chantiers" breakdown, Claude invents STRUCTURE_READY
+    // instead of PLAN_READY. We accept it as an alias.
+    const content = 'Modules Core/Dilem/Shared, 15 chantiers.\nKRONN:STRUCTURE_READY';
+    const cleaned = content.replace(SIGNAL_REGEX, '').trim();
+    expect(cleaned).toBe('Modules Core/Dilem/Shared, 15 chantiers.');
   });
 });
 

@@ -748,14 +748,23 @@ fn try_spawn(
     env_key: &str,
     api_key: Option<&str>,
 ) -> Result<tokio::process::Child, String> {
-    let (cmd_name, mut cmd_args) = if let Some(pkg) = npx_package {
+    // Resolve the final command. We also remember whether the resolved binary
+    // lives inside WSL (`via_wsl`) so we can pick the right exec strategy
+    // below — sending a Linux path to a Windows-native spawn would just fail.
+    let (cmd_name, mut cmd_args, resolved_via_wsl) = if let Some(pkg) = npx_package {
         let mut npx_args = vec!["--yes".to_string(), pkg.to_string()];
         npx_args.extend_from_slice(args);
-        ("npx".to_string(), npx_args)
+        // For the npx fallback we don't know up-front where npx itself lives;
+        // probe it so we wrap with wsl.exe only when npx is a WSL binary.
+        let via_wsl = super::find_binary("npx")
+            .map(|loc| loc.via_wsl)
+            .unwrap_or(false);
+        ("npx".to_string(), npx_args, via_wsl)
     } else {
         let bin_loc = super::find_binary(binary)
             .ok_or_else(|| format!("Binary '{}' not found", binary))?;
-        (bin_loc.path, args.to_vec())
+        let via_wsl = bin_loc.via_wsl;
+        (bin_loc.path, args.to_vec(), via_wsl)
     };
 
     // Force current workspace as trusted for Codex sessions inside Docker.
@@ -786,11 +795,22 @@ fn try_spawn(
         if api_key.is_some() { "override" } else { "local auth" }
     );
 
-    // On Windows native (Tauri desktop app), agents are typically installed in WSL.
-    // Wrap the command in `wsl.exe -e` to execute inside WSL, similar to how
-    // JetBrains IDEs and VS Code handle WSL integration.
+    // Decide whether to wrap the command with `wsl.exe -e`. On Windows native
+    // (Tauri desktop) most agents live inside WSL, but a user may also have
+    // installed them as Windows-native binaries (npm-global, scoop, winget).
+    // We trust `find_binary` to flag WSL-resolved binaries via `via_wsl` so
+    // native Windows binaries (paths like `C:\Users\...\claude.cmd`) are
+    // executed directly without the WSL detour.
+    //
+    // Linux paths (starting with `/`) on Windows are an unambiguous WSL
+    // signal — fall back to wrapping in case `via_wsl` was not set, e.g. for
+    // a binary picked up via `which::which` inside the host PATH.
     #[cfg(target_os = "windows")]
-    let use_wsl = !is_wsl();
+    let use_wsl = !is_wsl() && (resolved_via_wsl || cmd_name.starts_with('/'));
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = resolved_via_wsl; // suppress unused on non-Windows
+    }
     #[cfg(not(target_os = "windows"))]
     let use_wsl = false;
 
@@ -890,8 +910,9 @@ fn try_spawn(
     let gh_token = std::env::var("GH_TOKEN")
         .or_else(|_| std::env::var("GITHUB_TOKEN"))
         .or_else(|_| {
-            // Fallback: extract token from `gh auth token` (stored in ~/.config/gh/hosts.yml)
-            std::process::Command::new("gh")
+            // Fallback: extract token from `gh auth token` (stored in ~/.config/gh/hosts.yml).
+            // Use sync_cmd so the gh subprocess does not flash a console window on Windows.
+            crate::core::cmd::sync_cmd("gh")
                 .args(["auth", "token"])
                 .output()
                 .ok()

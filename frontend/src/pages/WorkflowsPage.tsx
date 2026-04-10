@@ -9,7 +9,7 @@ import type {
 } from '../types/generated';
 import {
   Plus, Trash2, Play, Loader2, ChevronLeft, ChevronRight, ChevronDown,
-  Clock, GitBranch, Zap, Eye,
+  Clock, GitBranch, Zap, Eye, Layers, X,
   ToggleLeft, ToggleRight,
 } from 'lucide-react';
 import { WorkflowDetail } from '../components/workflows/WorkflowDetail';
@@ -23,6 +23,11 @@ interface WorkflowsPageProps {
   agentAccess?: AgentsConfig;
   configLanguage?: string;
   onNavigateDiscussion?: (discId: string) => void;
+  /** Called after a batch launch — parent marks every returned disc id as
+   * "sending" in the shared sendingMap so the sidebar spinner lights up for
+   * all of them, not just the one we navigate to. Without this prop the
+   * batch still works but only the navigated disc looks like it's running. */
+  onBatchLaunched?: (discIds: string[]) => void;
 }
 
 const TRIGGER_LABELS: Record<string, string> = {
@@ -40,7 +45,7 @@ const STATUS_COLORS: Record<string, string> = {
   WaitingApproval: '#c8ff00',
 };
 
-export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, configLanguage, onNavigateDiscussion }: WorkflowsPageProps) {
+export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, configLanguage, onNavigateDiscussion, onBatchLaunched }: WorkflowsPageProps) {
   const { t } = useT();
   const isMobile = useIsMobile();
   const [tab, setTab] = useState<'workflows' | 'quickPrompts'>('workflows');
@@ -52,6 +57,12 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const [launchingQP, setLaunchingQP] = useState<QuickPrompt | null>(null);
   const [launchVars, setLaunchVars] = useState<Record<string, string>>({});
   const [launching, setLaunching] = useState(false);
+  // Batch launch state — when the user clicks "Batch" on a QP, we show a
+  // modal that asks for one value of the first variable per line, then
+  // fans out N discussions via POST /api/quick-prompts/:id/batch.
+  const [batchingQP, setBatchingQP] = useState<QuickPrompt | null>(null);
+  const [batchInputLines, setBatchInputLines] = useState('');
+  const [batchLaunching, setBatchLaunching] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [editingWorkflow, setEditingWorkflow] = useState<Workflow | null>(null);
   const [detailWorkflow, setDetailWorkflow] = useState<Workflow | null>(null);
@@ -241,6 +252,117 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       console.warn('Launch failed:', e);
     } finally {
       setLaunching(false);
+    }
+  };
+
+  /**
+   * Fan-out launch: parse the user's list (one value per line), render the
+   * QP template for each, call POST /quick-prompts/:id/batch which creates
+   * N child discussions linked to a batch WorkflowRun, then kick off the
+   * agent runs in parallel (backend semaphore limits concurrency to 5).
+   */
+  const handleBatchLaunch = async (qp: QuickPrompt) => {
+    // Accept newline, comma AND semicolon as separators — users often paste
+    // a comma-separated list from Jira/GitHub search results on a single line
+    // (real-world bug report from the first batch run that shipped a single
+    // disc with title "EW-7223,EW-7182,EW-6071,EW-7141").
+    // Also deduplicate so accidental repeats don't create duplicate discussions.
+    const rawItems = batchInputLines
+      .split(/[\n,;]/)
+      .map(s => s.trim())
+      .filter(Boolean);
+    const seen = new Set<string>();
+    const lines: string[] = [];
+    for (const item of rawItems) {
+      if (!seen.has(item)) {
+        seen.add(item);
+        lines.push(item);
+      }
+    }
+    if (lines.length === 0) {
+      alert(t('qp.batch.emptyInput'));
+      return;
+    }
+    if (lines.length > 50) {
+      alert(t('qp.batch.tooManyItems', lines.length));
+      return;
+    }
+    if (qp.variables.length === 0) {
+      alert(t('qp.batch.needsVariable'));
+      return;
+    }
+    // Use the FIRST variable as the batch key. Each line becomes the value
+    // of that variable for one child discussion. For now we only support
+    // 1 variable per batch — multi-var comes in Phase 2 with auto-fetch.
+    const keyVar = qp.variables[0];
+    // Confirm before firing — N agents × ~X tokens is not cheap.
+    const estimateMsg = t('qp.batch.confirm', lines.length, qp.name);
+    if (!confirm(estimateMsg)) return;
+
+    setBatchLaunching(true);
+    try {
+      const items = lines.map(line => {
+        const vars: Record<string, string> = { [keyVar.name]: line };
+        const prompt = renderTemplate(qp.prompt_template, vars);
+        return { title: `${qp.name} — ${line}`, prompt };
+      });
+      const now = new Date();
+      const batchName = `${qp.name} — ${now.toLocaleString(configLanguage || 'fr', {
+        day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
+      })}`;
+      const res = await quickPromptsApi.batchRun(qp.id, {
+        items,
+        batch_name: batchName,
+        project_id: qp.project_id ?? null,
+      });
+      // Kick off each child discussion's agent run in parallel.
+      //
+      // Two gotchas:
+      // 1. The backend spawns the agent in a detached tokio task that
+      //    outlives the HTTP request, so we don't need the SSE stream
+      //    at all. We abort the fetch right after dispatch to release
+      //    the browser's per-host HTTP/1.1 connection slot (~6 max).
+      //    Without this, launching >5 discs saturates the connection
+      //    pool and later POSTs queue on the client side, making the
+      //    batch look sequential.
+      // 2. We mark every disc as "sending" in the shared sendingMap so
+      //    the sidebar spinner lights up for all of them — otherwise
+      //    only the navigated disc looks like it's running.
+      res.discussion_ids.forEach(discId => {
+        const controller = new AbortController();
+        fetch(`/api/discussions/${discId}/run`, {
+          method: 'POST',
+          signal: controller.signal,
+          // keepalive lets the browser finish dispatching even if we
+          // abort the read side almost immediately.
+          keepalive: true,
+        }).catch(() => {
+          // Aborted or network blip — backend run is independent, so
+          // we just log and move on.
+        });
+        // Release the connection slot after the request is definitely
+        // on the wire. 500ms is enough for the browser to flush the
+        // headers + body; the backend `tokio::spawn` inside
+        // make_agent_stream has already captured the work.
+        setTimeout(() => controller.abort(), 500);
+      });
+      // Tell the parent (Dashboard) to mark all these disc ids as
+      // sending AND to open the first one — this is what lights up
+      // the spinner in the sidebar and routes the user to the live
+      // batch view. We deliberately do NOT call onNavigateDiscussion
+      // here: that path triggers an auto-run on the navigated disc,
+      // which would create a second POST /run on top of the one we
+      // already fired in the fan-out loop, doubling its response.
+      // `onBatchLaunched` in Dashboard uses `setOpenDiscussionId`
+      // which opens without auto-running.
+      onBatchLaunched?.(res.discussion_ids);
+      setBatchingQP(null);
+      setBatchInputLines('');
+    } catch (e) {
+      console.warn('Batch launch failed:', e);
+      alert(t('qp.batch.failed', String(e)));
+    } finally {
+      setBatchLaunching(false);
     }
   };
 
@@ -520,6 +642,21 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                           }} title={t('qp.delete')}>
                             <Trash2 size={12} />
                           </button>
+                          {/* Batch button — fans out N discussions from a list
+                              of values for the first QP variable. Only meaningful
+                              for QPs with at least one variable. */}
+                          {qp.variables.length > 0 && (
+                            <button
+                              className="wf-icon-btn"
+                              onClick={() => {
+                                setBatchingQP(batchingQP?.id === qp.id ? null : qp);
+                                setBatchInputLines('');
+                              }}
+                              title={t('qp.batch.launch')}
+                            >
+                              <Layers size={12} />
+                            </button>
+                          )}
                           <button
                             className="qp-launch-btn"
                             onClick={() => {
@@ -539,6 +676,57 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                           </button>
                         </div>
                       </div>
+
+                      {/* Batch launch form — list of values, one per line,
+                          each becomes the first variable for one child disc. */}
+                      {batchingQP?.id === qp.id && (
+                        <div className="qp-launch-form">
+                          {qp.description && (
+                            <p className="qp-batch-hint">{qp.description}</p>
+                          )}
+                          <label className="qp-launch-label">
+                            {t('qp.batch.inputLabel', qp.variables[0]?.label || qp.variables[0]?.name || 'value')}
+                            {qp.variables[0]?.description && (
+                              <span className="qp-batch-var-desc"> — {qp.variables[0].description}</span>
+                            )}
+                          </label>
+                          <textarea
+                            className="wf-textarea"
+                            rows={6}
+                            value={batchInputLines}
+                            onChange={e => setBatchInputLines(e.target.value)}
+                            placeholder={t('qp.batch.inputPlaceholder')}
+                            autoFocus
+                          />
+                          <p className="qp-syntax-hint">
+                            {/* Same multi-separator split as handleBatchLaunch
+                                so the live count matches what will actually run */}
+                            {t(
+                              'qp.batch.countHint',
+                              new Set(
+                                batchInputLines.split(/[\n,;]/).map(s => s.trim()).filter(Boolean)
+                              ).size
+                            )}
+                          </p>
+                          <div className="flex-row gap-4">
+                            <button
+                              className="qp-launch-go-btn"
+                              onClick={() => handleBatchLaunch(qp)}
+                              disabled={batchLaunching || !batchInputLines.trim()}
+                            >
+                              {batchLaunching ? <Loader2 size={14} className="spin" /> : <Layers size={14} />}
+                              {batchLaunching ? '...' : t('qp.batch.launch')}
+                            </button>
+                            <button
+                              className="wf-icon-btn"
+                              onClick={() => { setBatchingQP(null); setBatchInputLines(''); }}
+                              title={t('qp.batch.cancel')}
+                            >
+                              <X size={14} />
+                            </button>
+                          </div>
+                        </div>
+                      )}
 
                       {/* Launch form with variable inputs */}
                       {launchingQP?.id === qp.id && qp.variables.length > 0 && (

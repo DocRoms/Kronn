@@ -54,6 +54,7 @@ fn sample_discussion(id: &str, project_id: Option<&str>) -> Discussion {
         summary_up_to_msg_idx: None,
             shared_id: None,
             shared_with: vec![],
+        workflow_run_id: None,
         created_at: now,
         updated_at: now,
     }
@@ -983,6 +984,11 @@ fn sample_run(id: &str, workflow_id: &str) -> WorkflowRun {
         workspace_path: None,
         started_at: now,
         finished_at: None,
+        run_type: "linear".into(),
+        batch_total: 0,
+        batch_completed: 0,
+        batch_failed: 0,
+        batch_name: None,
     }
 }
 
@@ -1052,6 +1058,139 @@ fn workflow_runs_delete_all() {
     crate::db::workflows::delete_all_runs(&conn, "w1").unwrap();
     let runs = crate::db::workflows::list_runs(&conn, "w1").unwrap();
     assert!(runs.is_empty());
+}
+
+// ─── Batch runs (Phase 1b) ───────────────────────────────────────────────
+
+/// Build a sample batch run. Caller must insert the placeholder workflow
+/// first (or use `insert_batch_run_with_placeholder` below).
+fn sample_batch_run(id: &str, qp_id: &str, total: u32) -> WorkflowRun {
+    let now = Utc::now();
+    WorkflowRun {
+        id: id.into(),
+        workflow_id: format!("qp:{}", qp_id),
+        status: RunStatus::Running,
+        trigger_context: None,
+        step_results: vec![],
+        tokens_used: 0,
+        workspace_path: None,
+        started_at: now,
+        finished_at: None,
+        run_type: "batch".into(),
+        batch_total: total,
+        batch_completed: 0,
+        batch_failed: 0,
+        batch_name: Some(format!("Cadrage — {}", id)),
+    }
+}
+
+/// Insert a batch run with its placeholder workflow in one shot.
+fn insert_batch_run_with_placeholder(conn: &rusqlite::Connection, id: &str, qp_id: &str, total: u32) {
+    crate::db::workflows::ensure_batch_placeholder_workflow(conn, qp_id, "TestQP", None).unwrap();
+    let run = sample_batch_run(id, qp_id, total);
+    crate::db::workflows::insert_run(conn, &run).unwrap();
+}
+
+#[test]
+fn batch_run_persists_fields() {
+    let conn = test_db();
+    insert_batch_run_with_placeholder(&conn, "br1", "qp-br1", 5);
+    let loaded = crate::db::workflows::get_run(&conn, "br1").unwrap().unwrap();
+    assert_eq!(loaded.run_type, "batch");
+    assert_eq!(loaded.batch_total, 5);
+    assert_eq!(loaded.batch_completed, 0);
+    assert_eq!(loaded.batch_failed, 0);
+    assert_eq!(loaded.batch_name.as_deref(), Some("Cadrage — br1"));
+}
+
+#[test]
+fn batch_placeholder_workflow_is_hidden_from_list() {
+    let conn = test_db();
+    // Insert a real workflow AND a batch placeholder
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("real-wf")).unwrap();
+    crate::db::workflows::ensure_batch_placeholder_workflow(&conn, "qp-test", "TestQP", None).unwrap();
+    // Placeholder is in the DB but filtered out of list_workflows
+    let visible = crate::db::workflows::list_workflows(&conn).unwrap();
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].id, "real-wf");
+    // But get_workflow can still fetch it by id if needed (placeholder row exists)
+}
+
+#[test]
+fn batch_placeholder_is_idempotent() {
+    let conn = test_db();
+    crate::db::workflows::ensure_batch_placeholder_workflow(&conn, "qp-x", "X", None).unwrap();
+    // Second call must not error — INSERT OR IGNORE
+    crate::db::workflows::ensure_batch_placeholder_workflow(&conn, "qp-x", "X", None).unwrap();
+}
+
+#[test]
+fn batch_progress_increments_success_counter() {
+    let conn = test_db();
+    insert_batch_run_with_placeholder(&conn, "br2", "qp-br2", 3);
+
+    // First child succeeds — not final yet
+    let updated = crate::db::workflows::increment_batch_progress(&conn, "br2", true).unwrap();
+    let updated = updated.unwrap();
+    assert_eq!(updated.batch_completed, 1);
+    assert_eq!(updated.batch_failed, 0);
+    assert_eq!(updated.status, RunStatus::Running);
+
+    // Second child succeeds
+    let updated = crate::db::workflows::increment_batch_progress(&conn, "br2", true).unwrap().unwrap();
+    assert_eq!(updated.batch_completed, 2);
+    assert_eq!(updated.status, RunStatus::Running);
+
+    // Third (last) child succeeds → run is marked Success and finished
+    let final_run = crate::db::workflows::increment_batch_progress(&conn, "br2", true).unwrap().unwrap();
+    assert_eq!(final_run.batch_completed, 3);
+    assert_eq!(final_run.status, RunStatus::Success);
+    assert!(final_run.finished_at.is_some());
+}
+
+#[test]
+fn batch_progress_marks_failed_if_all_children_fail() {
+    let conn = test_db();
+    insert_batch_run_with_placeholder(&conn, "br3", "qp-br3", 2);
+
+    crate::db::workflows::increment_batch_progress(&conn, "br3", false).unwrap();
+    let final_run = crate::db::workflows::increment_batch_progress(&conn, "br3", false).unwrap().unwrap();
+    assert_eq!(final_run.batch_failed, 2);
+    assert_eq!(final_run.batch_completed, 0);
+    // At least one success is needed to mark Success — otherwise Failed
+    assert_eq!(final_run.status, RunStatus::Failed);
+    assert!(final_run.finished_at.is_some());
+}
+
+#[test]
+fn batch_progress_marks_success_if_at_least_one_child_succeeds() {
+    let conn = test_db();
+    insert_batch_run_with_placeholder(&conn, "br4", "qp-br4", 3);
+
+    crate::db::workflows::increment_batch_progress(&conn, "br4", false).unwrap();
+    crate::db::workflows::increment_batch_progress(&conn, "br4", true).unwrap();
+    let final_run = crate::db::workflows::increment_batch_progress(&conn, "br4", false).unwrap().unwrap();
+    assert_eq!(final_run.batch_completed, 1);
+    assert_eq!(final_run.batch_failed, 2);
+    // Mixed result — one success is enough to count as "the batch did something"
+    assert_eq!(final_run.status, RunStatus::Success);
+}
+
+#[test]
+fn batch_progress_ignores_linear_runs() {
+    let conn = test_db();
+    // A plain linear run — increment_batch_progress must be a no-op on it
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    crate::db::workflows::insert_run(&conn, &sample_run("lr1", "w1")).unwrap();
+    let result = crate::db::workflows::increment_batch_progress(&conn, "lr1", true).unwrap();
+    // The UPDATE is guarded on run_type = 'batch' so nothing was written,
+    // and the helper returns None early once it loads the run and sees
+    // it's not a batch. The caller treats None as "no-op, no broadcast".
+    assert!(result.is_none(), "linear runs must be skipped by batch progress helper");
+    // Verify the linear run is untouched in DB
+    let unchanged = crate::db::workflows::get_run(&conn, "lr1").unwrap().unwrap();
+    assert_eq!(unchanged.batch_completed, 0);
+    assert_eq!(unchanged.status, RunStatus::Running);
 }
 
 #[test]
@@ -1491,13 +1630,20 @@ fn quick_prompt_crud() {
         icon: "🔍".into(),
         prompt_template: "Analyse le ticket {{ticket}} sur le projet {{project}}".into(),
         variables: vec![
-            crate::models::PromptVariable { name: "ticket".into(), label: "Ticket".into(), placeholder: "PROJ-123".into() },
-            crate::models::PromptVariable { name: "project".into(), label: "Projet".into(), placeholder: "front_euronews".into() },
+            crate::models::PromptVariable {
+                name: "ticket".into(), label: "Ticket".into(), placeholder: "PROJ-123".into(),
+                description: Some("Identifiant Jira du ticket à analyser".into()), required: true,
+            },
+            crate::models::PromptVariable {
+                name: "project".into(), label: "Projet".into(), placeholder: "front_euronews".into(),
+                description: None, required: true,
+            },
         ],
         agent: crate::models::AgentType::ClaudeCode,
         project_id: None,
         skill_ids: vec![],
         tier: crate::models::ModelTier::Default,
+        description: "Analyse technique d'un ticket Jira pour cadrage".into(),
         created_at: now,
         updated_at: now,
     };
@@ -1513,7 +1659,13 @@ fn quick_prompt_crud() {
     // Get
     let found = crate::db::quick_prompts::get_quick_prompt(&conn, "qp1").unwrap();
     assert!(found.is_some());
-    assert_eq!(found.unwrap().prompt_template, "Analyse le ticket {{ticket}} sur le projet {{project}}");
+    let found_qp = found.unwrap();
+    assert_eq!(found_qp.prompt_template, "Analyse le ticket {{ticket}} sur le projet {{project}}");
+    // v2 fields: description on the QP + per-variable description/required
+    assert_eq!(found_qp.description, "Analyse technique d'un ticket Jira pour cadrage");
+    assert_eq!(found_qp.variables[0].description.as_deref(), Some("Identifiant Jira du ticket à analyser"));
+    assert!(found_qp.variables[0].required);
+    assert!(found_qp.variables[1].description.is_none());
 
     // Update
     let mut updated = qp.clone();
@@ -1546,13 +1698,20 @@ fn quick_prompt_variables_roundtrip() {
         icon: "🔍".into(),
         prompt_template: "{{#jira}}Ticket {{jira}}, {{/jira}}{{#pr}}PR #{{pr}}{{/pr}}".into(),
         variables: vec![
-            crate::models::PromptVariable { name: "jira".into(), label: "Ticket Jira".into(), placeholder: "PROJ-123".into() },
-            crate::models::PromptVariable { name: "pr".into(), label: "PR".into(), placeholder: "42".into() },
+            crate::models::PromptVariable {
+                name: "jira".into(), label: "Ticket Jira".into(), placeholder: "PROJ-123".into(),
+                description: None, required: false,
+            },
+            crate::models::PromptVariable {
+                name: "pr".into(), label: "PR".into(), placeholder: "42".into(),
+                description: None, required: false,
+            },
         ],
         agent: crate::models::AgentType::ClaudeCode,
         project_id: None,
         skill_ids: vec!["security".into()],
         tier: crate::models::ModelTier::Reasoning,
+        description: String::new(),
         created_at: now,
         updated_at: now,
     };

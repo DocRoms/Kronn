@@ -149,7 +149,8 @@ fn default_key_name() -> String {
             return h;
         }
     }
-    if let Ok(output) = std::process::Command::new("hostname").output() {
+    // sync_cmd ensures no console window flashes on Windows.
+    if let Ok(output) = crate::core::cmd::sync_cmd("hostname").output() {
         if output.status.success() {
             let h = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !h.is_empty() {

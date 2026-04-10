@@ -65,19 +65,109 @@ pub async fn get(
 /// POST /api/projects/scan
 /// Discover WSL user home directories (Windows only).
 /// Returns paths like `\\wsl.localhost\Ubuntu\home\username`.
+///
+/// Strategy: query `wsl.exe -l -q` to list installed distros, then for each distro,
+/// query `wsl.exe -d <distro> -- ls /home` to find user homes. This is more reliable
+/// than reading `\\wsl.localhost\` directly because the 9P filesystem may not be
+/// mounted until WSL is invoked.
+///
+/// Hardened: every `wsl.exe` invocation runs through a per-distro timeout
+/// (`WSL_DISTRO_TIMEOUT`). A corrupted or stopped distro can otherwise hang
+/// `wsl.exe -d <distro>` indefinitely and freeze project scanning.
 pub fn discover_wsl_homes() -> Vec<String> {
     let mut homes = Vec::new();
     #[cfg(target_os = "windows")]
     {
-        for distro_path in &["\\\\wsl.localhost", "\\\\wsl$"] {
-            let wsl_root = std::path::Path::new(distro_path);
-            if let Ok(entries) = std::fs::read_dir(wsl_root) {
-                for entry in entries.flatten() {
-                    let home = entry.path().join("home");
-                    if let Ok(users) = std::fs::read_dir(&home) {
-                        for user in users.flatten() {
-                            if user.path().is_dir() {
-                                homes.push(user.path().to_string_lossy().to_string());
+        use crate::core::cmd::sync_cmd;
+        use std::time::{Duration, Instant};
+
+        /// Max wait per `wsl.exe` invocation. wsl.exe -l -q normally answers
+        /// in <100 ms; we give it generous slack but still cap so a hung
+        /// distro can't lock out the scan endpoint.
+        const WSL_DISTRO_TIMEOUT: Duration = Duration::from_secs(5);
+
+        /// Spawn a wsl.exe child, kill it if it overruns `timeout`, return its output.
+        fn run_with_timeout(
+            args: &[&str],
+            timeout: Duration,
+        ) -> Option<std::process::Output> {
+            let mut child = sync_cmd("wsl.exe")
+                .args(args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .ok()?;
+            let deadline = Instant::now() + timeout;
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => return child.wait_with_output().ok(),
+                    Ok(None) => {
+                        if Instant::now() >= deadline {
+                            tracing::warn!(
+                                "wsl.exe {:?} did not return within {:?}; killing",
+                                args,
+                                timeout
+                            );
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            return None;
+                        }
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    Err(e) => {
+                        tracing::warn!("wsl.exe poll failed: {}", e);
+                        let _ = child.kill();
+                        return None;
+                    }
+                }
+            }
+        }
+
+        // List installed distros
+        let distros: Vec<String> = match run_with_timeout(&["-l", "-q"], WSL_DISTRO_TIMEOUT) {
+            Some(out) if out.status.success() => {
+                // wsl.exe outputs UTF-16 LE on Windows
+                let stdout = String::from_utf8_lossy(&out.stdout)
+                    .replace('\u{0}', "")
+                    .replace('\r', "");
+                stdout.lines()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty() && !s.contains("docker-desktop"))
+                    .collect()
+            }
+            _ => return homes,
+        };
+
+        for distro in &distros {
+            // List /home directory inside the distro
+            let args = ["-d", distro.as_str(), "--", "ls", "/home"];
+            if let Some(out) = run_with_timeout(&args, WSL_DISTRO_TIMEOUT) {
+                if out.status.success() {
+                    let users = String::from_utf8_lossy(&out.stdout);
+                    for user in users.lines() {
+                        let user = user.trim();
+                        if !user.is_empty() {
+                            // UNC path: \\wsl.localhost\<distro>\home\<user>
+                            homes.push(format!("\\\\wsl.localhost\\{}\\home\\{}", distro, user));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback: try direct \\wsl.localhost\ filesystem read if wsl.exe didn't return anything
+        if homes.is_empty() {
+            for distro_path in &["\\\\wsl.localhost", "\\\\wsl$"] {
+                let wsl_root = std::path::Path::new(distro_path);
+                if let Ok(entries) = std::fs::read_dir(wsl_root) {
+                    for entry in entries.flatten() {
+                        let home = entry.path().join("home");
+                        if let Ok(users) = std::fs::read_dir(&home) {
+                            for user in users.flatten() {
+                                if user.path().is_dir() {
+                                    homes.push(user.path().to_string_lossy().to_string());
+                                }
                             }
                         }
                     }
@@ -85,10 +175,9 @@ pub fn discover_wsl_homes() -> Vec<String> {
             }
         }
     }
-    // On non-Windows, also try if running inside WSL (wsl paths are native Linux paths)
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = &mut homes; // suppress unused warning
+        let _ = &mut homes;
     }
     homes
 }
@@ -145,6 +234,14 @@ pub async fn create(
     State(state): State<AppState>,
     Json(repo): Json<DetectedRepo>,
 ) -> Json<ApiResponse<Project>> {
+    // Reject path traversal attempts before they reach the DB. A registered
+    // project path is later passed to scanner/mcp_scanner/file readers, so a
+    // `..` component would let a remote caller (peer / future multi-user mode)
+    // anchor reads outside the intended scan roots.
+    if scanner::contains_parent_dir(&repo.path) {
+        return Json(ApiResponse::err("Project path may not contain '..' components"));
+    }
+
     let now = Utc::now();
 
     let mut project = Project {
@@ -401,6 +498,7 @@ pub async fn bootstrap(
         summary_up_to_msg_idx: None,
         shared_id: None,
         shared_with: vec![],
+        workflow_run_id: None,
         created_at: now,
         updated_at: now,
     };
@@ -423,7 +521,11 @@ pub async fn bootstrap(
 
 /// Build the bootstrap discussion prompt
 /// Bootstrap++ prompt: short user message that defers to the bootstrap-architect skill.
-/// The skill (injected as system context) handles the gated validation flow.
+/// The skill (injected as system context) handles the gated validation flow and
+/// decides which stage to run first (Stage 0 if a repo MCP is configured,
+/// otherwise Stage 1). The user prompt MUST NOT hardcode a starting stage —
+/// earlier versions said "Commence par l'Étape 1" which contradicted the skill
+/// and caused the agent to skip Stage 0 entirely (seen in disc 8716ae79).
 fn build_bootstrap_plus_prompt(language: &str, project_name: &str, description: &str) -> String {
     match language {
         "en" => format!(
@@ -436,7 +538,7 @@ Respond in English.
 
 ---
 
-Follow the **Bootstrap Architect** skill instructions. Start with **Stage 1 — Architecture Analysis**: read all uploaded documents and context, then produce a structured architecture summary. Emit `KRONN:ARCHITECTURE_READY` when done and wait for my validation before continuing."#),
+Follow the **Bootstrap Architect** skill instructions exactly. The skill defines 4 gated stages (Repo & Project Setup → Architecture → Plan → Issues) and tells you which one to start with based on the configured MCPs. Read the skill first, then start at the right stage. Do NOT skip stages. Emit the stage signal at the end of each message and wait for my validation before continuing."#),
         "es" => format!(
 r#"# Bootstrap del proyecto "{project_name}"
 
@@ -447,7 +549,7 @@ Responde en español.
 
 ---
 
-Sigue las instrucciones del skill **Bootstrap Architect**. Comienza con la **Etapa 1 — Análisis de arquitectura**: lee todos los documentos y el contexto, luego produce un resumen estructurado de la arquitectura. Emite `KRONN:ARCHITECTURE_READY` cuando termines y espera mi validación antes de continuar."#),
+Sigue exactamente las instrucciones del skill **Bootstrap Architect**. El skill define 4 etapas con puertas (Repo y Project → Arquitectura → Plan → Issues) e indica cuál iniciar según los MCPs configurados. Lee el skill primero, luego comienza en la etapa correcta. NO saltes etapas. Emite la señal de la etapa al final de cada mensaje y espera mi validación antes de continuar."#),
         _ => format!(
 r#"# Bootstrap du projet "{project_name}"
 
@@ -458,7 +560,7 @@ Réponds en français.
 
 ---
 
-Suis les instructions du skill **Bootstrap Architect**. Commence par l'**Étape 1 — Analyse de l'architecture** : lis tous les documents et le contexte uploadés, puis produis un résumé structuré de l'architecture. Émets `KRONN:ARCHITECTURE_READY` quand tu as terminé et attends ma validation avant de continuer."#),
+Suis les instructions du skill **Bootstrap Architect** à la lettre. Le skill définit 4 étapes avec validation (Repo & Project Setup → Architecture → Plan → Issues) et t'indique par laquelle commencer selon les MCPs configurés. Lis le skill d'abord, puis démarre à la bonne étape. Ne saute AUCUNE étape. Émets le signal de l'étape à la fin de chaque message et attends ma validation avant de continuer."#),
     }
 }
 
@@ -1477,6 +1579,11 @@ pub async fn remap_path(
         None => return Json(ApiResponse::err("Missing 'path' field".to_string())),
     };
 
+    // Reject traversal first — same reasoning as POST /api/projects.
+    if scanner::contains_parent_dir(&new_path) {
+        return Json(ApiResponse::err("Path may not contain '..' components".to_string()));
+    }
+
     // Validate path exists
     if !std::path::Path::new(&new_path).exists() {
         return Json(ApiResponse::err("Path does not exist".to_string()));
@@ -1525,16 +1632,57 @@ mod prompt_tests {
             // Must contain the project info
             assert!(prompt.contains("MyApp"), "Plus prompt ({}) must contain project name", lang);
             assert!(prompt.contains("A cool app"), "Plus prompt ({}) must contain description", lang);
-            // Must reference the ARCHITECTURE_READY signal (first gate)
-            assert!(prompt.contains("KRONN:ARCHITECTURE_READY"),
-                "Plus prompt ({}) must mention ARCHITECTURE_READY", lang);
-            // Must NOT contain old 6-step instructions or BOOTSTRAP_COMPLETE
-            assert!(!prompt.contains("KRONN:BOOTSTRAP_COMPLETE"),
-                "Plus prompt ({}) must NOT mention BOOTSTRAP_COMPLETE (handled by skill)", lang);
-            // Must reference the skill
+            // Must reference the skill by name — that's how the LLM knows to
+            // look at the injected system prompt for the gated workflow.
             assert!(prompt.contains("Bootstrap Architect"),
                 "Plus prompt ({}) must reference the skill", lang);
+            // v4: must NOT hardcode a starting stage. Earlier versions said
+            // "Commence par l'Étape 1" / "Start with Stage 1" which made the
+            // agent skip Stage 0 entirely (disc 8716ae79). The skill decides
+            // which stage to start based on the configured MCPs.
+            assert!(!prompt.contains("Commence par l'**Étape 1**"),
+                "Plus prompt ({}) must NOT hardcode 'Commence par l'Étape 1' — let the skill decide", lang);
+            assert!(!prompt.contains("Start with **Stage 1**"),
+                "Plus prompt ({}) must NOT hardcode 'Start with Stage 1'", lang);
+            assert!(!prompt.contains("Comienza con la **Etapa 1**"),
+                "Plus prompt ({}) must NOT hardcode 'Comienza con la Etapa 1'", lang);
+            // Must NOT mention legacy signals that the skill no longer uses
+            assert!(!prompt.contains("KRONN:BOOTSTRAP_COMPLETE"),
+                "Plus prompt ({}) must NOT mention BOOTSTRAP_COMPLETE (handled by skill)", lang);
+            // Must tell the agent to not skip stages — otherwise Stage 0
+            // can be silently bypassed when the LLM infers the wrong start.
+            assert!(prompt.to_lowercase().contains("saute")
+                 || prompt.to_lowercase().contains("skip")
+                 || prompt.to_lowercase().contains("salt"),
+                "Plus prompt ({}) must instruct the agent to not skip stages", lang);
         }
     }
 
+    // ─── Path traversal validation ─────────────────────────────────────────
+
+    #[test]
+    fn create_rejects_path_with_dotdot_components() {
+        // POST /api/projects must refuse paths containing `..` to prevent
+        // a future multi-user / peer caller from registering a project that
+        // anchors reads outside the intended scan roots.
+        let bad = scanner::contains_parent_dir("/home/user/../etc/passwd");
+        assert!(bad, "scanner::contains_parent_dir must flag /home/user/../etc/passwd");
+        let good = scanner::contains_parent_dir("/home/user/repos/my-project");
+        assert!(!good, "Clean absolute paths must not be flagged");
+    }
+
+    #[test]
+    fn create_rejects_relative_traversal() {
+        // Relative paths with `..` are equally dangerous and must be flagged.
+        assert!(scanner::contains_parent_dir("../../etc/shadow"));
+        assert!(scanner::contains_parent_dir("a/b/../c"));
+    }
+
+    #[test]
+    fn create_allows_dotdot_inside_filename() {
+        // A double-dot sequence within a filename component (e.g. "file..bak")
+        // is not a parent-dir component — must NOT be rejected.
+        assert!(!scanner::contains_parent_dir("/home/user/file..bak"));
+        assert!(!scanner::contains_parent_dir("/home/user/.config/app..conf"));
+    }
 }

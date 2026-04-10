@@ -85,7 +85,12 @@ RUN mkdir -p /home/kronn/.local/bin /home/kronn/.local/share/uv \
 # Agent configs mounted from the host may contain absolute host paths
 # (e.g. Vibe's save_dir = "/home/<user>/.vibe/logs"). The entrypoint creates
 # a symlink $KRONN_HOST_HOME → /home/kronn so these paths resolve correctly.
-RUN chmod 777 /home
+#
+# Sticky bit (1777, like /tmp) lets non-root users create entries inside /home
+# but prevents them from deleting or renaming entries owned by other users —
+# safer than plain 0777 because it stops a compromised process from clobbering
+# another user's home directory or symlinking it elsewhere.
+RUN chmod 1777 /home
 
 ENV KRONN_DATA_DIR=/data
 ENV PATH="/home/kronn/.local/bin:/usr/local/bin:${PATH}"

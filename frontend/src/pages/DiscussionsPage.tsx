@@ -110,6 +110,9 @@ export function DiscussionsPage({
 
   // ─── Internal state ──────────────────────────────────────────────────────
   const [sidebarOpen, setSidebarOpen] = useState(true); // always start open; mobile auto-closes on select
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    try { return localStorage.getItem('kronn:sidebarCollapsed') === 'true'; } catch { return false; }
+  });
   const [activeDiscussionId, setActiveDiscussionId] = useState<string | null>(initialActiveDiscussionId ?? null);
   const [showNewDiscussion, setShowNewDiscussion] = useState(false);
   const [showGitPanel, setShowGitPanel] = useState(false);
@@ -151,11 +154,21 @@ export function DiscussionsPage({
   const onAgentLog = useCallback((log: string) => setAgentLogs(prev => [...prev.slice(-50), log]), []);
   const resetAgentLogs = useCallback(() => { setAgentLogs([]); setShowLogs(false); }, []);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  // True when the user is reading higher up in the message log. We freeze
+  // the auto-scroll behavior so the streaming output doesn't yank the
+  // scroll position back to the bottom every chunk. Re-enabled the moment
+  // the user manually scrolls back near the bottom.
+  const [stickToBottom, setStickToBottom] = useState(true);
+  const [hasNewWhileScrolledUp, setHasNewWhileScrolledUp] = useState(false);
 
   // Persist sidebar collapse state to localStorage
   useEffect(() => {
     localStorage.setItem('kronn:discCollapsedGroups', JSON.stringify([...collapsedDiscGroups]));
   }, [collapsedDiscGroups]);
+  useEffect(() => {
+    localStorage.setItem('kronn:sidebarCollapsed', String(sidebarCollapsed));
+  }, [sidebarCollapsed]);
 
   // Persist TTS preference
   useEffect(() => {
@@ -305,7 +318,37 @@ export function DiscussionsPage({
       refetchDiscussions();
       toast(`${msg.from_pseudo} shared "${msg.title}"`, 'info');
     }
-  }, [contactsList, activeDiscussionId, refetchDiscussions, toast]);
+    // Batch workflow run finished — show a toast + refresh the disc list so
+    // the sidebar group pill updates from "⏳ 7/12" to "✓ 12/12".
+    if (msg.type === 'batch_run_finished') {
+      refetchDiscussions();
+      // Clear the per-disc "Agent en cours..." indicator for the child that
+      // just finished. Batch children are fire-and-forget on the client side
+      // (no SSE consumer → cleanupStream never runs), so the WS event is the
+      // only signal we get that the agent actually finished.
+      setSendingMap(prev => ({ ...prev, [msg.discussion_id]: false }));
+      reloadDiscussion(msg.discussion_id);
+      const name = msg.batch_name ?? 'Batch';
+      if (msg.batch_failed === 0) {
+        toast(t('qp.batch.toast.ok', name, msg.batch_completed), 'success');
+      } else {
+        // No 'warning' variant in useToast — use 'info' so the toast still
+        // shows distinctively without crashing the type check.
+        toast(t('qp.batch.toast.partial', name, msg.batch_completed, msg.batch_failed), 'info');
+      }
+    }
+    // Batch progress tick — clear the spinner for the disc that just finished
+    // and refresh the list so the pill ticks live.
+    if (msg.type === 'batch_run_progress') {
+      refetchDiscussions();
+      setSendingMap(prev => ({ ...prev, [msg.discussion_id]: false }));
+      reloadDiscussion(msg.discussion_id);
+    }
+  // NOTE: reloadDiscussion is defined later in the component and referenced
+  // here only inside the callback body (closure). Do NOT add it to the dep
+  // array — it would be in the temporal dead zone at this point in render
+  // and throw a ReferenceError.
+  }, [contactsList, activeDiscussionId, refetchDiscussions, setSendingMap, toast, t]);
   const { connected: wsConnected } = useWebSocket(handleWsMessage);
 
 
@@ -341,18 +384,62 @@ export function DiscussionsPage({
     return () => { if (sendingTimerRef.current) clearInterval(sendingTimerRef.current); };
   }, [sending, activeDiscussionId, sendingStartMap]);
 
-  // Auto-scroll on new messages, sending state, and streaming (throttled to avoid 60fps layout thrashing)
+  // Auto-scroll on new messages, sending state, and streaming. Two rules:
+  // 1. We only auto-scroll if the user is "stuck to bottom" — i.e. they
+  //    haven't manually scrolled up to read older content. This is the
+  //    classic "stick to bottom" pattern from chat UIs (Slack, Discord, …):
+  //    if you scroll up, the stream stops yanking you back; if you scroll
+  //    back near the bottom, auto-scroll re-engages.
+  // 2. The streaming branch is throttled to ~250ms so we don't thrash
+  //    layout at every chunk.
+  //
+  // CRITICAL: we read `stickToBottom` through a ref, NOT as a useEffect
+  // dependency. Otherwise scrolling up flips stickToBottom → the effect
+  // re-runs → it sees `!stickToBottom` → it incorrectly flags
+  // hasNewWhileScrolledUp=true even though no new content has arrived.
+  // The pill must only appear when fresh content shows up while the user
+  // is already scrolled up — not just because they scrolled up.
   const lastScrollRef = useRef(0);
+  const stickToBottomRef = useRef(stickToBottom);
+  useEffect(() => { stickToBottomRef.current = stickToBottom; }, [stickToBottom]);
+  // Update stickToBottom whenever the user scrolls inside the messages
+  // container. Threshold = 80px from bottom counts as "still at bottom".
+  const handleMessagesScroll = useCallback(() => {
+    const el = messagesContainerRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const atBottom = distanceFromBottom < 80;
+    setStickToBottom(atBottom);
+    if (atBottom) setHasNewWhileScrolledUp(false);
+  }, []);
   useEffect(() => {
+    if (!stickToBottomRef.current) {
+      setHasNewWhileScrolledUp(true);
+      return;
+    }
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [activeDiscussion?.messages.length, sending]);
   useEffect(() => {
     if (!streamingText) return;
+    if (!stickToBottomRef.current) {
+      setHasNewWhileScrolledUp(true);
+      return;
+    }
     const now = Date.now();
     if (now - lastScrollRef.current < 250) return;
     lastScrollRef.current = now;
     chatEndRef.current?.scrollIntoView({ behavior: 'instant' as ScrollBehavior });
   }, [streamingText]);
+  // Re-engage auto-scroll when the user switches discussions: jump to the
+  // bottom of the new conversation and reset the stick flag.
+  useEffect(() => {
+    setStickToBottom(true);
+    setHasNewWhileScrolledUp(false);
+    // Defer to next frame so the new messages have rendered.
+    requestAnimationFrame(() => {
+      chatEndRef.current?.scrollIntoView({ behavior: 'instant' as ScrollBehavior });
+    });
+  }, [activeDiscussionId]);
 
   // Handle prefill from parent (e.g. "validate audit" button on Projects page)
   useEffect(() => {
@@ -897,8 +984,12 @@ export function DiscussionsPage({
   // ─── Render ──────────────────────────────────────────────────────────────
   return (
     <div className="disc-root">
-      {/* Sidebar */}
-      {(!isMobile || sidebarOpen) && (
+      {/* Sidebar — collapsed mode shows a thin rail with expand button */}
+      {!isMobile && sidebarCollapsed ? (
+        <div className="disc-sidebar-rail" onClick={() => setSidebarCollapsed(false)} title="Expand sidebar">
+          <ChevronRight size={16} />
+        </div>
+      ) : (!isMobile || sidebarOpen) ? (
         <DiscussionSidebar
           discussions={allDiscussions}
           projects={projects}
@@ -921,8 +1012,9 @@ export function DiscussionsPage({
           t={t}
           collapsedGroups={collapsedDiscGroups}
           onToggleGroup={handleToggleGroup}
+          onCollapse={() => setSidebarCollapsed(true)}
         />
-      )}
+      ) : null}
 
       {/* Main area */}
       <div className="disc-chat-area">
@@ -1002,7 +1094,11 @@ export function DiscussionsPage({
             )}
 
             {/* Messages */}
-            <div className="disc-messages">
+            <div
+              className="disc-messages"
+              ref={messagesContainerRef}
+              onScroll={handleMessagesScroll}
+            >
               {(() => {
                 const msgs = activeDiscussion.messages;
                 // Pre-compute indices and timestamps in O(n) instead of O(n²)
@@ -1074,7 +1170,16 @@ export function DiscussionsPage({
                       </span>
                     </div>
                     {streamingText ? (
-                      <pre className="disc-streaming-pre">{streamingText}</pre>
+                      // Render the streamed buffer as markdown so headings,
+                      // tables, code blocks, etc. show progressively instead
+                      // of as raw `#` and `**` until the stream finishes.
+                      // The renderer is tolerant of half-finished syntax —
+                      // an unclosed `**` or code fence just renders the
+                      // partial state and snaps into place when the closer
+                      // arrives in the next chunk.
+                      <div className="disc-streaming-md">
+                        <MarkdownContent content={streamingText} />
+                      </div>
                     ) : (
                       <div className="disc-streaming-waiting" aria-live="assertive">
                         <span className="disc-pulse-dot" />
@@ -1283,9 +1388,34 @@ export function DiscussionsPage({
                 const bAgentMsgs = activeDiscussion.messages.filter((m, idx) => m.role === 'Agent' && idx > 0);
                 const lastBMsg = bAgentMsgs.length > 0 ? bAgentMsgs[bAgentMsgs.length - 1] : null;
                 const bStreamedText = streamingMap[activeDiscussion.id] ?? '';
-                const lastContent = (lastBMsg?.content ?? '') + bStreamedText;
+                // While the user is waiting for the agent's NEW reply (just clicked
+                // a "Validate" CTA → sendingMap is set OR streamed text starts
+                // arriving), we must ignore the previous saved message — otherwise
+                // the OLD signal in lastBMsg.content keeps the OLD banner visible
+                // even after the user moved on. The right "lastContent" during a
+                // run is the new streaming buffer alone; once the run ends and
+                // sendingMap clears, the fresh message in DB takes over.
+                const isAwaitingReply = !!sendingMap[activeDiscussion.id] || bStreamedText.length > 0;
+                const lastContent = isAwaitingReply
+                  ? bStreamedText
+                  : (lastBMsg?.content ?? '');
                 if (!lastContent) return null;
                 const upper = lastContent.toUpperCase();
+
+                if (upper.includes('KRONN:REPO_READY')) {
+                  return (
+                    <div className="disc-cta-banner" data-variant="info">
+                      <p className="disc-cta-text" data-variant="info">
+                        <Check size={14} /> {t('bootstrap.repoReady')}
+                      </p>
+                      <button className="disc-cta-btn" data-variant="info" onClick={() => {
+                        handleSendMessage(t('bootstrap.repoValidated'));
+                      }}>
+                        <Play size={12} /> {t('bootstrap.analyzeArchitecture')}
+                      </button>
+                    </div>
+                  );
+                }
 
                 if (upper.includes('KRONN:ARCHITECTURE_READY')) {
                   return (
@@ -1302,7 +1432,11 @@ export function DiscussionsPage({
                   );
                 }
 
-                if (upper.includes('KRONN:PLAN_READY')) {
+                // STRUCTURE_READY is treated as a PLAN_READY alias — LLM
+                // hallucinates it when Stage 2 produces a structural breakdown
+                // (e.g. "modules Core/Dilem/Shared, 15 chantiers") rather than
+                // an explicit "plan" header. Same CTA fires the issue creation.
+                if (upper.includes('KRONN:PLAN_READY') || upper.includes('KRONN:STRUCTURE_READY')) {
                   return (
                     <div className="disc-cta-banner" data-variant="accent">
                       <p className="disc-cta-text" data-variant="accent">
@@ -1317,7 +1451,11 @@ export function DiscussionsPage({
                   );
                 }
 
-                if (upper.includes('KRONN:ISSUES_CREATED')) {
+                // Accept both ISSUES_READY (canonical, *_READY family) and
+                // ISSUES_CREATED (legacy / what older skill versions used).
+                // Claude regularly hallucinates one when the skill says the
+                // other — covering both gives us a stable banner regardless.
+                if (upper.includes('KRONN:ISSUES_READY') || upper.includes('KRONN:ISSUES_CREATED')) {
                   const proj = projects.find(p => p.id === activeDiscussion.project_id);
                   return (
                     <div className="disc-cta-banner" data-variant="accent">
@@ -1338,6 +1476,24 @@ export function DiscussionsPage({
 
               <div ref={chatEndRef} />
             </div>
+
+            {/* Floating "↓ New messages" pill — appears when the user is
+                scrolled up while new content (a new message OR streaming
+                chunks) is arriving. Click jumps back to the bottom and
+                re-engages auto-scroll. */}
+            {!stickToBottom && hasNewWhileScrolledUp && (
+              <button
+                className="disc-jump-to-bottom"
+                onClick={() => {
+                  setStickToBottom(true);
+                  setHasNewWhileScrolledUp(false);
+                  chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+                }}
+                aria-label="Jump to latest message"
+              >
+                ↓ {t('disc.newContent')}
+              </button>
+            )}
 
             {/* Disabled agent banner */}
             {activeAgentDisabled && activeDiscussion && (

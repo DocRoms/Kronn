@@ -5,7 +5,7 @@ import { isHiddenPath } from '../lib/constants';
 import type { Project, McpConfigDisplay, McpDefinition, McpOverview } from '../types/generated';
 import {
   Puzzle, Plus, Trash2, Eye, Check, RefreshCw, Square, CheckSquare,
-  X, Key, Pencil, FileText, ExternalLink, Save, Search,
+  X, Key, Pencil, FileText, ExternalLink, Save, Search, ArrowDownAZ, ArrowDownZA,
 } from 'lucide-react';
 import './McpPage.css';
 
@@ -117,6 +117,15 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
   const [contextSaving, setContextSaving] = useState(false);
   // Search & detail panel
   const [mcpSearch, setMcpSearch] = useState('');
+  const [mcpSort, setMcpSort] = useState<'az' | 'za'>(() => {
+    try {
+      const saved = localStorage.getItem('kronn:mcpSort');
+      return saved === 'za' ? 'za' : 'az';
+    } catch { return 'az'; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('kronn:mcpSort', mcpSort); } catch {}
+  }, [mcpSort]);
   const [selectedConfigId, setSelectedConfigId] = useState<string | null>(initialSelectedConfigId ?? null);
 
   // Open a specific config when navigated from another page (e.g. ProjectCard)
@@ -564,13 +573,25 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
               <X size={12} />
             </button>
           )}
+          <button
+            className="mcp-btn-action mcp-sort-toggle"
+            onClick={() => setMcpSort(mcpSort === 'az' ? 'za' : 'az')}
+            title={mcpSort === 'az' ? t('mcp.sortAz') : t('mcp.sortZa')}
+            aria-label={mcpSort === 'az' ? t('mcp.sortAz') : t('mcp.sortZa')}
+          >
+            {mcpSort === 'az' ? <ArrowDownAZ size={14} /> : <ArrowDownZA size={14} />}
+          </button>
         </div>
       )}
 
       {/* ── Installed plugins grid (detail expands inline) ── */}
       {totalConfigs > 0 ? (
         <div className="mcp-installed-grid">
-          {configs
+          {[...configs]
+            .sort((a, b) => {
+              const cmp = a.label.localeCompare(b.label, undefined, { sensitivity: 'base' });
+              return mcpSort === 'az' ? cmp : -cmp;
+            })
             .filter(cfg => {
               if (!mcpSearch) return true;
               const s = mcpSearch.toLowerCase();

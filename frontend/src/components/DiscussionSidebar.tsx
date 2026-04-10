@@ -6,7 +6,7 @@ import { getProjectGroup, isHiddenPath } from '../lib/constants';
 import { gravatarUrl } from '../lib/gravatar';
 import type { ToastFn } from '../hooks/useToast';
 import {
-  Folder, ChevronRight, Plus, X, MessageSquare, Archive, Search, Users2,
+  Folder, ChevronLeft, ChevronRight, Plus, X, MessageSquare, Archive, Search, Users2,
 } from 'lucide-react';
 
 export interface DiscussionSidebarProps {
@@ -32,6 +32,8 @@ export interface DiscussionSidebarProps {
   /** Ref-setter so parent can expand groups when navigating to a discussion */
   collapsedGroups: Set<string>;
   onToggleGroup: (key: string) => void;
+  /** Desktop only: collapse sidebar into a thin rail */
+  onCollapse?: () => void;
 }
 
 export function DiscussionSidebar({
@@ -56,6 +58,7 @@ export function DiscussionSidebar({
   t,
   collapsedGroups,
   onToggleGroup,
+  onCollapse,
 }: DiscussionSidebarProps) {
   // ─── Sidebar-only state ───────────────────────────────────────────────
   const [discSearchFilter, setDiscSearchFilter] = useState('');
@@ -103,6 +106,11 @@ export function DiscussionSidebar({
           </button>
           {isMobile && (
             <button className="disc-icon-btn" onClick={onClose} aria-label="Close sidebar"><X size={16} /></button>
+          )}
+          {!isMobile && onCollapse && (
+            <button className="disc-icon-btn" onClick={onCollapse} aria-label="Collapse sidebar" title="Collapse sidebar">
+              <ChevronLeft size={16} />
+            </button>
           )}
         </div>
       </div>
@@ -289,19 +297,108 @@ export function DiscussionSidebar({
                         <Folder size={10} /> {proj.name}
                         <span className="disc-group-count">{projDiscs.length}</span>
                       </button>
-                      {!isCollapsed && projDiscs.filter(d => !discSearchFilter || d.title.toLowerCase().includes(discSearchFilter.toLowerCase())).sort((a, b) => b.updated_at.localeCompare(a.updated_at)).map(disc => (
-                        <SwipeableDiscItem
-                          key={disc.id}
-                          disc={disc}
-                          isActive={disc.id === activeId}
-                          lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
-                          isSending={!!sendingMap[disc.id]}
-                          onSelect={onSelect}
-                          onArchive={onArchive}
-                          onDelete={onDelete}
-                          t={t}
-                        />
-                      ))}
+                      {!isCollapsed && (() => {
+                        // Filter + sort, then split into batch groups vs loose discs.
+                        const filtered = projDiscs
+                          .filter(d => !discSearchFilter || d.title.toLowerCase().includes(discSearchFilter.toLowerCase()))
+                          .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+                        // Group by workflow_run_id — discs without one are "loose".
+                        const batchMap = new Map<string, typeof filtered>();
+                        const loose: typeof filtered = [];
+                        for (const d of filtered) {
+                          if (d.workflow_run_id) {
+                            const arr = batchMap.get(d.workflow_run_id) ?? [];
+                            arr.push(d);
+                            batchMap.set(d.workflow_run_id, arr);
+                          } else {
+                            loose.push(d);
+                          }
+                        }
+                        // Compute batch live status from its child discs:
+                        //   - in_progress: at least one disc in sendingMap (true)
+                        //   - or all "terminal" discs done — we approximate via sendingMap
+                        const batchGroups = Array.from(batchMap.entries())
+                          .map(([runId, discs]) => {
+                            const anySending = discs.some(d => !!sendingMap[d.id]);
+                            const total = discs.length;
+                            // "Done" = not in sendingMap AND has at least 2 messages (user + agent reply).
+                            // This is a rough live heuristic; the real authority is workflow_runs in DB.
+                            const done = discs.filter(d => !sendingMap[d.id] && d.message_count >= 2).length;
+                            return { runId, discs, anySending, total, done };
+                          })
+                          .sort((a, b) => b.discs[0].updated_at.localeCompare(a.discs[0].updated_at));
+                        return (
+                          <>
+                            {/* Batch groups first — dépliables, collapsed by default */}
+                            {batchGroups.map(bg => {
+                              const batchKey = `batch::${bg.runId}`;
+                              const isBatchCollapsed = collapsedGroups.has(batchKey);
+                              // First disc's creation time is a close-enough proxy for the batch start
+                              const firstTitle = bg.discs[0].title;
+                              // Use a generic label derived from the first disc's title —
+                              // "Bootstrap: EW-7100" → "Batch (12) — Bootstrap..."
+                              const label = firstTitle.split('—')[0].trim();
+                              const statusPill = bg.anySending
+                                ? `⏳ ${bg.done}/${bg.total}`
+                                : bg.done === bg.total
+                                  ? `✓ ${bg.total}/${bg.total}`
+                                  : `${bg.done}/${bg.total}`;
+                              return (
+                                <div key={batchKey} className="disc-batch-wrap">
+                                  <button
+                                    className="disc-group-btn"
+                                    data-variant="batch"
+                                    onClick={() => onToggleGroup(batchKey)}
+                                    aria-expanded={!isBatchCollapsed}
+                                    style={{ marginLeft: 12 }}
+                                    title={label}
+                                  >
+                                    <ChevronRight size={10} className="disc-chevron" data-expanded={!isBatchCollapsed} />
+                                    📦 {label}
+                                    <span className="disc-group-count" data-batch-status={bg.anySending ? 'running' : 'done'}>
+                                      {statusPill}
+                                    </span>
+                                  </button>
+                                  {!isBatchCollapsed && (
+                                    // Wrapper with a left "tree line" + indent so the
+                                    // batch children read as "inside" the 📦 folder,
+                                    // not as siblings of the loose discs below.
+                                    <div className="disc-batch-children">
+                                      {bg.discs.map(disc => (
+                                        <SwipeableDiscItem
+                                          key={disc.id}
+                                          disc={disc}
+                                          isActive={disc.id === activeId}
+                                          lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
+                                          isSending={!!sendingMap[disc.id]}
+                                          onSelect={onSelect}
+                                          onArchive={onArchive}
+                                          onDelete={onDelete}
+                                          t={t}
+                                        />
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                            {/* Loose discs below the batches */}
+                            {loose.map(disc => (
+                              <SwipeableDiscItem
+                                key={disc.id}
+                                disc={disc}
+                                isActive={disc.id === activeId}
+                                lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
+                                isSending={!!sendingMap[disc.id]}
+                                onSelect={onSelect}
+                                onArchive={onArchive}
+                                onDelete={onDelete}
+                                t={t}
+                              />
+                            ))}
+                          </>
+                        );
+                      })()}
                     </div>
                   );
                 })}

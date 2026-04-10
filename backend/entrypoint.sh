@@ -30,11 +30,45 @@ elif [ -S "/run/host-ssh-agent.sock" ]; then
   export SSH_AUTH_SOCK="/run/host-ssh-agent.sock"
 fi
 
-# Configure git credential helper for HTTPS push using GH_TOKEN
+# Configure git credential helper for HTTPS push using GH_TOKEN.
+#
+# We write the token to ~/.netrc with mode 0600 instead of embedding it in
+# `git config credential.helper '!f() { echo "password=$GH_TOKEN"; }; f'`.
+# Reasons:
+#   1. ~/.gitconfig is world-readable by default (0644) and the inline
+#      credential helper exposes the token to anything that can read the file
+#      (other agents, MCP servers, log scrapers).
+#   2. Inline shell helpers re-evaluate $GH_TOKEN at every git invocation,
+#      which means a token containing a quote/newline could break out of the
+#      helper string and run arbitrary shell code.
+# ~/.netrc with 0600 is the standard mechanism git itself documents and is
+# scoped to the current user only.
 if [ -n "$GH_TOKEN" ]; then
-  git config --global credential.helper '!f() { echo "password=$GH_TOKEN"; }; f' 2>/dev/null || true
-  git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "git@github.com:" 2>/dev/null || true
-  git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/" 2>/dev/null || true
+  NETRC="${HOME}/.netrc"
+  # Remove any prior github.com/gitlab.com entries we previously wrote so
+  # rotating the token does not leave stale credentials behind.
+  if [ -f "$NETRC" ]; then
+    awk '
+      /^machine (github\.com|gitlab\.com)$/ { skip=1; next }
+      /^machine / { skip=0 }
+      skip != 1 { print }
+    ' "$NETRC" > "${NETRC}.tmp" && mv "${NETRC}.tmp" "$NETRC"
+  fi
+  {
+    echo "machine github.com"
+    echo "  login x-access-token"
+    echo "  password ${GH_TOKEN}"
+    echo "machine gitlab.com"
+    echo "  login oauth2"
+    echo "  password ${GH_TOKEN}"
+  } >> "$NETRC"
+  chmod 600 "$NETRC"
+
+  # Make HTTPS the canonical remote so SSH-style URLs are rewritten on the fly.
+  # The token is sourced from ~/.netrc, never inlined in the URL, so it does
+  # not end up in `git config --list` or process listings.
+  git config --global url."https://github.com/".insteadOf "git@github.com:" 2>/dev/null || true
+  git config --global url."https://gitlab.com/".insteadOf "git@gitlab.com:" 2>/dev/null || true
 fi
 
 # Restore uv tool symlinks from persistent volume.

@@ -630,6 +630,124 @@ fn sync_vibe_project_config(
 
 // ─── Codex global sync ───────────────────────────────────────────────────────
 
+/// Warn once if a host-native Codex config also exists in a different
+/// directory than the one Kronn is about to write to.
+///
+/// Kronn syncs MCPs into a single `~/.codex/config.toml`. When run from
+/// Docker / WSL the path is derived from `KRONN_HOST_HOME` or `HOME` inside
+/// the container, while a host-native Codex install lives at `$USERPROFILE`
+/// (Windows) or `$HOME` (Unix native). If the user installs Codex on the host
+/// AND uses Kronn from Docker/WSL, the two configs diverge silently.
+fn detect_codex_config_drift(active_dir: &Path) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if WARNED.load(Ordering::Relaxed) {
+        return;
+    }
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {
+        candidates.push(PathBuf::from(format!("{}/.codex", host_home)));
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        candidates.push(PathBuf::from(format!("{}/.codex", home)));
+    }
+    if let Ok(profile) = std::env::var("USERPROFILE") {
+        candidates.push(PathBuf::from(format!("{}/.codex", profile)));
+    }
+
+    let active_canon = active_dir.canonicalize().ok();
+    for cand in &candidates {
+        if !cand.join("config.toml").exists() {
+            continue;
+        }
+        let cand_canon = cand.canonicalize().ok();
+        let same = match (&active_canon, &cand_canon) {
+            (Some(a), Some(b)) => a == b,
+            _ => active_dir == cand,
+        };
+        if !same {
+            tracing::warn!(
+                "Codex config drift detected: Kronn writes to {} but another \
+                 config also exists at {}. The two will diverge — pick a single \
+                 source of truth (either run Codex inside Kronn's environment \
+                 or set KRONN_HOST_HOME to point at the host install).",
+                active_dir.display(),
+                cand.display()
+            );
+            WARNED.store(true, Ordering::Relaxed);
+            return;
+        }
+    }
+}
+
+/// Outcome of attempting to load an existing Codex `config.toml` for merge.
+///
+/// `Loaded(table)` — file parsed cleanly, returns the table to merge into.
+/// `Empty`         — file does not exist or could not be read; start fresh.
+/// `Aborted`       — file exists but is corrupt/non-table; the caller MUST
+///                   abandon the sync without writing to avoid clobbering
+///                   the user's existing provider config.
+#[derive(Debug)]
+pub(crate) enum CodexLoadOutcome {
+    Loaded(toml::value::Table),
+    Empty,
+    Aborted,
+}
+
+/// Read an existing Codex `config.toml`, returning a parsed table or signalling
+/// that the caller must abort. On parse failure we copy the file to
+/// `config.toml.kronn-backup` so the user can recover their original.
+///
+/// Extracted from `sync_codex_global_config` so the data-preservation logic
+/// is unit-testable in isolation.
+pub(crate) fn load_codex_config_for_merge(codex_config: &Path) -> CodexLoadOutcome {
+    if !codex_config.exists() {
+        return CodexLoadOutcome::Empty;
+    }
+    let content = match std::fs::read_to_string(codex_config) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                "Cannot read Codex config {}: {} — starting fresh",
+                codex_config.display(),
+                e
+            );
+            return CodexLoadOutcome::Empty;
+        }
+    };
+    match content.parse::<toml::Value>() {
+        Ok(v) => match v.as_table() {
+            Some(t) => CodexLoadOutcome::Loaded(t.clone()),
+            None => {
+                tracing::error!(
+                    "Codex config {} is not a TOML table — aborting sync to avoid data loss",
+                    codex_config.display()
+                );
+                CodexLoadOutcome::Aborted
+            }
+        },
+        Err(e) => {
+            let backup = codex_config.with_extension("toml.kronn-backup");
+            if let Err(copy_err) = std::fs::copy(codex_config, &backup) {
+                tracing::error!(
+                    "Failed to back up corrupt Codex config {} to {}: {}",
+                    codex_config.display(),
+                    backup.display(),
+                    copy_err
+                );
+            }
+            tracing::error!(
+                "Failed to parse Codex config {} ({}). Backed up to {} and aborting sync to preserve user data.",
+                codex_config.display(),
+                e,
+                backup.display()
+            );
+            CodexLoadOutcome::Aborted
+        }
+    }
+}
+
 /// Rebuild ~/.codex/config.toml with ALL configured MCP servers.
 /// Codex uses a single global config file — no per-project support.
 /// We merge MCP entries into the existing config, preserving non-MCP settings.
@@ -710,17 +828,24 @@ fn sync_codex_global_config(
     };
     let codex_config = codex_dir.join("config.toml");
 
+    // Drift detection: if both KRONN_HOST_HOME/.codex and the local user's
+    // ~/.codex exist *and* point at different filesystems, the user is likely
+    // alternating between Kronn (Docker / WSL) and a host-native Codex install.
+    // The two configs will silently diverge as Kronn syncs only one of them.
+    // We can't pick a winner safely — just warn once so the user knows to
+    // pick a single source of truth.
+    detect_codex_config_drift(&codex_dir);
+
     // Parse existing config as a TOML table to preserve other settings
-    let mut doc: toml::value::Table = if codex_config.exists() {
-        match std::fs::read_to_string(&codex_config) {
-            Ok(content) => content.parse::<toml::Value>()
-                .ok()
-                .and_then(|v| v.as_table().cloned())
-                .unwrap_or_default(),
-            Err(_) => toml::value::Table::new(),
-        }
-    } else {
-        toml::value::Table::new()
+    // (e.g. [model_providers], [profiles], custom user keys).
+    //
+    // SAFETY: data preservation is delegated to load_codex_config_for_merge,
+    // which backs up corrupt files before signalling Aborted so we never
+    // silently overwrite the user's provider config.
+    let mut doc: toml::value::Table = match load_codex_config_for_merge(&codex_config) {
+        CodexLoadOutcome::Loaded(t) => t,
+        CodexLoadOutcome::Empty => toml::value::Table::new(),
+        CodexLoadOutcome::Aborted => return,
     };
 
     // Replace mcp_servers section
@@ -737,16 +862,31 @@ fn sync_codex_global_config(
         doc.insert("mcp_servers".into(), toml::Value::Table(mcp_table));
     }
 
-    // Write back
-    if let Err(e) = std::fs::create_dir_all(codex_dir) {
-        tracing::warn!("Failed to create Codex config dir: {}", e);
+    // Write back. create_dir_all can fail for surprising reasons on real
+    // user machines: ~/.codex moved to iCloud Drive (read-only sync), FileVault
+    // not yet unlocked, parent owned by another user, or a Linux mount point
+    // re-mounted read-only. Surface enough context that the user can act on
+    // the message instead of staring at "Failed to create Codex config dir".
+    if let Err(e) = std::fs::create_dir_all(&codex_dir) {
+        tracing::error!(
+            "Codex MCPs will NOT be synced — cannot create config dir {}: {} \
+             (kind: {:?}). Common causes: ~/.codex moved to iCloud Drive, FileVault locked, \
+             parent dir owned by another user, or read-only filesystem.",
+            codex_dir.display(),
+            e,
+            e.kind()
+        );
         return;
     }
 
     match toml::to_string_pretty(&doc) {
         Ok(content) => {
             if let Err(e) = atomic_write(&codex_config, &content) {
-                tracing::warn!("Failed to write Codex config: {}", e);
+                tracing::error!(
+                    "Failed to write Codex config to {}: {} — \
+                     check disk space and that the path is writable.",
+                    codex_config.display(), e
+                );
             } else {
                 tracing::info!("Synced Codex global config ({} MCP servers)", mcp_entries.len());
             }

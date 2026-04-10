@@ -22,6 +22,100 @@ const MAX_CONTENT_LEN: usize = 100_000;
 const AGENT_GLOBAL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// Default stall timeout (5 minutes) — overridden by config.server.agent_stall_timeout_min
 const DEFAULT_STALL_TIMEOUT_MIN: u32 = 5;
+/// Hard cap on a single agent reply (~2 MB). Beyond this we kill the agent
+/// and append a partial-response footer. The bound is intentionally
+/// generous — a normal Claude Code reply is ~50 KB even with tool calls,
+/// long workflow runs are ~500 KB. Anything larger is almost always a
+/// runaway loop (the "90 issues from a 46-issue plan" case) and the cost
+/// of letting it continue dwarfs the cost of cutting it off.
+const MAX_AGENT_RESPONSE_BYTES: usize = 2_000_000;
+
+/// Gated KRONN signals — when an agent emits any of these, it MUST stop.
+///
+/// Each signal marks a deliberate handoff back to the user (validate the
+/// architecture, validate the plan, view the project board, etc.). Without
+/// hard enforcement here, an agent that ignores the skill's "STOP HERE"
+/// instruction can keep streaming indefinitely — for example creating
+/// duplicate GitHub issues after KRONN:ISSUES_CREATED, which is exactly the
+/// bug that produced 90 issues from a 46-issue plan.
+///
+/// Detection happens in the streaming loop: as soon as `full_response`
+/// (uppercased suffix) contains one of these substrings, the loop breaks
+/// and the agent subprocess is killed. The user picks up via the CTA
+/// banners in DiscussionsPage.tsx and triggers the next stage with a fresh
+/// message.
+const TERMINAL_SIGNALS: &[&str] = &[
+    "KRONN:REPO_READY",
+    "KRONN:ARCHITECTURE_READY",
+    "KRONN:PLAN_READY",
+    "KRONN:STRUCTURE_READY",  // alias for PLAN_READY — LLM hallucinates this when
+                              // Stage 2 produces a structural breakdown (modules,
+                              // chantiers) rather than an explicit "plan" header
+    "KRONN:ISSUES_READY",     // canonical (consistent with the *_READY family)
+    "KRONN:ISSUES_CREATED",   // legacy alias — LLMs sometimes invent one or the other
+    "KRONN:VALIDATION_COMPLETE",
+    "KRONN:WORKFLOW_READY",
+    "KRONN:BOOTSTRAP_COMPLETE",
+    "KRONN:BRIEFING_COMPLETE",
+];
+
+/// Returns the first terminal signal found in the *tail* of `text`, or None.
+///
+/// We only inspect the last ~256 bytes because terminal signals always sit on
+/// the final line of the agent's reply. Scanning the entire `full_response`
+/// every chunk would be O(n²) on long runs (100k+ chars) and is unnecessary —
+/// the signal is on the very last line by skill convention.
+///
+/// CRITICAL: `text.len()` is a byte count, not a char count. If we slice at a
+/// byte index that falls in the middle of a multibyte UTF-8 codepoint
+/// (e.g. an accented French char like `é` = 2 bytes, an emoji = 4 bytes),
+/// `&text[tail_start..]` panics with "byte index N is not a char boundary".
+/// We back off the index until it lands on a valid char boundary — at most
+/// 3 bytes since UTF-8 codepoints are 1–4 bytes.
+pub(crate) fn detect_terminal_signal(text: &str) -> Option<&'static str> {
+    let mut tail_start = text.len().saturating_sub(256);
+    while tail_start > 0 && !text.is_char_boundary(tail_start) {
+        tail_start -= 1;
+    }
+    let tail = &text[tail_start..];
+    let tail_upper = tail.to_uppercase();
+    TERMINAL_SIGNALS.iter().copied().find(|sig| tail_upper.contains(sig))
+}
+
+/// Truncate `text` so it ends right after the first occurrence of `signal`.
+///
+/// Used after a terminal signal is detected: the LLM may have started writing
+/// a follow-up sentence in the same chunk before our break landed (the
+/// "STOP immediately" rule isn't always obeyed). Cutting after the signal
+/// keeps the saved message clean — no orphan letter / half-sentence trailing
+/// the marker.
+///
+/// Case-insensitive ASCII match. Safe with multibyte UTF-8 in `text`: we
+/// search at the byte level using `eq_ignore_ascii_case` so we never need
+/// to call `to_uppercase()` (which can shift byte positions on non-ASCII
+/// chars and break our slice).
+///
+/// Returns the original text untouched if the signal is not found.
+pub(crate) fn truncate_after_signal(text: &str, signal: &str) -> String {
+    let needle = signal.as_bytes();
+    let haystack = text.as_bytes();
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return text.to_string();
+    }
+    let pos = haystack
+        .windows(needle.len())
+        .position(|w| w.eq_ignore_ascii_case(needle));
+    let Some(pos) = pos else { return text.to_string(); };
+    let end = pos + needle.len();
+    // Defensive: end must land on a char boundary. Since the signal is pure
+    // ASCII (KRONN:* / underscores / digits), if `pos` is on a char boundary
+    // then so is `end` — but check anyway in case of pathological input.
+    if text.is_char_boundary(end) {
+        text[..end].to_string()
+    } else {
+        text.to_string()
+    }
+}
 
 /// Per-agent prompt budget in characters.
 /// Leaves room for the agent's response within its context window.
@@ -178,6 +272,7 @@ pub async fn create(
         summary_up_to_msg_idx: None,
         shared_id: None,
         shared_with: vec![],
+        workflow_run_id: None,
         created_at: now,
         updated_at: now,
     };
@@ -571,6 +666,10 @@ async fn make_agent_stream(
     let directive_ids = disc.directive_ids.clone();
     let profile_ids = disc.profile_ids.clone();
     let mut workspace_path = disc.workspace_path.clone();
+    // Captured for the batch progress hook at the end of the stream — if
+    // this disc was spawned by a batch run, we increment its counters and
+    // broadcast a WS event when it finishes.
+    let batch_run_id = disc.workflow_run_id.clone();
 
     let project_path = if let Some(ref pid) = disc.project_id {
         let pid = pid.clone();
@@ -746,6 +845,16 @@ async fn make_agent_stream(
                 };
                 let stall_timeout = Duration::from_secs(stall_timeout_min as u64 * 60);
                 let mut was_interrupted = false;
+                // Set when we break the loop because the agent emitted a
+                // terminal signal (KRONN:ARCHITECTURE_READY, etc.). Used to
+                // distinguish from a stall timeout when killing the process
+                // — both paths end up calling kill() but only stalls add a
+                // partial-response footer.
+                let mut stopped_on_signal: Option<&'static str> = None;
+                // Set when we break because full_response exceeded
+                // MAX_AGENT_RESPONSE_BYTES. We then kill the child and
+                // append a footer so the user sees what happened.
+                let mut stopped_on_size: bool = false;
 
                 // Stall timeout pattern: the `tokio::time::sleep(stall_timeout)` future
                 // is created fresh on each iteration of the `while let` loop because the
@@ -779,6 +888,26 @@ async fn make_agent_stream(
                                 if !client_gone {
                                     let chunk = serde_json::json!({ "text": text });
                                     let _ = tx.send(AgentStreamEvent::Chunk { data: chunk }).await;
+                                }
+                                // Terminal-signal detection — see TERMINAL_SIGNALS doc.
+                                if let Some(sig) = detect_terminal_signal(&full_response) {
+                                    tracing::info!("Terminal signal {} detected — stopping agent", sig);
+                                    // Strip anything the LLM wrote AFTER the signal in
+                                    // the same chunk (orphan letters, half-sentences).
+                                    // The skill rule is "STOP immediately after the
+                                    // signal" — we enforce it visually so the saved
+                                    // message ends cleanly on the marker.
+                                    full_response = truncate_after_signal(&full_response, sig);
+                                    stopped_on_signal = Some(sig);
+                                    break;
+                                }
+                                if full_response.len() > MAX_AGENT_RESPONSE_BYTES {
+                                    tracing::warn!(
+                                        "Agent response exceeded {} bytes — killing to prevent runaway",
+                                        MAX_AGENT_RESPONSE_BYTES
+                                    );
+                                    stopped_on_size = true;
+                                    break;
                                 }
                             }
                             runner::StreamJsonEvent::Usage { input_tokens, output_tokens, cost_usd } => {
@@ -821,14 +950,29 @@ async fn make_agent_stream(
                             let chunk = serde_json::json!({ "text": text_with_nl });
                             let _ = tx.send(AgentStreamEvent::Chunk { data: chunk }).await;
                         }
+                        if let Some(sig) = detect_terminal_signal(&full_response) {
+                            tracing::info!("Terminal signal {} detected — stopping agent", sig);
+                            full_response = truncate_after_signal(&full_response, sig);
+                            stopped_on_signal = Some(sig);
+                            break;
+                        }
+                        if full_response.len() > MAX_AGENT_RESPONSE_BYTES {
+                            tracing::warn!(
+                                "Agent response exceeded {} bytes — killing to prevent runaway",
+                                MAX_AGENT_RESPONSE_BYTES
+                            );
+                            stopped_on_size = true;
+                            break;
+                        }
                     }
                 }
 
                 // Stop the stderr log streamer
                 log_task.abort();
 
-                // Kill agent on timeout/stall (process may still be running)
-                if was_interrupted {
+                // Kill agent on timeout/stall OR terminal signal OR size cap
+                // (process may still be running and producing output).
+                if was_interrupted || stopped_on_signal.is_some() || stopped_on_size {
                     let _ = process.child.kill().await;
                 }
 
@@ -838,7 +982,15 @@ async fn make_agent_stream(
                     Ok(s) => format!("exit code: {:?}", s.code()),
                     Err(e) => format!("wait error: {}", e),
                 };
-                let success = !was_interrupted && status.map(|s| s.success()).unwrap_or(false);
+                // A signal-driven stop is a SUCCESS even though we killed the
+                // child — the agent did exactly what we asked. Wait status
+                // will report a non-zero exit code from SIGKILL, so we
+                // explicitly mark these as successful.
+                let success = if stopped_on_signal.is_some() {
+                    true
+                } else {
+                    !was_interrupted && status.map(|s| s.success()).unwrap_or(false)
+                };
 
                 let stderr_lines = process.captured_stderr_flushed().await;
                 let stderr_text = stderr_lines.join("\n");
@@ -849,6 +1001,14 @@ async fn make_agent_stream(
                         "\n\n---\n⚠️ **Partial response** — the agent was interrupted after {} min without output. \
                         You can increase the timeout in **Config > Server > Agent inactivity timeout**.",
                         stall_timeout_min
+                    ));
+                }
+                if stopped_on_size {
+                    full_response.push_str(&format!(
+                        "\n\n---\n🛑 **Response cut off** — the agent produced more than {} KB of output, \
+                        which usually means it's stuck in a loop. Killed to prevent runaway costs. \
+                        Review the work above and decide whether to continue with a fresh prompt.",
+                        MAX_AGENT_RESPONSE_BYTES / 1024
                     ));
                 }
 
@@ -929,6 +1089,52 @@ async fn make_agent_stream(
                     crate::db::discussions::insert_message(conn, &did, &msg)
                 }).await {
                     tracing::error!("Failed to save agent message: {e}");
+                }
+
+                // ── Batch progress hook ────────────────────────────────
+                // If this disc was spawned by a batch workflow run, bump
+                // its counters. Broadcast a progress or finished event so
+                // the sidebar pill + any open batch monitor updates live.
+                if let Some(ref run_id) = batch_run_id {
+                    let run_id_inner = run_id.clone();
+                    let child_succeeded = success;
+                    let ws_tx = state.ws_broadcast.clone();
+                    let batch_updated = state.db.with_conn(move |conn| {
+                        crate::db::workflows::increment_batch_progress(conn, &run_id_inner, child_succeeded)
+                    }).await;
+                    match batch_updated {
+                        Ok(Some(updated_run)) => {
+                            let is_final = matches!(updated_run.status, RunStatus::Success | RunStatus::Failed);
+                            let event = if is_final {
+                                WsMessage::BatchRunFinished {
+                                    run_id: updated_run.id.clone(),
+                                    discussion_id: disc_id.clone(),
+                                    batch_name: updated_run.batch_name.clone(),
+                                    batch_total: updated_run.batch_total,
+                                    batch_completed: updated_run.batch_completed,
+                                    batch_failed: updated_run.batch_failed,
+                                }
+                            } else {
+                                WsMessage::BatchRunProgress {
+                                    run_id: updated_run.id.clone(),
+                                    discussion_id: disc_id.clone(),
+                                    batch_total: updated_run.batch_total,
+                                    batch_completed: updated_run.batch_completed,
+                                    batch_failed: updated_run.batch_failed,
+                                }
+                            };
+                            let _ = ws_tx.send(event);
+                            if is_final {
+                                tracing::info!(
+                                    "Batch run {} finished: {}/{} ok, {} failed",
+                                    updated_run.id, updated_run.batch_completed,
+                                    updated_run.batch_total, updated_run.batch_failed
+                                );
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(e) => tracing::error!("Failed to update batch progress: {e}"),
+                    }
                 }
 
                 // Detect KRONN:BRIEFING_COMPLETE marker
@@ -1036,7 +1242,7 @@ async fn make_agent_stream(
         }
     });
 
-    Sse::new(stream)
+    Sse::new(crate::core::sse_limits::bounded(stream))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1072,6 +1278,7 @@ async fn run_agent_streaming(
     let is_stream_json = process.output_mode == runner::OutputMode::StreamJson;
     let deadline = tokio::time::Instant::now() + AGENT_GLOBAL_TIMEOUT;
 
+    let mut signal_stop = false;
     loop {
         tokio::select! {
             line = process.next_line() => {
@@ -1123,6 +1330,15 @@ async fn run_agent_streaming(
                                 let _ = tx.send(AgentStreamEvent::Chunk { data: chunk }).await;
                             }
                         }
+                        // Same terminal-signal enforcement as the regular run loop:
+                        // an orchestrated agent that emits e.g. KRONN:ARCHITECTURE_READY
+                        // should hand back to the user, not keep streaming.
+                        if let Some(sig) = detect_terminal_signal(&full_response) {
+                            tracing::info!("Terminal signal {} detected (orchestration) — stopping agent", sig);
+                            full_response = truncate_after_signal(&full_response, sig);
+                            signal_stop = true;
+                            break;
+                        }
                     }
                     None => break,
                 }
@@ -1133,6 +1349,9 @@ async fn run_agent_streaming(
                 break;
             }
         }
+    }
+    if signal_stop {
+        let _ = process.child.kill().await;
     }
 
     let status = process.child.wait().await;
@@ -1639,7 +1858,7 @@ pub async fn orchestrate(
         }
     });
 
-    Sse::new(stream)
+    Sse::new(crate::core::sse_limits::bounded(stream))
 }
 
 fn auth_mode_for(agent_type: &AgentType, tokens: &TokensConfig) -> String {
@@ -2639,6 +2858,197 @@ pub async fn delete_context_file(
         }
         Ok(false) => Json(ApiResponse::<()>::err("Context file not found".to_string())),
         Err(e) => Json(ApiResponse::<()>::err(format!("DB error: {e}"))),
+    }
+}
+
+#[cfg(test)]
+mod terminal_signal_tests {
+    use super::detect_terminal_signal;
+
+    #[test]
+    fn detects_repo_ready_at_end() {
+        let s = "All done.\nRepo created.\nKRONN:REPO_READY";
+        assert_eq!(detect_terminal_signal(s), Some("KRONN:REPO_READY"));
+    }
+
+    #[test]
+    fn detects_architecture_ready_lowercase() {
+        let s = "Architecture summary.\nkronn:architecture_ready";
+        assert_eq!(detect_terminal_signal(s), Some("KRONN:ARCHITECTURE_READY"));
+    }
+
+    #[test]
+    fn detects_plan_ready() {
+        let s = "Plan ready.\nKRONN:PLAN_READY";
+        assert_eq!(detect_terminal_signal(s), Some("KRONN:PLAN_READY"));
+    }
+
+    #[test]
+    fn detects_issues_created() {
+        let s = "Created 12 issues.\nKRONN:ISSUES_CREATED";
+        assert_eq!(detect_terminal_signal(s), Some("KRONN:ISSUES_CREATED"));
+    }
+
+    #[test]
+    fn detects_issues_ready_canonical_variant() {
+        // Real-world bug: Claude hallucinated KRONN:ISSUES_READY because the
+        // *_READY family (REPO_READY, ARCHITECTURE_READY, PLAN_READY) makes
+        // the LLM "harmonize" the last signal name. v3 of the skill uses
+        // ISSUES_READY as canonical; both must be detected so old skills /
+        // mid-conversation drift don't fall through the cracks.
+        let s = "Created 13 epics.\nKRONN:ISSUES_READY";
+        assert_eq!(detect_terminal_signal(s), Some("KRONN:ISSUES_READY"));
+    }
+
+    #[test]
+    fn detects_structure_ready_alias_for_plan_ready() {
+        // Real-world bug: when Stage 2 produces a "structure modulaire /
+        // 15 chantiers" breakdown rather than an explicit "plan" header,
+        // Claude emits KRONN:STRUCTURE_READY instead of KRONN:PLAN_READY.
+        // We accept it as an alias so the agent stops cleanly and the
+        // frontend CTA still fires.
+        let s = "Structure Core/Dilem/Shared, 15 chantiers.\nKRONN:STRUCTURE_READY";
+        assert_eq!(detect_terminal_signal(s), Some("KRONN:STRUCTURE_READY"));
+    }
+
+    #[test]
+    fn ignores_text_without_signal() {
+        let s = "Just a long agent reply with no terminal marker.";
+        assert_eq!(detect_terminal_signal(s), None);
+    }
+
+    #[test]
+    fn ignores_signals_buried_more_than_256_chars_from_end() {
+        // The signal is at the START of a long reply — we only inspect the
+        // tail. This is fine because real agents emit the signal as the
+        // very last thing they print; tail-only inspection is the perf
+        // win that lets us check on every chunk in O(1).
+        let mut s = String::from("KRONN:PLAN_READY");
+        s.push_str(&"a".repeat(300));
+        assert_eq!(detect_terminal_signal(&s), None);
+    }
+
+    #[test]
+    fn handles_empty_string() {
+        assert_eq!(detect_terminal_signal(""), None);
+    }
+
+    #[test]
+    fn does_not_match_unknown_signal() {
+        let s = "End.\nKRONN:NOT_A_REAL_SIGNAL";
+        assert_eq!(detect_terminal_signal(s), None);
+    }
+
+    #[test]
+    fn detects_signal_with_trailing_newline() {
+        let s = "Done.\nKRONN:BOOTSTRAP_COMPLETE\n";
+        assert_eq!(detect_terminal_signal(s), Some("KRONN:BOOTSTRAP_COMPLETE"));
+    }
+
+    #[test]
+    fn handles_multibyte_utf8_at_byte_boundary() {
+        // Regression: a previous version of detect_terminal_signal sliced at
+        // text.len() - 256 bytes without checking char boundaries, which
+        // panics if a multibyte UTF-8 codepoint spans the cut. Real bug:
+        // a French agent reply in markdown was full of accented chars (é/è/à)
+        // and one fell exactly on the 256-byte boundary → panic, agent task
+        // killed silently, user saw nothing. Build a string that GUARANTEES
+        // a multibyte char straddles the cut, then make sure we don't panic.
+        //
+        // 'é' is 2 bytes in UTF-8. 257 'é' chars = 514 bytes total. The cut
+        // at 514 - 256 = 258 lands on the second byte of the 130th é.
+        let s = "é".repeat(257);
+        // Must not panic.
+        let result = detect_terminal_signal(&s);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn handles_4byte_emoji_at_boundary() {
+        // 4-byte UTF-8 (emoji 🚀 = 4 bytes). Stress the back-off logic with
+        // a wider codepoint.
+        let s = "🚀".repeat(80); // 320 bytes total, cut at 64
+        let result = detect_terminal_signal(&s);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn detects_signal_after_french_text() {
+        // Realistic case: a long French markdown reply ending with the signal.
+        let s = format!(
+            "{}\nÉtape terminée — synthèse des trois profils ci-dessus.\nKRONN:ARCHITECTURE_READY",
+            "Voici l'analyse détaillée de l'architecture proposée. ".repeat(20)
+        );
+        assert_eq!(detect_terminal_signal(&s), Some("KRONN:ARCHITECTURE_READY"));
+    }
+
+    #[test]
+    fn truncate_strips_orphan_letter_after_signal() {
+        // Real bug from the first successful Bootstrap++ run: Claude wrote
+        // "...analysis.\nKRONN:ARCHITECTURE_READY\n\nJ" — the LLM started its
+        // next sentence ("J'attends ta validation...") in the same chunk
+        // before our break landed. We should cut after the signal so the
+        // saved DB content has no orphan letter.
+        let s = "Section 10 done.\n\n---\n\nKRONN:ARCHITECTURE_READY\n\nJ";
+        let result = super::truncate_after_signal(s, "KRONN:ARCHITECTURE_READY");
+        assert_eq!(result, "Section 10 done.\n\n---\n\nKRONN:ARCHITECTURE_READY");
+    }
+
+    #[test]
+    fn truncate_strips_full_followup_sentence() {
+        let s = "Done.\nKRONN:PLAN_READY\n\nJ'attends ta validation pour passer aux issues.";
+        let result = super::truncate_after_signal(s, "KRONN:PLAN_READY");
+        assert_eq!(result, "Done.\nKRONN:PLAN_READY");
+    }
+
+    #[test]
+    fn truncate_case_insensitive_match() {
+        // The LLM may emit the signal in lowercase (rare but legal per skill).
+        let s = "Done.\nkronn:architecture_ready\n\nMore text.";
+        let result = super::truncate_after_signal(s, "KRONN:ARCHITECTURE_READY");
+        assert_eq!(result, "Done.\nkronn:architecture_ready");
+    }
+
+    #[test]
+    fn truncate_safe_with_french_accents_before_signal() {
+        // Multibyte UTF-8 chars before the signal must not throw off the
+        // byte-level slicing. Bytes for "Étape" = 6, "à" = 2, etc.
+        let s = "Étape 1 — Analyse complète. Voilà.\nKRONN:ARCHITECTURE_READY\n\nfollow-up";
+        let result = super::truncate_after_signal(s, "KRONN:ARCHITECTURE_READY");
+        assert_eq!(
+            result,
+            "Étape 1 — Analyse complète. Voilà.\nKRONN:ARCHITECTURE_READY"
+        );
+    }
+
+    #[test]
+    fn truncate_no_change_when_signal_absent() {
+        let s = "Just text without any signal.";
+        let result = super::truncate_after_signal(s, "KRONN:ARCHITECTURE_READY");
+        assert_eq!(result, "Just text without any signal.");
+    }
+
+    #[test]
+    fn truncate_no_change_when_signal_at_very_end() {
+        let s = "Done.\nKRONN:ISSUES_CREATED";
+        let result = super::truncate_after_signal(s, "KRONN:ISSUES_CREATED");
+        assert_eq!(result, "Done.\nKRONN:ISSUES_CREATED");
+    }
+
+    #[test]
+    fn max_response_bytes_constant_is_sane() {
+        // Compile-time bounds check via const assertions — these become
+        // build errors if someone bumps MAX_AGENT_RESPONSE_BYTES outside the
+        // safe range. A normal Claude reply is ~50 KB, a 100-issue workflow
+        // is ~500 KB. 2 MB catches anything 4× larger as a likely runaway.
+        const _BOUND_LO: () = assert!(
+            super::MAX_AGENT_RESPONSE_BYTES >= 1_000_000,
+            "size cap must allow at least 1 MB so legitimate large runs aren't cut off"
+        );
+        const _BOUND_HI: () = assert!(
+            super::MAX_AGENT_RESPONSE_BYTES <= 5_000_000,
+            "size cap must stay under 5 MB so a runaway agent can't burn $$$"
+        );
     }
 }
 

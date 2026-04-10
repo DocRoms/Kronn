@@ -174,6 +174,26 @@ export function Dashboard({ onReset }: DashboardProps) {
   const [bootstrapFiles, setBootstrapFiles] = useState<File[]>([]);
   const [bootstrapRepoMcp, setBootstrapRepoMcp] = useState('');       // MCP config ID for repo creation
   const [bootstrapTrackerMcp, setBootstrapTrackerMcp] = useState(''); // MCP config ID for issue tracker
+
+  // When the bootstrap modal opens, pre-select the first available repo MCP
+  // and tracker MCP so the user doesn't have to remember to pick them. They
+  // can still opt out via the empty option in each dropdown. Only fires when
+  // the field is empty so we don't override an explicit user choice.
+  useEffect(() => {
+    if (!showBootstrap) return;
+    const repoMcps = mcpOverview.configs.filter(c =>
+      c.server_id === 'mcp-github' || c.server_id === 'mcp-gitlab'
+    );
+    const trackerMcps = mcpOverview.configs.filter(c =>
+      c.server_id === 'mcp-github' || c.server_id === 'mcp-atlassian' || c.server_id === 'mcp-linear'
+    );
+    if (!bootstrapRepoMcp && repoMcps.length > 0) {
+      setBootstrapRepoMcp(repoMcps[0].id);
+    }
+    if (!bootstrapTrackerMcp && trackerMcps.length > 0) {
+      setBootstrapTrackerMcp(trackerMcps[0].id);
+    }
+  }, [showBootstrap, mcpOverview.configs, bootstrapRepoMcp, bootstrapTrackerMcp]);
   const [newProjectMode, setNewProjectMode] = useState<'bootstrap' | 'clone'>('bootstrap');
   const [cloneUrl, setCloneUrl] = useState('');
   const [cloneName, setCloneName] = useState('');
@@ -739,7 +759,45 @@ export function Dashboard({ onReset }: DashboardProps) {
         {/* ════════ WORKFLOWS ════════ */}
         {page === 'workflows' && (
           <ErrorBoundary mode="zone" label="Workflows">
-            <WorkflowsPage projects={projects} installedAgentTypes={agents.filter(isUsable).map(a => a.agent_type)} agentAccess={agentAccess ?? undefined} configLanguage={configLanguage ?? undefined} onNavigateDiscussion={(discId) => { setAutoRunDiscussionId(discId); setPage('discussions'); }} />
+            <WorkflowsPage
+              projects={projects}
+              installedAgentTypes={agents.filter(isUsable).map(a => a.agent_type)}
+              agentAccess={agentAccess ?? undefined}
+              configLanguage={configLanguage ?? undefined}
+              onNavigateDiscussion={(discId) => { setAutoRunDiscussionId(discId); setPage('discussions'); }}
+              onBatchLaunched={(discIds) => {
+                // Mark every batch-child disc as sending so the sidebar
+                // spinner lights up for all of them in parallel, not just
+                // the one we navigate to. The parent (Dashboard) owns
+                // sendingMap; WorkflowsPage only lives in the workflow tab.
+                setSendingMap(prev => {
+                  const next = { ...prev };
+                  for (const id of discIds) next[id] = true;
+                  return next;
+                });
+                setSendingStartMap(prev => {
+                  const next = { ...prev };
+                  const now = Date.now();
+                  for (const id of discIds) next[id] = now;
+                  return next;
+                });
+                // Open the first disc WITHOUT auto-running it. The disc
+                // is already running (we fired its POST /run in the
+                // fan-out loop); using setAutoRunDiscussionId here would
+                // trigger a SECOND run from DiscussionsPage's auto-run
+                // effect, giving that disc 2 agent replies and pushing
+                // the batch progress counter past the total (bug seen
+                // 2026-04-10: 7/6 ok on a 6-item batch, first disc had
+                // 3 messages instead of 2).
+                if (discIds.length > 0) {
+                  setOpenDiscussionId(discIds[0]);
+                  setPage('discussions');
+                }
+                // Force a refetch so the new discs show up in the sidebar
+                // grouped under their batch run.
+                refetchDiscussions?.();
+              }}
+            />
           </ErrorBoundary>
         )}
 

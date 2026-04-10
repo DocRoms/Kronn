@@ -83,16 +83,68 @@ fn worktree_base_dir(repo_path: &Path) -> PathBuf {
     repo_path.join(".kronn/worktrees")
 }
 
+/// Maximum length of a single slug component (project / discussion).
+///
+/// Windows MAX_PATH is 260 characters by default. A worktree path looks like:
+///   `<repo>\.kronn\worktrees\<project>--<discussion>\…\file`
+/// With a typical repo path of ~80 chars and the `.kronn\worktrees\` prefix
+/// (~17 chars), capping each slug at 60 chars leaves at least ~100 chars for
+/// nested files inside the worktree before hitting the legacy limit.
+const MAX_SLUG_LEN: usize = 60;
+
 /// Slugify a string for use in paths and branch names.
+///
+/// Caps the result at `MAX_SLUG_LEN` so concatenations like
+/// `<project>--<discussion>` stay safely below Windows MAX_PATH (260)
+/// even before the long-path prefix kicks in.
 fn slugify(s: &str) -> String {
-    s.to_lowercase()
+    let raw: String = s
+        .to_lowercase()
         .chars()
         .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '-' })
         .collect::<String>()
         .split('-')
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
-        .join("-")
+        .join("-");
+    truncate_slug(&raw)
+}
+
+/// Truncate a slug to `MAX_SLUG_LEN` chars without splitting on a trailing dash.
+fn truncate_slug(s: &str) -> String {
+    if s.len() <= MAX_SLUG_LEN {
+        return s.to_string();
+    }
+    // chars() to be unicode-safe (slugs can contain accented letters)
+    let truncated: String = s.chars().take(MAX_SLUG_LEN).collect();
+    truncated.trim_end_matches('-').to_string()
+}
+
+/// Apply the Windows extended-length path prefix `\\?\` so file APIs accept
+/// paths longer than 260 chars. No-op on non-Windows. Idempotent.
+#[allow(dead_code)]
+pub(crate) fn long_path(p: &Path) -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        let s = p.to_string_lossy();
+        if s.starts_with(r"\\?\") || s.starts_with(r"\\.\") {
+            return p.to_path_buf();
+        }
+        // Only meaningful for absolute drive paths (C:\...). UNC paths use
+        // a different form: \\?\UNC\server\share\…
+        if s.len() >= 3 && s.as_bytes()[1] == b':' {
+            return PathBuf::from(format!(r"\\?\{}", s));
+        }
+        if let Some(rest) = s.strip_prefix(r"\\") {
+            // \\server\share → \\?\UNC\server\share
+            return PathBuf::from(format!(r"\\?\UNC\{}", rest));
+        }
+        p.to_path_buf()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        p.to_path_buf()
+    }
 }
 
 /// Create a persistent worktree for a discussion.
@@ -533,6 +585,40 @@ mod tests {
     #[test]
     fn test_slugify_empty_string() {
         assert_eq!(slugify(""), "");
+    }
+
+    #[test]
+    fn test_slugify_caps_at_max_len() {
+        // A 200-char input must be capped to MAX_SLUG_LEN (60).
+        let long = "a".repeat(200);
+        let result = slugify(&long);
+        assert!(result.len() <= MAX_SLUG_LEN, "slug must be <= MAX_SLUG_LEN, got {}", result.len());
+        assert_eq!(result.len(), MAX_SLUG_LEN);
+    }
+
+    #[test]
+    fn test_slugify_truncation_does_not_leave_trailing_dash() {
+        // 30 chars + dash + 30 chars = 61 chars → truncation lands on the dash boundary
+        let s = format!("{}-{}", "a".repeat(30), "b".repeat(30));
+        let result = slugify(&s);
+        assert!(result.len() <= MAX_SLUG_LEN);
+        assert!(!result.ends_with('-'), "truncated slug must not end with a dash, got {:?}", result);
+    }
+
+    #[test]
+    fn test_truncate_slug_unicode_safe() {
+        // Truncation must operate on chars, not bytes, to avoid panicking
+        // mid-codepoint with unicode slugs (e.g. lots of "é").
+        let s = "é".repeat(200);
+        let result = truncate_slug(&s);
+        assert!(result.chars().count() <= MAX_SLUG_LEN);
+    }
+
+    #[test]
+    fn test_long_path_noop_on_unix() {
+        // long_path is a no-op on non-Windows. Confirm it returns the same path.
+        let p = PathBuf::from("/home/user/project");
+        assert_eq!(long_path(&p), p);
     }
 
     #[test]

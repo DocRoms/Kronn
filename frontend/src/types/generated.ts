@@ -432,6 +432,16 @@ export interface WorkflowRun {
   workspace_path: string | null;
   started_at: string;
   finished_at: string | null;
+  /** "linear" (classic workflow runs) or "batch" (Phase 1b fan-out) */
+  run_type?: string;
+  /** Batch runs only: target number of child discussions */
+  batch_total?: number;
+  /** Batch runs only: number of child discussions that finished OK */
+  batch_completed?: number;
+  /** Batch runs only: number of child discussions that failed */
+  batch_failed?: number;
+  /** Batch runs only: display name in the sidebar group header */
+  batch_name?: string | null;
 }
 
 export type RunStatus = "Pending" | "Running" | "Success" | "Failed" | "Cancelled" | "WaitingApproval";
@@ -709,6 +719,8 @@ export interface Discussion {
   summary_up_to_msg_idx?: number | null;
   shared_id?: string | null;
   shared_with?: string[];
+  /** If set, this disc was spawned by a batch WorkflowRun — used for sidebar grouping */
+  workflow_run_id?: string | null;
   created_at: string; // ISO 8601
   updated_at: string;
 }
@@ -819,7 +831,9 @@ export type WsMessage =
   | { type: 'ping'; timestamp: number }
   | { type: 'pong'; timestamp: number }
   | { type: 'chat_message'; shared_discussion_id: string; message_id: string; from_pseudo: string; from_avatar_email: string | null; from_invite_code: string; content: string; timestamp: number }
-  | { type: 'discussion_invite'; shared_discussion_id: string; title: string; from_pseudo: string; from_invite_code: string };
+  | { type: 'discussion_invite'; shared_discussion_id: string; title: string; from_pseudo: string; from_invite_code: string }
+  | { type: 'batch_run_finished'; run_id: string; discussion_id: string; batch_name: string | null; batch_total: number; batch_completed: number; batch_failed: number }
+  | { type: 'batch_run_progress'; run_id: string; discussion_id: string; batch_total: number; batch_completed: number; batch_failed: number };
 
 export interface DetectedIp {
   ip: string;
@@ -891,6 +905,10 @@ export interface PromptVariable {
   name: string;
   label: string;
   placeholder: string;
+  /** Human description of what this variable is for. Shown in batch UI. */
+  description?: string | null;
+  /** Must be filled before the prompt can run. Defaults to true. */
+  required?: boolean;
 }
 
 export interface QuickPrompt {
@@ -903,6 +921,8 @@ export interface QuickPrompt {
   project_id?: string | null;
   skill_ids?: string[];
   tier?: ModelTier;
+  /** Human description of what this Quick Prompt does. Shown in batch picker. */
+  description?: string;
   created_at: string;
   updated_at: string;
 }
@@ -916,4 +936,5 @@ export interface CreateQuickPromptRequest {
   project_id?: string | null;
   skill_ids?: string[];
   tier?: ModelTier;
+  description?: string;
 }

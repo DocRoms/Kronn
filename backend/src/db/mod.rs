@@ -57,7 +57,30 @@ impl Database {
         conn.execute_batch("PRAGMA busy_timeout=5000;")?;
 
         if use_wal {
-            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")?;
+            // Setting journal_mode requires a query that yields the *actual*
+            // mode. SQLite silently falls back to TRUNCATE/PERSIST when the
+            // backing filesystem cannot support WAL (NFS, SMB, iCloud Drive,
+            // some FUSE mounts). If we don't notice we lose concurrent-write
+            // safety without ever telling the user — verify and warn loudly.
+            let actual_mode: String = conn.query_row(
+                "PRAGMA journal_mode=WAL;",
+                [],
+                |row| row.get(0),
+            ).context("Failed to set WAL journal mode")?;
+            conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")?;
+
+            if !actual_mode.eq_ignore_ascii_case("wal") {
+                tracing::warn!(
+                    "Requested journal_mode=WAL but SQLite fell back to '{}'. \
+                     The database file at {} is likely on a network or sync \
+                     filesystem (NFS, SMB, iCloud Drive, FUSE) that does not \
+                     support WAL — concurrent writes may block or corrupt. \
+                     Move the data dir off the network mount or set KRONN_DB_WAL=0 \
+                     to suppress this warning.",
+                    actual_mode,
+                    path.display()
+                );
+            }
         } else {
             tracing::warn!("WAL mode disabled (KRONN_DB_WAL=0); using DELETE journal mode");
             conn.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")?;

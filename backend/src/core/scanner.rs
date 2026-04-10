@@ -261,9 +261,29 @@ fn restore_host_path(path: &Path) -> String {
     s.to_string()
 }
 
+/// Returns true if a path string contains a `..` component anywhere.
+/// We reject these defensively before mapping to /host-home so a request
+/// cannot escape the mount root via traversal (`/host-home/../etc/passwd`).
+/// Works on both Unix and Windows path separators.
+pub fn contains_parent_dir(path: &str) -> bool {
+    Path::new(path)
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+}
+
 /// Map a host-absolute path to the Docker mount point if needed.
 /// e.g. /home/priol/Repositories -> /host-home/Repositories
+///
+/// SECURITY: paths containing `..` components are returned as-is without
+/// mapping. The caller still gets a `PathBuf`, but downstream filesystem
+/// calls will fail to resolve outside the mount root, and we never silently
+/// translate a traversal attempt into a `/host-home` access.
 pub fn resolve_host_path(path: &str) -> PathBuf {
+    if contains_parent_dir(path) {
+        tracing::warn!("Refusing to map path containing '..' component: {}", path);
+        return PathBuf::from(path);
+    }
+
     // In Docker: always prefer the /host-home mount over any local path
     if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {
         if let Some(relative) = path.strip_prefix(&host_home) {
@@ -460,5 +480,36 @@ mod tests {
         std::env::remove_var("KRONN_HOST_HOME");
         let result = resolve_host_path("/home/user/repos");
         assert_eq!(result, PathBuf::from("/home/user/repos"));
+    }
+
+    // ─── path traversal rejection ───────────────────────────────────────────
+
+    #[test]
+    fn contains_parent_dir_detects_dotdot() {
+        assert!(contains_parent_dir("/home/user/../etc/passwd"));
+        assert!(contains_parent_dir("../../etc/passwd"));
+        assert!(contains_parent_dir("/a/b/../c"));
+    }
+
+    #[test]
+    fn contains_parent_dir_allows_clean_paths() {
+        assert!(!contains_parent_dir("/home/user/repos"));
+        assert!(!contains_parent_dir("/home/user/repos/.kronn"));
+        assert!(!contains_parent_dir("relative/path"));
+        // A literal '..' inside a filename component is fine — only path
+        // separators around it count.
+        assert!(!contains_parent_dir("/home/user/file..bak"));
+    }
+
+    #[test]
+    fn resolve_host_path_refuses_traversal_with_host_home() {
+        // Even if KRONN_HOST_HOME is set, a `..` in the path must not be
+        // mapped into /host-home — that would let a caller pivot outside
+        // the mount root. We return the original PathBuf so downstream
+        // operations fail rather than silently succeeding on the wrong target.
+        std::env::set_var("KRONN_HOST_HOME", "/home/user");
+        let result = resolve_host_path("/home/user/../etc/passwd");
+        assert_eq!(result, PathBuf::from("/home/user/../etc/passwd"));
+        std::env::remove_var("KRONN_HOST_HOME");
     }
 }

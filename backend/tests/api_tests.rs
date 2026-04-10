@@ -2187,6 +2187,7 @@ async fn ws_chat_message_inserts_into_shared_discussion() {
         summary_up_to_msg_idx: None,
         shared_id: Some("shared-abc-123".into()),
         shared_with: vec![],
+        workflow_run_id: None,
         created_at: now,
         updated_at: now,
     };
@@ -2299,6 +2300,7 @@ async fn ws_chat_message_idempotent() {
         summary_up_to_msg_idx: None,
         shared_id: Some("shared-idem-001".into()),
         shared_with: vec![],
+        workflow_run_id: None,
         created_at: now,
         updated_at: now,
     };
@@ -2866,11 +2868,45 @@ async fn skills_list_includes_bootstrap_architect() {
     let skill = skill.unwrap();
     assert_eq!(skill["category"], "Domain");
     assert!(skill["is_builtin"].as_bool().unwrap());
-    // Must mention all 3 gated signals
+    // Must mention all 4 gated signals (v4 — canonical *_READY family)
     let content = skill["content"].as_str().unwrap();
+    assert!(content.contains("KRONN:REPO_READY"), "Must mention REPO_READY");
     assert!(content.contains("KRONN:ARCHITECTURE_READY"), "Must mention ARCHITECTURE_READY");
     assert!(content.contains("KRONN:PLAN_READY"), "Must mention PLAN_READY");
-    assert!(content.contains("KRONN:ISSUES_CREATED"), "Must mention ISSUES_CREATED");
+    assert!(content.contains("KRONN:ISSUES_READY"), "Must mention ISSUES_READY");
+    // Hard guardrails: runaway agent prevention
+    assert!(content.contains("STOP HERE") || content.contains("STOP IMMEDIATELY"),
+        "Must have explicit STOP between stages");
+    assert!(content.to_lowercase().contains("no retries") || content.contains("NO RETRIES"),
+        "Must have no-retries rule");
+    // v3+ enforces stories-as-checklists, not separate issues
+    assert!(content.to_lowercase().contains("checklist"),
+        "Must instruct stories live as checklists inside epics");
+    // v4 guardrails added after disc 8716ae79 debrief:
+    // - Stage 0 must call get_me first (not search globally)
+    assert!(content.contains("get_me") || content.contains("authenticated user"),
+        "Stage 0 must start by identifying the authenticated user");
+    // - GitHub Projects v2 limitation must be acknowledged (MCP can't create them)
+    assert!(content.contains("Projects v2") || content.contains("project board"),
+        "Must mention Projects v2 / project board limitation");
+    // - Fallback cascade explicitly forbidden (no plan A/B/C menus)
+    assert!(content.contains("NO FALLBACK") || content.to_lowercase().contains("no fallback"),
+        "Must forbid fallback cascades (no plan A/B/C menus)");
+    // - Tool pivoting forbidden mid-stage (no switching from MCP to gh CLI)
+    assert!(content.contains("pivot") || content.contains("switch tool"),
+        "Must forbid pivoting between tools mid-stage");
+    // - Stage 0 and Stage 3 are execution stages, no multi-profile discussion
+    assert!(content.contains("no multi-profile") || content.contains("no-multi-profile") ||
+            content.contains("do NOT use the multi-profile"),
+        "Must disable multi-profile format for Stage 0 and Stage 3");
+    // - Auto-configure git identity from get_me, never ask the user
+    //   (regression check for the "Quel nom et email?" prompt bug)
+    assert!(content.contains("git config user.name") || content.contains("user.email"),
+        "Stage 0 must explicitly set git user.name/email from get_me");
+    assert!(content.contains("DO NOT ASK THE USER") || content.contains("MUST NOT ask"),
+        "Stage 0 must forbid asking the user for git identity");
+    assert!(content.contains("users.noreply.github.com"),
+        "Must document the noreply fallback email");
 }
 
 #[tokio::test]

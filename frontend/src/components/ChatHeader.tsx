@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import '../pages/DiscussionsPage.css';
 import { discussions as discussionsApi } from '../lib/api';
 import type { Project, AgentDetection, Discussion, AgentType, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact } from '../types/generated';
@@ -67,6 +67,35 @@ export function ChatHeader({
   const [mcpSearchFilter, setMcpSearchFilter] = useState('');
   const [showProfileEditor, setShowProfileEditor] = useState(false);
   const [showAgentSwitch, setShowAgentSwitch] = useState(false);
+  // Which inline badge popover is currently open, if any. Encoded as
+  // "type:id" (e.g. "profile:default-architect", "skill:bootstrap-architect")
+  // so we only need one useState for the whole header sub-row.
+  const [openBadgeInfo, setOpenBadgeInfo] = useState<string | null>(null);
+
+  // Close the badge info popover on click-outside and on Escape. The
+  // click-outside check walks up from the event target until it finds
+  // a `.disc-badge-wrap` parent; if none, we close. This lets clicks
+  // *inside* the popover (e.g. on a link) pass through.
+  useEffect(() => {
+    if (!openBadgeInfo) return;
+    const onClick = (e: MouseEvent) => {
+      const el = e.target as Element | null;
+      if (!el?.closest('.disc-badge-wrap')) setOpenBadgeInfo(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpenBadgeInfo(null);
+    };
+    document.addEventListener('click', onClick);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('click', onClick);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [openBadgeInfo]);
+  const toggleBadgeInfo = (key: string) => (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setOpenBadgeInfo(prev => (prev === key ? null : key));
+  };
 
   const installedAgentsList = agents.filter(isUsable);
 
@@ -210,11 +239,46 @@ export function ChatHeader({
               <span className="disc-separator">·</span>
               {discussion.profile_ids?.map((pid: string) => {
                 const p = availableProfiles.find(p => p.id === pid);
-                return p ? (
-                  <span key={pid} className="disc-header-profile-badge" style={{ background: `${p.color}15`, color: p.color, border: `1px solid ${p.color}30` }}>
-                    {p.avatar} {p.persona_name || p.name}
+                if (!p) return null;
+                const key = `profile:${pid}`;
+                const isOpen = openBadgeInfo === key;
+                return (
+                  <span key={pid} className="disc-badge-wrap">
+                    <button
+                      type="button"
+                      className="disc-header-profile-badge"
+                      style={{ background: `${p.color}15`, color: p.color, border: `1px solid ${p.color}30`, cursor: 'pointer' }}
+                      onClick={toggleBadgeInfo(key)}
+                      aria-expanded={isOpen}
+                      title={t('disc.badgeInfo.showDetails')}
+                    >
+                      {p.avatar} {p.persona_name || p.name}
+                    </button>
+                    {isOpen && (
+                      <div className="disc-badge-info-popover" role="dialog">
+                        <div className="disc-badge-info-header">
+                          <span className="disc-badge-info-avatar" style={{ background: `${p.color}20`, color: p.color }}>
+                            {p.avatar}
+                          </span>
+                          <div>
+                            <div className="disc-badge-info-title">{p.persona_name || p.name}</div>
+                            <div className="disc-badge-info-subtitle">{p.role}</div>
+                          </div>
+                        </div>
+                        <div className="disc-badge-info-kind">{t('disc.badgeInfo.profileKind')}</div>
+                        <div className="disc-badge-info-body">
+                          {p.persona_prompt.length > 400
+                            ? p.persona_prompt.slice(0, 400) + '…'
+                            : p.persona_prompt}
+                        </div>
+                        <div className="disc-badge-info-footer">
+                          ~{p.token_estimate} {t('disc.badgeInfo.tokens')}
+                          {p.is_builtin && <span className="disc-badge-info-pill">{t('disc.badgeInfo.builtin')}</span>}
+                        </div>
+                      </div>
+                    )}
                   </span>
-                ) : null;
+                );
               })}
             </>
           )}
@@ -223,9 +287,45 @@ export function ChatHeader({
               <span className="disc-separator">·</span>
               {(discussion.skill_ids ?? []).map(sid => {
                 const skill = availableSkills.find(s => s.id === sid);
+                const key = `skill:${sid}`;
+                const isOpen = openBadgeInfo === key;
                 return (
-                  <span key={sid} className="disc-header-skill-badge">
-                    {skill?.name ?? sid}
+                  <span key={sid} className="disc-badge-wrap">
+                    <button
+                      type="button"
+                      className="disc-header-skill-badge"
+                      style={{ cursor: 'pointer' }}
+                      onClick={toggleBadgeInfo(key)}
+                      aria-expanded={isOpen}
+                      title={t('disc.badgeInfo.showDetails')}
+                    >
+                      {skill?.icon ? `${skill.icon} ` : ''}{skill?.name ?? sid}
+                    </button>
+                    {isOpen && skill && (
+                      <div className="disc-badge-info-popover" role="dialog">
+                        <div className="disc-badge-info-header">
+                          <span className="disc-badge-info-avatar">{skill.icon || '📘'}</span>
+                          <div>
+                            <div className="disc-badge-info-title">{skill.name}</div>
+                            <div className="disc-badge-info-subtitle">{skill.category}</div>
+                          </div>
+                        </div>
+                        <div className="disc-badge-info-kind">{t('disc.badgeInfo.skillKind')}</div>
+                        <div className="disc-badge-info-body">
+                          {skill.description}
+                        </div>
+                        <div className="disc-badge-info-footer">
+                          ~{skill.token_estimate} {t('disc.badgeInfo.tokens')}
+                          {skill.is_builtin && <span className="disc-badge-info-pill">{t('disc.badgeInfo.builtin')}</span>}
+                        </div>
+                      </div>
+                    )}
+                    {isOpen && !skill && (
+                      <div className="disc-badge-info-popover" role="dialog">
+                        <div className="disc-badge-info-title">{sid}</div>
+                        <div className="disc-badge-info-body">{t('disc.badgeInfo.notFound')}</div>
+                      </div>
+                    )}
                   </span>
                 );
               })}
@@ -236,10 +336,40 @@ export function ChatHeader({
               <span className="disc-separator">·</span>
               {(discussion.directive_ids ?? []).map(id => {
                 const d = availableDirectives.find(dd => dd.id === id);
+                const key = `directive:${id}`;
+                const isOpen = openBadgeInfo === key;
                 return (
-                  <span key={id} className="disc-header-directive-badge">
-                    <FileText size={7} style={{ marginRight: 2 }} />
-                    {d ? `${d.icon} ${d.name}` : id}
+                  <span key={id} className="disc-badge-wrap">
+                    <button
+                      type="button"
+                      className="disc-header-directive-badge"
+                      style={{ cursor: 'pointer' }}
+                      onClick={toggleBadgeInfo(key)}
+                      aria-expanded={isOpen}
+                      title={t('disc.badgeInfo.showDetails')}
+                    >
+                      <FileText size={7} style={{ marginRight: 2 }} />
+                      {d ? `${d.icon} ${d.name}` : id}
+                    </button>
+                    {isOpen && d && (
+                      <div className="disc-badge-info-popover" role="dialog">
+                        <div className="disc-badge-info-header">
+                          <span className="disc-badge-info-avatar">{d.icon || '📜'}</span>
+                          <div>
+                            <div className="disc-badge-info-title">{d.name}</div>
+                            <div className="disc-badge-info-subtitle">{d.category}</div>
+                          </div>
+                        </div>
+                        <div className="disc-badge-info-kind">{t('disc.badgeInfo.directiveKind')}</div>
+                        <div className="disc-badge-info-body">
+                          {d.description}
+                        </div>
+                        <div className="disc-badge-info-footer">
+                          ~{d.token_estimate} {t('disc.badgeInfo.tokens')}
+                          {d.is_builtin && <span className="disc-badge-info-pill">{t('disc.badgeInfo.builtin')}</span>}
+                        </div>
+                      </div>
+                    )}
                   </span>
                 );
               })}
