@@ -17,7 +17,6 @@ mod tests {
         build_router_with_auth,
         core::config::default_config,
         db::Database,
-        workflows::WorkflowEngine,
         AppState, AuditTracker, DEFAULT_MAX_CONCURRENT_AGENTS,
     };
 
@@ -27,15 +26,14 @@ mod tests {
         let db = Arc::new(Database::open_in_memory().expect("in-memory DB"));
         let config = default_config();
         let config_arc = Arc::new(RwLock::new(config));
-        let workflow_engine = Arc::new(WorkflowEngine::new(db.clone(), config_arc.clone()));
         let (ws_tx, _) = tokio::sync::broadcast::channel(256);
         AppState {
             config: config_arc,
             db,
-            workflow_engine,
             agent_semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_AGENTS)),
             audit_tracker: Arc::new(std::sync::Mutex::new(AuditTracker::default())),
             ws_broadcast: Arc::new(ws_tx),
+            cancel_registry: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -46,15 +44,14 @@ mod tests {
         config.server.auth_token = Some(token.to_string());
         config.server.auth_enabled = true;
         let config_arc = Arc::new(RwLock::new(config));
-        let workflow_engine = Arc::new(WorkflowEngine::new(db.clone(), config_arc.clone()));
         let (ws_tx, _) = tokio::sync::broadcast::channel(256);
         AppState {
             config: config_arc,
             db,
-            workflow_engine,
             agent_semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_AGENTS)),
             audit_tracker: Arc::new(std::sync::Mutex::new(AuditTracker::default())),
             ws_broadcast: Arc::new(ws_tx),
+            cancel_registry: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 

@@ -49,6 +49,9 @@ pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> 
         ("027_quick_prompts", include_str!("sql/026_quick_prompts.sql")),
         ("028_quick_prompt_descriptions", include_str!("sql/027_quick_prompt_descriptions.sql")),
         ("029_batch_workflow_runs", include_str!("sql/028_batch_workflow_runs.sql")),
+        ("030_workflow_run_parent", include_str!("sql/030_workflow_run_parent.sql")),
+        ("031_partial_response", include_str!("sql/031_partial_response.sql")),
+        ("032_partial_response_started_at", include_str!("sql/032_partial_response_started_at.sql")),
     ];
 
     // Check if there are pending migrations before backing up

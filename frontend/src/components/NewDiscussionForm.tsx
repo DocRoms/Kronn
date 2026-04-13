@@ -193,13 +193,18 @@ export function NewDiscussionForm({
           </div>
         )}
 
-        {/* Workspace mode toggle — only for git projects */}
+        {/* Workspace mode toggle — always shown when a project is selected.
+            Previously hidden when `repo_url` was null/empty (non-git projects),
+            but that made the option silently disappear for users who couldn't
+            tell why. Now always visible: for non-git projects, Isolated mode
+            is disabled with a hint explaining the requirement. */}
         {(() => {
           const selectedProj = projects.find(p => p.id === newDiscProjectId);
-          if (!newDiscProjectId || !selectedProj?.repo_url) return null;
+          if (!newDiscProjectId) return null; // no project → no workspace choice
+          const hasRepo = Boolean(selectedProj?.repo_url);
           return (
             <div style={{ marginBottom: 12 }}>
-              <label className="disc-form-label">{t('disc.workspaceDirect').replace(/.*/, 'Workspace')}</label>
+              <label className="disc-form-label">{t('disc.workspaceLabel')}</label>
               <div className="disc-workspace-toggle">
                 <button
                   type="button"
@@ -216,7 +221,9 @@ export function NewDiscussionForm({
                 </button>
                 <button
                   type="button"
+                  disabled={!hasRepo}
                   onClick={() => {
+                    if (!hasRepo) return;
                     setNewDiscWorkspaceMode('Isolated');
                     if (!newDiscBranchName) {
                       const title = newDiscTitle.trim();
@@ -227,15 +234,19 @@ export function NewDiscussionForm({
                   className="disc-workspace-btn"
                   data-active={newDiscWorkspaceMode === 'Isolated'}
                   data-mode="isolated"
+                  title={hasRepo ? undefined : t('disc.workspaceIsolatedNeedsRepo')}
+                  style={!hasRepo ? { opacity: 0.5, cursor: 'not-allowed' } : undefined}
                 >
                   <GitBranch size={12} />
                   <div>
                     <div className="disc-workspace-btn-title">{t('disc.workspaceIsolated')}</div>
-                    <div className="disc-workspace-btn-desc">{t('disc.workspaceIsolatedDesc')}</div>
+                    <div className="disc-workspace-btn-desc">
+                      {hasRepo ? t('disc.workspaceIsolatedDesc') : t('disc.workspaceIsolatedNeedsRepo')}
+                    </div>
                   </div>
                 </button>
               </div>
-              {newDiscWorkspaceMode === 'Isolated' && (
+              {newDiscWorkspaceMode === 'Isolated' && hasRepo && (
                 <div className="disc-workspace-branch-grid">
                   <div>
                     <label className="disc-form-label" data-size="xs">{t('disc.branchName')}</label>

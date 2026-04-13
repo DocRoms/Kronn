@@ -367,11 +367,20 @@ export interface WorkflowStep {
   skill_ids?: string[];
   profile_ids?: string[];
   directive_ids?: string[];
+  // ─── BatchQuickPrompt fields (Phase 2 batch workflows) ─────────────
+  // Only meaningful when step_type.type === 'BatchQuickPrompt'.
+  batch_quick_prompt_id?: string | null;
+  batch_items_from?: string | null;
+  batch_wait_for_completion?: boolean | null;
+  batch_max_items?: number | null;
+  /// "Direct" (default) or "Isolated" — per-child git worktree for parallel code writes.
+  batch_workspace_mode?: string | null;
 }
 
 export type StepType =
   | { type: "Agent" }
-  | { type: "ApiCall" };
+  | { type: "ApiCall" }
+  | { type: "BatchQuickPrompt" };
 
 export type StepMode =
   | { type: "Normal" };
@@ -473,6 +482,23 @@ export interface WorkflowRunSummary {
   started_at: string;
   finished_at: string | null;
   tokens_used: number;
+}
+
+/** Compact summary of a batch workflow run, with its parent linear run
+ *  resolved to (workflow name + run sequence). Feeds the sidebar pastille. */
+export interface BatchRunSummary {
+  run_id: string;
+  batch_name: string | null;
+  batch_total: number;
+  status: RunStatus;
+  /** Quick Prompt that this batch fans out — used as the sidebar folder label. */
+  quick_prompt_id: string | null;
+  quick_prompt_name: string | null;
+  quick_prompt_icon: string | null;
+  parent_run_id: string | null;
+  parent_workflow_id: string | null;
+  parent_workflow_name: string | null;
+  parent_run_sequence: number | null;
 }
 
 export interface WorkflowSuggestion {
@@ -833,7 +859,8 @@ export type WsMessage =
   | { type: 'chat_message'; shared_discussion_id: string; message_id: string; from_pseudo: string; from_avatar_email: string | null; from_invite_code: string; content: string; timestamp: number }
   | { type: 'discussion_invite'; shared_discussion_id: string; title: string; from_pseudo: string; from_invite_code: string }
   | { type: 'batch_run_finished'; run_id: string; discussion_id: string; batch_name: string | null; batch_total: number; batch_completed: number; batch_failed: number }
-  | { type: 'batch_run_progress'; run_id: string; discussion_id: string; batch_total: number; batch_completed: number; batch_failed: number };
+  | { type: 'batch_run_progress'; run_id: string; discussion_id: string; batch_total: number; batch_completed: number; batch_failed: number }
+  | { type: 'partial_response_recovered'; discussion_ids: string[] };
 
 export interface DetectedIp {
   ip: string;

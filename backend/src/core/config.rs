@@ -204,6 +204,9 @@ pub fn default_config() -> AppConfig {
             model_tiers: Default::default(),
         },
         language: "fr".into(),
+        ui_language: "fr".into(),
+        stt_model: None,
+        tts_voices: std::collections::HashMap::new(),
         disabled_agents: vec![],
         encryption_secret: Some(super::crypto::generate_secret()),
     }

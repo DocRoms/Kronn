@@ -31,18 +31,14 @@ fn test_state() -> AppState {
     let mut cfg = kronn::core::config::default_config();
     cfg.server.auth_token = None; // Disable auth for tests
     let config = Arc::new(RwLock::new(cfg));
-    let workflow_engine = Arc::new(kronn::workflows::WorkflowEngine::new(
-        db.clone(),
-        config.clone(),
-    ));
     let (ws_tx, _) = tokio::sync::broadcast::channel(256);
     AppState {
         config,
         db,
-        workflow_engine,
         agent_semaphore: Arc::new(tokio::sync::Semaphore::new(DEFAULT_MAX_CONCURRENT_AGENTS)),
         audit_tracker: Arc::new(std::sync::Mutex::new(kronn::AuditTracker::default())),
         ws_broadcast: Arc::new(ws_tx),
+        cancel_registry: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     }
 }
 
@@ -353,6 +349,719 @@ async fn discussions_list_empty() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["success"], true);
     assert!(json["data"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn discussions_stop_returns_cancelled_false_when_nothing_running() {
+    // Endpoint smoke test: POST /api/discussions/:id/stop on a disc that has
+    // no token in the cancel registry (never started, or already finished)
+    // must return success with `cancelled: false` — not a fake success.
+    let state = test_state();
+    let (status, _) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/discussions",
+        serde_json::json!({
+            "title": "idle", "agent": "ClaudeCode", "language": "en", "initial_prompt": "x",
+        }),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    // Any disc id — the endpoint doesn't validate existence, it just looks
+    // up the registry (by design: even a just-finished disc won't be in the
+    // registry anymore because of the CancelGuard Drop).
+    let (status, json) = post_json(
+        build_router_with_auth(state, false),
+        "/api/discussions/nonexistent-disc/stop",
+        serde_json::json!({}),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+    assert_eq!(json["data"]["cancelled"], false);
+}
+
+#[tokio::test]
+async fn config_ui_language_round_trip() {
+    // The Tauri WebView2 localStorage wipe bug: frontend must be able to
+    // recover the user's UI locale from the backend after a wipe. This test
+    // proves the backend stores + returns the value.
+    let state = test_state();
+    let app = build_router_with_auth(state.clone(), false);
+
+    // Default: fr
+    let (_, json) = get_json(app.clone(), "/api/config/ui-language").await;
+    assert_eq!(json["data"], "fr");
+
+    // Save "en"
+    let (status, json) = post_json(app.clone(), "/api/config/ui-language",
+        serde_json::json!("en")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+
+    // GET returns the new value
+    let (_, json) = get_json(app.clone(), "/api/config/ui-language").await;
+    assert_eq!(json["data"], "en");
+
+    // Reject invalid value
+    let (_, json) = post_json(app.clone(), "/api/config/ui-language",
+        serde_json::json!("klingon")).await;
+    assert_eq!(json["success"], false);
+
+    // Previous valid value is still there
+    let (_, json) = get_json(app, "/api/config/ui-language").await;
+    assert_eq!(json["data"], "en");
+}
+
+#[tokio::test]
+async fn config_stt_model_round_trip() {
+    let state = test_state();
+    let app = build_router_with_auth(state.clone(), false);
+
+    // Default: null (never set)
+    let (_, json) = get_json(app.clone(), "/api/config/stt-model").await;
+    assert!(json["data"].is_null());
+
+    // Save
+    let (_, _) = post_json(app.clone(), "/api/config/stt-model",
+        serde_json::json!("onnx-community/whisper-tiny")).await;
+    let (_, json) = get_json(app.clone(), "/api/config/stt-model").await;
+    assert_eq!(json["data"], "onnx-community/whisper-tiny");
+
+    // Empty string clears it
+    let (_, _) = post_json(app.clone(), "/api/config/stt-model",
+        serde_json::json!("")).await;
+    let (_, json) = get_json(app, "/api/config/stt-model").await;
+    assert!(json["data"].is_null());
+}
+
+#[tokio::test]
+async fn config_tts_voices_per_language() {
+    let state = test_state();
+    let app = build_router_with_auth(state.clone(), false);
+
+    let (_, json) = get_json(app.clone(), "/api/config/tts-voices").await;
+    assert_eq!(json["data"].as_object().unwrap().len(), 0);
+
+    // Save 2 voices for different languages
+    post_json(app.clone(), "/api/config/tts-voice",
+        serde_json::json!({"lang": "fr", "voice_id": "voice-fr-alpha"})).await;
+    post_json(app.clone(), "/api/config/tts-voice",
+        serde_json::json!({"lang": "en", "voice_id": "voice-en-beta"})).await;
+
+    let (_, json) = get_json(app.clone(), "/api/config/tts-voices").await;
+    let voices = json["data"].as_object().unwrap();
+    assert_eq!(voices["fr"], "voice-fr-alpha");
+    assert_eq!(voices["en"], "voice-en-beta");
+
+    // Overwrite fr
+    post_json(app.clone(), "/api/config/tts-voice",
+        serde_json::json!({"lang": "fr", "voice_id": "voice-fr-new"})).await;
+    let (_, json) = get_json(app.clone(), "/api/config/tts-voices").await;
+    assert_eq!(json["data"]["fr"], "voice-fr-new");
+
+    // Empty voice_id removes the entry
+    post_json(app.clone(), "/api/config/tts-voice",
+        serde_json::json!({"lang": "fr", "voice_id": ""})).await;
+    let (_, json) = get_json(app, "/api/config/tts-voices").await;
+    assert!(json["data"].as_object().unwrap().get("fr").is_none());
+    assert_eq!(json["data"]["en"], "voice-en-beta");
+}
+
+#[tokio::test]
+async fn workflow_test_batch_step_dry_run_preview() {
+    // The wizard's "Tester" button on a BatchQuickPrompt step must let the
+    // user spot-check what would happen WITHOUT spawning anything. We hit
+    // the endpoint with a step + mock previous output, get back the parsed
+    // items + sample prompt, no DB writes.
+    let state = test_state();
+
+    // Seed a Quick Prompt with one variable.
+    let (status, qp_resp) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/quick-prompts",
+        serde_json::json!({
+            "name": "Analyse ticket",
+            "icon": "🎯",
+            "prompt_template": "Analyse {{ticket}} en profondeur",
+            "variables": [{ "name": "ticket", "label": "Ticket", "placeholder": "EW-1" }],
+            "agent": "ClaudeCode",
+        }),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    let qp_id = qp_resp["data"]["id"].as_str().unwrap().to_string();
+
+    // Hit the dry-run endpoint with a mock previous output (the kind of
+    // string a fetch step would produce: a JSON array of ticket ids).
+    let (status, json) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/workflows/test-batch-step",
+        serde_json::json!({
+            "step": {
+                "name": "batch-tickets",
+                "step_type": { "type": "BatchQuickPrompt" },
+                "agent": "ClaudeCode",
+                "prompt_template": "",
+                "mode": { "type": "Normal" },
+                "batch_quick_prompt_id": qp_id,
+                // {{steps.X.data}} resolves to the data envelope object
+                // (JSON-stringified). parse_items unwraps the inner array.
+                "batch_items_from": "{{steps.fetch.data}}",
+                "batch_max_items": 50
+            },
+            "mock_previous_output": "{\"data\":{\"tickets\":[\"EW-100\",\"EW-101\",\"EW-102\"]},\"status\":\"OK\",\"summary\":\"3 tickets\"}",
+            "previous_step_name": "fetch"
+        }),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "preview endpoint must return 200, got: {:?}", json);
+    assert_eq!(json["success"], true);
+    let preview = &json["data"];
+    assert_eq!(preview["total_items"], 3);
+    let sample = preview["sample_items"].as_array().unwrap();
+    assert_eq!(sample.len(), 3);
+    assert_eq!(sample[0], "EW-100");
+    assert_eq!(preview["quick_prompt_name"], "Analyse ticket");
+    assert_eq!(preview["quick_prompt_icon"], "🎯");
+    assert_eq!(preview["first_variable_name"], "ticket");
+    assert_eq!(preview["sample_rendered_prompt"], "Analyse EW-100 en profondeur");
+    let prompts = preview["sample_rendered_prompts"].as_array().unwrap();
+    assert_eq!(prompts.len(), 3, "One rendered prompt per sample item");
+    assert_eq!(prompts[0], "Analyse EW-100 en profondeur");
+    assert_eq!(prompts[1], "Analyse EW-101 en profondeur");
+    assert_eq!(prompts[2], "Analyse EW-102 en profondeur");
+    assert_eq!(preview["workspace_mode"], "Direct");
+    assert_eq!(preview["wait_for_completion"], true);
+    assert!(preview["errors"].as_array().unwrap().is_empty());
+
+    // No DB writes — discussions table should still be empty
+    let (_, discs) = get_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/discussions",
+    ).await;
+    assert!(discs["data"].as_array().unwrap().is_empty(),
+        "Dry-run must not create any discussion");
+}
+
+#[tokio::test]
+async fn workflow_test_batch_step_freetext_with_data_template_warns_but_continues() {
+    // Marie's bug 2026-04-13: she wires `{{steps.main.data}}` but step main
+    // is in FreeText mode → at runtime, `.data` is never populated, the
+    // template stays literal, batch fails. The dry-run must:
+    //   1. Inject a fallback so the user CAN see what their items would be
+    //   2. Warn them clearly that this won't work in production
+    let state = test_state();
+    let (_, qp_resp) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/quick-prompts",
+        serde_json::json!({
+            "name": "Auto-PR", "icon": "🤯",
+            "prompt_template": "Code {{ticketId}}",
+            "variables": [{ "name": "ticketId", "label": "id", "placeholder": "x" }],
+            "agent": "ClaudeCode",
+        }),
+    ).await;
+    let qp_id = qp_resp["data"]["id"].as_str().unwrap().to_string();
+
+    let (_, json) = post_json(
+        build_router_with_auth(state, false),
+        "/api/workflows/test-batch-step",
+        serde_json::json!({
+            "step": {
+                "name": "batch", "step_type": { "type": "BatchQuickPrompt" },
+                "agent": "ClaudeCode", "prompt_template": "",
+                "mode": { "type": "Normal" },
+                "batch_quick_prompt_id": qp_id,
+                "batch_items_from": "{{steps.main.data}}",
+            },
+            // Mock is plain text (FreeText output from step main) — no envelope
+            "mock_previous_output": "EW-2687,EW-3055",
+            "previous_step_name": "main"
+        }),
+    ).await;
+    assert_eq!(json["success"], true);
+
+    // Errors must stay empty: the dry-run succeeded thanks to the fallback
+    let errors = json["data"]["errors"].as_array().unwrap();
+    assert!(errors.is_empty(), "Expected no blocking errors with fallback. Got: {:?}", errors);
+
+    // Items got extracted (2 tickets via comma-split)
+    assert_eq!(json["data"]["total_items"], 2);
+    let sample = json["data"]["sample_items"].as_array().unwrap();
+    assert_eq!(sample[0], "EW-2687");
+    assert_eq!(sample[1], "EW-3055");
+
+    // BUT: warnings must explain the production gap
+    let warnings = json["data"]["warnings"].as_array().unwrap();
+    assert!(!warnings.is_empty(), "Must surface a warning about FreeText + .data");
+    let warn_text: String = warnings.iter().map(|w| w.as_str().unwrap_or("").to_string()).collect::<Vec<_>>().join(" ");
+    assert!(warn_text.contains("Structured") || warn_text.contains(".output"),
+        "Warning should suggest Structured mode or .output. Got: {}", warn_text);
+    assert!(warn_text.contains("main"), "Warning should name the step. Got: {}", warn_text);
+}
+
+#[tokio::test]
+async fn workflow_test_batch_step_rejects_unresolved_template() {
+    // Regression: user reported running the preview without providing a
+    // mock_previous_output → the `{{steps.main.data}}` placeholder stayed
+    // literal, parse_items treated it as a single item, and the UI showed
+    // "1 item would be launched" with the raw template shown as sample.
+    // Worse than useless — it hid the config bug. Now the endpoint detects
+    // the unresolved braces and returns an explicit error.
+    let state = test_state();
+    let (_, qp_resp) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/quick-prompts",
+        serde_json::json!({
+            "name": "QP", "prompt_template": "Do {{id}}",
+            "variables": [{ "name": "id", "label": "id", "placeholder": "x" }],
+            "agent": "ClaudeCode",
+        }),
+    ).await;
+    let qp_id = qp_resp["data"]["id"].as_str().unwrap().to_string();
+
+    let (_, json) = post_json(
+        build_router_with_auth(state, false),
+        "/api/workflows/test-batch-step",
+        serde_json::json!({
+            "step": {
+                "name": "batch", "step_type": { "type": "BatchQuickPrompt" },
+                "agent": "ClaudeCode", "prompt_template": "",
+                "mode": { "type": "Normal" },
+                "batch_quick_prompt_id": qp_id,
+                "batch_items_from": "{{steps.main.data}}",
+            },
+            // NO mock_previous_output — the template can't resolve
+        }),
+    ).await;
+    assert_eq!(json["success"], true);
+    let errors = json["data"]["errors"].as_array().unwrap();
+    assert!(!errors.is_empty(), "Must surface error on unresolved template");
+    let err_text: String = errors.iter().map(|e| e.as_str().unwrap_or("").to_string()).collect::<Vec<_>>().join(" ");
+    assert!(err_text.contains("non résolue") || err_text.contains("unresolved"),
+        "Error should mention unresolved variable. Got: {}", err_text);
+    // The preview should NOT report a bogus "1 item" count
+    assert_eq!(json["data"]["total_items"], 0);
+}
+
+#[tokio::test]
+async fn workflow_test_batch_step_surfaces_validation_errors() {
+    // Missing items_from + bad QP id → endpoint returns errors[] populated
+    // and total_items=0, never crashes.
+    let state = test_state();
+    let (status, json) = post_json(
+        build_router_with_auth(state, false),
+        "/api/workflows/test-batch-step",
+        serde_json::json!({
+            "step": {
+                "name": "batch-broken",
+                "step_type": { "type": "BatchQuickPrompt" },
+                "agent": "ClaudeCode",
+                "prompt_template": "",
+                "mode": { "type": "Normal" }
+                // No batch_quick_prompt_id, no batch_items_from
+            }
+        }),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+    let errors = json["data"]["errors"].as_array().unwrap();
+    assert!(!errors.is_empty(), "Should report missing required fields");
+    assert!(errors.iter().any(|e| e.as_str().unwrap().contains("batch_quick_prompt_id")),
+        "Error should mention missing QP id: {:?}", errors);
+}
+
+#[tokio::test]
+async fn workflow_cancel_run_triggers_token_and_cascades_to_children() {
+    // Pre-register a token for a fake run id + 3 fake child disc ids.
+    // Then hit the cancel endpoint — all 4 tokens must be triggered.
+    let state = test_state();
+    let run_token = tokio_util::sync::CancellationToken::new();
+    let d1 = tokio_util::sync::CancellationToken::new();
+    let d2 = tokio_util::sync::CancellationToken::new();
+    let d3 = tokio_util::sync::CancellationToken::new();
+    {
+        let mut map = state.cancel_registry.lock().unwrap();
+        map.insert("run-cancel-me".into(), run_token.clone());
+        map.insert("disc-A".into(), d1.clone());
+        map.insert("disc-B".into(), d2.clone());
+        map.insert("disc-C".into(), d3.clone());
+    }
+
+    // Seed the DB: parent linear run, one child batch, 3 child discs linked.
+    // The endpoint's cascade query walks discussions.workflow_run_id →
+    // workflow_runs where parent_run_id = target.
+    state.db.with_conn(|conn| {
+        // Minimal workflow row so the FK is satisfied.
+        conn.execute(
+            "INSERT INTO workflows (id, name, project_id, trigger_json, steps_json, actions_json,
+             safety_json, workspace_config_json, concurrency_limit, enabled, created_at, updated_at)
+             VALUES ('wf-1', 'W', NULL, '\"Manual\"', '[]', '[]', '{}', NULL, NULL, 0,
+             datetime('now'), datetime('now'))",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO workflow_runs (id, workflow_id, status, step_results_json, tokens_used,
+             started_at, run_type, batch_total, batch_completed, batch_failed)
+             VALUES ('run-cancel-me', 'wf-1', 'Running', '[]', 0, datetime('now'),
+             'linear', 0, 0, 0)",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO workflow_runs (id, workflow_id, status, step_results_json, tokens_used,
+             started_at, run_type, batch_total, batch_completed, batch_failed, parent_run_id)
+             VALUES ('batch-child', 'wf-1', 'Running', '[]', 0, datetime('now'),
+             'batch', 3, 0, 0, 'run-cancel-me')",
+            [],
+        )?;
+        for disc_id in ["disc-A", "disc-B", "disc-C"] {
+            conn.execute(
+                "INSERT INTO discussions (id, project_id, title, agent, language,
+                 participants_json, skill_ids_json, profile_ids_json, directive_ids_json,
+                 created_at, updated_at, archived, workflow_run_id, message_count,
+                 workspace_mode)
+                 VALUES (?1, NULL, 'T', 'ClaudeCode', 'en', '[]', '[]', '[]', '[]',
+                 datetime('now'), datetime('now'), 0, 'batch-child', 1, 'Direct')",
+                rusqlite::params![disc_id],
+            )?;
+        }
+        Ok(())
+    }).await.unwrap();
+
+    let (status, json) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/workflows/wf-1/runs/run-cancel-me/cancel",
+        serde_json::json!({}),
+    ).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["data"]["run_cancelled"], true);
+    assert_eq!(json["data"]["child_discs_cancelled"], 3);
+
+    // Every token we pre-registered is now cancelled
+    assert!(run_token.is_cancelled(), "parent run token must fire");
+    assert!(d1.is_cancelled() && d2.is_cancelled() && d3.is_cancelled(),
+        "all child disc tokens must fire");
+
+    // The child batch run row must be marked Cancelled in DB
+    let batch_status: String = state.db.with_conn(|conn| {
+        Ok(conn.query_row(
+            "SELECT status FROM workflow_runs WHERE id = 'batch-child'",
+            [],
+            |r| r.get::<_, String>(0),
+        )?)
+    }).await.unwrap();
+    assert_eq!(batch_status, "Cancelled");
+}
+
+#[tokio::test]
+async fn workflow_cancel_run_idempotent_on_already_finished() {
+    // Calling cancel on a run that never registered (or finished already)
+    // must not error — returns `{run_cancelled: false, child_discs_cancelled: 0}`.
+    let state = test_state();
+    let (status, json) = post_json(
+        build_router_with_auth(state, false),
+        "/api/workflows/anything/runs/ghost-run/cancel",
+        serde_json::json!({}),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+    assert_eq!(json["data"]["run_cancelled"], false);
+    assert_eq!(json["data"]["child_discs_cancelled"], 0);
+}
+
+#[tokio::test]
+async fn discussions_stop_triggers_registered_token() {
+    // Full path: pre-register a token in the cancel registry, hit the stop
+    // endpoint, verify the token was triggered.
+    let state = test_state();
+    let token = tokio_util::sync::CancellationToken::new();
+    {
+        let mut map = state.cancel_registry.lock().unwrap();
+        map.insert("live-disc".into(), token.clone());
+    }
+    assert!(!token.is_cancelled());
+
+    let (status, json) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/discussions/live-disc/stop",
+        serde_json::json!({}),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["data"]["cancelled"], true);
+    assert!(token.is_cancelled());
+
+    // Registry was cleaned: a second stop returns cancelled=false
+    let (_, json2) = post_json(
+        build_router_with_auth(state, false),
+        "/api/discussions/live-disc/stop",
+        serde_json::json!({}),
+    ).await;
+    assert_eq!(json2["data"]["cancelled"], false);
+}
+
+// ─── Partial response recovery — HTTP layer ─────────────────────────────────
+// DB-level behavior is covered in backend/src/db/tests.rs. These tests cover
+// the HTTP contract: dismiss-partial endpoint, WS broadcast, and the
+// send-message guard that refused a new run while a partial is pending.
+// Regression net for the 2026-04-13 "double Agent response" bug.
+
+#[tokio::test]
+async fn discussions_dismiss_partial_recovers_and_broadcasts_ws() {
+    let state = test_state();
+    // Subscribe BEFORE we call the endpoint so we don't miss the broadcast.
+    let mut ws_rx = state.ws_broadcast.subscribe();
+
+    // Seed: disc with a dangling partial checkpoint.
+    state.db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO discussions (id, project_id, title, agent, language,
+             participants_json, skill_ids_json, profile_ids_json, directive_ids_json,
+             created_at, updated_at, archived, message_count, workspace_mode,
+             partial_response, partial_response_started_at)
+             VALUES ('disc-dismiss-1', NULL, 'T', 'ClaudeCode', 'fr', '[]', '[]', '[]', '[]',
+             datetime('now'), datetime('now'), 0, 0, 'Direct',
+             'partial draft v1', datetime('now', '-1 minute'))",
+            [],
+        )?;
+        Ok(())
+    }).await.unwrap();
+
+    let (status, json) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/discussions/disc-dismiss-1/dismiss-partial",
+        serde_json::json!({}),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+    assert_eq!(json["data"]["recovered"], true,
+        "dismiss must return recovered=true when the targeted disc had a partial");
+
+    // The partial was converted to an Agent message and the column cleared.
+    let (partial_col, msg_count): (Option<String>, i64) = state.db.with_conn(|conn| {
+        let p = conn.query_row(
+            "SELECT partial_response FROM discussions WHERE id = 'disc-dismiss-1'",
+            [], |r| r.get::<_, Option<String>>(0),
+        )?;
+        let n = conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE discussion_id = 'disc-dismiss-1'",
+            [], |r| r.get::<_, i64>(0),
+        )?;
+        Ok((p, n))
+    }).await.unwrap();
+    assert!(partial_col.is_none(), "partial_response must be cleared after dismiss");
+    assert_eq!(msg_count, 1, "recovery must produce exactly one Agent message");
+
+    // WS broadcast fired with the recovered id.
+    let received = tokio::time::timeout(std::time::Duration::from_secs(2), ws_rx.recv())
+        .await
+        .expect("WS broadcast not received within 2s")
+        .expect("broadcast recv error");
+    match received {
+        WsMessage::PartialResponseRecovered { discussion_ids } => {
+            assert!(discussion_ids.contains(&"disc-dismiss-1".to_string()),
+                "WS must include the dismissed disc id");
+        }
+        other => panic!("Expected PartialResponseRecovered, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn discussions_dismiss_partial_idempotent_on_clean_disc() {
+    // No partial → dismiss is a cheap no-op that returns recovered=false and
+    // does NOT broadcast (subscribers are just there for "real" events).
+    let state = test_state();
+    let mut ws_rx = state.ws_broadcast.subscribe();
+
+    state.db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO discussions (id, title, agent, language, participants_json,
+             created_at, updated_at, message_count, workspace_mode)
+             VALUES ('disc-clean', 'T', 'ClaudeCode', 'fr', '[]',
+             datetime('now'), datetime('now'), 0, 'Direct')",
+            [],
+        )?;
+        Ok(())
+    }).await.unwrap();
+
+    let (status, json) = post_json(
+        build_router_with_auth(state, false),
+        "/api/discussions/disc-clean/dismiss-partial",
+        serde_json::json!({}),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+    assert_eq!(json["data"]["recovered"], false);
+
+    // Drain any non-recovery event the dispatch might emit (e.g. telemetry)
+    // and assert that NO PartialResponseRecovered is among them.
+    let mut got_recovery = false;
+    for _ in 0..5 {
+        match tokio::time::timeout(std::time::Duration::from_millis(100), ws_rx.recv()).await {
+            Ok(Ok(WsMessage::PartialResponseRecovered { .. })) => { got_recovery = true; break; }
+            Ok(Ok(_)) => continue, // some other event — ignore
+            _ => break, // timeout or channel closed — done
+        }
+    }
+    assert!(!got_recovery,
+        "PartialResponseRecovered must NOT be broadcast when nothing was recovered");
+}
+
+#[tokio::test]
+async fn discussions_send_message_blocks_while_partial_pending() {
+    // Full HTTP guard: POST a new user message while a partial_response
+    // checkpoint exists → SSE stream emits a single `error` event with code
+    // `partial_pending` and NO agent run is spawned (no new message row).
+    let state = test_state();
+    state.db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO discussions (id, title, agent, language, participants_json,
+             created_at, updated_at, message_count, workspace_mode,
+             partial_response, partial_response_started_at)
+             VALUES ('disc-blocked', 'T', 'ClaudeCode', 'fr', '[]',
+             datetime('now'), datetime('now'), 0, 'Direct',
+             'half a thought', datetime('now'))",
+            [],
+        )?;
+        Ok(())
+    }).await.unwrap();
+
+    let app = build_router_with_auth(state.clone(), false);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/discussions/disc-blocked/messages")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&serde_json::json!({
+            "content": "hello again",
+            "target_agent": null,
+        })).unwrap()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let body_str = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body_str.contains("event: error"),
+        "stream must contain an `error` SSE event, got: {body_str}");
+    assert!(body_str.contains("partial_pending"),
+        "error payload must tag the case as partial_pending, got: {body_str}");
+
+    // No user message was persisted (guard fired before insert).
+    let msg_count: i64 = state.db.with_conn(|conn| {
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE discussion_id = 'disc-blocked'",
+            [], |r| r.get::<_, i64>(0),
+        )?)
+    }).await.unwrap();
+    assert_eq!(msg_count, 0,
+        "blocked send must not write a user message — otherwise resending after dismiss duplicates it");
+}
+
+#[tokio::test]
+async fn boot_recovery_simulation_emits_ws_event() {
+    // Simulates the main.rs bootstrap sequence: seed partials, run the
+    // recovery fn, assert the same WS event is broadcast as the live dismiss
+    // path. Guards the exact call chain main.rs:110-124 uses.
+    let state = test_state();
+    let mut ws_rx = state.ws_broadcast.subscribe();
+
+    state.db.with_conn(|conn| {
+        for id in ["disc-boot-1", "disc-boot-2"] {
+            conn.execute(
+                "INSERT INTO discussions (id, title, agent, language, participants_json,
+                 created_at, updated_at, message_count, workspace_mode,
+                 partial_response, partial_response_started_at)
+                 VALUES (?1, 'T', 'ClaudeCode', 'fr', '[]',
+                 datetime('now'), datetime('now'), 0, 'Direct',
+                 'in-flight output', datetime('now', '-30 seconds'))",
+                rusqlite::params![id],
+            )?;
+        }
+        Ok(())
+    }).await.unwrap();
+
+    // This is the exact call main.rs makes.
+    let ids = state.db.with_conn(|conn| {
+        kronn::db::discussions::recover_partial_responses(conn)
+    }).await.unwrap();
+    assert_eq!(ids.len(), 2);
+    let _ = state.ws_broadcast.send(kronn::models::WsMessage::PartialResponseRecovered {
+        discussion_ids: ids.clone(),
+    });
+
+    let received = tokio::time::timeout(std::time::Duration::from_secs(2), ws_rx.recv())
+        .await
+        .expect("WS not received")
+        .expect("broadcast error");
+    match received {
+        WsMessage::PartialResponseRecovered { discussion_ids } => {
+            assert_eq!(discussion_ids.len(), 2);
+            assert!(discussion_ids.contains(&"disc-boot-1".to_string()));
+            assert!(discussion_ids.contains(&"disc-boot-2".to_string()));
+        }
+        other => panic!("Expected PartialResponseRecovered, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn discussions_list_no_query_params_returns_all_not_limited_to_50() {
+    // Regression for the 2026-04-13 bug: `PaginationQuery.page` used to have a
+    // serde default of 1, which made `Option<Query<PaginationQuery>>` always
+    // succeed even on a bare `GET /api/discussions`, silently capping results
+    // at 50. Users with >50 discussions lost access to their older ones as
+    // soon as a 50-item batch pushed them past the boundary.
+    //
+    // This test creates 60 discussions and asserts that a plain list call
+    // returns all 60 (not 50).
+    let state = test_state();
+    for i in 0..60 {
+        let (status, _) = post_json(
+            build_router_with_auth(state.clone(), false),
+            "/api/discussions",
+            serde_json::json!({
+                "title": format!("Disc {}", i),
+                "agent": "ClaudeCode",
+                "language": "en",
+                "initial_prompt": "test",
+            }),
+        ).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    let (status, json) = get_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/discussions",
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    let discs = json["data"].as_array().expect("data must be an array");
+    assert_eq!(
+        discs.len(), 60,
+        "Bare GET /api/discussions must return ALL discussions, not a paginated slice. \
+         Got {} items. Check that PaginationQuery.page has NO serde default.",
+        discs.len()
+    );
+}
+
+#[tokio::test]
+async fn discussions_list_explicit_pagination_still_works() {
+    // When the caller DOES pass pagination params, the server must honor them.
+    // Counterpart to the regression test above.
+    let state = test_state();
+    for i in 0..10 {
+        let (status, _) = post_json(
+            build_router_with_auth(state.clone(), false),
+            "/api/discussions",
+            serde_json::json!({
+                "title": format!("Disc {}", i),
+                "agent": "ClaudeCode",
+                "language": "en",
+                "initial_prompt": "test",
+            }),
+        ).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    let (status, json) = get_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/discussions?page=1&per_page=3",
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["data"].as_array().unwrap().len(), 3);
 }
 
 #[tokio::test]
@@ -2930,4 +3639,88 @@ async fn bootstrap_request_accepts_skill_ids() {
         let err = json["error"].as_str().unwrap_or("");
         assert!(!err.contains("skill_ids"), "skill_ids should be accepted by the schema");
     }
+}
+
+#[tokio::test]
+async fn batch_run_isolated_without_project_id_fails_early() {
+    // Safety check: POST /api/quick-prompts/:id/batch with workspace_mode=Isolated
+    // must be rejected if neither the QP nor the request has a project_id —
+    // otherwise the child discussions would crash at run time when the
+    // worktree code tries to locate a non-existent repo.
+    let state = test_state();
+    let app = kronn::build_router_with_auth(state, false);
+
+    // 1. Create a Quick Prompt WITHOUT project_id
+    let (status, json) = post_json(
+        app.clone(),
+        "/api/quick-prompts",
+        serde_json::json!({
+            "name": "Test QP",
+            "prompt_template": "Analyse {{ticket}}",
+            "variables": [{ "name": "ticket", "label": "Ticket", "placeholder": "EW-1" }],
+            "agent": "ClaudeCode",
+            // project_id intentionally omitted
+        }),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "QP creation failed: {:?}", json);
+    assert_eq!(json["success"], true, "QP creation returned error: {:?}", json);
+    let qp_id = json["data"]["id"].as_str().expect("QP id missing").to_string();
+
+    // 2. Hit /batch with workspace_mode=Isolated → must fail with a clear message
+    let (status, json) = post_json(
+        app,
+        &format!("/api/quick-prompts/{}/batch", qp_id),
+        serde_json::json!({
+            "items": [
+                { "title": "EW-1", "prompt": "Analyse EW-1" },
+                { "title": "EW-2", "prompt": "Analyse EW-2" },
+            ],
+            "batch_name": "Should-fail batch",
+            "workspace_mode": "Isolated",
+            // No project_id in request either — qp also has none
+        }),
+    ).await;
+    assert_eq!(status, StatusCode::OK); // HTTP 200 with success=false (Kronn error envelope)
+    assert_eq!(json["success"], false, "Should have been rejected: {:?}", json);
+    let err = json["error"].as_str().unwrap_or("");
+    assert!(
+        err.to_lowercase().contains("isolated") && err.to_lowercase().contains("project"),
+        "Error should mention Isolated + project requirement: got {:?}", err
+    );
+}
+
+#[tokio::test]
+async fn batch_run_direct_mode_works_without_project_id() {
+    // Regression guard: the Isolated-mode safety check must NOT block Direct
+    // mode runs on project-less QPs. This is the legacy path used by the
+    // manual batch button for analysis-only Quick Prompts (Jira cadrage, etc.).
+    let state = test_state();
+    let app = kronn::build_router_with_auth(state, false);
+
+    let (status, json) = post_json(
+        app.clone(),
+        "/api/quick-prompts",
+        serde_json::json!({
+            "name": "Analysis QP",
+            "prompt_template": "Analyse {{ticket}}",
+            "variables": [{ "name": "ticket", "label": "Ticket", "placeholder": "EW-1" }],
+            "agent": "ClaudeCode",
+        }),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    let qp_id = json["data"]["id"].as_str().unwrap().to_string();
+
+    // Direct mode on a projectless QP is legit — analysis batches don't need a repo.
+    let (status, json) = post_json(
+        app,
+        &format!("/api/quick-prompts/{}/batch", qp_id),
+        serde_json::json!({
+            "items": [{ "title": "EW-1", "prompt": "Analyse EW-1" }],
+            "batch_name": "Analysis batch",
+            // workspace_mode omitted → defaults to Direct on the backend
+        }),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true, "Direct mode without project should succeed: {:?}", json);
+    assert_eq!(json["data"]["batch_total"], 1);
 }

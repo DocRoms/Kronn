@@ -176,6 +176,91 @@
   margin-left: auto;
 }
 
+/* Relative timestamp shown next to the batch group label — disambiguates
+   multiple batches of the same Quick Prompt (e.g. cron firing hourly).
+   Kept light-weight visually so it doesn't steal attention from the status pill. */
+.disc-batch-when {
+  font-size: 0.85em;
+  font-weight: 400;
+  color: rgba(255, 255, 255, 0.35);
+  margin-left: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Batch group header — flex row holding the toggle button + the trash icon.
+   The trash stays hidden until the user hovers the row, so it doesn't add
+   visual noise on every batch in a long list. */
+.disc-batch-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.disc-batch-delete {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  background: transparent;
+  border: 1px solid rgba(255, 77, 106, 0.2);
+  border-radius: 6px;
+  color: rgba(255, 77, 106, 0.5);
+  cursor: pointer;
+  /* Discreet by default on desktop, but visible enough that a hover or focus
+     reveal isn't strictly needed. Was opacity:0 + hover-reveal — that broke
+     touch devices entirely. Now: 35% always, 100% on hover/focus. */
+  opacity: 0.35;
+  transition: opacity 0.12s, background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.disc-batch-header:hover .disc-batch-delete,
+.disc-batch-header:focus-within .disc-batch-delete,
+.disc-batch-delete:focus {
+  opacity: 1;
+}
+
+.disc-batch-delete:hover {
+  background: rgba(255, 77, 106, 0.12);
+  border-color: rgba(255, 77, 106, 0.5);
+  color: var(--kr-error, #ff4d6a);
+}
+
+/* Touch devices have no hover state — keep the icon visible so users can
+   tap it. The 35% default already does this on desktop too, so this is
+   mostly a safety net for explicit touch detection. */
+@media (hover: none) {
+  .disc-batch-delete {
+    opacity: 0.6;
+  }
+}
+
+/* Clickable pastille linking a batch group back to its spawning workflow run.
+   Lives on its own row under the batch folder header so users notice it
+   without it stealing focus from the folder's status pill. */
+.disc-batch-parent-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 8px;
+  margin-top: 2px;
+  margin-bottom: 4px;
+  background: rgba(200, 255, 0, 0.06);
+  border: 1px solid rgba(200, 255, 0, 0.18);
+  border-radius: 10px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: rgba(200, 255, 0, 0.75);
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.disc-batch-parent-pill:hover {
+  background: rgba(200, 255, 0, 0.14);
+  border-color: rgba(200, 255, 0, 0.38);
+  color: #c8ff00;
+}
+
 /* Live status pill on the batch group header (⏳ 7/12, ✓ 12/12). */
 .disc-group-count[data-batch-status="running"] {
   color: var(--kr-warning, #ffc800);
@@ -304,6 +389,29 @@
   display: flex;
   align-items: center;
   gap: 4px;
+}
+
+/* ⏹ Stop button inline on a disc that's currently Running. Appears next
+   to the spinner in the meta row. Compact so it fits without stealing
+   focus from the title. */
+.disc-item-stop-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid rgba(255, 77, 106, 0.35);
+  border-radius: 3px;
+  color: var(--kr-error, #ff4d6a);
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.disc-item-stop-btn:hover {
+  background: rgba(255, 77, 106, 0.15);
+  border-color: rgba(255, 77, 106, 0.6);
 }
 
 /* Relative time in the sidebar meta row — slightly dimmer so it doesn't

@@ -1,34 +1,64 @@
 import { useState, useRef, useEffect } from 'react';
 import { useT } from '../../lib/I18nContext';
-import { workflows as workflowsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi } from '../../lib/api';
+import { workflows as workflowsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, quickPrompts as quickPromptsApi } from '../../lib/api';
 import { AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES, isAgentRestricted } from '../../lib/constants';
 import type {
   Project, Workflow, WorkflowTrigger,
   WorkflowStep, AgentType, WorkflowSafety,
   WorkspaceConfig, StepConditionRule,
   CreateWorkflowRequest, Skill, AgentProfile, Directive,
-  WorkflowSuggestion,
+  WorkflowSuggestion, QuickPrompt,
 } from '../../types/generated';
 import type { AgentsConfig } from '../../types/generated';
 import {
   Plus, Loader2, Check, X, ChevronRight, ChevronDown,
   Clock, GitBranch, Zap, HelpCircle, Settings, Shield,
-  AlertTriangle, UserCircle, FileText, Sparkles,
+  AlertTriangle, UserCircle, FileText, Sparkles, Layers,
 } from 'lucide-react';
 import '../../pages/WorkflowsPage.css';
 
 const checkAgentRestricted = isAgentRestricted;
 
+/** Inline help indicator — a small (?) icon with a native tooltip on hover.
+ * Used to explain jargon next to labels without cluttering the form layout. */
+function HelpTip({ hint }: { hint: string }) {
+  return (
+    <span className="wf-help-icon" title={hint} aria-label={hint} role="img">
+      <HelpCircle size={11} />
+    </span>
+  );
+}
+
 /** Parse a cron expression back into visual builder values */
-function parseCronExpr(expr: string): { every: number; unit: 'minutes' | 'hours' | 'days' | 'weeks' | 'months'; at: string; raw?: string } {
+function parseCronExpr(expr: string): { every: number; unit: 'minutes' | 'hours' | 'days' | 'weeks' | 'months'; at: string; weekdays: number[]; raw?: string } {
   const parts = expr.split(' ');
-  if (parts.length !== 5) return { every: 5, unit: 'minutes', at: '00:00' };
-  const [min, hour, dom] = parts;
-  if (min.startsWith('*/')) return { every: parseInt(min.slice(2)) || 5, unit: 'minutes', at: '00:00' };
-  if (hour.startsWith('*/')) return { every: parseInt(hour.slice(2)) || 1, unit: 'hours', at: `00:${min.padStart(2, '0')}` };
-  if (dom.startsWith('*/')) return { every: parseInt(dom.slice(2)) || 1, unit: 'days', at: `${hour.padStart(2, '0')}:${min.padStart(2, '0')}` };
+  if (parts.length !== 5) return { every: 5, unit: 'minutes', at: '00:00', weekdays: [] };
+  const [min, hour, dom, _mon, dow] = parts;
+
+  // Parse a comma-separated list of integers (e.g. "1,3,5") into a sorted array.
+  // Handles plain numbers only — ranges like "1-5" fall through to raw preservation.
+  const parseIntList = (s: string): number[] | null => {
+    if (s === '*') return [];
+    if (!/^[0-9,]+$/.test(s)) return null;
+    const nums = s.split(',').map(n => parseInt(n, 10)).filter(n => !isNaN(n) && n >= 0 && n <= 6);
+    return nums.length > 0 ? Array.from(new Set(nums)).sort((a, b) => a - b) : null;
+  };
+
+  if (min.startsWith('*/')) return { every: parseInt(min.slice(2)) || 5, unit: 'minutes', at: '00:00', weekdays: [] };
+  if (hour.startsWith('*/')) return { every: parseInt(hour.slice(2)) || 1, unit: 'hours', at: `00:${min.padStart(2, '0')}`, weekdays: [] };
+
+  // Days-of-week variant: "m h * * 1,3,5" → specific weekdays, every=1
+  if (dom === '*' && dow !== '*') {
+    const parsed = parseIntList(dow);
+    if (parsed !== null && parsed.length > 0 && parsed.length < 7) {
+      return { every: 1, unit: 'days', at: `${hour.padStart(2, '0')}:${min.padStart(2, '0')}`, weekdays: parsed };
+    }
+  }
+
+  if (dom.startsWith('*/')) return { every: parseInt(dom.slice(2)) || 1, unit: 'days', at: `${hour.padStart(2, '0')}:${min.padStart(2, '0')}`, weekdays: [] };
+
   // Complex expression (e.g. "0 7,10,13,16,19 * * 1-5") — preserve raw
-  return { every: 1, unit: 'days', at: `${hour.padStart(2, '0')}:${min.padStart(2, '0')}`, raw: expr };
+  return { every: 1, unit: 'days', at: `${hour.padStart(2, '0')}:${min.padStart(2, '0')}`, weekdays: [], raw: expr };
 }
 
 export interface WorkflowWizardProps {
@@ -68,8 +98,15 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   const [cronEvery, setCronEvery] = useState(initCron?.every ?? 5);
   const [cronUnit, setCronUnit] = useState<'minutes' | 'hours' | 'days' | 'weeks' | 'months'>(initCron?.unit ?? 'minutes');
   const [cronAt, setCronAt] = useState(initCron?.at ?? '00:00');
+  // Cron day-of-week: empty array = "every day", non-empty = specific days picked
+  // (values are cron DoW: 0=Sun, 1=Mon, ..., 6=Sat).
+  const [cronWeekdays, setCronWeekdays] = useState<number[]>(initCron?.weekdays ?? []);
   const [cronRaw, setCronRaw] = useState(initCron?.raw ?? '');
   const cronIsRaw = !!cronRaw;
+  const hasSpecificDays = cronWeekdays.length > 0 && cronWeekdays.length < 7;
+  const toggleWeekday = (d: number) => {
+    setCronWeekdays(prev => prev.includes(d) ? prev.filter(x => x !== d) : [...prev, d]);
+  };
   const [trackerOwner, setTrackerOwner] = useState(initTracker?.source?.owner ?? '');
   const [trackerRepo, setTrackerRepo] = useState(initTracker?.source?.repo ?? '');
   const [trackerLabels, setTrackerLabels] = useState(initTracker?.labels?.join(', ') ?? '');
@@ -104,7 +141,13 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     switch (cronUnit) {
       case 'minutes': return `*/${cronEvery} * * * *`;
       case 'hours':   return `${m} */${cronEvery} * * *`;
-      case 'days':    return `${m} ${h} */${cronEvery} * *`;
+      case 'days':
+        // If specific weekdays are picked (1-6 of them), emit a DoW-specific
+        // cron pattern. 0 or 7 selected = "every day", fall back to */N.
+        if (cronWeekdays.length > 0 && cronWeekdays.length < 7) {
+          return `${m} ${h} * * ${[...cronWeekdays].sort((a, b) => a - b).join(',')}`;
+        }
+        return `${m} ${h} */${cronEvery} * *`;
       case 'weeks':   return `${m} ${h} * * 1`;
       case 'months':  return `${m} ${h} 1 */${cronEvery} *`;
       default:        return '*/5 * * * *';
@@ -117,6 +160,14 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     const unitLabels: Record<string, string> = { minutes: t('wiz.minutes'), hours: t('wiz.hours'), days: t('wiz.days'), weeks: t('wiz.weeks'), months: t('wiz.months') };
     if (cronUnit === 'minutes' || cronUnit === 'hours') {
       return `${t('wiz.every')} ${cronEvery} ${unitLabels[cronUnit]}`;
+    }
+    // Days unit with specific weekdays: "Lundi, Mercredi à 09:00"
+    if (cronUnit === 'days' && cronWeekdays.length > 0 && cronWeekdays.length < 7) {
+      const names = [...cronWeekdays]
+        .sort((a, b) => a - b)
+        .map(d => t(`wiz.weekday.${d}`))
+        .join(', ');
+      return `${names} ${t('wiz.at')} ${atStr}`;
     }
     return `${t('wiz.every')} ${cronEvery} ${unitLabels[cronUnit]} ${t('wiz.at')} ${atStr}`;
   };
@@ -133,6 +184,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   const [availableSkills, setAvailableSkills] = useState<Skill[]>([]);
   const [availableProfiles, setAvailableProfiles] = useState<AgentProfile[]>([]);
   const [availableDirectives, setAvailableDirectives] = useState<Directive[]>([]);
+  const [availableQuickPrompts, setAvailableQuickPrompts] = useState<QuickPrompt[]>([]);
   const promptTextareaRefs = useRef<Record<number, HTMLTextAreaElement | null>>({});
 
   /** Insert text at cursor position in the prompt textarea of step `stepIndex` */
@@ -162,6 +214,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     skillsApi.list().then(setAvailableSkills).catch(() => {});
     profilesApi.list().then(setAvailableProfiles).catch(() => {});
     directivesApi.list().then(setAvailableDirectives).catch(() => {});
+    quickPromptsApi.list().then(setAvailableQuickPrompts).catch(() => {});
   }, []);
 
   // Fetch suggestions when project changes
@@ -183,6 +236,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
       setCronEvery(parsed.every);
       setCronUnit(parsed.unit);
       setCronAt(parsed.at);
+      setCronWeekdays(parsed.weekdays);
       setCronRaw(parsed.raw ?? '');
     }
     setShowSuggestions(false);
@@ -313,10 +367,12 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               className="wf-trigger-btn"
               data-selected={wizardMode === mode}
               onClick={() => { setWizardMode(mode); setWizardStep(0); }}
+              title={mode === 'simple' ? t('wiz.helpModeSimple') : t('wiz.helpModeAdvanced')}
             >
               {mode === 'simple' ? t('wiz.modeSimple') : t('wiz.modeAdvanced')}
             </button>
           ))}
+          <HelpTip hint={t('wiz.helpSimpleVsAdvanced')} />
         </div>
       )}
 
@@ -417,7 +473,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
       {/* Step: Simple task (simple mode step 1) */}
       {isSimple && wizardStep === 1 && (
         <div>
-          <label className="wf-label">{t('wiz.agentLabel')}</label>
+          <label className="wf-label">
+            {t('wiz.agentLabel')} <HelpTip hint={t('wiz.helpAgent')} />
+          </label>
           <select
             className="wf-select mb-6"
             value={steps[0]?.agent ?? 'ClaudeCode'}
@@ -428,10 +486,12 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             ))}
           </select>
 
-          <label className="wf-label">{t('wiz.promptLabel')}</label>
+          <label className="wf-label">
+            {t('wiz.promptLabel')} <HelpTip hint={t('wiz.helpPromptSimple')} />
+          </label>
           {!isEdit && !(steps[0]?.prompt_template) && (
             <div className="wf-starters">
-              <span className="wf-starters-label">{t('wiz.starterLabel')}</span>
+              <span className="wf-starters-label">{t('wiz.starterLabel')} <HelpTip hint={t('wiz.helpStarters')} /></span>
               <div className="wf-starters-grid">
                 {[
                   { icon: '📊', title: t('wiz.starter.codeReview'), prompt: t('wiz.starter.codeReviewPrompt') },
@@ -465,12 +525,15 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           />
 
           {/* Simple trigger: Manual or Scheduled */}
-          <label className="wf-label">{t('wiz.triggerLabel')}</label>
+          <label className="wf-label">
+            {t('wiz.triggerWhenLabel')} <HelpTip hint={t('wiz.helpTriggerSimple')} />
+          </label>
           <div className="flex-row gap-4 mb-4">
             <button
               className="wf-trigger-btn"
               data-selected={triggerType === 'Manual'}
               onClick={() => setTriggerType('Manual')}
+              title={t('wiz.helpTriggerManual')}
             >
               <Zap size={12} /> {t('wiz.triggerManual')}
             </button>
@@ -478,6 +541,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               className="wf-trigger-btn"
               data-selected={triggerType === 'Cron'}
               onClick={() => setTriggerType('Cron')}
+              title={t('wiz.helpTriggerCron')}
             >
               <Clock size={12} /> {t('wiz.triggerScheduled')}
             </button>
@@ -498,45 +562,95 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                   type="button"
                   className="text-xs text-muted"
                   style={{ background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}
-                  onClick={() => { setCronRaw(''); setCronEvery(5); setCronUnit('minutes'); setCronAt('00:00'); }}
+                  onClick={() => { setCronRaw(''); setCronEvery(5); setCronUnit('minutes'); setCronAt('00:00'); setCronWeekdays([]); }}
                 >
                   {t('wiz.cronSwitchSimple')}
                 </button>
               </div>
             </div>
           ) : (
-            <div className="flex-row gap-4 mb-2" style={{ alignItems: 'center' }}>
-              <span className="text-base text-tertiary">{t('wiz.every')}</span>
-              <input
-                type="number" min={1} max={60}
-                className="wf-input"
-                style={{ width: 60, textAlign: 'center' }}
-                value={cronEvery}
-                onChange={e => setCronEvery(Math.max(1, parseInt(e.target.value) || 1))}
-              />
-              <select
-                className="wf-select"
-                style={{ width: 130 }}
-                value={cronUnit}
-                onChange={e => setCronUnit(e.target.value as typeof cronUnit)}
-              >
-                <option value="minutes">{t('wiz.minutes')}</option>
-                <option value="hours">{t('wiz.hours')}</option>
-                <option value="days">{t('wiz.days')}</option>
-              </select>
+            <>
+              <div className="flex-row gap-4 mb-2" style={{ alignItems: 'center' }}>
+                <span className="text-base text-tertiary">{t('wiz.every')}</span>
+                <input
+                  type="number" min={1} max={60}
+                  className="wf-input"
+                  style={{ width: 60, textAlign: 'center' }}
+                  value={cronEvery}
+                  disabled={hasSpecificDays}
+                  onChange={e => setCronEvery(Math.max(1, parseInt(e.target.value) || 1))}
+                  title={hasSpecificDays ? t('wiz.cronEveryDisabledHint') : undefined}
+                />
+                <select
+                  className="wf-select"
+                  style={{ width: 130 }}
+                  value={cronUnit}
+                  onChange={e => {
+                    const u = e.target.value as typeof cronUnit;
+                    setCronUnit(u);
+                    // Clear day-of-week selection when leaving "days" — stale
+                    // weekdays would silently restrict any non-day pattern
+                    // (e.g. "every 5 minutes only on Monday" makes no sense).
+                    if (u !== 'days') setCronWeekdays([]);
+                  }}
+                >
+                  <option value="minutes">{t('wiz.minutes')}</option>
+                  <option value="hours">{t('wiz.hours')}</option>
+                  <option value="days">{t('wiz.days')}</option>
+                </select>
+                {cronUnit === 'days' && (
+                  <>
+                    <span className="text-base text-tertiary">{t('wiz.at')}</span>
+                    <input
+                      type="time"
+                      className="wf-input"
+                      style={{ width: 100 }}
+                      value={cronAt}
+                      onChange={e => setCronAt(e.target.value)}
+                    />
+                  </>
+                )}
+              </div>
               {cronUnit === 'days' && (
-                <>
-                  <span className="text-base text-tertiary">{t('wiz.at')}</span>
-                  <input
-                    type="time"
-                    className="wf-input"
-                    style={{ width: 100 }}
-                    value={cronAt}
-                    onChange={e => setCronAt(e.target.value)}
-                  />
-                </>
+                <div className="wf-cron-weekdays">
+                  <span className="text-xs text-muted">{t('wiz.cronWeekdaysLabel')} <HelpTip hint={t('wiz.helpCronWeekdays')} /></span>
+                  <div className="flex-row gap-2 mt-2 flex-wrap">
+                    {[1, 2, 3, 4, 5, 6, 0].map(d => {
+                      const active = cronWeekdays.includes(d);
+                      return (
+                        <button
+                          key={d}
+                          type="button"
+                          className="wf-weekday-chip"
+                          data-selected={active}
+                          onClick={() => toggleWeekday(d)}
+                          title={t(`wiz.weekday.${d}`)}
+                          aria-pressed={active}
+                        >
+                          {t(`wiz.weekdayShort.${d}`)}
+                        </button>
+                      );
+                    })}
+                    {hasSpecificDays && (
+                      <button
+                        type="button"
+                        className="text-xs text-muted"
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}
+                        onClick={() => setCronWeekdays([])}
+                      >
+                        {t('wiz.cronWeekdaysAll')}
+                      </button>
+                    )}
+                  </div>
+                  <p className="text-xs text-ghost mt-1" style={{ fontStyle: 'italic' }}>
+                    {hasSpecificDays
+                      ? t('wiz.cronWeekdaysPreview', [...cronWeekdays].sort((a, b) => a - b).map(d => t(`wiz.weekday.${d}`)).join(', '))
+                      : t('wiz.cronWeekdaysEveryday')
+                    }
+                  </p>
+                </div>
               )}
-            </div>
+            </>
           ))}
         </div>
       )}
@@ -544,21 +658,32 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
       {/* Step 1 (advanced): Trigger */}
       {!isSimple && wizardStep === 1 && (
         <div>
-          <label className="wf-label">{t('wiz.triggerType')}</label>
+          <label className="wf-label">
+            {t('wiz.triggerWhenLabel')} <HelpTip hint={t('wiz.helpTriggerAdvanced')} />
+          </label>
           <div className="flex-row gap-4 mb-6">
-            {(['Manual', 'Cron', 'Tracker'] as const).map(tt => (
-              <button
-                key={tt}
-                className="wf-trigger-btn"
-                data-selected={triggerType === tt}
-                onClick={() => setTriggerType(tt)}
-              >
-                {tt === 'Manual' && <Zap size={12} />}
-                {tt === 'Cron' && <Clock size={12} />}
-                {tt === 'Tracker' && <GitBranch size={12} />}
-                {tt}
-              </button>
-            ))}
+            {(['Manual', 'Cron', 'Tracker'] as const).map(tt => {
+              const tooltipKey = tt === 'Manual' ? 'wiz.helpTriggerManual'
+                : tt === 'Cron' ? 'wiz.helpTriggerCron'
+                : 'wiz.helpTriggerTracker';
+              const labelKey = tt === 'Manual' ? 'wiz.triggerManual'
+                : tt === 'Cron' ? 'wiz.triggerScheduled'
+                : 'wiz.triggerTracker';
+              return (
+                <button
+                  key={tt}
+                  className="wf-trigger-btn"
+                  data-selected={triggerType === tt}
+                  onClick={() => setTriggerType(tt)}
+                  title={t(tooltipKey)}
+                >
+                  {tt === 'Manual' && <Zap size={12} />}
+                  {tt === 'Cron' && <Clock size={12} />}
+                  {tt === 'Tracker' && <GitBranch size={12} />}
+                  {t(labelKey)}
+                </button>
+              );
+            })}
           </div>
 
           {triggerType === 'Cron' && (
@@ -578,47 +703,97 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       type="button"
                       className="text-xs text-muted"
                       style={{ background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}
-                      onClick={() => { setCronRaw(''); setCronEvery(5); setCronUnit('minutes'); setCronAt('00:00'); }}
+                      onClick={() => { setCronRaw(''); setCronEvery(5); setCronUnit('minutes'); setCronAt('00:00'); setCronWeekdays([]); }}
                     >
                       {t('wiz.cronSwitchSimple')}
                     </button>
                   </div>
                 </div>
               ) : (
-                <div className="flex-row gap-4 mb-4">
-                  <span className="text-base text-tertiary">{t('wiz.every')}</span>
-                  <input
-                    type="number" min={1} max={60}
-                    className="wf-input"
-                    style={{ width: 60, textAlign: 'center' }}
-                    value={cronEvery}
-                    onChange={e => setCronEvery(Math.max(1, parseInt(e.target.value) || 1))}
-                  />
-                  <select
-                    className="wf-select"
-                    style={{ width: 130 }}
-                    value={cronUnit}
-                    onChange={e => setCronUnit(e.target.value as typeof cronUnit)}
-                  >
-                    <option value="minutes">{t('wiz.minutes')}</option>
-                    <option value="hours">{t('wiz.hours')}</option>
-                    <option value="days">{t('wiz.days')}</option>
-                    <option value="weeks">{t('wiz.weeks')}</option>
-                    <option value="months">{t('wiz.months')}</option>
-                  </select>
-                  {(cronUnit === 'days' || cronUnit === 'weeks' || cronUnit === 'months') && (
-                    <>
-                      <span className="text-base text-tertiary">{t('wiz.at')}</span>
-                      <input
-                        type="time"
-                        className="wf-input"
-                        style={{ width: 100 }}
-                        value={cronAt}
-                        onChange={e => setCronAt(e.target.value)}
-                      />
-                    </>
+                <>
+                  <div className="flex-row gap-4 mb-4">
+                    <span className="text-base text-tertiary">{t('wiz.every')}</span>
+                    <input
+                      type="number" min={1} max={60}
+                      className="wf-input"
+                      style={{ width: 60, textAlign: 'center' }}
+                      value={cronEvery}
+                      disabled={hasSpecificDays}
+                      onChange={e => setCronEvery(Math.max(1, parseInt(e.target.value) || 1))}
+                      title={hasSpecificDays ? t('wiz.cronEveryDisabledHint') : undefined}
+                    />
+                    <select
+                      className="wf-select"
+                      style={{ width: 130 }}
+                      value={cronUnit}
+                      onChange={e => {
+                    const u = e.target.value as typeof cronUnit;
+                    setCronUnit(u);
+                    // Clear day-of-week selection when leaving "days" — stale
+                    // weekdays would silently restrict any non-day pattern
+                    // (e.g. "every 5 minutes only on Monday" makes no sense).
+                    if (u !== 'days') setCronWeekdays([]);
+                  }}
+                    >
+                      <option value="minutes">{t('wiz.minutes')}</option>
+                      <option value="hours">{t('wiz.hours')}</option>
+                      <option value="days">{t('wiz.days')}</option>
+                      <option value="weeks">{t('wiz.weeks')}</option>
+                      <option value="months">{t('wiz.months')}</option>
+                    </select>
+                    {(cronUnit === 'days' || cronUnit === 'weeks' || cronUnit === 'months') && (
+                      <>
+                        <span className="text-base text-tertiary">{t('wiz.at')}</span>
+                        <input
+                          type="time"
+                          className="wf-input"
+                          style={{ width: 100 }}
+                          value={cronAt}
+                          onChange={e => setCronAt(e.target.value)}
+                        />
+                      </>
+                    )}
+                  </div>
+                  {cronUnit === 'days' && (
+                    <div className="wf-cron-weekdays">
+                      <span className="text-xs text-muted">{t('wiz.cronWeekdaysLabel')} <HelpTip hint={t('wiz.helpCronWeekdays')} /></span>
+                      <div className="flex-row gap-2 mt-2 flex-wrap">
+                        {[1, 2, 3, 4, 5, 6, 0].map(d => {
+                          const active = cronWeekdays.includes(d);
+                          return (
+                            <button
+                              key={d}
+                              type="button"
+                              className="wf-weekday-chip"
+                              data-selected={active}
+                              onClick={() => toggleWeekday(d)}
+                              title={t(`wiz.weekday.${d}`)}
+                              aria-pressed={active}
+                            >
+                              {t(`wiz.weekdayShort.${d}`)}
+                            </button>
+                          );
+                        })}
+                        {hasSpecificDays && (
+                          <button
+                            type="button"
+                            className="text-xs text-muted"
+                            style={{ background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}
+                            onClick={() => setCronWeekdays([])}
+                          >
+                            {t('wiz.cronWeekdaysAll')}
+                          </button>
+                        )}
+                      </div>
+                      <p className="text-xs text-ghost mt-1" style={{ fontStyle: 'italic' }}>
+                        {hasSpecificDays
+                          ? t('wiz.cronWeekdaysPreview', [...cronWeekdays].sort((a, b) => a - b).map(d => t(`wiz.weekday.${d}`)).join(', '))
+                          : t('wiz.cronWeekdaysEveryday')
+                        }
+                      </p>
+                    </div>
                   )}
-                </div>
+                </>
               )}
               <div className="wf-cron-preview">
                 <Clock size={12} className="text-accent flex-shrink-0" />
@@ -795,6 +970,13 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       data-selected={step.step_type?.type === 'ApiCall'}
                       onClick={() => updateStep(i, { step_type: { type: 'ApiCall' } })}
                     >{t('wiz.stepTypeApiCall')}</button>
+                    <button
+                      className="wf-step-type-btn"
+                      data-type="batch-qp"
+                      data-selected={step.step_type?.type === 'BatchQuickPrompt'}
+                      onClick={() => updateStep(i, { step_type: { type: 'BatchQuickPrompt' } })}
+                      title={t('wiz.stepTypeBatchQPHint')}
+                    >{t('wiz.stepTypeBatchQP')}</button>
                   </div>
                   <input
                     className="wf-input flex-1 text-sm"
@@ -803,7 +985,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                     placeholder={t('wiz.stepDescriptionPlaceholder')}
                   />
                 </div>
-                {checkAgentRestricted(agentAccess, step.agent) && (
+                {step.step_type?.type !== 'BatchQuickPrompt' && checkAgentRestricted(agentAccess, step.agent) && (
                   <div className="wf-restricted-warning">
                     <AlertTriangle size={12} />
                     <span>{t('config.restrictedStep')}</span>
@@ -812,35 +994,190 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                     >{t('config.restrictedAgentLink')}</span>
                   </div>
                 )}
-                <textarea
-                  ref={el => { promptTextareaRefs.current[i] = el; }}
-                  className="wf-textarea"
-                  rows={3}
-                  value={step.prompt_template}
-                  onChange={e => updateStep(i, { prompt_template: e.target.value })}
-                  placeholder={i === 0
-                    ? 'Prompt template... ex: Analyse le bug {{issue.title}}. Trouve la cause racine.'
-                    : `Prompt template... ex: Voici l'analyse : {{previous_step.output}}. Ecris le correctif.`
-                  }
-                />
-                {/* Hint: available variables for this step (clickable) */}
-                {i > 0 && (
-                  <div className="mt-2 text-xs text-ghost flex-wrap flex-row gap-1">
-                    <span>{t('wiz.clickToInsert')} :</span>
-                    <code
-                      className="wf-var-hint-code"
-                      onClick={() => insertVarAtCursor(i, '{{previous_step.output}}')}
-                      title={t('wiz.prevOutput')}
-                    >{'{{previous_step.output}}'}</code>
-                    {steps.slice(0, i).map(prev => (
-                      <code
-                        key={prev.name}
-                        className="wf-var-hint-code"
-                        onClick={() => insertVarAtCursor(i, `{{steps.${prev.name}.output}}`)}
-                        title={`${t('wiz.namedOutput')}: ${prev.name}`}
-                      >{`{{steps.${prev.name}.output}}`}</code>
-                    ))}
+                {/* ── BatchQuickPrompt form ── */}
+                {step.step_type?.type === 'BatchQuickPrompt' ? (() => {
+                  const selectedQp = availableQuickPrompts.find(qp => qp.id === step.batch_quick_prompt_id);
+                  const qpMissing = !step.batch_quick_prompt_id;
+                  const itemsFromEmpty = !step.batch_items_from || !step.batch_items_from.trim();
+                  const isFirstStep = i === 0;
+                  return (
+                  <div className="wf-batch-qp-form">
+                    <div className="wf-batch-intro">
+                      <Layers size={14} />
+                      <div>
+                        <strong>{t('wiz.batchQPTitle')}</strong>
+                        <p className="text-xs text-muted">{t('wiz.batchQPHint')}</p>
+                      </div>
+                    </div>
+
+                    {isFirstStep && (
+                      <div className="wf-batch-info mt-2">
+                        <AlertTriangle size={12} />
+                        <span>{t('wiz.batchFirstStepWarning')}</span>
+                      </div>
+                    )}
+
+                    {availableQuickPrompts.length === 0 ? (
+                      <div className="wf-restricted-warning">
+                        <AlertTriangle size={12} />
+                        <span>{t('wiz.batchQPNoQPs')}</span>
+                      </div>
+                    ) : (
+                      <>
+                        {/* ─── QP picker (required) ─── */}
+                        <label className="text-xs text-muted mb-1">
+                          {t('wiz.batchQPPicker')} <span className="wf-required">*</span>
+                        </label>
+                        <select
+                          className="wf-input text-sm"
+                          data-invalid={qpMissing}
+                          value={step.batch_quick_prompt_id ?? ''}
+                          onChange={e => updateStep(i, { batch_quick_prompt_id: e.target.value || null })}
+                        >
+                          <option value="">— {t('wiz.batchQPPickerEmpty')} —</option>
+                          {availableQuickPrompts.map(qp => (
+                            <option key={qp.id} value={qp.id}>
+                              {qp.icon} {qp.name}
+                            </option>
+                          ))}
+                        </select>
+                        {qpMissing ? (
+                          <p className="wf-field-error">{t('wiz.batchQPRequired')}</p>
+                        ) : selectedQp && (
+                          <div className="wf-qp-preview">
+                            <div className="wf-qp-preview-head">
+                              <span className="wf-qp-preview-icon">{selectedQp.icon}</span>
+                              <span className="font-semibold text-sm">{selectedQp.name}</span>
+                              <span className="text-xs text-dim">→ {AGENT_LABELS[selectedQp.agent] ?? selectedQp.agent}</span>
+                            </div>
+                            {selectedQp.description && (
+                              <p className="text-xs text-muted mt-1">{selectedQp.description}</p>
+                            )}
+                            {selectedQp.variables.length > 0 && (
+                              <p className="text-xs text-ghost mt-1">
+                                {t('wiz.batchQPVarSubst', selectedQp.variables[0].name)}
+                              </p>
+                            )}
+                          </div>
+                        )}
+
+                        {/* ─── Items source (required) ─── */}
+                        <label className="text-xs text-muted mb-1 mt-3">
+                          {t('wiz.batchItemsFrom')} <span className="wf-required">*</span>
+                        </label>
+                        <textarea
+                          className="wf-textarea"
+                          data-invalid={itemsFromEmpty}
+                          rows={2}
+                          value={step.batch_items_from ?? ''}
+                          onChange={e => updateStep(i, { batch_items_from: e.target.value || null })}
+                          placeholder={i > 0
+                            ? `{{steps.${steps[i - 1].name}.data.items}}`
+                            : '{{steps.fetch.data.items}}'
+                          }
+                        />
+                        {itemsFromEmpty && (
+                          <p className="wf-field-error">{t('wiz.batchItemsFromRequired')}</p>
+                        )}
+                        {i > 0 && (
+                          <div className="mt-2">
+                            <p className="text-xs text-ghost mb-1">{t('wiz.batchItemsFromHelper')}</p>
+                            <div className="flex-wrap flex-row gap-2">
+                              {steps.slice(0, i).map(prev => (
+                                <button
+                                  key={prev.name}
+                                  type="button"
+                                  className="wf-batch-prev-chip"
+                                  onClick={() => updateStep(i, { batch_items_from: `{{steps.${prev.name}.data}}` })}
+                                  title={t('wiz.batchItemsFromPickStep', prev.name)}
+                                >
+                                  {t('wiz.batchItemsFromFromStep', prev.name)}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        <div className="flex-row gap-4 mt-3 flex-wrap">
+                          <label className="flex-row gap-2 text-xs" style={{ alignItems: 'center' }}>
+                            <input
+                              type="checkbox"
+                              checked={step.batch_wait_for_completion ?? true}
+                              onChange={e => updateStep(i, { batch_wait_for_completion: e.target.checked })}
+                            />
+                            {t('wiz.batchWaitForCompletion')}
+                          </label>
+                          <label className="flex-row gap-2 text-xs" style={{ alignItems: 'center' }}>
+                            {t('wiz.batchMaxItems')}
+                            <input
+                              type="number"
+                              min={1}
+                              max={50}
+                              className="wf-input text-xs"
+                              style={{ width: 60 }}
+                              value={step.batch_max_items ?? 50}
+                              onChange={e => updateStep(i, { batch_max_items: parseInt(e.target.value) || null })}
+                            />
+                          </label>
+                        </div>
+                        {/* Worktree toggle — needs a project (QP's or workflow's) to be useful */}
+                        {(() => {
+                          const hasProject = Boolean(selectedQp?.project_id || projectId);
+                          const isIsolated = step.batch_workspace_mode === 'Isolated';
+                          return (
+                            <label
+                              className="flex-row gap-2 text-xs mt-2"
+                              style={{ alignItems: 'center', opacity: hasProject ? 1 : 0.5 }}
+                              title={hasProject ? t('wiz.batchWorktreeHint') : t('wiz.batchWorktreeNoProject')}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={isIsolated}
+                                disabled={!hasProject}
+                                onChange={e => updateStep(i, {
+                                  batch_workspace_mode: e.target.checked ? 'Isolated' : 'Direct',
+                                })}
+                              />
+                              <GitBranch size={10} /> {t('wiz.batchWorktree')}
+                            </label>
+                          );
+                        })()}
+                      </>
+                    )}
                   </div>
+                  );
+                })() : (
+                  <>
+                    <textarea
+                      ref={el => { promptTextareaRefs.current[i] = el; }}
+                      className="wf-textarea"
+                      rows={3}
+                      value={step.prompt_template}
+                      onChange={e => updateStep(i, { prompt_template: e.target.value })}
+                      placeholder={i === 0
+                        ? 'Prompt template... ex: Analyse le bug {{issue.title}}. Trouve la cause racine.'
+                        : `Prompt template... ex: Voici l'analyse : {{previous_step.output}}. Ecris le correctif.`
+                      }
+                    />
+                    {/* Hint: available variables for this step (clickable) */}
+                    {i > 0 && (
+                      <div className="mt-2 text-xs text-ghost flex-wrap flex-row gap-1">
+                        <span>{t('wiz.clickToInsert')} :</span>
+                        <code
+                          className="wf-var-hint-code"
+                          onClick={() => insertVarAtCursor(i, '{{previous_step.output}}')}
+                          title={t('wiz.prevOutput')}
+                        >{'{{previous_step.output}}'}</code>
+                        {steps.slice(0, i).map(prev => (
+                          <code
+                            key={prev.name}
+                            className="wf-var-hint-code"
+                            onClick={() => insertVarAtCursor(i, `{{steps.${prev.name}.output}}`)}
+                            title={`${t('wiz.namedOutput')}: ${prev.name}`}
+                          >{`{{steps.${prev.name}.output}}`}</code>
+                        ))}
+                      </div>
+                    )}
+                  </>
                 )}
 
                 {/* Skills selector per step */}
@@ -1278,19 +1615,30 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             <div className="wf-summary-row"><span className="wf-summary-label">Concurrence</span> max {concurrencyLimit} runs</div>
           )}
           <div className="wf-summary-row"><span className="wf-summary-label">Steps</span> {steps.length}</div>
-          {steps.map((s, i) => (
+          {steps.map((s, i) => {
+            const typeKind = s.step_type?.type ?? 'Agent';
+            const typeLabel = typeKind === 'ApiCall' ? 'API' : typeKind === 'BatchQuickPrompt' ? 'BATCH' : 'AGENT';
+            const typeData = typeKind === 'ApiCall' ? 'api' : typeKind === 'BatchQuickPrompt' ? 'batch-qp' : 'agent';
+            const isBatch = typeKind === 'BatchQuickPrompt';
+            const qpName = isBatch && s.batch_quick_prompt_id
+              ? availableQuickPrompts.find(qp => qp.id === s.batch_quick_prompt_id)?.name
+              : null;
+            return (
             <div key={i} className="wf-summary-row" style={{ paddingLeft: 20 }}>
-              {i + 1}. <span className="wf-summary-step-type" data-type={s.step_type?.type === 'ApiCall' ? 'api' : 'agent'}>
-                {s.step_type?.type === 'ApiCall' ? 'API' : 'AGENT'}
-              </span>
-              <span className="font-semibold" style={{ color: AGENT_COLORS[s.agent] ?? '#888' }}>{s.name}</span> ({AGENT_LABELS[s.agent] ?? s.agent})
+              {i + 1}. <span className="wf-summary-step-type" data-type={typeData}>{typeLabel}</span>
+              <span className="font-semibold" style={{ color: isBatch ? '#888' : (AGENT_COLORS[s.agent] ?? '#888') }}>{s.name}</span>
+              {isBatch
+                ? <span className="text-dim text-xs"> ({qpName ?? t('wiz.batchQPPickerEmpty')})</span>
+                : <> ({AGENT_LABELS[s.agent] ?? s.agent})</>
+              }
               {s.description && <span className="text-faint text-xs" style={{ fontStyle: 'italic' }}> &mdash; {s.description}</span>}
               {s.on_result && s.on_result.length > 0 && <span className="text-dim text-xs"> [{s.on_result.length} condition{s.on_result.length > 1 ? 's' : ''}]</span>}
               {s.retry && <span className="text-dim text-xs"> [retry x{s.retry.max_retries}]</span>}
               {s.stall_timeout_secs && <span className="text-dim text-xs"> [timeout {s.stall_timeout_secs}s]</span>}
               {s.delay_after_secs && <span className="text-dim text-xs"> [delai {s.delay_after_secs}s]</span>}
             </div>
-          ))}
+            );
+          })}
           {(safety.sandbox || safety.require_approval || safety.max_files || safety.max_lines) && (
             <div className="wf-summary-row">
               <span className="wf-summary-label">Securite</span>
@@ -1321,9 +1669,22 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
         const errors: string[] = [];
         if (!name) errors.push(t('wiz.errorNoName'));
         steps.forEach((s, i) => {
-          if (!s.prompt_template) errors.push(t('wiz.errorNoPrompt').replace('{0}', s.name || `step-${i + 1}`));
+          const label = s.name || `step-${i + 1}`;
+          if (s.step_type?.type === 'BatchQuickPrompt') {
+            // Batch steps have no prompt_template of their own — the prompt
+            // comes from the referenced Quick Prompt. We validate the batch
+            // fields instead.
+            if (!s.batch_quick_prompt_id) {
+              errors.push(t('wiz.errorBatchNoQP').replace('{0}', label));
+            }
+            if (!s.batch_items_from || !s.batch_items_from.trim()) {
+              errors.push(t('wiz.errorBatchNoItemsFrom').replace('{0}', label));
+            }
+          } else if (!s.prompt_template) {
+            errors.push(t('wiz.errorNoPrompt').replace('{0}', label));
+          }
           (s.on_result ?? []).forEach((r, j) => {
-            if (!r.contains) errors.push(t('wiz.errorNoCondition').replace('{0}', s.name || `step-${i + 1}`).replace('{1}', String(j + 1)));
+            if (!r.contains) errors.push(t('wiz.errorNoCondition').replace('{0}', label).replace('{1}', String(j + 1)));
           });
         });
         return errors.length > 0 ? (
@@ -1352,7 +1713,16 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           <button
             className="wf-next-btn"
             onClick={handleSave}
-            disabled={saving || !name || steps.some(s => !s.prompt_template || (s.on_result ?? []).some(r => !r.contains))}
+            disabled={saving || !name || steps.some(s => {
+              // BatchQuickPrompt steps validate their own fields instead of prompt_template
+              if (s.step_type?.type === 'BatchQuickPrompt') {
+                if (!s.batch_quick_prompt_id) return true;
+                if (!s.batch_items_from || !s.batch_items_from.trim()) return true;
+              } else if (!s.prompt_template) {
+                return true;
+              }
+              return (s.on_result ?? []).some(r => !r.contains);
+            })}
           >
             {saving ? <Loader2 size={12} /> : <Check size={12} />}
             {isEdit ? t('wiz.save') : t('wiz.create')}

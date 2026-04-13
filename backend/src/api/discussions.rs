@@ -557,6 +557,28 @@ pub async fn send_message(
         return Sse::new(stream);
     }
 
+    // Guard against the 2026-04-13 double-response bug: if a previous agent
+    // run on this disc is still in recovery (partial_response checkpoint
+    // dangling from a backend crash), refuse the new send instead of
+    // stacking a fresh run on top of what will soon become a recovered
+    // Agent message. The frontend can either wait for the PartialResponseRecovered
+    // WS event or explicitly dismiss the partial (same endpoint below).
+    let pending_check_id = id.clone();
+    let has_partial = state.db.with_conn(move |conn| {
+        crate::db::discussions::has_pending_partial(conn, &pending_check_id)
+    }).await.unwrap_or(false);
+    if has_partial {
+        let stream: SseStream = Box::pin(futures::stream::once(async {
+            Ok::<_, Infallible>(Event::default().event("error").data(
+                serde_json::json!({
+                    "error": "partial_pending",
+                    "message": "Une réponse d'agent précédente est en cours de récupération. Patientez ou fermez la notification de récupération avant de renvoyer."
+                }).to_string()
+            ))
+        }));
+        return Sse::new(stream);
+    }
+
     let target = req.target_agent.clone();
 
     // Read user identity from config for message attribution
@@ -635,6 +657,88 @@ pub async fn run_agent(
     Path(id): Path<String>,
 ) -> Sse<SseStream> {
     make_agent_stream(state, id, None).await
+}
+
+/// POST /api/discussions/:id/dismiss-partial
+///
+/// Force-recover a pending partial_response on demand. Used by the
+/// "Dismiss" button the frontend shows next to the PartialResponseRecovered
+/// toast and as a fallback when the WS event missed: calls the same
+/// recovery path used at boot, scoped to this one disc.
+///
+/// Returns `{ recovered: true }` if there was a partial to recover,
+/// `{ recovered: false }` if the disc was clean (no-op, idempotent).
+pub async fn dismiss_partial(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<serde_json::Value>> {
+    let ids = match state.db.with_conn(move |conn| {
+        // Reuses the boot recovery — process-wide (handles every disc with
+        // a non-null partial), so a "dismiss" click incidentally cleans up
+        // any other dangling partials too. Cheap (one indexed scan).
+        crate::db::discussions::recover_partial_responses(conn)
+    }).await {
+        Ok(list) => list,
+        Err(e) => return Json(ApiResponse::err(format!("Recovery failed: {}", e))),
+    };
+    let recovered_this = ids.iter().any(|d| d == &id);
+    if !ids.is_empty() {
+        let _ = state.ws_broadcast.send(WsMessage::PartialResponseRecovered {
+            discussion_ids: ids,
+        });
+    }
+    Json(ApiResponse::ok(serde_json::json!({ "recovered": recovered_this })))
+}
+
+/// POST /api/discussions/:id/stop
+///
+/// Abort the currently-running agent for this discussion. Triggers the
+/// disc's cancellation token if one is registered in `state.cancel_registry`.
+/// The agent task's `select!` picks up the cancellation, kills the spawned
+/// child process, saves a partial response with an "⏹️ Interrompu" footer,
+/// and broadcasts `batch_run_progress` if the disc was part of a batch.
+///
+/// Returns `{ cancelled: true }` if a token was registered and triggered,
+/// `{ cancelled: false }` if nothing was running (agent already finished,
+/// disc never started, race with backend restart, etc.) — which lets the
+/// frontend show a "Rien à arrêter" toast rather than fake-confirming.
+pub async fn stop_agent(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<serde_json::Value>> {
+    let cancelled = {
+        let mut map = match state.cancel_registry.lock() {
+            Ok(m) => m,
+            Err(_) => return Json(ApiResponse::err("Cancel registry poisoned")),
+        };
+        if let Some(token) = map.remove(&id) {
+            token.cancel();
+            true
+        } else {
+            false
+        }
+    };
+    Json(ApiResponse::ok(serde_json::json!({ "cancelled": cancelled })))
+}
+
+/// Spawn an agent run on a discussion in the background, without SSE wrapping.
+///
+/// Used by the workflow runner's `BatchQuickPrompt` step executor to fan out
+/// N child discs in parallel. Each call reuses the full `make_agent_stream`
+/// pipeline (auth, worktree lock, agent spawn, batch progress hook) but the
+/// returned SSE stream is immediately dropped.
+///
+/// The actual agent work runs in a detached `tokio::spawn` inside
+/// `make_agent_stream` and keeps executing even after the SSE stream is
+/// dropped — the spawned task checks `tx.is_closed()` only to skip streaming
+/// chunks to a gone client, not to abort the run. Completion still persists
+/// the agent message to DB and fires the batch progress WS events.
+///
+/// The `agent_semaphore` on `state` still caps concurrency across all fan-outs.
+pub async fn spawn_agent_run_background(state: AppState, discussion_id: String) {
+    let _sse = make_agent_stream(state, discussion_id, None).await;
+    // Drop the SSE stream — the agent keeps running via the detached task.
+    drop(_sse);
 }
 
 /// Shared SSE stream builder
@@ -782,9 +886,19 @@ async fn make_agent_stream(
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentStreamEvent>(64);
 
+    // Register a cancellation token keyed by the disc id so the "⏹ Arrêter"
+    // UI (POST /api/discussions/:id/stop) can trigger it. The CancelGuard
+    // removes the entry from the registry when this task's scope exits —
+    // either on normal completion or via panic/early return.
+    let cancel_guard = crate::CancelGuard::insert(&state.cancel_registry, disc_id.clone());
+    let cancel_token = cancel_guard.token.clone();
+
     // Spawn background task — always saves to DB even if client disconnects
     let semaphore = state.agent_semaphore.clone();
     tokio::spawn(async move {
+        // Keep the guard alive for the lifetime of this task. Dropping it at
+        // the end of the move closure removes the token from the registry.
+        let _cancel_guard = cancel_guard;
         // Acquire semaphore permit — limits concurrent agent processes
         let _permit = match semaphore.acquire_owned().await {
             Ok(p) => p,
@@ -817,6 +931,29 @@ async fn make_agent_stream(
                 let mut current_tool: Option<String> = None;
                 let mut current_tool_input = String::new();
                 let global_deadline = tokio::time::Instant::now() + AGENT_GLOBAL_TIMEOUT;
+
+                // Periodic checkpoint of full_response → discussions.partial_response
+                // so a backend crash/restart doesn't lose what the agent has thought.
+                // Throttled to ~30s OR 100 chunks (whichever first) to bound DB writes
+                // even during high-throughput agents like Claude Code.
+                let mut last_checkpoint = tokio::time::Instant::now();
+                let mut chunks_since_checkpoint: usize = 0;
+                const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(30);
+                const CHECKPOINT_CHUNKS: usize = 100;
+                let checkpoint_disc_id = disc_id.clone();
+                let checkpoint_db = state.db.clone();
+                // Helper: best-effort flush, never propagates DB errors to the agent loop.
+                let do_checkpoint = |partial: String| {
+                    let did = checkpoint_disc_id.clone();
+                    let db = checkpoint_db.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = db.with_conn(move |conn| {
+                            crate::db::discussions::set_partial_response(conn, &did, Some(&partial))
+                        }).await {
+                            tracing::warn!("partial_response checkpoint failed: {}", e);
+                        }
+                    });
+                };
 
                 // Stream stderr logs to the client in real-time
                 let stderr_log_capture = process.stderr_capture.clone();
@@ -855,6 +992,11 @@ async fn make_agent_stream(
                 // MAX_AGENT_RESPONSE_BYTES. We then kill the child and
                 // append a footer so the user sees what happened.
                 let mut stopped_on_size: bool = false;
+                // Set when the user clicked "⏹ Arrêter" from the UI and the
+                // POST /api/discussions/:id/stop handler triggered our token.
+                // We then kill the child and save the partial response with
+                // a footer so the user sees what happened.
+                let mut stopped_on_cancel: bool = false;
 
                 // Stall timeout pattern: the `tokio::time::sleep(stall_timeout)` future
                 // is created fresh on each iteration of the `while let` loop because the
@@ -865,6 +1007,11 @@ async fn make_agent_stream(
                 // The global_deadline sleep_until is NOT reset (absolute deadline).
                 while let Some(line) = tokio::select! {
                     line = process.next_line() => line,
+                    _ = cancel_token.cancelled() => {
+                        tracing::info!("Agent stream for disc {} cancelled by user", disc_id);
+                        stopped_on_cancel = true;
+                        None
+                    }
                     _ = tokio::time::sleep_until(global_deadline) => {
                         tracing::warn!("Agent stream global timeout ({:?}) exceeded", AGENT_GLOBAL_TIMEOUT);
                         was_interrupted = true;
@@ -885,6 +1032,15 @@ async fn make_agent_stream(
                         match runner::parse_claude_stream_line(&line) {
                             runner::StreamJsonEvent::Text(text) => {
                                 full_response.push_str(&text);
+                                chunks_since_checkpoint += 1;
+                                // Throttled checkpoint to DB (Option A) — survives backend restart
+                                if chunks_since_checkpoint >= CHECKPOINT_CHUNKS
+                                    || last_checkpoint.elapsed() >= CHECKPOINT_INTERVAL
+                                {
+                                    do_checkpoint(full_response.clone());
+                                    last_checkpoint = tokio::time::Instant::now();
+                                    chunks_since_checkpoint = 0;
+                                }
                                 if !client_gone {
                                     let chunk = serde_json::json!({ "text": text });
                                     let _ = tx.send(AgentStreamEvent::Chunk { data: chunk }).await;
@@ -940,6 +1096,14 @@ async fn make_agent_stream(
                             full_response.push('\n');
                         }
                         full_response.push_str(&line);
+                        chunks_since_checkpoint += 1;
+                        if chunks_since_checkpoint >= CHECKPOINT_CHUNKS
+                            || last_checkpoint.elapsed() >= CHECKPOINT_INTERVAL
+                        {
+                            do_checkpoint(full_response.clone());
+                            last_checkpoint = tokio::time::Instant::now();
+                            chunks_since_checkpoint = 0;
+                        }
 
                         if !client_gone {
                             let text_with_nl = if full_response.len() > line.len() {
@@ -971,8 +1135,9 @@ async fn make_agent_stream(
                 log_task.abort();
 
                 // Kill agent on timeout/stall OR terminal signal OR size cap
-                // (process may still be running and producing output).
-                if was_interrupted || stopped_on_signal.is_some() || stopped_on_size {
+                // OR user-triggered cancel (process may still be running and
+                // producing output at this point).
+                if was_interrupted || stopped_on_signal.is_some() || stopped_on_size || stopped_on_cancel {
                     let _ = process.child.kill().await;
                 }
 
@@ -986,8 +1151,13 @@ async fn make_agent_stream(
                 // child — the agent did exactly what we asked. Wait status
                 // will report a non-zero exit code from SIGKILL, so we
                 // explicitly mark these as successful.
+                // A user cancel is NOT a success — we want the run to be
+                // flagged as failed so batch counters see it as a failure
+                // and the UI treats the partial response as interrupted.
                 let success = if stopped_on_signal.is_some() {
                     true
+                } else if stopped_on_cancel {
+                    false
                 } else {
                     !was_interrupted && status.map(|s| s.success()).unwrap_or(false)
                 };
@@ -1010,6 +1180,14 @@ async fn make_agent_stream(
                         Review the work above and decide whether to continue with a fresh prompt.",
                         MAX_AGENT_RESPONSE_BYTES / 1024
                     ));
+                }
+                if stopped_on_cancel {
+                    let footer = "\n\n---\n⏹️ **Interrompu par l'utilisateur.** Le process de l'agent a été tué.";
+                    if full_response.is_empty() {
+                        full_response = footer.trim_start_matches('\n').to_string();
+                    } else {
+                        full_response.push_str(footer);
+                    }
                 }
 
                 if full_response.is_empty() && !success {
@@ -1090,6 +1268,14 @@ async fn make_agent_stream(
                 }).await {
                     tracing::error!("Failed to save agent message: {e}");
                 }
+
+                // Clear the in-flight checkpoint — the final message is now in
+                // `messages`, so partial_response would be redundant + would
+                // double up at the next backend boot if we left it dangling.
+                let did_clear = disc_id.clone();
+                let _ = state.db.with_conn(move |conn| {
+                    crate::db::discussions::set_partial_response(conn, &did_clear, None)
+                }).await;
 
                 // ── Batch progress hook ────────────────────────────────
                 // If this disc was spawned by a batch workflow run, bump

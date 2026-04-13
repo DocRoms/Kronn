@@ -6,6 +6,7 @@
 pub mod template;
 pub mod workspace;
 pub mod steps;
+pub mod batch_step;
 pub mod runner;
 pub mod trigger;
 pub mod tracker;
@@ -17,17 +18,22 @@ use uuid::Uuid;
 
 use crate::db::Database;
 use crate::models::*;
+use crate::AppState;
 
 /// The workflow engine — runs in the background, checks triggers, spawns runs.
 pub struct WorkflowEngine {
-    db: Arc<Database>,
-    config: Arc<tokio::sync::RwLock<AppConfig>>,
+    state: AppState,
 }
 
 impl WorkflowEngine {
-    pub fn new(db: Arc<Database>, config: Arc<tokio::sync::RwLock<AppConfig>>) -> Self {
-        Self { db, config }
+    pub fn new(state: AppState) -> Self {
+        Self { state }
     }
+
+    /// Convenience accessors so existing code using `self.db` / `self.config`
+    /// keeps working without threading `.state.` everywhere.
+    fn db(&self) -> &Arc<Database> { &self.state.db }
+    fn config(&self) -> &Arc<tokio::sync::RwLock<AppConfig>> { &self.state.config }
 
     /// Start the engine tick loop (runs forever).
     pub async fn start(self: Arc<Self>) {
@@ -44,7 +50,7 @@ impl WorkflowEngine {
 
     /// Check all enabled workflows and fire triggers.
     async fn check_triggers(&self) -> anyhow::Result<()> {
-        let db = self.db.clone();
+        let db = self.db().clone();
         let workflows = db.with_conn(|conn| {
             crate::db::workflows::list_workflows(conn)
         }).await?;
@@ -61,7 +67,7 @@ impl WorkflowEngine {
             // Check concurrency limit
             if let Some(limit) = wf.concurrency_limit {
                 let wf_id = wf.id.clone();
-                let db2 = self.db.clone();
+                let db2 = self.db().clone();
                 let active = db2.with_conn(move |conn| {
                     crate::db::workflows::count_active_runs(conn, &wf_id)
                 }).await?;
@@ -116,7 +122,7 @@ impl WorkflowEngine {
             // Check reconciliation — skip already-processed issues
             let wf_id = wf.id.clone();
             let issue_id = issue.id.clone();
-            let db = self.db.clone();
+            let db = self.db().clone();
             let already = db.with_conn(move |conn| {
                 crate::db::workflows::is_issue_processed(conn, &wf_id, &issue_id)
             }).await?;
@@ -128,7 +134,7 @@ impl WorkflowEngine {
             // Mark as processed
             let wf_id = wf.id.clone();
             let issue_id = issue.id.clone();
-            let db2 = self.db.clone();
+            let db2 = self.db().clone();
             db2.with_conn(move |conn| {
                 crate::db::workflows::mark_issue_processed(conn, &wf_id, &issue_id)
             }).await?;
@@ -168,26 +174,27 @@ impl WorkflowEngine {
             batch_completed: 0,
             batch_failed: 0,
             batch_name: None,
+            parent_run_id: None,
         };
 
         // Persist the run
         let r = run.clone();
-        let db = self.db.clone();
+        let db = self.db().clone();
         db.with_conn(move |conn| crate::db::workflows::insert_run(conn, &r)).await?;
 
         tracing::info!("Spawning workflow run {} for '{}'", run.id, wf.name);
 
         // Read config for tokens and agents
-        let config = self.config.read().await;
+        let config = self.config().read().await;
         let tokens = config.tokens.clone();
         let agents = config.agents.clone();
 
-        let db2 = self.db.clone();
+        let state = self.state.clone();
         let workflow = wf.clone();
 
         // Execute in background
         tokio::spawn(async move {
-            if let Err(e) = runner::execute_run(db2, &workflow, &mut run, &tokens, &agents, None).await {
+            if let Err(e) = runner::execute_run(state, &workflow, &mut run, &tokens, &agents, None).await {
                 tracing::error!("Workflow run {} failed: {}", run.id, e);
             }
         });
@@ -220,6 +227,7 @@ mod tests {
             batch_completed: 0,
             batch_failed: 0,
             batch_name: None,
+            parent_run_id: None,
         };
 
         assert_eq!(run.status, RunStatus::Pending);
@@ -259,6 +267,7 @@ mod tests {
             batch_completed: 0,
             batch_failed: 0,
             batch_name: None,
+            parent_run_id: None,
         };
         let tc = run.trigger_context.unwrap();
         assert_eq!(tc["type"], "tracker");

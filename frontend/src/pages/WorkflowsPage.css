@@ -240,6 +240,26 @@
   align-items: center;
 }
 
+.wf-run-cancel-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  background: rgba(255, 77, 106, 0.08);
+  border: 1px solid rgba(255, 77, 106, 0.3);
+  border-radius: 10px;
+  color: var(--kr-error, #ff4d6a);
+  font-size: var(--kr-fs-xs);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.wf-run-cancel-btn:hover {
+  background: rgba(255, 77, 106, 0.18);
+  border-color: rgba(255, 77, 106, 0.55);
+}
+
 /* ── Run step progress dots ────────────────────────────── */
 .wf-step-dot {
   width: 6px;
@@ -779,6 +799,20 @@
   background: rgba(255, 80, 80, 0.08);
   border-radius: var(--kr-r-sm);
 }
+/* Non-blocking warning — preview ran but config has a smell. Orange so it
+   doesn't get confused with the red error block. */
+.wf-test-warning {
+  font-size: var(--kr-fs-sm);
+  color: #f0a030;
+  padding: var(--kr-sp-3);
+  background: rgba(240, 160, 48, 0.08);
+  border-left: 3px solid #f0a030;
+  border-radius: var(--kr-r-sm);
+}
+.wf-test-warning ul {
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+}
 .wf-test-result { border-top: 1px solid var(--kr-border); padding-top: var(--kr-sp-4); }
 .wf-test-status {
   font-size: var(--kr-fs-xs);
@@ -1198,6 +1232,390 @@
   border-radius: var(--kr-r-md);
   background: rgba(var(--kr-accent-rgb), 0.04);
   border: 1px solid rgba(var(--kr-accent-rgb), 0.1);
+}
+
+/* ── BatchQuickPrompt dry-run preview (test panel) ────── */
+.wf-batch-preview {
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  border-radius: var(--kr-r-sm);
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.wf-batch-preview-ok {
+  color: var(--kr-success, #34d399);
+  font-size: var(--kr-fs-sm);
+}
+
+.wf-batch-preview-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.wf-batch-preview-items {
+  margin: 0;
+  padding-left: 18px;
+  list-style: '→ ';
+  font-size: var(--kr-fs-xs);
+}
+
+.wf-batch-preview-items li {
+  padding: 2px 0;
+}
+
+.wf-batch-preview-items code {
+  font-family: var(--kr-font-mono);
+  background: rgba(0, 0, 0, 0.2);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+
+/* Per-item batch list with collapsible prompt + per-item dry-run button. */
+.wf-batch-items-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.wf-batch-item {
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: var(--kr-r-sm);
+  background: rgba(255, 255, 255, 0.015);
+  overflow: hidden;
+}
+
+.wf-batch-item-header {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  padding: 6px 10px;
+}
+
+.wf-batch-item-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
+  color: var(--kr-text);
+  font-size: var(--kr-fs-xs);
+}
+
+.wf-batch-item-toggle code {
+  font-family: var(--kr-font-mono);
+  background: rgba(0, 0, 0, 0.2);
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+
+.wf-batch-item-dryrun-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  background: rgba(var(--kr-accent-rgb), 0.08);
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.25);
+  border-radius: 10px;
+  color: var(--kr-accent);
+  font-size: var(--kr-fs-xs);
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+.wf-batch-item-dryrun-btn:hover:not(:disabled) {
+  background: rgba(var(--kr-accent-rgb), 0.18);
+}
+
+.wf-batch-item-dryrun-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.wf-batch-item-body,
+.wf-batch-item-result {
+  padding: 6px 10px;
+  border-top: 1px dashed rgba(255, 255, 255, 0.05);
+}
+
+/* ── Run → Batch discussions chip ──────────────────────── */
+/* Sits under each linear run in the WorkflowDetail runs list. Click jumps
+   to the Discussions tab with the matching batch group expanded. */
+.wf-run-batch-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  margin: 4px 0 8px 24px;
+  background: rgba(var(--kr-accent-rgb), 0.06);
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.18);
+  border-radius: 12px;
+  font-size: var(--kr-fs-xs);
+  font-weight: 500;
+  color: var(--kr-accent);
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.wf-run-batch-chip:hover {
+  background: rgba(var(--kr-accent-rgb), 0.14);
+  border-color: rgba(var(--kr-accent-rgb), 0.4);
+}
+
+.wf-run-batch-chip-status {
+  font-size: 11px;
+  margin-left: 2px;
+}
+
+/* ── BatchQuickPrompt step form ────────────────────────── */
+.wf-batch-qp-form {
+  padding: var(--kr-sp-4) var(--kr-sp-5);
+  border-radius: var(--kr-r-md);
+  background: rgba(var(--kr-accent-rgb), 0.03);
+  border: 1px dashed rgba(var(--kr-accent-rgb), 0.25);
+}
+
+.wf-batch-intro {
+  display: flex;
+  gap: var(--kr-sp-4);
+  align-items: flex-start;
+  padding-bottom: var(--kr-sp-3);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  margin-bottom: var(--kr-sp-4);
+  color: var(--kr-accent);
+}
+
+.wf-batch-intro strong {
+  display: block;
+  color: var(--kr-text);
+  margin-bottom: 2px;
+}
+
+.wf-batch-info {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  margin-bottom: var(--kr-sp-4);
+  border-radius: var(--kr-r-sm);
+  background: rgba(var(--kr-warning-rgb), 0.06);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.15);
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-warning);
+}
+
+/* Required-field marker — kept bold + slightly larger to pop on dark bg */
+.wf-required {
+  color: var(--kr-error);
+  font-weight: 700;
+  font-size: 1.05em;
+  margin-left: 3px;
+}
+
+/* ── Batch step summary in WorkflowDetail ─────────────── */
+/* Visually distinct from agent steps: accent border + layered card look,
+   so it's immediately obvious the step has a different shape (QP reference
+   + items source + flags) rather than a prompt. */
+.wf-step-card[data-step-type='batch-qp'] {
+  border-left: 3px solid rgba(var(--kr-accent-rgb), 0.5);
+  background: rgba(var(--kr-accent-rgb), 0.02);
+}
+
+.wf-step-kind-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  color: var(--kr-accent);
+  background: rgba(var(--kr-accent-rgb), 0.1);
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.3);
+  border-radius: 10px;
+}
+
+.wf-batch-step-summary {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-4);
+  padding: var(--kr-sp-4) var(--kr-sp-5);
+  margin-top: var(--kr-sp-3);
+  border-radius: var(--kr-r-sm);
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.wf-batch-step-qp {
+  display: flex;
+  gap: var(--kr-sp-4);
+  align-items: flex-start;
+}
+
+.wf-batch-step-qp-icon {
+  font-size: 20px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.wf-batch-step-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.wf-batch-step-items {
+  display: block;
+  padding: 6px 10px;
+  font-family: var(--kr-font-mono);
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text);
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: var(--kr-r-sm);
+  word-break: break-all;
+}
+
+.wf-batch-step-flags {
+  display: flex;
+  gap: var(--kr-sp-3);
+  flex-wrap: wrap;
+}
+
+.wf-batch-step-flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-muted);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+}
+
+.wf-batch-step-flag-worktree {
+  color: var(--kr-accent);
+  background: rgba(var(--kr-accent-rgb), 0.08);
+  border-color: rgba(var(--kr-accent-rgb), 0.2);
+}
+
+/* Day-of-week picker (cron weekday chips) */
+.wf-cron-weekdays {
+  margin-top: var(--kr-sp-3);
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  border-radius: var(--kr-r-sm);
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.wf-weekday-chip {
+  min-width: 44px;
+  padding: 6px 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--kr-r-sm);
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.wf-weekday-chip:hover {
+  background: rgba(var(--kr-accent-rgb), 0.06);
+  border-color: rgba(var(--kr-accent-rgb), 0.2);
+  color: var(--kr-text);
+}
+
+.wf-weekday-chip[data-selected='true'] {
+  background: rgba(var(--kr-accent-rgb), 0.18);
+  border-color: rgba(var(--kr-accent-rgb), 0.5);
+  color: var(--kr-accent);
+}
+
+/* Inline help icon next to labels/buttons — hover shows native tooltip.
+   Discreet on purpose: it only draws attention when the user actually looks. */
+.wf-help-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 6px;
+  color: rgba(255, 255, 255, 0.35);
+  cursor: help;
+  vertical-align: middle;
+  transition: color 0.15s;
+}
+
+.wf-help-icon:hover {
+  color: var(--kr-accent);
+}
+
+/* Inline field error (right under the offending field) */
+.wf-field-error {
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-error);
+  margin: 4px 0 0 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.wf-field-error::before {
+  content: '⚠';
+  font-size: 11px;
+}
+
+/* Invalid input visual marker — combined with :not(:placeholder-shown)
+   to avoid lighting up empty fields the user hasn't touched yet for
+   optional cases, but for required fields we want it visible from the start. */
+.wf-input[data-invalid='true'],
+.wf-textarea[data-invalid='true'] {
+  border-color: rgba(var(--kr-error-rgb), 0.5) !important;
+  background: rgba(var(--kr-error-rgb), 0.04);
+}
+
+/* QP preview card shown once a QP is selected */
+.wf-qp-preview {
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  margin-top: var(--kr-sp-3);
+  border-radius: var(--kr-r-sm);
+  background: rgba(var(--kr-accent-rgb), 0.05);
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.15);
+}
+
+.wf-qp-preview-head {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+}
+
+.wf-qp-preview-icon {
+  font-size: 18px;
+  line-height: 1;
+}
+
+/* "← Depuis step-X" chip */
+.wf-batch-prev-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  background: rgba(var(--kr-accent-rgb), 0.08);
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.2);
+  border-radius: 12px;
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-accent);
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.wf-batch-prev-chip:hover {
+  background: rgba(var(--kr-accent-rgb), 0.15);
+  border-color: rgba(var(--kr-accent-rgb), 0.4);
 }
 
 /* ── Restricted agent warning ──────────────────────────── */

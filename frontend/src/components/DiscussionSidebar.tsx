@@ -1,12 +1,13 @@
 import { useState, useMemo } from 'react';
 import '../pages/DiscussionsPage.css';
 import { SwipeableDiscItem } from './SwipeableDiscItem';
-import type { Discussion, Project, Contact } from '../types/generated';
+import type { Discussion, Project, Contact, BatchRunSummary } from '../types/generated';
 import { getProjectGroup, isHiddenPath } from '../lib/constants';
 import { gravatarUrl } from '../lib/gravatar';
+import { formatRelativeTime } from '../lib/relativeTime';
 import type { ToastFn } from '../hooks/useToast';
 import {
-  Folder, ChevronLeft, ChevronRight, Plus, X, MessageSquare, Archive, Search, Users2,
+  Folder, ChevronLeft, ChevronRight, Plus, X, MessageSquare, Archive, Search, Users2, Trash2,
 } from 'lucide-react';
 
 export interface DiscussionSidebarProps {
@@ -25,15 +26,44 @@ export interface DiscussionSidebarProps {
   onDelete: (discId: string) => void;
   onNewDiscussion: () => void;
   onClose: () => void;
+  /** Called when the user clicks the ⏹ stop button inline on a disc that
+   *  is currently Running (isSending). Parent calls `discussionsApi.stop`
+   *  and updates sendingMap on success. */
+  onStopDiscussion?: (discId: string) => void;
   onContactAdd: (code: string) => Promise<void>;
   onContactDelete: (id: string) => Promise<void>;
   toast: ToastFn;
   t: (key: string, ...args: any[]) => string;
+  /** Active Kronn locale — used for the batch group relative-time formatter. */
+  lang?: string;
+  /** Batch run summaries (run_id → parent workflow meta). Populated by the
+   *  parent with `quickPromptsApi.listBatchRunSummaries()` so each batch group
+   *  in the sidebar can show a clickable pastille pointing back to the
+   *  workflow run that spawned it. */
+  batchSummaries?: BatchRunSummary[];
+  /** Called when the user clicks the "↗ run #N · {workflow}" pastille on a
+   *  batch group. Parent is expected to switch to the workflows tab + open
+   *  the detail panel for that workflow. */
+  onNavigateWorkflow?: (workflowId: string) => void;
+  /** Called when the user clicks "🗑" on a batch group header and confirms.
+   *  Parent calls the DELETE /api/workflow-runs/:run_id endpoint, then
+   *  refetches discussions + batchSummaries so the group disappears live. */
+  onDeleteBatch?: (runId: string, discCount: number) => void;
   /** Ref-setter so parent can expand groups when navigating to a discussion */
   collapsedGroups: Set<string>;
   onToggleGroup: (key: string) => void;
   /** Desktop only: collapse sidebar into a thin rail */
   onCollapse?: () => void;
+}
+
+function formatBatchParent(summary: BatchRunSummary | undefined, t: (k: string, ...a: any[]) => string): string | null {
+  if (!summary) return null;
+  const seq = summary.parent_run_sequence;
+  const name = summary.parent_workflow_name;
+  if (!name) return null;
+  return seq != null
+    ? t('disc.batchFromWorkflowRun', seq, name)
+    : t('disc.batchFromWorkflow', name);
 }
 
 export function DiscussionSidebar({
@@ -52,16 +82,29 @@ export function DiscussionSidebar({
   onDelete,
   onNewDiscussion,
   onClose,
+  onStopDiscussion,
   onContactAdd,
   onContactDelete,
   toast,
   t,
+  lang = 'fr',
+  batchSummaries = [],
+  onNavigateWorkflow,
+  onDeleteBatch,
   collapsedGroups,
   onToggleGroup,
   onCollapse,
 }: DiscussionSidebarProps) {
   // ─── Sidebar-only state ───────────────────────────────────────────────
   const [discSearchFilter, setDiscSearchFilter] = useState('');
+
+  // Map batch run_id → parent workflow meta. Built from props so the parent
+  // can refetch (e.g. on WS batch progress events) and the sidebar updates.
+  const batchMetaById = useMemo(() => {
+    const m = new Map<string, BatchRunSummary>();
+    for (const s of batchSummaries) m.set(s.run_id, s);
+    return m;
+  }, [batchSummaries]);
   const [showArchives, setShowArchives] = useState(false);
   const [showAddContact, setShowAddContact] = useState(false);
   const [addContactCode, setAddContactCode] = useState('');
@@ -235,6 +278,7 @@ export function DiscussionSidebar({
                   onSelect={onSelect}
                   onArchive={onArchive}
                   onDelete={onDelete}
+                  onStop={onStopDiscussion}
                   t={t}
                 />
               ))}
@@ -333,32 +377,100 @@ export function DiscussionSidebar({
                             {batchGroups.map(bg => {
                               const batchKey = `batch::${bg.runId}`;
                               const isBatchCollapsed = collapsedGroups.has(batchKey);
-                              // First disc's creation time is a close-enough proxy for the batch start
+                              const summaryForLabel = batchMetaById.get(bg.runId);
+                              // Folder label: prefer the Quick Prompt name (the campaign)
+                              // over the first child disc title (one ticket among N,
+                              // misleading — was showing "EW-7100" for a 50-disc batch).
+                              // Falls back to the old disc-title derivation if we don't
+                              // have the summary yet (e.g. fetch in flight on first render).
                               const firstTitle = bg.discs[0].title;
-                              // Use a generic label derived from the first disc's title —
-                              // "Bootstrap: EW-7100" → "Batch (12) — Bootstrap..."
-                              const label = firstTitle.split('—')[0].trim();
+                              const qpIcon = summaryForLabel?.quick_prompt_icon;
+                              const qpName = summaryForLabel?.quick_prompt_name;
+                              // When a QP icon is available we use IT as the folder
+                              // glyph instead of the generic 📦 — avoids stacking two
+                              // emojis like "📦 🎯 Analyse...".
+                              const folderGlyph = qpIcon || '📦';
+                              const label = qpName ?? firstTitle.split('—')[0].trim();
+                              // Relative timestamp of the batch — disambiguates between
+                              // multiple batches of the same QP (e.g. cron firing every 10min).
+                              // We use the earliest disc's created_at since that's when the batch
+                              // was spawned. Full ISO shown on hover for precision.
+                              const batchStartIso = bg.discs
+                                .map(d => d.created_at)
+                                .sort()[0] ?? bg.discs[0].created_at;
+                              const batchWhen = formatRelativeTime(batchStartIso, lang);
+                              const batchWhenAbs = (() => {
+                                try { return new Date(batchStartIso).toLocaleString(lang); }
+                                catch { return batchStartIso; }
+                              })();
                               const statusPill = bg.anySending
                                 ? `⏳ ${bg.done}/${bg.total}`
                                 : bg.done === bg.total
                                   ? `✓ ${bg.total}/${bg.total}`
                                   : `${bg.done}/${bg.total}`;
+                              const summary = batchMetaById.get(bg.runId);
+                              const parentLabel = formatBatchParent(summary, t);
+                              const parentWorkflowId = summary?.parent_workflow_id ?? null;
                               return (
-                                <div key={batchKey} className="disc-batch-wrap">
-                                  <button
-                                    className="disc-group-btn"
-                                    data-variant="batch"
-                                    onClick={() => onToggleGroup(batchKey)}
-                                    aria-expanded={!isBatchCollapsed}
-                                    style={{ marginLeft: 12 }}
-                                    title={label}
-                                  >
-                                    <ChevronRight size={10} className="disc-chevron" data-expanded={!isBatchCollapsed} />
-                                    📦 {label}
-                                    <span className="disc-group-count" data-batch-status={bg.anySending ? 'running' : 'done'}>
-                                      {statusPill}
-                                    </span>
-                                  </button>
+                                <div key={batchKey} className="disc-batch-wrap" data-batch-key={batchKey}>
+                                  <div className="disc-batch-header" style={{ marginLeft: 12 }}>
+                                    <button
+                                      className="disc-group-btn"
+                                      data-variant="batch"
+                                      onClick={() => onToggleGroup(batchKey)}
+                                      aria-expanded={!isBatchCollapsed}
+                                      style={{ marginLeft: 0, flex: 1 }}
+                                      title={`${label} — ${batchWhenAbs}`}
+                                    >
+                                      <ChevronRight size={10} className="disc-chevron" data-expanded={!isBatchCollapsed} />
+                                      {folderGlyph} {label}
+                                      {batchWhen && (
+                                        <span className="disc-batch-when" title={batchWhenAbs}>
+                                          · {batchWhen}
+                                        </span>
+                                      )}
+                                      <span className="disc-group-count" data-batch-status={bg.anySending ? 'running' : 'done'}>
+                                        {statusPill}
+                                      </span>
+                                    </button>
+                                    {onDeleteBatch && (
+                                      <button
+                                        type="button"
+                                        className="disc-batch-delete"
+                                        title={t('disc.batchDeleteHint', bg.total)}
+                                        aria-label={t('disc.batchDeleteHint', bg.total)}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          // Native confirm — keeps the dependency
+                                          // surface tiny. Future polish: a styled
+                                          // modal with the disc preview list.
+                                          if (confirm(t('disc.batchDeleteConfirm', bg.total, label))) {
+                                            onDeleteBatch(bg.runId, bg.total);
+                                          }
+                                        }}
+                                      >
+                                        <Trash2 size={11} />
+                                      </button>
+                                    )}
+                                  </div>
+                                  {parentLabel && parentWorkflowId && onNavigateWorkflow && (
+                                    <button
+                                      type="button"
+                                      className="disc-batch-parent-pill"
+                                      style={{ marginLeft: 24 }}
+                                      onClick={(e) => {
+                                        // stopPropagation isn't strictly needed (we're not
+                                        // nested in another button), but future refactors
+                                        // could move this inside the group button — keeping
+                                        // it defensive.
+                                        e.stopPropagation();
+                                        onNavigateWorkflow(parentWorkflowId);
+                                      }}
+                                      title={t('disc.batchParentClickHint')}
+                                    >
+                                      ↗ {parentLabel}
+                                    </button>
+                                  )}
                                   {!isBatchCollapsed && (
                                     // Wrapper with a left "tree line" + indent so the
                                     // batch children read as "inside" the 📦 folder,
@@ -374,6 +486,7 @@ export function DiscussionSidebar({
                                           onSelect={onSelect}
                                           onArchive={onArchive}
                                           onDelete={onDelete}
+                                          onStop={onStopDiscussion}
                                           t={t}
                                         />
                                       ))}
@@ -393,6 +506,7 @@ export function DiscussionSidebar({
                                 onSelect={onSelect}
                                 onArchive={onArchive}
                                 onDelete={onDelete}
+                                onStop={onStopDiscussion}
                                 t={t}
                               />
                             ))}

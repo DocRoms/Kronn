@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useT } from '../../lib/I18nContext';
 import type { WorkflowRun, WorkflowStep } from '../../types/generated';
-import { Trash2, ChevronRight } from 'lucide-react';
+import { Trash2, ChevronRight, Square } from 'lucide-react';
 import '../../pages/WorkflowsPage.css';
 
 const STATUS_COLORS: Record<string, string> = {
@@ -17,9 +17,11 @@ export interface RunDetailProps {
   run: WorkflowRun;
   workflowSteps?: WorkflowStep[];
   onDelete: () => void;
+  /** Cancel a Running workflow run. Button is only rendered for Running status. */
+  onCancel?: () => void;
 }
 
-export function RunDetail({ run, workflowSteps, onDelete }: RunDetailProps) {
+export function RunDetail({ run, workflowSteps, onDelete, onCancel }: RunDetailProps) {
   const { t } = useT();
   const [expandedStep, setExpandedStep] = useState<number | null>(null);
 
@@ -49,6 +51,19 @@ export function RunDetail({ run, workflowSteps, onDelete }: RunDetailProps) {
         </span>
         {run.tokens_used > 0 && (
           <span className="text-xs text-muted">{run.tokens_used} tokens</span>
+        )}
+        {run.status === 'Running' && onCancel && (
+          <button
+            className="wf-run-cancel-btn"
+            onClick={(e) => {
+              e.stopPropagation();
+              if (confirm(t('wf.cancelRunConfirm'))) onCancel();
+            }}
+            title={t('wf.cancelRun')}
+          >
+            <Square size={10} style={{ fill: 'currentColor' }} />
+            {t('wf.cancelRun')}
+          </button>
         )}
         <button
           className="wf-run-delete-btn"

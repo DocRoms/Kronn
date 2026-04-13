@@ -32,7 +32,7 @@ export interface DiscussionsPageProps {
   agentAccess: AgentsConfig | null;
   refetchDiscussions: () => void;
   refetchProjects: () => void;
-  onNavigate: (page: string, opts?: { projectId?: string; scrollTo?: string }) => void;
+  onNavigate: (page: string, opts?: { projectId?: string; scrollTo?: string; workflowId?: string }) => void;
   prefill?: { projectId: string; title: string; prompt: string; locked?: boolean } | null;
   initialActiveDiscussionId?: string | null;
   onPrefillConsumed?: () => void;
@@ -42,6 +42,12 @@ export interface DiscussionsPageProps {
   /** Open a specific discussion without triggering agent (e.g. Resume Validation) */
   openDiscussionId?: string | null;
   onOpenDiscConsumed?: () => void;
+  /** When clicking "📋 N conversations" on a workflow run, the parent passes
+   *  the batch run id here. We auto-uncollapse the matching project + batch
+   *  group in the sidebar and scroll to it, then ack via onFocusBatchConsumed
+   *  so the same id doesn't re-trigger on every render. */
+  focusBatchId?: string | null;
+  onFocusBatchConsumed?: () => void;
   toast: ToastFn;
   // Lifted streaming state (lives in Dashboard, survives page changes)
   sendingMap: Record<string, boolean>;
@@ -89,6 +95,8 @@ export function DiscussionsPage({
   onAutoRunConsumed,
   openDiscussionId,
   onOpenDiscConsumed,
+  focusBatchId,
+  onFocusBatchConsumed,
   toast,
   sendingMap,
   setSendingMap,
@@ -141,6 +149,20 @@ export function DiscussionsPage({
   const [uploadingFiles, setUploadingFiles] = useState(false);
   const [contactsList, setContactsList] = useState<Contact[]>([]);
   const [contactsOnline, setContactsOnline] = useState<Record<string, boolean>>({});
+  // Batch run summaries — feeds the sidebar pastille that links a batch group
+  // back to the workflow run that spawned it. Refetched on batch WS events
+  // (see handleWsMessage below) so newly-finished batches pick up their
+  // parent_run_sequence label without a full page reload.
+  const [batchSummaries, setBatchSummaries] = useState<import('../types/generated').BatchRunSummary[]>([]);
+  const refetchBatchSummaries = useCallback(() => {
+    workflowsApi.listBatchRunSummaries()
+      .then(setBatchSummaries)
+      .catch((e) => {
+        // Log so silent API/network failures stop manifesting as
+        // "batch groups have no parent pastille" without any signal.
+        console.warn('Failed to load batch run summaries:', e);
+      });
+  }, []);
   const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
   const [ttsEnabled, setTtsEnabled] = useState<boolean>(() => {
     try { return localStorage.getItem('kronn:ttsEnabled') === 'true'; } catch { return false; }
@@ -295,7 +317,8 @@ export function DiscussionsPage({
     profilesApi.list().then(setAvailableProfiles).catch(() => {});
     directivesApi.list().then(setAvailableDirectives).catch(() => {});
     contactsApi.list().then(setContactsList).catch(() => {});
-  }, []);
+    refetchBatchSummaries();
+  }, [refetchBatchSummaries]);
 
   // WebSocket-based real-time events (presence, chat, invites)
   const handleWsMessage = useCallback((msg: WsMessage) => {
@@ -322,6 +345,9 @@ export function DiscussionsPage({
     // the sidebar group pill updates from "⏳ 7/12" to "✓ 12/12".
     if (msg.type === 'batch_run_finished') {
       refetchDiscussions();
+      // Refresh batch summaries so the "↗ run #N" pastille picks up the
+      // just-finalized parent workflow link for this run.
+      refetchBatchSummaries();
       // Clear the per-disc "Agent en cours..." indicator for the child that
       // just finished. Batch children are fire-and-forget on the client side
       // (no SSE consumer → cleanupStream never runs), so the WS event is the
@@ -343,6 +369,17 @@ export function DiscussionsPage({
       refetchDiscussions();
       setSendingMap(prev => ({ ...prev, [msg.discussion_id]: false }));
       reloadDiscussion(msg.discussion_id);
+    }
+    // Backend boot recovered in-flight agent partials — refresh the affected
+    // discs + tell the user so they don't resend on top of the recovered run.
+    if (msg.type === 'partial_response_recovered') {
+      refetchDiscussions();
+      for (const id of msg.discussion_ids) {
+        reloadDiscussion(id);
+        // Drop any stale "sending" indicator left over from before the restart.
+        setSendingMap(prev => ({ ...prev, [id]: false }));
+      }
+      toast(t('disc.partialRecoveredToast', msg.discussion_ids.length), 'info');
     }
   // NOTE: reloadDiscussion is defined later in the component and referenced
   // here only inside the callback body (closure). Do NOT add it to the dep
@@ -583,6 +620,38 @@ export function DiscussionsPage({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openDiscussionId, allDiscussions.length]);
 
+  // ── Cross-page navigation: WorkflowDetail "📋 N conversations" → here ──
+  // The chip click sets `focusBatchId` on Dashboard, which lands as a prop here.
+  // We expand the matching project + batch group, then scroll to it. The
+  // sidebar render uses `data-batch-key` on the wrapper so we can target it.
+  useEffect(() => {
+    if (!focusBatchId || allDiscussions.length === 0) return;
+    const childDisc = allDiscussions.find(d => d.workflow_run_id === focusBatchId);
+    if (!childDisc) {
+      // Batch not in the current discs list (deleted? still loading?). Ack
+      // anyway so we don't loop on the same id forever.
+      onFocusBatchConsumed?.();
+      return;
+    }
+    const projectKey = childDisc.project_id ?? null;
+    const batchKey = `batch::${focusBatchId}`;
+    setCollapsedDiscGroups(prev => {
+      const next = new Set(prev);
+      if (projectKey != null) next.delete(projectKey);
+      next.delete(batchKey);
+      return next;
+    });
+    // Defer the scroll one tick so the just-uncollapsed nodes have time to render.
+    requestAnimationFrame(() => {
+      const el = document.querySelector(`[data-batch-key="${batchKey}"]`);
+      if (el && 'scrollIntoView' in el) {
+        (el as HTMLElement).scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    });
+    onFocusBatchConsumed?.();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusBatchId, allDiscussions.length]);
+
   const handleCreateDiscussion = async (config: NewDiscConfig) => {
     let disc;
     try {
@@ -680,6 +749,18 @@ export function DiscussionsPage({
         const errStr = String(error);
         if (errStr.includes('checked out') || errStr.includes('worktree')) {
           setWorktreeError(errStr);
+        } else if (errStr.includes('partial_pending')) {
+          // Backend refused: previous run still in recovery. Offer one-click
+          // dismiss so the user can retype without waiting for the WS event.
+          if (confirm(t('disc.partialPendingPrompt'))) {
+            discussionsApi.dismissPartial(discId)
+              .then(() => {
+                refetchDiscussions();
+                reloadDiscussion(discId);
+                toast(t('disc.partialDismissed'), 'success');
+              })
+              .catch(e => toast(String(e), 'error'));
+          }
         } else {
           toast(errStr, 'error');
         }
@@ -1010,6 +1091,40 @@ export function DiscussionsPage({
           onContactDelete={handleContactDelete}
           toast={toast}
           t={t}
+          lang={configLanguage ?? 'fr'}
+          onStopDiscussion={async (discId) => {
+            try {
+              const res = await discussionsApi.stop(discId);
+              if (res.cancelled) {
+                toast(t('disc.stopAgentToast'), 'success');
+                // Don't manually clear sendingMap — the backend's cancel
+                // path in make_agent_stream finishes its finally-block,
+                // saves the partial message, then the WS batch_run_progress
+                // (or the normal done event) will tick sendingMap for us.
+                // Refetch to pick up the partial response promptly.
+                setTimeout(() => refetchDiscussions(), 500);
+              } else {
+                toast(t('disc.stopAgentNothing'), 'info');
+              }
+            } catch (e) {
+              toast(t('disc.stopAgentError', String(e)), 'error');
+            }
+          }}
+          batchSummaries={batchSummaries}
+          onNavigateWorkflow={(workflowId) => onNavigate('workflows', { workflowId })}
+          onDeleteBatch={async (runId, count) => {
+            try {
+              const res = await workflowsApi.deleteBatchRun(runId);
+              toast(t('disc.batchDeletedToast', res.discussions_deleted), 'success');
+              refetchDiscussions();
+              refetchBatchSummaries();
+            } catch (e) {
+              toast(t('disc.batchDeleteError', String(e)), 'error');
+              // Touch `count` so the linter accepts it — useful for future
+              // optimistic-UI fallbacks if we want to roll back a fake removal.
+              void count;
+            }
+          }}
           collapsedGroups={collapsedDiscGroups}
           onToggleGroup={handleToggleGroup}
           onCollapse={() => setSidebarCollapsed(true)}

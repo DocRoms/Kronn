@@ -24,8 +24,26 @@ pub struct AppConfig {
     pub tokens: TokensConfig,
     pub scan: ScanConfig,
     pub agents: AgentsConfig,
+    /// Output language used by agents when they write their replies.
+    /// Separate from `ui_language` below which controls the Kronn UI locale.
     #[serde(default = "default_language")]
     pub language: String,
+    /// UI language (FR/EN/ES) for the React frontend. Persisted here so a
+    /// Tauri WebView2 localStorage wipe doesn't reset the user's choice
+    /// every time the app updates or Windows rotates the WebView2 profile.
+    /// Frontend still writes to localStorage as a fast-path + fallback when
+    /// the backend is unreachable.
+    #[serde(default = "default_ui_language")]
+    pub ui_language: String,
+    /// Persistent STT model choice (e.g. "onnx-community/whisper-tiny").
+    /// None = first-launch default / user never set it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stt_model: Option<String>,
+    /// Persistent TTS voice choices, keyed by output language code
+    /// ("fr" → "voice-id-fr", "en" → "voice-id-en", …).
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    #[ts(type = "Record<string, string>")]
+    pub tts_voices: std::collections::HashMap<String, String>,
     #[serde(default)]
     pub disabled_agents: Vec<AgentType>,
     #[serde(default)]
@@ -786,6 +804,43 @@ pub struct WorkflowStep {
     pub profile_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub directive_ids: Vec<String>,
+
+    // ─── BatchQuickPrompt fields ─────────────────────────────────────────
+    // All Option<> so existing Agent/ApiCall steps deserialize unchanged.
+    // Only meaningful when `step_type == BatchQuickPrompt`.
+
+    /// Id of the Quick Prompt to fan out. Required for BatchQuickPrompt steps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_quick_prompt_id: Option<String>,
+
+    /// Template expression that resolves to the list of items. Each item
+    /// becomes one child discussion. Examples:
+    /// - `"{{steps.fetch_tickets.data.tickets}}"` — structured JSON array
+    /// - `"{{steps.fetch_tickets.output}}"` — raw text (parsed as one id per line)
+    ///
+    /// Required for BatchQuickPrompt steps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_items_from: Option<String>,
+
+    /// If true (default), the linear workflow run waits for all child
+    /// discussions to finish before moving to the next step. Uses the existing
+    /// `BatchRunFinished` WS broadcast as the wake signal — no polling.
+    /// If false, the batch is fired and the linear run advances immediately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_wait_for_completion: Option<bool>,
+
+    /// Safety cap for the number of items spawned by this step. Falls back to
+    /// the global 50-item cap enforced by `create_batch_run` when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_max_items: Option<u32>,
+
+    /// Workspace mode for each batch child discussion: `"Direct"` (default)
+    /// or `"Isolated"` for per-disc git worktrees. Isolated is required when
+    /// the agents will write code in parallel — otherwise they clobber each
+    /// other in the main working tree. Requires the workflow to have a
+    /// project_id, otherwise the step fails early.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_workspace_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -802,6 +857,11 @@ pub enum StepType {
     #[default]
     Agent,
     ApiCall,
+    /// Fan out a Quick Prompt over a list of items (rendered from a previous
+    /// step's output) — spawns N child discussions via the shared `create_batch_run`
+    /// helper and optionally waits for all of them to finish before moving on.
+    /// Phase 2 batch workflows (2026-04-10).
+    BatchQuickPrompt,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -933,6 +993,11 @@ pub struct WorkflowRun {
     /// Example: "Cadrage to-Frame — 10 avr 14:00".
     #[serde(default)]
     pub batch_name: Option<String>,
+    /// Link a child batch run back to the linear workflow run that spawned it
+    /// via a `BatchQuickPrompt` step. `None` for top-level runs (both linear
+    /// runs and manual batch runs triggered from the UI).
+    #[serde(default)]
+    pub parent_run_id: Option<String>,
 }
 
 fn default_run_type() -> String { "linear".to_string() }
@@ -1307,6 +1372,15 @@ pub enum WsMessage {
         batch_completed: u32,
         batch_failed: u32,
     },
+    /// Broadcast once at backend boot when `recover_partial_responses`
+    /// resurrected in-flight agent responses that were cut short by a
+    /// restart. Each id in the list got a new Agent message with an
+    /// "interrupted" footer — the frontend refetches those discs + toasts
+    /// the user so they don't resend their prompt on top of a silently
+    /// recovered conversation.
+    PartialResponseRecovered {
+        discussion_ids: Vec<String>,
+    },
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1468,6 +1542,36 @@ pub struct WorkflowRunSummary {
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
     pub tokens_used: u64,
+}
+
+/// Compact summary of a batch workflow run, with its parent linear run
+/// resolved to a human-friendly (workflow name + run sequence number) label.
+/// Consumed by the discussion sidebar to render a clickable pastille on each
+/// batch group ("↗ run #3 de Recap hebdo") so users can trace a batch back
+/// to the workflow that spawned it.
+#[derive(Debug, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct BatchRunSummary {
+    pub run_id: String,
+    pub batch_name: Option<String>,
+    pub batch_total: u32,
+    pub status: RunStatus,
+    /// Id + name of the Quick Prompt that this batch fans out. Resolved from
+    /// the batch run's virtual `qp:<id>` workflow_id prefix. Used by the
+    /// sidebar as the batch folder label (instead of the first child disc's
+    /// title, which is just one ticket id among N and misleads users).
+    pub quick_prompt_id: Option<String>,
+    pub quick_prompt_name: Option<String>,
+    pub quick_prompt_icon: Option<String>,
+    /// Parent linear workflow run id (None for top-level manual batches).
+    pub parent_run_id: Option<String>,
+    /// Name of the workflow that spawned this batch, resolved at query time.
+    /// None when the parent run was deleted or this is a manual batch.
+    pub parent_workflow_id: Option<String>,
+    pub parent_workflow_name: Option<String>,
+    /// 1-based position of the parent linear run among all runs of that
+    /// workflow (ordered by started_at). None for manual batches.
+    pub parent_run_sequence: Option<u32>,
 }
 
 // ─── Workflow suggestions ─────────────────────────────────────────────────
@@ -1650,6 +1754,10 @@ pub struct UpdateDiscussionRequest {
 }
 
 fn default_language() -> String {
+    "fr".into()
+}
+
+fn default_ui_language() -> String {
     "fr".into()
 }
 
@@ -1908,15 +2016,21 @@ pub struct PaginatedResponse<T: Serialize> {
 }
 
 /// Query params for paginated endpoints.
+///
+/// IMPORTANT: `page` has NO serde default on purpose. The caller (e.g.
+/// `api::discussions::list`) wraps this in `Option<Query<PaginationQuery>>`
+/// and treats "no query params at all" as "return everything unpaginated".
+/// If we gave `page` a default of 1, axum's extractor would always succeed
+/// on a bare `GET /api/discussions` call, silently capping results at 50 —
+/// that's the bug we hit on 2026-04-13 where users with >50 discussions
+/// stopped seeing their older conversations once a 50-item batch ran.
 #[derive(Debug, Deserialize)]
 pub struct PaginationQuery {
-    #[serde(default = "default_page")]
     pub page: u32,
     #[serde(default = "default_per_page")]
     pub per_page: u32,
 }
 
-fn default_page() -> u32 { 1 }
 fn default_per_page() -> u32 { 50 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
