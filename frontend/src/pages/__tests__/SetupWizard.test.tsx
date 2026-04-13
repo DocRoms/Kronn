@@ -20,6 +20,10 @@ vi.mock('../../lib/api', () => ({
   projects: {
     create: vi.fn().mockResolvedValue({ id: 'p1', name: 'repo1' }),
   },
+  config: {
+    getUiLanguage: vi.fn().mockResolvedValue('fr'),
+    saveUiLanguage: vi.fn().mockResolvedValue(undefined),
+  },
 }));
 
 import { agents as agentsApi, setup as setupApi, projects as projectsApi } from '../../lib/api';

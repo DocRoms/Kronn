@@ -908,6 +908,11 @@ fn sample_workflow(id: &str) -> Workflow {
             skill_ids: vec![],
             profile_ids: vec![],
             directive_ids: vec![],
+            batch_quick_prompt_id: None,
+            batch_items_from: None,
+            batch_wait_for_completion: None,
+            batch_max_items: None,
+            batch_workspace_mode: None,
         }],
         actions: vec![],
         safety: WorkflowSafety {
@@ -989,6 +994,7 @@ fn sample_run(id: &str, workflow_id: &str) -> WorkflowRun {
         batch_completed: 0,
         batch_failed: 0,
         batch_name: None,
+        parent_run_id: None,
     }
 }
 
@@ -1081,6 +1087,7 @@ fn sample_batch_run(id: &str, qp_id: &str, total: u32) -> WorkflowRun {
         batch_completed: 0,
         batch_failed: 0,
         batch_name: Some(format!("Cadrage — {}", id)),
+        parent_run_id: None,
     }
 }
 
@@ -1298,6 +1305,497 @@ fn workflow_get_last_runs_all_empty() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Phase 2 — batch workflows chained from a linear workflow run
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Build a test QuickPrompt with a single `{{ticket}}` variable.
+fn sample_qp_for_batch(id: &str) -> QuickPrompt {
+    let now = Utc::now();
+    QuickPrompt {
+        id: id.into(),
+        name: format!("BatchQP {}", id),
+        icon: "🎯".into(),
+        prompt_template: "Analyse le ticket {{ticket}} en profondeur".into(),
+        variables: vec![crate::models::PromptVariable {
+            name: "ticket".into(),
+            label: "Ticket".into(),
+            placeholder: "EW-123".into(),
+            description: None,
+            required: true,
+        }],
+        agent: crate::models::AgentType::ClaudeCode,
+        project_id: None,
+        skill_ids: vec![],
+        tier: crate::models::ModelTier::Default,
+        description: "Test QP for batch chaining".into(),
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+#[test]
+fn create_batch_run_pure_fn_roundtrip_toplevel() {
+    let conn = test_db();
+    let qp = sample_qp_for_batch("qp-pure-1");
+    crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
+
+    let outcome = crate::db::workflows::create_batch_run(
+        &conn,
+        crate::db::workflows::CreateBatchRunInput {
+            quick_prompt: &qp,
+            items: vec![
+                ("EW-100".into(), "Analyse le ticket EW-100 en profondeur".into()),
+                ("EW-101".into(), "Analyse le ticket EW-101 en profondeur".into()),
+                ("EW-102".into(), "Analyse le ticket EW-102 en profondeur".into()),
+            ],
+            batch_name: Some("Cadrage hebdo".into()),
+            project_id: None,
+            parent_run_id: None, // top-level batch, no parent
+            author_pseudo: Some("TestUser".into()),
+            author_avatar_email: Some("test@example.com".into()),
+            language: "fr".into(),
+            workspace_mode: "Direct".into(),
+        },
+    ).unwrap();
+
+    assert_eq!(outcome.batch_total, 3);
+    assert_eq!(outcome.discussion_ids.len(), 3);
+
+    // Run is persisted with parent_run_id = None
+    let run = crate::db::workflows::get_run(&conn, &outcome.run_id).unwrap().unwrap();
+    assert_eq!(run.run_type, "batch");
+    assert_eq!(run.batch_total, 3);
+    assert_eq!(run.batch_name.as_deref(), Some("Cadrage hebdo"));
+    assert_eq!(run.parent_run_id, None);
+    assert_eq!(run.status, RunStatus::Running);
+
+    // All three child discussions exist and link back via workflow_run_id
+    for (i, disc_id) in outcome.discussion_ids.iter().enumerate() {
+        let disc = crate::db::discussions::get_discussion(&conn, disc_id).unwrap().unwrap();
+        assert_eq!(disc.workflow_run_id.as_ref(), Some(&outcome.run_id));
+        assert_eq!(disc.title, format!("EW-{}", 100 + i));
+        assert_eq!(disc.messages.len(), 1);
+        assert_eq!(disc.messages[0].content, format!("Analyse le ticket EW-{} en profondeur", 100 + i));
+        assert_eq!(disc.messages[0].author_pseudo.as_deref(), Some("TestUser"));
+    }
+}
+
+#[test]
+fn create_batch_run_chained_from_linear_parent() {
+    let conn = test_db();
+
+    // 1. Create a real linear workflow and run it (the would-be parent)
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("linear-wf")).unwrap();
+    let parent = sample_run("parent-linear-1", "linear-wf");
+    crate::db::workflows::insert_run(&conn, &parent).unwrap();
+
+    // 2. Insert a QP and call create_batch_run with parent_run_id = Some(...)
+    let qp = sample_qp_for_batch("qp-chained");
+    crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
+
+    let outcome = crate::db::workflows::create_batch_run(
+        &conn,
+        crate::db::workflows::CreateBatchRunInput {
+            quick_prompt: &qp,
+            items: vec![
+                ("EW-200".into(), "rendered prompt A".into()),
+                ("EW-201".into(), "rendered prompt B".into()),
+            ],
+            batch_name: Some("Chained batch".into()),
+            project_id: None,
+            parent_run_id: Some("parent-linear-1".into()),
+            author_pseudo: None,
+            author_avatar_email: None,
+            language: "fr".into(),
+            workspace_mode: "Direct".into(),
+        },
+    ).unwrap();
+
+    // 3. The child batch run persists parent_run_id back to the linear parent
+    let child = crate::db::workflows::get_run(&conn, &outcome.run_id).unwrap().unwrap();
+    assert_eq!(child.parent_run_id.as_deref(), Some("parent-linear-1"));
+    assert_eq!(child.run_type, "batch");
+    assert_eq!(child.batch_total, 2);
+
+    // 4. The linear parent is untouched (still Running, no batch_total)
+    let parent_reloaded = crate::db::workflows::get_run(&conn, "parent-linear-1").unwrap().unwrap();
+    assert_eq!(parent_reloaded.run_type, "linear");
+    assert_eq!(parent_reloaded.batch_total, 0);
+    assert_eq!(parent_reloaded.parent_run_id, None);
+}
+
+#[test]
+fn partial_response_set_then_recover_inserts_agent_message() {
+    // Simulates: agent runs → checkpoints partial → backend dies →
+    // boot scan calls recover_partial_responses → user sees a saved Agent
+    // message with the "interrupted" footer.
+    let conn = test_db();
+
+    // Create a discussion with a user message
+    let now = chrono::Utc::now();
+    let disc = Discussion {
+        id: "disc-pr-1".into(),
+        project_id: None,
+        title: "Test".into(),
+        agent: AgentType::ClaudeCode,
+        language: "fr".into(),
+        participants: vec![AgentType::ClaudeCode],
+        messages: vec![],
+        message_count: 0,
+        skill_ids: vec![],
+        profile_ids: vec![],
+        directive_ids: vec![],
+        archived: false,
+        workspace_mode: "Direct".into(),
+        workspace_path: None,
+        worktree_branch: None,
+        tier: ModelTier::Default,
+        pin_first_message: false,
+        summary_cache: None,
+        summary_up_to_msg_idx: None,
+        shared_id: None,
+        shared_with: vec![],
+        workflow_run_id: None,
+        created_at: now,
+        updated_at: now,
+    };
+    crate::db::discussions::insert_discussion(&conn, &disc).unwrap();
+
+    // Simulate the agent task checkpointing some thinking
+    let partial = "I am in the middle of analyzing the issue. Let me look at the code...";
+    crate::db::discussions::set_partial_response(&conn, "disc-pr-1", Some(partial)).unwrap();
+
+    // Verify it's there
+    let stored: Option<String> = conn.query_row(
+        "SELECT partial_response FROM discussions WHERE id = 'disc-pr-1'", [], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(stored.as_deref(), Some(partial));
+
+    // Boot scan recovers it
+    let recovered = crate::db::discussions::recover_partial_responses(&conn).unwrap();
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0], "disc-pr-1");
+
+    // partial_response is now cleared
+    let after: Option<String> = conn.query_row(
+        "SELECT partial_response FROM discussions WHERE id = 'disc-pr-1'", [], |r| r.get(0),
+    ).unwrap();
+    assert!(after.is_none(), "partial_response must be cleared after recovery");
+
+    // A new Agent message exists with the partial + footer
+    let msg_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM messages WHERE discussion_id = 'disc-pr-1'", [], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(msg_count, 1);
+    let (role, content): (String, String) = conn.query_row(
+        "SELECT role, content FROM messages WHERE discussion_id = 'disc-pr-1'", [],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    ).unwrap();
+    assert_eq!(role, "Agent");
+    assert!(content.starts_with(partial), "Recovered message must start with the partial");
+    assert!(content.contains("Réflexion interrompue"), "Footer must be appended");
+}
+
+#[test]
+fn partial_response_recovery_idempotent_when_nothing_to_recover() {
+    let conn = test_db();
+    // No discs with partial_response → returns 0, no errors
+    let n = crate::db::discussions::recover_partial_responses(&conn).unwrap();
+    assert!(n.is_empty());
+    // Run again — still empty
+    let n2 = crate::db::discussions::recover_partial_responses(&conn).unwrap();
+    assert!(n2.is_empty());
+}
+
+#[test]
+fn partial_response_preserves_started_at_across_checkpoints() {
+    // Regression for the 2026-04-13 double-response bug: the recovered
+    // Agent message must inherit the start time of the in-flight run, so
+    // it falls chronologically BEFORE any user message posted after restart.
+    let conn = test_db();
+    let now = chrono::Utc::now();
+    let disc = Discussion {
+        id: "disc-ts".into(), project_id: None, title: "X".into(),
+        agent: AgentType::ClaudeCode, language: "fr".into(),
+        participants: vec![AgentType::ClaudeCode], messages: vec![], message_count: 0,
+        skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
+        archived: false, workspace_mode: "Direct".into(),
+        workspace_path: None, worktree_branch: None, tier: ModelTier::Default,
+        pin_first_message: false, summary_cache: None, summary_up_to_msg_idx: None,
+        shared_id: None, shared_with: vec![], workflow_run_id: None,
+        created_at: now, updated_at: now,
+    };
+    crate::db::discussions::insert_discussion(&conn, &disc).unwrap();
+
+    // First checkpoint sets the started_at
+    crate::db::discussions::set_partial_response(&conn, "disc-ts", Some("draft v1")).unwrap();
+    let first_ts: String = conn.query_row(
+        "SELECT partial_response_started_at FROM discussions WHERE id = 'disc-ts'", [], |r| r.get(0),
+    ).unwrap();
+    assert!(!first_ts.is_empty(), "First checkpoint must populate started_at");
+
+    // Wait a tick (in real life: 30s of agent thinking) — second checkpoint
+    // updates `partial_response` but MUST NOT shift `started_at`.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    crate::db::discussions::set_partial_response(&conn, "disc-ts", Some("draft v2 longer")).unwrap();
+    let second_ts: String = conn.query_row(
+        "SELECT partial_response_started_at FROM discussions WHERE id = 'disc-ts'", [], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(first_ts, second_ts, "started_at must be preserved across updates");
+
+    // Recovery uses the started_at, not now()
+    let ids = crate::db::discussions::recover_partial_responses(&conn).unwrap();
+    assert_eq!(ids, vec!["disc-ts"]);
+    let msg_ts_str: String = conn.query_row(
+        "SELECT timestamp FROM messages WHERE discussion_id = 'disc-ts'", [], |r| r.get(0),
+    ).unwrap();
+    let msg_ts = chrono::DateTime::parse_from_rfc3339(&msg_ts_str).unwrap();
+    let started = chrono::DateTime::parse_from_rfc3339(&first_ts).unwrap();
+    // Tolerate sub-second drift but not seconds — the recovered message
+    // must use the checkpoint time, not Utc::now() at recovery moment.
+    let drift = (msg_ts - started).num_milliseconds().abs();
+    assert!(drift < 100, "Recovered message timestamp must match started_at within 100ms (got {}ms drift)", drift);
+}
+
+#[test]
+fn has_pending_partial_returns_true_when_set() {
+    let conn = test_db();
+    let now = chrono::Utc::now();
+    let disc = Discussion {
+        id: "disc-pending".into(), project_id: None, title: "X".into(),
+        agent: AgentType::ClaudeCode, language: "fr".into(),
+        participants: vec![AgentType::ClaudeCode], messages: vec![], message_count: 0,
+        skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
+        archived: false, workspace_mode: "Direct".into(),
+        workspace_path: None, worktree_branch: None, tier: ModelTier::Default,
+        pin_first_message: false, summary_cache: None, summary_up_to_msg_idx: None,
+        shared_id: None, shared_with: vec![], workflow_run_id: None,
+        created_at: now, updated_at: now,
+    };
+    crate::db::discussions::insert_discussion(&conn, &disc).unwrap();
+    assert!(!crate::db::discussions::has_pending_partial(&conn, "disc-pending").unwrap());
+    crate::db::discussions::set_partial_response(&conn, "disc-pending", Some("hi")).unwrap();
+    assert!(crate::db::discussions::has_pending_partial(&conn, "disc-pending").unwrap());
+    crate::db::discussions::set_partial_response(&conn, "disc-pending", None).unwrap();
+    assert!(!crate::db::discussions::has_pending_partial(&conn, "disc-pending").unwrap());
+}
+
+#[test]
+fn partial_response_clear_with_none_wipes_column() {
+    let conn = test_db();
+    let now = chrono::Utc::now();
+    let disc = Discussion {
+        id: "disc-clear".into(), project_id: None, title: "X".into(),
+        agent: AgentType::ClaudeCode, language: "fr".into(),
+        participants: vec![AgentType::ClaudeCode], messages: vec![], message_count: 0,
+        skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
+        archived: false, workspace_mode: "Direct".into(),
+        workspace_path: None, worktree_branch: None, tier: ModelTier::Default,
+        pin_first_message: false, summary_cache: None, summary_up_to_msg_idx: None,
+        shared_id: None, shared_with: vec![], workflow_run_id: None,
+        created_at: now, updated_at: now,
+    };
+    crate::db::discussions::insert_discussion(&conn, &disc).unwrap();
+    crate::db::discussions::set_partial_response(&conn, "disc-clear", Some("draft")).unwrap();
+    crate::db::discussions::set_partial_response(&conn, "disc-clear", None).unwrap();
+    let (after, after_ts): (Option<String>, Option<String>) = conn.query_row(
+        "SELECT partial_response, partial_response_started_at FROM discussions WHERE id = 'disc-clear'",
+        [], |r| Ok((r.get(0)?, r.get(1)?)),
+    ).unwrap();
+    assert!(after.is_none(), "partial_response must be cleared");
+    assert!(after_ts.is_none(), "partial_response_started_at must be cleared too");
+}
+
+#[test]
+fn delete_batch_run_cascades_discussions_and_messages() {
+    // Bulk-deleting a batch group from the sidebar must wipe the batch run row,
+    // every child discussion, and (via the FK cascade on messages.discussion_id)
+    // every message in those discussions.
+    let conn = test_db();
+    let qp = sample_qp_for_batch("qp-del");
+    crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
+
+    let outcome = crate::db::workflows::create_batch_run(
+        &conn,
+        crate::db::workflows::CreateBatchRunInput {
+            quick_prompt: &qp,
+            items: vec![
+                ("EW-1".into(), "p1".into()),
+                ("EW-2".into(), "p2".into()),
+                ("EW-3".into(), "p3".into()),
+            ],
+            batch_name: Some("To-be-deleted".into()),
+            project_id: None,
+            parent_run_id: None,
+            author_pseudo: None,
+            author_avatar_email: None,
+            language: "fr".into(),
+            workspace_mode: "Direct".into(),
+        },
+    ).unwrap();
+
+    // Sanity: 3 discs + 3 initial messages exist
+    let n_discs_before: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM discussions WHERE workflow_run_id = ?1",
+        rusqlite::params![&outcome.run_id], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(n_discs_before, 3);
+    let n_msgs_before: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM messages WHERE discussion_id IN \
+         (SELECT id FROM discussions WHERE workflow_run_id = ?1)",
+        rusqlite::params![&outcome.run_id], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(n_msgs_before, 3);
+
+    // Delete the batch
+    let summary = crate::db::workflows::delete_batch_run_with_discussions(
+        &conn, &outcome.run_id,
+    ).unwrap();
+    assert_eq!(summary.discussions_deleted, 3);
+    assert_eq!(summary.run_id, outcome.run_id);
+
+    // Run row gone
+    assert!(crate::db::workflows::get_run(&conn, &outcome.run_id).unwrap().is_none());
+    // Discussions gone
+    let n_discs_after: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM discussions WHERE workflow_run_id = ?1",
+        rusqlite::params![&outcome.run_id], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(n_discs_after, 0);
+    // Messages cascaded out (would be 3 if cascade was broken)
+    for disc_id in &outcome.discussion_ids {
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE discussion_id = ?1",
+            rusqlite::params![disc_id], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(n, 0, "Messages of disc {} should have cascaded", disc_id);
+    }
+}
+
+#[test]
+fn delete_batch_run_refuses_linear_runs() {
+    // The endpoint is wired to the sidebar's "delete batch group" action.
+    // If a linear run id leaks in (UI bug, manual API call), refuse hard
+    // rather than silently nuking the wrong thing.
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("wf-linear")).unwrap();
+    crate::db::workflows::insert_run(&conn, &sample_run("linear-run-1", "wf-linear")).unwrap();
+
+    let result = crate::db::workflows::delete_batch_run_with_discussions(
+        &conn, "linear-run-1",
+    );
+    assert!(result.is_err(), "Should reject linear runs");
+    let err = format!("{}", result.unwrap_err());
+    assert!(err.contains("not 'batch'"), "Error must mention the type mismatch: {}", err);
+    // Run still exists (transaction rolled back / never started)
+    assert!(crate::db::workflows::get_run(&conn, "linear-run-1").unwrap().is_some());
+}
+
+#[test]
+fn delete_batch_run_unknown_id_errors() {
+    let conn = test_db();
+    let result = crate::db::workflows::delete_batch_run_with_discussions(
+        &conn, "does-not-exist",
+    );
+    assert!(result.is_err());
+    assert!(format!("{}", result.unwrap_err()).contains("not found"));
+}
+
+#[test]
+fn create_batch_run_isolated_mode_persists_on_children() {
+    // When workspace_mode is Isolated, every child disc should carry that
+    // mode — the per-disc worktree is then auto-created by make_agent_stream
+    // on the first agent run.
+    let conn = test_db();
+    // NOTE: project_id is intentionally None here. This test focuses on
+    // workspace_mode persistence — the Isolated mode "requires project_id"
+    // safety check lives at a higher layer (the BatchQuickPrompt step
+    // executor in workflows::batch_step), not inside create_batch_run itself.
+    let qp = sample_qp_for_batch("qp-iso");
+    crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
+
+    let outcome = crate::db::workflows::create_batch_run(
+        &conn,
+        crate::db::workflows::CreateBatchRunInput {
+            quick_prompt: &qp,
+            items: vec![
+                ("EW-1".into(), "prompt 1".into()),
+                ("EW-2".into(), "prompt 2".into()),
+            ],
+            batch_name: Some("Isolated batch".into()),
+            project_id: None,
+            parent_run_id: None,
+            author_pseudo: None,
+            author_avatar_email: None,
+            language: "fr".into(),
+            workspace_mode: "Isolated".into(),
+        },
+    ).unwrap();
+
+    for disc_id in &outcome.discussion_ids {
+        let disc = crate::db::discussions::get_discussion(&conn, disc_id).unwrap().unwrap();
+        assert_eq!(disc.workspace_mode, "Isolated");
+    }
+}
+
+#[test]
+fn create_batch_run_direct_mode_is_default_when_empty() {
+    // Passing an empty workspace_mode string falls back to "Direct" — we
+    // don't want to crash later just because a caller forgot to set it.
+    let conn = test_db();
+    let qp = sample_qp_for_batch("qp-default");
+    crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
+
+    let outcome = crate::db::workflows::create_batch_run(
+        &conn,
+        crate::db::workflows::CreateBatchRunInput {
+            quick_prompt: &qp,
+            items: vec![("EW-1".into(), "prompt 1".into())],
+            batch_name: None,
+            project_id: None,
+            parent_run_id: None,
+            author_pseudo: None,
+            author_avatar_email: None,
+            language: "fr".into(),
+            workspace_mode: "".into(),
+        },
+    ).unwrap();
+
+    let disc = crate::db::discussions::get_discussion(&conn, &outcome.discussion_ids[0]).unwrap().unwrap();
+    assert_eq!(disc.workspace_mode, "Direct");
+}
+
+#[test]
+fn create_batch_run_sets_workflow_run_id_on_discussions() {
+    // Regression: child discussions MUST link back to the batch run via
+    // workflow_run_id, otherwise the sidebar grouping + batch progress hooks
+    // in api::discussions won't fire.
+    let conn = test_db();
+    let qp = sample_qp_for_batch("qp-link");
+    crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
+
+    let outcome = crate::db::workflows::create_batch_run(
+        &conn,
+        crate::db::workflows::CreateBatchRunInput {
+            quick_prompt: &qp,
+            items: vec![("X-1".into(), "prompt 1".into())],
+            batch_name: None,
+            project_id: None,
+            parent_run_id: None,
+            author_pseudo: None,
+            author_avatar_email: None,
+            language: "fr".into(),
+            workspace_mode: "Direct".into(),
+        },
+    ).unwrap();
+
+    let disc = crate::db::discussions::get_discussion(&conn, &outcome.discussion_ids[0])
+        .unwrap()
+        .unwrap();
+    assert_eq!(disc.workflow_run_id.as_ref(), Some(&outcome.run_id));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Workflow multi-step
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1328,6 +1826,11 @@ fn workflow_multi_step_roundtrip() {
                 skill_ids: vec![],
                 profile_ids: vec![],
                 directive_ids: vec![],
+                batch_quick_prompt_id: None,
+                batch_items_from: None,
+                batch_wait_for_completion: None,
+                batch_max_items: None,
+                batch_workspace_mode: None,
             },
             WorkflowStep {
                 step_type: StepType::default(),
@@ -1349,6 +1852,11 @@ fn workflow_multi_step_roundtrip() {
                 skill_ids: vec!["token-saver".into()],
                 profile_ids: vec![],
                 directive_ids: vec![],
+                batch_quick_prompt_id: None,
+                batch_items_from: None,
+                batch_wait_for_completion: None,
+                batch_max_items: None,
+                batch_workspace_mode: None,
             },
             WorkflowStep {
                 step_type: StepType::default(),
@@ -1367,6 +1875,11 @@ fn workflow_multi_step_roundtrip() {
                 skill_ids: vec![],
                 profile_ids: vec![],
                 directive_ids: vec![],
+                batch_quick_prompt_id: None,
+                batch_items_from: None,
+                batch_wait_for_completion: None,
+                batch_max_items: None,
+                batch_workspace_mode: None,
             },
         ],
         actions: vec![],
@@ -1422,6 +1935,11 @@ fn workflow_update_steps_count() {
         skill_ids: vec![],
         profile_ids: vec![],
         directive_ids: vec![],
+        batch_quick_prompt_id: None,
+        batch_items_from: None,
+        batch_wait_for_completion: None,
+        batch_max_items: None,
+        batch_workspace_mode: None,
     });
     crate::db::workflows::update_workflow(&conn, &wf).unwrap();
 

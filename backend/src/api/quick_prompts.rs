@@ -122,6 +122,11 @@ pub struct BatchRunRequest {
     /// Optional project ID to attach all child discussions to.
     #[serde(default)]
     pub project_id: Option<String>,
+    /// Workspace mode for each child discussion: `"Direct"` (default) or
+    /// `"Isolated"` for per-disc git worktrees. Isolated is required when
+    /// the agents will write code in parallel.
+    #[serde(default)]
+    pub workspace_mode: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -171,133 +176,54 @@ pub async fn batch_run(
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
-    let now = Utc::now();
-    let run_id = Uuid::new_v4().to_string();
-    let batch_total = req.items.len() as u32;
-
     // Read user identity for message attribution
     let (author_pseudo, author_avatar_email) = {
         let config = state.config.read().await;
         (config.server.pseudo.clone(), config.server.avatar_email.clone())
     };
 
-    // Build the WorkflowRun + all child Discussion rows ahead of time so the
-    // whole insert happens in a single transaction. If anything fails, no
-    // partial state is left behind.
-    let run = WorkflowRun {
-        id: run_id.clone(),
-        // Batch runs are not tied to a saved Workflow — use the QP id as the
-        // "virtual workflow id" so the existing list_runs(workflow_id) query
-        // still works and users can view all runs for a QP in one place.
-        workflow_id: format!("qp:{}", qp.id),
-        status: RunStatus::Running,
-        trigger_context: Some(serde_json::json!({
-            "type": "batch",
-            "quick_prompt_id": qp.id,
-            "quick_prompt_name": qp.name,
-            "batch_size": batch_total,
-        })),
-        step_results: vec![],
-        tokens_used: 0,
-        workspace_path: None,
-        started_at: now,
-        finished_at: None,
-        run_type: "batch".into(),
-        batch_total,
-        batch_completed: 0,
-        batch_failed: 0,
-        batch_name: Some(req.batch_name.clone()),
-    };
+    // Delegate to the shared pure fn — same logic as the workflow step executor.
+    let batch_name_for_log = req.batch_name.clone();
+    let qp_name_for_log = qp.name.clone();
+    let items: Vec<(String, String)> = req.items.into_iter().map(|i| (i.title, i.prompt)).collect();
+    let workspace_mode = req.workspace_mode.unwrap_or_else(|| "Direct".into());
 
-    // Build each child discussion with the fully-rendered prompt as its
-    // initial message, all linked back to the run via workflow_run_id.
-    let discussions: Vec<(Discussion, DiscussionMessage)> = req.items.iter().map(|item| {
-        let disc_id = Uuid::new_v4().to_string();
-        let initial_message = DiscussionMessage {
-            id: Uuid::new_v4().to_string(),
-            role: MessageRole::User,
-            content: item.prompt.clone(),
-            agent_type: None,
-            timestamp: now,
-            tokens_used: 0,
-            auth_mode: None,
-            model_tier: None,
-            cost_usd: None,
-            author_pseudo: author_pseudo.clone(),
-            author_avatar_email: author_avatar_email.clone(),
-        };
-        let discussion = Discussion {
-            id: disc_id,
-            project_id: req.project_id.clone().or_else(|| qp.project_id.clone()),
-            title: item.title.clone(),
-            agent: qp.agent.clone(),
-            language: "fr".into(), // Batch disc inherits the server default language
-            participants: vec![qp.agent.clone()],
-            messages: vec![initial_message.clone()],
-            message_count: 1,
-            skill_ids: qp.skill_ids.clone(),
-            profile_ids: vec![],
-            directive_ids: vec![],
-            archived: false,
-            workspace_mode: "Direct".into(),
-            workspace_path: None,
-            worktree_branch: None,
-            tier: qp.tier,
-            pin_first_message: false,
-            summary_cache: None,
-            summary_up_to_msg_idx: None,
-            shared_id: None,
-            shared_with: vec![],
-            workflow_run_id: Some(run_id.clone()),
-            created_at: now,
-            updated_at: now,
-        };
-        (discussion, initial_message)
-    }).collect();
-
-    let discussion_ids: Vec<String> = discussions.iter().map(|(d, _)| d.id.clone()).collect();
-
-    // Single transaction: ensure the batch placeholder workflow exists,
-    // insert the run, then all discussions and their initial messages.
-    // Using a placeholder keeps the workflow_runs FK intact without needing
-    // a schema change — the placeholder row is filtered out of the
-    // user-facing workflows list (see BATCH_WORKFLOW_PREFIX).
-    let run_for_db = run.clone();
-    let discs_for_db = discussions;
-    let qp_id_for_tx = qp.id.clone();
-    let qp_name_for_tx = qp.name.clone();
-    let qp_project_for_tx = qp.project_id.clone();
-    if let Err(e) = state.db.with_conn(move |conn| {
-        conn.execute_batch("BEGIN")?;
-        let tx_result: anyhow::Result<()> = (|| {
-            crate::db::workflows::ensure_batch_placeholder_workflow(
-                conn, &qp_id_for_tx, &qp_name_for_tx, qp_project_for_tx.as_deref(),
-            )?;
-            crate::db::workflows::insert_run(conn, &run_for_db)?;
-            for (disc, msg) in &discs_for_db {
-                crate::db::discussions::insert_discussion(conn, disc)?;
-                crate::db::discussions::insert_message(conn, &disc.id, msg)?;
-            }
-            Ok(())
-        })();
-        if let Err(e) = tx_result {
-            let _ = conn.execute_batch("ROLLBACK");
-            return Err(e);
-        }
-        conn.execute_batch("COMMIT")?;
-        Ok(())
-    }).await {
-        return Json(ApiResponse::err(format!("Failed to create batch: {}", e)));
+    // Safety: Isolated mode needs a project (git repo) to worktree against.
+    // Check the effective project_id (request override OR QP default).
+    if workspace_mode == "Isolated"
+        && req.project_id.is_none()
+        && qp.project_id.is_none()
+    {
+        return Json(ApiResponse::err(
+            "Isolated workspace mode requires a project_id (the Quick Prompt or the batch request must target a git-backed project)"
+        ));
     }
+
+    let outcome = match state.db.with_conn(move |conn| {
+        crate::db::workflows::create_batch_run(conn, crate::db::workflows::CreateBatchRunInput {
+            quick_prompt: &qp,
+            items,
+            batch_name: Some(req.batch_name),
+            project_id: req.project_id,
+            parent_run_id: None,
+            author_pseudo,
+            author_avatar_email,
+            language: "fr".into(),
+            workspace_mode,
+        })
+    }).await {
+        Ok(o) => o,
+        Err(e) => return Json(ApiResponse::err(format!("Failed to create batch: {}", e))),
+    };
 
     tracing::info!(
         "Created batch run {} with {} discussions (QP: {}, name: {})",
-        run_id, batch_total, qp.name, req.batch_name
+        outcome.run_id, outcome.batch_total, qp_name_for_log, batch_name_for_log
     );
 
     Json(ApiResponse::ok(BatchRunResponse {
-        run_id,
-        discussion_ids,
-        batch_total,
+        run_id: outcome.run_id,
+        discussion_ids: outcome.discussion_ids,
+        batch_total: outcome.batch_total,
     }))
 }

@@ -378,6 +378,93 @@ pub async fn save_language(
     }
 }
 
+/// GET /api/config/ui-language
+///
+/// UI locale of the React frontend (FR/EN/ES). Returned by the frontend at
+/// mount to survive Tauri WebView2 localStorage wipes (app update, profile
+/// rotation on Windows) — localStorage remains the fast-path write so the
+/// UI doesn't flash on navigation.
+pub async fn get_ui_language(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<String>> {
+    let config = state.config.read().await;
+    Json(ApiResponse::ok(config.ui_language.clone()))
+}
+
+/// POST /api/config/ui-language
+pub async fn save_ui_language(
+    State(state): State<AppState>,
+    Json(lang): Json<String>,
+) -> Json<ApiResponse<()>> {
+    // Validate — refuse random strings to avoid poisoning the config. We
+    // accept only the three locales the frontend actually ships.
+    if !matches!(lang.as_str(), "fr" | "en" | "es") {
+        return Json(ApiResponse::err(format!("Invalid ui_language '{}'. Expected fr|en|es.", lang)));
+    }
+    let mut config = state.config.write().await;
+    config.ui_language = lang;
+    match config::save(&config).await {
+        Ok(_) => Json(ApiResponse::ok(())),
+        Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
+    }
+}
+
+/// GET /api/config/stt-model
+pub async fn get_stt_model(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<Option<String>>> {
+    let config = state.config.read().await;
+    Json(ApiResponse::ok(config.stt_model.clone()))
+}
+
+/// POST /api/config/stt-model
+pub async fn save_stt_model(
+    State(state): State<AppState>,
+    Json(model_id): Json<String>,
+) -> Json<ApiResponse<()>> {
+    let mut config = state.config.write().await;
+    config.stt_model = if model_id.is_empty() { None } else { Some(model_id) };
+    match config::save(&config).await {
+        Ok(_) => Json(ApiResponse::ok(())),
+        Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
+    }
+}
+
+/// GET /api/config/tts-voices — returns the whole map so the frontend can
+/// render the correct voice on whatever language it currently displays.
+pub async fn get_tts_voices(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<std::collections::HashMap<String, String>>> {
+    let config = state.config.read().await;
+    Json(ApiResponse::ok(config.tts_voices.clone()))
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct TtsVoiceRequest {
+    pub lang: String,
+    pub voice_id: String,
+}
+
+/// POST /api/config/tts-voice — update a single `(lang, voice_id)` mapping.
+pub async fn save_tts_voice(
+    State(state): State<AppState>,
+    Json(req): Json<TtsVoiceRequest>,
+) -> Json<ApiResponse<()>> {
+    if req.lang.is_empty() {
+        return Json(ApiResponse::err("lang is required"));
+    }
+    let mut config = state.config.write().await;
+    if req.voice_id.is_empty() {
+        config.tts_voices.remove(&req.lang);
+    } else {
+        config.tts_voices.insert(req.lang, req.voice_id);
+    }
+    match config::save(&config).await {
+        Ok(_) => Json(ApiResponse::ok(())),
+        Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
+    }
+}
+
 /// GET /api/config/scan-depth
 pub async fn get_scan_depth(
     State(state): State<AppState>,

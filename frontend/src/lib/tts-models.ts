@@ -41,7 +41,11 @@ export const TTS_VOICES: Record<string, TtsLangVoices> = {
   },
 };
 
-/** Get the selected voice ID for a language, falling back to the language default */
+import { config as configApi } from './api';
+
+/** Sync fast-path: read the selected voice for a language from localStorage,
+ *  falling back to the bundled default. Used for the immediate render before
+ *  the backend fetch lands. */
 export function getTtsVoiceId(lang: string): string {
   try {
     const stored = localStorage.getItem(`kronn:ttsVoice:${lang}`);
@@ -51,7 +55,26 @@ export function getTtsVoiceId(lang: string): string {
   return TTS_VOICES[lang]?.default ?? TTS_VOICES.fr.default;
 }
 
-/** Store the selected voice ID for a language */
+/** Hydrate localStorage from the backend-stored voice map at app boot, so
+ *  subsequent sync reads survive a Tauri WebView2 localStorage wipe. Skipped
+ *  (silent) if the backend is unreachable. */
+export async function hydrateTtsVoicesFromBackend(): Promise<void> {
+  try {
+    const map = await configApi.getTtsVoices();
+    for (const [lang, voiceId] of Object.entries(map ?? {})) {
+      const langVoices = TTS_VOICES[lang];
+      if (langVoices?.voices.some(v => v.id === voiceId)) {
+        try { localStorage.setItem(`kronn:ttsVoice:${lang}`, voiceId); } catch { /* ignore */ }
+      }
+    }
+  } catch { /* offline — nothing to hydrate */ }
+}
+
+/** Store the selected voice for a language. Writes both localStorage (fast
+ *  re-render) and backend (durable across Tauri restarts). */
 export function setTtsVoiceId(lang: string, voiceId: string) {
-  localStorage.setItem(`kronn:ttsVoice:${lang}`, voiceId);
+  try { localStorage.setItem(`kronn:ttsVoice:${lang}`, voiceId); } catch { /* ignore */ }
+  configApi.saveTtsVoice(lang, voiceId).catch(e => {
+    console.warn(`Failed to persist TTS voice for ${lang} to backend:`, e);
+  });
 }

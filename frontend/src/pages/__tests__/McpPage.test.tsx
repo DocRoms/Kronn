@@ -19,6 +19,10 @@ vi.mock('../../lib/api', () => ({
     getContext: vi.fn(),
     updateContext: vi.fn(),
   },
+  config: {
+    getUiLanguage: vi.fn().mockResolvedValue('fr'),
+    saveUiLanguage: vi.fn().mockResolvedValue(undefined),
+  },
 }));
 
 import { McpPage } from '../McpPage';

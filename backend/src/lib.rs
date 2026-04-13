@@ -46,11 +46,58 @@ pub struct AuditTracker {
 pub struct AppState {
     pub config: Arc<RwLock<AppConfig>>,
     pub db: Arc<Database>,
-    pub workflow_engine: Arc<WorkflowEngine>,
     pub agent_semaphore: Arc<Semaphore>,
     pub audit_tracker: Arc<Mutex<AuditTracker>>,
-    /// Broadcast channel for WebSocket messages (presence, heartbeat, future: chat).
+    /// Broadcast channel for WebSocket messages (presence, heartbeat, chat, batch progress).
     pub ws_broadcast: Arc<tokio::sync::broadcast::Sender<crate::models::WsMessage>>,
+    /// Registry of in-flight cancellable tasks keyed by a string id — used by
+    /// the "⏹ Arrêter" UI to abort a running agent discussion or workflow
+    /// run. Keys are either a `disc_id` (from `make_agent_stream`) or a
+    /// `run_id` (from the workflow runner). Tokens are inserted when work
+    /// starts and removed in its finally-block — see the Registry impl below.
+    pub cancel_registry: Arc<Mutex<HashMap<String, tokio_util::sync::CancellationToken>>>,
+}
+
+/// Helpers to manage the cancel registry without leaking mutex details all
+/// over the code. Keep this file-local so the registry convention stays
+/// consistent (RAII-style insertion + cleanup on drop).
+pub struct CancelGuard {
+    registry: Arc<Mutex<HashMap<String, tokio_util::sync::CancellationToken>>>,
+    key: String,
+    pub token: tokio_util::sync::CancellationToken,
+}
+
+impl CancelGuard {
+    /// Register a new cancellation token under `key`, returning a guard that
+    /// automatically removes it from the registry when dropped. If a token
+    /// already exists under this key (e.g. the user retried a run that never
+    /// cleaned up), it's silently replaced — the old token stays dangling
+    /// but is no longer reachable, which is fine since CancellationToken is
+    /// Arc-based and will be dropped when its last holder goes away.
+    pub fn insert(
+        registry: &Arc<Mutex<HashMap<String, tokio_util::sync::CancellationToken>>>,
+        key: impl Into<String>,
+    ) -> Self {
+        let key = key.into();
+        let token = tokio_util::sync::CancellationToken::new();
+        if let Ok(mut map) = registry.lock() {
+            map.insert(key.clone(), token.clone());
+        }
+        Self { registry: registry.clone(), key, token }
+    }
+}
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        if let Ok(mut map) = self.registry.lock() {
+            // Simple remove-by-key: if a later registration replaced this one
+            // before Drop runs (rare race), we'd wipe the fresh entry — but
+            // that scenario doesn't happen in practice since a disc_id/run_id
+            // is only active in one task at a time. If it ever does, the
+            // user's ⏹ button would briefly no-op until the next request.
+            map.remove(&self.key);
+        }
+    }
 }
 
 // ─── Auth Middleware ─────────────────────────────────────────────────────────
@@ -197,6 +244,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/config/discover-keys", post(api::setup::discover_keys))
         .route("/api/config/toggle-token-override", post(api::setup::toggle_token_override))
         .route("/api/config/language", get(api::setup::get_language).post(api::setup::save_language))
+        .route("/api/config/ui-language", get(api::setup::get_ui_language).post(api::setup::save_ui_language))
+        .route("/api/config/stt-model", get(api::setup::get_stt_model).post(api::setup::save_stt_model))
+        .route("/api/config/tts-voices", get(api::setup::get_tts_voices))
+        .route("/api/config/tts-voice", post(api::setup::save_tts_voice))
         .route("/api/config/scan-paths", get(api::setup::get_scan_paths).post(api::setup::set_scan_paths))
         .route("/api/config/scan-ignore", get(api::setup::get_scan_ignore).post(api::setup::set_scan_ignore))
         .route("/api/config/scan-depth", get(api::setup::get_scan_depth).post(api::setup::set_scan_depth))
@@ -261,9 +312,13 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/workflows", get(api::workflows::list).post(api::workflows::create))
         .route("/api/workflows/:id", get(api::workflows::get).put(api::workflows::update).delete(api::workflows::delete))
         .route("/api/workflows/test-step", post(api::workflows::test_step))
+        .route("/api/workflows/test-batch-step", post(api::workflows::test_batch_step))
         .route("/api/workflows/:id/trigger", post(api::workflows::trigger))
         .route("/api/workflows/:id/runs", get(api::workflows::list_runs).delete(api::workflows::delete_all_runs))
         .route("/api/workflows/:id/runs/:run_id", get(api::workflows::get_run).delete(api::workflows::delete_run))
+        .route("/api/workflows/:id/runs/:run_id/cancel", post(api::workflows::cancel_run))
+        .route("/api/workflow-runs/batch-summaries", get(api::workflows::list_batch_run_summaries))
+        .route("/api/workflow-runs/:run_id", delete(api::workflows::delete_batch_run))
         // ── Quick Prompts ──
         .route("/api/quick-prompts", get(api::quick_prompts::list).post(api::quick_prompts::create))
         .route("/api/quick-prompts/:id", put(api::quick_prompts::update).delete(api::quick_prompts::delete))
@@ -276,6 +331,8 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/discussions/:id/messages", post(api::discussions::send_message))
         .route("/api/discussions/:id/messages/last", delete(api::discussions::delete_last_agent_messages).patch(api::discussions::edit_last_user_message))
         .route("/api/discussions/:id/run", post(api::discussions::run_agent))
+        .route("/api/discussions/:id/stop", post(api::discussions::stop_agent))
+        .route("/api/discussions/:id/dismiss-partial", post(api::discussions::dismiss_partial))
         .route("/api/discussions/:id/orchestrate", post(api::discussions::orchestrate))
         .route("/api/discussions/:id/share", post(api::discussions::share))
         .route("/api/discussions/:id/git-status", get(api::disc_git::disc_git_status))

@@ -72,6 +72,13 @@ vi.mock('../../lib/api', () => ({
     inviteCode: vi.fn().mockResolvedValue('kronn:test@localhost:3456'),
     ping: vi.fn().mockResolvedValue(false),
   },
+  workflows: {
+    listBatchRunSummaries: vi.fn().mockResolvedValue([]),
+  },
+  config: {
+    getUiLanguage: vi.fn().mockResolvedValue('fr'),
+    saveUiLanguage: vi.fn().mockResolvedValue(undefined),
+  },
 }));
 
 // Mock useWebSocket hook (WS not available in jsdom)

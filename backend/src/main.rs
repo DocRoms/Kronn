@@ -55,18 +55,77 @@ async fn main() -> anyhow::Result<()> {
     let database = Arc::new(Database::open().expect("Failed to open database"));
     tracing::info!("Database opened at {}/kronn.db", config::config_dir().unwrap().display());
 
-    // Build state
+    // Build state first (no longer holds workflow_engine — broken circular dep)
     let config_arc = Arc::new(RwLock::new(app_config));
-    let workflow_engine = Arc::new(WorkflowEngine::new(database.clone(), config_arc.clone()));
     let (ws_tx, _) = tokio::sync::broadcast::channel::<kronn::models::WsMessage>(256);
     let state = AppState {
         config: config_arc,
         db: database,
-        workflow_engine: workflow_engine.clone(),
         agent_semaphore: Arc::new(Semaphore::new(max_agents)),
         audit_tracker: Arc::new(std::sync::Mutex::new(AuditTracker::default())),
         ws_broadcast: Arc::new(ws_tx),
+        cancel_registry: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
+
+    // Workflow engine gets a clone of the state so it can spawn runs that
+    // need full access (batch fan-out, ws broadcasts, agent semaphore).
+    let workflow_engine = Arc::new(WorkflowEngine::new(state.clone()));
+
+    // ── Orphan scan ────────────────────────────────────────────────────────
+    // Previous process may have crashed/been killed while workflow_runs or
+    // discussions were in the "Running" state. Nothing is listening for them
+    // anymore (cancel registry is empty at boot), so the UI would show them
+    // as running forever without this cleanup. We mark any still-Running row
+    // as Failed with a clear note.
+    let cleaned = state.db.with_conn(|conn| {
+        let runs = conn.execute(
+            "UPDATE workflow_runs SET status = 'Failed', finished_at = datetime('now') \
+             WHERE status = 'Running'",
+            [],
+        )?;
+        // Append a marker message to the last agent response so the UI shows
+        // what happened. We can't easily UPDATE the last message content from
+        // here without rehydrating the messages table schema, so we just log
+        // the count — the disc will show as "no reply yet" until re-run.
+        Ok(runs)
+    }).await;
+    match cleaned {
+        Ok(n) if n > 0 => tracing::warn!(
+            "Orphan scan: {} workflow_runs left Running by previous process, marked as Failed", n
+        ),
+        Ok(_) => tracing::info!("Orphan scan: nothing to clean up"),
+        Err(e) => tracing::warn!("Orphan scan failed: {}", e),
+    }
+
+    // Partial-response recovery — agents whose `full_response` was being
+    // checkpointed into discussions.partial_response when the previous
+    // process died. Convert each into an Agent message with an "interrupted"
+    // footer so the user sees what was thought instead of a silent gap.
+    //
+    // Broadcast PartialResponseRecovered over the WS so any already-connected
+    // frontend refetches the affected discs and shows the recovered messages
+    // immediately — without this, a user who reopens the app before the
+    // recovery finishes and retypes their prompt ends up with two agent
+    // responses on the same disc (the recovered one + the new run).
+    let recovered = state.db.with_conn(|conn| {
+        kronn::db::discussions::recover_partial_responses(conn)
+    }).await;
+    match recovered {
+        Ok(ids) if !ids.is_empty() => {
+            tracing::warn!(
+                "Partial-response recovery: {} discussion(s) had in-flight agent output \
+                 from a previous process, saved as Agent messages with footer",
+                ids.len()
+            );
+            let _ = state.ws_broadcast.send(
+                kronn::models::WsMessage::PartialResponseRecovered {
+                    discussion_ids: ids,
+                }
+            );
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!("Partial-response recovery failed: {}", e),
+    }
 
     // Auto-discover and import API keys from agent config files (~/.vibe/.env, ~/.codex/auth.json, etc.)
     {

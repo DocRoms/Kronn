@@ -12,6 +12,137 @@ pub fn count_discussions(conn: &Connection) -> Result<u32> {
     Ok(count)
 }
 
+/// Checkpoint the in-flight agent response. Called periodically from
+/// `make_agent_stream` (every ~30s or ~100 chunks) so a backend restart
+/// preserves what the agent has produced so far.
+///
+/// - Setting a non-null `partial` sets `partial_response_started_at` to NOW()
+///   only if the column is currently NULL (first checkpoint of this run).
+///   Subsequent checkpoints preserve the original timestamp — critical for
+///   `recover_partial_responses` to place the recovered Agent message
+///   chronologically before any later user message posted after restart.
+/// - Setting `None` clears BOTH columns (normal completion).
+pub fn set_partial_response(conn: &Connection, disc_id: &str, partial: Option<&str>) -> Result<()> {
+    match partial {
+        Some(text) => {
+            conn.execute(
+                "UPDATE discussions \
+                 SET partial_response = ?2, \
+                     partial_response_started_at = COALESCE(partial_response_started_at, ?3) \
+                 WHERE id = ?1",
+                params![disc_id, text, Utc::now().to_rfc3339()],
+            )?;
+        }
+        None => {
+            conn.execute(
+                "UPDATE discussions \
+                 SET partial_response = NULL, partial_response_started_at = NULL \
+                 WHERE id = ?1",
+                params![disc_id],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Recover any in-flight agent responses that were checkpointed but never
+/// completed (process killed mid-stream). Called once at backend boot:
+/// for each `discussion` with non-null `partial_response`, we save the
+/// partial as an Agent message with a clear "interrupted" footer, then
+/// clear the checkpoint.
+///
+/// Returns the list of recovered discussion ids so the caller can broadcast
+/// a `PartialResponseRecovered` WS event — the frontend uses it to refetch
+/// the affected discs + toast the user that their in-flight agents were
+/// interrupted.
+///
+/// Chronology: each recovered message is timestamped with the discussion's
+/// `partial_response_started_at` (when the agent began producing output),
+/// NOT Utc::now(). Without this, a user who didn't see the partial
+/// (frontend not yet connected) and resent their prompt would see the
+/// recovered message appear AFTER their 2nd user message — confusing, and
+/// the bug reported 2026-04-13.
+///
+/// Companion to the orphan workflow_runs scan in main.rs — together they
+/// guarantee no fake-Running state survives a crash.
+pub fn recover_partial_responses(conn: &Connection) -> Result<Vec<String>> {
+    let triples: Vec<(String, String, Option<String>)> = {
+        let mut stmt = conn.prepare(
+            "SELECT id, partial_response, partial_response_started_at \
+             FROM discussions WHERE partial_response IS NOT NULL"
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+
+    if triples.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    const FOOTER: &str = "\n\n---\n⚠️ **Réflexion interrompue** — le backend a été redémarré pendant que cet agent répondait. \
+        Voici ce qu'il avait écrit jusque-là. Relancez la discussion pour reprendre.";
+
+    let mut recovered = Vec::with_capacity(triples.len());
+    for (disc_id, partial, started_at_str) in triples {
+        let content = format!("{}{}", partial.trim_end(), FOOTER);
+        // Use the checkpoint's start time so the recovered message sits
+        // BEFORE any later user message. Fall back to now() only if the
+        // column is empty (shouldn't happen after migration 032, but
+        // defensive since legacy rows might have partial_response set
+        // without a start timestamp).
+        let ts = started_at_str
+            .as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|d| d.with_timezone(&Utc))
+            .unwrap_or_else(Utc::now);
+        let msg = DiscussionMessage {
+            id: uuid::Uuid::new_v4().to_string(),
+            role: MessageRole::Agent,
+            content,
+            agent_type: None,
+            timestamp: ts,
+            tokens_used: 0,
+            auth_mode: None,
+            model_tier: None,
+            cost_usd: None,
+            author_pseudo: None,
+            author_avatar_email: None,
+        };
+        match insert_message(conn, &disc_id, &msg) {
+            Ok(_) => {
+                if let Err(e) = set_partial_response(conn, &disc_id, None) {
+                    tracing::warn!("Cleared partial after recovery but failed to wipe column for {}: {}", disc_id, e);
+                }
+                recovered.push(disc_id);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to recover partial for disc {}: {}", disc_id, e);
+            }
+        }
+    }
+    Ok(recovered)
+}
+
+/// Check if a discussion currently has an in-flight partial response
+/// checkpoint (i.e. an agent started answering but hasn't finished).
+/// Used by the POST message handler to refuse duplicate sends while a
+/// previous partial is still pending recovery.
+pub fn has_pending_partial(conn: &Connection, disc_id: &str) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM discussions \
+         WHERE id = ?1 AND partial_response IS NOT NULL",
+        params![disc_id],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
 pub fn list_discussions(conn: &Connection) -> Result<Vec<Discussion>> {
     list_discussions_paginated(conn, None, None)
 }

@@ -213,6 +213,7 @@ pub async fn trigger(
         batch_completed: 0,
         batch_failed: 0,
         batch_name: None,
+        parent_run_id: None,
     };
 
     let r = run.clone();
@@ -245,7 +246,7 @@ pub async fn trigger(
     let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::workflows::runner::RunEvent>(32);
 
     // Dispatch execution in background with the sender
-    let db = state.db.clone();
+    let state_for_run = state.clone();
     let config = state.config.clone();
     let mut run_exec = run.clone();
     tokio::spawn(async move {
@@ -255,7 +256,7 @@ pub async fn trigger(
         drop(cfg);
 
         if let Err(e) = crate::workflows::runner::execute_run(
-            db, &wf, &mut run_exec, &tokens, &agents, Some(tx),
+            state_for_run, &wf, &mut run_exec, &tokens, &agents, Some(tx),
         ).await {
             tracing::error!("Workflow run {} failed: {}", run_exec.id, e);
         }
@@ -311,6 +312,266 @@ fn sse_error(msg: impl Into<String>) -> Sse<SseStream> {
         )
     }));
     Sse::new(stream)
+}
+
+/// Request for [`test_batch_step`].
+#[derive(Debug, serde::Deserialize)]
+pub struct TestBatchStepRequest {
+    pub step: WorkflowStep,
+    /// Mock output of the upstream step (raw text or structured JSON envelope).
+    /// We feed it to the template engine so `{{steps.<name>.data.tickets}}`
+    /// resolves to the same thing it would at runtime.
+    #[serde(default)]
+    pub mock_previous_output: Option<String>,
+    /// The name of the upstream step the mock output represents — defaults
+    /// to "previous" so users can use `{{previous_step.output}}` in items_from.
+    #[serde(default)]
+    pub previous_step_name: Option<String>,
+}
+
+/// Response for [`test_batch_step`].
+#[derive(Debug, serde::Serialize)]
+pub struct BatchPreview {
+    /// First N items the runner would fan out (capped at 10 for display).
+    pub sample_items: Vec<String>,
+    pub total_items: u32,
+    pub capped_at: u32,
+    pub max_items_allowed: u32,
+    pub quick_prompt_id: Option<String>,
+    pub quick_prompt_name: Option<String>,
+    pub quick_prompt_icon: Option<String>,
+    pub quick_prompt_agent: Option<String>,
+    pub first_variable_name: Option<String>,
+    /// Prompt that would be sent for the FIRST item (after `{{var}}` substitution).
+    /// Kept for backward compat — prefer `sample_rendered_prompts` for the
+    /// per-item view.
+    pub sample_rendered_prompt: Option<String>,
+    /// Rendered prompt for EACH sample item (same length & order as
+    /// `sample_items`). Lets the user spot-check the rendering on every
+    /// ticket of their batch, not just the first one.
+    pub sample_rendered_prompts: Vec<String>,
+    pub workspace_mode: String,
+    pub wait_for_completion: bool,
+    /// Validation errors found during the dry-run (missing QP, empty list,
+    /// unresolved template, etc.) — non-empty means the step would fail at
+    /// runtime. Frontend renders these as red bullets.
+    pub errors: Vec<String>,
+    /// Non-blocking warnings: the dry-run could proceed, but there's a
+    /// configuration smell that would bite in production (e.g. using
+    /// `{{steps.X.data}}` against a FreeText step). Shown in orange,
+    /// separate from the red errors block.
+    pub warnings: Vec<String>,
+}
+
+/// POST /api/workflows/test-batch-step
+///
+/// Dry-run preview for a `BatchQuickPrompt` step. Renders the items_from
+/// template against mock previous output, parses the items, loads the QP,
+/// and returns what the runner would do — WITHOUT creating any discussion,
+/// batch run, or worktree. Used by the wizard's per-step "Tester" button so
+/// users can validate their batch configuration before triggering the real
+/// workflow.
+pub async fn test_batch_step(
+    State(state): State<AppState>,
+    Json(req): Json<TestBatchStepRequest>,
+) -> Json<ApiResponse<BatchPreview>> {
+    let mut errors: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+
+    // 1. Validate required fields up front — same checks as the runtime
+    //    executor. Surfaces config bugs without needing to fire the workflow.
+    let qp_id = match req.step.batch_quick_prompt_id.as_ref() {
+        Some(id) if !id.is_empty() => id.clone(),
+        _ => {
+            errors.push("Missing batch_quick_prompt_id".to_string());
+            return Json(ApiResponse::ok(empty_preview(&req.step, errors)));
+        }
+    };
+    let items_from = match req.step.batch_items_from.as_ref() {
+        Some(s) if !s.is_empty() => s.clone(),
+        _ => {
+            errors.push("Missing batch_items_from".to_string());
+            return Json(ApiResponse::ok(empty_preview(&req.step, errors)));
+        }
+    };
+
+    // 2. Render items_from against the mock previous output. We seed the
+    //    template ctx with a synthetic upstream step so the same expressions
+    //    that work at runtime work here.
+    let mut ctx = crate::workflows::template::TemplateContext::new();
+    if let Some(ref prev) = req.mock_previous_output {
+        let step_name = req.previous_step_name.as_deref().unwrap_or("previous");
+        ctx.set_step_output(step_name, prev);
+        // Also expose under "previous" so `{{previous_step.output}}` works
+        // regardless of the actual step name.
+        if step_name != "previous" {
+            ctx.set_step_output("previous", prev);
+        }
+
+        // Dry-run convenience: users often wire `{{steps.X.data}}` but their
+        // source step is in FreeText mode → `.data` is never populated by
+        // `set_step_output`, and the render leaves the template literal
+        // (which then looks like a single item = silent config bug).
+        //
+        // Detect the smell (items_from references `.data` and the mock is
+        // NOT a structured envelope) and:
+        //   1. Inject a raw-text fallback for `.data` so the preview runs
+        //   2. Warn the user so they know this won't work at runtime
+        let uses_data = items_from.contains(".data");
+        let has_envelope = crate::workflows::template::extract_step_envelope(prev).is_some();
+        if uses_data && !has_envelope {
+            ctx.set(format!("steps.{}.data", step_name), prev.clone());
+            if step_name != "previous" {
+                ctx.set("previous_step.data".to_string(), prev.clone());
+            }
+            warnings.push(format!(
+                "Ton template utilise `{{{{steps.{name}.data}}}}` mais le step « {name} » \
+                 n'est pas en mode « Structured ». En production, `.data` ne sera pas disponible — \
+                 seulement `.output`. Pour corriger : coche « Structured » sur le step « {name} » \
+                 (le step précédent), OU remplace `.data` par `.output` dans « Liste des items ». \
+                 Ce test continue avec un fallback pour te montrer le résultat.",
+                name = step_name
+            ));
+        }
+    }
+
+    let rendered = match ctx.render(&items_from) {
+        Ok(s) => s,
+        Err(e) => {
+            errors.push(format!("Template render error: {}", e));
+            return Json(ApiResponse::ok(empty_preview(&req.step, errors)));
+        }
+    };
+
+    // Detect an unresolved template — the render engine leaves `{{foo}}`
+    // in-place when a variable is unknown (no exception thrown). Without
+    // this guard, the parser downstream treats the literal `{{steps.X.data}}`
+    // as a single item and reports "1 item would be launched", which is
+    // worse than useless: it hides the configuration bug behind a green
+    // check. Catch it here and tell the user exactly what's missing.
+    if rendered.contains("{{") && rendered.contains("}}") {
+        errors.push(format!(
+            "Le template contient une variable non résolue : {}. \
+             As-tu testé le step précédent pour qu'il produise un output ? \
+             Ou colle manuellement un exemple dans « Mock input » ci-dessus.",
+            rendered.trim()
+        ));
+        return Json(ApiResponse::ok(empty_preview(&req.step, errors)));
+    }
+
+    // 3. Parse the rendered string into items. Reuses the same logic as
+    //    the runtime executor (JSON array OR text split).
+    let items = crate::workflows::batch_step::parse_items_for_test(&rendered);
+    if items.is_empty() {
+        errors.push(format!(
+            "items_from resolved to an empty list. Rendered value: {:?}",
+            if rendered.len() > 200 { format!("{}…", &rendered[..200]) } else { rendered.clone() }
+        ));
+    }
+
+    // 4. Load the Quick Prompt.
+    let qp_lookup = qp_id.clone();
+    let qp = match state.db.with_conn(move |conn| {
+        crate::db::quick_prompts::get_quick_prompt(conn, &qp_lookup)
+    }).await {
+        Ok(Some(q)) => Some(q),
+        Ok(None) => {
+            errors.push(format!("Quick prompt '{}' not found", qp_id));
+            None
+        }
+        Err(e) => {
+            errors.push(format!("DB error loading QP: {}", e));
+            None
+        }
+    };
+
+    // 5. Worktree safety check (same as runtime).
+    let workspace_mode = req.step.batch_workspace_mode
+        .clone()
+        .unwrap_or_else(|| "Direct".to_string());
+    if workspace_mode == "Isolated"
+        && qp.as_ref().map(|q| q.project_id.is_none()).unwrap_or(false)
+    {
+        errors.push(
+            "Isolated workspace mode requires a project-linked Quick Prompt"
+                .to_string()
+        );
+    }
+
+    // 6. Render every sample item's prompt for the user to spot-check.
+    //    Was rendering only the first item — but Marie wants to see the
+    //    rendering for each ticket of her batch, not just one (otherwise
+    //    she can't catch per-ticket template surprises).
+    let first_variable_name = qp.as_ref()
+        .and_then(|q| q.variables.first())
+        .map(|v| v.name.clone());
+    const SAMPLE_LIMIT: usize = 10;
+    let sample_rendered_prompts: Vec<String> = if let Some(qp) = &qp {
+        items.iter().take(SAMPLE_LIMIT).map(|item| {
+            crate::workflows::batch_step::render_qp_prompt_for_test(
+                &qp.prompt_template,
+                first_variable_name.as_deref(),
+                item,
+            )
+        }).collect()
+    } else {
+        Vec::new()
+    };
+    let sample_rendered_prompt = sample_rendered_prompts.first().cloned();
+
+    let max_items = req.step.batch_max_items.unwrap_or(50);
+    let total = items.len() as u32;
+    if total > max_items {
+        errors.push(format!(
+            "Item count {} exceeds max {} (raise `batch_max_items` if needed)",
+            total, max_items
+        ));
+    }
+
+    // Same SAMPLE_LIMIT as above — keep them in lockstep so sample_items
+    // and sample_rendered_prompts have matching indices.
+    let sample_items: Vec<String> = items.iter().take(SAMPLE_LIMIT).cloned().collect();
+
+    Json(ApiResponse::ok(BatchPreview {
+        sample_items,
+        total_items: total,
+        capped_at: SAMPLE_LIMIT as u32,
+        max_items_allowed: max_items,
+        quick_prompt_id: qp.as_ref().map(|q| q.id.clone()),
+        quick_prompt_name: qp.as_ref().map(|q| q.name.clone()),
+        quick_prompt_icon: qp.as_ref().map(|q| q.icon.clone()),
+        quick_prompt_agent: qp.as_ref().map(|q| {
+            serde_json::to_string(&q.agent).unwrap_or_default().trim_matches('"').to_string()
+        }),
+        first_variable_name,
+        sample_rendered_prompt,
+        sample_rendered_prompts,
+        workspace_mode,
+        wait_for_completion: req.step.batch_wait_for_completion.unwrap_or(true),
+        errors,
+        warnings,
+    }))
+}
+
+/// Build a mostly-empty BatchPreview when validation aborts early.
+fn empty_preview(step: &WorkflowStep, errors: Vec<String>) -> BatchPreview {
+    BatchPreview {
+        sample_items: vec![],
+        total_items: 0,
+        capped_at: 10,
+        max_items_allowed: step.batch_max_items.unwrap_or(50),
+        quick_prompt_id: step.batch_quick_prompt_id.clone(),
+        quick_prompt_name: None,
+        quick_prompt_icon: None,
+        quick_prompt_agent: None,
+        first_variable_name: None,
+        sample_rendered_prompt: None,
+        sample_rendered_prompts: Vec::new(),
+        workspace_mode: step.batch_workspace_mode.clone().unwrap_or_else(|| "Direct".into()),
+        wait_for_completion: step.batch_wait_for_completion.unwrap_or(true),
+        errors,
+        warnings: Vec::new(),
+    }
 }
 
 /// POST /api/workflows/test-step — Test a single step with mock context (SSE)
@@ -451,6 +712,152 @@ pub async fn list_runs(
     match state.db.with_conn(move |conn| crate::db::workflows::list_runs(conn, &id)).await {
         Ok(runs) => Json(ApiResponse::ok(runs)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
+/// GET /api/workflow-runs/batch-summaries
+///
+/// Returns a compact summary of every batch run, with the parent linear run
+/// resolved to a human-friendly (workflow name + run sequence) label.
+/// Consumed by the discussion sidebar to render a clickable pastille that
+/// jumps back to the workflow that spawned a given batch.
+pub async fn list_batch_run_summaries(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<Vec<BatchRunSummary>>> {
+    match state.db.with_conn(crate::db::workflows::list_batch_run_summaries).await {
+        Ok(summaries) => Json(ApiResponse::ok(summaries)),
+        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
+/// Response for [`cancel_run`].
+#[derive(Debug, serde::Serialize)]
+pub struct CancelRunResponse {
+    pub run_cancelled: bool,
+    /// Number of child-batch discussions whose agent tokens were triggered.
+    /// Zero means either this was a plain linear run (no batch children)
+    /// or all child discs had already finished.
+    pub child_discs_cancelled: u32,
+}
+
+/// POST /api/workflows/:id/runs/:run_id/cancel
+///
+/// Stop a Running workflow run. Triggers the run's cancellation token (so the
+/// runner short-circuits to `Cancelled` status before its next step) AND
+/// cascades to every active batch child: each child batch run's discussions
+/// have their own agent token triggered so in-flight agents stop too.
+///
+/// This is the "⏹ Arrêter" button on WorkflowDetail run cards. Idempotent —
+/// safe to call on an already-finished run (returns false for all).
+pub async fn cancel_run(
+    State(state): State<AppState>,
+    Path((_workflow_id, run_id)): Path<(String, String)>,
+) -> Json<ApiResponse<CancelRunResponse>> {
+    // 1. Trigger the linear run's own token
+    let run_cancelled = {
+        let mut map = match state.cancel_registry.lock() {
+            Ok(m) => m,
+            Err(_) => return Json(ApiResponse::err("Cancel registry poisoned")),
+        };
+        if let Some(token) = map.remove(&run_id) {
+            token.cancel();
+            true
+        } else {
+            false
+        }
+    };
+
+    // 2. Find child batches via parent_run_id and cascade to their disc agents.
+    //    One DB call to get all child batches of this run, then another to get
+    //    each batch's child discussions. For each disc, trigger its cancel
+    //    token if one is registered (i.e. agent still running).
+    let run_id_for_db = run_id.clone();
+    let child_disc_ids: Vec<String> = match state.db.with_conn(move |conn| {
+        let mut stmt = conn.prepare(
+            "SELECT d.id FROM discussions d \
+             JOIN workflow_runs wr ON d.workflow_run_id = wr.id \
+             WHERE wr.parent_run_id = ?1"
+        )?;
+        let ids: Vec<String> = stmt
+            .query_map(rusqlite::params![&run_id_for_db], |row| row.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(ids)
+    }).await {
+        Ok(ids) => ids,
+        Err(e) => return Json(ApiResponse::err(format!("DB error finding child discs: {}", e))),
+    };
+
+    let child_discs_cancelled = {
+        let mut map = match state.cancel_registry.lock() {
+            Ok(m) => m,
+            Err(_) => return Json(ApiResponse::err("Cancel registry poisoned")),
+        };
+        let mut n: u32 = 0;
+        for disc_id in &child_disc_ids {
+            if let Some(token) = map.remove(disc_id) {
+                token.cancel();
+                n += 1;
+            }
+        }
+        n
+    };
+
+    // 3. Also mark any running child batch runs as Cancelled in the DB so the
+    //    sidebar stops showing them as "in progress" even though no one is
+    //    actively writing to them anymore. We don't touch discussions — they
+    //    get their Cancelled/Failed status from the agent-task finally path.
+    let run_id_for_db2 = run_id.clone();
+    let _ = state.db.with_conn(move |conn| {
+        conn.execute(
+            "UPDATE workflow_runs SET status = 'Cancelled', finished_at = datetime('now') \
+             WHERE parent_run_id = ?1 AND status = 'Running'",
+            rusqlite::params![&run_id_for_db2],
+        )?;
+        Ok(())
+    }).await;
+
+    tracing::info!(
+        "Cancel run {}: run_cancelled={}, {} child disc agents stopped",
+        run_id, run_cancelled, child_discs_cancelled
+    );
+
+    Json(ApiResponse::ok(CancelRunResponse {
+        run_cancelled,
+        child_discs_cancelled,
+    }))
+}
+
+/// Response for [`delete_batch_run`].
+#[derive(Debug, serde::Serialize)]
+pub struct DeletedBatchResponse {
+    pub run_id: String,
+    pub discussions_deleted: u32,
+}
+
+/// DELETE /api/workflow-runs/:run_id
+///
+/// Delete a batch workflow run AND all its child discussions in one
+/// transaction. Refuses to act on linear runs (use the workflow run delete
+/// endpoint for those — they don't own discussions to begin with).
+///
+/// The user-visible flow: from the sidebar batch group, "🗑 Supprimer ce
+/// batch et ses N discussions" → confirm → this handler. Returns the count
+/// of discussions actually deleted so the toast can show the right number
+/// (a batch may have grown/shrunk between when the UI computed N and now).
+pub async fn delete_batch_run(
+    State(state): State<AppState>,
+    Path(run_id): Path<String>,
+) -> Json<ApiResponse<DeletedBatchResponse>> {
+    let run_id_for_db = run_id.clone();
+    match state.db.with_conn(move |conn| {
+        crate::db::workflows::delete_batch_run_with_discussions(conn, &run_id_for_db)
+    }).await {
+        Ok(summary) => Json(ApiResponse::ok(DeletedBatchResponse {
+            run_id: summary.run_id,
+            discussions_deleted: summary.discussions_deleted as u32,
+        })),
+        Err(e) => Json(ApiResponse::err(format!("Failed to delete batch: {}", e))),
     }
 }
 
@@ -772,6 +1179,11 @@ pub async fn suggestions(
                 skill_ids: vec![],
                 profile_ids: vec![],
                 directive_ids: vec![],
+                batch_quick_prompt_id: None,
+                batch_items_from: None,
+                batch_wait_for_completion: None,
+                batch_max_items: None,
+                batch_workspace_mode: None,
             }).collect(),
         });
     }

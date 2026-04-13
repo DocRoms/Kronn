@@ -1,4 +1,4 @@
-import { useState, useRef, useMemo } from 'react';
+import { useState, useRef, useMemo, useEffect } from 'react';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { useT } from '../lib/I18nContext';
 import { workflows as workflowsApi, discussions as discussionsApi, quickPrompts as quickPromptsApi } from '../lib/api';
@@ -28,6 +28,17 @@ interface WorkflowsPageProps {
    * all of them, not just the one we navigate to. Without this prop the
    * batch still works but only the navigated disc looks like it's running. */
   onBatchLaunched?: (discIds: string[]) => void;
+  /** When the user clicks a batch pastille in the discussion sidebar, the
+   * Dashboard switches to this tab and sets this prop to the parent workflow
+   * id. We auto-open its detail panel + switch to the 'workflows' sub-tab
+   * so the user lands exactly on the run that spawned their batch. */
+  initialSelectedWorkflowId?: string | null;
+  /** Ack callback — Dashboard clears the id after we've consumed it so the
+   * same click doesn't re-open on every render. */
+  onInitialSelectionConsumed?: () => void;
+  /** Reverse direction: when "📋 N conversations" is clicked on a workflow run,
+   * jump to the discussions tab and focus that batch group. */
+  onNavigateToBatch?: (batchRunId: string) => void;
 }
 
 const TRIGGER_LABELS: Record<string, string> = {
@@ -45,7 +56,7 @@ const STATUS_COLORS: Record<string, string> = {
   WaitingApproval: '#c8ff00',
 };
 
-export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, configLanguage, onNavigateDiscussion, onBatchLaunched }: WorkflowsPageProps) {
+export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, configLanguage, onNavigateDiscussion, onBatchLaunched, initialSelectedWorkflowId, onInitialSelectionConsumed, onNavigateToBatch }: WorkflowsPageProps) {
   const { t } = useT();
   const isMobile = useIsMobile();
   const [tab, setTab] = useState<'workflows' | 'quickPrompts'>('workflows');
@@ -63,6 +74,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const [batchingQP, setBatchingQP] = useState<QuickPrompt | null>(null);
   const [batchInputLines, setBatchInputLines] = useState('');
   const [batchLaunching, setBatchLaunching] = useState(false);
+  const [batchIsolated, setBatchIsolated] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [editingWorkflow, setEditingWorkflow] = useState<Workflow | null>(null);
   const [detailWorkflow, setDetailWorkflow] = useState<Workflow | null>(null);
@@ -129,6 +141,18 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       setLoadingDetail(false);
     }
   };
+
+  // Cross-page navigation: when the sidebar's batch pastille is clicked, the
+  // Dashboard passes the parent workflow id here. We auto-switch to the
+  // "workflows" sub-tab, open its detail panel, then ack so the same click
+  // doesn't re-fire on every render.
+  useEffect(() => {
+    if (!initialSelectedWorkflowId) return;
+    setTab('workflows');
+    openDetail(initialSelectedWorkflowId);
+    onInitialSelectionConsumed?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialSelectedWorkflowId]);
 
   const handleTrigger = async (id: string) => {
     setTriggering(id);
@@ -314,6 +338,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         items,
         batch_name: batchName,
         project_id: qp.project_id ?? null,
+        workspace_mode: batchIsolated ? 'Isolated' : 'Direct',
       });
       // Kick off each child discussion's agent run in parallel.
       //
@@ -375,7 +400,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         {tab === 'workflows' ? (
         <div className="flex-row gap-3">
           {onNavigateDiscussion && (
-            <button className="wf-create-ai-btn" onClick={async () => {
+            <button className="wf-create-ai-btn" title={t('wf.createWithAIHint')} onClick={async () => {
               try {
                 // Inject project list as compact lookup table (max 20, saves tokens)
                 const shown = projects.slice(0, 20);
@@ -402,7 +427,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
               <Zap size={14} /> {t('wf.createWithAI')}
             </button>
           )}
-          <button className="wf-create-btn" onClick={() => setShowCreate(true)}>
+          <button className="wf-create-btn" title={t('wf.newHint')} onClick={() => setShowCreate(true)}>
             <Plus size={14} /> {t('wf.new')}
           </button>
         </div>
@@ -586,6 +611,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 }}
                 triggering={triggering === detailWorkflow.id}
                 agentAccess={agentAccess}
+                onNavigateToBatch={onNavigateToBatch}
               />
             )}
 
@@ -708,6 +734,20 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                               ).size
                             )}
                           </p>
+                          {/* Isolated-worktree toggle — only meaningful if the QP is project-linked */}
+                          <label
+                            className="flex-row gap-2 text-xs mt-2 mb-2"
+                            style={{ alignItems: 'center', opacity: qp.project_id ? 1 : 0.5 }}
+                            title={qp.project_id ? t('qp.batch.worktreeHint') : t('qp.batch.worktreeNoProject')}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={batchIsolated}
+                              disabled={!qp.project_id}
+                              onChange={e => setBatchIsolated(e.target.checked)}
+                            />
+                            {t('qp.batch.worktree')}
+                          </label>
                           <div className="flex-row gap-4">
                             <button
                               className="qp-launch-go-btn"

@@ -3,12 +3,11 @@
 //! Creates workspace → runs hooks → executes steps sequentially →
 //! executes actions → cleans up workspace.
 
-use std::sync::Arc;
 use anyhow::Result;
 use chrono::Utc;
 
-use crate::db::Database;
 use crate::models::*;
+use crate::AppState;
 
 use super::template::TemplateContext;
 use super::workspace::Workspace;
@@ -36,7 +35,7 @@ pub type EventSender = tokio::sync::mpsc::Sender<RunEvent>;
 
 /// Execute a complete workflow run.
 pub async fn execute_run(
-    db: Arc<Database>,
+    state: AppState,
     workflow: &Workflow,
     run: &mut WorkflowRun,
     tokens_config: &TokensConfig,
@@ -52,6 +51,15 @@ pub async fn execute_run(
             }
         }
     };
+
+    let db = state.db.clone();
+
+    // Register a cancellation token keyed by the run id. The "⏹ Arrêter" UI
+    // triggers this token via POST /api/workflows/.../runs/:run_id/cancel.
+    // We check it between steps and during any long await — short-circuiting
+    // to status = Cancelled. The CancelGuard auto-cleans on scope exit.
+    let cancel_guard = crate::CancelGuard::insert(&state.cancel_registry, run.id.clone());
+    let cancel_token = cancel_guard.token.clone();
 
     // Update run status to Running
     run.status = RunStatus::Running;
@@ -116,12 +124,32 @@ pub async fn execute_run(
 
     // Execute steps sequentially
     let mut all_success = true;
+    let mut cancelled_by_user = false;
     let mut step_idx = 0;
     let total_steps = workflow.steps.len();
     let max_total_iterations = max_iterations_for(total_steps); // safeguard against infinite Goto loops
     let mut iteration_count = 0;
 
     while step_idx < workflow.steps.len() {
+        // Cancellation check — fires when the user clicked "⏹ Arrêter" and
+        // the /cancel endpoint triggered our token. We break BEFORE executing
+        // the next step so a runaway linear run doesn't keep burning tokens.
+        // Note: a step already in flight won't stop here — agent steps have
+        // their own disc-level token checked inside `make_agent_stream`.
+        if cancel_token.is_cancelled() {
+            tracing::info!("Workflow run {} cancelled by user before step {}", run.id, step_idx);
+            cancelled_by_user = true;
+            run.step_results.push(StepResult {
+                step_name: "__cancelled_by_user__".to_string(),
+                status: RunStatus::Cancelled,
+                output: "Workflow run cancelled by user".to_string(),
+                tokens_used: 0,
+                duration_ms: 0,
+                condition_result: None,
+            });
+            all_success = false;
+            break;
+        }
         iteration_count += 1;
         if iteration_count > max_total_iterations {
             tracing::error!("Workflow run exceeded {} iterations — aborting to prevent infinite loop", max_total_iterations);
@@ -145,16 +173,28 @@ pub async fn execute_run(
             total_steps,
         }).await;
 
-        let full_access = agents_config.full_access_for(&step.agent);
-        let outcome: StepOutcome = execute_step(
-            step,
-            &project_path,
-            &work_dir,
-            tokens_config,
-            full_access,
-            &ctx,
-            None,
-        ).await;
+        let outcome: StepOutcome = if step.step_type == StepType::BatchQuickPrompt {
+            // Phase 2 batch workflows — fan out a Quick Prompt over items
+            // from a previous step's output, then optionally wait for all
+            // children to finish before moving on.
+            super::batch_step::execute_batch_quick_prompt_step(
+                step,
+                &run.id,
+                state.clone(),
+                &ctx,
+            ).await
+        } else {
+            let full_access = agents_config.full_access_for(&step.agent);
+            execute_step(
+                step,
+                &project_path,
+                &work_dir,
+                tokens_config,
+                full_access,
+                &ctx,
+                None,
+            ).await
+        };
 
         // Record step output for template chaining
         ctx.set_step_output(&step.name, &outcome.result.output);
@@ -221,8 +261,15 @@ pub async fn execute_run(
     // Post-step actions (CreatePr, CommentIssue, etc.) are handled by MCP tools
     // injected into agent prompts — no separate actions phase needed.
 
-    // Final status
-    run.status = if all_success { RunStatus::Success } else { RunStatus::Failed };
+    // Final status: Cancelled takes precedence over Failed/Success when the
+    // user explicitly stopped the run.
+    run.status = if cancelled_by_user {
+        RunStatus::Cancelled
+    } else if all_success {
+        RunStatus::Success
+    } else {
+        RunStatus::Failed
+    };
     run.finished_at = Some(Utc::now());
 
     let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);

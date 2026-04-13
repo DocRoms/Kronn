@@ -34,6 +34,12 @@ vi.mock('../../lib/api', () => ({
   },
   config: {
     getLanguage: vi.fn().mockResolvedValue('fr'),
+    getUiLanguage: vi.fn().mockResolvedValue('fr'),
+    saveUiLanguage: vi.fn().mockResolvedValue(undefined),
+    getSttModel: vi.fn().mockResolvedValue(null),
+    saveSttModel: vi.fn().mockResolvedValue(undefined),
+    getTtsVoices: vi.fn().mockResolvedValue({}),
+    saveTtsVoice: vi.fn().mockResolvedValue(undefined),
     getAgentAccess: vi.fn().mockResolvedValue(null),
   },
   skills: {

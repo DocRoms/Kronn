@@ -40,6 +40,17 @@ vi.mock('../../lib/api', () => ({
     update: vi.fn(),
     delete: vi.fn(),
   },
+  quickPrompts: {
+    list: vi.fn().mockResolvedValue([]),
+    create: vi.fn(),
+    update: vi.fn(),
+    delete: vi.fn(),
+    batchRun: vi.fn(),
+  },
+  config: {
+    getUiLanguage: vi.fn().mockResolvedValue('fr'),
+    saveUiLanguage: vi.fn().mockResolvedValue(undefined),
+  },
 }));
 
 const defaultModelTiers = {
@@ -287,8 +298,8 @@ describe('WorkflowsPage', () => {
     // Navigate to step 1 (trigger)
     await act(async () => { fireEvent.click(nextBtn); });
 
-    // Step 1 should show trigger options — verify "Manual" is visible
-    expect(document.body.textContent).toContain('Manual');
+    // Step 1 should show trigger options — verify the "Manually" trigger button is visible
+    expect(document.body.textContent).toContain('Manuellement');
 
     // Navigate to step 2 (steps)
     nextBtns = screen.getAllByText(/Suivant/);
@@ -336,15 +347,15 @@ describe('WorkflowsPage', () => {
 
     // Step 1 (simple task): should show agent selector, prompt, and trigger toggle
     expect(document.body.textContent).toContain('Agent');
-    expect(document.body.textContent).toContain('Manuel');
-    expect(document.body.textContent).toContain('Programmer');
+    expect(document.body.textContent).toContain('Manuellement');
+    expect(document.body.textContent).toContain('Sur un planning');
 
     // Fill the prompt
     const promptInput = screen.getByPlaceholderText(/Décrivez la tâche/);
     await act(async () => { fireEvent.change(promptInput, { target: { value: 'Analyse ce projet' } }); });
 
     // Switch to scheduled trigger
-    const scheduleBtn = screen.getByText(/Programmer/);
+    const scheduleBtn = screen.getByText(/Sur un planning/);
     await act(async () => { fireEvent.click(scheduleBtn); });
 
     // Should show frequency picker (the "Tous les" label)

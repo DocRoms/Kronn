@@ -1,5 +1,5 @@
 import { useState, useRef, memo } from 'react';
-import { ShieldCheck, Zap, Rocket, GitBranch, Loader2, Users, Users2 } from 'lucide-react';
+import { ShieldCheck, Zap, Rocket, GitBranch, Loader2, Users, Users2, Square } from 'lucide-react';
 import type { Discussion } from '../types/generated';
 import { isValidationDisc } from '../lib/constants';
 import { formatRelativeTime } from '../lib/relativeTime';
@@ -19,12 +19,14 @@ export interface SwipeableDiscItemProps {
   onSelect: (discId: string, msgCount: number) => void;
   onArchive: (discId: string) => void;
   onDelete: (discId: string) => void;
+  /** Abort the running agent on this disc. Only rendered when `isSending`. */
+  onStop?: (discId: string) => void;
   t: (key: string, ...args: any[]) => string;
   archiveLabel?: string;
 }
 
 export const SwipeableDiscItem = memo(function SwipeableDiscItem({
-  disc, isActive, lastSeenCount, isSending, onSelect, onArchive, onDelete, t, archiveLabel,
+  disc, isActive, lastSeenCount, isSending, onSelect, onArchive, onDelete, onStop, t, archiveLabel,
 }: SwipeableDiscItemProps) {
   const [offsetX, setOffsetX] = useState(0);
   const [swiping, setSwiping] = useState(false);
@@ -106,6 +108,20 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
           </div>
           <div className="disc-item-meta">
             {isSending && <Loader2 size={8} style={{ animation: 'spin 1s linear infinite', color: '#c8ff00' }} />}
+            {isSending && onStop && (
+              <button
+                type="button"
+                className="disc-item-stop-btn"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onStop(disc.id);
+                }}
+                title={t('disc.stopAgent')}
+                aria-label={t('disc.stopAgent')}
+              >
+                <Square size={8} style={{ fill: 'currentColor' }} />
+              </button>
+            )}
             {(disc.participants?.length ?? 0) > 1 && (
               <Users size={8} style={{ color: '#8b5cf6' }} />
             )}

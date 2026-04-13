@@ -35,8 +35,10 @@ import type {
   DiscoverReposRequest,
   DiscoverReposResponse,
   Workflow,
+  WorkflowStep,
   WorkflowSummary,
   WorkflowRun,
+  BatchRunSummary,
   StepResult,
   CreateWorkflowRequest,
   UpdateWorkflowRequest,
@@ -258,6 +260,17 @@ export const config = {
   toggleTokenOverride: (provider: string) => api<boolean>('POST', '/config/toggle-token-override', provider),
   getLanguage: () => api<string>('GET', '/config/language'),
   saveLanguage: (lang: string) => api<void>('POST', '/config/language', lang),
+  /** UI locale of the React frontend — persisted backend-side so it survives
+   *  Tauri WebView2 localStorage wipes. */
+  getUiLanguage: () => api<string>('GET', '/config/ui-language'),
+  saveUiLanguage: (lang: string) => api<void>('POST', '/config/ui-language', lang),
+  /** STT model ("onnx-community/whisper-tiny" etc.). null = never set. */
+  getSttModel: () => api<string | null>('GET', '/config/stt-model'),
+  saveSttModel: (modelId: string) => api<void>('POST', '/config/stt-model', modelId),
+  /** TTS voices keyed by output language code. */
+  getTtsVoices: () => api<Record<string, string>>('GET', '/config/tts-voices'),
+  saveTtsVoice: (lang: string, voiceId: string) =>
+    api<void>('POST', '/config/tts-voice', { lang, voice_id: voiceId }),
   getScanPaths: () => api<string[]>('GET', '/config/scan-paths'),
   setScanPaths: (paths: string[]) => api<void>('POST', '/config/scan-paths', { paths }),
   getScanIgnore: () => api<string[]>('GET', '/config/scan-ignore'),
@@ -488,6 +501,15 @@ export const discussions = {
   delete: (id: string) => api<void>('DELETE', `/discussions/${id}`),
   update: (id: string, body: { title?: string; archived?: boolean; skill_ids?: string[]; profile_ids?: string[]; directive_ids?: string[]; project_id?: string | null; tier?: ModelTier; agent?: AgentType }) => api<void>('PATCH', `/discussions/${id}`, body),
   share: (id: string, contactIds: string[]) => api<string>('POST', `/discussions/${id}/share`, { contact_ids: contactIds }),
+  /** Abort the currently-running agent on this discussion. Backend kills the
+   *  child process and saves a partial response with an "⏹️ Interrompu" footer. */
+  stop: (id: string) => api<{ cancelled: boolean }>('POST', `/discussions/${id}/stop`, {}),
+  /** Force-recover a pending partial_response (the recovered Agent message
+   *  is inserted with the in-flight start timestamp). Used by the "Dismiss
+   *  partial" CTA when the user wants to retype on a still-recovering disc
+   *  without waiting for the WS event. */
+  dismissPartial: (id: string) =>
+    api<{ recovered: boolean }>('POST', `/discussions/${id}/dismiss-partial`, {}),
 
   /** Stream SSE helper shared by sendMessage and run. */
   _streamSSE: async (
@@ -729,7 +751,24 @@ export const workflows = {
   getRun: (id: string, runId: string) => api<WorkflowRun>('GET', `/workflows/${id}/runs/${runId}`),
   deleteRun: (id: string, runId: string) => api<void>('DELETE', `/workflows/${id}/runs/${runId}`),
   deleteAllRuns: (id: string) => api<void>('DELETE', `/workflows/${id}/runs`),
+  /** Stop a Running workflow run. Cascades to child batch discs (each running
+   *  agent gets its own cancel token triggered). Idempotent. */
+  cancelRun: (id: string, runId: string) =>
+    api<{ run_cancelled: boolean; child_discs_cancelled: number }>(
+      'POST', `/workflows/${id}/runs/${runId}/cancel`, {}
+    ),
+  /** Dry-run preview of a BatchQuickPrompt step: returns parsed items, sample
+   *  rendered prompt, QP info, errors. NO discussion is created. */
+  testBatchStep: (req: { step: WorkflowStep; mock_previous_output?: string | null; previous_step_name?: string | null }) =>
+    api<BatchPreview>('POST', '/workflows/test-batch-step', req),
   suggestions: (projectId: string) => api<WorkflowSuggestion[]>('GET', `/projects/${projectId}/workflow-suggestions`),
+  /** Batch runs with parent workflow meta (name + run sequence) — feeds the
+   *  sidebar pastille that jumps from a batch group back to its spawning workflow. */
+  listBatchRunSummaries: () => api<BatchRunSummary[]>('GET', '/workflow-runs/batch-summaries'),
+  /** Delete a batch workflow run AND all its child discussions atomically.
+   *  Returns the count of discussions actually deleted. */
+  deleteBatchRun: (runId: string) =>
+    api<{ run_id: string; discussions_deleted: number }>('DELETE', `/workflow-runs/${runId}`),
 
   /** Test a single step with mock context (SSE streaming, dry-run by default) */
   testStepStream: async (
@@ -774,10 +813,35 @@ export interface BatchItem {
   prompt: string;
 }
 
+export interface BatchPreview {
+  sample_items: string[];
+  total_items: number;
+  capped_at: number;
+  max_items_allowed: number;
+  quick_prompt_id: string | null;
+  quick_prompt_name: string | null;
+  quick_prompt_icon: string | null;
+  quick_prompt_agent: string | null;
+  first_variable_name: string | null;
+  /** First sample item's rendered prompt — kept for backward compat.
+   *  Prefer `sample_rendered_prompts` for the per-item view. */
+  sample_rendered_prompt: string | null;
+  /** Rendered prompt for each sample item (same length & order as sample_items). */
+  sample_rendered_prompts: string[];
+  workspace_mode: string;
+  wait_for_completion: boolean;
+  errors: string[];
+  /** Non-blocking warnings: dry-run succeeded but config would bite at runtime
+   *  (e.g. {{steps.X.data}} against a FreeText step). Shown in orange. */
+  warnings: string[];
+}
+
 export interface BatchRunRequest {
   items: BatchItem[];
   batch_name: string;
   project_id?: string | null;
+  /** "Direct" (default) or "Isolated" — per-child git worktree. */
+  workspace_mode?: string | null;
 }
 
 export interface BatchRunResponse {

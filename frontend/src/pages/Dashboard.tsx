@@ -7,6 +7,8 @@ import type { RemoteRepo, RepoSource, DriftCheckResponse } from '../types/genera
 import { useT } from '../lib/I18nContext';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { isUsable } from '../lib/constants';
+import { hydrateTtsVoicesFromBackend } from '../lib/tts-models';
+import { fetchSttModelId } from '../lib/stt-models';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 import { McpPage } from './McpPage';
 import { WorkflowsPage } from './WorkflowsPage';
@@ -51,6 +53,14 @@ export function Dashboard({ onReset }: DashboardProps) {
   const [autoRunDiscussionId, setAutoRunDiscussionId] = useState<string | null>(null);
   // Open a specific discussion without triggering agent (e.g. Resume Validation button)
   const [openDiscussionId, setOpenDiscussionId] = useState<string | null>(null);
+  // When the sidebar batch pastille is clicked, we hand the workflow id to
+  // WorkflowsPage via this prop. It's cleared right after consumption so the
+  // navigation only fires once per click.
+  const [openWorkflowId, setOpenWorkflowId] = useState<string | null>(null);
+  // Reverse direction: when a "📋 View N discussions" chip on a workflow run
+  // is clicked, we hand the batch run id to DiscussionsPage so the sidebar
+  // expands the matching batch group + scrolls to it.
+  const [focusBatchId, setFocusBatchId] = useState<string | null>(null);
 
   // ─── Drift detection state ──────────
   const [driftByProject, setDriftByProject] = useState<Record<string, DriftCheckResponse>>({});
@@ -77,6 +87,15 @@ export function Dashboard({ onReset }: DashboardProps) {
   const { data: agentAccess, refetch: refetchAgentAccess } = useApi(() => configApi.getAgentAccess(), []);
   const { data: workflowList, refetch: refetchWorkflows } = useApi(() => workflowsApi.list(), []);
   const { data: skillList, refetch: refetchSkills } = useApi(() => skillsApi.list(), []);
+
+  // Hydrate user-preference caches from backend once at mount.
+  // Tauri WebView2 can wipe localStorage across app updates, so the backend
+  // is the durable source of truth for these settings. The calls are
+  // best-effort — failure falls back silently to whatever localStorage holds.
+  useEffect(() => {
+    void fetchSttModelId();
+    void hydrateTtsVoicesFromBackend();
+  }, []);
 
   // Poll discussions for notifications — faster when on discussions page, slower otherwise
   useEffect(() => {
@@ -764,6 +783,12 @@ export function Dashboard({ onReset }: DashboardProps) {
               installedAgentTypes={agents.filter(isUsable).map(a => a.agent_type)}
               agentAccess={agentAccess ?? undefined}
               configLanguage={configLanguage ?? undefined}
+              initialSelectedWorkflowId={openWorkflowId}
+              onInitialSelectionConsumed={() => setOpenWorkflowId(null)}
+              onNavigateToBatch={(batchRunId) => {
+                setFocusBatchId(batchRunId);
+                setPage('discussions');
+              }}
               onNavigateDiscussion={(discId) => { setAutoRunDiscussionId(discId); setPage('discussions'); }}
               onBatchLaunched={(discIds) => {
                 // Mark every batch-child disc as sending so the sidebar
@@ -825,6 +850,10 @@ export function Dashboard({ onReset }: DashboardProps) {
                   document.getElementById(opts.scrollTo!)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
                 }, 200);
               }
+              // Sidebar batch pastille → workflows tab + pre-open the parent workflow's detail.
+              if (opts?.workflowId) {
+                setOpenWorkflowId(opts.workflowId);
+              }
             }}
             prefill={discPrefill}
             onPrefillConsumed={handlePrefillConsumed}
@@ -832,6 +861,8 @@ export function Dashboard({ onReset }: DashboardProps) {
             onAutoRunConsumed={handleAutoRunConsumed}
             openDiscussionId={openDiscussionId}
             onOpenDiscConsumed={handleOpenDiscConsumed}
+            focusBatchId={focusBatchId}
+            onFocusBatchConsumed={() => setFocusBatchId(null)}
             toast={toast}
             sendingMap={sendingMap}
             setSendingMap={setSendingMap}
