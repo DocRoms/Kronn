@@ -465,15 +465,42 @@ async fn start_backend(port: u16, dist_dir: std::path::PathBuf) -> anyhow::Resul
     // Build state
     let (ws_tx, _) = tokio::sync::broadcast::channel(256);
     let config_arc = Arc::new(RwLock::new(app_config));
-    let workflow_engine = Arc::new(WorkflowEngine::new(database.clone(), config_arc.clone()));
     let state = AppState {
         config: config_arc,
         db: database.clone(),
-        workflow_engine: workflow_engine.clone(),
         agent_semaphore: Arc::new(Semaphore::new(max_agents)),
         audit_tracker: Arc::new(std::sync::Mutex::new(AuditTracker::default())),
         ws_broadcast: Arc::new(ws_tx),
+        cancel_registry: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
+
+    // Workflow engine gets a clone of the state (same pattern as backend main.rs)
+    let workflow_engine = Arc::new(WorkflowEngine::new(state.clone()));
+
+    // ── Boot scans (same as backend main.rs) ───────────────────────────
+    // Orphan workflow runs: mark any still-Running rows as Failed.
+    let cleaned = state.db.with_conn(|conn| {
+        let runs = conn.execute(
+            "UPDATE workflow_runs SET status = 'Failed', finished_at = datetime('now') \
+             WHERE status = 'Running'",
+            [],
+        )?;
+        Ok(runs)
+    }).await;
+    if let Ok(n) = cleaned { if n > 0 { tracing::warn!("Orphan scan: {} runs marked Failed", n); } }
+
+    // Partial response recovery: convert dangling checkpoints to Agent messages.
+    let recovered = state.db.with_conn(|conn| {
+        kronn::db::discussions::recover_partial_responses(conn)
+    }).await;
+    if let Ok(ids) = recovered {
+        if !ids.is_empty() {
+            tracing::warn!("Partial recovery: {} discussion(s)", ids.len());
+            let _ = state.ws_broadcast.send(kronn::models::WsMessage::PartialResponseRecovered {
+                discussion_ids: ids,
+            });
+        }
+    }
 
     // Auto-discover API keys
     {
