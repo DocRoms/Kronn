@@ -173,27 +173,36 @@ pub async fn execute_run(
             total_steps,
         }).await;
 
-        let outcome: StepOutcome = if step.step_type == StepType::BatchQuickPrompt {
-            // Phase 2 batch workflows — fan out a Quick Prompt over items
-            // from a previous step's output, then optionally wait for all
-            // children to finish before moving on.
-            super::batch_step::execute_batch_quick_prompt_step(
-                step,
-                &run.id,
-                state.clone(),
-                &ctx,
-            ).await
-        } else {
-            let full_access = agents_config.full_access_for(&step.agent);
-            execute_step(
-                step,
-                &project_path,
-                &work_dir,
-                tokens_config,
-                full_access,
-                &ctx,
-                None,
-            ).await
+        let outcome: StepOutcome = match step.step_type {
+            StepType::BatchQuickPrompt => {
+                // Phase 2 batch workflows — fan out a Quick Prompt over items
+                // from a previous step's output, then optionally wait for all
+                // children to finish before moving on.
+                super::batch_step::execute_batch_quick_prompt_step(
+                    step,
+                    &run.id,
+                    state.clone(),
+                    &ctx,
+                ).await
+            }
+            StepType::Notify => {
+                // Direct HTTP webhook — zero agent tokens. Used as a workflow
+                // finalizer or mechanical data step (post to Slack, create
+                // ticket, etc.). Shipped 0.3.5.
+                super::notify_step::execute_notify_step(step, &ctx).await
+            }
+            StepType::Agent | StepType::ApiCall => {
+                let full_access = agents_config.full_access_for(&step.agent);
+                execute_step(
+                    step,
+                    &project_path,
+                    &work_dir,
+                    tokens_config,
+                    full_access,
+                    &ctx,
+                    None,
+                ).await
+            }
         };
 
         // Record step output for template chaining

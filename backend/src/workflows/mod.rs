@@ -7,6 +7,7 @@ pub mod template;
 pub mod workspace;
 pub mod steps;
 pub mod batch_step;
+pub mod notify_step;
 pub mod runner;
 pub mod trigger;
 pub mod tracker;

@@ -271,6 +271,12 @@ export const config = {
   getTtsVoices: () => api<Record<string, string>>('GET', '/config/tts-voices'),
   saveTtsVoice: (lang: string, voiceId: string) =>
     api<void>('POST', '/config/tts-voice', { lang, voice_id: voiceId }),
+  /** Global context (markdown) injected into discussions. */
+  getGlobalContext: () => api<string>('GET', '/config/global-context'),
+  saveGlobalContext: (content: string) => api<void>('POST', '/config/global-context', content),
+  /** When to inject: "always" | "no_project" | "never". */
+  getGlobalContextMode: () => api<string>('GET', '/config/global-context-mode'),
+  saveGlobalContextMode: (mode: string) => api<void>('POST', '/config/global-context-mode', mode),
   getScanPaths: () => api<string[]>('GET', '/config/scan-paths'),
   setScanPaths: (paths: string[]) => api<void>('POST', '/config/scan-paths', { paths }),
   getScanIgnore: () => api<string[]>('GET', '/config/scan-ignore'),
@@ -325,6 +331,7 @@ export const projects = {
   get: (id: string) => api<Project>('GET', `/projects/${id}`),
   scan: () => api<DetectedRepo[]>('POST', '/projects/scan'),
   create: (repo: DetectedRepo) => api<Project>('POST', '/projects', repo),
+  addFolder: (req: { path: string; name?: string }) => api<Project>('POST', '/projects/add-folder', req),
   bootstrap: (req: BootstrapProjectRequest) => api<BootstrapProjectResponse>('POST', '/projects/bootstrap', req),
   delete: (id: string, hard?: boolean) => api<void>('DELETE', `/projects/${id}${hard ? '?hard=true' : ''}`),
   clone: (req: CloneProjectRequest) => api<CloneProjectResponse>('POST', '/projects/clone', req),

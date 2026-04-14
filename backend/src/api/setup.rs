@@ -445,6 +445,56 @@ pub struct TtsVoiceRequest {
     pub voice_id: String,
 }
 
+/// GET /api/config/global-context
+///
+/// Global knowledge base injected into all discussions. Markdown content
+/// that provides glossary, company conventions, tech stack overview, etc.
+/// Supplements project-level `ai/` context — this one applies even when
+/// the discussion has no project attached.
+pub async fn get_global_context(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<String>> {
+    let config = state.config.read().await;
+    Json(ApiResponse::ok(config.server.global_context.clone().unwrap_or_default()))
+}
+
+/// GET /api/config/global-context-mode
+pub async fn get_global_context_mode(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<String>> {
+    let config = state.config.read().await;
+    Json(ApiResponse::ok(config.server.global_context_mode.clone()))
+}
+
+/// POST /api/config/global-context-mode
+pub async fn save_global_context_mode(
+    State(state): State<AppState>,
+    Json(mode): Json<String>,
+) -> Json<ApiResponse<()>> {
+    if !matches!(mode.as_str(), "always" | "no_project" | "never") {
+        return Json(ApiResponse::err(format!("Invalid mode '{}'. Expected always|no_project|never.", mode)));
+    }
+    let mut config = state.config.write().await;
+    config.server.global_context_mode = mode;
+    match config::save(&config).await {
+        Ok(_) => Json(ApiResponse::ok(())),
+        Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
+    }
+}
+
+/// POST /api/config/global-context
+pub async fn save_global_context(
+    State(state): State<AppState>,
+    Json(content): Json<String>,
+) -> Json<ApiResponse<()>> {
+    let mut config = state.config.write().await;
+    config.server.global_context = if content.trim().is_empty() { None } else { Some(content) };
+    match config::save(&config).await {
+        Ok(_) => Json(ApiResponse::ok(())),
+        Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
+    }
+}
+
 /// POST /api/config/tts-voice — update a single `(lang, voice_id)` mapping.
 pub async fn save_tts_voice(
     State(state): State<AppState>,

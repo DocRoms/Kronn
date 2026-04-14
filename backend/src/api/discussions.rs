@@ -849,8 +849,8 @@ async fn make_agent_stream(
         crate::core::context_files::build_context_prompt(&entries)
     };
 
-    // Inject user bio on the first exchange of a discussion (≤2 messages = initial prompt + system)
-    let (tokens, full_access, model_tiers_config, user_bio) = {
+    // Inject user bio (first exchange only) + global context (always).
+    let (tokens, full_access, model_tiers_config, user_bio, global_context) = {
         let config = state.config.read().await;
         let fa = config.agents.full_access_for(&agent_type);
         let bio = if disc.messages.len() <= 2 {
@@ -858,17 +858,31 @@ async fn make_agent_stream(
         } else {
             None
         };
-        (config.tokens.clone(), fa, config.agents.model_tiers.clone(), bio)
+        let gc = {
+            let mode = config.server.global_context_mode.as_str();
+            let has_project = disc.project_id.is_some();
+            match mode {
+                "never" => None,
+                "no_project" if has_project => None,
+                _ => config.server.global_context.clone().filter(|g| !g.trim().is_empty()),
+            }
+        };
+        (config.tokens.clone(), fa, config.agents.model_tiers.clone(), bio, gc)
     };
 
-    // Prepend user bio to context files prompt (only on first exchange)
-    let context_files_prompt = if let Some(ref bio) = user_bio {
-        let pseudo = disc.messages.first()
-            .and_then(|m| m.author_pseudo.as_deref())
-            .unwrap_or("User");
-        format!("--- About the user ({}) ---\n{}\n\n{}", pseudo, bio, context_files_prompt)
-    } else {
-        context_files_prompt
+    // Build the context preamble: user bio (first exchange) + global context (always)
+    let context_files_prompt = {
+        let mut preamble = String::new();
+        if let Some(ref bio) = user_bio {
+            let pseudo = disc.messages.first()
+                .and_then(|m| m.author_pseudo.as_deref())
+                .unwrap_or("User");
+            preamble.push_str(&format!("--- About the user ({}) ---\n{}\n\n", pseudo, bio));
+        }
+        if let Some(ref gc) = global_context {
+            preamble.push_str(&format!("--- Global context ---\n{}\n\n", gc));
+        }
+        format!("{}{}", preamble, context_files_prompt)
     };
 
     // Estimate extra_context size so build_agent_prompt can respect the agent's budget.

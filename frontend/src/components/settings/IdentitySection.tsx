@@ -22,10 +22,13 @@ export function IdentitySection({ toast, t }: IdentitySectionProps) {
   const [pseudo, setPseudo] = useState('');
   const [avatarEmail, setAvatarEmail] = useState('');
   const [bio, setBio] = useState('');
+  const [globalContext, setGlobalContext] = useState('');
+  const [globalContextDirty, setGlobalContextDirty] = useState(false);
+  const [globalContextMode, setGlobalContextMode] = useState('always');
   const [serverDomain, setServerDomain] = useState('');
   const [networkInfo, setNetworkInfo] = useState<NetworkInfo | null>(null);
 
-  // Load server config once
+  // Load server config + global context once
   useEffect(() => {
     configApi.getServerConfig().then(cfg => {
       if (cfg) {
@@ -34,6 +37,12 @@ export function IdentitySection({ toast, t }: IdentitySectionProps) {
         setAvatarEmail(cfg.avatar_email ?? '');
         setBio(cfg.bio ?? '');
       }
+    }).catch(() => {});
+    configApi.getGlobalContext().then(gc => {
+      setGlobalContext(gc ?? '');
+    }).catch(() => {});
+    configApi.getGlobalContextMode().then(m => {
+      setGlobalContextMode(m ?? 'always');
     }).catch(() => {});
   }, []);
 
@@ -99,6 +108,47 @@ export function IdentitySection({ toast, t }: IdentitySectionProps) {
               />
               <div className="set-hint-xs">
                 {t('settings.bioHint')}
+              </div>
+            </div>
+            <div style={{ marginTop: 16 }}>
+              <div className="flex-row gap-4 mb-3" style={{ alignItems: 'baseline', flexWrap: 'wrap' }}>
+                <span className="label mb-0">{t('settings.globalContext')}</span>
+                <select
+                  className="set-input cursor-pointer"
+                  style={{ width: 'auto', flex: 'none' }}
+                  value={globalContextMode}
+                  onChange={e => {
+                    setGlobalContextMode(e.target.value);
+                    configApi.saveGlobalContextMode(e.target.value);
+                  }}
+                  aria-label={t('settings.globalContext')}
+                >
+                  <option value="always">{t('settings.gcModeAlways')}</option>
+                  <option value="no_project">{t('settings.gcModeNoProject')}</option>
+                  <option value="never">{t('settings.gcModeNever')}</option>
+                </select>
+              </div>
+              <textarea
+                value={globalContext}
+                placeholder={t('settings.globalContextPlaceholder')}
+                onChange={e => {
+                  setGlobalContext(e.target.value);
+                  setGlobalContextDirty(true);
+                }}
+                onBlur={() => {
+                  if (globalContextDirty) {
+                    configApi.saveGlobalContext(globalContext).then(() => {
+                      toast(t('settings.globalContextSaved'), 'success');
+                      setGlobalContextDirty(false);
+                    }).catch(() => {});
+                  }
+                }}
+                className="set-input"
+                rows={6}
+                style={{ resize: 'vertical', fontFamily: 'monospace', fontSize: 12 }}
+              />
+              <div className="set-hint-xs">
+                {t('settings.globalContextHint')}
               </div>
             </div>
           </div>

@@ -913,6 +913,7 @@ fn sample_workflow(id: &str) -> Workflow {
             batch_wait_for_completion: None,
             batch_max_items: None,
             batch_workspace_mode: None,
+            notify_config: None,
         }],
         actions: vec![],
         safety: WorkflowSafety {
@@ -1831,6 +1832,7 @@ fn workflow_multi_step_roundtrip() {
                 batch_wait_for_completion: None,
                 batch_max_items: None,
                 batch_workspace_mode: None,
+            notify_config: None,
             },
             WorkflowStep {
                 step_type: StepType::default(),
@@ -1857,6 +1859,7 @@ fn workflow_multi_step_roundtrip() {
                 batch_wait_for_completion: None,
                 batch_max_items: None,
                 batch_workspace_mode: None,
+            notify_config: None,
             },
             WorkflowStep {
                 step_type: StepType::default(),
@@ -1880,6 +1883,7 @@ fn workflow_multi_step_roundtrip() {
                 batch_wait_for_completion: None,
                 batch_max_items: None,
                 batch_workspace_mode: None,
+            notify_config: None,
             },
         ],
         actions: vec![],
@@ -1940,6 +1944,7 @@ fn workflow_update_steps_count() {
         batch_wait_for_completion: None,
         batch_max_items: None,
         batch_workspace_mode: None,
+        notify_config: None,
     });
     crate::db::workflows::update_workflow(&conn, &wf).unwrap();
 

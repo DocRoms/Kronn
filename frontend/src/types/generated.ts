@@ -375,12 +375,24 @@ export interface WorkflowStep {
   batch_max_items?: number | null;
   /// "Direct" (default) or "Isolated" — per-child git worktree for parallel code writes.
   batch_workspace_mode?: string | null;
+  // ─── Notify fields (0.3.5) ─────────────────────────────────────────
+  // Only meaningful when step_type.type === 'Notify'.
+  notify_config?: NotifyConfig | null;
+}
+
+/** Configuration for a Notify webhook step (zero agent tokens). */
+export interface NotifyConfig {
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  body_template: string;
 }
 
 export type StepType =
   | { type: "Agent" }
   | { type: "ApiCall" }
-  | { type: "BatchQuickPrompt" };
+  | { type: "BatchQuickPrompt" }
+  | { type: "Notify" };
 
 export type StepMode =
   | { type: "Normal" };

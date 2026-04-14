@@ -274,6 +274,136 @@ pub async fn create(
     }
 }
 
+/// POST /api/projects/add-folder
+///
+/// Register a local directory as a project — no git required. Useful for
+/// documentation repos, design folders, config directories, or any workspace
+/// that doesn't have a `.git` root. The path must exist on disk.
+///
+/// If the folder happens to contain a `.git`, we auto-detect the remote URL
+/// and branch so the project still benefits from worktree isolation and PR
+/// features. Otherwise `repo_url` is set to None and git features are
+/// gracefully disabled.
+pub async fn add_folder(
+    State(state): State<AppState>,
+    Json(req): Json<AddFolderRequest>,
+) -> Json<ApiResponse<Project>> {
+    if scanner::contains_parent_dir(&req.path) {
+        return Json(ApiResponse::err("Project path may not contain '..' components"));
+    }
+
+    let resolved = crate::core::scanner::resolve_host_path(&req.path);
+    if !resolved.is_dir() {
+        return Json(ApiResponse::err(format!(
+            "Directory does not exist: {}",
+            resolved.display()
+        )));
+    }
+
+    // Auto-detect name from last path component if not provided.
+    let name = req.name
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| {
+            resolved.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("project")
+                .to_string()
+        });
+
+    // Check for duplicate path.
+    let path_check = req.path.clone();
+    let duplicate = state.db.with_conn(move |conn| {
+        let projects = crate::db::projects::list_projects(conn)?;
+        Ok(projects.iter().any(|p| p.path == path_check))
+    }).await.unwrap_or(false);
+    if duplicate {
+        return Json(ApiResponse::err("A project with this path already exists"));
+    }
+
+    // If there's a .git, detect remote + branch.
+    // Uses sync_cmd to suppress console flash on Windows/Tauri.
+    let (repo_url, _branch) = if resolved.join(".git").exists() {
+        let path_for_git = req.path.clone();
+        let detected = tokio::task::spawn_blocking(move || {
+            let remote = sync_cmd("git")
+                .args(["remote", "get-url", "origin"])
+                .current_dir(&path_for_git)
+                .output()
+                .ok()
+                .and_then(|o| if o.status.success() {
+                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                } else { None });
+            let branch = sync_cmd("git")
+                .args(["branch", "--show-current"])
+                .current_dir(&path_for_git)
+                .output()
+                .ok()
+                .and_then(|o| if o.status.success() {
+                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                } else { None });
+            (remote, branch.unwrap_or_else(|| "main".to_string()))
+        }).await.unwrap_or((None, "main".to_string()));
+        detected
+    } else {
+        (None, String::new())
+    };
+
+    // Detect ai/ configs if present (same patterns as the scan pipeline
+    // in core/scanner.rs — kept simple here since we only need the check
+    // once and the pattern list is short).
+    let ai_configs = {
+        use crate::models::AiConfigType;
+        let mut found = Vec::new();
+        if resolved.join("CLAUDE.md").exists() { found.push(AiConfigType::ClaudeMd); }
+        if resolved.join(".claude").is_dir() { found.push(AiConfigType::ClauseDir); }
+        if resolved.join(".ai").is_dir() { found.push(AiConfigType::AiDir); }
+        if resolved.join(".cursorrules").exists() { found.push(AiConfigType::CursorRules); }
+        if resolved.join(".continue").is_dir() { found.push(AiConfigType::ContinueDev); }
+        if resolved.join(".mcp.json").exists() { found.push(AiConfigType::McpJson); }
+        found
+    };
+
+    let now = Utc::now();
+    let mut project = Project {
+        id: Uuid::new_v4().to_string(),
+        name,
+        path: req.path.clone(),
+        repo_url,
+        token_override: None,
+        ai_config: AiConfigStatus {
+            detected: !ai_configs.is_empty(),
+            configs: ai_configs,
+        },
+        audit_status: AiAuditStatus::NoTemplate,
+        ai_todo_count: 0,
+        default_skill_ids: vec![],
+        default_profile_id: None,
+        briefing_notes: None,
+        created_at: now,
+        updated_at: now,
+    };
+    enrich_audit_status(&mut project);
+
+    let p = project.clone();
+    match state.db.with_conn(move |conn| {
+        crate::db::projects::insert_project(conn, &p)?;
+        Ok(())
+    }).await {
+        Ok(()) => {
+            tracing::info!("Project '{}' added from folder: {}", project.name, project.path);
+            Json(ApiResponse::ok(project))
+        }
+        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct AddFolderRequest {
+    pub path: String,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
 /// Determine the parent directory for new projects (shared between bootstrap and clone).
 async fn determine_parent_dir(state: &AppState) -> Result<String, String> {
     let existing = state.db.with_conn(crate::db::projects::list_projects).await.unwrap_or_default();

@@ -128,8 +128,8 @@ export function SettingsPage({
           { id: 'settings-profiles', label: 'Profiles' },
           { id: 'settings-directives', label: 'Directives' },
           { id: 'settings-identity', label: t('settings.identity') },
-          { id: 'settings-server', label: 'Server' },
           { id: 'settings-usage', label: t('config.usage') },
+          { id: 'settings-server', label: t('config.server') },
           { id: 'settings-database', label: 'Database' },
         ].map(s => (
           <button
@@ -731,6 +731,8 @@ export function SettingsPage({
       {/* Identity */}
       <IdentitySection toast={toast} t={t} />
 
+      {/* Usage — moved before Server so non-dev users see their consumption first */}
+      <UsageSection onNavigateDiscussion={onNavigateDiscussion} />
 
       <div id="settings-server" className="set-card">
         <div className="set-section">
@@ -882,9 +884,6 @@ export function SettingsPage({
         </div>
       </div>
 
-      {/* Usage */}
-      <UsageSection onNavigateDiscussion={onNavigateDiscussion} />
-
       {/* Database */}
       <div id="settings-database" className="set-card">
         <div className="set-section">
@@ -920,9 +919,18 @@ export function SettingsPage({
             </div>
           )}
 
-          <div className="set-warning-banner" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', borderRadius: 6, background: 'var(--color-warning-bg, #fff3cd)', border: '1px solid var(--color-warning-border, #ffc107)', marginBottom: 8, fontSize: 13 }}>
-            <AlertTriangle size={14} style={{ color: 'var(--color-warning, #856404)', flexShrink: 0 }} />
-            <span style={{ color: 'var(--color-warning, #856404)' }}>{t('config.exportApiWarning')}</span>
+          <div className="set-export-warning">
+            <AlertTriangle size={14} />
+            <span>
+              {t('config.exportApiWarning')}{' '}
+              <a
+                href="#settings-server"
+                onClick={(e) => {
+                  e.preventDefault();
+                  document.getElementById('settings-server')?.scrollIntoView({ behavior: 'smooth' });
+                }}
+              >{t('config.exportApiWarningLink')}</a>
+            </span>
           </div>
           <div className="flex-row gap-4">
             <button

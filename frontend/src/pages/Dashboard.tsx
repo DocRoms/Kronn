@@ -16,7 +16,7 @@ import { SettingsPage } from './SettingsPage';
 import { DiscussionsPage } from './DiscussionsPage';
 import { ProjectList } from '../components/ProjectList';
 import {
-  Folder, Puzzle,
+  Folder, FolderOpen, Puzzle,
   Plus, Search, Zap, Settings,
   Loader2,
   MessageSquare, X,
@@ -213,7 +213,10 @@ export function Dashboard({ onReset }: DashboardProps) {
       setBootstrapTrackerMcp(trackerMcps[0].id);
     }
   }, [showBootstrap, mcpOverview.configs, bootstrapRepoMcp, bootstrapTrackerMcp]);
-  const [newProjectMode, setNewProjectMode] = useState<'bootstrap' | 'clone'>('bootstrap');
+  const [newProjectMode, setNewProjectMode] = useState<'bootstrap' | 'clone' | 'folder'>('bootstrap');
+  const [folderPath, setFolderPath] = useState('');
+  const [folderName, setFolderName] = useState('');
+  const [folderLoading, setFolderLoading] = useState(false);
   const [cloneUrl, setCloneUrl] = useState('');
   const [cloneName, setCloneName] = useState('');
   const [cloneLoading, setCloneLoading] = useState(false);
@@ -439,6 +442,14 @@ export function Dashboard({ onReset }: DashboardProps) {
               >
                 <Folder size={14} style={{ verticalAlign: 'middle', marginRight: 6 }} />
                 {t('projects.clone')}
+              </button>
+              <button
+                onClick={() => setNewProjectMode('folder')}
+                className="dash-tab"
+                data-active={newProjectMode === 'folder'}
+              >
+                <FolderOpen size={14} style={{ verticalAlign: 'middle', marginRight: 6 }} />
+                {t('projects.addFolder')}
               </button>
             </div>
             {newProjectMode === 'bootstrap' && (
@@ -720,6 +731,51 @@ export function Dashboard({ onReset }: DashboardProps) {
                   </div>
                   </div>
                 )}
+              </div>
+            )}
+            {newProjectMode === 'folder' && (
+              <div>
+                <p className="text-sm text-muted mb-4">{t('projects.folder.hint')}</p>
+                <label className="dash-field">
+                  <span className="dash-field-label">{t('projects.folder.path')}</span>
+                  <input
+                    value={folderPath} onChange={e => setFolderPath(e.target.value)}
+                    className="dash-field-input"
+                    placeholder="/home/user/my-docs"
+                    autoFocus
+                  />
+                </label>
+                <label className="dash-field" style={{ marginBottom: 16 }}>
+                  <span className="dash-field-label">{t('projects.folder.name')}</span>
+                  <input
+                    value={folderName} onChange={e => setFolderName(e.target.value)}
+                    className="dash-field-input"
+                    placeholder={t('projects.folder.namePlaceholder')}
+                  />
+                </label>
+                <button
+                  onClick={async () => {
+                    if (!folderPath.trim()) return;
+                    setFolderLoading(true);
+                    try {
+                      await projectsApi.addFolder({ path: folderPath.trim(), name: folderName.trim() || undefined });
+                      toast(t('projects.folder.success'), 'success');
+                      setShowBootstrap(false);
+                      setFolderPath('');
+                      setFolderName('');
+                      refetch();
+                    } catch (e) {
+                      toast(String(e), 'error');
+                    } finally {
+                      setFolderLoading(false);
+                    }
+                  }}
+                  disabled={folderLoading || !folderPath.trim()}
+                  className="dash-submit-btn"
+                >
+                  {folderLoading ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <FolderOpen size={16} />}
+                  {folderLoading ? '...' : t('projects.folder.add')}
+                </button>
               </div>
             )}
           </div>
