@@ -4,7 +4,7 @@ import { useApi } from '../../hooks/useApi';
 import type { AgentDetection, AgentsConfig, ModelTiersConfig } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
 import {
-  Cpu, Key, AlertTriangle, Save,
+  Key, AlertTriangle, Save,
   Plus, Trash2, Download, Check,
   Loader2, RefreshCw, X, Eye, EyeOff, Play, StopCircle,
   ExternalLink, FolderSearch,
@@ -63,14 +63,9 @@ export function AgentsSection({
   };
 
   return (
-    <div id="settings-agents" className="set-card">
-      <div className="set-section">
-        <div className="flex-row gap-4 set-section-header-lg">
-          <Cpu size={14} className="text-accent" />
-          <span className="font-semibold text-lg">{t('config.agents')}</span>
-          <span className="text-sm text-dim" style={{ marginLeft: 'auto' }}>
-            {agents.filter(a => a.installed || a.runtime_available).length}/{agents.length} {agents.filter(a => a.installed || a.runtime_available).length > 1 ? t('config.installedPlural') : t('config.installed')}
-          </span>
+    <div>
+      <div>
+        <div className="flex-row gap-4 mb-4" style={{ justifyContent: 'flex-end' }}>
           <button
             className="set-discover-btn"
             title={t('config.discoverKeys')}

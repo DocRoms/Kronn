@@ -9,6 +9,9 @@ import { useIsMobile } from '../hooks/useMediaQuery';
 import { isUsable } from '../lib/constants';
 import { hydrateTtsVoicesFromBackend } from '../lib/tts-models';
 import { userError } from '../lib/userError';
+import { TourProvider } from '../components/tour/TourProvider';
+import { TourOverlay } from '../components/tour/TourOverlay';
+import { TourHelpButton } from '../components/tour/TourHelpButton';
 import { fetchSttModelId } from '../lib/stt-models';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 import { McpPage } from './McpPage';
@@ -369,6 +372,7 @@ export function Dashboard({ onReset }: DashboardProps) {
   return (
     <div className="dash-app">
       <ToastContainer />
+      <TourProvider setPage={setPage as (p: string) => void}>
       {/* Nav */}
       <nav className="dash-nav">
         <div className="dash-nav-brand" data-mobile={isMobile}>
@@ -384,7 +388,7 @@ export function Dashboard({ onReset }: DashboardProps) {
           ['workflows', Workflow, t('nav.workflows')],
           ['settings', Settings, t('nav.config')],
         ] as [string, typeof Folder, string][]).map(([id, Icon, label]) => (
-          <button key={id} className="dash-nav-btn" data-active={page === id} data-mobile={isMobile} onClick={() => { setPage(id as Page); if (id !== 'mcps') setMcpSelectedConfigId(null); }} title={label}>
+          <button key={id} className="dash-nav-btn" data-active={page === id} data-mobile={isMobile} data-tour-id={`nav-${id}`} onClick={() => { setPage(id as Page); if (id !== 'mcps') setMcpSelectedConfigId(null); }} title={label}>
             {id === 'workflows' && runningWorkflows > 0
               ? <Loader2 size={isMobile ? 16 : 14} style={{ animation: 'spin 1s linear infinite' }} className="text-accent" />
               : <Icon size={isMobile ? 16 : 14} />
@@ -400,13 +404,14 @@ export function Dashboard({ onReset }: DashboardProps) {
         ))}
         </div>
         <div className="dash-nav-spacer" data-mobile={isMobile} />
-        <button className="dash-scan-btn" onClick={() => setShowBootstrap(true)} title={t('projects.bootstrap')}>
+        <button className="dash-scan-btn" data-tour-id="new-project-btn" onClick={() => setShowBootstrap(true)} title={t('projects.bootstrap')}>
           <Plus size={14} /> {!isMobile && t('projects.bootstrap')}
         </button>
-        <button className="dash-scan-btn" onClick={handleScan} disabled={scanning} title={t('nav.scan')}>
+        <button className="dash-scan-btn" data-tour-id="scan-btn" onClick={handleScan} disabled={scanning} title={t('nav.scan')}>
           {scanning ? <Loader2 size={14} className="spin" /> : <Search size={14} />}
           {!isMobile && (scanning ? t('projects.scanning') : t('nav.scan'))}
         </button>
+        <TourHelpButton />
       </nav>
 
       {/* Bootstrap modal */}
@@ -432,6 +437,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                 onClick={() => setNewProjectMode('bootstrap')}
                 className="dash-tab"
                 data-active={newProjectMode === 'bootstrap'}
+                data-tour-id="tab-bootstrap"
               >
                 <Rocket size={14} style={{ verticalAlign: 'middle', marginRight: 6 }} />
                 Bootstrap
@@ -440,6 +446,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                 onClick={() => setNewProjectMode('clone')}
                 className="dash-tab"
                 data-active={newProjectMode === 'clone'}
+                data-tour-id="tab-clone"
               >
                 <Folder size={14} style={{ verticalAlign: 'middle', marginRight: 6 }} />
                 {t('projects.clone')}
@@ -448,6 +455,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                 onClick={() => setNewProjectMode('folder')}
                 className="dash-tab"
                 data-active={newProjectMode === 'folder'}
+                data-tour-id="tab-folder"
               >
                 <FolderOpen size={14} style={{ verticalAlign: 'middle', marginRight: 6 }} />
                 {t('projects.addFolder')}
@@ -960,6 +968,8 @@ export function Dashboard({ onReset }: DashboardProps) {
           </ErrorBoundary>
         )}
       </main>
+      <TourOverlay />
+      </TourProvider>
     </div>
   );
 }

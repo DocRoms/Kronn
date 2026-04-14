@@ -52,6 +52,57 @@
   border-color: var(--kr-border-strong);
 }
 
+/* ── Accordion sections (Agents / Skills / Profiles / Directives) ──── */
+
+.set-accordion-section {
+  border-bottom: 1px solid var(--kr-border);
+}
+
+.set-accordion-section:last-child {
+  border-bottom: none;
+}
+
+.set-accordion-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-4);
+  padding: var(--kr-sp-6) var(--kr-sp-8);
+  border: none;
+  background: transparent;
+  color: var(--kr-text-primary);
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.set-accordion-header:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.set-accordion-chevron {
+  color: var(--kr-text-muted);
+  transition: transform 0.2s;
+  flex-shrink: 0;
+}
+
+.set-accordion-chevron[data-expanded="true"] {
+  transform: rotate(90deg);
+}
+
+.set-accordion-count {
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-muted);
+  background: rgba(255, 255, 255, 0.04);
+  padding: 1px 6px;
+  border-radius: var(--kr-r-sm);
+  margin-left: auto;
+}
+
+.set-accordion-body {
+  padding: 0 var(--kr-sp-8) var(--kr-sp-8);
+}
+
 /* ── Card section (padding wrapper) ────────────────────── */
 .set-section {
   padding: var(--kr-sp-8) var(--kr-sp-9);

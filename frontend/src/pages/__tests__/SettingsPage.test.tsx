@@ -177,8 +177,14 @@ describe('SettingsPage', () => {
     expect(body).toContain('Profils agent');
   });
 
-  it('renders skill cards with name and description', async () => {
+  it('renders skill cards after opening accordion', async () => {
     await wrap(<SettingsPage {...defaultProps} />);
+    // Skills are behind an accordion — find and click the header
+    const allButtons = document.querySelectorAll('.set-accordion-header');
+    // Open ALL accordions to make content visible
+    allButtons.forEach(btn => fireEvent.click(btn));
+    // Wait for re-render
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
     const body = document.body.textContent!;
 
     expect(body).toContain('Rust');
@@ -187,8 +193,12 @@ describe('SettingsPage', () => {
     expect(body).toContain('Security auditing');
   });
 
-  it('renders directive cards with name, description, and conflicts', async () => {
+  it('renders directive cards after opening accordion', async () => {
     await wrap(<SettingsPage {...defaultProps} />);
+    // Directives are behind an accordion — open all
+    const allButtons = document.querySelectorAll('.set-accordion-header');
+    allButtons.forEach(btn => fireEvent.click(btn));
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
     const body = document.body.textContent!;
 
     expect(body).toContain('Terse');

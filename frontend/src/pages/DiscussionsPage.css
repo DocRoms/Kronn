@@ -2212,6 +2212,42 @@
   margin-bottom: 4px;
 }
 
+.disc-advanced-section-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 0;
+  border: none;
+  background: transparent;
+  color: var(--kr-text-faint);
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+
+.disc-advanced-section-toggle:hover {
+  color: var(--kr-text-secondary);
+}
+
+.disc-advanced-count {
+  font-size: 9px;
+  background: rgba(var(--kr-accent-rgb), 0.15);
+  color: var(--kr-accent);
+  padding: 1px 5px;
+  border-radius: var(--kr-r-sm);
+  margin-left: auto;
+}
+
+.disc-advanced-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 0 2px 16px;
+}
+
 /* ── Model tier selector ──────────────────────────────── */
 .disc-tier-btn {
   flex: 1;

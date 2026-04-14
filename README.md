@@ -136,17 +136,17 @@ Kronn reads [OpenAI Symphony](https://github.com/openai/symphony)'s `WORKFLOW.md
 
 Three independent axes shape how agents behave — all multi-selectable, all available in discussions and workflow steps:
 
-**Profiles (WHO)** — 16 built-in personas with distinct perspectives and avatars.
+**Profiles (WHO)** — 17 built-in personas with distinct perspectives and avatars.
 
 | Category | Profiles |
 |----------|----------|
 | Technical | Architect, Tech Lead, QA Engineer, Game Developer, Staff Engineer |
-| Business | Product Owner, Scrum Master, Technical Writer, Entrepreneur, UX Designer |
+| Business | Product Owner, Scrum Master, Technical Writer, Entrepreneur, UX Designer, Translator/Teacher |
 | Data | Data Analyst, Data Engineer |
 | Operations | SRE/DevOps, SEO/Growth |
 | Meta | Devil's Advocate, Mentor |
 
-**Skills (WHAT)** — 22 built-in domain expertise, injected as knowledge.
+**Skills (WHAT)** — 25 built-in domain expertise, injected as knowledge.
 
 | Category | Skills |
 |----------|--------|
@@ -195,6 +195,7 @@ All models downloaded on first use and cached locally.
 - **Project Bootstrap** — create a new project from scratch with an AI architect guiding Vision → Architecture → Stack → MVP → Action Plan
 - **Worktree Isolation** — each discussion/workflow runs in its own git worktree. Lock/Unlock for local testing
 - **Agent Incompatibility** — Kronn tracks per-agent limitations and auto-excludes incompatible agents from steps
+- **Guided Tour** — 17-step interactive onboarding for new users. Auto-launched on first visit, replayable from "?" button. 4 learn-by-doing steps where the user clicks the real UI (pulse animation). Spotlight overlay with auto-positioned tooltips. Keyboard navigation (Escape/arrows). Mobile-responsive
 
 ---
 
@@ -258,7 +259,7 @@ kronn/
 │       ├── agents/         # Agent runner (spawns CLIs, streams stdout)
 │       ├── workflows/      # Workflow engine, triggers, steps
 │       ├── skills/         # 22 built-in (Markdown + YAML frontmatter)
-│       ├── profiles/       # 16 built-in agent profiles
+│       ├── profiles/       # 17 built-in agent profiles
 │       └── directives/     # Output directives
 ├── frontend/           # React 18 + TypeScript + Vite
 │   └── src/

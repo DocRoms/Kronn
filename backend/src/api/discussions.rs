@@ -374,8 +374,15 @@ pub async fn update(
     };
 
     match state.db.with_conn(move |conn| {
-        // project_id: None = don't change, Some(None) = unset, Some(Some("id")) = set
-        let pid_update = project_id.as_ref().map(|p| p.as_deref());
+        // project_id: None = don't change, Some(None)/Some(Some("")) = unset, Some(Some("id")) = set
+        // Note: serde can't distinguish JSON null from absent for Option<Option<T>>,
+        // so the frontend sends "" instead of null to mean "unset".
+        let pid_update = project_id.as_ref().map(|p| {
+            match p.as_deref() {
+                Some("") | None => None,    // "" or null = unset project
+                Some(id) => Some(id),       // real id = set project
+            }
+        });
         let mut updated = crate::db::discussions::update_discussion(conn, &id, title.as_deref(), archived, pid_update)?;
         if let Some(ref ids) = skill_ids {
             updated = crate::db::discussions::update_discussion_skill_ids(conn, &id, ids)? || updated;

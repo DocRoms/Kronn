@@ -336,7 +336,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
           </p>
         </div>
         <div className="flex-row gap-4">
-          <button className="mcp-btn-action mcp-btn-action-primary" onClick={() => { setShowAddMcp(true); setAddMcpSelected(null); setAddMcpSearch(''); }} title={t('mcp.addTitle')}>
+          <button className="mcp-btn-action mcp-btn-action-primary" data-tour-id="add-plugin-btn" onClick={() => { setShowAddMcp(true); setAddMcpSelected(null); setAddMcpSearch(''); }} title={t('mcp.addTitle')}>
             <Plus size={14} /> {t('mcp.add')}
           </button>
           <button className="mcp-btn-action" disabled={syncing} onClick={async () => { setSyncing(true); try { await mcpsApi.refresh(); refetchMcps(); } catch (e) { console.warn('Failed to sync MCPs:', e); } finally { setSyncing(false); } }} title={t('mcp.detect')}>
