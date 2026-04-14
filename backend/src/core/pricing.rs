@@ -26,6 +26,8 @@ pub fn estimate_cost(agent_type: &str, tokens_used: u64) -> Option<f64> {
         "Kiro" => ModelPrice { input_per_m: 3.0, output_per_m: 15.0 },
         // GitHub Copilot — uses GPT-4o by default
         "CopilotCli" => ModelPrice { input_per_m: 2.5, output_per_m: 10.0 },
+        // Ollama — local inference, zero cost
+        "Ollama" => return Some(0.0),
         _ => return None,
     };
 
@@ -91,8 +93,10 @@ mod tests {
 
     #[test]
     fn all_known_agents_have_pricing() {
-        for agent in &["ClaudeCode", "Codex", "GeminiCli", "Vibe", "Kiro", "CopilotCli"] {
+        for agent in &["ClaudeCode", "Codex", "GeminiCli", "Vibe", "Kiro", "CopilotCli", "Ollama"] {
             assert!(estimate_cost(agent, 1000).is_some(), "Missing pricing for {}", agent);
         }
+        // Ollama is free
+        assert_eq!(estimate_cost("Ollama", 1_000_000), Some(0.0));
     }
 }

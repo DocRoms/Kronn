@@ -1,6 +1,6 @@
 [package]
 name = "kronn"
-version = "0.3.7"
+version = "0.4.0"
 edition = "2021"
 description = "Self-hosted AI dev workflow control plane"
 license = "AGPL-3.0-only"
@@ -50,7 +50,7 @@ base64 = "0.22"
 rand = "0.8"
 
 # HTTP client (for tracker APIs)
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
 # WebSocket client (for peer-to-peer connections between Kronn instances)
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }

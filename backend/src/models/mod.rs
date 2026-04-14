@@ -204,6 +204,8 @@ pub struct AgentsConfig {
     pub vibe: AgentConfig,
     #[serde(default)]
     pub copilot_cli: AgentConfig,
+    #[serde(default)]
+    pub ollama: AgentConfig,
     /// Per-agent model tier overrides (Economy/Reasoning model names).
     #[serde(default)]
     pub model_tiers: ModelTiersConfig,
@@ -219,6 +221,7 @@ impl AgentsConfig {
             AgentType::Kiro => self.kiro.full_access,
             AgentType::Vibe => self.vibe.full_access,
             AgentType::CopilotCli => self.copilot_cli.full_access,
+            AgentType::Ollama => self.ollama.full_access,
             _ => false,
         }
     }
@@ -230,6 +233,7 @@ impl AgentsConfig {
             || self.kiro.full_access
             || self.vibe.full_access
             || self.copilot_cli.full_access
+            || self.ollama.full_access
     }
 
     /// Returns true if at least one agent is marked as installed.
@@ -240,6 +244,7 @@ impl AgentsConfig {
             || self.kiro.installed
             || self.vibe.installed
             || self.copilot_cli.installed
+            || self.ollama.installed
     }
 }
 
@@ -296,6 +301,8 @@ pub struct ModelTiersConfig {
     pub vibe: ModelTierConfig,
     #[serde(default)]
     pub copilot_cli: ModelTierConfig,
+    #[serde(default)]
+    pub ollama: ModelTierConfig,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -355,6 +362,9 @@ pub enum AgentType {
     GeminiCli,
     Kiro,
     CopilotCli,
+    /// Local LLM via Ollama (0.4.0). CLI: `ollama run <model>`.
+    /// Zero tokens, zero cost. MCP via prompt injection (Phase 1).
+    Ollama,
     Custom,
 }
 
@@ -1806,6 +1816,37 @@ pub struct UpdateDiscussionRequest {
 
 fn default_language() -> String {
     "fr".into()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Ollama (local LLM) — 0.4.0
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct OllamaModel {
+    pub name: String,
+    pub size: String,
+    pub modified: String,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct OllamaHealthResponse {
+    /// "online", "offline", "not_installed", "unreachable"
+    pub status: String,
+    pub version: Option<String>,
+    pub endpoint: String,
+    pub models_count: u32,
+    /// User-facing explanation when status != "online". Contextualized
+    /// for the detected environment (native, Docker, WSL).
+    pub hint: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct OllamaModelsResponse {
+    pub models: Vec<OllamaModel>,
 }
 
 fn default_ui_language() -> String {

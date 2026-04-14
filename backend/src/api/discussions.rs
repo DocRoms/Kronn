@@ -128,6 +128,7 @@ fn agent_prompt_budget(agent_type: &AgentType) -> usize {
         AgentType::Kiro       => 400_000, // ~100K tokens, Claude via AWS Bedrock (200K window)
         AgentType::CopilotCli => 200_000, // ~50K tokens, GPT-4o 128K window
         AgentType::Vibe       =>  60_000, // ~15K tokens, Mistral 128K window (API mode)
+        AgentType::Ollama     => 100_000, // ~25K tokens, depends on model (llama3 128K window)
         AgentType::Custom     =>  60_000, // reasonable default
     }
 }
@@ -2097,6 +2098,7 @@ fn auth_mode_for(agent_type: &AgentType, tokens: &TokensConfig) -> String {
         AgentType::Vibe => "mistral",
         AgentType::Kiro => "aws",
         AgentType::CopilotCli => "github",
+        AgentType::Ollama => "ollama",
         AgentType::Custom => "",
     };
     let has_key = tokens.active_key_for(provider).is_some();
@@ -2112,6 +2114,7 @@ fn agent_display_name(agent_type: &AgentType) -> String {
         AgentType::GeminiCli => "Gemini CLI".into(),
         AgentType::Kiro => "Kiro".into(),
         AgentType::CopilotCli => "GitHub Copilot".into(),
+        AgentType::Ollama => "Ollama".into(),
         AgentType::Custom => "Custom".into(),
     }
 }

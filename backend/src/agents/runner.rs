@@ -218,6 +218,7 @@ pub(crate) fn resolve_model_flag(agent_type: &AgentType, tier: ModelTier, overri
             AgentType::Kiro => &cfg.kiro,
             AgentType::Vibe => &cfg.vibe,
             AgentType::CopilotCli => &cfg.copilot_cli,
+            AgentType::Ollama => &cfg.ollama,
             AgentType::Custom => return None,
         };
         let override_val = match tier {
@@ -247,6 +248,10 @@ pub(crate) fn resolve_model_flag(agent_type: &AgentType, tier: ModelTier, overri
         (AgentType::CopilotCli, ModelTier::Economy)   => Some("gpt-4o-mini".into()),
         (AgentType::CopilotCli, ModelTier::Default)    => None, // Copilot default is fine
         (AgentType::CopilotCli, ModelTier::Reasoning)  => Some("o4-mini".into()),
+        // Ollama: user picks model explicitly via model_flag; return as-is
+        (AgentType::Ollama, ModelTier::Default)        => Some("llama3.2".into()),
+        (AgentType::Ollama, ModelTier::Economy)        => Some("llama3.2".into()),
+        (AgentType::Ollama, ModelTier::Reasoning)      => Some("qwen3".into()),
         // Kiro, Vibe: no --model flag support
         _ => None,
     }
@@ -338,6 +343,20 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     if !mcp_context.is_empty() { parts.push(format!("=== AVAILABLE TOOLS ===\n\n{}", mcp_context)); }
     if !directives_prompt.is_empty() { parts.push(format!("=== OUTPUT REQUIREMENTS ===\n\n{}", directives_prompt)); }
     let extra_context = parts.join("\n\n");
+
+    // ── Ollama HTTP path ────────────────────────────────────────────────
+    // Ollama uses the HTTP API (/api/chat) instead of a CLI process.
+    // This gives us: (1) separate system/user message roles — the model
+    // doesn't confuse MCP context with the user's question, (2) token
+    // counts in the response, (3) works without the ollama binary (Docker).
+    if *config.agent_type == AgentType::Ollama {
+        let model_flag = resolve_model_flag(config.agent_type, config.tier, config.model_tiers);
+        return start_ollama_http(
+            config.prompt,
+            &extra_context,
+            model_flag.as_deref().unwrap_or("llama3.2"),
+        ).await;
+    }
 
     // Resolve model tier to a --model flag
     let model_flag = resolve_model_flag(config.agent_type, config.tier, config.model_tiers);
@@ -546,6 +565,125 @@ fn vibe_runner_path() -> String {
     dev_path.to_string()
 }
 
+/// Start Ollama via HTTP API streaming (/api/chat) instead of CLI.
+/// Returns an AgentProcess with a dummy child process and an rx fed by
+/// the HTTP response stream. System context and user prompt are sent as
+/// separate messages (role: system, role: user) so the model doesn't
+/// confuse MCP instructions with the user's question.
+async fn start_ollama_http(
+    user_prompt: &str,
+    system_context: &str,
+    model: &str,
+) -> Result<AgentProcess, String> {
+    let base = crate::api::ollama::ollama_base_url_pub();
+    let url = format!("{}/api/chat", base);
+
+    let mut messages = Vec::new();
+    if !system_context.is_empty() {
+        messages.push(serde_json::json!({
+            "role": "system",
+            "content": system_context,
+        }));
+    }
+    messages.push(serde_json::json!({
+        "role": "user",
+        "content": user_prompt,
+    }));
+
+    let body = serde_json::json!({
+        "model": model,
+        "messages": messages,
+        "stream": true,
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(600)) // 10 min max for slow models
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+
+    let response = client.post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Ollama unreachable at {}: {}", base, e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let err_body = response.text().await.unwrap_or_default();
+        return Err(format!("Ollama error {}: {}", status, err_body));
+    }
+
+    // Stream the response — each line is a JSON object with a `message.content` field.
+    // The last chunk has `done: true` and includes token counts.
+    let (tx, rx) = tokio::sync::mpsc::channel::<String>(256);
+    let stderr_capture: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let stderr_clone = stderr_capture.clone();
+
+    // Spawn a background task to read the HTTP stream and forward text to the channel.
+    tokio::spawn(async move {
+        use futures::StreamExt;
+        let mut stream = response.bytes_stream();
+        let mut buffer = String::new();
+
+        while let Some(chunk) = stream.next().await {
+            let bytes = match chunk {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!("Ollama stream error: {}", e);
+                    break;
+                }
+            };
+
+            buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+            // Process complete JSON lines (newline-delimited)
+            while let Some(newline_pos) = buffer.find('\n') {
+                let line = buffer[..newline_pos].to_string();
+                buffer = buffer[newline_pos + 1..].to_string();
+
+                if line.trim().is_empty() { continue; }
+
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
+                    // Extract text content
+                    if let Some(text) = json["message"]["content"].as_str() {
+                        if !text.is_empty() {
+                            let _ = tx.send(text.to_string()).await;
+                        }
+                    }
+                    // Last chunk: extract token counts into stderr for parse_token_usage
+                    if json["done"].as_bool() == Some(true) {
+                        let prompt_tokens = json["prompt_eval_count"].as_u64().unwrap_or(0);
+                        let eval_tokens = json["eval_count"].as_u64().unwrap_or(0);
+                        if let Ok(mut stderr) = stderr_clone.lock() {
+                            stderr.push(format!("ollama_tokens:{}:{}", prompt_tokens, eval_tokens));
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    // Create a dummy child process (sleep infinity) — AgentProcess requires it
+    // but Ollama's execution is HTTP-based, not process-based. The child is
+    // never read from; it's just a handle that we kill on cancellation.
+    let dummy_child = crate::core::cmd::async_cmd("sleep")
+        .arg("3600")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn dummy process: {}", e))?;
+
+    Ok(AgentProcess {
+        child: dummy_child,
+        output_mode: OutputMode::Text,
+        work_dir: std::env::temp_dir(),
+        agent_type: AgentType::Ollama,
+        rx,
+        stderr_capture,
+        stderr_task: None,
+    })
+}
+
 /// MCP context is injected via --append-system-prompt for Claude Code,
 /// or prepended to the prompt for other agents.
 /// Returns: (binary, npx_package, args, env_key, stderr_mode, output_mode)
@@ -724,6 +862,29 @@ fn agent_command(agent_type: &AgentType, prompt: &str, full_access: bool, mcp_co
                 Some("@github/copilot"),
                 args,
                 "GH_TOKEN",
+                StderrMode::StdoutOnly,
+                OutputMode::Text,
+            )
+        },
+        AgentType::Ollama => {
+            // Ollama: local LLM inference via `ollama run <model> <prompt>`
+            let model = model_flag.unwrap_or("llama3.2");
+            let full_prompt = if mcp_context.is_empty() {
+                prompt.into()
+            } else {
+                format!("{}\n\n{}", mcp_context, prompt)
+            };
+            let args = vec![
+                "run".into(),
+                "--nowordwrap".into(),
+                model.into(),
+                full_prompt,
+            ];
+            (
+                "ollama",
+                None,
+                args,
+                "OLLAMA_HOST",
                 StderrMode::StdoutOnly,
                 OutputMode::Text,
             )
@@ -1141,6 +1302,21 @@ pub fn parse_token_usage(agent_type: &AgentType, response: &str, stderr_lines: &
             }
             (response.to_string(), 0)
         }
+        AgentType::Ollama => {
+            // Ollama HTTP streaming puts "ollama_tokens:prompt:eval" in stderr_capture
+            // (written by start_ollama_http when the final `done: true` chunk arrives).
+            for line in stderr_lines {
+                if let Some(rest) = line.strip_prefix("ollama_tokens:") {
+                    let parts: Vec<&str> = rest.split(':').collect();
+                    if parts.len() == 2 {
+                        let prompt = parts[0].parse::<u64>().unwrap_or(0);
+                        let eval = parts[1].parse::<u64>().unwrap_or(0);
+                        return (response.to_string(), prompt + eval);
+                    }
+                }
+            }
+            (response.to_string(), 0)
+        }
         // Claude Code: tokens parsed inline via parse_claude_stream_line() in discussions.rs
         // TODO: Gemini CLI, Vibe — not yet supported
         _ => (response.to_string(), 0),
@@ -1157,6 +1333,7 @@ fn get_api_key(env_key: &str, tokens: &TokensConfig) -> Option<String> {
         "OPENAI_API_KEY" => "openai",
         "GEMINI_API_KEY" => "google",
         "MISTRAL_API_KEY" => "mistral",
+        "OLLAMA_HOST" => return std::env::var(env_key).ok(), // Ollama: no API key, just host URL
         _ => return None,
     };
 

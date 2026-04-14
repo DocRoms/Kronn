@@ -54,6 +54,7 @@ vi.mock('../../lib/api', () => ({
       kiro: { economy: null, reasoning: null },
       vibe: { economy: null, reasoning: null },
       copilot_cli: { economy: null, reasoning: null },
+      ollama: { economy: null, reasoning: null },
     }),
     setModelTiers: vi.fn().mockResolvedValue(undefined),
     exportData: vi.fn(),

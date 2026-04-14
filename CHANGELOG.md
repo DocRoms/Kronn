@@ -7,6 +7,22 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.4.0] — 2026-04-14
+
+### Added
+- **Ollama local LLM integration** — new `AgentType::Ollama` for running local models (Llama, Gemma, Codestral, Qwen) at zero cost. HTTP API execution via `/api/chat` with separate system/user roles (model distinguishes MCP context from user question). Streaming output, token tracking (`prompt_eval_count` + `eval_count`). Health check (`GET /api/ollama/health`) with contextual hints per environment (native, Docker WSL, Docker macOS). Model listing (`GET /api/ollama/models`). `reqwest` stream feature added for HTTP response streaming
+- **Ollama setup wizard in Settings** — 4-state inline card: not installed (OS-specific install commands + ollama.com link), offline/unreachable (contextual launch instructions for WSL/Linux/macOS), online with 0 models (4 suggested models with `ollama pull` commands + sizes), online with models (list of installed models with sizes). Refresh button for live status
+- **Docker Ollama connectivity** — `OLLAMA_HOST` env var in docker-compose.yml. `extra_hosts: host.docker.internal:host-gateway` for Linux Docker. Contextual error message when Ollama listens on 127.0.0.1 only (WSL common issue)
+
+### Changed
+- **Ollama execution: CLI → HTTP API** — replaced `ollama run <model>` (single text blob, model confused MCP context with user question) with `POST /api/chat` (separate `role: system` for MCP/skills/profiles/directives context, `role: user` for the actual prompt). Fixes "response à côté de la plaque" issue with small models
+
+### Tests
+- Backend: **1187** (1040 lib + 147 integration). +2 Ollama endpoint tests, +5 cross-agent for 7 agents
+- Frontend: **520** (41 suites). Cross-agent tests updated for 7 agents
+
+---
+
 ## [0.3.7] — 2026-04-14
 
 ### Fixed (stability pass)

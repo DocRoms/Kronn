@@ -31,6 +31,7 @@ Kronn/
 │       │   ├── mcps.rs         # MCP 3-tier API: overview, configs CRUD, registry, refresh, secrets
 │       │   ├── workflows.rs    # Workflow CRUD + trigger + runs + cancel_run (cascades via parent_run_id) + test_step + test_batch_step (dry-run preview: eligible_items + sample_rendered_prompts + warnings)
 │       │   ├── quick_prompts.rs # Quick Prompts CRUD + render + launch (0.3.4)
+│       │   ├── ollama.rs      # Ollama local LLM (0.4.0) — health check (contextual hints per env) + model listing via HTTP API. ollama_base_url_pub() reused by runner
 │       │   ├── agents.rs       # Agent detection + install + uninstall + toggle (enable/disable)
 │       │   ├── stats.rs        # Token usage & cost stats (by provider, project, daily history, top discussions/workflows)
 │       │   ├── skills.rs       # Skills API: list, create, update, delete
@@ -162,7 +163,8 @@ Kronn/
 │       │       ├── AgentsSection.tsx  # Agent config (tokens, keys, model tiers, install/uninstall)
 │       │       ├── UsageSection.tsx   # Usage dashboard (summary cards, provider bar, project bars, daily chart, top-5 lists, tokens/cost toggle, disc/wf filter)
 │       │       ├── IdentitySection.tsx # User identity (pseudo, avatar, invite code)
-│       │       └── ProfilesSection.tsx # Profile management
+│       │       ├── ProfilesSection.tsx # Profile management
+│       │       └── OllamaCard.tsx     # Ollama setup wizard (0.4.0) — 4-state card (install/launch/pull/picker) with contextual OS hints
 │       ├── styles/
 │       │   ├── tokens.css        # CSS custom properties (--kr-bg-*, --kr-text-*, --kr-accent-*, --kr-sp-*, --kr-r-*, --kr-fs-*)
 │       │   ├── reset.css         # Global reset + font-face (moved from index.html)

@@ -10,6 +10,8 @@ services:
         APP_GID: ${KRONN_HOST_GID:-1000}
     group_add:
       - "${KRONN_DOCKER_GID:-989}"  # Docker socket GID for docker compose access
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # Linux: resolve host.docker.internal → host IP (macOS/Windows have this built-in)
     expose:
       - "3140"
     volumes:
@@ -61,6 +63,7 @@ services:
       - MISTRAL_API_KEY=${MISTRAL_API_KEY:-}
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       - GH_TOKEN=${GH_TOKEN:-${GITHUB_TOKEN:-}}
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
       - RUST_LOG=kronn=debug,tower_http=debug
     # Resource limits — prevents runaway agents from consuming all host resources
     deploy:

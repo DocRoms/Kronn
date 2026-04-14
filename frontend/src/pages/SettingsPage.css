@@ -103,6 +103,150 @@
   padding: 0 var(--kr-sp-8) var(--kr-sp-8);
 }
 
+/* ── Ollama card (v0.4.0) ─────────────────────────────── */
+
+.set-ollama-card {
+  padding: var(--kr-sp-6) var(--kr-sp-8);
+}
+
+.set-ollama-header {
+  margin-bottom: var(--kr-sp-4);
+}
+
+.set-ollama-status {
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+}
+
+.set-ollama-body {
+  padding-left: var(--kr-sp-9);
+}
+
+.set-ollama-wizard {
+  background: rgba(var(--kr-info-rgb), 0.04);
+  border: 1px solid rgba(var(--kr-info-rgb), 0.1);
+  border-radius: var(--kr-r-lg);
+  padding: var(--kr-sp-6);
+}
+
+.set-ollama-wizard-title {
+  font-size: var(--kr-fs-sm);
+  font-weight: 700;
+  color: var(--kr-text-primary);
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  margin-bottom: var(--kr-sp-4);
+}
+
+.set-ollama-wizard-desc {
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-secondary);
+  line-height: 1.5;
+  margin: 0 0 var(--kr-sp-4);
+}
+
+.set-ollama-commands {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-3);
+  margin-bottom: var(--kr-sp-4);
+}
+
+.set-ollama-cmd-group {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-4);
+}
+
+.set-ollama-cmd-label {
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--kr-text-muted);
+  min-width: 60px;
+}
+
+.set-ollama-cmd {
+  font-size: var(--kr-fs-xs);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-sm);
+  padding: 3px 8px;
+  color: var(--kr-text-secondary);
+  user-select: all;
+}
+
+.set-ollama-hint {
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-secondary);
+  line-height: 1.6;
+  margin: 0 0 var(--kr-sp-4);
+  white-space: pre-line;
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-family: inherit;
+}
+
+.set-ollama-link {
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-accent-text);
+  text-decoration: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.set-ollama-link:hover {
+  text-decoration: underline;
+}
+
+.set-ollama-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-3);
+}
+
+.set-ollama-suggestion {
+  display: flex;
+  align-items: baseline;
+  gap: var(--kr-sp-4);
+  flex-wrap: wrap;
+}
+
+.set-ollama-suggestion-desc {
+  font-size: 9px;
+  color: var(--kr-text-muted);
+}
+
+.set-ollama-models {
+  padding: var(--kr-sp-2) 0;
+}
+
+.set-ollama-model-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+}
+
+.set-ollama-model-row {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  padding: 2px 0;
+}
+
+.set-ollama-model-name {
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-primary);
+}
+
+.set-ollama-pull-hint {
+  margin-top: var(--kr-sp-4);
+  padding-top: var(--kr-sp-3);
+  border-top: 1px solid var(--kr-border);
+}
+
 /* ── Card section (padding wrapper) ────────────────────── */
 .set-section {
   padding: var(--kr-sp-8) var(--kr-sp-9);

@@ -44,6 +44,8 @@ Three Docker services behind nginx gateway:
 - **Path resolution**: `resolve_host_path` uses Docker mount priority (prefers /host-home over /home/priol).
 - **macOS Docker agent bootstrap (0.3.5)**: on macOS hosts, host-mounted binaries are Darwin (macOS) executables that cannot run in the Linux container. `entrypoint.sh` detects `KRONN_HOST_OS=macOS` and installs Linux versions of Claude Code (npm), Codex (npm), and Kiro (curl) inside the container. `find_binary()` skips host-mounted Darwin binaries for `claude`, `codex`, `copilot`, `kiro-cli` when `host_is_macos()`. `~/.npm/bin` is mounted at `/host-bin/npm` via `KRONN_NPM_BIN` env var (auto-detected by Makefile `npm bin -g`).
 
+- **Ollama local LLM (0.4.0)**: unlike other agents (CLI spawn), Ollama uses HTTP API streaming (`POST OLLAMA_HOST/api/chat`). System context (MCP, skills, profiles, directives) is sent as `role: system`, user prompt as `role: user` — the model doesn't confuse context with question. Token tracking from `prompt_eval_count` + `eval_count` in the `done: true` response chunk. Cost: always $0. Docker: `OLLAMA_HOST` env var resolves to `host.docker.internal:11434` (macOS/Windows) or requires `OLLAMA_HOST=0.0.0.0 ollama serve` on WSL/Linux. Health endpoint returns contextual hints per environment. Setup wizard in Settings with 4 states (install → launch → pull models → model picker). `api/ollama.rs` for health+models, execution in `runner.rs:start_ollama_http()`.
+
 ### Discussions
 - `Discussion.project_id` is `Option<String>` (Rust) / `string | null` (TS).
 - Discussions without a project are "global" — shown under "Général" group in the sidebar.

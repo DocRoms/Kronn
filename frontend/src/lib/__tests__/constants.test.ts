@@ -33,12 +33,12 @@ describe('constants', () => {
   });
 
   describe('ALL_AGENT_TYPES', () => {
-    it('contains the 6 real agent types — Custom is intentionally excluded', () => {
+    it('contains the 7 real agent types — Custom is intentionally excluded', () => {
       // ALL_AGENT_TYPES lists only the concrete, installable agent types.
-      // AgentType (from generated.ts) also includes "Custom" (a 7th variant)
+      // AgentType (from generated.ts) also includes "Custom" (an 8th variant)
       // which is a generic escape-hatch type, not a selectable agent in the UI.
-      // Therefore ALL_AGENT_TYPES has 6 entries and Custom is excluded on purpose.
-      expect(ALL_AGENT_TYPES).toHaveLength(6);
+      // Therefore ALL_AGENT_TYPES has 7 entries and Custom is excluded on purpose.
+      expect(ALL_AGENT_TYPES).toHaveLength(7);
       expect(ALL_AGENT_TYPES).toContain('ClaudeCode');
       expect(ALL_AGENT_TYPES).toContain('Codex');
       expect(ALL_AGENT_TYPES).toContain('Vibe');
@@ -158,7 +158,7 @@ describe('constants', () => {
       // If a new agent is added to the Rust enum but not to ALL_AGENT_TYPES
       // in constants.ts, this test fails. The generated.ts union is the
       // source of truth from the backend.
-      const knownFromGenerated: string[] = ['ClaudeCode', 'Codex', 'Vibe', 'GeminiCli', 'Kiro', 'CopilotCli'];
+      const knownFromGenerated: string[] = ['ClaudeCode', 'Codex', 'Vibe', 'GeminiCli', 'Kiro', 'CopilotCli', 'Ollama'];
       expect(ALL_AGENT_TYPES.sort()).toEqual(knownFromGenerated.sort());
     });
 
@@ -171,7 +171,7 @@ describe('constants', () => {
     });
 
     it('has at least 6 agent types (grows when new agents are added)', () => {
-      expect(ALL_AGENT_TYPES.length).toBeGreaterThanOrEqual(6);
+      expect(ALL_AGENT_TYPES.length).toBeGreaterThanOrEqual(7);
     });
   });
 });

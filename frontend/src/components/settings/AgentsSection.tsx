@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { config as configApi, agents as agentsApi } from '../../lib/api';
+import { OllamaCard } from './OllamaCard';
 import { useApi } from '../../hooks/useApi';
 import type { AgentDetection, AgentsConfig, ModelTiersConfig } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
@@ -102,6 +103,11 @@ export function AgentsSection({
         })()}
 
         {agents.map(agent => {
+          // Ollama gets its own dedicated card with health check + model picker
+          if (agent.agent_type === 'Ollama') {
+            return <OllamaCard key="ollama" t={t} />;
+          }
+
           const permFlag: Record<string, { flag: string; descKey: string }> = {
             ClaudeCode: { flag: '--dangerously-skip-permissions', descKey: 'config.fullAccess' },
             Codex: { flag: '--full-auto', descKey: 'config.autoApply' },
@@ -448,6 +454,7 @@ export function AgentsSection({
                   kiro: { economy: newEditing.kiro?.economy || null, reasoning: newEditing.kiro?.reasoning || null },
                   vibe: { economy: newEditing.vibe?.economy || null, reasoning: newEditing.vibe?.reasoning || null },
                   copilot_cli: { economy: newEditing.copilot_cli?.economy || null, reasoning: newEditing.copilot_cli?.reasoning || null },
+                  ollama: { economy: newEditing.ollama?.economy || null, reasoning: newEditing.ollama?.reasoning || null },
                 };
                 try { await configApi.setModelTiers(newTiers); toast(t('config.saved'), 'success'); } catch { toast(t('config.saveError'), 'error'); }
               };

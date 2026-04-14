@@ -615,6 +615,7 @@ pub async fn test_step(
         AgentType::Kiro => agents.kiro.full_access,
         AgentType::Vibe => agents.vibe.full_access,
         AgentType::CopilotCli => agents.copilot_cli.full_access,
+        AgentType::Ollama => agents.ollama.full_access,
         AgentType::Custom => false,
     };
 

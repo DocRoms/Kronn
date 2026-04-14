@@ -203,6 +203,7 @@ pub fn default_config() -> AppConfig {
             kiro: AgentConfig::default(),
             vibe: AgentConfig::default(),
             copilot_cli: AgentConfig::default(),
+            ollama: AgentConfig::default(),
             model_tiers: Default::default(),
         },
         language: "fr".into(),

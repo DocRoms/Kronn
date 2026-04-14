@@ -68,6 +68,7 @@ export interface AgentsConfig {
   kiro: AgentConfig;
   vibe: AgentConfig;
   copilot_cli: AgentConfig;
+  ollama: AgentConfig;
   model_tiers: ModelTiersConfig;
 }
 
@@ -85,6 +86,27 @@ export interface ModelTiersConfig {
   kiro: ModelTierConfig;
   vibe: ModelTierConfig;
   copilot_cli: ModelTierConfig;
+  ollama: ModelTierConfig;
+}
+
+// ─── Ollama (0.4.0) ──────────────────────────────────────────────────
+
+export interface OllamaModel {
+  name: string;
+  size: string;
+  modified: string;
+}
+
+export interface OllamaHealthResponse {
+  status: string;
+  version: string | null;
+  endpoint: string;
+  models_count: number;
+  hint: string | null;
+}
+
+export interface OllamaModelsResponse {
+  models: OllamaModel[];
 }
 
 export interface SetAgentAccessRequest {
@@ -128,7 +150,7 @@ export interface AgentDetection {
   runtime_available: boolean;
 }
 
-export type AgentType = "ClaudeCode" | "Codex" | "Vibe" | "GeminiCli" | "Kiro" | "CopilotCli" | "Custom";
+export type AgentType = "ClaudeCode" | "Codex" | "Vibe" | "GeminiCli" | "Kiro" | "CopilotCli" | "Ollama" | "Custom";
 
 // ─── AI Audit ────────────────────────────────────────────────────────────────
 
