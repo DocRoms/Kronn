@@ -1,7 +1,7 @@
 # ⚡ Kronn
 
 Self-hosted control plane for AI coding agents.
-Orchestrate Claude Code, Codex, Vibe, Gemini CLI, and Kiro — with less waste.
+Orchestrate Claude Code, Codex, Vibe, Gemini CLI, Kiro, and Ollama (local models) — with less waste.
 
 > Enter the grid. Command your agents.
 
@@ -209,10 +209,11 @@ All models downloaded on first use and cached locally.
 | Gemini CLI | `gemini` | ✅ Supported |
 | Kiro | `kiro-cli` | ✅ Supported |
 | GitHub Copilot | `copilot` | ✅ Supported |
+| **Ollama (local)** | `ollama` | ✅ Supported (100% local, zero cost) |
 | DeepSeek | `deepseek` | Planned |
 | OpenCode | `opencode` | Planned |
 
-Auto-detected at setup with runtime probe fallback (npx). Per-agent permissions toggle. Multiple named API keys per provider.
+Auto-detected at setup with runtime probe fallback (npx). Per-agent permissions toggle. Multiple named API keys per provider. **Ollama**: runs models locally (Llama, Gemma, Codestral, Qwen) — setup wizard in Settings with health check, model suggestions, and contextual install instructions per OS.
 
 ![Multi API key management per agent](docs/screenshots/multiApiKeyByAgent.png)
 

@@ -50,6 +50,7 @@ const KNOWN_AGENTS: &[AgentDef] = &[
     AgentDef { name: "Gemini CLI", agent_type: AgentType::GeminiCli, binary: "gemini", origin: "US", install_cmd: "npm install -g @google/gemini-cli" },
     AgentDef { name: "Kiro", agent_type: AgentType::Kiro, binary: "kiro-cli", origin: "US", install_cmd: "curl -fsSL https://cli.kiro.dev/install | bash" },
     AgentDef { name: "GitHub Copilot", agent_type: AgentType::CopilotCli, binary: "copilot", origin: "US", install_cmd: "npm install -g @github/copilot" },
+    AgentDef { name: "Ollama", agent_type: AgentType::Ollama, binary: "ollama", origin: "US", install_cmd: "curl -fsSL https://ollama.com/install.sh | sh" },
 ];
 
 /// Detect the host platform label (WSL, macOS, Linux, Windows, etc.)
@@ -169,6 +170,7 @@ async fn probe_runtime(def: &AgentDef) -> bool {
         AgentType::CopilotCli => Some("@github/copilot"),
         AgentType::Vibe => None, // uvx, handled differently
         AgentType::Kiro => None, // Native binary, no npx package
+        AgentType::Ollama => None, // Native binary, own installer
         AgentType::Custom => None,
     };
 
@@ -420,7 +422,7 @@ fn install_prerequisite(agent_type: &AgentType) -> Option<(&'static str, &'stati
             Some(("npm", "Node.js is required. Install it from https://nodejs.org")),
         AgentType::Vibe =>
             Some(("uv", "uv is required. Install it from https://docs.astral.sh/uv")),
-        _ => None,
+        AgentType::Kiro | AgentType::Ollama | AgentType::Custom => None,
     }
 }
 
@@ -467,6 +469,10 @@ pub async fn uninstall_agent(agent_type: &AgentType) -> Result<String> {
         AgentType::Kiro => "rm -f $(which kiro-cli)",
         #[cfg(windows)]
         AgentType::Kiro => "where kiro-cli >nul 2>&1 && del /f /q kiro-cli",
+        #[cfg(unix)]
+        AgentType::Ollama => "sudo rm -f $(which ollama)",
+        #[cfg(windows)]
+        AgentType::Ollama => "winget uninstall Ollama.Ollama",
         AgentType::Custom => anyhow::bail!("Cannot uninstall custom agents"),
     };
 
@@ -721,6 +727,7 @@ mod tests {
             AgentType::GeminiCli,
             AgentType::Kiro,
             AgentType::CopilotCli,
+            AgentType::Ollama,
         ];
         for agent_type in &all_types {
             let found = KNOWN_AGENTS.iter().any(|a| std::mem::discriminant(&a.agent_type) == std::mem::discriminant(agent_type));

@@ -60,6 +60,7 @@ const defaultModelTiers = {
   kiro: { economy: null, reasoning: null },
   vibe: { economy: null, reasoning: null },
   copilot_cli: { economy: null, reasoning: null },
+  ollama: { economy: null, reasoning: null },
 };
 
 const restrictedConfig: AgentsConfig = {
@@ -69,6 +70,7 @@ const restrictedConfig: AgentsConfig = {
   kiro: { path: null, installed: false, version: null, full_access: false },
   vibe: { path: null, installed: false, version: null, full_access: false },
   copilot_cli: { path: null, installed: false, version: null, full_access: false },
+  ollama: { path: null, installed: false, version: null, full_access: false },
   model_tiers: defaultModelTiers,
 };
 
@@ -79,6 +81,7 @@ const fullConfig: AgentsConfig = {
   kiro: { path: null, installed: false, version: null, full_access: true },
   vibe: { path: null, installed: false, version: null, full_access: true },
   copilot_cli: { path: null, installed: false, version: null, full_access: false },
+  ollama: { path: null, installed: false, version: null, full_access: false },
   model_tiers: defaultModelTiers,
 };
 

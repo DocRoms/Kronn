@@ -2541,6 +2541,36 @@ async fn discover_repos_accepts_empty_sources() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Ollama endpoints (0.4.0)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn ollama_health_returns_valid_status() {
+    let app = test_app();
+    let (status, json) = get_json(app, "/api/ollama/health").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+    // Status depends on whether Ollama is running on the dev machine
+    let health_status = json["data"]["status"].as_str().unwrap();
+    assert!(
+        ["online", "offline", "not_installed", "unreachable"].contains(&health_status),
+        "Unexpected status: '{}'", health_status
+    );
+    // Endpoint field is always present
+    assert!(json["data"]["endpoint"].as_str().unwrap().starts_with("http"));
+}
+
+#[tokio::test]
+async fn ollama_models_returns_valid_response() {
+    let app = test_app();
+    let (status, json) = get_json(app, "/api/ollama/models").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+    // Models array: empty if Ollama offline, populated if online
+    assert!(json["data"]["models"].is_array());
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Skills / Profiles / Directives / Stats — CRUD smoke tests (0.3.7)
 // ═══════════════════════════════════════════════════════════════════════════════
 

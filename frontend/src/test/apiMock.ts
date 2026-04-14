@@ -45,6 +45,7 @@ export const API_NAMESPACES = [
   'profiles',
   'directives',
   'stats',
+  'ollama',
 ] as const;
 
 /** Flat top-level helpers (non-namespace exports). */
@@ -75,6 +76,7 @@ interface DefaultMock {
   profiles: Record<string, AnyFn>;
   directives: Record<string, AnyFn>;
   stats: Record<string, AnyFn>;
+  ollama: Record<string, AnyFn>;
 }
 
 /**
@@ -238,6 +240,11 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     stats: {
       getTokens: resolve({ total_tokens: 0, by_provider: [], by_project: [] }),
       getAgentUsage: resolve([]),
+    },
+
+    ollama: {
+      health: resolve({ status: 'not_installed', version: null, endpoint: 'http://localhost:11434', models_count: 0, hint: null }),
+      models: resolve({ models: [] }),
     },
   };
 

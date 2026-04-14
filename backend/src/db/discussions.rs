@@ -623,6 +623,7 @@ fn parse_agent_type(s: &str) -> AgentType {
         "GeminiCli" => AgentType::GeminiCli,
         "Kiro" => AgentType::Kiro,
         "CopilotCli" => AgentType::CopilotCli,
+        "Ollama" => AgentType::Ollama,
         _ => AgentType::Custom,
     }
 }
@@ -635,6 +636,7 @@ fn format_agent_type(a: &AgentType) -> String {
         AgentType::GeminiCli => "GeminiCli".into(),
         AgentType::Kiro => "Kiro".into(),
         AgentType::CopilotCli => "CopilotCli".into(),
+        AgentType::Ollama => "Ollama".into(),
         AgentType::Custom => "Custom".into(),
     }
 }

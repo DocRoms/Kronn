@@ -64,6 +64,8 @@ import type {
   TestStepRequest,
   QuickPrompt,
   CreateQuickPromptRequest,
+  OllamaHealthResponse,
+  OllamaModelsResponse,
 } from '../types/generated';
 import type { DiscoverKeysResponse } from '../types/extensions';
 
@@ -907,4 +909,11 @@ export const directives = {
 export const stats = {
   tokenUsage: () => api<TokenUsageSummary>('GET', '/stats/tokens'),
   agentUsage: () => api<AgentUsageSummary[]>('GET', '/stats/agent-usage'),
+};
+
+// ─── Ollama (local LLM) ────────────────────────────────────────────────────
+
+export const ollama = {
+  health: () => api<OllamaHealthResponse>('GET', '/ollama/health'),
+  models: () => api<OllamaModelsResponse>('GET', '/ollama/models'),
 };
