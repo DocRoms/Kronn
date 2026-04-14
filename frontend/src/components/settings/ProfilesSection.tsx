@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { profiles as profilesApi } from '../../lib/api';
 import type { AgentProfile } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
-import { UserCircle, Plus, Trash2, Check, X } from 'lucide-react';
+import { Plus, Trash2, Check, X } from 'lucide-react';
 import '../../pages/SettingsPage.css';
 
 interface ProfilesSectionProps {
@@ -29,11 +29,8 @@ export function ProfilesSection({ toast, t }: ProfilesSectionProps) {
   }, []);
 
   return (
-    <div id="settings-profiles" className="set-card">
-      <div className="set-section">
-        <h2 className="flex-row gap-6 text-lg font-bold text-primary mb-8">
-          <UserCircle size={16} style={{ color: '#a78bfa' }} /> {t('profiles.title')}
-        </h2>
+    <div>
+      <div>
 
         <div className="flex-wrap mb-8" style={{ gap: 12, maxHeight: 400, overflowY: 'auto', overflowX: 'hidden' }}>
           {availableProfiles.map(profile => (

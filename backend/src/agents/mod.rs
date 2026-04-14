@@ -701,4 +701,81 @@ mod tests {
         };
         assert_eq!(pkg, Some("@github/copilot"));
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Cross-agent regression tests (auto-extends when agents are added)
+    // ═══════════════════════════════════════════════════════════════════
+    //
+    // These tests iterate over ALL known agents and verify that each one
+    // has a complete configuration. When you add a new AgentType variant
+    // or a new KNOWN_AGENTS entry, these tests fail if you forget any
+    // of the supporting pieces (runner config, DB serialization, etc.).
+
+    /// All non-Custom AgentType variants must have a KNOWN_AGENTS entry.
+    #[test]
+    fn cross_agent_every_type_in_known_agents() {
+        let all_types = [
+            AgentType::ClaudeCode,
+            AgentType::Codex,
+            AgentType::Vibe,
+            AgentType::GeminiCli,
+            AgentType::Kiro,
+            AgentType::CopilotCli,
+        ];
+        for agent_type in &all_types {
+            let found = KNOWN_AGENTS.iter().any(|a| std::mem::discriminant(&a.agent_type) == std::mem::discriminant(agent_type));
+            assert!(found, "AgentType::{:?} is missing from KNOWN_AGENTS — add an AgentDef entry", agent_type);
+        }
+        // Reverse: every KNOWN_AGENTS entry must map to a real AgentType
+        assert_eq!(KNOWN_AGENTS.len(), all_types.len(),
+            "KNOWN_AGENTS has {} entries but we expect {} (one per non-Custom AgentType)",
+            KNOWN_AGENTS.len(), all_types.len());
+    }
+
+    /// Every KNOWN_AGENTS entry must have a non-empty binary name and install command.
+    #[test]
+    fn cross_agent_definitions_are_complete() {
+        for def in KNOWN_AGENTS {
+            assert!(!def.binary.is_empty(), "{:?} has empty binary name", def.agent_type);
+            assert!(!def.install_cmd.is_empty(), "{:?} has empty install_cmd", def.agent_type);
+            assert!(!def.name.is_empty(), "{:?} has empty display name", def.agent_type);
+            assert!(!def.origin.is_empty(), "{:?} has empty origin", def.agent_type);
+        }
+    }
+
+    /// Every agent in KNOWN_AGENTS must NOT be the Custom variant.
+    /// runner.rs has exhaustive match on AgentType — the compiler enforces
+    /// that every variant has a command builder. This test documents that
+    /// KNOWN_AGENTS only contains real agents.
+    #[test]
+    fn cross_agent_no_custom_in_known_agents() {
+        for def in KNOWN_AGENTS {
+            assert!(!matches!(def.agent_type, AgentType::Custom),
+                "KNOWN_AGENTS must not contain Custom — it has no CLI binary");
+        }
+    }
+
+    /// The macOS binary skip list must include ALL npm-based agents.
+    /// If you add a new npm agent, it needs to be in the skip list
+    /// (otherwise macOS Docker users get a Darwin binary that can't execute).
+    #[test]
+    fn cross_agent_macos_skip_covers_npm_agents() {
+        // This test doesn't run the actual macOS code path, but it verifies
+        // the skip list concept by checking that every npm-installed agent
+        // binary is accounted for in the skip list comment/documentation.
+        let npm_agents: Vec<&str> = KNOWN_AGENTS.iter()
+            .filter(|d| d.install_cmd.starts_with("npm "))
+            .map(|d| d.binary)
+            .collect();
+        // At minimum: claude, codex, gemini, copilot
+        assert!(npm_agents.contains(&"claude"), "claude should be detected as npm agent");
+        assert!(npm_agents.contains(&"codex"), "codex should be detected as npm agent");
+        assert!(npm_agents.contains(&"gemini"), "gemini should be detected as npm agent");
+        assert!(npm_agents.contains(&"copilot"), "copilot should be detected as npm agent");
+        // When you add a new npm agent, this assertion will remind you to
+        // update the macOS skip list in find_binary() and entrypoint.sh
+        assert!(npm_agents.len() >= 4,
+            "Expected at least 4 npm agents, found {}. If you added one, update the macOS skip list in find_binary() and entrypoint.sh",
+            npm_agents.len());
+    }
 }

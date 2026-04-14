@@ -7,6 +7,35 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.3.6] — 2026-04-14
+
+### Added
+- **Guided tour / onboarding overlay** — 15-step interactive walkthrough for new users, auto-launched on first visit. 3 interactive steps where the user clicks the real UI element (portal-rendered pulse animation, "Next" blocked until click). 5 acts with group labels (Projets → Plugins → Discussions → Automatisation → Config). Ends on Discussions page for action-oriented onboarding. Spotlight via box-shadow cutout, tooltip auto-positioned, mobile bottom-sheet. Keyboard: Escape/arrows. Replayable from "?" nav button or Settings. `kronn:tour-completed` localStorage persistence. Designed by consensus of 3 expert personas (PM Marie, UX Designer, Learning Scientist). 10 unit tests
+- **Skill: structured-questions** — teaches agents the `{{var}}: question` format for structured Q&A. Bidirectional protocol: agent asks in `{{var}}: text` format → UI renders form → user replies as `var: value` lines → agent parses correctly. Category: domain
+- **Profile: Translator / Teacher (Lin)** — contextual translation with vocabulary explanations. Translates with register awareness, explains idioms and jargon inline, treats each exchange as a micro-lesson. 17 builtin profiles total
+- **macOS Docker agent bootstrap** — `entrypoint.sh` installs Linux `claude` + `codex` via npm on macOS hosts (Darwin binaries can't run in Linux container). Agent detection skips host-mounted Darwin binaries for `claude`, `codex`, `copilot`, `kiro-cli`. `~/.npm/bin` mounted via `KRONN_NPM_BIN` env var
+- **Gemini CLI Docker mount** — `~/.gemini:/home/kronn/.gemini:rw` added to docker-compose.yml (was missing → Gemini crashed on agent switch with ENOENT on `projects.json`)
+- **CI: desktop type-check** — `cargo check` of `desktop/src-tauri/` added to `ci-test.yml` to catch signature mismatches between backend lib and Tauri desktop app
+- **Cross-agent regression tests** — 5 backend + 3 frontend parameterized tests that iterate over ALL agent types. Auto-fail when a new agent is added without complete configuration (KNOWN_AGENTS entry, macOS skip, DB round-trip, frontend color/label). Filet de sécurité pour ne plus casser un agent en en touchant un autre
+
+### Changed
+- **Settings: accordion for Agents & Skills** — Agents, Skills, Profiles, Directives collapsed into a single card with 4 accordion sections. Agents open by default, others collapsed. Reduces vertical scroll by ~3 screens
+- **Discussions: accordion in advanced options** — Skills, Profiles, Directives in the new discussion form are now collapsible (mutually exclusive). Selection count badge. Same visual pattern as Settings
+- **Tour step descriptions** — multiline text support (`white-space: pre-line`) for richer explanations. Step "3 façons de commencer" uses line breaks for clarity
+
+### Fixed
+- **Desktop Tauri build broken** — `AppState` and `WorkflowEngine::new()` signature updated in `desktop/src-tauri/src/main.rs` to match backend changes (removed `workflow_engine` field, added `cancel_registry`, `WorkflowEngine::new(state)` instead of `(db, config)`). Boot scans (orphan runs + partial recovery) added to desktop — were missing since 0.3.5
+- **Project switch in discussions silently failing** — `Option<Option<String>>` serde bug: JSON `null` and absent key both deserialize as `None` (= no change). Frontend now sends `""` for "unset project", backend treats `""` as unset. Added try/catch + console.error on the PATCH call
+- **Tour pulse animation invisible** — `box-shadow` on target element was hidden by parent stacking contexts (sticky nav). Pulse is now a separate portal div (`.tour-pulse-ring`) rendered above everything
+- **Tour spotlight not cleaned up on step change** — `tour-target-elevated` class was not removed when transitioning to centered steps (welcome/finale). Fixed by calling `cleanupPrev()` before early returns in `useTourPositioning`
+- **Tour backdrop blocking clicks on interactive steps** — `pointer-events: none` on backdrop during `waitForClick` steps so clicks reach the real UI element
+
+### Tests
+- Frontend: **517** (39 suites). +10 tour, +3 cross-agent consistency
+- Backend: **1171** (1037 lib + 134 integration). +5 cross-agent regression (every_type_in_known_agents, definitions_complete, no_custom, macos_skip_covers_npm, db_round_trip_all_types)
+
+---
+
 ## [0.3.5] — 2026-04-13
 
 ### Added

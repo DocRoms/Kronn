@@ -472,9 +472,15 @@ export function ChatHeader({
                   className="disc-popover-select"
                   value={discussion.project_id ?? ''}
                   onChange={async (e) => {
-                    const newPid = e.target.value || null;
-                    await discussionsApi.update(discussion.id, { project_id: newPid });
-                    onDiscussionUpdated();
+                    // Send "" (not null) for "General" — serde can't distinguish
+                    // JSON null from absent field with Option<Option<String>>
+                    const newPid = e.target.value;
+                    try {
+                      await discussionsApi.update(discussion.id, { project_id: newPid || '' });
+                      onDiscussionUpdated();
+                    } catch (err) {
+                      console.error('Failed to update project:', err);
+                    }
                   }}
                 >
                   <option value="">{t('disc.general')}</option>

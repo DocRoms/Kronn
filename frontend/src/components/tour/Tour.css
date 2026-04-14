@@ -1,0 +1,217 @@
+/* ── Guided Tour Overlay (0.3.6) ─────────────────────────────────────── */
+/* Spotlight + tooltip card for onboarding. Uses box-shadow technique:   */
+/* a positioned div with a massive spread shadow creates the darkened    */
+/* backdrop with a "hole" around the target element.                     */
+
+.tour-spotlight {
+  position: fixed;
+  border-radius: var(--kr-r-lg);
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.7);
+  transition: top 0.35s ease, left 0.35s ease, width 0.35s ease, height 0.35s ease;
+  z-index: var(--kr-z-tour);
+  pointer-events: none;
+}
+
+/* Click-catcher behind the spotlight — captures clicks on the dark area.
+   Disabled (pointer-events: none) during waitForClick steps so the user's
+   click reaches the real target element underneath. */
+.tour-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--kr-z-tour) - 1);
+  cursor: pointer;
+}
+
+.tour-backdrop[data-passthrough="true"] {
+  pointer-events: none;
+}
+
+/* Full-dim backdrop for centered steps (welcome / finale) where there
+   is no spotlight element casting the box-shadow darkness. */
+.tour-backdrop[data-dimmed="true"] {
+  background: rgba(0, 0, 0, 0.7);
+}
+
+/* Target element elevation — visual hint only. The actual click-through
+   is handled by pointer-events:none on the backdrop, not by z-index
+   (which doesn't work across stacking contexts like sticky navs). */
+.tour-target-elevated {
+  position: relative !important;
+  z-index: 1 !important;
+}
+
+/* ── Pulse animation for interactive (waitForClick) steps ────────────── */
+
+/* Pulse ring rendered as a portal div ON TOP of the spotlight.
+   Guarantees visibility regardless of target's stacking context. */
+.tour-pulse-ring {
+  position: fixed;
+  border-radius: var(--kr-r-lg);
+  z-index: var(--kr-z-tour);
+  pointer-events: none;
+  border: 2px solid rgba(var(--kr-accent-rgb), 0.7);
+  animation: tour-pulse-anim 1.5s ease-in-out infinite;
+  transition: top 0.35s ease, left 0.35s ease, width 0.35s ease, height 0.35s ease;
+}
+
+@keyframes tour-pulse-anim {
+  0%   { border-color: rgba(var(--kr-accent-rgb), 0.7); transform: scale(1); }
+  50%  { border-color: rgba(var(--kr-accent-rgb), 0.2); transform: scale(1.06); }
+  100% { border-color: rgba(var(--kr-accent-rgb), 0.7); transform: scale(1); }
+}
+
+/* Legacy class on target — kept minimal, just for pointer-events */
+.tour-pulse {
+  cursor: pointer !important;
+}
+
+/* ── Tooltip card ────────────────────────────────────────────────────── */
+
+.tour-tooltip {
+  position: fixed;
+  z-index: var(--kr-z-tour-tooltip);
+  width: 360px;
+  max-width: calc(100vw - 24px);
+  background: var(--kr-bg-elevated);
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.2);
+  border-radius: var(--kr-r-2xl);
+  padding: var(--kr-sp-8);
+  box-shadow: var(--kr-shadow-lg);
+  animation: tour-fade-in 0.25s ease;
+}
+
+.tour-tooltip[data-mobile="true"] {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  width: 100%;
+  max-width: 100%;
+  border-radius: var(--kr-r-2xl) var(--kr-r-2xl) 0 0;
+  padding: var(--kr-sp-10) var(--kr-sp-8) var(--kr-sp-12);
+}
+
+/* Welcome / finale steps — no target, centered */
+.tour-tooltip[data-centered="true"] {
+  top: 50% !important;
+  left: 50% !important;
+  transform: translate(-50%, -50%);
+}
+
+@keyframes tour-fade-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Tooltip content ─────────────────────────────────────────────────── */
+
+.tour-group-label {
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  color: var(--kr-accent-text);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: var(--kr-sp-2);
+}
+
+.tour-step-counter {
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-muted);
+  margin-bottom: var(--kr-sp-3);
+}
+
+.tour-title {
+  font-size: var(--kr-fs-lg);
+  font-weight: 700;
+  color: var(--kr-text-primary);
+  margin: 0 0 var(--kr-sp-3);
+}
+
+.tour-desc {
+  font-size: var(--kr-fs-base);
+  color: var(--kr-text-secondary);
+  line-height: 1.6;
+  margin: 0 0 var(--kr-sp-8);
+  white-space: pre-line;
+}
+
+/* Hint shown on waitForClick steps */
+.tour-click-hint {
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-accent-text);
+  font-style: italic;
+  margin-bottom: var(--kr-sp-4);
+}
+
+/* ── Navigation buttons ──────────────────────────────────────────────── */
+
+.tour-nav {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-4);
+}
+
+.tour-btn-next {
+  margin-left: auto;
+  padding: var(--kr-sp-3) var(--kr-sp-8);
+  border-radius: var(--kr-r-lg);
+  border: none;
+  background: var(--kr-accent);
+  color: var(--kr-bg-base);
+  font-weight: 700;
+  font-size: var(--kr-fs-sm);
+  font-family: inherit;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+}
+
+.tour-btn-next:hover {
+  filter: brightness(1.1);
+}
+
+.tour-btn-next:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+  filter: none;
+}
+
+.tour-btn-prev {
+  padding: var(--kr-sp-3) var(--kr-sp-6);
+  border-radius: var(--kr-r-lg);
+  border: 1px solid var(--kr-border-medium);
+  background: transparent;
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-sm);
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.tour-btn-prev:hover {
+  border-color: var(--kr-text-muted);
+  color: var(--kr-text-primary);
+}
+
+.tour-btn-skip {
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  border: none;
+  background: transparent;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+  font-family: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.tour-btn-skip:hover {
+  color: var(--kr-text-secondary);
+}
+
+/* ── Reduced motion ──────────────────────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  .tour-spotlight { transition-duration: 0.01ms !important; }
+  .tour-tooltip { animation-duration: 0.01ms !important; }
+  .tour-pulse { animation-duration: 0.01ms !important; }
+}

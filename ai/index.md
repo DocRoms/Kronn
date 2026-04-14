@@ -189,7 +189,9 @@ Dashboard tabs (current / planned):
 | Automatisation | Done | Two tabs: **Workflows** + **Quick Prompts**. Workflows: list (grouped by project), creation wizard (simple 3-step + advanced 5-step), detail + runs with live SSE, manual trigger, run deletion. MCP-based suggestions (10 templates). Structured inter-step contracts. AI Architect ("Create with AI" → discussion → `KRONN:WORKFLOW_READY`). Test step (dry-run + live streaming, state survives tab switches via module-level tracker). Starter templates (6 examples). Raw cron editor. **⏹ Cancel run** with cascade to child batch discussions via `parent_run_id`. **Notify step (0.3.5)**: `StepType::Notify` with webhook support (POST/PUT/GET), zero tokens, template rendering in URL + body. **Quick Prompts**: reusable prompt templates with `{{variables}}` and conditional sections `{{#var}}text{{/var}}`. Launch creates a discussion with rendered prompt and dynamic title. **Batch Quick Prompts (0.3.5)**: fan-out to N items (tickets / list / resolved template), each child gets its own discussion + optional worktree, aggregated in sidebar groups. Dry-run preview with per-item rendered prompt + per-item test button. |
 | Config | Done | Multi-key API management (incl. Mistral/Vibe API keys), token usage tracking, language, agent detection + permissions, agent usage dashboard links, Directives CRUD with live cards, DB management (**export ZIP** with data.json + config.toml, **import ZIP/JSON** with config merge + path remapping). **Global context (0.3.5)**: markdown textarea + mode dropdown (always/no_project/never), injected into agent prompts via `ServerConfig.global_context`. Skills/Profiles are now managed per-project on the Project page. |
 
-Note: the old "Agents" tab has been merged into Config. Nav order: Projets → Discussions → Plugins → Workflows → Config.
+Note: the old "Agents" tab has been merged into Config. Nav order: Projets → Discussions → Plugins → Workflows → Config. **"?" button** in nav replays the guided tour.
+
+**Guided tour (0.3.6)**: 17-step interactive onboarding auto-launched on first visit. 5 acts (Projets → Plugins → Discussions → Automatisation → Config). 4 interactive steps with `waitForClick` (user must click the real UI element — pulse animation, "Next" blocked). Spotlight via box-shadow cutout, tooltip auto-positioned. Ends on Discussions page. Persistence: `kronn:tour-completed` in localStorage. Components: `TourProvider` (context + state machine), `TourOverlay` (portal), `tourSteps.ts` (declarative step definitions), `useTourPositioning.ts` (placement + MutationObserver).
 
 ### Project Bootstrap (create from scratch)
 
@@ -269,4 +271,4 @@ Redirectors to this file: `CLAUDE.md`, `GEMINI.md`, `AGENTS.md`, `.kiro/steering
 
 ## 11. Last updated
 
-AI context last reviewed: **2026-04-14** (v0.3.5).
+AI context last reviewed: **2026-04-14** (v0.3.6).

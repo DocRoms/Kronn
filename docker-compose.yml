@@ -40,6 +40,7 @@ services:
       - ${HOME}/.vibe:/home/kronn/.vibe:rw                  # Vibe auth + state (needs write)
       - ${HOME}/.kiro:/home/kronn/.kiro:rw                  # Kiro auth + state (AWS Builder ID)
       - ${HOME}/.copilot:/home/kronn/.copilot:rw              # GitHub Copilot auth + config
+      - ${HOME}/.gemini:/home/kronn/.gemini:rw                # Gemini CLI auth + project registry + settings
       - ${HOME}/.local/share/kiro-cli:/home/kronn/.local/share/kiro-cli:rw  # Kiro SQLite data
       - ./templates:/app/templates:ro                   # AI context templates for project init
     environment:

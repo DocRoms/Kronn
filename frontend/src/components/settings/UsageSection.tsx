@@ -64,10 +64,10 @@ export function UsageSection({ onNavigateDiscussion }: UsageSectionProps) {
   const toggleExpand = (key: string) => setExpanded(expanded === key ? null : key);
 
   return (
-    <div id="settings-usage" className="set-card">
+    <div id="settings-usage" data-tour-id="usage-section" className="set-card">
       <div className="set-section">
         {/* ── Header with controls ── */}
-        <div className="flex-row gap-4 set-section-header-lg" style={{ flexWrap: 'wrap' }}>
+        <div className="flex-row gap-4 set-section-header-lg" data-tour-id="usage-header" style={{ flexWrap: 'wrap' }}>
           <TrendingUp size={14} className="text-accent" />
           <span className="font-semibold text-lg">{t('config.usage')}</span>
 

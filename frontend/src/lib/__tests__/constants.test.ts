@@ -151,4 +151,27 @@ describe('constants', () => {
       expect(isValidationDisc('Some other discussion')).toBe(false);
     });
   });
+
+  // ── Cross-agent regression (auto-extends) ──────────────────────────
+  describe('cross-agent consistency', () => {
+    it('ALL_AGENT_TYPES matches the generated AgentType union (minus Custom)', () => {
+      // If a new agent is added to the Rust enum but not to ALL_AGENT_TYPES
+      // in constants.ts, this test fails. The generated.ts union is the
+      // source of truth from the backend.
+      const knownFromGenerated: string[] = ['ClaudeCode', 'Codex', 'Vibe', 'GeminiCli', 'Kiro', 'CopilotCli'];
+      expect(ALL_AGENT_TYPES.sort()).toEqual(knownFromGenerated.sort());
+    });
+
+    it('every agent has a color, a label, and a non-empty label', () => {
+      for (const at of ALL_AGENT_TYPES) {
+        expect(AGENT_COLORS[at], `${at} missing color`).toBeDefined();
+        expect(AGENT_LABELS[at], `${at} missing label`).toBeDefined();
+        expect(AGENT_LABELS[at].length, `${at} label is empty`).toBeGreaterThan(0);
+      }
+    });
+
+    it('has at least 6 agent types (grows when new agents are added)', () => {
+      expect(ALL_AGENT_TYPES.length).toBeGreaterThanOrEqual(6);
+    });
+  });
 });

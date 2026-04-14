@@ -3,7 +3,7 @@
 ## Rules
 
 - **Quality gate is non-negotiable**: code must compile and build after any change.
-- **All tests must pass**: `npm run test` (frontend, **504 tests**), `cargo test` (backend, **1166 tests**: 1032 lib + 134 integration), `make test-shell` (192 bats tests).
+- **All tests must pass**: `npm run test` (frontend, **517 tests**), `cargo test` (backend, **1171 tests**: 1037 lib + 134 integration), `make test-shell` (192 bats tests).
 - **0 ESLint errors**: `npm run lint` must report 0 errors (warnings are tolerated for existing patterns).
 - **0 clippy warnings**: `cargo clippy --all-targets -- -D warnings` must pass.
 
@@ -16,7 +16,7 @@
 | Rust format | `cargo fmt --check` | Formatting check |
 | TS compile | `cd frontend && npx tsc -b` | Type check |
 | Frontend lint | `cd frontend && npm run lint` | ESLint 10 strict |
-| Frontend tests | `cd frontend && npm test` | Vitest 4 (504 tests) |
+| Frontend tests | `cd frontend && npm test` | Vitest 4 (517 tests) |
 | Frontend coverage | `cd frontend && npm run test:coverage` | Vitest + @vitest/coverage-v8 |
 | Frontend build | `cd frontend && npm run build` | Production build (Vite, code-split) |
 | Shell tests | `make test-shell` | bats-core (186 tests) |
@@ -38,7 +38,7 @@
 - **i18n parity**: `src/lib/__tests__/i18n-parity.test.ts` — imports the exported `dictionaries` object and asserts fr/en/es key set isomorphism + non-empty values + placeholder-subset invariant (en/es may have fewer `{N}` than fr, never extras).
 - **Module-level state trackers**: patterns like `activeStepTests` (Map + subscribe/notify) in `WorkflowDetail.tsx` survive React unmount. Tests using these must either render inside the parent or mock the tracker directly.
 
-### Test files (38 suites, 504 tests)
+### Test files (39 suites, 517 tests)
 
 | File | Tests | Covers |
 |------|-------|--------|
@@ -93,8 +93,23 @@
 
 - **Page components**: Dashboard.tsx (~650 lines), SetupWizard.tsx — basic render tests exist for 4 sub-pages but deeper interaction/state tests still needed.
 - **SSE streaming logic** in api.ts — requires mocking ReadableStream, complex setup.
-- **Backend Rust**: **1166 tests** (1032 lib + 134 integration). Key test suites: `discussions_test.rs` (21 tests: CRUD, archive, title editing, message management, AgentType round-trip for all 6 agents, DB string stability), `runner_test.rs` (agent commands, model tiers, token parsing, stream parsing for all agents), `pricing.rs` (cost estimation for all 6 providers), `key_discovery.rs` (cross-platform HOME resolution), `mod.rs` (agent detection with .cmd/.exe extensions, WSL_DISTRO_NAME detection), `env.rs` (is_docker, host_os_label), `scanner.rs` (shellexpand ~/, UNC paths), `db/tests.rs` (partial_response set/recover/idempotency + `partial_response_started_at` preservation + `has_pending_partial`), `tests/api_tests.rs` HTTP integration: dismiss-partial + WS broadcast, partial_pending guard on send_message, boot recovery simulation, workflow_cancel_run cascade to child discs via parent_run_id + idempotent on finished run. Run with `cargo test`.
+- **Backend Rust**: **1171 tests** (1037 lib + 134 integration). Key test suites: `discussions_test.rs` (21 tests: CRUD, archive, title editing, message management, AgentType round-trip for all 6 agents, DB string stability), `runner_test.rs` (agent commands, model tiers, token parsing, stream parsing for all agents), `pricing.rs` (cost estimation for all 6 providers), `key_discovery.rs` (cross-platform HOME resolution), `mod.rs` (agent detection with .cmd/.exe extensions, WSL_DISTRO_NAME detection), `env.rs` (is_docker, host_os_label), `scanner.rs` (shellexpand ~/, UNC paths), `db/tests.rs` (partial_response set/recover/idempotency + `partial_response_started_at` preservation + `has_pending_partial`), `tests/api_tests.rs` HTTP integration: dismiss-partial + WS broadcast, partial_pending guard on send_message, boot recovery simulation, workflow_cancel_run cascade to child discs via parent_run_id + idempotent on finished run. Run with `cargo test`.
 - **Shell interactive functions**: menu systems, agent installation/uninstall, terminal animation (require terminal I/O, tested indirectly via non-interactive helpers).
+
+### Cross-agent regression tests (0.3.6)
+
+Parameterized tests that iterate over ALL agent types automatically. When a new agent is added, these fail if any supporting piece is missing:
+
+| Test | Location | What it catches |
+|------|----------|----------------|
+| `cross_agent_every_type_in_known_agents` | agents/mod.rs | New AgentType variant missing from KNOWN_AGENTS |
+| `cross_agent_definitions_are_complete` | agents/mod.rs | Agent with empty binary/name/install_cmd |
+| `cross_agent_no_custom_in_known_agents` | agents/mod.rs | Custom variant accidentally in KNOWN_AGENTS |
+| `cross_agent_macos_skip_covers_npm_agents` | agents/mod.rs | npm agent missing from macOS Docker skip list |
+| `cross_agent_db_round_trip_all_types` | db/tests.rs | DB serialization broken for a specific agent |
+| `ALL_AGENT_TYPES matches generated` | constants.test.ts | Frontend missing a backend-defined agent |
+| `every agent has color + label` | constants.test.ts | New agent without UI color/label |
+| `at least 6 agent types` | constants.test.ts | Agent accidentally removed |
 
 ## ESLint configuration
 

@@ -144,7 +144,7 @@ export function DiscussionSidebar({
       <div className="disc-sidebar-header">
         <span className="disc-sidebar-header-title">Discussions</span>
         <div className="disc-sidebar-header-actions">
-          <button className="disc-scan-btn" onClick={onNewDiscussion}>
+          <button className="disc-scan-btn" data-tour-id="new-disc-btn" onClick={onNewDiscussion}>
             <Plus size={12} /> {t('disc.new')}
           </button>
           {isMobile && (

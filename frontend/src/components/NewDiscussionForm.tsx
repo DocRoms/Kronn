@@ -59,6 +59,7 @@ export function NewDiscussionForm({
   const [newDiscPrompt, setNewDiscPrompt] = useState('');
   const [newDiscPrefilled, setNewDiscPrefilled] = useState(false);
   const [showAdvancedOptions, setShowAdvancedOptions] = useState(false);
+  const [expandedAdvanced, setExpandedAdvanced] = useState<'skills' | 'profiles' | 'directives' | null>(null);
 
   const [availableSkills, setAvailableSkills] = useState<Skill[]>([]);
   const [newDiscSkillIds, setNewDiscSkillIds] = useState<string[]>([]);
@@ -320,99 +321,88 @@ export function NewDiscussionForm({
                   </div>
                 </div>
 
-                {/* Skills selector */}
+                {/* Skills accordion */}
                 {availableSkills.length > 0 && (
                   <div className="disc-advanced-section">
-                    <label className="disc-advanced-section-label"><Zap size={10} />{t('skills.selectSkills')}</label>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                      {availableSkills.map(skill => {
-                        const selected = newDiscSkillIds.includes(skill.id);
-                        return (
-                          <button
-                            key={skill.id}
-                            type="button"
-                            className="disc-chip"
-                            data-active={selected}
-                            data-color="accent"
-                            onClick={() => {
-                              setNewDiscSkillIds(prev =>
-                                selected ? prev.filter(id => id !== skill.id) : [...prev, skill.id]
-                              );
-                            }}
-                            title={skill.description || skill.name}
-                          >
-                            {selected && <Check size={9} />}
-                            {skill.name}
-                          </button>
-                        );
-                      })}
-                    </div>
+                    <button type="button" className="disc-advanced-section-toggle" onClick={() => setExpandedAdvanced(prev => prev === 'skills' ? null : 'skills')}>
+                      <ChevronRight size={9} className="disc-chevron" data-expanded={expandedAdvanced === 'skills'} />
+                      <Zap size={10} />
+                      <span>{t('skills.selectSkills')}</span>
+                      {newDiscSkillIds.length > 0 && <span className="disc-advanced-count">{newDiscSkillIds.length}</span>}
+                    </button>
+                    {expandedAdvanced === 'skills' && (
+                      <div className="disc-advanced-chips">
+                        {availableSkills.map(skill => {
+                          const selected = newDiscSkillIds.includes(skill.id);
+                          return (
+                            <button key={skill.id} type="button" className="disc-chip" data-active={selected} data-color="accent"
+                              onClick={() => setNewDiscSkillIds(prev => selected ? prev.filter(id => id !== skill.id) : [...prev, skill.id])}
+                              title={skill.description || skill.name}
+                            >
+                              {selected && <Check size={9} />} {skill.name}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                 )}
 
-                {/* Profile selector */}
+                {/* Profiles accordion */}
                 {availableProfiles.length > 0 && (
                   <div className="disc-advanced-section">
-                    <label className="disc-advanced-section-label"><UserCircle size={10} />{t('profiles.select')}</label>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                      <button
-                        type="button"
-                        className="disc-chip"
-                        data-active={newDiscProfileIds.length === 0}
-                        data-color="purple"
-                        onClick={() => setNewDiscProfileIds([])}
-                      >
-                        {t('profiles.none')}
-                      </button>
-                      {availableProfiles.map(profile => {
-                        const selected = newDiscProfileIds.includes(profile.id);
-                        return (
-                          <button
-                            key={profile.id}
-                            type="button"
-                            className="disc-chip"
-                            data-active={selected}
-                            data-color="purple"
-                            onClick={() => setNewDiscProfileIds(prev => selected ? prev.filter(id => id !== profile.id) : [...prev, profile.id])}
-                            title={profile.role}
-                            style={selected && profile.color ? { borderColor: profile.color, background: `${profile.color}15`, color: profile.color } : undefined}
-                          >
-                            {selected && <Check size={9} />}
-                            {profile.avatar} {profile.persona_name || profile.name}
-                          </button>
-                        );
-                      })}
-                    </div>
+                    <button type="button" className="disc-advanced-section-toggle" onClick={() => setExpandedAdvanced(prev => prev === 'profiles' ? null : 'profiles')}>
+                      <ChevronRight size={9} className="disc-chevron" data-expanded={expandedAdvanced === 'profiles'} />
+                      <UserCircle size={10} />
+                      <span>{t('profiles.select')}</span>
+                      {newDiscProfileIds.length > 0 && <span className="disc-advanced-count">{newDiscProfileIds.length}</span>}
+                    </button>
+                    {expandedAdvanced === 'profiles' && (
+                      <div className="disc-advanced-chips">
+                        <button type="button" className="disc-chip" data-active={newDiscProfileIds.length === 0} data-color="purple" onClick={() => setNewDiscProfileIds([])}>
+                          {t('profiles.none')}
+                        </button>
+                        {availableProfiles.map(profile => {
+                          const selected = newDiscProfileIds.includes(profile.id);
+                          return (
+                            <button key={profile.id} type="button" className="disc-chip" data-active={selected} data-color="purple"
+                              onClick={() => setNewDiscProfileIds(prev => selected ? prev.filter(id => id !== profile.id) : [...prev, profile.id])}
+                              title={profile.role}
+                              style={selected && profile.color ? { borderColor: profile.color, background: `${profile.color}15`, color: profile.color } : undefined}
+                            >
+                              {selected && <Check size={9} />} {profile.avatar} {profile.persona_name || profile.name}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                 )}
 
-                {/* Directive selector */}
+                {/* Directives accordion */}
                 {availableDirectives.length > 0 && (
-                  <div>
-                    <label className="disc-advanced-section-label"><FileText size={10} />{t('directives.title')}</label>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                      {availableDirectives.map(directive => {
-                        const selected = newDiscDirectiveIds.includes(directive.id);
-                        return (
-                          <button
-                            key={directive.id}
-                            type="button"
-                            className="disc-chip"
-                            data-active={selected}
-                            data-color="warning"
-                            onClick={() => {
-                              setNewDiscDirectiveIds(prev =>
-                                selected ? prev.filter(id => id !== directive.id) : [...prev, directive.id]
-                              );
-                            }}
-                            title={directive.description || directive.name}
-                          >
-                            {selected && <Check size={9} />}
-                            {directive.icon} {directive.name}
-                          </button>
-                        );
-                      })}
-                    </div>
+                  <div className="disc-advanced-section">
+                    <button type="button" className="disc-advanced-section-toggle" onClick={() => setExpandedAdvanced(prev => prev === 'directives' ? null : 'directives')}>
+                      <ChevronRight size={9} className="disc-chevron" data-expanded={expandedAdvanced === 'directives'} />
+                      <FileText size={10} />
+                      <span>{t('directives.title')}</span>
+                      {newDiscDirectiveIds.length > 0 && <span className="disc-advanced-count">{newDiscDirectiveIds.length}</span>}
+                    </button>
+                    {expandedAdvanced === 'directives' && (
+                      <div className="disc-advanced-chips">
+                        {availableDirectives.map(directive => {
+                          const selected = newDiscDirectiveIds.includes(directive.id);
+                          return (
+                            <button key={directive.id} type="button" className="disc-chip" data-active={selected} data-color="warning"
+                              onClick={() => setNewDiscDirectiveIds(prev => selected ? prev.filter(id => id !== directive.id) : [...prev, directive.id])}
+                              title={directive.description || directive.name}
+                            >
+                              {selected && <Check size={9} />} {directive.icon} {directive.name}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

@@ -11,7 +11,7 @@ import {
   HardDrive, Plus, Trash2, Download, Upload, Check,
   RefreshCw, X, Eye, EyeOff,
   Layers, FolderSearch, Filter, FileText,
-  Shield, Globe, Copy, Server, Mic, Volume2,
+  Shield, Globe, Copy, Server, Mic, Volume2, HelpCircle, ChevronRight,
 } from 'lucide-react';
 import { STT_MODELS, getSttModelId, setSttModelId } from '../lib/stt-models';
 import { TTS_VOICES, getTtsVoiceId, setTtsVoiceId } from '../lib/tts-models';
@@ -68,6 +68,12 @@ export function SettingsPage({
   const [scanIgnore, setScanIgnore] = useState<string[]>([]);
   const [newScanPath, setNewScanPath] = useState('');
   const [newIgnorePattern, setNewIgnorePattern] = useState('');
+  const [configAccordion, setConfigAccordion] = useState<Set<string>>(() => new Set(['agents']));
+  const toggleAccordion = (id: string) => setConfigAccordion(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
   const [availableSkills, setAvailableSkills] = useState<Skill[]>([]);
   const [showCreateSkill, setShowCreateSkill] = useState(false);
   const [newSkillName, setNewSkillName] = useState('');
@@ -123,10 +129,7 @@ export function SettingsPage({
           { id: 'settings-languages', label: 'Languages' },
           { id: 'settings-voice', label: t('settings.voice') },
           { id: 'settings-scan', label: 'Scan' },
-          { id: 'settings-agents', label: 'Agents' },
-          { id: 'settings-skills', label: 'Skills' },
-          { id: 'settings-profiles', label: 'Profiles' },
-          { id: 'settings-directives', label: 'Directives' },
+          { id: 'settings-agent-config', label: 'Agents & Skills' },
           { id: 'settings-identity', label: t('settings.identity') },
           { id: 'settings-usage', label: t('config.usage') },
           { id: 'settings-server', label: t('config.server') },
@@ -438,23 +441,43 @@ export function SettingsPage({
         </div>
       </div>
 
-      {/* Agents */}
-      <AgentsSection
-        agents={agents}
-        agentAccess={agentAccess}
-        configLanguage={configLanguage}
-        refetchAgents={refetchAgents}
-        refetchAgentAccess={refetchAgentAccess}
-        toast={toast}
-        t={t}
-      />
+      {/* ── Agent Config Accordion (Agents / Skills / Profiles / Directives) ── */}
+      <div id="settings-agent-config" className="set-card">
 
-      {/* Skills */}
-      <div id="settings-skills" className="set-card">
-        <div className="set-section">
-          <h2 className="flex-row gap-6 text-lg font-bold text-primary mb-8">
-            <Zap size={16} className="text-accent" /> {t('skills.title')}
-          </h2>
+        {/* Agents accordion */}
+        <div className="set-accordion-section" id="settings-agents">
+          <button className="set-accordion-header" onClick={() => toggleAccordion('agents')} aria-expanded={configAccordion.has('agents')}>
+            <ChevronRight size={12} className="set-accordion-chevron" data-expanded={configAccordion.has('agents')} />
+            <Cpu size={14} className="text-accent" />
+            <span className="font-semibold text-base">Agents</span>
+            <span className="set-accordion-count">{agents.length}</span>
+          </button>
+          {configAccordion.has('agents') && (
+            <div className="set-accordion-body">
+              <AgentsSection
+                agents={agents}
+                agentAccess={agentAccess}
+                configLanguage={configLanguage}
+                refetchAgents={refetchAgents}
+                refetchAgentAccess={refetchAgentAccess}
+                toast={toast}
+                t={t}
+              />
+            </div>
+          )}
+        </div>
+
+        {/* Skills accordion */}
+        <div className="set-accordion-section" id="settings-skills">
+          <button className="set-accordion-header" onClick={() => toggleAccordion('skills')} aria-expanded={configAccordion.has('skills')}>
+            <ChevronRight size={12} className="set-accordion-chevron" data-expanded={configAccordion.has('skills')} />
+            <Zap size={14} className="text-accent" />
+            <span className="font-semibold text-base">{t('skills.title')}</span>
+            <span className="set-accordion-count">{availableSkills.length}</span>
+          </button>
+          {configAccordion.has('skills') && (
+          <div className="set-accordion-body">
+          <div className="set-section">
 
           <div className="flex-wrap mb-8" style={{ gap: 10, maxHeight: 400, overflowY: 'auto', overflowX: 'hidden' }}>
             {availableSkills.map(skill => (
@@ -577,19 +600,36 @@ export function SettingsPage({
             </div>
           )}
 
+          </div>
+          </div>
+          )}
         </div>
-      </div>
 
-      {/* Agent Profiles */}
-      <ProfilesSection toast={toast} t={t} />
+        {/* Profiles accordion */}
+        <div className="set-accordion-section" id="settings-profiles">
+          <button className="set-accordion-header" onClick={() => toggleAccordion('profiles')} aria-expanded={configAccordion.has('profiles')}>
+            <ChevronRight size={12} className="set-accordion-chevron" data-expanded={configAccordion.has('profiles')} />
+            <Layers size={14} style={{ color: '#8b5cf6' }} />
+            <span className="font-semibold text-base">{t('profiles.title')}</span>
+          </button>
+          {configAccordion.has('profiles') && (
+            <div className="set-accordion-body">
+              <ProfilesSection toast={toast} t={t} />
+            </div>
+          )}
+        </div>
 
-
-      {/* ── Directives (HOW) ── */}
-      <div id="settings-directives" className="set-card">
-        <div className="set-section">
-          <h2 className="flex-row gap-6 text-lg font-bold text-primary mb-8">
-            <FileText size={16} style={{ color: '#f59e0b' }} /> {t('directives.title')}
-          </h2>
+        {/* Directives accordion */}
+        <div className="set-accordion-section" id="settings-directives">
+          <button className="set-accordion-header" onClick={() => toggleAccordion('directives')} aria-expanded={configAccordion.has('directives')}>
+            <ChevronRight size={12} className="set-accordion-chevron" data-expanded={configAccordion.has('directives')} />
+            <FileText size={14} style={{ color: '#f59e0b' }} />
+            <span className="font-semibold text-base">{t('directives.title')}</span>
+            <span className="set-accordion-count">{availableDirectives.length}</span>
+          </button>
+          {configAccordion.has('directives') && (
+          <div className="set-accordion-body">
+          <div className="set-section">
           <div className="flex-wrap mb-8" style={{ gap: 10, maxHeight: 400, overflowY: 'auto', overflowX: 'hidden' }}>
             {availableDirectives.map(directive => (
               <div key={directive.id} className="set-item-card">
@@ -725,8 +765,12 @@ export function SettingsPage({
               </div>
             </div>
           )}
+          </div>
+          </div>
+          )}
         </div>
-      </div>
+
+      </div>{/* end settings-agent-config card */}
 
       {/* Identity */}
       <IdentitySection toast={toast} t={t} />
@@ -1007,6 +1051,14 @@ export function SettingsPage({
           <p className="text-muted text-md mb-8">
             {t('config.configFile')} : <code className="set-code">~/.config/kronn/config.toml</code>
           </p>
+          <div className="set-inner-divider" style={{ paddingTop: 16 }}>
+            <button className="set-action-btn" onClick={() => {
+              localStorage.removeItem('kronn:tour-completed');
+              window.location.reload();
+            }}>
+              <HelpCircle size={12} /> {t('tour.replay')}
+            </button>
+          </div>
           <div className="set-inner-divider" style={{ paddingTop: 16 }}>
             <p className="set-hint">
               {t('config.resetHint')}

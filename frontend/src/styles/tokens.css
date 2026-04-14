@@ -100,4 +100,7 @@
   --kr-z-sticky: 50;
   --kr-z-modal: 100;
   --kr-z-toast: 200;
+  --kr-z-tour: 5000;
+  --kr-z-tour-tooltip: 5001;
+  --kr-z-tour-tooltip: 5001;
 }

@@ -2257,3 +2257,54 @@ fn quick_prompt_variables_roundtrip() {
     assert!(loaded.prompt_template.contains("{{#jira}}"));
     assert!(loaded.prompt_template.contains("{{/pr}}"));
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Cross-agent DB round-trip (auto-extends when new agents are added)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn cross_agent_db_round_trip_all_types() {
+    let conn = test_db();
+    let all_agents = [
+        AgentType::ClaudeCode,
+        AgentType::Codex,
+        AgentType::Vibe,
+        AgentType::GeminiCli,
+        AgentType::Kiro,
+        AgentType::CopilotCli,
+    ];
+    for agent_type in &all_agents {
+        let disc_id = format!("cross-{:?}", agent_type);
+        let now = chrono::Utc::now();
+        let disc = Discussion {
+            id: disc_id.clone(),
+            project_id: None,
+            title: format!("Test {:?}", agent_type),
+            agent: agent_type.clone(),
+            language: "en".into(),
+            participants: vec![agent_type.clone()],
+            messages: vec![],
+            message_count: 0,
+            skill_ids: vec![],
+            profile_ids: vec![],
+            directive_ids: vec![],
+            archived: false,
+            workspace_mode: "Direct".into(),
+            workspace_path: None,
+            worktree_branch: None,
+            tier: ModelTier::Default,
+            pin_first_message: false,
+            summary_cache: None,
+            summary_up_to_msg_idx: None,
+            shared_id: None,
+            shared_with: vec![],
+            workflow_run_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+        crate::db::discussions::insert_discussion(&conn, &disc).unwrap();
+        let loaded = crate::db::discussions::get_discussion(&conn, &disc_id).unwrap().unwrap();
+        assert_eq!(loaded.agent, *agent_type,
+            "DB round-trip failed for {:?} — agent_type mutated after insert+read", agent_type);
+    }
+}

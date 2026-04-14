@@ -147,6 +147,13 @@ Kronn/
 │       │   ├── MessageBubble.tsx # Message bubble (329L) — user/agent/system, markdown, TTS, edit, copy, retry
 │       │   ├── SwipeableDiscItem.tsx  # Swipeable sidebar item (110L) — swipe-to-archive/delete
 │       │   ├── AgentQuestionForm.tsx  # Structured agent questions (0.3.5) — renders mini-form above ChatInput when agent asks {{var}}: questions
+│       │   ├── tour/             # Guided tour / onboarding overlay (0.3.6)
+│       │   │   ├── TourProvider.tsx      # Context + state machine + useTour() hook. waitForClick listener, cross-page nav
+│       │   │   ├── TourOverlay.tsx       # Portal to body: spotlight (box-shadow cutout) + tooltip card + group label
+│       │   │   ├── TourHelpButton.tsx    # "?" nav button to replay tour
+│       │   │   ├── tourSteps.ts          # 17 declarative steps in 5 acts with waitForClick/pulse/group
+│       │   │   ├── useTourPositioning.ts # Auto-placement hook + resize tracking + waitForElement (MutationObserver)
+│       │   │   └── Tour.css              # Spotlight, pulse animation, tooltip, backdrop dimming, reduced-motion
 │       │   ├── GitPanel.tsx      # Git file/branch panel
 │       │   ├── AiDocViewer.tsx   # AI doc viewer
 │       │   ├── ProjectList.tsx   # Project list with search, filter, group-by-org (234L)
