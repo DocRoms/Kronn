@@ -100,6 +100,27 @@ if [ "${KRONN_HOST_OS:-}" = "macOS" ]; then
       echo "[entrypoint] warning: unzip missing, cannot install kiro-cli."
     fi
   fi
+
+  # Same for Claude Code — the host's macOS `claude` binary can't run in
+  # this Linux container. Install a Linux version via npm.
+  if ! command -v claude >/dev/null 2>&1; then
+    echo "[entrypoint] macOS host detected: installing Linux claude via npm..."
+    if command -v npm >/dev/null 2>&1; then
+      if ! npm install -g @anthropic-ai/claude-code 2>/dev/null; then
+        echo "[entrypoint] warning: claude-code install failed (Claude Code unavailable until fixed)."
+      fi
+    else
+      echo "[entrypoint] warning: npm missing, cannot install claude-code."
+    fi
+  fi
+
+  # Same for Codex
+  if ! command -v codex >/dev/null 2>&1; then
+    echo "[entrypoint] macOS host detected: installing Linux codex via npm..."
+    if command -v npm >/dev/null 2>&1; then
+      npm install -g @openai/codex 2>/dev/null || true
+    fi
+  fi
 fi
 
 exec "$@"

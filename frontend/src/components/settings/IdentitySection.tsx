@@ -194,6 +194,7 @@ export function IdentitySection({ toast, t }: IdentitySectionProps) {
                 className="set-icon-btn"
                 style={{ padding: '4px 8px', fontSize: 10 }}
                 title={t('disc.copy')}
+                aria-label={t('disc.copy')}
               >
                 <Copy size={10} />
               </button>
@@ -263,7 +264,7 @@ export function IdentitySection({ toast, t }: IdentitySectionProps) {
             </div>
           )}
 
-          <div className="set-guide-inner" style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', lineHeight: 1.5 }}>
+          <div className="set-guide-inner" style={{ fontSize: 10, color: 'var(--kr-text-dim)', lineHeight: 1.5 }}>
             <span className="font-semibold text-muted">{t('contacts.guideNetworkTitle')}</span><br />
             {t('contacts.guideNetwork')}
           </div>

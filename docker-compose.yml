@@ -18,6 +18,7 @@ services:
       - ${KRONN_REPOS_DIR:-${HOME}/Repositories}:/host-home/${KRONN_REPOS_REL:-Repositories}:rw  # rw for agent writes
       - ${KRONN_GLOBAL_BIN:-/usr/local/bin}:/host-bin/global:ro
       - ${HOME}/.local/bin:/host-bin/local:ro
+      - ${KRONN_NPM_BIN:-/dev/null}:/host-bin/npm:ro  # npm global bin (macOS: ~/.npm/bin or /opt/homebrew/bin)
       - /usr/bin:/host-bin/sysbin:ro              # Host system binaries (make, php, etc.)
       - /usr/sbin:/host-bin/syssbin:ro            # Host system admin binaries
       - /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro  # Docker compose plugin
@@ -45,8 +46,8 @@ services:
       - KRONN_TEMPLATES_DIR=/app/templates
       - KRONN_DATA_DIR=/data
       - KRONN_HOST_HOME=${HOME}
-      - KRONN_HOST_BIN=/host-bin/local:/host-bin/global
-      - PATH=/home/kronn/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/host-bin/local:/host-bin/global:/host-bin/sysbin:/host-bin/syssbin
+      - KRONN_HOST_BIN=/host-bin/local:/host-bin/global:/host-bin/npm
+      - PATH=/home/kronn/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/host-bin/local:/host-bin/global:/host-bin/npm:/host-bin/sysbin:/host-bin/syssbin
       - KRONN_HOST_OS=${KRONN_HOST_OS:-Linux}
       - KRONN_HOST_UID=${KRONN_HOST_UID:-1000}
       - KRONN_HOST_GID=${KRONN_HOST_GID:-1000}

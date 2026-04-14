@@ -1546,6 +1546,13 @@
   cursor: not-allowed;
 }
 
+.agent-question-form-shortcut {
+  font-size: 9px;
+  font-weight: 400;
+  opacity: 0.5;
+  margin-left: 4px;
+}
+
 /* ── Input / composer ─────────────────────────────────── */
 .disc-composer-wrap {
   padding: 10px 16px 12px;

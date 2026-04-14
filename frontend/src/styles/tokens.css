@@ -28,10 +28,10 @@
   --kr-text-primary: #e8eaed;
   --kr-text-secondary: rgba(255, 255, 255, 0.6);
   --kr-text-tertiary: rgba(255, 255, 255, 0.5);
-  --kr-text-muted: rgba(255, 255, 255, 0.4);
-  --kr-text-faint: rgba(255, 255, 255, 0.35);
-  --kr-text-dim: rgba(255, 255, 255, 0.3);
-  --kr-text-ghost: rgba(255, 255, 255, 0.2);
+  --kr-text-muted: rgba(255, 255, 255, 0.45);
+  --kr-text-faint: rgba(255, 255, 255, 0.4);
+  --kr-text-dim: rgba(255, 255, 255, 0.45);
+  --kr-text-ghost: rgba(255, 255, 255, 0.35);
 
   /* ── Semantic colors ──────────────────────────────────────────────────── */
   --kr-success: #34d399;
@@ -44,6 +44,7 @@
   --kr-info-rgb: 96, 165, 250;
   --kr-cyan: #00d4ff;
   --kr-purple: #8b5cf6;
+  --kr-cancelled: rgba(255, 255, 255, 0.45);
 
   /* ── Borders ──────────────────────────────────────────────────────────── */
   --kr-border: rgba(255, 255, 255, 0.07);

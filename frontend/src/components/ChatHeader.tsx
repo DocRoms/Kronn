@@ -155,7 +155,7 @@ export function ChatHeader({
           {!isValidationDisc(discussion.title) && !isBootstrapDisc(discussion.title) && !isBriefingDisc(discussion.title) && (
           <button
             className="disc-icon-btn"
-            style={{ padding: '2px 4px', border: 'none', background: 'none', color: 'rgba(255,255,255,0.2)' }}
+            style={{ padding: '2px 4px', border: 'none', background: 'none', color: 'var(--kr-text-ghost)' }}
             onClick={() => {
               if (editingTitleId === discussion.id) {
                 setEditingTitleId(null);
@@ -440,7 +440,7 @@ export function ChatHeader({
                           opacity: incomp ? 0.7 : isApiOnly ? 0.5 : 1,
                         }}
                       >
-                        <Server size={9} style={{ color: incomp ? '#ff6b6b' : isApiOnly ? 'rgba(255,255,255,0.2)' : '#00d4ff' }} className="flex-shrink-0" />
+                        <Server size={9} style={{ color: incomp ? '#ff6b6b' : isApiOnly ? 'var(--kr-text-ghost)' : '#00d4ff' }} className="flex-shrink-0" />
                         {c.label}
                         {incomp && <span className="disc-mcp-incompatible">incompatible</span>}
                         <span className="disc-mcp-item-name">{c.server_name}</span>

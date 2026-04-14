@@ -20,7 +20,7 @@ export function ProjectSkills({ projectId, currentSkillIds, allSkills, onUpdate 
 
   if (allSkills.length === 0) {
     return (
-      <div style={{ padding: '4px 0', fontSize: 11, color: 'rgba(255,255,255,0.3)' }}>
+      <div style={{ padding: '4px 0', fontSize: 11, color: 'var(--kr-text-dim)' }}>
         {t('projects.noSkills')}
       </div>
     );

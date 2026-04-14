@@ -45,6 +45,8 @@ const BUILTIN_SKILLS: &[BuiltinSkill] = &[
     BuiltinSkill { id: "green-it", content: include_str!("../skills/green-it.md") },
     BuiltinSkill { id: "accessibility", content: include_str!("../skills/accessibility.md") },
     BuiltinSkill { id: "gdpr", content: include_str!("../skills/gdpr.md") },
+    // Meta
+    BuiltinSkill { id: "structured-questions", content: include_str!("../skills/structured-questions.md") },
 ];
 
 // ─── Frontmatter parsing ────────────────────────────────────────────────────

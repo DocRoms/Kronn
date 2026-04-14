@@ -47,6 +47,7 @@ const fr: TranslationDict = {
   'projects.showMore': 'Voir plus ({0} projet{1} restant{2})',
   'projects.collapse': 'Réduire',
   'projects.empty': 'Aucun projet. Cliquez sur "Scanner" pour détecter vos dépôts.',
+  'projects.emptyHint': 'Aucun projet pour le moment. Utilisez le bouton + en haut pour ajouter un dossier, cloner un dépôt, ou créer un nouveau projet.',
   'projects.emptySearch': 'Aucun projet correspondant.',
   'projects.manageMcps': 'Gérer dans Plugins',
   'projects.noMcp': 'Aucun plugin — configurer',
@@ -293,7 +294,7 @@ const fr: TranslationDict = {
   'settings.bioPlaceholder': 'Ex: Product Manager chez Acme Corp, spécialisé en analytics et growth...',
   'settings.bioHint': 'Partagé avec les agents au début de chaque nouvelle discussion. Aide les agents à adapter leurs réponses à votre profil.',
   'settings.globalContext': 'Contexte global',
-  'settings.globalContextHint': 'Injecté dans toutes les discussions (avec ou sans projet). Glossaire, conventions, stack technique... en markdown.',
+  'settings.globalContextHint': 'Ce texte est partagé avec tous vos agents au début de chaque discussion. Idéal pour y mettre votre glossaire métier, vos conventions internes, ou des infos que vos agents doivent toujours connaître.',
   'settings.globalContextPlaceholder': '## Glossaire\n- CMS : notre CMS custom basé sur...\n- DAM : Digital Asset Manager\n\n## Stack\n- Frontend : Next.js 14\n- Backend : Node.js + Express\n\n## Conventions\n- Tests obligatoires pour tout changement\n- PR review par au moins 1 personne',
   'settings.globalContextSaved': 'Contexte global sauvegardé',
   'settings.gcModeAlways': 'Toujours injecter',
@@ -460,7 +461,7 @@ const fr: TranslationDict = {
   'config.exportApiWarning': "Les tokens d'authentification ne sont pas inclus dans l'export. Notez-les avant de migrer.",
   'config.exportApiWarningLink': 'Voir mes tokens →',
   'config.resetHint': "Remettre à zéro la configuration et relancer l'assistant de setup.",
-  'config.resetConfirm': "ATTENTION : cette action va supprimer toute la configuration (clés API, préférences, agents).\n\nPensez à :\n- Exporter vos données (Config → Base de données → Exporter)\n- Sauvegarder votre token API\n\nCette action est irréversible. Continuer ?",
+  'config.resetConfirm': "ATTENTION : cette action va supprimer toute la configuration (clés des fournisseurs IA, préférences, agents).\n\nPensez à :\n- Exporter vos données (Config → Base de données → Exporter)\n- Noter vos clés API et votre token d'authentification\n\nCette action est irréversible. Continuer ?",
   'config.reset': 'Reset configuration',
   'config.configFile': 'Fichier de config',
 
@@ -668,7 +669,7 @@ const fr: TranslationDict = {
   'wiz.testBatchItemDryRunResult': 'Ce que l\'agent ferait :',
 
   // ── Structured agent questions (0.3.5) ──
-  'agentQuestions.hint': 'L\'agent attend quelques précisions. Remplissez les champs ci-dessous pour répondre d\'un coup.',
+  'agentQuestions.hint': 'L\'agent vous pose des questions. Remplissez chaque champ et cliquez sur Répondre — c\'est plus rapide que de tout taper dans le chat.',
   'agentQuestions.submit': 'Répondre',
   'agentQuestions.fillAll': 'Remplissez tous les champs pour envoyer',
 
@@ -792,8 +793,8 @@ const fr: TranslationDict = {
   'wiz.batchFirstStepWarning': 'Un step batch en première position n\'a pas de step précédent à chaîner. Ajoute un step "fetch" avant pour récupérer la liste d\'items, ou hardcode la liste dans le champ ci-dessous.',
   'wiz.batchWaitForCompletion': 'Attendre la fin de toutes les discussions',
   'wiz.batchMaxItems': 'Max items',
-  'wiz.batchWorktree': 'Isoler chaque discussion dans son propre dossier git',
-  'wiz.batchWorktreeHint': 'Chaque discussion enfant travaille dans sa propre copie isolée du projet (une branche git dédiée). Indispensable si les agents vont MODIFIER du code en parallèle : sans ça, les agents écrivent tous dans le même dossier et écrasent mutuellement leurs modifications. À laisser DÉCOCHÉ pour les analyses en lecture seule (rapports, synthèses, audits), ça évite de créer 50 dossiers sur le disque pour rien.',
+  'wiz.batchWorktree': 'Isoler les modifications de chaque agent',
+  'wiz.batchWorktreeHint': 'Chaque agent travaille dans sa propre copie du projet pour ne pas écraser le travail des autres. Cochez si les agents vont modifier des fichiers en parallèle. Laissez décoché pour les analyses (rapports, audits) — c\'est plus rapide.',
   'wiz.batchWorktreeNoProject': 'Ce Quick Prompt n\'est lié à aucun projet — il n\'y a pas de code git à isoler.',
   'wiz.stepDescription': 'Description',
   'wiz.stepDescriptionPlaceholder': 'Décrire le rôle de ce step...',
@@ -1033,6 +1034,7 @@ const en: TranslationDict = {
   'projects.showMore': 'Show more ({0} project{1} remaining)',
   'projects.collapse': 'Collapse',
   'projects.empty': 'No projects. Click "Scan" to detect your repositories.',
+  'projects.emptyHint': 'No projects yet. Use the + button at the top to add a folder, clone a repo, or create a new project.',
   'projects.emptySearch': 'No matching project.',
   'projects.manageMcps': 'Manage in Plugins',
   'projects.noMcp': 'No plugin — configure',
@@ -1279,7 +1281,7 @@ const en: TranslationDict = {
   'settings.bioPlaceholder': 'Ex: Product Manager at Acme Corp, specialized in analytics and growth...',
   'settings.bioHint': 'Shared with agents at the start of each new discussion. Helps agents tailor their responses to your profile.',
   'settings.globalContext': 'Global context',
-  'settings.globalContextHint': 'Injected into all discussions (with or without a project). Glossary, conventions, tech stack... in markdown.',
+  'settings.globalContextHint': 'This text is shared with all your agents at the start of every discussion. Great for your business glossary, internal conventions, or anything your agents should always know.',
   'settings.globalContextPlaceholder': '## Glossary\n- CMS: our custom CMS based on...\n- DAM: Digital Asset Manager\n\n## Stack\n- Frontend: Next.js 14\n- Backend: Node.js + Express\n\n## Conventions\n- Tests required for every change\n- PR review by at least 1 person',
   'settings.globalContextSaved': 'Global context saved',
   'settings.gcModeAlways': 'Always inject',
@@ -1446,7 +1448,7 @@ const en: TranslationDict = {
   'config.exportApiWarning': 'Authentication tokens are not included in the export. Save them before migrating.',
   'config.exportApiWarningLink': 'View my tokens →',
   'config.resetHint': 'Reset configuration and relaunch the setup wizard.',
-  'config.resetConfirm': "WARNING: this will delete all configuration (API keys, preferences, agents).\n\nRemember to:\n- Export your data (Config → Database → Export)\n- Save your API token\n\nThis action is irreversible. Continue?",
+  'config.resetConfirm': "WARNING: this will delete all configuration (AI provider keys, preferences, agents).\n\nRemember to:\n- Export your data (Config → Database → Export)\n- Save your API keys and authentication token\n\nThis action is irreversible. Continue?",
   'config.reset': 'Reset configuration',
   'config.configFile': 'Config file',
 
@@ -1653,7 +1655,7 @@ const en: TranslationDict = {
   'wiz.testBatchItemDryRunResult': 'What the agent would do:',
 
   // ── Structured agent questions (0.3.5) ──
-  'agentQuestions.hint': 'The agent is waiting for a few details. Fill the fields below to answer in one go.',
+  'agentQuestions.hint': 'The agent is asking you questions. Fill each field and click Reply — faster than typing everything in the chat.',
   'agentQuestions.submit': 'Reply',
   'agentQuestions.fillAll': 'Fill every field to send',
 
@@ -1777,8 +1779,8 @@ const en: TranslationDict = {
   'wiz.batchFirstStepWarning': 'A batch step in the first slot has no previous step to chain from. Add a "fetch" step before it to pull the list, or hardcode the list in the field below.',
   'wiz.batchWaitForCompletion': 'Wait for all discussions to finish',
   'wiz.batchMaxItems': 'Max items',
-  'wiz.batchWorktree': 'Isolate each discussion in its own git folder',
-  'wiz.batchWorktreeHint': 'Each child discussion works in its own isolated copy of the project (a dedicated git branch). REQUIRED when the agents will MODIFY code in parallel: otherwise all agents write to the same folder and overwrite each other. Leave UNCHECKED for read-only analysis batches (reports, audits, summaries) — it avoids creating dozens of folders on disk for nothing.',
+  'wiz.batchWorktree': 'Isolate each agent\'s changes',
+  'wiz.batchWorktreeHint': 'Each agent works in its own copy of the project so they don\'t overwrite each other. Check this if agents will modify files in parallel. Leave unchecked for analyses (reports, audits) — it\'s faster.',
   'wiz.batchWorktreeNoProject': 'This Quick Prompt is not linked to any project — there is no code to isolate.',
   'wiz.stepDescription': 'Description',
   'wiz.stepDescriptionPlaceholder': 'Describe this step\'s purpose...',
@@ -2018,6 +2020,7 @@ const es: TranslationDict = {
   'projects.showMore': 'Ver más ({0} proyecto{1} restante{2})',
   'projects.collapse': 'Reducir',
   'projects.empty': 'Sin proyectos. Haga clic en "Escanear" para detectar sus repositorios.',
+  'projects.emptyHint': 'Sin proyectos por ahora. Use el botón + arriba para agregar una carpeta, clonar un repositorio o crear un proyecto nuevo.',
   'projects.emptySearch': 'Ningún proyecto encontrado.',
   'projects.manageMcps': 'Gestionar en Plugins',
   'projects.noMcp': 'Sin plugin — configurar',
@@ -2264,7 +2267,7 @@ const es: TranslationDict = {
   'settings.bioPlaceholder': 'Ej: Product Manager en Acme Corp, especializado en analytics y growth...',
   'settings.bioHint': 'Compartido con los agentes al inicio de cada nueva discusión. Ayuda a los agentes a adaptar sus respuestas a tu perfil.',
   'settings.globalContext': 'Contexto global',
-  'settings.globalContextHint': 'Inyectado en todas las discusiones (con o sin proyecto). Glosario, convenciones, stack técnico... en markdown.',
+  'settings.globalContextHint': 'Este texto se comparte con todos sus agentes al inicio de cada discusión. Ideal para su glosario empresarial, convenciones internas o cualquier información que sus agentes deban conocer siempre.',
   'settings.globalContextPlaceholder': '## Glosario\n- CMS: nuestro CMS personalizado basado en...\n- DAM: Digital Asset Manager\n\n## Stack\n- Frontend: Next.js 14\n- Backend: Node.js + Express\n\n## Convenciones\n- Tests obligatorios para cada cambio\n- Revisión de PR por al menos 1 persona',
   'settings.globalContextSaved': 'Contexto global guardado',
   'settings.gcModeAlways': 'Siempre inyectar',
@@ -2431,7 +2434,7 @@ const es: TranslationDict = {
   'config.exportApiWarning': 'Los tokens de autenticación no se incluyen en la exportación. Guárdalos antes de migrar.',
   'config.exportApiWarningLink': 'Ver mis tokens →',
   'config.resetHint': 'Restablecer la configuración y relanzar el asistente de setup.',
-  'config.resetConfirm': "ATENCIÓN: esto eliminará toda la configuración (claves API, preferencias, agentes).\n\nRecuerde:\n- Exportar sus datos (Config → Base de datos → Exportar)\n- Guardar su token API\n\nEsta acción es irreversible. ¿Continuar?",
+  'config.resetConfirm': "ATENCIÓN: esto eliminará toda la configuración (claves de proveedores IA, preferencias, agentes).\n\nRecuerde:\n- Exportar sus datos (Config → Base de datos → Exportar)\n- Guardar sus claves API y su token de autenticación\n\nEsta acción es irreversible. ¿Continuar?",
   'config.reset': 'Restablecer configuración',
   'config.configFile': 'Archivo de config',
 
@@ -2638,7 +2641,7 @@ const es: TranslationDict = {
   'wiz.testBatchItemDryRunResult': 'Lo que el agente haría:',
 
   // ── Structured agent questions (0.3.5) ──
-  'agentQuestions.hint': 'El agente espera algunos detalles. Rellena los campos de abajo para responder de una vez.',
+  'agentQuestions.hint': 'El agente le hace preguntas. Rellene cada campo y haga clic en Responder — es más rápido que escribir todo en el chat.',
   'agentQuestions.submit': 'Responder',
   'agentQuestions.fillAll': 'Rellena todos los campos para enviar',
 
@@ -2762,8 +2765,8 @@ const es: TranslationDict = {
   'wiz.batchFirstStepWarning': 'Un paso batch en primera posición no tiene paso anterior para encadenar. Añade un paso "fetch" antes para obtener la lista, o codifica la lista directamente en el campo de abajo.',
   'wiz.batchWaitForCompletion': 'Esperar a que terminen todas las discusiones',
   'wiz.batchMaxItems': 'Máx ítems',
-  'wiz.batchWorktree': 'Aislar cada discusión en su propia carpeta git',
-  'wiz.batchWorktreeHint': 'Cada discusión hija trabaja en su propia copia aislada del proyecto (una rama git dedicada). IMPRESCINDIBLE cuando los agentes van a MODIFICAR código en paralelo: sin esto, todos los agentes escriben en la misma carpeta y se sobrescriben mutuamente. Déjalo DESMARCADO para batches de análisis en solo lectura (informes, auditorías, resúmenes) — así no creas decenas de carpetas en disco para nada.',
+  'wiz.batchWorktree': 'Aislar los cambios de cada agente',
+  'wiz.batchWorktreeHint': 'Cada agente trabaja en su propia copia del proyecto para no sobrescribir el trabajo de los demás. Marque si los agentes van a modificar archivos en paralelo. Deje desmarcado para análisis (informes, auditorías) — es más rápido.',
   'wiz.batchWorktreeNoProject': 'Este Quick Prompt no está vinculado a ningún proyecto — no hay código que aislar.',
   'wiz.stepDescription': 'Descripción',
   'wiz.stepDescriptionPlaceholder': 'Describir el propósito de este step...',

@@ -194,12 +194,12 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             {!sending && !isEditing && (isLastUser || isLastAgent) && (
               <div className="flex-row gap-2">
                 {isLastUser && (
-                  <button className="disc-icon-btn" style={{ padding: '2px 6px', fontSize: 10, color: 'rgba(255,255,255,0.3)' }} onClick={() => onEditStart(msg.id, msg.content)} title={t('disc.editResend')} aria-label={t('disc.editResend')}>
+                  <button className="disc-icon-btn" style={{ padding: '2px 6px', fontSize: 10, color: 'var(--kr-text-dim)' }} onClick={() => onEditStart(msg.id, msg.content)} title={t('disc.editResend')} aria-label={t('disc.editResend')}>
                     <Pencil size={10} />
                   </button>
                 )}
                 {isLastAgent && (
-                  <button className="disc-icon-btn" style={{ padding: '2px 6px', fontSize: 10, color: 'rgba(255,255,255,0.3)' }} onClick={onRetry} title={t('disc.retryResponse')} aria-label={t('disc.retryResponse')}>
+                  <button className="disc-icon-btn" style={{ padding: '2px 6px', fontSize: 10, color: 'var(--kr-text-dim)' }} onClick={onRetry} title={t('disc.retryResponse')} aria-label={t('disc.retryResponse')}>
                     <RotateCcw size={10} />
                   </button>
                 )}

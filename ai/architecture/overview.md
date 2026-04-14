@@ -42,6 +42,7 @@ Three Docker services behind nginx gateway:
 - **WSL detection**: uses `WSL_DISTRO_NAME` env var first (most reliable), then `/proc/version` fallback.
 - **File permissions (fixed)**: agents run as `root` inside Docker. `fix_ownership()` called after all agent executions (discussions, workflows, AI audit) to chown files back to `KRONN_HOST_UID:KRONN_HOST_GID` on host-mounted volumes.
 - **Path resolution**: `resolve_host_path` uses Docker mount priority (prefers /host-home over /home/priol).
+- **macOS Docker agent bootstrap (0.3.5)**: on macOS hosts, host-mounted binaries are Darwin (macOS) executables that cannot run in the Linux container. `entrypoint.sh` detects `KRONN_HOST_OS=macOS` and installs Linux versions of Claude Code (npm), Codex (npm), and Kiro (curl) inside the container. `find_binary()` skips host-mounted Darwin binaries for `claude`, `codex`, `copilot`, `kiro-cli` when `host_is_macos()`. `~/.npm/bin` is mounted at `/host-bin/npm` via `KRONN_NPM_BIN` env var (auto-detected by Makefile `npm bin -g`).
 
 ### Discussions
 - `Discussion.project_id` is `Option<String>` (Rust) / `string | null` (TS).

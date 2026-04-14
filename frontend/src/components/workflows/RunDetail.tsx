@@ -9,7 +9,7 @@ const STATUS_COLORS: Record<string, string> = {
   Running: '#00d4ff',
   Success: '#34d399',
   Failed: '#ff4d6a',
-  Cancelled: 'rgba(255,255,255,0.3)',
+  Cancelled: 'var(--kr-cancelled)',
   WaitingApproval: '#c8ff00',
 };
 
@@ -85,7 +85,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel }: RunDetailP
                 <span
                   className="wf-step-dot"
                   style={{
-                    background: completed ? (STATUS_COLORS[completed.status] ?? '#888') : isNext ? '#ffc800' : 'rgba(255,255,255,0.1)',
+                    background: completed ? (STATUS_COLORS[completed.status] ?? '#888') : isNext ? '#ffc800' : 'var(--kr-border-medium)',
                     animation: isNext ? 'pulse 1.5s ease-in-out infinite' : undefined,
                   }}
                 />

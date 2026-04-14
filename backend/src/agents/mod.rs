@@ -254,9 +254,10 @@ pub fn find_binary(name: &str) -> Option<BinaryLocation> {
                     || file_name_str == format!("{}.exe", name)
                     || file_name_str == format!("{}.ps1", name);
                 if matches {
-                    // On macOS hosts, host-mounted kiro-cli is a macOS binary
-                    // and cannot be executed from this Linux container.
-                    if name == "kiro-cli" && host_is_macos() {
+                    // On macOS hosts, host-mounted binaries are Darwin
+                    // binaries that cannot execute in this Linux container.
+                    // The entrypoint.sh installs Linux versions via npm/curl.
+                    if host_is_macos() && matches!(name, "kiro-cli" | "claude" | "codex" | "copilot") {
                         continue;
                     }
                     return Some(BinaryLocation {

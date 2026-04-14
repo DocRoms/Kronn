@@ -36,6 +36,12 @@ RESET  := \033[0m
 		echo "KRONN_HOST_OS=Linux" >> .env; \
 		echo "$(CYAN)  Detected Linux$(RESET)"; \
 	fi
+	@# Detect npm global bin directory (where `npm install -g` puts binaries)
+	@npm_bin=$$(npm bin -g 2>/dev/null || npm config get prefix 2>/dev/null | xargs -I{} echo "{}/bin"); \
+	if [ -d "$$npm_bin" ]; then \
+		echo "KRONN_NPM_BIN=$$npm_bin" >> .env; \
+		echo "$(CYAN)  npm global bin: $$npm_bin$(RESET)"; \
+	fi
 	@echo "KRONN_HOST_UID=$$(id -u)" >> .env
 	@echo "KRONN_HOST_GID=$$(id -g)" >> .env
 	@echo "UID=$$(id -u)" >> .env
