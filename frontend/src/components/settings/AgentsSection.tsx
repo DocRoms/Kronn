@@ -167,7 +167,7 @@ export function AgentsSection({
                     onClick={async () => {
                       try {
                         await agentsApi.toggle(agent.agent_type);
-                      } catch { /* ignore */ }
+                      } catch (e) { toast(String(e) || t('config.saveError'), 'error'); }
                       refetchAgents();
                     }}
                     disabled={installing !== null}
@@ -379,7 +379,7 @@ export function AgentsSection({
                                 toast(t('config.syncTokensNone'), 'info');
                               }
                             }
-                          } catch { /* done */ }
+                          } catch (e) { toast(String(e) || t('config.saveError'), 'error'); }
                         }}>
                         <Save size={10} />
                       </button>

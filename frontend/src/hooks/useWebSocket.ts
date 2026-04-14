@@ -14,7 +14,7 @@ export type WsEventHandler = (msg: WsMessage) => void;
 export function useWebSocket(onMessage: WsEventHandler): { connected: boolean } {
   const [connected, setConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimeout = useRef<ReturnType<typeof setTimeout>>();
+  const reconnectTimeout = useRef<ReturnType<typeof setTimeout>>(undefined);
   const backoff = useRef(1000);
   const onMessageRef = useRef(onMessage);
   onMessageRef.current = onMessage;

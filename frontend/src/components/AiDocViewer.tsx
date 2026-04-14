@@ -31,7 +31,7 @@ export function AiDocViewer({ projectId, onDiscussFile }: AiDocViewerProps) {
   const [currentMatchIdx, setCurrentMatchIdx] = useState(0);
   const contentRef = useRef<HTMLDivElement>(null);
   const [renderKey, setRenderKey] = useState(0);
-  const searchDebounceRef = useRef<ReturnType<typeof setTimeout>>();
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   // ─── Load tree ──────────────────────────────────────────────────────────
   useEffect(() => {

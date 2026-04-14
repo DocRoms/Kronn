@@ -84,9 +84,9 @@ export function NewDiscussionForm({
 
   // Fetch available skills, profiles, directives
   useEffect(() => {
-    skillsApi.list().then(setAvailableSkills).catch(() => {});
-    profilesApi.list().then(setAvailableProfiles).catch(() => {});
-    directivesApi.list().then(setAvailableDirectives).catch(() => {});
+    skillsApi.list().then(setAvailableSkills).catch(e => console.warn('Failed to load skills:', e));
+    profilesApi.list().then(setAvailableProfiles).catch(e => console.warn('Failed to load profiles:', e));
+    directivesApi.list().then(setAvailableDirectives).catch(e => console.warn('Failed to load directives:', e));
   }, []);
 
   // Auto-select first installed agent if current selection is invalid
@@ -168,7 +168,7 @@ export function NewDiscussionForm({
         <div className="disc-new-grid">
           <div>
             <label className="disc-form-label">{t('disc.project')}</label>
-            <select className="disc-select-styled" data-locked={newDiscPrefilled} value={newDiscProjectId} onChange={e => {
+            <select className="disc-select-styled" aria-label={t('disc.project')} data-locked={newDiscPrefilled} value={newDiscProjectId} onChange={e => {
               const pid = e.target.value;
               setNewDiscProjectId(pid);
               const proj = projects.find(p => p.id === pid);
@@ -185,7 +185,7 @@ export function NewDiscussionForm({
           </div>
           <div>
             <label className="disc-form-label">{t('disc.agent')}</label>
-            <select className="disc-select-styled" value={newDiscAgent} onChange={e => setNewDiscAgent(e.target.value as AgentType)}>
+            <select className="disc-select-styled" aria-label={t('disc.agent')} value={newDiscAgent} onChange={e => setNewDiscAgent(e.target.value as AgentType)}>
               {installedAgentsList.map(a => (
                 <option key={a.name} value={a.agent_type}>{a.name}</option>
               ))}

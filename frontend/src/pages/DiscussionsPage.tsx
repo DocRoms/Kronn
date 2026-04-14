@@ -526,7 +526,7 @@ export function DiscussionsPage({
       discId,
       (text) => appendStreamChunk(discId, text),
       () => cleanupStream(discId),
-      (error) => { console.error('Agent error:', error); const e = String(error); if (e.includes('checked out') || e.includes('worktree')) { setWorktreeError(e); } else { toast(e, 'error'); } cleanupStream(discId); },
+      (error) => { console.error('Agent error:', error); const e = userError(error); if (e.includes('checked out') || e.includes('worktree')) { setWorktreeError(e); } else { toast(e, 'error'); } cleanupStream(discId); },
       controller.signal,
       onAgentLog,
     );
@@ -604,7 +604,7 @@ export function DiscussionsPage({
         discId,
         (text) => appendStreamChunk(discId, text),
         () => cleanupStream(discId),
-        (error) => { console.error('Agent error:', error); const e = String(error); if (e.includes('checked out') || e.includes('worktree')) { setWorktreeError(e); } else { toast(e, 'error'); } cleanupStream(discId); },
+        (error) => { console.error('Agent error:', error); const e = userError(error); if (e.includes('checked out') || e.includes('worktree')) { setWorktreeError(e); } else { toast(e, 'error'); } cleanupStream(discId); },
         controller.signal,
         onAgentLog,
       );
@@ -704,7 +704,7 @@ export function DiscussionsPage({
       discId,
       (text) => appendStreamChunk(discId, text),
       () => cleanupStream(discId),
-      (error) => { console.error('Agent error:', error); const e = String(error); if (e.includes('checked out') || e.includes('worktree')) { setWorktreeError(e); } else { toast(e, 'error'); } cleanupStream(discId); },
+      (error) => { console.error('Agent error:', error); const e = userError(error); if (e.includes('checked out') || e.includes('worktree')) { setWorktreeError(e); } else { toast(e, 'error'); } cleanupStream(discId); },
       controller.signal,
         onAgentLog,
     );
@@ -749,7 +749,7 @@ export function DiscussionsPage({
       () => cleanupStream(discId),
       (error) => {
         console.error('Agent error:', error);
-        const errStr = String(error);
+        const errStr = userError(error);
         if (errStr.includes('checked out') || errStr.includes('worktree')) {
           setWorktreeError(errStr);
         } else if (errStr.includes('partial_pending')) {
@@ -868,7 +868,7 @@ export function DiscussionsPage({
       () => cleanupStream(discId),
       (error) => {
         console.error('Agent error:', error);
-        const errStr = String(error);
+        const errStr = userError(error);
         if (errStr.includes('checked out') || errStr.includes('worktree')) {
           setWorktreeError(errStr);
         } else {
@@ -971,7 +971,7 @@ export function DiscussionsPage({
       discId,
       (text) => appendStreamChunk(discId, text),
       () => cleanupStream(discId),
-      (error) => { console.error('Agent error:', error); const e = String(error); if (e.includes('checked out') || e.includes('worktree')) { setWorktreeError(e); } else { toast(e, 'error'); } cleanupStream(discId); },
+      (error) => { console.error('Agent error:', error); const e = userError(error); if (e.includes('checked out') || e.includes('worktree')) { setWorktreeError(e); } else { toast(e, 'error'); } cleanupStream(discId); },
       controller.signal,
         onAgentLog,
     );

@@ -2498,6 +2498,186 @@ async fn start_test_server(state: AppState) -> std::net::SocketAddr {
     addr
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// disc_git / ai_docs / discover — route existence smoke tests (0.3.7)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn disc_git_status_returns_error_for_nonexistent_disc() {
+    let app = test_app();
+    let (status, json) = get_json(app, "/api/discussions/nonexistent/git-status").await;
+    // Route exists, returns an error (not 404 — the handler runs but disc not found)
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], false);
+}
+
+#[tokio::test]
+async fn disc_git_diff_route_exists() {
+    // git-diff may return non-JSON (raw diff text), so just verify the route exists (not 404)
+    let app = test_app();
+    let req = Request::builder().method("GET").uri("/api/discussions/nonexistent/git-diff").body(Body::empty()).unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_ne!(resp.status(), StatusCode::NOT_FOUND, "Route must exist");
+}
+
+#[tokio::test]
+async fn ai_files_returns_error_for_nonexistent_project() {
+    let app = test_app();
+    let (status, json) = get_json(app, "/api/projects/nonexistent/ai-files").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], false);
+}
+
+#[tokio::test]
+async fn discover_repos_accepts_empty_sources() {
+    // discover-repos needs MCP tokens to actually work — just verify the route accepts the payload
+    let state = test_state();
+    let (status, _json) = post_json(
+        build_router_with_auth(state, false),
+        "/api/projects/discover-repos",
+        serde_json::json!({ "source_ids": [] }),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Skills / Profiles / Directives / Stats — CRUD smoke tests (0.3.7)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn skills_crud_create_and_delete_custom() {
+    let state = test_state();
+    let (status, json) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/skills",
+        serde_json::json!({
+            "name": "TestSkill",
+            "description": "A test skill",
+            "icon": "Zap",
+            "category": "Domain",
+            "content": "Be excellent.",
+        }),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+    let skill_id = json["data"]["id"].as_str().unwrap().to_string();
+
+    // Verify it appears in list
+    let (_, json) = get_json(build_router_with_auth(state.clone(), false), "/api/skills").await;
+    assert!(json["data"].as_array().unwrap().iter().any(|s| s["id"] == skill_id));
+
+    // Delete
+    let (status, _) = delete_json(
+        build_router_with_auth(state.clone(), false),
+        &format!("/api/skills/{}", skill_id),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn directives_list_returns_builtins() {
+    let app = test_app();
+    let (status, json) = get_json(app, "/api/directives").await;
+    assert_eq!(status, StatusCode::OK);
+    let directives = json["data"].as_array().unwrap();
+    assert!(!directives.is_empty(), "Expected at least 1 builtin directive");
+}
+
+#[tokio::test]
+async fn directives_create_and_delete_custom() {
+    let state = test_state();
+    let (status, json) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/directives",
+        serde_json::json!({
+            "name": "TestDirective",
+            "description": "Be terse",
+            "icon": "MessageSquare",
+            "category": "Output",
+            "content": "Keep answers under 3 sentences.",
+        }),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+    let id = json["data"]["id"].as_str().unwrap().to_string();
+
+    let (status, _) = delete_json(
+        build_router_with_auth(state.clone(), false),
+        &format!("/api/directives/{}", id),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn stats_tokens_returns_success() {
+    let app = test_app();
+    let (status, json) = get_json(app, "/api/stats/tokens").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+    assert_eq!(json["data"]["total_tokens"], 0);
+}
+
+#[tokio::test]
+async fn stats_agent_usage_returns_success() {
+    let app = test_app();
+    let (status, json) = get_json(app, "/api/stats/agent-usage").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+}
+
+#[tokio::test]
+async fn agents_detect_returns_list() {
+    let app = test_app();
+    let (status, json) = get_json(app, "/api/agents").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+    let agents = json["data"].as_array().unwrap();
+    assert!(agents.len() >= 6, "Expected at least 6 agents, got {}", agents.len());
+}
+
+#[tokio::test]
+async fn quick_prompts_crud() {
+    let state = test_state();
+    // List empty
+    let (_, json) = get_json(build_router_with_auth(state.clone(), false), "/api/quick-prompts").await;
+    assert!(json["data"].as_array().unwrap().is_empty());
+
+    // Create
+    let (status, json) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/quick-prompts",
+        serde_json::json!({
+            "name": "TestQP",
+            "prompt_template": "Analyse {{ticket}}",
+            "variables": [{"name": "ticket", "label": "Ticket", "placeholder": "PROJ-123", "required": true}],
+            "agent": "ClaudeCode",
+            "icon": null,
+            "project_id": null,
+            "skill_ids": [],
+            "tier": "default",
+            "description": "A test QP",
+        }),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+    let qp_id = json["data"]["id"].as_str().unwrap().to_string();
+
+    // List has 1
+    let (_, json) = get_json(build_router_with_auth(state.clone(), false), "/api/quick-prompts").await;
+    assert_eq!(json["data"].as_array().unwrap().len(), 1);
+
+    // Delete
+    let (status, _) = delete_json(
+        build_router_with_auth(state.clone(), false),
+        &format!("/api/quick-prompts/{}", qp_id),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // List empty again
+    let (_, json) = get_json(build_router_with_auth(state.clone(), false), "/api/quick-prompts").await;
+    assert!(json["data"].as_array().unwrap().is_empty());
+}
+
 /// Send an initial Presence message to authenticate the WS connection.
 /// Required since the security fix: first message MUST be Presence.
 async fn ws_send_presence(sender: &mut futures::stream::SplitSink<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, tokio_tungstenite::tungstenite::Message>) {

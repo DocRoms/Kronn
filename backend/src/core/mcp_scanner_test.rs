@@ -930,17 +930,22 @@ args = ["@example/old-mcp"]
     }
 
     #[test]
-    fn sync_claude_enabled_servers_noop_when_all_present() {
+    fn sync_claude_enabled_servers_removes_stale_entries() {
+        // Regression for TD-20260403-mcp-naming-migration:
+        // Old entries (from server.name era) must be removed when no longer
+        // in .mcp.json. Otherwise Claude Code never reads the renamed MCP.
         let tmp = setup_tmp("claude-settings-noop");
         let claude_dir = tmp.join(".claude");
         std::fs::create_dir_all(&claude_dir).unwrap();
 
+        // Whitelist has "GitLab" (current) + "Docker" (stale — no longer in .mcp.json)
         let settings = serde_json::json!({
             "enabledMcpjsonServers": ["GitLab", "Docker"]
         });
         std::fs::write(claude_dir.join("settings.local.json"),
             serde_json::to_string_pretty(&settings).unwrap()).unwrap();
 
+        // Only GitLab is in the current .mcp.json
         let mut servers = HashMap::new();
         servers.insert("GitLab".to_string(), McpServerEntry {
             command: Some("npx".into()), args: Some(vec![]), url: None, env: HashMap::new(),
@@ -953,8 +958,10 @@ args = ["@example/old-mcp"]
         let enabled: Vec<&str> = result["enabledMcpjsonServers"].as_array().unwrap()
             .iter().map(|v| v.as_str().unwrap()).collect();
 
-        assert_eq!(enabled.len(), 2, "no entries added");
-        assert!(enabled.contains(&"Docker"), "user entry preserved");
+        // Docker must be REMOVED (stale), only GitLab remains
+        assert_eq!(enabled.len(), 1, "stale entry must be removed");
+        assert!(enabled.contains(&"GitLab"), "current entry preserved");
+        assert!(!enabled.contains(&"Docker"), "stale entry removed");
 
         std::fs::remove_dir_all(&tmp).ok();
     }

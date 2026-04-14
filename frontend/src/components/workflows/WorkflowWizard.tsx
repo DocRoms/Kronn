@@ -211,10 +211,10 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   const [suggestionsLoading, setSuggestionsLoading] = useState(false);
 
   useEffect(() => {
-    skillsApi.list().then(setAvailableSkills).catch(() => {});
-    profilesApi.list().then(setAvailableProfiles).catch(() => {});
-    directivesApi.list().then(setAvailableDirectives).catch(() => {});
-    quickPromptsApi.list().then(setAvailableQuickPrompts).catch(() => {});
+    skillsApi.list().then(setAvailableSkills).catch(e => console.warn('Failed to load skills:', e));
+    profilesApi.list().then(setAvailableProfiles).catch(e => console.warn('Failed to load profiles:', e));
+    directivesApi.list().then(setAvailableDirectives).catch(e => console.warn('Failed to load directives:', e));
+    quickPromptsApi.list().then(setAvailableQuickPrompts).catch(e => console.warn('Failed to load quick prompts:', e));
   }, []);
 
   // Fetch suggestions when project changes
