@@ -92,7 +92,7 @@ Server (type)  →  Config (instance + secrets)  →  Project (N:N)
 
 ### Workflows
 
-One system for everything: cron jobs, multi-step pipelines, issue-to-PR automation, manual triggers. Created from a 5-step UI wizard or imported from a `WORKFLOW.md` file. MCP tools auto-injected into agent prompts.
+One system for everything: cron jobs, multi-step pipelines, issue-to-PR automation, manual triggers, and **webhook notifications** (Notify step — zero tokens, direct HTTP call). Created from a 5-step UI wizard or imported from a `WORKFLOW.md` file. MCP tools auto-injected into agent prompts.
 
 **Level 1 — Simple cron**: one agent, one prompt, on a schedule.
 ```yaml
@@ -136,12 +136,14 @@ Kronn reads [OpenAI Symphony](https://github.com/openai/symphony)'s `WORKFLOW.md
 
 Three independent axes shape how agents behave — all multi-selectable, all available in discussions and workflow steps:
 
-**Profiles (WHO)** — 11 built-in personas with distinct perspectives and avatars.
+**Profiles (WHO)** — 16 built-in personas with distinct perspectives and avatars.
 
 | Category | Profiles |
 |----------|----------|
-| Technical | Architect, Tech Lead, QA Engineer, Game Developer |
+| Technical | Architect, Tech Lead, QA Engineer, Game Developer, Staff Engineer |
 | Business | Product Owner, Scrum Master, Technical Writer, Entrepreneur, UX Designer |
+| Data | Data Analyst, Data Engineer |
+| Operations | SRE/DevOps, SEO/Growth |
 | Meta | Devil's Advocate, Mentor |
 
 **Skills (WHAT)** — 22 built-in domain expertise, injected as knowledge.
@@ -256,7 +258,7 @@ kronn/
 │       ├── agents/         # Agent runner (spawns CLIs, streams stdout)
 │       ├── workflows/      # Workflow engine, triggers, steps
 │       ├── skills/         # 22 built-in (Markdown + YAML frontmatter)
-│       ├── profiles/       # 11 built-in agent profiles
+│       ├── profiles/       # 16 built-in agent profiles
 │       └── directives/     # Output directives
 ├── frontend/           # React 18 + TypeScript + Vite
 │   └── src/

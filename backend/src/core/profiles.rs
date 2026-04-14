@@ -65,6 +65,14 @@ const BUILTIN_PROFILES: &[BuiltinProfile] = &[
     BuiltinProfile { id: "ux-designer", content: include_str!("../profiles/ux-designer.md") },
     // Technical
     BuiltinProfile { id: "game-developer", content: include_str!("../profiles/game-developer.md") },
+    // Data
+    BuiltinProfile { id: "data-analyst", content: include_str!("../profiles/data-analyst.md") },
+    BuiltinProfile { id: "data-engineer", content: include_str!("../profiles/data-engineer.md") },
+    // Growth
+    BuiltinProfile { id: "seo-growth", content: include_str!("../profiles/seo-growth.md") },
+    // Ops & Strategy
+    BuiltinProfile { id: "sre", content: include_str!("../profiles/sre.md") },
+    BuiltinProfile { id: "staff-engineer", content: include_str!("../profiles/staff-engineer.md") },
 ];
 
 // ─── Frontmatter parsing ────────────────────────────────────────────────────
@@ -358,7 +366,7 @@ mod tests {
     #[test]
     fn parse_builtin_profiles() {
         let profiles = list_all_profiles();
-        assert!(profiles.len() >= 11, "Expected at least 11 builtin profiles, got {}", profiles.len());
+        assert!(profiles.len() >= 16, "Expected at least 16 builtin profiles, got {}", profiles.len());
 
         let architect = profiles.iter().find(|p| p.id == "architect").unwrap();
         assert_eq!(architect.name, "Architect");
@@ -425,6 +433,35 @@ mod tests {
             assert_eq!(p.category, category, "Profile '{}' wrong category", id);
             assert!(!p.persona_prompt.is_empty(), "Profile '{}' must have content", id);
         }
+    }
+
+    #[test]
+    fn new_data_and_seo_profiles_exist() {
+        for (id, category, expected_persona) in [
+            ("data-analyst", ProfileCategory::Business, "Ren"),
+            ("data-engineer", ProfileCategory::Technical, "Ash"),
+            ("seo-growth", ProfileCategory::Business, "Rio"),
+            ("sre", ProfileCategory::Technical, "Ops"),
+            ("staff-engineer", ProfileCategory::Technical, "Dex"),
+        ] {
+            let profile = get_profile(id);
+            assert!(profile.is_some(), "Profile '{}' must exist", id);
+            let p = profile.unwrap();
+            assert_eq!(p.category, category, "Profile '{}' wrong category", id);
+            assert_eq!(p.persona_name, expected_persona, "Profile '{}' wrong persona_name", id);
+            assert!(!p.persona_prompt.is_empty(), "Profile '{}' must have content", id);
+            assert!(p.default_engine.is_some(), "Profile '{}' must have default_engine", id);
+        }
+    }
+
+    #[test]
+    fn all_persona_names_are_unique() {
+        let profiles = list_all_profiles();
+        let mut names: Vec<&str> = profiles.iter().map(|p| p.persona_name.as_str()).collect();
+        let count_before = names.len();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), count_before, "Duplicate persona names found");
     }
 
     #[test]

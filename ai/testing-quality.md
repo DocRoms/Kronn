@@ -3,8 +3,9 @@
 ## Rules
 
 - **Quality gate is non-negotiable**: code must compile and build after any change.
-- **All tests must pass**: `npm run test` (frontend, 350+ tests), `cargo test` (backend, 980+ tests), `make test-shell` (192 bats tests).
+- **All tests must pass**: `npm run test` (frontend, **489 tests**), `cargo test` (backend, **1166 tests**: 1032 lib + 134 integration), `make test-shell` (192 bats tests).
 - **0 ESLint errors**: `npm run lint` must report 0 errors (warnings are tolerated for existing patterns).
+- **0 clippy warnings**: `cargo clippy --all-targets -- -D warnings` must pass.
 
 ## Build checks
 
@@ -15,7 +16,7 @@
 | Rust format | `cargo fmt --check` | Formatting check |
 | TS compile | `cd frontend && npx tsc -b` | Type check |
 | Frontend lint | `cd frontend && npm run lint` | ESLint 10 strict |
-| Frontend tests | `cd frontend && npm test` | Vitest 4 (329+ tests) |
+| Frontend tests | `cd frontend && npm test` | Vitest 4 (489 tests) |
 | Frontend coverage | `cd frontend && npm run test:coverage` | Vitest + @vitest/coverage-v8 |
 | Frontend build | `cd frontend && npm run build` | Production build (Vite, code-split) |
 | Shell tests | `make test-shell` | bats-core (186 tests) |
@@ -30,7 +31,14 @@
 - **Setup file**: `frontend/src/test/setup.ts`
 - **Node requirement**: >= 23.6.0 (native TS support, latest tooling)
 
-### Test files (24 suites, 350+ tests)
+### Frontend testing patterns (0.3.5)
+
+- **Shared API mock**: `src/test/apiMock.ts` exposes `buildApiMock(overrides)`. Factory covers all 13 namespaces + 5 flat fns of `lib/api.ts`. Deep-merges overrides namespace-by-namespace so slim overrides don't wipe sibling methods. **Always use via `vi.hoisted` + `vi.mock`** — factory refs at the top level break because `vi.mock` is hoisted above imports.
+- **Completeness guard**: `src/test/apiMock.complete.test.ts` imports the real `lib/api.ts` and asserts every top-level export is covered. Adding a new namespace without updating the default mock fails this test.
+- **i18n parity**: `src/lib/__tests__/i18n-parity.test.ts` — imports the exported `dictionaries` object and asserts fr/en/es key set isomorphism + non-empty values + placeholder-subset invariant (en/es may have fewer `{N}` than fr, never extras).
+- **Module-level state trackers**: patterns like `activeStepTests` (Map + subscribe/notify) in `WorkflowDetail.tsx` survive React unmount. Tests using these must either render inside the parent or mock the tracker directly.
+
+### Test files (37 suites, 489 tests)
 
 | File | Tests | Covers |
 |------|-------|--------|
@@ -48,6 +56,8 @@
 | `src/pages/__tests__/DiscussionsPage.test.tsx` | 26 | Render, prefill, sidebar (message_count, titles, archives, org groups, collapse, search filter), streaming (thinking loader, tab restore, SSE abort, refetch), TTS (toggle, persist, play, speech cancel), discussion creation, copy button, response time, overflow-wrap, agent switch (button, dropdown) |
 | `src/pages/__tests__/SettingsPage.test.tsx` | 13 | Render, agents config, scan sections, API key management, model tiers, Usage section nav + filter buttons |
 | `src/pages/__tests__/McpPage.test.tsx` | 3 | Render with minimal props, configs, agents |
+| `src/lib/__tests__/agent-question-parse.test.ts` | 15 | Structured agent question parser: {{var}}: question extraction, edge cases, multi-var |
+| `src/components/__tests__/AgentQuestionForm.test.tsx` | 5 | AgentQuestionForm render, field filling, submit, empty state, integration with parser |
 
 ### Coverage status
 
@@ -83,7 +93,7 @@
 
 - **Page components**: Dashboard.tsx (~650 lines), SetupWizard.tsx — basic render tests exist for 4 sub-pages but deeper interaction/state tests still needed.
 - **SSE streaming logic** in api.ts — requires mocking ReadableStream, complex setup.
-- **Backend Rust**: 940+ tests across all modules. Key test suites: `discussions_test.rs` (21 tests: CRUD, archive, title editing, message management, AgentType round-trip for all 6 agents, DB string stability), `runner_test.rs` (agent commands, model tiers, token parsing, stream parsing for all agents), `pricing.rs` (cost estimation for all 6 providers), `key_discovery.rs` (cross-platform HOME resolution: KRONN_HOST_HOME, HOME, USERPROFILE), `mod.rs` (agent detection with .cmd/.exe extensions, WSL_DISTRO_NAME detection), `env.rs` (is_docker, host_os_label across platforms), `scanner.rs` (shellexpand ~/ and ~\, UNC paths). Run with `cargo test`.
+- **Backend Rust**: **1166 tests** (1032 lib + 134 integration). Key test suites: `discussions_test.rs` (21 tests: CRUD, archive, title editing, message management, AgentType round-trip for all 6 agents, DB string stability), `runner_test.rs` (agent commands, model tiers, token parsing, stream parsing for all agents), `pricing.rs` (cost estimation for all 6 providers), `key_discovery.rs` (cross-platform HOME resolution), `mod.rs` (agent detection with .cmd/.exe extensions, WSL_DISTRO_NAME detection), `env.rs` (is_docker, host_os_label), `scanner.rs` (shellexpand ~/, UNC paths), `db/tests.rs` (partial_response set/recover/idempotency + `partial_response_started_at` preservation + `has_pending_partial`), `tests/api_tests.rs` HTTP integration: dismiss-partial + WS broadcast, partial_pending guard on send_message, boot recovery simulation, workflow_cancel_run cascade to child discs via parent_run_id + idempotent on finished run. Run with `cargo test`.
 - **Shell interactive functions**: menu systems, agent installation/uninstall, terminal animation (require terminal I/O, tested indirectly via non-interactive helpers).
 
 ## ESLint configuration

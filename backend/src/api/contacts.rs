@@ -235,6 +235,8 @@ mod tests {
             pseudo: None,
             avatar_email: None,
             bio: None,
+            global_context: None,
+            global_context_mode: "always".into(),
         }
     }
 

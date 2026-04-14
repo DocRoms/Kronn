@@ -112,6 +112,10 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       getScanDepth: resolve(2),
       getAgentAccess: resolve({ agents: {} }),
       getModelTiers: resolve({ tiers: {} }),
+      getGlobalContext: resolve(''),
+      saveGlobalContext: resolve(undefined),
+      getGlobalContextMode: resolve('always'),
+      saveGlobalContextMode: resolve(undefined),
       getServerConfig: resolve({ pseudo: null, avatar_email: null, host: 'localhost', port: 3140 }),
     },
 
@@ -126,6 +130,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       get: resolve(null),
       scan: resolve([]),
       create: resolve({}),
+      addFolder: resolve({}),
       update: resolve({}),
       delete: resolve(undefined),
       installTemplate: resolve({}),

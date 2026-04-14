@@ -7,6 +7,51 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.3.5] — 2026-04-13
+
+### Added
+- **Batch Quick Prompts** — fan-out a Quick Prompt to N tickets/items in parallel. New step type `BatchQuickPrompt` with `batch_items_from` (resolves `{{steps.X.output}}` / `.data` / manual list), `batch_wait_for_completion`, `batch_run_worktrees`. Each child gets its own discussion, optional worktree isolation, aggregated in sidebar groups. Dry-run preview shows eligible items + warnings + per-item rendered prompt + one-click per-item test
+- **Partial response recovery** — agent output is checkpointed every ~30s / ~100 chunks into `discussions.partial_response` (+ `partial_response_started_at`). On backend crash/restart, dangling partials are converted into Agent messages with an "⚠️ Réflexion interrompue" footer and `PartialResponseRecovered` WS broadcast. Migrations 031 (partial_response) + 032 (started_at) + 030 (workflow_run parent). `POST /api/discussions/:id/dismiss-partial` force-recovers on demand. `send_message` refuses a new run while a partial is pending (`partial_pending` SSE error) — prevents the 2026-04-13 double-response bug
+- **Stop agent** — `POST /api/discussions/:id/stop` triggers a registered `CancellationToken` via `AppState.cancel_registry`. CancelGuard RAII pattern cleans the registry on agent completion. Frontend "⏹" button in chat header
+- **Cancel workflow run (cascade)** — `POST /api/workflows/:id/runs/:run_id/cancel` cancels the linear run token AND cascades to every child batch discussion via `workflow_run.parent_run_id`. Child batch runs marked `Cancelled` in DB. Idempotent
+- **Dry-run step test tracker** — module-level `activeStepTests` Map with subscribe/notify so in-flight step tests survive tab switches (React unmount). Each StepCard subscribes to its (workflowId, stepName, index) key
+- **Workspace toggle always visible** — on new discussion form, the Direct/Isolated toggle is always shown when a project is selected; Isolated is disabled with tooltip when `repo_url` is null
+- **UI locale persistence on Tauri WebView2** — backend stores `ui_language`, `stt_model`, `tts_voices` in config. `I18nContext` fetches from backend first with localStorage fallback, fixing the WebView2 localStorage wipe on Windows
+- **SSE limits** — new `core/sse_limits.rs` module: global max concurrent SSE streams + per-client limit, configurable via `ServerConfig`
+- **Cross-platform cmd helpers** — `core/cmd.rs` (`async_cmd`, `sync_cmd`) applies `CREATE_NO_WINDOW` on Windows. ALL `Command::new` calls routed through these to suppress flash-console windows on Tauri desktop
+- **Structured agent questions** — `{{var}}: question` syntax parsed from the last agent message (`lib/agent-question-parse.ts`). When detected, a mini-form (`AgentQuestionForm.tsx`) renders above ChatInput with labeled fields for each variable. Submitting fills values and sends a formatted response. 15 parser tests + 5 component tests
+- **Notify workflow step** — `StepType::Notify` with `NotifyConfig` (webhook URL, HTTP method POST/PUT/GET, optional body). Direct `reqwest` from Rust, zero tokens consumed. Template rendering in URL + body (`{{previous_step.output}}`, etc.). Frontend wizard form with method select + body textarea. 5 backend tests
+- **5 new agent profiles** (total 16 builtins): Data Analyst (Ren), Data Engineer (Ash), SEO/Growth (Rio), SRE/DevOps (Ops), Staff Engineer (Dex)
+- **Add project from local folder** — `POST /api/projects/add-folder` for non-git directories. Auto-detects `.git` if present. 3rd tab "Dossier local" in new project modal. 4 integration tests
+- **Global context** — `ServerConfig.global_context` (markdown) + `global_context_mode` (always/no_project/never). Injected into agent prompts. `GET/POST /api/config/global-context` + `GET/POST /api/config/global-context-mode`. Settings UI with textarea + mode dropdown. 1 integration test
+
+### Changed
+- **Bootstrap-architect skill** — deeply rewritten for gated validation flow (architecture → plan → issues). +251 lines with clearer stage handoffs
+- **Pagination** — `PaginationQuery.page` no longer has a `serde(default = 1)` — `Option<Query<_>>` now correctly falls through to unpaginated mode when no query params are sent. Regression fix for the 50-items silent cap
+- **Settings UX** — section reorder (Usage before Server), export warning redesigned (proper CSS class, "tokens d'authentification" wording, clickable link to Server section)
+
+### Fixed
+- **50-items silent pagination cap** — regression test added: creating 60 discussions and calling plain `GET /api/discussions` returns all 60 (not 50)
+- **Double agent response after backend restart** — `partial_response_started_at` preserved across checkpoints so the recovered message sits chronologically before any later user message. `send_message` blocks while a partial is pending
+- **Dry-run test state lost on tab switch** — module-level tracker owns the AbortController; components re-subscribe on mount
+- **i18n placeholder mismatches** — new parity test caught 6 EN keys with dangling `{N}` placeholders (literal `{2}` rendered in UI)
+- **Clippy** — `doc_lazy_continuation` in `models/mod.rs`, `manual_pattern_char_comparison` in `workflows/batch_step.rs`
+
+### Tests (robustness pass)
+- Backend: **1166/1166** (1032 lib + 134 integration). +4 HTTP integration tests for partial-response recovery, +5 notify_step tests, +4 add-folder integration tests, +1 global-context integration test, +15 agent-question parser tests (frontend), +5 AgentQuestionForm component tests (frontend)
+- Frontend: **489/489** (37 suites). New helpers + tests:
+  - `src/test/apiMock.ts` — shared `buildApiMock()` factory (all 13 namespaces + 5 flat fns) + completeness test (ns coverage, flat-fn coverage, deep-merge preserves siblings)
+  - `src/lib/__tests__/i18n-parity.test.ts` — 9 tests asserting fr/en/es key isomorphism + non-empty values + placeholder-subset invariant
+  - `src/components/workflows/__tests__/BatchItemsList.test.tsx` — 6 tests (render, toggle prompt, dry-run forwarding, no-agent hides btn, running disables btn, defensive empty-prompt)
+- `dictionaries` + `BatchItemsList` exported from their modules for testability
+
+### DB migrations
+- `030_workflow_run_parent.sql` — `workflow_runs.parent_run_id` for batch fan-out linkage
+- `031_partial_response.sql` — `discussions.partial_response` (TEXT, nullable)
+- `032_partial_response_started_at.sql` — preserves checkpoint start time across updates
+
+---
+
 ## [0.3.4] — 2026-04-08
 
 ### Added

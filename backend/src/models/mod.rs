@@ -82,7 +82,20 @@ pub struct ServerConfig {
     /// Short bio — who the user is, their role, expertise. Injected at the start of first message in a discussion.
     #[serde(default)]
     pub bio: Option<String>,
+    /// Global context injected into discussions. Markdown content — glossary,
+    /// company conventions, stack overview, etc. Supplements project-level
+    /// `ai/` context. Stored in config.toml.
+    #[serde(default)]
+    pub global_context: Option<String>,
+    /// When to inject global_context:
+    /// - `"always"` (default) — every discussion
+    /// - `"no_project"` — only discussions without a project
+    /// - `"never"` — disabled
+    #[serde(default = "default_global_context_mode")]
+    pub global_context_mode: String,
 }
+
+fn default_global_context_mode() -> String { "always".to_string() }
 
 fn default_max_agents() -> usize { 5 }
 fn default_agent_stall_timeout() -> u32 { 5 }
@@ -841,7 +854,40 @@ pub struct WorkflowStep {
     /// project_id, otherwise the step fails early.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_workspace_mode: Option<String>,
+
+    // ─── Notify fields ───────────────────────────────────────────────────
+    // Only meaningful when `step_type == Notify`. Webhook-based workflow
+    // finalizer: posts to an external URL with a rendered body. Zero agent
+    // tokens consumed — direct HTTP from Rust.
+
+    /// Webhook configuration for `StepType::Notify`. URL and body support
+    /// the same `{{steps.X.output}}` / `{{steps.X.data}}` templates as
+    /// agent prompts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify_config: Option<NotifyConfig>,
 }
+
+/// Configuration for a `StepType::Notify` webhook step. Rendered at run-time
+/// (URL + body support template expressions like `{{previous_step.summary}}`).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct NotifyConfig {
+    /// Target URL. Supports template variables.
+    pub url: String,
+    /// HTTP method — "POST" (default), "PUT", "GET". Only these three are
+    /// accepted; anything else fails at execution time.
+    #[serde(default = "default_notify_method")]
+    pub method: String,
+    /// Custom headers. Case-insensitive on the wire — we send them as given.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub headers: std::collections::HashMap<String, String>,
+    /// Request body. Templated. Sent as-is — set `Content-Type: application/json`
+    /// in `headers` if the body is JSON. Ignored for GET.
+    #[serde(default)]
+    pub body_template: String,
+}
+
+fn default_notify_method() -> String { "POST".to_string() }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -862,6 +908,11 @@ pub enum StepType {
     /// helper and optionally waits for all of them to finish before moving on.
     /// Phase 2 batch workflows (2026-04-10).
     BatchQuickPrompt,
+    /// Direct webhook/HTTP call — zero agent tokens. Used as a finalizer
+    /// (send completion notification, trigger downstream pipeline) or as
+    /// a mechanical data step (create GitHub issue, post to Slack) without
+    /// spawning an LLM. Shipped 0.3.5.
+    Notify,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

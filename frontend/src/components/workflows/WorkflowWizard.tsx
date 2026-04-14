@@ -13,7 +13,7 @@ import type { AgentsConfig } from '../../types/generated';
 import {
   Plus, Loader2, Check, X, ChevronRight, ChevronDown,
   Clock, GitBranch, Zap, HelpCircle, Settings, Shield,
-  AlertTriangle, UserCircle, FileText, Sparkles, Layers,
+  AlertTriangle, UserCircle, FileText, Sparkles, Layers, Send,
 } from 'lucide-react';
 import '../../pages/WorkflowsPage.css';
 
@@ -977,6 +977,13 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       onClick={() => updateStep(i, { step_type: { type: 'BatchQuickPrompt' } })}
                       title={t('wiz.stepTypeBatchQPHint')}
                     >{t('wiz.stepTypeBatchQP')}</button>
+                    <button
+                      className="wf-step-type-btn"
+                      data-type="notify"
+                      data-selected={step.step_type?.type === 'Notify'}
+                      onClick={() => updateStep(i, { step_type: { type: 'Notify' } })}
+                      title={t('wiz.stepTypeNotifyHint')}
+                    >{t('wiz.stepTypeNotify')}</button>
                   </div>
                   <input
                     className="wf-input flex-1 text-sm"
@@ -1145,7 +1152,58 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                     )}
                   </div>
                   );
-                })() : (
+                })() : step.step_type?.type === 'Notify' ? (
+                  <div className="wf-notify-form">
+                    <div className="wf-batch-intro">
+                      <Send size={14} />
+                      <div>
+                        <strong>{t('wiz.notifyTitle')}</strong>
+                        <p className="text-xs text-muted">{t('wiz.notifyHint')}</p>
+                      </div>
+                    </div>
+                    <label className="text-xs text-muted mb-1">{t('wiz.notifyUrl')} <span className="wf-required">*</span></label>
+                    <input
+                      className="wf-input text-sm mb-2"
+                      value={step.notify_config?.url ?? ''}
+                      onChange={e => updateStep(i, { notify_config: { ...step.notify_config ?? { url: '', method: 'POST', headers: {}, body_template: '' }, url: e.target.value } })}
+                      placeholder="https://hooks.slack.com/services/... ou {{steps.fetch.data.webhook_url}}"
+                    />
+                    <div className="flex-row gap-4 mb-2">
+                      <div>
+                        <label className="text-xs text-muted">{t('wiz.notifyMethod')}</label>
+                        <select
+                          className="wf-select text-sm"
+                          value={step.notify_config?.method ?? 'POST'}
+                          onChange={e => updateStep(i, { notify_config: { ...step.notify_config ?? { url: '', method: 'POST', headers: {}, body_template: '' }, method: e.target.value } })}
+                        >
+                          <option value="POST">POST</option>
+                          <option value="PUT">PUT</option>
+                          <option value="GET">GET</option>
+                        </select>
+                      </div>
+                    </div>
+                    <label className="text-xs text-muted mb-1">{t('wiz.notifyBody')}</label>
+                    <textarea
+                      className="wf-textarea text-sm mb-2"
+                      rows={4}
+                      value={step.notify_config?.body_template ?? ''}
+                      onChange={e => updateStep(i, { notify_config: { ...step.notify_config ?? { url: '', method: 'POST', headers: {}, body_template: '' }, body_template: e.target.value } })}
+                      placeholder={`{"text": "Workflow terminé : {{previous_step.summary}}"}`}
+                    />
+                    {i > 0 && (
+                      <div className="mt-1 text-xs text-ghost flex-wrap flex-row gap-1">
+                        <span>{t('wiz.clickToInsert')} :</span>
+                        <code className="wf-var-hint-code" style={{ cursor: 'default' }}>{'{{previous_step.output}}'}</code>
+                        <code className="wf-var-hint-code" style={{ cursor: 'default' }}>{'{{previous_step.summary}}'}</code>
+                        {steps.slice(0, i).map(prev => (
+                          <code key={prev.name} className="wf-var-hint-code" style={{ cursor: 'default' }}>
+                            {`{{steps.${prev.name}.output}}`}
+                          </code>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : (
                   <>
                     <textarea
                       ref={el => { promptTextareaRefs.current[i] = el; }}

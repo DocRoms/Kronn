@@ -30,7 +30,7 @@
 | TD-20260318-token-tracking-incomplete | Token usage returns 0 for Gemini CLI and Vibe — SDK doesn't expose token counts. Blocked by upstream. | Backend | Medium |
 | TD-20260314-home-mount | `$HOME` mounted read-only in container — security + portability risk | Infra | Low |
 | TD-20260328-localhost-exempt | Auth middleware skips localhost + Docker bridge IPs. Pragmatic for self-hosted but needs: (1) token rotation mechanism if leaked, (2) removal when TLS generalized. See `lib.rs:auth_middleware`. | Security | Low |
-| TD-20260328-discussions-backend | `discussions.rs` (2322L) — orchestration SSE tightly coupled with chat streaming. Extracting would require duplicating the streaming infrastructure. Low priority. | Backend | Low |
+| TD-20260328-discussions-backend | `discussions.rs` (~3900L) — orchestration SSE tightly coupled with chat streaming + partial checkpoint + cancel registry + dismiss-partial. Extracting would require duplicating the streaming infrastructure. Medium priority as the file keeps growing. | Backend | Medium |
 | TD-20260329-toast-no-warning | Toast system only supports `success`, `error`, `info` — no `warning` type. Contact diagnostics use `info` as workaround. Low priority cosmetic. | Frontend | Low |
 | TD-20260403-mcp-enabledlist-stale | `sync_claude_enabled_servers()` only adds to `enabledMcpjsonServers`, never removes stale entries. Whitelist grows unbounded with orphan MCPs. | Backend | Low |
 | TD-20260403-mcp-naming-migration | MCP key naming changed from `server.name` to `config.label` — existing `enabledMcpjsonServers` entries silently break after re-sync. Needs one-time migration. | Backend | Medium |

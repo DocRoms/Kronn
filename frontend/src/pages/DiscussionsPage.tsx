@@ -8,6 +8,8 @@ import { ChatHeader } from '../components/ChatHeader';
 import { DiscussionSidebar } from '../components/DiscussionSidebar';
 import { NewDiscussionForm } from '../components/NewDiscussionForm';
 import type { NewDiscConfig } from '../components/NewDiscussionForm';
+import { AgentQuestionForm } from '../components/AgentQuestionForm';
+import { parseAgentQuestions } from '../lib/agent-question-parse';
 import type { Project, AgentDetection, Discussion, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile } from '../types/generated';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useT } from '../lib/I18nContext';
@@ -1624,6 +1626,33 @@ export function DiscussionsPage({
                 </span>
               </div>
             )}
+
+            {/* Structured agent questions form (0.3.5) — surfaced when the
+                latest agent message contains `{{var}}: question` entries.
+                Hidden while the agent is still streaming (the pattern might
+                not be complete yet) and while a send is in flight. */}
+            {(() => {
+              if (!activeDiscussion) return null;
+              if (sendingMap[activeDiscussion.id]) return null;
+              const streaming = streamingMap[activeDiscussion.id];
+              if (streaming && streaming.length > 0) return null;
+              const agentMsgs = activeDiscussion.messages.filter(m => m.role === 'Agent');
+              const lastAgent = agentMsgs.length > 0 ? agentMsgs[agentMsgs.length - 1] : null;
+              const lastMsg = activeDiscussion.messages[activeDiscussion.messages.length - 1];
+              // Only show if the VERY last message is the agent one (user
+              // hasn't replied yet — otherwise the form is stale).
+              if (!lastAgent || lastMsg !== lastAgent) return null;
+              const questions = parseAgentQuestions(lastAgent.content);
+              if (questions.length === 0) return null;
+              return (
+                <AgentQuestionForm
+                  questions={questions}
+                  discussionId={activeDiscussion.id}
+                  onSubmit={(reply) => handleSendMessage(reply)}
+                  t={t}
+                />
+              );
+            })()}
 
             {/* Input — unified composer */}
             <ChatInput

@@ -411,6 +411,34 @@ async fn config_ui_language_round_trip() {
 }
 
 #[tokio::test]
+async fn config_global_context_round_trip() {
+    let state = test_state();
+    let app = build_router_with_auth(state, false);
+
+    // Default: empty
+    let (_, json) = get_json(app.clone(), "/api/config/global-context").await;
+    assert_eq!(json["data"], "");
+
+    // Save markdown content
+    let content = "## Glossary\n- CMS: our custom CMS\n\n## Stack\n- Rust + React";
+    let (status, json) = post_json(app.clone(), "/api/config/global-context",
+        serde_json::json!(content)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+
+    // GET returns saved content
+    let (_, json) = get_json(app.clone(), "/api/config/global-context").await;
+    assert_eq!(json["data"], content);
+
+    // Empty string clears it
+    let (_, json) = post_json(app.clone(), "/api/config/global-context",
+        serde_json::json!("   ")).await;
+    assert_eq!(json["success"], true);
+    let (_, json) = get_json(app, "/api/config/global-context").await;
+    assert_eq!(json["data"], "");
+}
+
+#[tokio::test]
 async fn config_stt_model_round_trip() {
     let state = test_state();
     let app = build_router_with_auth(state.clone(), false);
@@ -1197,6 +1225,80 @@ async fn projects_list_empty() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["success"], true);
     assert!(json["data"].as_array().unwrap().is_empty());
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Add folder (project without git)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn projects_add_folder_creates_project_with_no_repo_url() {
+    let state = test_state();
+    // Use the actual temp directory (always exists).
+    let tmp = std::env::temp_dir();
+    let path = tmp.to_str().unwrap().to_string();
+
+    let (status, json) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/projects/add-folder",
+        serde_json::json!({ "path": path }),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+    // Name auto-inferred from last path component.
+    assert!(!json["data"]["name"].as_str().unwrap().is_empty());
+    // No git → repo_url is null.
+    assert!(json["data"]["repo_url"].is_null());
+    assert!(!json["data"]["id"].as_str().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn projects_add_folder_rejects_nonexistent_path() {
+    let state = test_state();
+    let (status, json) = post_json(
+        build_router_with_auth(state, false),
+        "/api/projects/add-folder",
+        serde_json::json!({ "path": "/does/not/exist/xyzzy" }),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], false);
+    assert!(json["error"].as_str().unwrap().contains("does not exist"));
+}
+
+#[tokio::test]
+async fn projects_add_folder_rejects_path_traversal() {
+    let state = test_state();
+    let (_, json) = post_json(
+        build_router_with_auth(state, false),
+        "/api/projects/add-folder",
+        serde_json::json!({ "path": "/home/../etc/shadow" }),
+    ).await;
+    assert_eq!(json["success"], false);
+    assert!(json["error"].as_str().unwrap().contains(".."));
+}
+
+#[tokio::test]
+async fn projects_add_folder_rejects_duplicate_path() {
+    let state = test_state();
+    let tmp = std::env::temp_dir();
+    let path = tmp.to_str().unwrap().to_string();
+
+    // First add succeeds.
+    let (_, json1) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/projects/add-folder",
+        serde_json::json!({ "path": &path }),
+    ).await;
+    assert_eq!(json1["success"], true);
+
+    // Second add with same path fails.
+    let (_, json2) = post_json(
+        build_router_with_auth(state, false),
+        "/api/projects/add-folder",
+        serde_json::json!({ "path": &path }),
+    ).await;
+    assert_eq!(json2["success"], false);
+    assert!(json2["error"].as_str().unwrap().contains("already exists"));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

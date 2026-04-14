@@ -1184,6 +1184,7 @@ pub async fn suggestions(
                 batch_wait_for_completion: None,
                 batch_max_items: None,
                 batch_workspace_mode: None,
+                notify_config: None,
             }).collect(),
         });
     }

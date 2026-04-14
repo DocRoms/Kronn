@@ -96,8 +96,16 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel }: RunDetailP
                   {ws_step.name}
                 </span>
                 {ws_step.step_type && (
-                  <span className="wf-step-type-badge" data-type={ws_step.step_type.type === 'ApiCall' ? 'api' : 'agent'}>
-                    {ws_step.step_type.type === 'ApiCall' ? 'API' : 'AGENT'}
+                  <span className="wf-step-type-badge" data-type={
+                    ws_step.step_type.type === 'ApiCall' ? 'api'
+                      : ws_step.step_type.type === 'Notify' ? 'notify'
+                      : ws_step.step_type.type === 'BatchQuickPrompt' ? 'batch'
+                      : 'agent'
+                  }>
+                    {ws_step.step_type.type === 'ApiCall' ? 'API'
+                      : ws_step.step_type.type === 'Notify' ? 'NOTIFY'
+                      : ws_step.step_type.type === 'BatchQuickPrompt' ? 'BATCH'
+                      : 'AGENT'}
                   </span>
                 )}
                 {ws_step.description && (

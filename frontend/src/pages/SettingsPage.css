@@ -820,6 +820,32 @@
 }
 
 /* ── Auth status badge ─────────────────────────────────── */
+.set-export-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--kr-sp-4);
+  padding: var(--kr-sp-4) var(--kr-sp-6);
+  border-radius: var(--kr-r-md);
+  background: rgba(255, 180, 0, 0.06);
+  border: 1px solid rgba(255, 180, 0, 0.15);
+  margin-bottom: var(--kr-sp-4);
+  font-size: var(--kr-fs-sm);
+  color: rgba(255, 200, 0, 0.8);
+  line-height: 1.5;
+}
+
+.set-export-warning svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: rgba(255, 200, 0, 0.7);
+}
+
+.set-export-warning a {
+  color: var(--kr-accent);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
 .set-auth-badge {
   font-size: var(--kr-fs-xs);
   font-weight: 600;

@@ -20,16 +20,17 @@ Kronn/
 │       ├── models/mod.rs       # All data models (Project, Discussion, MCP, Workflow, Config...)
 │       ├── api/                # HTTP handlers (one file per domain)
 │       │   ├── mod.rs          # Re-exports
-│       │   ├── setup.rs        # Setup wizard + config endpoints (tokens, language, agents, server config, auth token)
+│       │   ├── setup.rs        # Setup wizard + config endpoints (tokens, language, agents, server config, auth token, ui_language/stt_model/tts_voices for Tauri persistence)
 │       │   ├── projects.rs     # Project CRUD (~1396L) + scan + bootstrap + clone + template install + git ops + defaults
 │       │   ├── audit.rs        # AI audit pipeline (~1848L) — SSE audit, full_audit, drift, validation, briefing, cancel, skill detection
 │       │   ├── ai_docs.rs      # AI doc file browser (~184L) — list/search/read ai/ files
 │       │   ├── discover.rs     # Remote repo discovery (~426L) — GitHub/GitLab multi-source with token from MCPs
-│       │   ├── discussions.rs  # Discussion CRUD + SSE streaming + orchestration (~3696L)
+│       │   ├── discussions.rs  # Discussion CRUD + SSE streaming + orchestration (~3900L). make_agent_stream checkpoints partial_response every 30s/100 chunks. /stop cancels via cancel_registry. /dismiss-partial force-recovers (shared path with boot recovery)
 │       │   ├── contacts.rs     # Contacts CRUD + invite codes + network info + ping
-│       │   ├── ws.rs           # WebSocket handler — peer-to-peer presence + auto-add unknown peers
+│       │   ├── ws.rs           # WebSocket handler — peer-to-peer presence + auto-add unknown peers + PartialResponseRecovered / BatchRunProgress / BatchRunFinished broadcasts
 │       │   ├── mcps.rs         # MCP 3-tier API: overview, configs CRUD, registry, refresh, secrets
-│       │   ├── workflows.rs    # Workflow CRUD + trigger + runs
+│       │   ├── workflows.rs    # Workflow CRUD + trigger + runs + cancel_run (cascades via parent_run_id) + test_step + test_batch_step (dry-run preview: eligible_items + sample_rendered_prompts + warnings)
+│       │   ├── quick_prompts.rs # Quick Prompts CRUD + render + launch (0.3.4)
 │       │   ├── agents.rs       # Agent detection + install + uninstall + toggle (enable/disable)
 │       │   ├── stats.rs        # Token usage & cost stats (by provider, project, daily history, top discussions/workflows)
 │       │   ├── skills.rs       # Skills API: list, create, update, delete
@@ -70,7 +71,13 @@ Kronn/
 │       │       ├── 021_message_identity.sql # Author pseudo + avatar on messages
 │       │       ├── 022_contacts.sql         # Contacts table (multi-user)
 │       │       ├── 023_shared_discussions.sql # Shared discussions (multi-user)
-│       │       └── 024_message_cost.sql     # Per-message cost_usd column
+│       │       ├── 024_message_cost.sql     # Per-message cost_usd column
+│       │       ├── 025-026_*.sql            # Quick Prompts tables + description column
+│       │       ├── 027_quick_prompt_descriptions.sql # Optional description column
+│       │       ├── 028_batch_workflow_runs.sql # run_type/batch_total/batch_completed/batch_failed/batch_name
+│       │       ├── 030_workflow_run_parent.sql # parent_run_id for batch fan-out linkage
+│       │       ├── 031_partial_response.sql    # discussions.partial_response (crash recovery)
+│       │       └── 032_partial_response_started_at.sql # preserves checkpoint start time
 │       ├── core/               # Business logic
 │       │   ├── mod.rs          # Re-exports
 │       │   ├── config.rs       # Config load/save (~/.config/kronn/)
@@ -85,8 +92,9 @@ Kronn/
 │       │   ├── profiles.rs   # Profiles loader: builtin (embedded .md) + custom (~/.config/kronn/profiles/). Persona override system, build_profiles_prompt()
 │       │   ├── directives.rs # Directives loader: builtin (embedded .md) + custom (~/.config/kronn/directives/). build_directives_prompt()
 │       │   ├── cmd.rs        # Cross-platform command helpers: async_cmd()/sync_cmd() apply CREATE_NO_WINDOW on Windows. ALL Command::new() calls MUST use these helpers
+│       │   ├── sse_limits.rs # Global + per-client SSE concurrency caps (0.3.5)
 │       │   └── pricing.rs    # Static token pricing table (per-provider $/1M tokens). estimate_cost() fallback when real cost unavailable
-│       ├── profiles/          # Builtin profile Markdown files (8 profiles: architect, tech-lead, qa-engineer, product-owner, scrum-master, technical-writer, devils-advocate, mentor)
+│       ├── profiles/          # Builtin profile Markdown files (16 profiles: architect, tech-lead, qa-engineer, product-owner, scrum-master, technical-writer, devils-advocate, mentor, entrepreneur, ux-designer, game-developer, data-analyst, data-engineer, seo-growth, sre, staff-engineer)
 │       ├── directives/        # Builtin directive Markdown files
 │       ├── skills/             # Builtin skill Markdown files (embedded at compile time)
 │       │   ├── token-saver.md  # Meta: minimize token usage
@@ -107,6 +115,8 @@ Kronn/
 │           ├── trigger.rs      # Cron evaluation, tracker polling frequency
 │           ├── runner.rs       # Orchestrates full run: workspace → hooks → steps → cleanup (no separate actions phase)
 │           ├── steps.rs        # Step execution: prompt rendering, stall detection, retry, on_result conditions
+│           ├── batch_step.rs   # BatchQuickPrompt fan-out (0.3.5): resolves batch_items_from (5 input shapes), creates parent_run + N child discussions, optional worktree isolation, aggregates child status via WsMessage::BatchRunProgress/BatchRunFinished
+│           ├── notify_step.rs  # StepType::Notify webhook execution (0.3.5): POST/PUT/GET via reqwest, template rendering in URL + body, zero tokens
 │           ├── template.rs     # Liquid-compatible template engine for {{variable}} substitution
 │           ├── workspace.rs    # Git worktree create/cleanup with lifecycle hooks
 │           └── tracker/
@@ -136,6 +146,7 @@ Kronn/
 │       │   ├── NewDiscussionForm.tsx  # New discussion form (447L) — project/agent/skills/profiles/directives selection
 │       │   ├── MessageBubble.tsx # Message bubble (329L) — user/agent/system, markdown, TTS, edit, copy, retry
 │       │   ├── SwipeableDiscItem.tsx  # Swipeable sidebar item (110L) — swipe-to-archive/delete
+│       │   ├── AgentQuestionForm.tsx  # Structured agent questions (0.3.5) — renders mini-form above ChatInput when agent asks {{var}}: questions
 │       │   ├── GitPanel.tsx      # Git file/branch panel
 │       │   ├── AiDocViewer.tsx   # AI doc viewer
 │       │   ├── ProjectList.tsx   # Project list with search, filter, group-by-org (234L)
@@ -165,11 +176,14 @@ Kronn/
 │       │   ├── tts-worker.ts   # Web Worker: Piper WASM inference (@diffusionstudio/vits-web)
 │       │   ├── stt-engine.ts   # STT recording: audio resampling 16kHz, Whisper worker communication
 │       │   ├── stt-models.ts   # Whisper model definitions (tiny/base/small) + localStorage persistence
-│       │   └── stt-worker.ts   # Web Worker: Whisper WASM inference (@huggingface/transformers)
+│       │   ├── stt-worker.ts   # Web Worker: Whisper WASM inference (@huggingface/transformers)
+│       │   └── agent-question-parse.ts # Structured agent question parser (0.3.5) — extracts {{var}}: question patterns from agent messages
 │       ├── types/
 │       │   └── generated.ts    # Auto-generated from Rust models (DO NOT EDIT)
 │       ├── test/
-│       │   └── setup.ts        # Test setup (@testing-library/jest-dom)
+│       │   ├── setup.ts        # Test setup (@testing-library/jest-dom)
+│       │   ├── apiMock.ts      # Shared buildApiMock() factory — exhaustive default mock (13 namespaces + 5 flat fns), deep-merge overrides. Use via vi.mock + vi.hoisted
+│       │   └── apiMock.complete.test.ts # Completeness guard: fails if lib/api.ts gains a namespace not covered by buildApiMock
 │       ├── __tests__/          # App-level tests (App.tsx, ErrorBoundary)
 │       ├── hooks/__tests__/    # Hook tests (useApi)
 │       ├── lib/__tests__/      # Lib tests (i18n, api, constants, types, regression, access-warnings)
@@ -223,7 +237,7 @@ Kronn/
 - CSS system: `src/styles/` (tokens, utilities, components) + per-page CSS. ~319 inline styles remain (dynamic only).
 - TTS/STT logic extracted into `lib/tts-*.ts` and `lib/stt-*.ts` modules (7 files, ~400 lines total). Web Workers for WASM inference run off the main thread.
 - Shared constants (AGENT_COLORS, AGENT_LABELS) extracted to `lib/constants.ts` — imported by Dashboard and WorkflowsPage.
-- Frontend tests in `__tests__/` directories alongside source (22 suites, ~315 tests). See `ai/testing-quality.md`.
+- Frontend tests in `__tests__/` directories alongside source (37 suites, 489 tests). See `ai/testing-quality.md`.
 - Shell tests in `tests/bats/` (8 suites, 186 tests via bats-core). See `ai/testing-quality.md`.
 - CI pipeline: `.github/workflows/ci-test.yml` triggered on push to main + all PRs (backend clippy/test + frontend tsc/test + shell bats + security scan). Desktop build: `.github/workflows/desktop-build.yml`.
 - `templates/` directory contains the AI context template files (ai/ skeleton, CLAUDE.md, .cursorrules, etc.) mounted at `/app/templates:ro` in Docker.
