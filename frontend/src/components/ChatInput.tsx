@@ -498,6 +498,7 @@ export function ChatInput({
               onClick={handleMicToggle}
               disabled={sending || sttState === 'transcribing'}
               title={sttState === 'recording' ? t('disc.micStop') : t('disc.micDictate')}
+              aria-label={sttState === 'recording' ? t('disc.micStop') : t('disc.micDictate')}
             >
               {sttState === 'recording' ? <MicOff size={15} /> : <Mic size={15} />}
             </button>
@@ -519,6 +520,7 @@ export function ChatInput({
                 }
               }}
               title={voiceMode ? t('disc.voiceModeOff') : t('disc.voiceModeOn')}
+              aria-label={voiceMode ? t('disc.voiceModeOff') : t('disc.voiceModeOn')}
             >
               {voiceMode ? <Phone size={15} /> : <PhoneOff size={15} />}
             </button>
@@ -530,6 +532,7 @@ export function ChatInput({
               data-color="accent"
               onClick={onTtsToggle}
               title={ttsEnabled ? t('disc.ttsDisable') : t('disc.ttsEnable')}
+              aria-label={ttsEnabled ? t('disc.ttsDisable') : t('disc.ttsEnable')}
             >
               {ttsEnabled ? <Volume2 size={15} /> : <VolumeX size={15} />}
             </button>
@@ -548,6 +551,7 @@ export function ChatInput({
                 }}
                 disabled={sending}
                 title={t('debate.title')}
+                aria-label={t('debate.title')}
               >
                 <Users size={15} />
               </button>

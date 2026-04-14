@@ -51,7 +51,7 @@ const STATUS_COLORS: Record<string, string> = {
   deleted: '#ff4d6a',
   renamed: '#60a5fa',
   copied: '#60a5fa',
-  untracked: 'rgba(255,255,255,0.3)',
+  untracked: 'var(--kr-text-dim)',
 };
 
 export function GitPanel({ projectId, discussionId, onClose, terminalEnabled = false }: Props) {

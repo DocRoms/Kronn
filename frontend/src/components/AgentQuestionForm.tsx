@@ -50,8 +50,15 @@ export function AgentQuestionForm({ questions, discussionId, onSubmit, t }: Prop
     onSubmit(reply);
   };
 
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && allRequired) {
+      e.preventDefault();
+      handleSubmit();
+    }
+  };
+
   return (
-    <div className="agent-question-form" data-testid="agent-question-form">
+    <div className="agent-question-form" data-testid="agent-question-form" onKeyDown={handleKeyDown}>
       <p className="agent-question-form-hint">{t('agentQuestions.hint')}</p>
       <div className="agent-question-form-fields">
         {questions.map(q => (
@@ -78,6 +85,7 @@ export function AgentQuestionForm({ questions, discussionId, onSubmit, t }: Prop
         title={allRequired ? t('agentQuestions.submit') : t('agentQuestions.fillAll')}
       >
         <Send size={12} /> {t('agentQuestions.submit')}
+        <span className="agent-question-form-shortcut">Ctrl+Enter</span>
       </button>
     </div>
   );

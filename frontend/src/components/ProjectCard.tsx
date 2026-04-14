@@ -17,7 +17,7 @@ import {
 
 const STATUS_COLORS: Record<string, string> = {
   Pending: '#ffc800', Running: '#00d4ff', Success: '#34d399',
-  Failed: '#ff4d6a', Cancelled: 'rgba(255,255,255,0.3)', WaitingApproval: '#c8ff00',
+  Failed: '#ff4d6a', Cancelled: 'var(--kr-cancelled)', WaitingApproval: '#c8ff00',
 };
 
 /** Agents that can run audits/briefings (need filesystem access + CLI mode). Excludes Vibe (API-only). */

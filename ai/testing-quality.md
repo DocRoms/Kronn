@@ -3,7 +3,7 @@
 ## Rules
 
 - **Quality gate is non-negotiable**: code must compile and build after any change.
-- **All tests must pass**: `npm run test` (frontend, **489 tests**), `cargo test` (backend, **1166 tests**: 1032 lib + 134 integration), `make test-shell` (192 bats tests).
+- **All tests must pass**: `npm run test` (frontend, **504 tests**), `cargo test` (backend, **1166 tests**: 1032 lib + 134 integration), `make test-shell` (192 bats tests).
 - **0 ESLint errors**: `npm run lint` must report 0 errors (warnings are tolerated for existing patterns).
 - **0 clippy warnings**: `cargo clippy --all-targets -- -D warnings` must pass.
 
@@ -16,7 +16,7 @@
 | Rust format | `cargo fmt --check` | Formatting check |
 | TS compile | `cd frontend && npx tsc -b` | Type check |
 | Frontend lint | `cd frontend && npm run lint` | ESLint 10 strict |
-| Frontend tests | `cd frontend && npm test` | Vitest 4 (489 tests) |
+| Frontend tests | `cd frontend && npm test` | Vitest 4 (504 tests) |
 | Frontend coverage | `cd frontend && npm run test:coverage` | Vitest + @vitest/coverage-v8 |
 | Frontend build | `cd frontend && npm run build` | Production build (Vite, code-split) |
 | Shell tests | `make test-shell` | bats-core (186 tests) |
@@ -38,7 +38,7 @@
 - **i18n parity**: `src/lib/__tests__/i18n-parity.test.ts` — imports the exported `dictionaries` object and asserts fr/en/es key set isomorphism + non-empty values + placeholder-subset invariant (en/es may have fewer `{N}` than fr, never extras).
 - **Module-level state trackers**: patterns like `activeStepTests` (Map + subscribe/notify) in `WorkflowDetail.tsx` survive React unmount. Tests using these must either render inside the parent or mock the tracker directly.
 
-### Test files (37 suites, 489 tests)
+### Test files (38 suites, 504 tests)
 
 | File | Tests | Covers |
 |------|-------|--------|

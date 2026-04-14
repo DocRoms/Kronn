@@ -298,7 +298,7 @@ export function AgentsSection({
                     ) : (
                       <button className="set-icon-btn set-icon-btn-bare" title={t('config.activateKey')} aria-label={t('config.activateKey')}
                         onClick={async () => { try { await configApi.activateApiKey(k.id); } catch (err) { console.warn('Settings action failed:', err); } refetchTokens(); }}>
-                        <div style={{ width: 9, height: 9, borderRadius: '50%', border: '1px solid rgba(255,255,255,0.2)' }} />
+                        <div style={{ width: 9, height: 9, borderRadius: '50%', border: '1px solid var(--kr-text-ghost)' }} />
                       </button>
                     )}
                     <span className="text-xs text-tertiary truncate" style={{ minWidth: 60 }}>

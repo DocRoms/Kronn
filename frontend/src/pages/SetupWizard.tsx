@@ -170,7 +170,7 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
             <div>
               <div className="flex-between">
                 <h2 className="setup-h2">{t('setup.aiAgents')}</h2>
-                <button className="btn btn-icon btn-secondary" onClick={refreshAgents} disabled={detecting} title={t('setup.refresh')}>
+                <button className="btn btn-icon btn-secondary" onClick={refreshAgents} disabled={detecting} title={t('setup.refresh')} aria-label={t('setup.refresh')}>
                   <RefreshCw size={14} style={detecting ? { animation: 'spin 1s linear infinite' } : undefined} />
                 </button>
               </div>

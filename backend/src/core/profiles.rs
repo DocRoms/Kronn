@@ -73,6 +73,8 @@ const BUILTIN_PROFILES: &[BuiltinProfile] = &[
     // Ops & Strategy
     BuiltinProfile { id: "sre", content: include_str!("../profiles/sre.md") },
     BuiltinProfile { id: "staff-engineer", content: include_str!("../profiles/staff-engineer.md") },
+    // Communication
+    BuiltinProfile { id: "translator", content: include_str!("../profiles/translator.md") },
 ];
 
 // ─── Frontmatter parsing ────────────────────────────────────────────────────
@@ -366,7 +368,7 @@ mod tests {
     #[test]
     fn parse_builtin_profiles() {
         let profiles = list_all_profiles();
-        assert!(profiles.len() >= 16, "Expected at least 16 builtin profiles, got {}", profiles.len());
+        assert!(profiles.len() >= 17, "Expected at least 17 builtin profiles, got {}", profiles.len());
 
         let architect = profiles.iter().find(|p| p.id == "architect").unwrap();
         assert_eq!(architect.name, "Architect");
@@ -443,6 +445,7 @@ mod tests {
             ("seo-growth", ProfileCategory::Business, "Rio"),
             ("sre", ProfileCategory::Technical, "Ops"),
             ("staff-engineer", ProfileCategory::Technical, "Dex"),
+            ("translator", ProfileCategory::Business, "Lin"),
         ] {
             let profile = get_profile(id);
             assert!(profile.is_some(), "Profile '{}' must exist", id);

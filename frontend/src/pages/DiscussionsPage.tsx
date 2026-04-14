@@ -10,6 +10,7 @@ import { NewDiscussionForm } from '../components/NewDiscussionForm';
 import type { NewDiscConfig } from '../components/NewDiscussionForm';
 import { AgentQuestionForm } from '../components/AgentQuestionForm';
 import { parseAgentQuestions } from '../lib/agent-question-parse';
+import { userError } from '../lib/userError';
 import type { Project, AgentDetection, Discussion, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile } from '../types/generated';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useT } from '../lib/I18nContext';
@@ -671,7 +672,7 @@ export function DiscussionsPage({
         tier: config.tier !== 'default' ? config.tier : undefined,
       });
     } catch (e) {
-      toast(String(e), 'error');
+      toast(userError(e), 'error');
       return;
     }
     setShowNewDiscussion(false);
@@ -688,7 +689,7 @@ export function DiscussionsPage({
             [disc.id]: [...(prev[disc.id] ?? []), resp.file],
           }));
         } catch (e) {
-          toast(`${file.name}: ${String(e)}`, 'error');
+          toast(`${file.name}: ${userError(e)}`, 'error');
         }
       }
     }
@@ -761,7 +762,7 @@ export function DiscussionsPage({
                 reloadDiscussion(discId);
                 toast(t('disc.partialDismissed'), 'success');
               })
-              .catch(e => toast(String(e), 'error'));
+              .catch(e => toast(userError(e), 'error'));
           }
         } else {
           toast(errStr, 'error');
@@ -831,7 +832,7 @@ export function DiscussionsPage({
           [activeDiscussionId]: [...(prev[activeDiscussionId] ?? []), resp.file],
         }));
       } catch (e) {
-        toast(String(e), 'error');
+        toast(userError(e), 'error');
       }
     }
     setUploadingFiles(false);
@@ -846,7 +847,7 @@ export function DiscussionsPage({
         [activeDiscussionId]: (prev[activeDiscussionId] ?? []).filter(f => f.id !== fileId),
       }));
     } catch (e) {
-      toast(String(e), 'error');
+      toast(userError(e), 'error');
     }
   }, [activeDiscussionId, toast]);
 
@@ -1052,7 +1053,7 @@ export function DiscussionsPage({
       },
       onError: (error) => {
         console.error('Orchestration error:', error);
-        toast(String(error), 'error');
+        toast(userError(error), 'error');
         setSendingMap(prev => ({ ...prev, [discId]: false }));
         delete abortControllers.current[discId];
         setOrchState(prev => {
@@ -1109,7 +1110,7 @@ export function DiscussionsPage({
                 toast(t('disc.stopAgentNothing'), 'info');
               }
             } catch (e) {
-              toast(t('disc.stopAgentError', String(e)), 'error');
+              toast(t('disc.stopAgentError', userError(e)), 'error');
             }
           }}
           batchSummaries={batchSummaries}
@@ -1121,7 +1122,7 @@ export function DiscussionsPage({
               refetchDiscussions();
               refetchBatchSummaries();
             } catch (e) {
-              toast(t('disc.batchDeleteError', String(e)), 'error');
+              toast(t('disc.batchDeleteError', userError(e)), 'error');
               // Touch `count` so the linter accepts it — useful for future
               // optimistic-UI fallbacks if we want to roll back a fake removal.
               void count;

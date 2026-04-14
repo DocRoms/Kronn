@@ -2,6 +2,7 @@ import { useState, useRef, useMemo, useEffect } from 'react';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { useT } from '../lib/I18nContext';
 import { workflows as workflowsApi, discussions as discussionsApi, quickPrompts as quickPromptsApi } from '../lib/api';
+import { userError } from '../lib/userError';
 import { useApi } from '../hooks/useApi';
 import type {
   Project, WorkflowSummary, Workflow, WorkflowRun,
@@ -39,6 +40,7 @@ interface WorkflowsPageProps {
   /** Reverse direction: when "📋 N conversations" is clicked on a workflow run,
    * jump to the discussions tab and focus that batch group. */
   onNavigateToBatch?: (batchRunId: string) => void;
+  toast?: (msg: string, type?: 'success' | 'error' | 'info') => void;
 }
 
 const TRIGGER_LABELS: Record<string, string> = {
@@ -52,11 +54,11 @@ const STATUS_COLORS: Record<string, string> = {
   Running: '#00d4ff',
   Success: '#34d399',
   Failed: '#ff4d6a',
-  Cancelled: 'rgba(255,255,255,0.3)',
+  Cancelled: 'var(--kr-cancelled)',
   WaitingApproval: '#c8ff00',
 };
 
-export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, configLanguage, onNavigateDiscussion, onBatchLaunched, initialSelectedWorkflowId, onInitialSelectionConsumed, onNavigateToBatch }: WorkflowsPageProps) {
+export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, configLanguage, onNavigateDiscussion, onBatchLaunched, initialSelectedWorkflowId, onInitialSelectionConsumed, onNavigateToBatch, toast: toastProp }: WorkflowsPageProps) {
   const { t } = useT();
   const isMobile = useIsMobile();
   const [tab, setTab] = useState<'workflows' | 'quickPrompts'>('workflows');
@@ -303,16 +305,17 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         lines.push(item);
       }
     }
+    const notify = toastProp ?? ((msg: string) => alert(msg));
     if (lines.length === 0) {
-      alert(t('qp.batch.emptyInput'));
+      notify(t('qp.batch.emptyInput'), 'error');
       return;
     }
     if (lines.length > 50) {
-      alert(t('qp.batch.tooManyItems', lines.length));
+      notify(t('qp.batch.tooManyItems', lines.length), 'error');
       return;
     }
     if (qp.variables.length === 0) {
-      alert(t('qp.batch.needsVariable'));
+      notify(t('qp.batch.needsVariable'), 'error');
       return;
     }
     // Use the FIRST variable as the batch key. Each line becomes the value
@@ -385,7 +388,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       setBatchInputLines('');
     } catch (e) {
       console.warn('Batch launch failed:', e);
-      alert(t('qp.batch.failed', String(e)));
+      notify(t('qp.batch.failed', userError(e)), 'error');
     } finally {
       setBatchLaunching(false);
     }
@@ -516,7 +519,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                       <span className="font-semibold text-md flex-1">{wf.name}</span>
                       <button
                         className="wf-icon-btn"
-                        style={{ color: wf.enabled ? '#34d399' : 'rgba(255,255,255,0.3)' }}
+                        style={{ color: wf.enabled ? '#34d399' : 'var(--kr-text-dim)' }}
                         onClick={(e) => { e.stopPropagation(); handleToggle(wf); }}
                         title={wf.enabled ? t('wf.active') : t('wf.inactive')}
                         aria-pressed={wf.enabled}

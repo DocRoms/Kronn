@@ -177,7 +177,9 @@ Kronn/
 │       │   ├── stt-engine.ts   # STT recording: audio resampling 16kHz, Whisper worker communication
 │       │   ├── stt-models.ts   # Whisper model definitions (tiny/base/small) + localStorage persistence
 │       │   ├── stt-worker.ts   # Web Worker: Whisper WASM inference (@huggingface/transformers)
-│       │   └── agent-question-parse.ts # Structured agent question parser (0.3.5) — extracts {{var}}: question patterns from agent messages
+│       │   ├── agent-question-parse.ts # Structured agent question parser (0.3.5) — extracts {{var}}: question patterns from agent messages
+│       │   ├── extractLikelyOutput.ts # Heuristic to extract useful data from raw agent response (envelope → last-line → fallback). 15 tests
+│       │   └── userError.ts       # Human-friendly error messages — wraps raw Error/string into actionable text (network, timeout, generic)
 │       ├── types/
 │       │   └── generated.ts    # Auto-generated from Rust models (DO NOT EDIT)
 │       ├── test/

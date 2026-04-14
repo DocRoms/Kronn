@@ -28,7 +28,11 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 - **Bootstrap-architect skill** — deeply rewritten for gated validation flow (architecture → plan → issues). +251 lines with clearer stage handoffs
 - **Pagination** — `PaginationQuery.page` no longer has a `serde(default = 1)` — `Option<Query<_>>` now correctly falls through to unpaginated mode when no query params are sent. Regression fix for the 50-items silent cap
-- **Settings UX** — section reorder (Usage before Server), export warning redesigned (proper CSS class, "tokens d'authentification" wording, clickable link to Server section)
+- **Settings UX** — section reorder (Usage before Server & Database), export warning redesigned (proper CSS class, "tokens d'authentification" consistent wording, clickable link scrolls to Server section)
+- **Contrast & accessibility** — all inline `rgba(255,255,255,0.2-0.3)` replaced with CSS tokens (`--kr-text-dim`, `--kr-text-ghost`, `--kr-cancelled`). Token values raised from 0.2/0.3 to 0.35/0.45 for better readability. 8 icon-only buttons gained `aria-label`. Advanced toggle gained `aria-expanded`
+- **Error messages humanized** — new `userError()` helper wraps raw `String(e)` in user-friendly messages (network, timeout, 413, generic fallback). 4 `alert()` calls replaced with `toast()`. Covers Dashboard, DiscussionsPage, WorkflowsPage
+- **Hints rewritten for non-dev users** — batch worktree, agent question form, global context hints rewritten to explain WHY not HOW (FR/EN/ES)
+- **Terminology consistency** — "clés API" vs "token API" confusion resolved in reset confirm dialog (FR/EN/ES). Distinction: "clés des fournisseurs IA" + "token d'authentification"
 
 ### Fixed
 - **50-items silent pagination cap** — regression test added: creating 60 discussions and calling plain `GET /api/discussions` returns all 60 (not 50)
@@ -36,10 +40,15 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Dry-run test state lost on tab switch** — module-level tracker owns the AbortController; components re-subscribe on mount
 - **i18n placeholder mismatches** — new parity test caught 6 EN keys with dangling `{N}` placeholders (literal `{2}` rendered in UI)
 - **Clippy** — `doc_lazy_continuation` in `models/mod.rs`, `manual_pattern_char_comparison` in `workflows/batch_step.rs`
+- **macOS Docker: Claude Code not detected** — host-mounted macOS (Darwin) binaries can't execute in the Linux container. `entrypoint.sh` now bootstraps Linux `claude` + `codex` via npm on macOS hosts (same pattern as existing Kiro curl install). Agent detection skips Darwin binaries for all npm agents (`claude`, `codex`, `copilot`, `kiro-cli`). `~/.npm/bin` mounted + added to container PATH via `KRONN_NPM_BIN` env var (auto-detected by Makefile)
+- **NewDiscussionForm: Escape + click-outside** — modal now closes on Escape key and overlay click (standard UX pattern)
+- **NewDiscussionForm: double-submit prevention** — create button disabled after first click
+- **AgentQuestionForm: Ctrl+Enter to submit** — keyboard shortcut + visual hint badge
+- **Empty state projects** — text rewritten to guide user toward + button (add folder / clone / bootstrap)
 
 ### Tests (robustness pass)
-- Backend: **1166/1166** (1032 lib + 134 integration). +4 HTTP integration tests for partial-response recovery, +5 notify_step tests, +4 add-folder integration tests, +1 global-context integration test, +15 agent-question parser tests (frontend), +5 AgentQuestionForm component tests (frontend)
-- Frontend: **489/489** (37 suites). New helpers + tests:
+- Backend: **1166** (1032 lib + 134 integration)
+- Frontend: **504** (38 suites). New helpers + tests:
   - `src/test/apiMock.ts` — shared `buildApiMock()` factory (all 13 namespaces + 5 flat fns) + completeness test (ns coverage, flat-fn coverage, deep-merge preserves siblings)
   - `src/lib/__tests__/i18n-parity.test.ts` — 9 tests asserting fr/en/es key isomorphism + non-empty values + placeholder-subset invariant
   - `src/components/workflows/__tests__/BatchItemsList.test.tsx` — 6 tests (render, toggle prompt, dry-run forwarding, no-agent hides btn, running disables btn, defensive empty-prompt)

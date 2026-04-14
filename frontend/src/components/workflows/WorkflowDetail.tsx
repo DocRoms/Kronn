@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import { useT } from '../../lib/I18nContext';
 import { workflows as workflowsApi, quickPrompts as quickPromptsApi } from '../../lib/api';
 import { AGENT_COLORS, AGENT_LABELS, isAgentRestricted } from '../../lib/constants';
+import { extractLikelyOutput } from '../../lib/extractLikelyOutput';
 import type { Workflow, WorkflowRun, StepResult, AgentsConfig, WorkflowStep, QuickPrompt, BatchRunSummary, AgentType } from '../../types/generated';
 import {
   Trash2, Play, Loader2, Check, X, ChevronRight,
@@ -359,30 +360,7 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
   // If we paste the whole thing into Mock input, parse_items splits the
   // blabla on newlines and treats each chunk as a separate item — the
   // batch step then thinks it has 5 tickets including the explanation.
-  //
-  // Heuristic, in priority order:
-  //   1. STEP_OUTPUT envelope (Structured mode) → take its contents
-  //   2. Last non-empty line if it looks like a list (commas, semicolons,
-  //      JSON-like brackets, or short enough to be data not prose)
-  //   3. Fall back to the whole output (let the user clean it up)
-  const extractLikelyOutput = (raw: string): { value: string; extracted: boolean } => {
-    if (!raw) return { value: '', extracted: false };
-    const envMatch = raw.match(/---STEP_OUTPUT---([\s\S]+?)---END_STEP_OUTPUT---/);
-    if (envMatch) return { value: envMatch[1].trim(), extracted: true };
-    const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
-    if (lines.length === 0) return { value: '', extracted: false };
-    if (lines.length === 1) return { value: lines[0], extracted: false };
-    const last = lines[lines.length - 1];
-    const looksLikeData = (
-      last.length < 200 ||
-      last.includes(',') ||
-      last.includes(';') ||
-      last.startsWith('[') ||
-      last.startsWith('{')
-    );
-    if (looksLikeData) return { value: last, extracted: true };
-    return { value: raw, extracted: false };
-  };
+  // Heuristic extracted to lib/extractLikelyOutput.ts for testability.
 
   const [prefilledFromPrev, setPrefilledFromPrev] = useState(false);
   const [showFullPrev, setShowFullPrev] = useState(false);
@@ -963,7 +941,7 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
                 )}
 
                 {isPending && (
-                  <span className="text-2xs" style={{ color: 'rgba(255,255,255,0.1)' }}>
+                  <span className="text-2xs" style={{ color: 'var(--kr-border-medium)' }}>
                     {t('wf.pending')}
                   </span>
                 )}
@@ -1028,9 +1006,10 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
                   // sees the status flip to Cancelled without a popup.
                   console.info('Cancelled run:', res);
                   onRefresh();
-                } catch (e) {
-                  console.warn('Cancel failed:', e);
-                  alert(t('wf.cancelRunError'));
+                } catch {
+                  // Cancel errors are rare (run already finished, registry
+                  // poisoned) — the UI refreshes automatically via onRefresh
+                  // so we just swallow silently.
                 }
               }}
             />

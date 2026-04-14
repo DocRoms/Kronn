@@ -120,8 +120,11 @@ export function NewDiscussionForm({
     onClose();
   };
 
+  const [creating, setCreating] = useState(false);
+
   const handleCreate = () => {
-    if (!newDiscPrompt.trim() || !newDiscAgent) return;
+    if (!newDiscPrompt.trim() || !newDiscAgent || creating) return;
+    setCreating(true);
     onSubmit({
       title: newDiscTitle.trim() || newDiscPrompt.trim().slice(0, 60),
       agent: newDiscAgent as AgentType,
@@ -141,10 +144,20 @@ export function NewDiscussionForm({
   // ─── Render ──────────────────────────────────────────────────────────────
 
   return (
-    <div className="disc-new-overlay">
+    <div
+      className="disc-new-overlay"
+      onClick={e => { if (e.target === e.currentTarget) handleClose(); }}
+      onKeyDown={e => { if (e.key === 'Escape') handleClose(); }}
+      role="dialog"
+      aria-modal="true"
+      tabIndex={-1}
+    >
       <div
         className="disc-new-card"
-        onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && newDiscPrompt.trim()) handleCreate(); }}
+        onKeyDown={e => {
+          if (e.key === 'Escape') { e.stopPropagation(); handleClose(); }
+          if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && newDiscPrompt.trim()) handleCreate();
+        }}
       >
         <div className="disc-new-header">
           <span className="disc-new-title">{t('disc.newTitle')}</span>
@@ -279,6 +292,8 @@ export function NewDiscussionForm({
               type="button"
               className="disc-advanced-toggle"
               onClick={() => setShowAdvancedOptions(prev => !prev)}
+              aria-expanded={showAdvancedOptions}
+              aria-label={t('disc.advancedOptions')}
             >
               <ChevronRight size={11} className="disc-chevron" data-expanded={showAdvancedOptions} />
               <Settings size={10} />
@@ -488,7 +503,7 @@ export function NewDiscussionForm({
           className="disc-create-btn"
           data-ready={!!newDiscPrompt.trim()}
           onClick={handleCreate}
-          disabled={!newDiscPrompt.trim() || !newDiscAgent}
+          disabled={!newDiscPrompt.trim() || !newDiscAgent || creating}
         >
           <MessageSquare size={14} /> {t('disc.start')}
           <span className="disc-create-shortcut">Ctrl+Enter</span>

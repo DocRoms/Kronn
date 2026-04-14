@@ -310,7 +310,7 @@ export function DiscussionSidebar({
             const isOrgCollapsed = collapsedGroups.has(orgKey) && !discSearchFilter;
             const orgDiscCount = orgProjects.reduce((sum, p) => sum + (activeDiscByProject.get(p.id) ?? []).length, 0);
             // Color from org name hash (same as Dashboard)
-            const orgColor = orgName === localLabel ? 'rgba(255,255,255,0.3)'
+            const orgColor = orgName === localLabel ? 'var(--kr-text-dim)'
               : `hsl(${[...orgName].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 0)}, 50%, 60%)`;
 
             return (

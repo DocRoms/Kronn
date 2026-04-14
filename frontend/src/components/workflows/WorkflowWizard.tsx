@@ -431,7 +431,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
         {WIZARD_STEPS.map((label, i) => (
           <div key={i} className="flex-1 text-center">
             <div className="wf-wizard-progress-segment" data-active={i <= wizardStep} />
-            <span className="text-xs" style={{ color: i <= wizardStep ? '#c8ff00' : 'rgba(255,255,255,0.3)' }}>
+            <span className="text-xs" style={{ color: i <= wizardStep ? '#c8ff00' : 'var(--kr-text-dim)' }}>
               {label}
             </span>
           </div>

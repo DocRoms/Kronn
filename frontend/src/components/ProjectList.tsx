@@ -143,7 +143,7 @@ export function ProjectList({
         const currentGroup = projGroup(proj);
         const prevGroup = idx > 0 ? projGroup(displayProjects[idx - 1]) : null;
         const showGroupHeader = !projectSearch && groupedProjects.length > 1 && currentGroup !== prevGroup;
-        const groupColor = currentGroup === t('projects.group.local') ? 'rgba(255,255,255,0.3)' : `hsl(${Math.abs([...currentGroup].reduce((h, c) => h * 31 + c.charCodeAt(0), 0)) % 360}, 60%, 65%)`;
+        const groupColor = currentGroup === t('projects.group.local') ? 'var(--kr-text-dim)' : `hsl(${Math.abs([...currentGroup].reduce((h, c) => h * 31 + c.charCodeAt(0), 0)) % 360}, 60%, 65%)`;
         const groupProjectCount = groupedProjects.find(g => g.group === currentGroup)?.projects.length ?? 0;
         const projDiscussions = discussionsByProject[proj.id] ?? [];
 
@@ -225,7 +225,7 @@ export function ProjectList({
         <div className="dash-card dash-empty">
           <Folder size={32} style={{ color: 'rgba(255,255,255,0.15)', marginBottom: 12 }} />
           <p className="dash-empty-text">
-            {projectSearch ? t('projects.emptySearch') : t('projects.empty')}
+            {projectSearch ? t('projects.emptySearch') : t('projects.emptyHint')}
           </p>
         </div>
       )}

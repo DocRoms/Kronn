@@ -8,6 +8,7 @@ import { useT } from '../lib/I18nContext';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { isUsable } from '../lib/constants';
 import { hydrateTtsVoicesFromBackend } from '../lib/tts-models';
+import { userError } from '../lib/userError';
 import { fetchSttModelId } from '../lib/stt-models';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 import { McpPage } from './McpPage';
@@ -290,7 +291,7 @@ export function Dashboard({ onReset }: DashboardProps) {
       await refetch();
       toast(t('projects.clone.success'), 'success');
     } catch (e) {
-      toast(`Error: ${e}`, 'error');
+      toast(userError(e), 'error');
     } finally {
       setCloneLoading(false);
     }
@@ -336,7 +337,7 @@ export function Dashboard({ onReset }: DashboardProps) {
       await refetch();
       toast(t('projects.clone.success'), 'success');
     } catch (e) {
-      toast(`Error: ${e}`, 'error');
+      toast(userError(e), 'error');
     } finally {
       setCloneLoading(false);
     }
@@ -765,7 +766,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                       setFolderName('');
                       refetch();
                     } catch (e) {
-                      toast(String(e), 'error');
+                      toast(userError(e), 'error');
                     } finally {
                       setFolderLoading(false);
                     }
@@ -839,6 +840,7 @@ export function Dashboard({ onReset }: DashboardProps) {
               installedAgentTypes={agents.filter(isUsable).map(a => a.agent_type)}
               agentAccess={agentAccess ?? undefined}
               configLanguage={configLanguage ?? undefined}
+              toast={toast}
               initialSelectedWorkflowId={openWorkflowId}
               onInitialSelectionConsumed={() => setOpenWorkflowId(null)}
               onNavigateToBatch={(batchRunId) => {

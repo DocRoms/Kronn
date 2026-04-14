@@ -656,7 +656,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                   <div className="mcp-detail-body">
                     {(cfg.env_keys.length > 0 || def?.token_help) && (
                       <div className="mcp-detail-section">
-                        <h3 className="mcp-detail-section-title"><Key size={12} /> {cfg.env_keys.length > 0 ? t('mcp.envVars') : t('mcp.setup')} {cfg.env_keys.length > 0 && editingEnvId !== cfg.id && <button className="mcp-icon-btn" style={{ marginLeft: 4 }} onClick={() => handleStartEditSecrets(cfg.id)} title={t('mcp.editKeys')}><Pencil size={11} style={{ color: 'rgba(255,255,255,0.3)' }} /></button>}</h3>
+                        <h3 className="mcp-detail-section-title"><Key size={12} /> {cfg.env_keys.length > 0 ? t('mcp.envVars') : t('mcp.setup')} {cfg.env_keys.length > 0 && editingEnvId !== cfg.id && <button className="mcp-icon-btn" style={{ marginLeft: 4 }} onClick={() => handleStartEditSecrets(cfg.id)} title={t('mcp.editKeys')} aria-label={t('mcp.editKeys')}><Pencil size={11} style={{ color: 'var(--kr-text-dim)' }} /></button>}</h3>
                         {def?.token_help && (() => {
                           const helpKey = `mcp.help.${def.id}`;
                           const translated = t(helpKey);
@@ -716,7 +716,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                                   {isLinked && (() => {
                                     const slug = slugify(cfg.label);
                                     const isCustom = mcpOverview.customized_contexts.includes(`${slug}:${proj.id}`);
-                                    return <button className="mcp-icon-btn mcp-context-btn" onClick={() => handleOpenContext(proj.id, proj.name, cfg.label)} title={`${t('mcp.editContext', cfg.label, proj.name)}${isCustom ? ' ' + t('mcp.customized') : ' ' + t('mcp.default')}`}><FileText size={10} style={{ color: isCustom ? 'var(--kr-accent)' : 'rgba(255,255,255,0.2)' }} /></button>;
+                                    return <button className="mcp-icon-btn mcp-context-btn" onClick={() => handleOpenContext(proj.id, proj.name, cfg.label)} title={`${t('mcp.editContext', cfg.label, proj.name)}${isCustom ? ' ' + t('mcp.customized') : ' ' + t('mcp.default')}`}><FileText size={10} style={{ color: isCustom ? 'var(--kr-accent)' : 'var(--kr-text-ghost)' }} /></button>;
                                   })()}
                                 </span>
                               );
