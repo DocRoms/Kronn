@@ -3,7 +3,7 @@
 ## Rules
 
 - **Quality gate is non-negotiable**: code must compile and build after any change.
-- **All tests must pass**: `npm run test` (frontend, **517 tests**), `cargo test` (backend, **1171 tests**: 1037 lib + 134 integration), `make test-shell` (192 bats tests).
+- **All tests must pass**: `npm run test` (frontend, **520 tests**), `cargo test` (backend, **1182 tests**: 1037 lib + 145 integration), `make test-shell` (192 bats tests).
 - **0 ESLint errors**: `npm run lint` must report 0 errors (warnings are tolerated for existing patterns).
 - **0 clippy warnings**: `cargo clippy --all-targets -- -D warnings` must pass.
 
@@ -38,7 +38,7 @@
 - **i18n parity**: `src/lib/__tests__/i18n-parity.test.ts` — imports the exported `dictionaries` object and asserts fr/en/es key set isomorphism + non-empty values + placeholder-subset invariant (en/es may have fewer `{N}` than fr, never extras).
 - **Module-level state trackers**: patterns like `activeStepTests` (Map + subscribe/notify) in `WorkflowDetail.tsx` survive React unmount. Tests using these must either render inside the parent or mock the tracker directly.
 
-### Test files (39 suites, 517 tests)
+### Test files (41 suites, 520 tests)
 
 | File | Tests | Covers |
 |------|-------|--------|
@@ -93,7 +93,7 @@
 
 - **Page components**: Dashboard.tsx (~650 lines), SetupWizard.tsx — basic render tests exist for 4 sub-pages but deeper interaction/state tests still needed.
 - **SSE streaming logic** in api.ts — requires mocking ReadableStream, complex setup.
-- **Backend Rust**: **1171 tests** (1037 lib + 134 integration). Key test suites: `discussions_test.rs` (21 tests: CRUD, archive, title editing, message management, AgentType round-trip for all 6 agents, DB string stability), `runner_test.rs` (agent commands, model tiers, token parsing, stream parsing for all agents), `pricing.rs` (cost estimation for all 6 providers), `key_discovery.rs` (cross-platform HOME resolution), `mod.rs` (agent detection with .cmd/.exe extensions, WSL_DISTRO_NAME detection), `env.rs` (is_docker, host_os_label), `scanner.rs` (shellexpand ~/, UNC paths), `db/tests.rs` (partial_response set/recover/idempotency + `partial_response_started_at` preservation + `has_pending_partial`), `tests/api_tests.rs` HTTP integration: dismiss-partial + WS broadcast, partial_pending guard on send_message, boot recovery simulation, workflow_cancel_run cascade to child discs via parent_run_id + idempotent on finished run. Run with `cargo test`.
+- **Backend Rust**: **1182 tests** (1037 lib + 145 integration). Key test suites: `discussions_test.rs` (21 tests: CRUD, archive, title editing, message management, AgentType round-trip for all 6 agents, DB string stability), `runner_test.rs` (agent commands, model tiers, token parsing, stream parsing for all agents), `pricing.rs` (cost estimation for all 6 providers), `key_discovery.rs` (cross-platform HOME resolution), `mod.rs` (agent detection with .cmd/.exe extensions, WSL_DISTRO_NAME detection), `env.rs` (is_docker, host_os_label), `scanner.rs` (shellexpand ~/, UNC paths), `db/tests.rs` (partial_response set/recover/idempotency + `partial_response_started_at` preservation + `has_pending_partial`), `tests/api_tests.rs` HTTP integration: dismiss-partial + WS broadcast, partial_pending guard on send_message, boot recovery simulation, workflow_cancel_run cascade to child discs via parent_run_id + idempotent on finished run. Run with `cargo test`.
 - **Shell interactive functions**: menu systems, agent installation/uninstall, terminal animation (require terminal I/O, tested indirectly via non-interactive helpers).
 
 ### Cross-agent regression tests (0.3.6)

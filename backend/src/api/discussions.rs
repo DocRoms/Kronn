@@ -769,8 +769,17 @@ async fn make_agent_stream(
         return Sse::new(stream);
     }
 
-    // Safety: early return above guarantees disc is Some
-    let disc = disc.expect("disc is Some after early return");
+    let disc = match disc {
+        Some(d) => d,
+        None => {
+            let stream: SseStream = Box::pin(futures::stream::once(async {
+                Ok::<_, Infallible>(Event::default().event("error").data(
+                    serde_json::json!({ "error": "Discussion not found" }).to_string()
+                ))
+            }));
+            return Sse::new(stream);
+        }
+    };
     let agent_type = agent_override.unwrap_or_else(|| disc.agent.clone());
     let disc_tier = disc.tier;
     let skill_ids = disc.skill_ids.clone();
@@ -983,7 +992,10 @@ async fn make_agent_stream(
                     let mut last_len = 0;
                     loop {
                         tokio::time::sleep(Duration::from_millis(500)).await;
-                        let lines = stderr_log_capture.lock().expect("lock poisoned").clone();
+                        let lines = match stderr_log_capture.lock() {
+                            Ok(g) => g.clone(),
+                            Err(e) => { tracing::warn!("stderr lock poisoned: {}", e); break; }
+                        };
                         if lines.len() > last_len {
                             for line in &lines[last_len..] {
                                 let trimmed = line.trim();
@@ -1668,8 +1680,17 @@ pub async fn orchestrate(
         return Sse::new(stream);
     }
 
-    // Safety: early return above guarantees disc is Some
-    let disc = disc.expect("disc is Some after early return");
+    let disc = match disc {
+        Some(d) => d,
+        None => {
+            let stream: SseStream = Box::pin(futures::stream::once(async {
+                Ok::<_, Infallible>(Event::default().event("error").data(
+                    serde_json::json!({ "error": "Discussion not found" }).to_string()
+                ))
+            }));
+            return Sse::new(stream);
+        }
+    };
     let orch_workspace_path = disc.workspace_path.clone();
     let original_question = disc.messages.iter().rev()
         .find(|m| matches!(m.role, MessageRole::User))
@@ -2395,7 +2416,7 @@ async fn maybe_generate_summary(
                 MessageRole::Agent => m.agent_type.as_ref()
                     .map(agent_display_name)
                     .unwrap_or_else(|| "Agent".into()),
-                MessageRole::System => unreachable!(),
+                MessageRole::System => "System".to_string(),
             };
             format!("{}: {}", role, m.content)
         })

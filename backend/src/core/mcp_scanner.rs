@@ -133,6 +133,15 @@ pub(crate) fn atomic_write(target: &Path, content: &str) -> Result<(), String> {
 /// Claude Code uses this list as a whitelist — MCPs not listed are silently ignored,
 /// even when enableAllProjectMcpServers is true (known bug #24657).
 /// This function only ADDS missing entries, never removes user-configured ones.
+/// Sync `enabledMcpjsonServers` in `.claude/settings.local.json` to match
+/// the current `.mcp.json` keys exactly. This fixes the naming migration
+/// issue (TD-20260403-mcp-naming-migration) where old keys (`server.name`)
+/// stayed in the whitelist after we switched to `config.label` as the key.
+///
+/// Strategy: REPLACE the whitelist with exactly the current `.mcp.json` keys.
+/// Old stale entries (from renamed MCPs, deleted configs, etc.) are removed.
+/// Claude Code only loads MCPs that are BOTH in `.mcp.json` AND whitelisted,
+/// so the whitelist must be a superset of `.mcp.json` keys.
 pub(crate) fn sync_claude_enabled_servers(project_path: &str, mcp_servers: &HashMap<String, McpServerEntry>) {
     let resolved = resolve_host_path(project_path);
     let settings_dir = Path::new(&resolved).join(".claude");
@@ -153,33 +162,41 @@ pub(crate) fn sync_claude_enabled_servers(project_path: &str, mcp_servers: &Hash
     };
 
     // Only act if enabledMcpjsonServers exists (don't create it if absent)
-    let enabled = match settings.get_mut("enabledMcpjsonServers").and_then(|v| v.as_array_mut()) {
-        Some(arr) => arr,
-        None => return,
-    };
-
-    let existing: std::collections::HashSet<String> = enabled.iter()
-        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-        .collect();
-
-    let mut added = Vec::new();
-    for name in mcp_servers.keys() {
-        if !existing.contains(name) {
-            enabled.push(serde_json::Value::String(name.clone()));
-            added.push(name.clone());
-        }
+    if settings.get("enabledMcpjsonServers").and_then(|v| v.as_array()).is_none() {
+        return;
     }
 
-    if added.is_empty() {
-        return; // All servers already listed
+    // Build the new whitelist: exactly the keys from the current .mcp.json.
+    // This removes stale entries from renamed/deleted MCPs and adds new ones.
+    let new_enabled: Vec<serde_json::Value> = mcp_servers.keys()
+        .map(|k| serde_json::Value::String(k.clone()))
+        .collect();
+
+    let old_enabled: Vec<String> = settings["enabledMcpjsonServers"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    settings["enabledMcpjsonServers"] = serde_json::Value::Array(new_enabled);
+
+    // Log what changed for debugging
+    let new_set: std::collections::HashSet<&str> = mcp_servers.keys().map(|s| s.as_str()).collect();
+    let old_set: std::collections::HashSet<&str> = old_enabled.iter().map(|s| s.as_str()).collect();
+    let added: Vec<&&str> = new_set.difference(&old_set).collect();
+    let removed: Vec<&&str> = old_set.difference(&new_set).collect();
+
+    if added.is_empty() && removed.is_empty() {
+        return; // No changes needed
     }
 
     if let Ok(json) = serde_json::to_string_pretty(&settings) {
         let _ = atomic_write(&settings_file, &json);
-        tracing::info!(
-            "Updated Claude settings.local.json for {} — added MCPs: {:?}",
-            project_path, added
-        );
+        if !added.is_empty() {
+            tracing::info!("Claude enabledMcpjsonServers: added {:?}", added);
+        }
+        if !removed.is_empty() {
+            tracing::info!("Claude enabledMcpjsonServers: removed stale {:?}", removed);
+        }
     }
 }
 

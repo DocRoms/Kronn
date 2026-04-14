@@ -32,6 +32,6 @@
 | TD-20260328-localhost-exempt | Auth middleware skips localhost + Docker bridge IPs. Pragmatic for self-hosted but needs: (1) token rotation mechanism if leaked, (2) removal when TLS generalized. See `lib.rs:auth_middleware`. | Security | Low |
 | TD-20260328-discussions-backend | `discussions.rs` (~3900L) — orchestration SSE tightly coupled with chat streaming + partial checkpoint + cancel registry + dismiss-partial. Extracting would require duplicating the streaming infrastructure. Medium priority as the file keeps growing. | Backend | Medium |
 | TD-20260329-toast-no-warning | Toast system only supports `success`, `error`, `info` — no `warning` type. Contact diagnostics use `info` as workaround. Low priority cosmetic. | Frontend | Low |
-| TD-20260403-mcp-enabledlist-stale | `sync_claude_enabled_servers()` only adds to `enabledMcpjsonServers`, never removes stale entries. Whitelist grows unbounded with orphan MCPs. | Backend | Low |
-| TD-20260403-mcp-naming-migration | MCP key naming changed from `server.name` to `config.label` — existing `enabledMcpjsonServers` entries silently break after re-sync. Needs one-time migration. | Backend | Medium |
+| ~~TD-20260403-mcp-enabledlist-stale~~ | ~~FIXED 0.3.7~~ — `sync_claude_enabled_servers()` now replaces whitelist entirely | Backend | ~~Low~~ |
+| ~~TD-20260403-mcp-naming-migration~~ | ~~FIXED 0.3.7~~ — whitelist replacement removes stale server.name keys automatically | Backend | ~~Medium~~ |
 

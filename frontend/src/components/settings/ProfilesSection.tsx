@@ -25,7 +25,7 @@ export function ProfilesSection({ toast, t }: ProfilesSectionProps) {
   const [editingPersonaValue, setEditingPersonaValue] = useState('');
 
   useEffect(() => {
-    profilesApi.list().then(setAvailableProfiles).catch(() => {});
+    profilesApi.list().then(setAvailableProfiles).catch(e => console.warn('Failed to load profiles:', e));
   }, []);
 
   return (

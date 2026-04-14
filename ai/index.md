@@ -271,4 +271,4 @@ Redirectors to this file: `CLAUDE.md`, `GEMINI.md`, `AGENTS.md`, `.kiro/steering
 
 ## 11. Last updated
 
-AI context last reviewed: **2026-04-14** (v0.3.6).
+AI context last reviewed: **2026-04-14** (v0.3.7).

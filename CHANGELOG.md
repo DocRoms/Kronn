@@ -7,6 +7,32 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.3.7] — 2026-04-14
+
+### Fixed (stability pass)
+- **MCP whitelist migration** — `sync_claude_enabled_servers` now replaces the entire `enabledMcpjsonServers` whitelist instead of only adding entries. Fixes all MCPs broken by the `server.name` → `config.label` rename (Jira, GitHub, Slack, etc.). Stale entries cleaned up automatically
+- **Project switch in discussions** — serde `Option<Option<String>>` can't distinguish JSON `null` from absent key. Frontend now sends `""` for "unset project", backend treats `""` as unset. Added try/catch on the PATCH call
+- **Panic paths removed** — `lock().expect("poisoned")` → `match` + graceful break in agent stderr loop. 2× `unreachable!()` on `MessageRole::System` → returns `"System"`. 2× `disc.expect("is Some")` → match with SSE error response
+- **Silent error swallowing** — 2 empty `catch {}` in AgentsSection (toggle, key sync) → error toast. 8 data-loading `.catch(() => {})` → `console.warn` with context. 6× `String(error)` → `userError()` in agent error handlers
+
+### Changed
+- **Package upgrades** — React 18→19, Vite 5→6, vitest 4.0→4.1, @vitejs/plugin-react 4→5, eslint 10.0→10.2, typescript-eslint 8.57→8.58, happy-dom 20.8→20.9. Only 2 lines of code changed (`useRef<T>()` → `useRef<T>(undefined)` for React 19 compat)
+- **Settings accordion** — Agents, Skills, Profiles, Directives collapsed into a single card with 4 accordion sections (Agents open by default). Reduces vertical scroll by ~3 screens
+- **Discussion form accordion** — Skills, Profiles, Directives in the new discussion form are collapsible (mutually exclusive). Selection count badge
+
+### Added
+- **Cross-agent regression tests** — 5 backend + 3 frontend parameterized tests that iterate ALL agent types. Auto-fail when a new agent is added without complete config (KNOWN_AGENTS, macOS skip, DB round-trip, color/label)
+- **API smoke tests** — skills CRUD, directives list+CRUD, stats (tokens + agent-usage), quick_prompts CRUD, agents detect, disc_git (status + diff route), ai_files, discover_repos. +11 integration tests
+- **Component smoke tests** — ChatInput, ProjectCard, WorkflowWizard render without crashing
+- **Accessibility** — `aria-label` on ChatInput textarea, NewDiscForm selects (project + agent)
+
+### Tests
+- Backend: **1182** (1037 lib + 145 integration)
+- Frontend: **520** (41 suites)
+- Security: `cargo audit` clean (0 vuln), `pnpm audit` clean (0 vuln)
+
+---
+
 ## [0.3.6] — 2026-04-14
 
 ### Added

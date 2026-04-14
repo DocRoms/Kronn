@@ -39,7 +39,7 @@
 - **Error boundaries**: wrap lazy-loaded routes with `ErrorBoundary` (see App.tsx).
 - **SSE handling**: use `_streamSSE` helper in api.ts with `AbortController` for cancellation. Cleanup AbortControllers on component unmount.
 - **Linter**: ESLint 10 (`npm run lint`) — strict config with typescript-eslint. 0 errors required.
-- **Tests**: Vitest 4 (`npm test`, 517 tests, 39 suites). Use @testing-library/react for component tests. Wrap state-triggering calls in `act()`. For api mocking, prefer the shared `src/test/apiMock.ts` factory over inline `vi.mock` factories — see `ai/testing-quality.md`.
+- **Tests**: Vitest 4 (`npm test`, 520 tests, 41 suites). Use @testing-library/react for component tests. Wrap state-triggering calls in `act()`. For api mocking, prefer the shared `src/test/apiMock.ts` factory over inline `vi.mock` factories — see `ai/testing-quality.md`.
 - **Coverage**: `npm run test:coverage` — @vitest/coverage-v8 with text + lcov reporters.
 - **Build**: `npm run build` (tsc + vite build)
 

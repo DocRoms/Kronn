@@ -448,6 +448,7 @@ export function ChatInput({
           ref={chatInputRef}
           className="disc-composer-textarea"
           rows={1}
+          aria-label={t('disc.messagePlaceholder')}
           placeholder={discussion && (discussion.participants?.length ?? 0) > 1 && AGENT_MENTIONS.length > 0
             ? t('disc.mentionHint', AGENT_MENTIONS.map(m => m.trigger).join(', '))
             : t('disc.messagePlaceholder')}
