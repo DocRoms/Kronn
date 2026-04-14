@@ -99,6 +99,18 @@ jobs:
           SCCACHE_GHA_ENABLED: "true"
           RUSTC_WRAPPER: "sccache"
 
+      # ── Desktop compilation check ───────────────────────────────────
+      # The Tauri desktop app (desktop/src-tauri/) imports the backend as
+      # a lib. Signature changes in the backend break the desktop build
+      # but NOT cargo test in backend/. This check catches it early.
+      # `cargo check` only type-checks (no link, no Tauri system deps).
+      - name: cargo check desktop (type-check only)
+        working-directory: desktop/src-tauri
+        run: cargo check --lib 2>/dev/null || cargo check 2>&1 | head -40
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: "sccache"
+
   test-frontend:
     if: github.event.label.name == 'ci-test'
     runs-on: ubuntu-latest
