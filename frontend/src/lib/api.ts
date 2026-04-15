@@ -27,6 +27,7 @@ import type {
   AgentsConfig,
   McpContextEntry,
   AiAuditStatus,
+  AuditProgress,
   LaunchAuditRequest,
   BootstrapProjectRequest,
   BootstrapProjectResponse,
@@ -311,7 +312,7 @@ export const config = {
     return json.data;
   },
   getServerConfig: () => api<ServerConfigPublic>('GET', '/config/server'),
-  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string }) => api<void>('POST', '/config/server', req),
+  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean }) => api<void>('POST', '/config/server', req),
   regenerateAuthToken: () => api<string>('POST', '/config/auth-token/regenerate'),
 };
 
@@ -343,6 +344,13 @@ export const projects = {
   validateAudit: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/validate-audit`),
   markBootstrapped: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/mark-bootstrapped`),
   cancelAudit: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/cancel-audit`),
+  /**
+   * Returns the live progress of an in-flight audit for this project, or
+   * `null` when nothing is running. Polled by ProjectCard every 2 s when a
+   * local checkpoint indicates an audit was in-flight before navigation —
+   * the server-side process keeps running regardless of the SSE client.
+   */
+  auditStatus: (id: string) => api<AuditProgress | null>('GET', `/projects/${id}/audit-status`),
   checkDrift: (id: string) => api<DriftCheckResponse>('GET', `/projects/${id}/drift`),
   getBriefing: (id: string) => api<string | null>('GET', `/projects/${id}/briefing`),
   setBriefing: (id: string, notes: string | null) => api<void>('PUT', `/projects/${id}/briefing`, { notes }),
@@ -917,3 +925,42 @@ export const ollama = {
   health: () => api<OllamaHealthResponse>('GET', '/ollama/health'),
   models: () => api<OllamaModelsResponse>('GET', '/ollama/models'),
 };
+
+/** Shape returned by `GET /api/debug/logs`. Not a `ts-rs`-generated type
+ *  because this is a purely internal endpoint — the wrapper is enough. */
+export interface DebugLogsResponse {
+  /** Most-recent lines, oldest-first (ready for <pre>). */
+  lines: string[];
+  /** Total buffered across all levels — drives the "N events captured" hint. */
+  buffered: number;
+  /** Max capacity of the ringbuffer (backend-configured). */
+  capacity: number;
+  /** Current value of `config.server.debug_mode`. */
+  debug_mode: boolean;
+}
+
+export const debugApi = {
+  /** Fetch the last `lines` log entries from the backend ringbuffer. */
+  getLogs: (lines: number = 200) =>
+    api<DebugLogsResponse>('GET', `/debug/logs?lines=${Math.max(0, Math.floor(lines))}`),
+  /** Empty the backend ringbuffer — useful for "clear, reproduce, capture". */
+  clearLogs: () => api<void>('POST', '/debug/logs/clear'),
+};
+
+/** Shape of `/api/health` — the endpoint predates the `ApiResponse<T>`
+ *  wrapper so it returns its payload directly. Used by the Debug > Report
+ *  a bug flow to stamp version + host_os into the issue template. */
+export interface HealthResponse {
+  ok: boolean;
+  version?: string;
+  host_os?: string;
+}
+
+/** Direct fetch — bypasses the `api()` unwrapping because `/health` isn't
+ *  wrapped in `ApiResponse<T>`. Kept private-ish (not on a big namespace)
+ *  since only the bug-report button needs it today. */
+export async function fetchHealth(): Promise<HealthResponse> {
+  const res = await fetch(`${_apiBase}/api/health`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(`Health check failed: HTTP ${res.status}`);
+  return res.json() as Promise<HealthResponse>;
+}

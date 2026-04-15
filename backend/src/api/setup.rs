@@ -602,6 +602,7 @@ pub async fn get_server_config(
         pseudo: config.server.pseudo.clone(),
         avatar_email: config.server.avatar_email.clone(),
         bio: config.server.bio.clone(),
+        debug_mode: config.server.debug_mode,
     }))
 }
 
@@ -628,6 +629,18 @@ pub async fn set_server_config(
     }
     if let Some(bio) = req.bio {
         config.server.bio = if bio.is_empty() { None } else { Some(bio) };
+    }
+    if let Some(debug_mode) = req.debug_mode {
+        if debug_mode != config.server.debug_mode {
+            config.server.debug_mode = debug_mode;
+            // The tracing EnvFilter was fixed at startup; toggling this
+            // flag only takes effect on the next process restart. Log
+            // prominently so the user knows what to expect.
+            tracing::warn!(
+                "debug_mode changed to {} — restart the backend for the new log level to take effect",
+                debug_mode
+            );
+        }
     }
     match config::save(&config).await {
         Ok(_) => Json(ApiResponse::ok(())),

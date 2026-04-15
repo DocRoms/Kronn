@@ -1837,6 +1837,23 @@
   background: transparent;
 }
 
+/* Emoji variant of the autocomplete popover: taller list (20 items) + a
+   wider glyph column so multi-codepoint emoji render at a readable size. */
+.disc-emoji-popover {
+  max-height: 220px;
+  overflow-y: auto;
+  min-width: 220px;
+}
+
+.disc-emoji-glyph {
+  display: inline-block;
+  font-size: 16px;
+  line-height: 1;
+  width: 18px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
 /* ── Worktree error banner ────────────────────────────── */
 .disc-worktree-error {
   display: flex;
@@ -1875,6 +1892,46 @@
   color: var(--kr-text-dim);
   display: flex;
   flex-shrink: 0;
+}
+
+/* ── Draft restored indicator ────────────────────────── */
+/* Small discreet hint above the textarea when a saved draft was loaded.
+   Visual weight kept deliberately low — this is informational, not alerting. */
+.disc-draft-restored {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  margin: 2px 8px 6px;
+  border-radius: var(--kr-r-md);
+  background: rgba(148, 163, 184, 0.08);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-dim);
+}
+
+.disc-draft-restored-text {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.disc-draft-restored-dismiss {
+  background: none;
+  border: none;
+  padding: 2px;
+  cursor: pointer;
+  color: var(--kr-text-dim);
+  display: flex;
+  flex-shrink: 0;
+  border-radius: var(--kr-r-sm);
+}
+
+.disc-draft-restored-dismiss:hover {
+  color: var(--kr-text);
+  background: rgba(148, 163, 184, 0.15);
 }
 
 /* ── Voice / recording banners ────────────────────────── */

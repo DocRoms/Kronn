@@ -7,28 +7,60 @@ use kronn::{build_router, core::{config, mcp_scanner}, db::Database, workflows::
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialize tracing — write to stdout (Docker best practice: stdout for logs, stderr for panics)
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stdout)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "kronn=info,tower_http=info".into()),
-        )
+    // Load config FIRST (before tracing init) so `debug_mode` can influence
+    // the tracing filter's default level. This is a tiny re-order vs. the
+    // historical flow — `config::load()` doesn't emit logs itself, so we
+    // can afford to run it silently.
+    let app_config = match config::load().await? {
+        Some(cfg) => cfg,
+        None => config::default_config(),
+    };
+
+    // Initialize tracing — write to stdout (Docker best practice: stdout for
+    // logs, stderr for panics) AND to the in-memory ringbuffer that the
+    // Settings > Debug viewer reads via `GET /api/debug/logs`.
+    //
+    // Filter precedence:
+    //   1. `RUST_LOG` env var if set AND non-empty (CLI `--debug` flag /
+    //      `make start DEBUG=1` sets `RUST_LOG=kronn=debug,tower_http=debug`
+    //      — always wins).
+    //   2. `config.server.debug_mode = true` → default to `debug`.
+    //   3. Default `info` (production-friendly).
+    //
+    // Bug 2026-04-15: docker-compose writes `RUST_LOG=${KRONN_RUST_LOG:-}`
+    // which resolves to an EMPTY STRING (not unset) when `KRONN_RUST_LOG`
+    // isn't defined. `try_from_default_env()` doesn't treat empty as
+    // missing — it parses `""` into a filter that matches nothing, so
+    // the debug_mode toggle and the log viewer silently died together.
+    // Fix: treat whitespace-only `RUST_LOG` as "not set".
+    let default_filter = if app_config.server.debug_mode {
+        "kronn=debug,tower_http=debug"
+    } else {
+        "kronn=info,tower_http=info"
+    };
+    let filter_src = std::env::var("RUST_LOG").ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| default_filter.to_string());
+    use tracing_subscriber::prelude::*;
+    let env_filter = tracing_subscriber::EnvFilter::new(&filter_src);
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stdout))
+        .with(kronn::core::log_buffer::BufferLayer)
         .init();
 
-    tracing::info!("Kronn — Entering the grid...");
+    tracing::info!("tracing initialized — filter: {}", filter_src);
 
-    // Load or create config
-    let app_config = match config::load().await? {
-        Some(cfg) => {
-            tracing::info!("Config loaded from {}", config::config_path()?.display());
-            cfg
-        }
-        None => {
-            tracing::info!("First run detected — setup wizard will guide you");
-            config::default_config()
-        }
-    };
+    tracing::info!("Kronn — Entering the grid...");
+    if app_config.server.debug_mode {
+        tracing::info!(
+            "Debug mode is ON (config.server.debug_mode = true). To turn off: Settings UI or edit config.toml."
+        );
+    }
+    let config_source = config::config_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "<unknown>".into());
+    tracing::info!("Config loaded from {}", config_source);
 
     let port = app_config.server.port;
     // In Docker (KRONN_DATA_DIR is set), always bind to 0.0.0.0

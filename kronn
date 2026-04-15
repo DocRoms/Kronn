@@ -140,8 +140,35 @@ cmd_web() {
     fi
 
     info "Build & starting..."
-    (cd "$KRONN_DIR" && make start)
+    # KRONN_DEBUG=1 in the environment (set by `./kronn start --debug` upstream)
+    # propagates to `make start` as DEBUG=1, which writes KRONN_RUST_LOG=…=debug
+    # into .env for this run only. Config.server.debug_mode remains untouched.
+    local make_args=()
+    local debug_requested=0
+    if [[ "${KRONN_DEBUG:-0}" == "1" ]]; then
+        make_args+=("DEBUG=1")
+        debug_requested=1
+        info "Debug mode requested (--debug) — backend will log at debug level."
+    fi
+    (cd "$KRONN_DIR" && make start "${make_args[@]}")
     maybe_login_kiro
+
+    # Containers run detached (`docker compose up -d`) so there's no log
+    # stream on the terminal by default. Always point the user at the logs
+    # command; when they passed --debug they clearly want to SEE them, so
+    # auto-tail in that case (Ctrl+C detaches without stopping the app).
+    echo ""
+    if (( debug_requested == 1 )); then
+        info "Debug active — streaming logs now (Ctrl+C to detach, containers keep running)."
+        printf "  ${DIM}Useful filters once attached:${RESET}\n"
+        printf "  ${DIM}  kronn logs | grep 'kronn::agent_detect'   — agent detection trace${RESET}\n"
+        printf "  ${DIM}  kronn logs | grep 'kronn::scanner'        — project scan + host-path mapping${RESET}\n"
+        echo ""
+        (cd "$KRONN_DIR" && make logs) || true
+    else
+        info "Logs: run ${BOLD}kronn logs${RESET} (or ${BOLD}make logs${RESET}) to tail them."
+        printf "  ${DIM}Path: stdout of the Docker containers (no file on disk).${RESET}\n"
+    fi
 }
 
 cmd_repos() {
@@ -256,6 +283,12 @@ cmd_restart() {
 }
 
 cmd_logs() {
+    # Logs live in the Docker containers' stdout — no file on disk. This
+    # wrapper calls `docker compose logs -f` so the user gets a live tail
+    # from all services (backend, frontend, gateway). Ctrl+C detaches.
+    printf "  ${DIM}Streaming logs (Ctrl+C to detach — containers keep running).${RESET}\n"
+    printf "  ${DIM}Grep helpers: 'kronn::agent_detect' | 'kronn::scanner'${RESET}\n"
+    echo ""
     (cd "$KRONN_DIR" && make logs)
 }
 
@@ -274,6 +307,17 @@ cmd_help() {
     printf "  ${CYAN}web${RESET}            Launch web interface directly\n"
     printf "  ${CYAN}mcp secrets${RESET}    Configure tokens\n"
     printf "  ${CYAN}help${RESET}           This help\n"
+    echo
+    printf "${BOLD}Flags (any command):${RESET}\n"
+    printf "  ${CYAN}--debug${RESET}        Force verbose backend logs for this run\n"
+    printf "                 (otherwise the backend reads config.server.debug_mode)\n"
+    printf "                 With ${BOLD}start${RESET}: auto-tails the logs after boot\n"
+    echo
+    printf "${BOLD}Where are the logs?${RESET}\n"
+    printf "  Logs live on the containers' stdout — no file on disk.\n"
+    printf "  ${CYAN}kronn logs${RESET}    Live tail of all services (Ctrl+C detaches)\n"
+    printf "  ${CYAN}kronn logs${RESET} ${DIM}| grep 'kronn::agent_detect'${RESET}   ${DIM}Agent detection trace${RESET}\n"
+    printf "  ${CYAN}kronn logs${RESET} ${DIM}| grep 'kronn::scanner'${RESET}        ${DIM}Project scan + host-path mapping${RESET}\n"
     echo
 }
 
@@ -358,6 +402,20 @@ ensure_in_path() {
 
 main() {
     load_config
+
+    # ── Global flags (pre-scan before routing to a subcommand) ──────────────
+    # Today we only recognise `--debug` which sets KRONN_DEBUG=1 for the rest
+    # of the script (read by cmd_web → make start). Add more here if needed,
+    # but keep them truly global — per-subcommand flags belong in the
+    # subcommand's own parsing.
+    local remaining=()
+    for arg in "$@"; do
+        case "$arg" in
+            --debug) export KRONN_DEBUG=1 ;;
+            *) remaining+=("$arg") ;;
+        esac
+    done
+    set -- "${remaining[@]+"${remaining[@]}"}"
 
     local cmd="${1:-start}"
     shift 2>/dev/null || true

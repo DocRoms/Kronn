@@ -1,11 +1,15 @@
 import '../pages/Dashboard.css';
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { projects as projectsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { isValidationDisc, isUsable } from '../lib/constants';
 import { AiDocViewer } from './AiDocViewer';
 import { ProjectSkills } from './ProjectSkills';
+import {
+  saveAuditCheckpoint, loadAuditCheckpoint, clearAuditCheckpoint,
+  type AuditCheckpointKind,
+} from '../lib/audit-resume';
 import type { Project, AgentDetection, AgentType, DriftCheckResponse, Discussion, Skill, McpConfigDisplay, WorkflowSummary } from '../types/generated';
 import {
   ChevronRight, ChevronDown, Cpu, Workflow,
@@ -87,6 +91,11 @@ export function ProjectCard({
   const [auditCurrentFile, setAuditCurrentFile] = useState('');
   const [auditAbortController, setAuditAbortController] = useState<AbortController | null>(null);
   const [auditAgentChoice, setAuditAgentChoice] = useState<AgentType | undefined>(undefined);
+  /// Handle to the polling interval so we can clear it on unmount / done.
+  const auditPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  /// `true` once the mount-time resume effect has run — avoids racing a
+  /// fresh handleFullAudit() that also calls saveAuditCheckpoint.
+  const resumeSettledRef = useRef(false);
 
   // ── Delete state ──
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
@@ -104,6 +113,12 @@ export function ProjectCard({
   );
   const projMcps = mcpConfigs.filter(c => c.is_global || c.project_ids.includes(proj.id));
   const projWorkflows = workflows.filter(w => w.project_id === proj.id);
+  // Pulse the "add plugins" hint when the project has zero MCPs AND hasn't
+  // been audited yet — plugins dramatically improve briefing + audit quality
+  // (tracker context, stack detection, MCP-aware questions) so the UI
+  // actively suggests adding some before either flow is launched.
+  const shouldPulseMcpHint = projMcps.length === 0
+    && (proj.audit_status === 'NoTemplate' || proj.audit_status === 'TemplateInstalled' || proj.audit_status === 'Bootstrapped');
 
   const handleDeleteProject = async (id: string, hard: boolean) => {
     await projectsApi.delete(id, hard);
@@ -111,6 +126,16 @@ export function ProjectCard({
     setDeleteConfirmInput('');
     onRefetch();
   };
+
+  // Stop polling the audit-status endpoint and drop the local checkpoint.
+  // Called on done, error, cancel, and unmount — anywhere we know the
+  // audit is no longer in-flight or we're leaving this card.
+  const stopAuditPolling = useCallback(() => {
+    if (auditPollRef.current) {
+      clearInterval(auditPollRef.current);
+      auditPollRef.current = null;
+    }
+  }, []);
 
   const handleCancelAudit = useCallback(async () => {
     auditAbortController?.abort();
@@ -122,9 +147,11 @@ export function ProjectCard({
     }
     setAuditActive(false);
     setAuditAbortController(null);
+    stopAuditPolling();
+    clearAuditCheckpoint(proj.id);
     onRefetch();
     onRefetchDiscussions();
-  }, [auditAbortController, proj.id, toast, t, onRefetch, onRefetchDiscussions]);
+  }, [auditAbortController, proj.id, toast, t, onRefetch, onRefetchDiscussions, stopAuditPolling]);
 
   const handleFullAudit = useCallback(async () => {
     const controller = new AbortController();
@@ -133,6 +160,13 @@ export function ProjectCard({
     setAuditStep(0);
     setAuditTotalSteps(10);
     setAuditCurrentFile(t('audit.templateStep'));
+    // Seed the resume checkpoint immediately so a tab-away during phase 1
+    // (template install) still leaves a breadcrumb to poll against.
+    const startedAt = new Date().toISOString();
+    saveAuditCheckpoint({
+      projectId: proj.id, kind: 'full_audit', startedAt,
+      stepIndex: 0, totalSteps: 10, currentFile: null,
+    });
     try {
       const auditAgent = auditAgentChoice ?? agents.filter(canAudit)[0]?.agent_type ?? 'ClaudeCode';
       await projectsApi.fullAuditStream(proj.id, { agent: auditAgent }, {
@@ -141,6 +175,12 @@ export function ProjectCard({
           setAuditStep(step);
           setAuditTotalSteps(total);
           setAuditCurrentFile(file);
+          // Mirror each step_start into localStorage so a remount can
+          // pick up exactly where the server is.
+          saveAuditCheckpoint({
+            projectId: proj.id, kind: 'full_audit', startedAt,
+            stepIndex: step, totalSteps: total, currentFile: file || null,
+          });
         },
         onChunk: () => {},
         onStepDone: () => {},
@@ -148,6 +188,7 @@ export function ProjectCard({
         onDone: (discussionId) => {
           setAuditActive(false);
           setAuditAbortController(null);
+          clearAuditCheckpoint(proj.id);
           onRefetch();
           onRefetchDiscussions();
           if (discussionId) {
@@ -158,12 +199,14 @@ export function ProjectCard({
         },
         onError: (error) => {
           console.warn('Full audit error:', error);
+          clearAuditCheckpoint(proj.id);
         },
       }, controller.signal);
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') return;
       console.warn('Full audit failed:', e);
       setAuditActive(false);
+      clearAuditCheckpoint(proj.id);
     } finally {
       setAuditAbortController(null);
     }
@@ -178,34 +221,132 @@ export function ProjectCard({
     setAuditStep(0);
     setAuditTotalSteps(steps.length);
     setAuditCurrentFile('');
+    const startedAt = new Date().toISOString();
+    saveAuditCheckpoint({
+      projectId: proj.id, kind: 'partial', startedAt,
+      stepIndex: 0, totalSteps: steps.length, currentFile: null,
+    });
     try {
       await projectsApi.partialAuditStream(proj.id, { agent: auditAgent, steps }, {
         onStepStart: (step, total, file) => {
           setAuditStep(step);
           setAuditTotalSteps(total);
           setAuditCurrentFile(file);
+          saveAuditCheckpoint({
+            projectId: proj.id, kind: 'partial', startedAt,
+            stepIndex: step, totalSteps: total, currentFile: file || null,
+          });
         },
         onChunk: () => {},
         onStepDone: () => {},
         onDone: () => {
           setAuditActive(false);
           setAuditAbortController(null);
+          clearAuditCheckpoint(proj.id);
           onRefetch();
           onRefetchDrift(proj.id);
           toast(t('audit.updateStale', String(steps.length)), 'success');
         },
         onError: (error) => {
           console.warn('Partial audit error:', error);
+          clearAuditCheckpoint(proj.id);
         },
       }, controller.signal);
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') return;
       console.warn('Partial audit failed:', e);
       setAuditActive(false);
+      clearAuditCheckpoint(proj.id);
     } finally {
       setAuditAbortController(null);
     }
   }, [auditAgentChoice, agents, proj.id, t, toast, onRefetch, onRefetchDrift]);
+
+  // ─── Audit resume on mount ───────────────────────────────────────────────
+  // When a local checkpoint indicates an audit was in-flight (tab switch, page
+  // navigation, browser reload), fetch the server-side status and paint the
+  // progress bar without restarting the audit. Polls every 2 s until the
+  // server reports `null` (done/cancelled/error) — then clear the checkpoint
+  // and refetch the project so `audit_status` catches up.
+  useEffect(() => {
+    if (resumeSettledRef.current) return;
+    resumeSettledRef.current = true;
+    const cp = loadAuditCheckpoint(proj.id);
+    if (!cp) return;
+
+    let cancelled = false;
+
+    const poll = async () => {
+      try {
+        // `api<T>()` unwraps ApiResponse and returns `T` directly (throws on
+        // failure), so the data is an `AuditProgress | null`.
+        const p = await projectsApi.auditStatus(proj.id);
+        if (cancelled) return;
+        if (p) {
+          setAuditActive(true);
+          setAuditStep(p.step_index);
+          setAuditTotalSteps(p.total_steps);
+          setAuditCurrentFile(p.current_file ?? '');
+          // Refresh the checkpoint so its age stays within the 1 h TTL.
+          saveAuditCheckpoint({
+            projectId: p.project_id,
+            kind: (p.kind === 'partial' || p.kind === 'full' || p.kind === 'full_audit')
+              ? (p.kind as AuditCheckpointKind)
+              : 'full_audit',
+            startedAt: p.started_at,
+            stepIndex: p.step_index,
+            totalSteps: p.total_steps,
+            currentFile: p.current_file ?? null,
+          });
+        } else {
+          // Server reports nothing → either the audit wrapped up while we
+          // were away or the checkpoint is orphaned (server restart, etc.).
+          // Either way: drop the checkpoint, stop the UI state, refetch.
+          clearAuditCheckpoint(proj.id);
+          setAuditActive(false);
+          if (auditPollRef.current) {
+            clearInterval(auditPollRef.current);
+            auditPollRef.current = null;
+          }
+          onRefetch();
+        }
+      } catch (err) {
+        // Network hiccup — keep the checkpoint, keep polling. If the backend
+        // is permanently gone the 1 h TTL will eventually retire the entry.
+        console.warn('audit-status poll failed:', err);
+      }
+    };
+
+    // Seed the UI immediately from the checkpoint so the resume bar shows
+    // up without waiting for the first network round-trip.
+    setAuditActive(true);
+    setAuditStep(cp.stepIndex);
+    setAuditTotalSteps(cp.totalSteps);
+    setAuditCurrentFile(cp.currentFile ?? '');
+
+    // Fire one immediate poll then every 2 s.
+    poll();
+    auditPollRef.current = setInterval(poll, 2000);
+
+    return () => {
+      cancelled = true;
+      if (auditPollRef.current) {
+        clearInterval(auditPollRef.current);
+        auditPollRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [proj.id]);
+
+  // Defensive cleanup: stop any lingering polling when the card unmounts.
+  useEffect(() => {
+    return () => {
+      if (auditPollRef.current) {
+        clearInterval(auditPollRef.current);
+        auditPollRef.current = null;
+      }
+    };
+  }, []);
 
   return (
     <div id={`project-${proj.id}`} className="dash-card" data-active={isOpen || auditActive}>
@@ -355,6 +496,23 @@ export function ProjectCard({
               <Puzzle size={14} /> <span className="dash-section-title">Plugins</span>
               <span className="dash-count">{projMcps.length}</span>
             </button>
+            {/* "Add plugins first" pulse hint — visible even when the section is
+                collapsed so a user skimming the card doesn't miss it. Shown
+                only when zero plugins AND no audit has run yet; once plugins
+                exist or the audit is done, the hint disappears. */}
+            {shouldPulseMcpHint && (
+              <div className="dash-mcp-hint" role="note" aria-live="polite">
+                <Zap size={14} className="dash-mcp-hint-icon" />
+                <span className="dash-mcp-hint-text">{t('projects.mcpHint.beforeAudit')}</span>
+                <button
+                  type="button"
+                  className="dash-mcp-hint-cta"
+                  onClick={() => onNavigate('mcps')}
+                >
+                  {t('projects.mcpHint.cta')}
+                </button>
+              </div>
+            )}
             {isSectionOpen('mcps') && (
               <>
                 {projMcps.map(cfg => (
@@ -373,7 +531,7 @@ export function ProjectCard({
                     <ChevronRight size={12} className="text-ghost" />
                   </div>
                 ))}
-                {projMcps.length === 0 && (
+                {projMcps.length === 0 && !shouldPulseMcpHint && (
                   <div className="dash-row-empty">
                     {t('projects.noMcp').split(' — ')[0]} — <button className="dash-icon-btn" style={{ fontSize: 11, color: '#c8ff00', display: 'inline-flex' }} onClick={() => onNavigate('mcps')}>{t('projects.noMcp').split(' — ')[1]}</button>
                   </div>

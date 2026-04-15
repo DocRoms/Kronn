@@ -33,13 +33,80 @@ pub use crate::workflows::WorkflowEngine;
 /// Default maximum concurrent agent processes.
 pub const DEFAULT_MAX_CONCURRENT_AGENTS: usize = 5;
 
-/// Tracks running audit processes so they can be cancelled.
+/// Tracks running audit processes so they can be cancelled AND inspected.
+///
+/// `progress` is the data source for `GET /api/projects/:id/audit-status` —
+/// the UI polls it to resume the progress bar after tab/page navigation.
+/// Entries are inserted by the SSE streams (`run_audit`, `partial_audit`,
+/// `full_audit`) and removed on completion/cancel/error.
 #[derive(Default)]
 pub struct AuditTracker {
     /// Currently running child PID per project (if any)
     pub running_pids: HashMap<String, u32>,
     /// Projects whose audit should be cancelled
     pub cancelled: HashSet<String>,
+    /// Live progress snapshot per project — empty when no audit runs.
+    pub progress: HashMap<String, crate::models::AuditProgress>,
+}
+
+impl AuditTracker {
+    /// Seed progress when an audit stream starts. Called from the `start`
+    /// SSE event. Resets any stale progress row for the same project.
+    pub fn start_progress(
+        &mut self,
+        project_id: impl Into<String>,
+        total_steps: u32,
+        kind: &str,
+    ) {
+        let project_id = project_id.into();
+        self.progress.insert(
+            project_id.clone(),
+            crate::models::AuditProgress {
+                project_id,
+                phase: "auditing".into(),
+                step_index: 0,
+                total_steps,
+                current_file: None,
+                started_at: chrono::Utc::now(),
+                kind: kind.into(),
+            },
+        );
+    }
+
+    /// Update the step counter when a `step_start` SSE event fires. No-op
+    /// if no progress row exists (the caller never invoked `start_progress`).
+    pub fn advance_step(
+        &mut self,
+        project_id: &str,
+        step_index: u32,
+        current_file: Option<String>,
+    ) {
+        if let Some(entry) = self.progress.get_mut(project_id) {
+            entry.step_index = step_index;
+            entry.current_file = current_file;
+            entry.phase = "auditing".into();
+        }
+    }
+
+    /// Mark the audit as transitioning to phase 3 (validation discussion
+    /// creation). Brief window — the caller clears progress right after.
+    pub fn mark_validating(&mut self, project_id: &str) {
+        if let Some(entry) = self.progress.get_mut(project_id) {
+            entry.phase = "validating".into();
+        }
+    }
+
+    /// Remove the progress entry for a project — called on `done`,
+    /// `cancelled`, and fatal `step_error`.
+    pub fn clear_progress(&mut self, project_id: &str) {
+        self.progress.remove(project_id);
+    }
+
+    /// Read the current progress snapshot (cloned for safe release of the
+    /// mutex). Used by the `audit-status` endpoint.
+    pub fn get_progress(&self, project_id: &str) -> Option<crate::models::AuditProgress> {
+        self.progress.get(project_id).cloned()
+    }
 }
 
 #[derive(Clone)]
@@ -227,7 +294,17 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
 
     let mut router = Router::new()
         // ── Health (lightweight, used by Docker healthcheck — no auth) ──
-        .route("/api/health", get(|| async { axum::Json(serde_json::json!({"ok": true})) }))
+        // `version` + `host_os` are included so the Settings > Debug "Report
+        // a bug on GitHub" button can stamp them into the issue template
+        // without hitting an authenticated endpoint first. Docker's curl-based
+        // healthcheck ignores the body, so adding fields is backwards-safe.
+        .route("/api/health", get(|| async {
+            axum::Json(serde_json::json!({
+                "ok": true,
+                "version": env!("CARGO_PKG_VERSION"),
+                "host_os": crate::agents::detect_host_label_public(),
+            }))
+        }))
         // ── Setup wizard ──
         .route("/api/open-url", post(api::setup::open_url))
         .route("/api/setup/status", get(api::setup::get_status))
@@ -279,6 +356,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/projects/:id/mark-bootstrapped", post(api::audit::mark_bootstrapped))
         .route("/api/projects/:id/full-audit", post(api::audit::full_audit))
         .route("/api/projects/:id/cancel-audit", post(api::audit::cancel_audit))
+        .route("/api/projects/:id/audit-status", get(api::audit::audit_status))
         .route("/api/projects/:id/remap-path", post(api::projects::remap_path))
         .route("/api/projects/:id/default-skills", put(api::projects::set_default_skills))
         .route("/api/projects/:id/default-profile", put(api::projects::set_default_profile))
@@ -304,6 +382,9 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // ── Ollama (local LLM) ──
         .route("/api/ollama/health", get(api::ollama::health))
         .route("/api/ollama/models", get(api::ollama::models))
+        // ── Debug (log ringbuffer — backs Settings > Debug viewer) ──
+        .route("/api/debug/logs", get(api::debug::get_logs))
+        .route("/api/debug/logs/clear", post(api::debug::clear_logs))
         // ── MCPs ──
         .route("/api/mcps", get(api::mcps::overview))
         .route("/api/mcps/registry", get(api::mcps::list_registry))
@@ -383,4 +464,76 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
     }
 
     router.with_state(state)
+}
+
+#[cfg(test)]
+mod audit_tracker_tests {
+    use super::AuditTracker;
+
+    #[test]
+    fn start_progress_seeds_an_entry_and_overwrites_stale_rows() {
+        let mut t = AuditTracker::default();
+        // Seed an explicitly stale entry to prove start_progress resets it.
+        t.start_progress("proj-a", 3, "full");
+        t.advance_step("proj-a", 2, Some("old.md".into()));
+        t.start_progress("proj-a", 10, "full_audit");
+
+        let p = t.get_progress("proj-a").unwrap();
+        assert_eq!(p.total_steps, 10);
+        assert_eq!(p.step_index, 0, "start_progress must reset step_index");
+        assert_eq!(p.current_file, None, "start_progress must clear current_file");
+        assert_eq!(p.kind, "full_audit");
+        assert_eq!(p.phase, "auditing");
+    }
+
+    #[test]
+    fn advance_step_updates_counter_and_file_label() {
+        let mut t = AuditTracker::default();
+        t.start_progress("proj-b", 10, "full");
+        t.advance_step("proj-b", 3, Some("repo-map.md".into()));
+
+        let p = t.get_progress("proj-b").unwrap();
+        assert_eq!(p.step_index, 3);
+        assert_eq!(p.current_file.as_deref(), Some("repo-map.md"));
+    }
+
+    #[test]
+    fn advance_step_is_noop_when_no_progress_exists() {
+        // advance_step must not silently create a progress entry — callers
+        // would otherwise see "running" for audits that never started.
+        let mut t = AuditTracker::default();
+        t.advance_step("ghost", 1, Some("x.md".into()));
+        assert!(t.get_progress("ghost").is_none());
+    }
+
+    #[test]
+    fn clear_progress_removes_the_entry() {
+        let mut t = AuditTracker::default();
+        t.start_progress("proj-c", 5, "partial");
+        t.clear_progress("proj-c");
+        assert!(t.get_progress("proj-c").is_none());
+    }
+
+    #[test]
+    fn mark_validating_flips_phase_without_touching_counts() {
+        let mut t = AuditTracker::default();
+        t.start_progress("proj-d", 10, "full_audit");
+        t.advance_step("proj-d", 10, Some("Final review".into()));
+        t.mark_validating("proj-d");
+
+        let p = t.get_progress("proj-d").unwrap();
+        assert_eq!(p.phase, "validating");
+        assert_eq!(p.step_index, 10, "mark_validating must not reset counters");
+    }
+
+    #[test]
+    fn progress_entries_are_isolated_per_project() {
+        let mut t = AuditTracker::default();
+        t.start_progress("one", 10, "full");
+        t.start_progress("two", 5, "partial");
+        t.advance_step("one", 7, Some("a.md".into()));
+
+        assert_eq!(t.get_progress("one").unwrap().step_index, 7);
+        assert_eq!(t.get_progress("two").unwrap().step_index, 0);
+    }
 }

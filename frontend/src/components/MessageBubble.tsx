@@ -1,6 +1,7 @@
 import { useState, useRef, useMemo, memo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkEmoji from 'remark-emoji';
 import '../pages/DiscussionsPage.css';
 import type { DiscussionMessage, AgentType } from '../types/generated';
 import { agentColor } from '../lib/constants';
@@ -286,7 +287,12 @@ const mdComponents = {
   strong: ({ children }: any) => <strong>{children}</strong>,
 };
 
-const remarkPluginsList = [remarkGfm];
+// `remark-emoji` transforms GitHub-style shortcodes (`:tada:`) into the
+// actual Unicode character during markdown parsing. Messages are stored
+// with the shortcode intact — the conversion is purely visual, so agents
+// and full-text search still see `tada` in the DB. Keeps the agent prompt
+// portable (some CLIs choke on raw multi-byte emoji sequences).
+const remarkPluginsList = [remarkGfm, remarkEmoji];
 
 export const MarkdownContent = memo(({ content }: { content: string }) => (
   <div className="disc-md">

@@ -160,6 +160,23 @@ export interface LaunchAuditRequest {
   agent: AgentType;
 }
 
+/**
+ * Live audit progress — snapshot of `AppState.audit_tracker.progress`.
+ * Polled via `GET /api/projects/:id/audit-status` by ProjectCard to
+ * resume the progress bar after tab/page navigation.
+ * `phase` is one of "installing" | "auditing" | "validating" | "done".
+ * `kind` is one of "full" | "partial" | "full_audit".
+ */
+export interface AuditProgress {
+  project_id: string;
+  phase: string;
+  step_index: number;
+  total_steps: number;
+  current_file?: string | null;
+  started_at: string;
+  kind: string;
+}
+
 export interface BootstrapProjectRequest {
   name: string;
   description: string;
@@ -920,6 +937,7 @@ export interface ServerConfigPublic {
   pseudo: string | null;
   avatar_email: string | null;
   bio: string | null;
+  debug_mode: boolean;
 }
 
 export interface DbInfo {

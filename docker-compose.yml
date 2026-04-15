@@ -64,7 +64,11 @@ services:
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       - GH_TOKEN=${GH_TOKEN:-${GITHUB_TOKEN:-}}
       - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
-      - RUST_LOG=kronn=debug,tower_http=debug
+      # RUST_LOG: if unset, the backend reads `config.server.debug_mode` to
+      # pick a sensible default (info vs debug). Set `KRONN_RUST_LOG` in the
+      # env (or via `./kronn start --debug` / `make start DEBUG=1`) to
+      # override for one run without touching the persisted config.
+      - RUST_LOG=${KRONN_RUST_LOG:-}
     # Resource limits — prevents runaway agents from consuming all host resources
     deploy:
       resources:

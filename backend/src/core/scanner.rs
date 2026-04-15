@@ -36,29 +36,51 @@ pub async fn scan_paths_with_depth(
     let depth = depth.clamp(2, 10);
     let mut repos = Vec::new();
 
+    // One-shot env dump at the start of a scan. Mirrors the agent-detect
+    // dump — together they make "why is this macOS install broken"
+    // questions answerable from a single `make logs | grep kronn::` sweep.
+    tracing::info!(target: "kronn::scanner",
+        host_os = %std::env::var("KRONN_HOST_OS").unwrap_or_else(|_| "<unset>".into()),
+        host_home = %std::env::var("KRONN_HOST_HOME").unwrap_or_else(|_| "<unset>".into()),
+        host_home_aliases = ?host_home_aliases(),
+        depth = depth,
+        paths = ?paths,
+        "starting scan",
+    );
+
     for base_path in paths {
         let expanded = shellexpand(base_path);
         let base = resolve_host_path(&expanded);
-        tracing::info!("Scanning path: {} (resolved: {})", base_path, base.display());
+        tracing::info!(target: "kronn::scanner",
+            "scanning '{}' (expanded: '{}', resolved: '{}')", base_path, expanded, base.display());
         if !base.exists() {
-            tracing::warn!("Scan path does not exist: {} (resolved: {})", base_path, base.display());
+            tracing::warn!(target: "kronn::scanner",
+                "scan path does not exist: {} (resolved: {}) — skipping", base_path, base.display());
             continue;
         }
 
         let found = scan_directory(&base, ignore, depth).await?;
-        tracing::info!("Found {} repos in {}", found.len(), base.display());
+        tracing::info!(target: "kronn::scanner",
+            "found {} repos in {}", found.len(), base.display());
         repos.extend(found);
     }
 
     // Filter out repos whose host path doesn't exist (ghost paths from symlink resolution)
+    let before_ghost = repos.len();
     repos.retain(|r| {
         let exists = Path::new(&r.path).exists()
             || resolve_host_path(&r.path).exists();
         if !exists {
-            tracing::debug!("Filtering non-existent repo path: {}", r.path);
+            tracing::debug!(target: "kronn::scanner",
+                "ghost-path filter: dropping {} (neither raw path nor resolve_host_path exists)", r.path);
         }
         exists
     });
+    if before_ghost != repos.len() {
+        tracing::info!(target: "kronn::scanner",
+            "ghost-path filter: dropped {} repos ({} -> {})",
+            before_ghost - repos.len(), before_ghost, repos.len());
+    }
 
     // Deduplicate repos (handles macOS symlinks like /Users -> /private/var/Users).
     // Strategy: use a composite key of (repo name, git remote URL) to detect duplicates.
@@ -88,7 +110,8 @@ pub async fn scan_paths_with_depth(
         });
     }
 
-    tracing::info!("Scan complete: {} repositories found", repos.len());
+    tracing::info!(target: "kronn::scanner",
+        "scan complete: {} repositories", repos.len());
     Ok(repos)
 }
 
@@ -280,21 +303,69 @@ pub fn contains_parent_dir(path: &str) -> bool {
 /// translate a traversal attempt into a `/host-home` access.
 pub fn resolve_host_path(path: &str) -> PathBuf {
     if contains_parent_dir(path) {
-        tracing::warn!("Refusing to map path containing '..' component: {}", path);
+        tracing::warn!(target: "kronn::scanner",
+            "resolve_host_path({}): refused — path contains '..'", path);
         return PathBuf::from(path);
     }
 
-    // In Docker: always prefer the /host-home mount over any local path
-    if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {
-        if let Some(relative) = path.strip_prefix(&host_home) {
+    // In Docker: try every plausible alias of HOST_HOME. On macOS APFS,
+    // `/Users/x` is a firmlink to `/System/Volumes/Data/Users/x` and some
+    // paths (especially canonicalized ones) arrive in the second form —
+    // we need to accept both so the scan doesn't drop them.
+    let aliases = host_home_aliases();
+    if aliases.is_empty() {
+        tracing::debug!(target: "kronn::scanner",
+            "resolve_host_path({}): KRONN_HOST_HOME unset — returning path as-is", path);
+        return PathBuf::from(path);
+    }
+
+    for alias in &aliases {
+        if let Some(relative) = path.strip_prefix(alias) {
             let mapped = PathBuf::from(format!("/host-home{}", relative));
             if mapped.exists() {
-                tracing::debug!("Mapped host path {} -> {}", path, mapped.display());
+                tracing::debug!(target: "kronn::scanner",
+                    "resolve_host_path({}): mapped via alias '{}' -> {}",
+                    path, alias, mapped.display());
                 return mapped;
+            } else {
+                tracing::debug!(target: "kronn::scanner",
+                    "resolve_host_path({}): strip matched alias '{}' but target {} does not exist",
+                    path, alias, mapped.display());
             }
         }
     }
+
+    tracing::debug!(target: "kronn::scanner",
+        "resolve_host_path({}): no alias matched (tried {:?}) — returning path as-is",
+        path, aliases);
     PathBuf::from(path)
+}
+
+/// Every plausible host-home prefix the caller's path could start with.
+/// Order matters: we try the raw KRONN_HOST_HOME first, then the macOS
+/// firmlink alternatives. On Linux / WSL only the first entry is used.
+///
+/// Exposed as `pub(crate)` so the scanner tests can sanity-check the
+/// alias expansion logic in isolation.
+pub(crate) fn host_home_aliases() -> Vec<String> {
+    let Ok(host_home) = std::env::var("KRONN_HOST_HOME") else {
+        return Vec::new();
+    };
+    if host_home.is_empty() {
+        return Vec::new();
+    }
+    let mut aliases = vec![host_home.clone()];
+
+    // macOS APFS: `/Users/<name>` ↔ `/System/Volumes/Data/Users/<name>`
+    // (firmlink on modern APFS) ↔ `/private/var/Users/<name>` (legacy
+    // layout still seen in older homedirs / some VMs). Include all forms.
+    if let Some(rest) = host_home.strip_prefix("/Users/") {
+        let canonical = format!("/System/Volumes/Data/Users/{}", rest);
+        if canonical != host_home { aliases.push(canonical); }
+        let legacy = format!("/private/var/Users/{}", rest);
+        if legacy != host_home { aliases.push(legacy); }
+    }
+    aliases
 }
 
 /// Detect the AI audit status for a project based on filesystem state.
@@ -511,5 +582,72 @@ mod tests {
         let result = resolve_host_path("/home/user/../etc/passwd");
         assert_eq!(result, PathBuf::from("/home/user/../etc/passwd"));
         std::env::remove_var("KRONN_HOST_HOME");
+    }
+
+    // ─── host_home_aliases (macOS APFS firmlinks) ──────────────────────────
+
+    #[test]
+    #[serial]
+    fn host_home_aliases_empty_when_env_unset() {
+        std::env::remove_var("KRONN_HOST_HOME");
+        assert!(host_home_aliases().is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn host_home_aliases_empty_when_env_blank() {
+        std::env::set_var("KRONN_HOST_HOME", "");
+        assert!(host_home_aliases().is_empty());
+        std::env::remove_var("KRONN_HOST_HOME");
+    }
+
+    #[test]
+    #[serial]
+    fn host_home_aliases_linux_wsl_single_entry() {
+        // Non-macOS homedirs don't match the `/Users/` special-case, so we
+        // return just the raw env value. Keeps the WSL/Linux hot path
+        // identical to the pre-fix behavior.
+        std::env::set_var("KRONN_HOST_HOME", "/home/john");
+        assert_eq!(host_home_aliases(), vec!["/home/john".to_string()]);
+        std::env::remove_var("KRONN_HOST_HOME");
+    }
+
+    #[test]
+    #[serial]
+    fn host_home_aliases_macos_includes_firmlink_variants() {
+        // `/Users/xxx` paths get the two APFS variants added so a
+        // canonicalized path (e.g. `/System/Volumes/Data/Users/xxx/Code`)
+        // still maps cleanly to `/host-home/Code` at scan time.
+        std::env::set_var("KRONN_HOST_HOME", "/Users/john");
+        let aliases = host_home_aliases();
+        assert_eq!(aliases.len(), 3);
+        assert_eq!(aliases[0], "/Users/john");
+        assert!(aliases.contains(&"/System/Volumes/Data/Users/john".to_string()));
+        assert!(aliases.contains(&"/private/var/Users/john".to_string()));
+        std::env::remove_var("KRONN_HOST_HOME");
+    }
+
+    // ─── resolve_host_path with APFS firmlink canonicalized paths ──────────
+
+    #[test]
+    #[serial]
+    fn resolve_host_path_unmapped_when_no_alias_matches() {
+        // A path entirely outside the configured HOST_HOME is returned
+        // unchanged — `exists()` will then fail downstream and the caller
+        // (scanner) will filter the entry.
+        std::env::set_var("KRONN_HOST_HOME", "/Users/john");
+        let result = resolve_host_path("/etc/hosts");
+        assert_eq!(result, PathBuf::from("/etc/hosts"));
+        std::env::remove_var("KRONN_HOST_HOME");
+    }
+
+    #[test]
+    #[serial]
+    fn resolve_host_path_no_mapping_when_env_missing() {
+        // If KRONN_HOST_HOME isn't set we can't map anything — path
+        // returned as-is. Prevents crashes on native (non-Docker) runs.
+        std::env::remove_var("KRONN_HOST_HOME");
+        let result = resolve_host_path("/Users/john/Code/proj");
+        assert_eq!(result, PathBuf::from("/Users/john/Code/proj"));
     }
 }

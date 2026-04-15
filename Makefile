@@ -105,8 +105,22 @@ _gen-override:
 		rm -f docker-compose.override.yml; \
 	fi
 
+## Write/remove KRONN_RUST_LOG in .env based on DEBUG=1.
+## docker-compose.yml reads `RUST_LOG=${KRONN_RUST_LOG:-}`, so setting it
+## here enables verbose backend logs for the next `up -d` without touching
+## the persisted `config.server.debug_mode`.
+_apply-debug-flag:
+	@sed -i.bak '/^KRONN_RUST_LOG=/d' .env 2>/dev/null || true
+	@rm -f .env.bak
+	@if [ "$(DEBUG)" = "1" ]; then \
+		echo "KRONN_RUST_LOG=kronn=debug,tower_http=debug" >> .env; \
+		echo "$(CYAN)  Debug mode: verbose logs enabled (DEBUG=1)$(RESET)"; \
+	fi
+
 ## Start everything (Docker, fast build — no LTO, ~4x faster than prod)
-start: .env _gen-override
+## Pass DEBUG=1 to force verbose logs (kronn=debug,tower_http=debug) for this run.
+## Without DEBUG=1, the backend picks the level from config.server.debug_mode.
+start: .env _gen-override _apply-debug-flag
 	@echo "$(GREEN)▸ Building $(APP_NAME) (fast profile)...$(RESET)"
 	@CARGO_PROFILE=fast $(DOCKER_COMP) up -d --build
 	@echo ""

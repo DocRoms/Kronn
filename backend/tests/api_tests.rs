@@ -4036,3 +4036,81 @@ async fn batch_run_direct_mode_works_without_project_id() {
     assert_eq!(json["success"], true, "Direct mode without project should succeed: {:?}", json);
     assert_eq!(json["data"]["batch_total"], 1);
 }
+
+// ─── Audit status endpoint (P1 — resume on nav) ─────────────────────────────
+
+#[tokio::test]
+async fn audit_status_returns_null_when_no_audit_is_running() {
+    // Baseline: a project with no live audit → data: null, success: true.
+    // The UI uses this to detect "nothing to resume" on ProjectCard mount.
+    let app = test_app();
+    let (status, json) = get_json(app, "/api/projects/p-unknown/audit-status").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+    assert!(
+        json["data"].is_null(),
+        "data must be null when no audit runs; got {:?}", json["data"]
+    );
+}
+
+#[tokio::test]
+async fn audit_status_reflects_advances_and_clears_when_done() {
+    // End-to-end check of the tracker → endpoint pipeline. Seed progress,
+    // advance through a few steps, then clear — the endpoint must mirror
+    // each transition exactly, without the UI having to know about the
+    // internal Mutex / HashMap layout.
+    let state = test_state();
+    let app = kronn::build_router_with_auth(state.clone(), false);
+
+    {
+        let mut t = state.audit_tracker.lock().unwrap();
+        t.start_progress("proj-x", 10, "full");
+        t.advance_step("proj-x", 3, Some("repo-map.md".into()));
+    }
+
+    let (status, json) = get_json(app.clone(), "/api/projects/proj-x/audit-status").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+    assert_eq!(json["data"]["project_id"], "proj-x");
+    assert_eq!(json["data"]["total_steps"], 10);
+    assert_eq!(json["data"]["step_index"], 3);
+    assert_eq!(json["data"]["current_file"], "repo-map.md");
+    assert_eq!(json["data"]["phase"], "auditing");
+    assert_eq!(json["data"]["kind"], "full");
+
+    // Mark validating (phase 3).
+    state.audit_tracker.lock().unwrap().mark_validating("proj-x");
+    let (_, json) = get_json(app.clone(), "/api/projects/proj-x/audit-status").await;
+    assert_eq!(json["data"]["phase"], "validating");
+
+    // Audit finishes → entry cleared → endpoint must report null again.
+    state.audit_tracker.lock().unwrap().clear_progress("proj-x");
+    let (_, json) = get_json(app, "/api/projects/proj-x/audit-status").await;
+    assert!(
+        json["data"].is_null(),
+        "data must return to null once the audit cleared; got {:?}", json["data"]
+    );
+}
+
+#[tokio::test]
+async fn audit_status_isolates_projects() {
+    // Two concurrent audits on different projects must not bleed into each
+    // other. Covers the "user has two tabs open on two projects" case.
+    let state = test_state();
+    let app = kronn::build_router_with_auth(state.clone(), false);
+
+    {
+        let mut t = state.audit_tracker.lock().unwrap();
+        t.start_progress("proj-a", 10, "full");
+        t.advance_step("proj-a", 7, Some("decisions.md".into()));
+        t.start_progress("proj-b", 3, "partial");
+    }
+
+    let (_, a) = get_json(app.clone(), "/api/projects/proj-a/audit-status").await;
+    let (_, b) = get_json(app, "/api/projects/proj-b/audit-status").await;
+
+    assert_eq!(a["data"]["step_index"], 7);
+    assert_eq!(a["data"]["kind"], "full");
+    assert_eq!(b["data"]["step_index"], 0);
+    assert_eq!(b["data"]["kind"], "partial");
+}

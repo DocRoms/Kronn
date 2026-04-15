@@ -53,6 +53,29 @@ const KNOWN_AGENTS: &[AgentDef] = &[
     AgentDef { name: "Ollama", agent_type: AgentType::Ollama, binary: "ollama", origin: "US", install_cmd: "curl -fsSL https://ollama.com/install.sh | sh" },
 ];
 
+/// Binaries that must NEVER be resolved from the host-mounted bin directory
+/// when running in a Linux container on a macOS host. The host-mounted
+/// binaries are Darwin (Mach-O) and will fail to execute under `exec()` in
+/// the container; `entrypoint.sh` re-installs Linux versions via npm/curl.
+///
+/// Keep this list in sync with `entrypoint.sh`. The
+/// `cross_agent_macos_skip_covers_npm_agents` test enforces that every
+/// `npm install`-style agent is present here.
+pub(crate) const MACOS_HOST_BIN_SKIP: &[&str] = &[
+    "claude",
+    "codex",
+    "gemini",
+    "copilot",
+    "kiro-cli",
+];
+
+/// Public accessor so `/api/health` can stamp the host label into its body
+/// (used by the "Report bug" flow to pre-fill a GitHub issue template).
+/// Keeping the core helper private preserves the module boundary.
+pub fn detect_host_label_public() -> String {
+    detect_host_label()
+}
+
 /// Detect the host platform label (WSL, macOS, Linux, Windows, etc.)
 /// In Docker: uses runtime heuristics (env vars, /proc/version).
 /// Native: uses compile-time detection + env var override.
@@ -103,10 +126,37 @@ fn host_is_macos() -> bool {
 
 /// Detect all known agents on the system
 pub async fn detect_all() -> Vec<AgentDetection> {
+    // One-shot env dump at the start of a detection sweep. Critical for
+    // diagnosing "why can't macOS see my agents" — the 4 env vars below
+    // fully determine the detection logic and a mismatch between
+    // Makefile/.env/docker-compose/entrypoint is the usual culprit.
+    tracing::info!(
+        target: "kronn::agent_detect",
+        host_os = %std::env::var("KRONN_HOST_OS").unwrap_or_else(|_| "<unset>".into()),
+        host_home = %std::env::var("KRONN_HOST_HOME").unwrap_or_else(|_| "<unset>".into()),
+        host_bin = %std::env::var("KRONN_HOST_BIN").unwrap_or_else(|_| "<unset>".into()),
+        host_label = %detect_host_label(),
+        "starting agent detection sweep",
+    );
+
     let mut agents = Vec::new();
     for def in KNOWN_AGENTS {
         agents.push(detect_agent(def).await);
     }
+
+    // Summary — lets the user grep `kronn::agent_detect` and see in one
+    // place which agents the container found and which are missing.
+    let summary: Vec<String> = agents.iter()
+        .map(|a| format!("{:?}={}{}",
+            a.agent_type,
+            if a.installed { "installed" }
+            else if a.runtime_available { "runtime" }
+            else { "missing" },
+            a.path.as_ref().map(|p| format!(" ({})", p)).unwrap_or_default(),
+        ))
+        .collect();
+    tracing::info!(target: "kronn::agent_detect", "sweep done: {}", summary.join(", "));
+
     agents
 }
 
@@ -232,6 +282,14 @@ pub fn find_binary(name: &str) -> Option<BinaryLocation> {
         .map(|v| std::env::split_paths(&v).collect())
         .unwrap_or_default();
 
+    tracing::debug!(
+        target: "kronn::agent_detect",
+        "find_binary('{}'): PATH={:?}, host_dirs={:?}",
+        name,
+        std::env::var("PATH").ok(),
+        host_dirs,
+    );
+
     // Standard PATH
     if let Ok(path) = which::which(name) {
         let resolved = path.to_string_lossy().to_string();
@@ -240,6 +298,11 @@ pub fn find_binary(name: &str) -> Option<BinaryLocation> {
         let host_managed = host_dirs.iter().any(|dir| {
             path.starts_with(dir)
         });
+        tracing::debug!(
+            target: "kronn::agent_detect",
+            "find_binary('{}'): resolved via PATH -> {} (host_managed={})",
+            name, resolved, host_managed,
+        );
         return Some(BinaryLocation { path: resolved, host_managed, via_wsl: false });
     }
 
@@ -259,7 +322,15 @@ pub fn find_binary(name: &str) -> Option<BinaryLocation> {
                     // On macOS hosts, host-mounted binaries are Darwin
                     // binaries that cannot execute in this Linux container.
                     // The entrypoint.sh installs Linux versions via npm/curl.
-                    if host_is_macos() && matches!(name, "kiro-cli" | "claude" | "codex" | "copilot") {
+                    // Source of truth for the skip list is MACOS_HOST_BIN_SKIP
+                    // above — a test enforces that every npm agent is covered.
+                    if host_is_macos() && MACOS_HOST_BIN_SKIP.contains(&name) {
+                        tracing::debug!(
+                            target: "kronn::agent_detect",
+                            "find_binary('{}'): skipping Darwin host-mounted binary at {} (macOS host — Linux copy should come from entrypoint.sh)",
+                            name,
+                            entry.path().display(),
+                        );
                         continue;
                     }
                     return Some(BinaryLocation {
@@ -358,6 +429,11 @@ pub fn find_binary(name: &str) -> Option<BinaryLocation> {
         }
     }
 
+    tracing::debug!(
+        target: "kronn::agent_detect",
+        "find_binary('{}'): NOT FOUND (not in PATH, not in host_dirs, not in platform-specific fallbacks)",
+        name,
+    );
     None
 }
 
@@ -767,22 +843,39 @@ mod tests {
     /// (otherwise macOS Docker users get a Darwin binary that can't execute).
     #[test]
     fn cross_agent_macos_skip_covers_npm_agents() {
-        // This test doesn't run the actual macOS code path, but it verifies
-        // the skip list concept by checking that every npm-installed agent
-        // binary is accounted for in the skip list comment/documentation.
+        // ENFORCES (no longer just documents) that every npm-installed agent
+        // is present in the macOS skip list. If this test fails after adding
+        // a new npm agent, update BOTH `MACOS_HOST_BIN_SKIP` and
+        // `backend/entrypoint.sh`.
         let npm_agents: Vec<&str> = KNOWN_AGENTS.iter()
             .filter(|d| d.install_cmd.starts_with("npm "))
             .map(|d| d.binary)
             .collect();
-        // At minimum: claude, codex, gemini, copilot
-        assert!(npm_agents.contains(&"claude"), "claude should be detected as npm agent");
-        assert!(npm_agents.contains(&"codex"), "codex should be detected as npm agent");
-        assert!(npm_agents.contains(&"gemini"), "gemini should be detected as npm agent");
-        assert!(npm_agents.contains(&"copilot"), "copilot should be detected as npm agent");
-        // When you add a new npm agent, this assertion will remind you to
-        // update the macOS skip list in find_binary() and entrypoint.sh
+
         assert!(npm_agents.len() >= 4,
-            "Expected at least 4 npm agents, found {}. If you added one, update the macOS skip list in find_binary() and entrypoint.sh",
+            "Expected at least 4 npm agents, found {}. If you added one, extend MACOS_HOST_BIN_SKIP + entrypoint.sh.",
             npm_agents.len());
+
+        for binary in &npm_agents {
+            assert!(
+                MACOS_HOST_BIN_SKIP.contains(binary),
+                "macOS skip list MUST include '{}' — without it, macOS users \
+                 get the Darwin binary from the host mount which can't execute \
+                 in the Linux container. Add it to MACOS_HOST_BIN_SKIP in \
+                 agents/mod.rs AND to backend/entrypoint.sh.",
+                binary,
+            );
+        }
+    }
+
+    /// Regression guard for the gemini + copilot bug reported 2026-04-15:
+    /// macOS users couldn't see Gemini detected because `gemini` was missing
+    /// from the skip list despite being npm-installed.
+    #[test]
+    fn macos_skip_list_includes_gemini_and_copilot() {
+        assert!(MACOS_HOST_BIN_SKIP.contains(&"gemini"),
+            "regression: gemini dropped from macOS skip list");
+        assert!(MACOS_HOST_BIN_SKIP.contains(&"copilot"),
+            "regression: copilot dropped from macOS skip list");
     }
 }

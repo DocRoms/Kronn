@@ -237,6 +237,7 @@ mod tests {
             bio: None,
             global_context: None,
             global_context_mode: "always".into(),
+            debug_mode: false,
         }
     }
 

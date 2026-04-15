@@ -500,6 +500,63 @@
   padding: var(--kr-sp-2) 0;
 }
 
+/* ── MCP "add plugins first" hint ──────────────────────────── */
+/* Shown on projects with 0 MCPs that haven't been audited yet. The hint
+   reuses the tour's pulse vocabulary so it stays visually consistent with
+   the guided onboarding. Stops pulsing once the user adds any plugin or
+   after the audit completes. */
+.dash-mcp-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 8px 10px;
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.35);
+  border-radius: var(--kr-r-md);
+  background: rgba(var(--kr-accent-rgb), 0.06);
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text);
+  animation: dash-mcp-hint-pulse 1.8s ease-in-out infinite;
+}
+
+.dash-mcp-hint-icon {
+  flex-shrink: 0;
+  color: var(--kr-accent);
+}
+
+.dash-mcp-hint-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.dash-mcp-hint-cta {
+  flex-shrink: 0;
+  background: rgba(var(--kr-accent-rgb), 0.15);
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.4);
+  color: var(--kr-accent);
+  border-radius: var(--kr-r-sm);
+  padding: 3px 10px;
+  font-family: inherit;
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.dash-mcp-hint-cta:hover {
+  background: rgba(var(--kr-accent-rgb), 0.25);
+}
+
+@keyframes dash-mcp-hint-pulse {
+  0%   { border-color: rgba(var(--kr-accent-rgb), 0.35); box-shadow: 0 0 0 0 rgba(var(--kr-accent-rgb), 0.2); }
+  50%  { border-color: rgba(var(--kr-accent-rgb), 0.7);  box-shadow: 0 0 0 4px rgba(var(--kr-accent-rgb), 0.06); }
+  100% { border-color: rgba(var(--kr-accent-rgb), 0.35); box-shadow: 0 0 0 0 rgba(var(--kr-accent-rgb), 0.2); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dash-mcp-hint { animation: none; }
+}
+
 .dash-row-disc-title {
   font-weight: 600;
   font-size: var(--kr-fs-base);

@@ -275,14 +275,28 @@ pub async fn run_audit(
 
     let agent_type = req.agent;
     let total_steps = ANALYSIS_STEPS.len();
+    let audit_tracker = state.audit_tracker.clone();
+    let project_id_for_progress = id.clone();
 
     let stream: SseStream = Box::pin(async_stream::try_stream! {
+        // Seed live progress so the UI can resume via GET /audit-status after
+        // navigating away. Cleared on done / error / cancelled.
+        if let Ok(mut t) = audit_tracker.lock() {
+            t.start_progress(&project_id_for_progress, total_steps as u32, "full");
+        }
+
         let start = serde_json::json!({ "total_steps": total_steps });
         yield Event::default().event("start").data(start.to_string());
 
         for (step_num, analysis_step) in ANALYSIS_STEPS.iter().enumerate() {
             let step = step_num + 1;
             let file_label = if analysis_step.target_file == "REVIEW" { "Final review" } else { analysis_step.target_file };
+
+            // Mirror the step_start event into the shared tracker so a
+            // polling client catches the same "step 3/10 — repo-map.md".
+            if let Ok(mut t) = audit_tracker.lock() {
+                t.advance_step(&project_id_for_progress, step as u32, Some(file_label.to_string()));
+            }
 
             let step_start = serde_json::json!({
                 "step": step,
@@ -368,6 +382,13 @@ pub async fn run_audit(
                     tracing::info!("Wrote ai/checksums.json with {} mappings", mappings.len());
                 }
             }).await;
+        }
+
+        // Audit finished cleanly — drop the progress entry so the UI stops
+        // polling. This runs BEFORE yielding `done` so a client racing the
+        // next request sees a consistent "no audit running" state.
+        if let Ok(mut t) = audit_tracker.lock() {
+            t.clear_progress(&project_id_for_progress);
         }
 
         let done = serde_json::json!({ "status": "complete", "total_steps": total_steps });
@@ -486,14 +507,26 @@ pub async fn partial_audit(
     let agent_type = req.agent;
     let requested_steps = req.steps;
     let total_requested = requested_steps.len();
+    let audit_tracker = state.audit_tracker.clone();
+    let project_id_for_progress = id.clone();
 
     let stream: SseStream = Box::pin(async_stream::try_stream! {
+        if let Ok(mut t) = audit_tracker.lock() {
+            t.start_progress(&project_id_for_progress, total_requested as u32, "partial");
+        }
+
         let start = serde_json::json!({ "total_steps": total_requested });
         yield Event::default().event("start").data(start.to_string());
 
         for (progress_idx, &step) in requested_steps.iter().enumerate() {
             let analysis_step = &ANALYSIS_STEPS[step - 1];
             let file_label = if analysis_step.target_file == "REVIEW" { "Final review" } else { analysis_step.target_file };
+
+            // Progress counter is 1-based position within the requested subset,
+            // not the absolute audit step number — matches what the SSE reports.
+            if let Ok(mut t) = audit_tracker.lock() {
+                t.advance_step(&project_id_for_progress, (progress_idx + 1) as u32, Some(file_label.to_string()));
+            }
 
             let step_start = serde_json::json!({
                 "step": step,
@@ -595,6 +628,10 @@ pub async fn partial_audit(
                     tracing::info!("Updated ai/checksums.json for {} re-run steps", steps_clone.len());
                 }
             }).await;
+        }
+
+        if let Ok(mut t) = audit_tracker.lock() {
+            t.clear_progress(&project_id_for_progress);
         }
 
         let done = serde_json::json!({ "status": "complete", "total_steps": total_requested });
@@ -968,6 +1005,18 @@ pub async fn full_audit(
     }
 
     let stream: SseStream = Box::pin(async_stream::try_stream! {
+        // Seed live progress so GET /audit-status can report where we are
+        // even when the SSE client (browser tab) went away.
+        if let Ok(mut t) = audit_tracker.lock() {
+            t.start_progress(&project_id, total_steps as u32, "full_audit");
+            // Phase 1 starts here; advance_step will update to "auditing"
+            // once the 10-step loop begins. The intermediate installing
+            // phase is visible by checking step_index == 0.
+            if let Some(entry) = t.progress.get_mut(&project_id) {
+                entry.phase = "installing".into();
+            }
+        }
+
         // ── Phase 1: Install template if needed ──
         let status = scanner::detect_audit_status(&project_path_str);
         let template_installed = matches!(status, AiAuditStatus::NoTemplate);
@@ -1017,6 +1066,9 @@ pub async fn full_audit(
             }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
             if let Err(e) = install_result {
+                // Install failed — drop progress so the UI stops polling with
+                // a stale "installing" state.
+                if let Ok(mut t) = audit_tracker.lock() { t.clear_progress(&project_id); }
                 let err = serde_json::json!({ "error": e });
                 yield Event::default().event("error").data(err.to_string());
                 return;
@@ -1041,6 +1093,7 @@ pub async fn full_audit(
         for (step_num, analysis_step) in ANALYSIS_STEPS.iter().enumerate() {
             // Check for cancellation before each step
             if audit_tracker.lock().map(|t| t.cancelled.contains(&project_id)).unwrap_or(false) {
+                if let Ok(mut t) = audit_tracker.lock() { t.clear_progress(&project_id); }
                 let cancelled = serde_json::json!({ "status": "cancelled" });
                 yield Event::default().event("cancelled").data(cancelled.to_string());
                 return;
@@ -1048,6 +1101,10 @@ pub async fn full_audit(
 
             let step = step_num + 1;
             let file_label = if analysis_step.target_file == "REVIEW" { "Final review" } else { analysis_step.target_file };
+
+            if let Ok(mut t) = audit_tracker.lock() {
+                t.advance_step(&project_id, step as u32, Some(file_label.to_string()));
+            }
 
             let step_start = serde_json::json!({
                 "step": step, "total": total_steps, "file": file_label
@@ -1094,6 +1151,7 @@ pub async fn full_audit(
 
                     // Check if cancelled during this step
                     if audit_tracker.lock().map(|t| t.cancelled.contains(&project_id)).unwrap_or(false) {
+                        if let Ok(mut t) = audit_tracker.lock() { t.clear_progress(&project_id); }
                         let cancelled = serde_json::json!({ "status": "cancelled" });
                         yield Event::default().event("cancelled").data(cancelled.to_string());
                         return;
@@ -1136,6 +1194,8 @@ pub async fn full_audit(
         };
 
         // ── Phase 3: Create validation discussion ──
+        if let Ok(mut t) = audit_tracker.lock() { t.mark_validating(&project_id); }
+
         let pp = project_path_str.clone();
         let audit_info = tokio::task::spawn_blocking(move || {
             compute_audit_info_sync(&pp)
@@ -1237,6 +1297,10 @@ pub async fn full_audit(
                 }
             }).await;
         }
+
+        // Audit fully complete — drop progress so UI polling can stop and
+        // `GET /audit-status` reports `None`.
+        if let Ok(mut t) = audit_tracker.lock() { t.clear_progress(&project_id); }
 
         let done = serde_json::json!({
             "status": "complete",
@@ -1377,6 +1441,9 @@ pub async fn cancel_audit(
             return Json(ApiResponse::err("Internal error: audit tracker lock poisoned"));
         };
         tracker.cancelled.insert(project_id.clone());
+        // Drop live progress so GET /audit-status stops reporting "running"
+        // even if the SSE stream is slow to notice the cancellation flag.
+        tracker.clear_progress(&project_id);
         if let Some(pid) = tracker.running_pids.remove(&project_id) {
             tracing::info!("Killing audit agent process (PID {}) for project {}", pid, project_id);
             // Kill the process tree: first try killing the process group, then the process itself
@@ -1725,6 +1792,29 @@ pub(crate) fn build_briefing_prompt(language: &str) -> String {
             "ETAPE 3 — Apres avoir ecrit le fichier, termine ton dernier message par : KRONN:BRIEFING_COMPLETE",
         ).to_string(),
     }
+}
+
+// ─── Live audit progress (for polling UI resume) ────────────────────────────
+
+/// GET /api/projects/:id/audit-status
+///
+/// Returns the current in-flight audit progress for this project, or `None`
+/// if no audit is running. The UI polls this endpoint every ~2 s while its
+/// `kronn:audit:<projectId>` localStorage entry is set, so the progress bar
+/// survives tab/page navigation (the server-side audit process keeps
+/// running whether or not an SSE client is attached).
+///
+/// Progress entries are written by `run_audit`, `partial_audit`, and
+/// `full_audit` as they advance, and cleared on done / cancelled / error.
+pub async fn audit_status(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<Option<AuditProgress>>> {
+    let snapshot = match state.audit_tracker.lock() {
+        Ok(t) => t.get_progress(&id),
+        Err(_) => return Json(ApiResponse::err("audit tracker lock poisoned")),
+    };
+    Json(ApiResponse::ok(snapshot))
 }
 
 #[cfg(test)]
