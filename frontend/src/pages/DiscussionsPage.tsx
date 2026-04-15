@@ -1655,8 +1655,16 @@ export function DiscussionsPage({
               );
             })()}
 
-            {/* Input — unified composer */}
+            {/* Input — unified composer.
+                `key={activeDiscussion.id}` forces a fresh mount whenever the
+                user switches discussions. Without this, React re-uses the
+                same ChatInput instance and the non-controlled textarea keeps
+                its DOM value from the previous discussion — reported as the
+                "même message dans toutes les discussions" bug on 2026-04-15.
+                Remount is cheap here and also gives us a clean reset of
+                mention popover / emoji popover / voice mode / draft hydration. */}
             <ChatInput
+              key={activeDiscussion.id}
               discussion={activeDiscussion}
               agents={agents}
               sending={sending}

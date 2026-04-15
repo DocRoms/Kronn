@@ -1426,3 +1426,92 @@
 .set-spin {
   animation: set-spin 1s linear infinite;
 }
+
+/* Reusable spin utility — reuses the `spin` keyframe from reset.css.
+   Referenced by the refresh button in the Debug log viewer. */
+.animate-spin {
+  animation: spin 1s linear infinite;
+}
+
+/* ── Debug log viewer ────────────────────────────────────────────────
+   Monospace scrollable area with a subtle terminal vibe. Alignment of
+   the level tag (ERROR / WARN / INFO / DEBUG / TRACE) depends on the
+   5-char-padded format emitted server-side in `log_buffer::format_line`. */
+.set-debug-viewer {
+  margin: 0;
+  padding: 12px;
+  max-height: 420px;
+  min-height: 120px;
+  overflow: auto;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-md);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: var(--kr-fs-xs);
+  line-height: 1.45;
+  color: var(--kr-text-secondary);
+  white-space: pre;
+  tab-size: 2;
+}
+
+.set-debug-viewer:focus-visible {
+  outline: 1px solid rgba(var(--kr-accent-rgb), 0.55);
+  outline-offset: 1px;
+}
+
+/* ── Debug "LIVE" badge — header of the Debug card ──────────────────
+   Shown when serverDebugMode=true so users have an unmistakable visual
+   signal that verbose capture is active (the user explicitly asked for
+   this — the checkbox alone wasn't visually loud enough). */
+.set-debug-live-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: var(--kr-r-sm);
+  background: rgba(239, 68, 68, 0.14);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  color: #ff9aa9;
+  font-size: var(--kr-fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+
+.set-debug-live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #ef4444;
+  box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);
+  animation: set-debug-live-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes set-debug-live-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.55); }
+  70%  { box-shadow: 0 0 0 5px rgba(239, 68, 68, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+}
+
+/* Same pulsing dot in the Settings sidebar nav, positioned after the
+   "Debug" label. Smaller + subtler than the in-card badge. */
+.set-nav-btn[data-live="true"] {
+  position: relative;
+}
+
+.set-nav-live-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: #ef4444;
+  vertical-align: middle;
+  animation: set-debug-live-pulse 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .set-debug-live-dot,
+  .set-nav-live-dot {
+    animation: none;
+  }
+}

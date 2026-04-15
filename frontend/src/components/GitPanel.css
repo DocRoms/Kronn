@@ -380,6 +380,107 @@
   word-break: break-all;
 }
 
+/* ── Diff line layout (shared by all kinds) ──────────────
+   Each line is a flex row: a narrow prefix column (+/-/ ) + the content.
+   Fixed prefix width keeps code aligned across kinds. */
+.git-diff-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 0 6px;
+  min-height: 18px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.git-diff-prefix {
+  flex-shrink: 0;
+  width: 10px;
+  text-align: center;
+  opacity: 0.7;
+  user-select: none;
+}
+
+.git-diff-content {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ── Diff line kinds ───────────────────────────────────── */
+
+/* Addition: subtle green background + full syntax highlighting via .hljs */
+.git-diff-line-add {
+  background: rgba(34, 197, 94, 0.12);
+  border-left: 2px solid rgba(52, 211, 153, 0.65);
+  padding-left: 4px;
+}
+.git-diff-line-add .git-diff-prefix {
+  color: #34d399;
+  opacity: 1;
+}
+
+/* Context: neutral background, syntax highlighted but muted */
+.git-diff-line-ctx {
+  background: transparent;
+  border-left: 2px solid transparent;
+  padding-left: 4px;
+  color: rgba(255, 255, 255, 0.75);
+}
+
+/* Deletion: flat red, NO syntax highlighting — the user only needs to
+   know the line is going away, not re-parse stale code. */
+.git-diff-line-del {
+  background: rgba(239, 68, 68, 0.14);
+  border-left: 2px solid rgba(255, 77, 106, 0.65);
+  padding-left: 4px;
+  color: #ff9aa9;
+}
+.git-diff-line-del .git-diff-prefix {
+  color: #ff4d6a;
+  opacity: 1;
+}
+.git-diff-line-del .git-diff-content {
+  color: #ff9aa9; /* uniformly red — no hljs tokens inside `del` */
+}
+
+/* Hunk header (@@ -1,3 +1,4 @@) — info-blue, stands out as section break */
+.git-diff-line-hunk {
+  color: #60a5fa;
+  margin-top: 4px;
+  padding-top: 2px;
+  padding-bottom: 2px;
+  border-top: 1px dashed rgba(96, 165, 250, 0.25);
+  font-weight: 600;
+}
+
+/* File meta (diff --git, index, +++, ---, rename, binary) — dim grey,
+   rendered verbatim; these lines aren't content, just git chrome. */
+.git-diff-line-meta {
+  color: rgba(255, 255, 255, 0.4);
+  font-style: italic;
+}
+
+/* ── highlight.js token colors (One Dark-ish, tuned for the Kronn palette) ──
+   Minimal subset — only the token classes highlight.js actually emits for
+   the languages we register. Keeps the CSS surface small instead of pulling
+   in a full 500-line theme file. */
+.hljs { color: inherit; background: transparent; }
+.hljs-comment, .hljs-quote                { color: #7a8899; font-style: italic; }
+.hljs-keyword, .hljs-selector-tag,
+.hljs-addition, .hljs-type, .hljs-built_in { color: #c678dd; }
+.hljs-string, .hljs-regexp,
+.hljs-attr, .hljs-meta                    { color: #98c379; }
+.hljs-number, .hljs-literal, .hljs-doctag,
+.hljs-variable.language_                  { color: #d19a66; }
+.hljs-title, .hljs-title.function_,
+.hljs-section, .hljs-name                 { color: #61afef; }
+.hljs-params, .hljs-variable              { color: #e06c75; }
+.hljs-symbol, .hljs-bullet, .hljs-link,
+.hljs-meta-string                         { color: #56b6c2; }
+.hljs-emphasis                            { font-style: italic; }
+.hljs-strong                              { font-weight: bold; }
+.hljs-deletion                            { color: #ff4d6a; }
+
 /* ── Status messages ─────────────────────────────────── */
 .git-empty {
   padding: 24px;

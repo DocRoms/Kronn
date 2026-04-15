@@ -1,7 +1,7 @@
 # ⚡ Kronn
 
 Self-hosted control plane for AI coding agents.
-Orchestrate Claude Code, Codex, Vibe, Gemini CLI, Kiro, and Ollama (local models) — with less waste.
+Orchestrate Claude Code, Codex, Vibe, Gemini CLI, Kiro, GitHub Copilot, and Ollama (local models) — with less waste.
 
 > Enter the grid. Command your agents.
 
@@ -80,7 +80,7 @@ A 3-tier architecture with encrypted secrets:
 Server (type)  →  Config (instance + secrets)  →  Project (N:N)
 ```
 
-**49 built-in servers** covering Git, databases, cloud & infra, browsers, monitoring, communication, project management, design, payments, knowledge bases, AI reasoning, SEO, code quality, IaC, and hosting. [Full list →](docs/mcps.md)
+**53 built-in servers** covering Git, databases, cloud & infra, browsers, monitoring, communication, project management, design, payments, knowledge bases, AI reasoning, SEO, code quality, IaC, and hosting. [Full list →](docs/mcps.md)
 
 - **Auto-detection** from existing `.mcp.json` files across projects
 - **Disk sync for all agents** — `.mcp.json` (Claude), `.kiro/settings/mcp.json` (Kiro), `.gemini/settings.json` (Gemini), `.vibe/config.toml` (Vibe), `~/.codex/config.toml` (Codex), `~/.copilot/mcp-config.json` (Copilot)
@@ -223,10 +223,11 @@ Auto-detected at setup with runtime probe fallback (npx). Per-agent permissions 
 
 ```bash
 ./kronn start           # Interactive flow: detect agents, choose CLI or web
+./kronn start --debug   # Same + verbose backend logs auto-tailed in terminal
 ./kronn stop            # Stop all services
 ./kronn restart         # Stop and restart services
 ./kronn web             # Launch web interface directly
-./kronn logs            # View service logs
+./kronn logs            # View service logs (Ctrl+C to detach)
 ./kronn status          # Overview: agents, repos, MCP secrets
 ./kronn init [path]     # Configure AI context for a repo
 ./kronn mcp sync        # Sync MCP configs across repos
@@ -237,13 +238,14 @@ Auto-detected at setup with runtime probe fallback (npx). Per-agent permissions 
 <summary><strong>Dev commands</strong></summary>
 
 ```bash
-make start          # Build & launch (Docker)
-make stop           # Stop services
-make logs           # Tail logs
-make dev-backend    # Rust hot reload
-make dev-frontend   # Vite dev server
-make typegen        # Sync Rust → TS types
-make bump V=x.y.z   # Bump version everywhere
+make start              # Build & launch (Docker)
+make start DEBUG=1      # Same, with verbose backend logs (debug level)
+make stop               # Stop services
+make logs               # Tail logs (all services)
+make dev-backend        # Rust hot reload
+make dev-frontend       # Vite dev server
+make typegen            # Sync Rust → TS types
+make bump V=x.y.z      # Bump version everywhere
 ```
 </details>
 
@@ -259,10 +261,10 @@ kronn/
 │       ├── core/           # config, scanner, registry, crypto, cmd helpers, profiles, directives
 │       ├── agents/         # Agent runner (spawns CLIs, streams stdout)
 │       ├── workflows/      # Workflow engine, triggers, steps
-│       ├── skills/         # 22 built-in (Markdown + YAML frontmatter)
+│       ├── skills/         # 25 built-in (Markdown + YAML frontmatter)
 │       ├── profiles/       # 17 built-in agent profiles
 │       └── directives/     # Output directives
-├── frontend/           # React 18 + TypeScript + Vite
+├── frontend/           # React 19 + TypeScript + Vite
 │   └── src/
 │       ├── pages/          # SetupWizard, Dashboard, Settings, Discussions, MCPs, Workflows
 │       ├── types/          # generated.ts (from Rust via ts-rs)
@@ -270,12 +272,12 @@ kronn/
 ├── desktop/            # Tauri desktop app (backend embedded, no Docker needed)
 ├── ai/                 # AI context (for agents working on Kronn itself)
 ├── templates/          # AI context templates (for managed projects)
-├── tests/bats/         # 186 shell tests (bats-core)
+├── tests/bats/         # 192 shell tests (bats-core)
 ├── docker-compose.yml  # 3 services: backend, frontend, gateway
 └── LICENSE             # AGPL-3.0
 ```
 
-**Stack**: Rust (Axum 0.7) + TypeScript (React 18 / Vite) — full type safety end-to-end via `ts-rs`.
+**Stack**: Rust (Axum 0.7) + TypeScript (React 19 / Vite) — full type safety end-to-end via `ts-rs`.
 
 <details>
 <summary><strong>Configuration</strong></summary>
@@ -304,9 +306,9 @@ scan_depth = 4
 <summary><strong>CI pipeline</strong></summary>
 
 GitHub Actions triggered by `ci-test` label on PRs:
-- **test-backend**: `cargo check` + `cargo clippy` + `cargo test` (~890 tests)
-- **test-frontend**: `tsc --noEmit` + `pnpm test` (~350 tests, 24 suites)
-- **test-shell**: `make test-shell` (186 bats tests, 8 suites)
+- **test-backend**: `cargo check` + `cargo clippy` + `cargo test` (~1064 tests)
+- **test-frontend**: `tsc --noEmit` + `pnpm test` (~610 tests, 48 suites)
+- **test-shell**: `make test-shell` (192 bats tests, 8 suites)
 - **desktop-build**: `.github/workflows/desktop-build.yml` — builds Tauri installers for Windows, macOS, and Linux
 </details>
 
@@ -316,7 +318,7 @@ GitHub Actions triggered by `ci-test` label on PRs:
 
 > **Kronn does not include TLS.** Do not expose port 3140 without a TLS reverse proxy (nginx, Caddy, Traefik...).
 
-> **Authentication is on by default.** A Bearer token is auto-generated at first launch. Localhost requests bypass auth. Remote peers require the token.
+> **Authentication is opt-in.** Enable Bearer token auth from Settings — Kronn generates a UUID token shown once. Localhost requests always bypass auth. Remote peers (multi-user P2P) require the token.
 
 ---
 

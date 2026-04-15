@@ -3,6 +3,12 @@ import '../pages/DiscussionsPage.css';
 import type { Discussion, AgentDetection, AgentType, Skill, Directive, ContextFile } from '../types/generated';
 import { isUsable } from '../lib/constants';
 import { audioBufferToFloat32, transcribeAudio } from '../lib/stt-engine';
+import { loadDraft, saveDraft, clearDraft } from '../lib/chat-drafts';
+import { formatRelativeTime } from '../lib/relativeTime';
+import {
+  findEmojiQuery, searchEmojis, applyEmojiReplacement,
+  type EmojiQuery, type EmojiSuggestion,
+} from '../lib/emoji-autocomplete';
 import type { ToastFn } from '../hooks/useToast';
 import {
   Send, X, AlertTriangle, Users,
@@ -96,8 +102,141 @@ export function ChatInput({
     if (chatInputRef.current) chatInputRef.current.value = val;
   }, []);
 
+  // ─── Draft persistence (per-discussion) ─────────────────────────────────
+  // Saved to localStorage so the textarea survives tab/page navigation.
+  // The textarea is non-controlled (chatInputRef) for perf — this hook
+  // rehydrates its `value` on discussion change, saves throttled on change,
+  // and clears on successful send.
+  const [restoredDraftAt, setRestoredDraftAt] = useState<string | null>(null);
+  const draftSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const currentDiscIdRef = useRef<string | null>(null);
+
+  const scheduleDraftSave = useCallback((text: string) => {
+    const discId = currentDiscIdRef.current;
+    if (!discId) return;
+    if (draftSaveTimerRef.current) clearTimeout(draftSaveTimerRef.current);
+    // 250ms debounce — fast enough to survive a "type-and-tab-away" gesture
+    // but sparse enough to never hammer localStorage on long messages.
+    draftSaveTimerRef.current = setTimeout(() => {
+      saveDraft(discId, text);
+    }, 250);
+  }, []);
+
+  const flushDraftNow = useCallback((discId: string, text: string) => {
+    if (draftSaveTimerRef.current) {
+      clearTimeout(draftSaveTimerRef.current);
+      draftSaveTimerRef.current = null;
+    }
+    saveDraft(discId, text);
+  }, []);
+
+  // On discussion switch: flush the previous discussion's draft (without
+  // waiting for the debounce), then rehydrate the textarea for the new one.
+  useEffect(() => {
+    const prevDiscId = currentDiscIdRef.current;
+    const nextDiscId = discussion?.id ?? null;
+
+    // Flush any pending save for the previous discussion so switching away
+    // quickly doesn't lose the last keystroke.
+    if (prevDiscId && prevDiscId !== nextDiscId) {
+      flushDraftNow(prevDiscId, chatInputValueRef.current);
+    }
+
+    currentDiscIdRef.current = nextDiscId;
+
+    if (!nextDiscId) {
+      // No discussion selected → clear textarea state.
+      updateChatInput('');
+      setRestoredDraftAt(null);
+      return;
+    }
+
+    const saved = loadDraft(nextDiscId);
+    if (saved) {
+      updateChatInput(saved.text);
+      setRestoredDraftAt(saved.savedAt);
+    } else {
+      updateChatInput('');
+      setRestoredDraftAt(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [discussion?.id]);
+
+  // Flush the pending debounce on unmount so navigation away (e.g. tab
+  // change) doesn't drop the last 250 ms of typing.
+  useEffect(() => {
+    return () => {
+      const discId = currentDiscIdRef.current;
+      if (discId && draftSaveTimerRef.current) {
+        clearTimeout(draftSaveTimerRef.current);
+        draftSaveTimerRef.current = null;
+        saveDraft(discId, chatInputValueRef.current);
+      }
+    };
+  }, []);
+
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
+
+  // ─── Emoji shortcode autocomplete (:tada: → 🎉) ──────────────────────────
+  // Clones the @mention plumbing below but matches `:word` anywhere in the
+  // textarea, not just at the start. The match is computed on every edit
+  // from (text, cursorPos); the resulting `EmojiQuery` is stored here with
+  // its fresh suggestion list so render + keyboard handlers read from the
+  // same snapshot (otherwise Tab/Enter could fire against a stale list).
+  const [emojiMatch, setEmojiMatch] = useState<EmojiQuery | null>(null);
+  const [emojiSuggestions, setEmojiSuggestions] = useState<EmojiSuggestion[]>([]);
+  const [emojiIndex, setEmojiIndex] = useState(0);
+
+  /** Recompute emoji suggestions from the current textarea state. Called
+   *  from the textarea onChange and onKeyUp so caret-only moves (arrow
+   *  keys inside the text) still refresh the popover correctly. */
+  const refreshEmojiQuery = useCallback((text: string, cursorPos: number) => {
+    const found = findEmojiQuery(text, cursorPos);
+    if (!found) {
+      setEmojiMatch(null);
+      setEmojiSuggestions([]);
+      return;
+    }
+    const suggestions = searchEmojis(found.query);
+    if (suggestions.length === 0) {
+      setEmojiMatch(null);
+      setEmojiSuggestions([]);
+      return;
+    }
+    setEmojiMatch(found);
+    setEmojiSuggestions(suggestions);
+    setEmojiIndex(0);
+  }, []);
+
+  /** Insert the picked shortcode, update the DOM textarea, restore caret. */
+  const applyEmojiSuggestion = useCallback((suggestion: EmojiSuggestion) => {
+    const ta = chatInputRef.current;
+    const match = emojiMatch;
+    if (!ta || !match) return;
+    // Insert the Unicode glyph directly (Discord/Slack UX) — cleaner than
+    // showing `:tada:` in the textarea and letting the user guess whether
+    // it will render. `remark-emoji` still handles the reverse direction
+    // for agent output that uses the `:shortcode:` form.
+    const { text: next, cursor } = applyEmojiReplacement(
+      chatInputValueRef.current,
+      match,
+      suggestion.emoji,
+    );
+    updateChatInput(next);
+    // Restore caret right after the inserted ":shortcode: " (on the next
+    // frame so React has flushed the DOM value).
+    requestAnimationFrame(() => {
+      if (chatInputRef.current) {
+        chatInputRef.current.selectionStart = cursor;
+        chatInputRef.current.selectionEnd = cursor;
+      }
+    });
+    setEmojiMatch(null);
+    setEmojiSuggestions([]);
+    scheduleDraftSave(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [emojiMatch, updateChatInput]);
 
   const [dragOver, setDragOver] = useState(false);
 
@@ -141,6 +280,15 @@ export function ChatInput({
     if (!discussion || !inputVal.trim() || sending) return;
     const msg = inputVal.trim();
     const { targetAgent } = parseMention(msg);
+    // Drop the persisted draft BEFORE we clear the textarea: if the onSend
+    // callback throws synchronously we still don't want to leave a stale
+    // draft around (the user sees the message in the chat anyway).
+    if (draftSaveTimerRef.current) {
+      clearTimeout(draftSaveTimerRef.current);
+      draftSaveTimerRef.current = null;
+    }
+    clearDraft(discussion.id);
+    setRestoredDraftAt(null);
     updateChatInput('');
     setMentionQuery(null);
     onSend(msg, targetAgent);
@@ -409,6 +557,32 @@ export function ChatInput({
           );
         })()}
 
+        {/* Emoji shortcode autocomplete (:tada: → 🎉). Reuses the same CSS
+            class as @mentions so both popovers look consistent; the extra
+            `disc-emoji-item` class lets us style the emoji glyph without
+            disturbing the mention item layout. */}
+        {emojiMatch && emojiSuggestions.length > 0 && (
+          <div className="disc-mention-popover disc-emoji-popover">
+            {emojiSuggestions.map((s, i) => (
+              <button
+                key={s.shortcode}
+                type="button"
+                className="disc-mention-item disc-emoji-item"
+                data-highlighted={i === emojiIndex}
+                onMouseDown={e => {
+                  e.preventDefault();
+                  applyEmojiSuggestion(s);
+                  chatInputRef.current?.focus();
+                }}
+                onMouseEnter={() => setEmojiIndex(i)}
+              >
+                <span className="disc-emoji-glyph" aria-hidden="true">{s.emoji}</span>
+                <span className="font-semibold text-accent">:{s.shortcode}:</span>
+              </button>
+            ))}
+          </div>
+        )}
+
         {/* Worktree error banner */}
         {worktreeError && (
           <div className="disc-worktree-error">
@@ -443,6 +617,36 @@ export function ChatInput({
           </div>
         )}
 
+        {/* Restored draft indicator — shown when a draft was loaded on
+            discussion switch/remount. Auto-hides as soon as the user edits. */}
+        {restoredDraftAt && (
+          <div className="disc-draft-restored" role="status" aria-live="polite">
+            <FileText size={11} className="text-muted flex-shrink-0" />
+            <span className="disc-draft-restored-text">
+              {t('disc.draftRestored', formatRelativeTime(restoredDraftAt, discussion?.language ?? 'fr'))}
+            </span>
+            <button
+              type="button"
+              className="disc-draft-restored-dismiss"
+              onClick={() => {
+                if (discussion?.id) {
+                  if (draftSaveTimerRef.current) {
+                    clearTimeout(draftSaveTimerRef.current);
+                    draftSaveTimerRef.current = null;
+                  }
+                  clearDraft(discussion.id);
+                }
+                updateChatInput('');
+                setRestoredDraftAt(null);
+              }}
+              aria-label={t('disc.draftDismiss')}
+              title={t('disc.draftDismiss')}
+            >
+              <X size={10} />
+            </button>
+          </div>
+        )}
+
         {/* Textarea */}
         <textarea
           ref={chatInputRef}
@@ -461,6 +665,11 @@ export function ChatInput({
             if (hadText !== hasText) setChatInput(val);
             const ta = e.target;
             requestAnimationFrame(() => { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 160) + 'px'; });
+            // Persist draft so tab/page navigation doesn't wipe the in-flight
+            // textarea content. Debounced inside scheduleDraftSave.
+            scheduleDraftSave(val);
+            // Hide the "restored draft" hint as soon as the user edits.
+            if (restoredDraftAt) setRestoredDraftAt(null);
             const atMatch = val.match(/^@(\w*)$/);
             if (atMatch) {
               setMentionQuery(atMatch[1].toLowerCase());
@@ -468,8 +677,42 @@ export function ChatInput({
             } else {
               setMentionQuery(null);
             }
+            // Emoji shortcode autocomplete — uses the caret position, not
+            // just the full value, so `:ta` buried mid-sentence also opens.
+            refreshEmojiQuery(val, ta.selectionStart ?? val.length);
+          }}
+          onKeyUp={e => {
+            // Caret-only moves (arrow keys inside existing text) don't
+            // fire onChange but still need to refresh the emoji popover.
+            if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(e.key)) {
+              const ta = e.currentTarget;
+              refreshEmojiQuery(ta.value, ta.selectionStart ?? ta.value.length);
+            }
+          }}
+          onClick={e => {
+            const ta = e.currentTarget;
+            refreshEmojiQuery(ta.value, ta.selectionStart ?? ta.value.length);
           }}
           onKeyDown={e => {
+            // Emoji popover takes priority over the mention popover and
+            // over the default Enter-to-send behavior. Keeps keyboard UX
+            // predictable: Tab/Enter confirm the highlighted suggestion,
+            // Escape dismisses, arrows move the selection.
+            if (emojiMatch && emojiSuggestions.length > 0) {
+              if (e.key === 'ArrowDown') { e.preventDefault(); setEmojiIndex(i => Math.min(i + 1, emojiSuggestions.length - 1)); return; }
+              if (e.key === 'ArrowUp')   { e.preventDefault(); setEmojiIndex(i => Math.max(i - 1, 0)); return; }
+              if (e.key === 'Tab' || e.key === 'Enter') {
+                e.preventDefault();
+                applyEmojiSuggestion(emojiSuggestions[emojiIndex]);
+                return;
+              }
+              if (e.key === 'Escape') {
+                e.preventDefault();
+                setEmojiMatch(null);
+                setEmojiSuggestions([]);
+                return;
+              }
+            }
             if (mentionQuery !== null) {
               const filtered = AGENT_MENTIONS.filter(m => m.trigger.slice(1).startsWith(mentionQuery ?? ''));
               if (e.key === 'ArrowDown') { e.preventDefault(); setMentionIndex(i => Math.min(i + 1, filtered.length - 1)); return; }

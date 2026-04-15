@@ -17,6 +17,7 @@ pub mod sse_limits;
 pub mod worktree;
 pub mod tailscale;
 pub mod ws_client;
+pub mod log_buffer;
 
 #[cfg(test)]
 #[path = "crypto_test.rs"]

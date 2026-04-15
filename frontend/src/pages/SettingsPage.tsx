@@ -20,6 +20,7 @@ import { AgentsSection } from '../components/settings/AgentsSection';
 import { IdentitySection } from '../components/settings/IdentitySection';
 import { ProfilesSection } from '../components/settings/ProfilesSection';
 import { UsageSection } from '../components/settings/UsageSection';
+import { DebugSection } from '../components/settings/DebugSection';
 import './SettingsPage.css';
 
 /** Output languages for agents (sent to backend, not related to UI i18n) */
@@ -93,13 +94,23 @@ export function SettingsPage({
   const [serverDomain, setServerDomain] = useState('');
   const [serverMaxAgents, setServerMaxAgents] = useState(5);
   const [serverStallTimeout, setServerStallTimeout] = useState(5);
+  const [serverDebugMode, setServerDebugMode] = useState(false);
+  // True after the user just toggled debug_mode. Shows a "restart required"
+  // callout because `tracing_subscriber`'s `EnvFilter` is frozen at startup
+  // and the new level only kicks in on the next backend restart.
+  const [debugModeNeedsRestart, setDebugModeNeedsRestart] = useState(false);
   const [authToken, setAuthTokenState] = useState<string | null>(null);
   const [authVisible, setAuthVisible] = useState(false);
 
   // Internal API calls
   const { data: dbInfo, refetch: refetchDbInfo } = useApi(() => configApi.dbInfo(), []);
   useApi(() => configApi.getServerConfig().then(cfg => {
-    if (cfg) { setServerDomain(cfg.domain ?? ''); setServerMaxAgents(cfg.max_concurrent_agents); setServerStallTimeout(cfg.agent_stall_timeout_min ?? 5); }
+    if (cfg) {
+      setServerDomain(cfg.domain ?? '');
+      setServerMaxAgents(cfg.max_concurrent_agents);
+      setServerStallTimeout(cfg.agent_stall_timeout_min ?? 5);
+      setServerDebugMode(cfg.debug_mode ?? false);
+    }
     return cfg;
   }), []);
 
@@ -133,14 +144,17 @@ export function SettingsPage({
           { id: 'settings-identity', label: t('settings.identity') },
           { id: 'settings-usage', label: t('config.usage') },
           { id: 'settings-server', label: t('config.server') },
+          { id: 'settings-debug', label: t('settings.debugSection'), live: serverDebugMode },
           { id: 'settings-database', label: 'Database' },
         ].map(s => (
           <button
             key={s.id}
             className="set-nav-btn"
+            data-live={s.live ? 'true' : undefined}
             onClick={() => document.getElementById(s.id)?.scrollIntoView({ behavior: 'smooth' })}
           >
             {s.label}
+            {s.live && <span className="set-nav-live-dot" aria-hidden="true" />}
           </button>
         ))}
       </div>
@@ -927,6 +941,18 @@ export function SettingsPage({
           </div>
         </div>
       </div>
+
+      {/* Debug — its own card so it's easy to find when diagnosing cross-platform
+          issues. Toggling the switch persists `debug_mode` in config.toml
+          (takes effect at next backend restart). The live viewer reads the
+          in-memory ringbuffer fed by every `tracing` event — no file on disk. */}
+      <DebugSection
+        serverDebugMode={serverDebugMode}
+        setServerDebugMode={setServerDebugMode}
+        debugModeNeedsRestart={debugModeNeedsRestart}
+        setDebugModeNeedsRestart={setDebugModeNeedsRestart}
+        t={t}
+      />
 
       {/* Database */}
       <div id="settings-database" className="set-card">

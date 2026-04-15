@@ -93,6 +93,15 @@ pub struct ServerConfig {
     /// - `"never"` — disabled
     #[serde(default = "default_global_context_mode")]
     pub global_context_mode: String,
+    /// Debug mode — when true, the tracing subscriber is initialized at
+    /// `debug` level instead of `info`, producing significantly more
+    /// output on stdout. Lets users diagnose agent detection / project
+    /// scan issues themselves without needing to set `RUST_LOG` by hand.
+    /// Persisted in config.toml so it survives restarts. Toggleable from
+    /// the Settings UI or via `./kronn start --debug` (CLI flag wins for
+    /// the duration of that run).
+    #[serde(default)]
+    pub debug_mode: bool,
 }
 
 fn default_global_context_mode() -> String { "always".to_string() }
@@ -446,6 +455,38 @@ pub enum AiAuditStatus {
     Bootstrapped,
     Audited,
     Validated,
+}
+
+/// Live progress of a running audit, exposed via `GET /api/projects/:id/audit-status`.
+///
+/// Produced by the three SSE streams (`run_audit`, `partial_audit`, `full_audit`)
+/// which write into `AppState.audit_tracker.progress` as they advance. The UI
+/// polls this endpoint to "resume" the progress bar when the user navigates
+/// away and comes back — no need to restart the audit since the server-side
+/// process keeps running.
+///
+/// The struct is deliberately thin: it carries what's needed to paint a
+/// progress bar, not the full audit content (that still flows through SSE
+/// when the user is actively connected).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AuditProgress {
+    pub project_id: String,
+    /// `"installing"` during template install, `"auditing"` during the 10-step
+    /// loop, `"validating"` during phase 3 (validation discussion creation),
+    /// `"done"` briefly before the tracker clears the entry.
+    pub phase: String,
+    pub step_index: u32,
+    pub total_steps: u32,
+    /// `ai/` file currently being produced (e.g. `"repo-map.md"`), or
+    /// `"Final review"` for the last step, or `None` between steps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_file: Option<String>,
+    pub started_at: DateTime<Utc>,
+    /// `"full"` for the 10-step audit, `"partial"` for drift-triggered
+    /// sub-audits, `"full_audit"` for the end-to-end variant. Kept as a
+    /// string so future audit kinds don't force a schema migration.
+    pub kind: String,
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -1899,6 +1940,7 @@ pub struct ServerConfigPublic {
     pub pseudo: Option<String>,
     pub avatar_email: Option<String>,
     pub bio: Option<String>,
+    pub debug_mode: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1909,6 +1951,7 @@ pub struct UpdateServerConfigRequest {
     pub pseudo: Option<String>,
     pub avatar_email: Option<String>,
     pub bio: Option<String>,
+    pub debug_mode: Option<bool>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

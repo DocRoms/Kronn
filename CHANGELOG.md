@@ -7,6 +7,49 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.4.1] — 2026-04-15
+
+### Added
+- **Chat draft persistence** — the ChatInput textarea now survives tab/page navigation. Drafts are saved per-discussion in `localStorage['kronn:draft:<disc_id>']` (7-day TTL, schema-versioned, throttled 250 ms). On rehydration, a subtle "Brouillon restauré · écrit il y a X" badge shows relative time, auto-hides as soon as the user edits. New helper `lib/chat-drafts.ts` with `saveDraft` / `loadDraft` / `clearDraft` / `purgeExpiredDrafts`
+- **Audit/briefing resume on navigation** — the AI audit no longer "disappears" when the user switches tabs. Backend `AuditTracker` gained a `progress` HashMap written by the 3 SSE streams (`run_audit`, `partial_audit`, `full_audit`) at each `start`/`step_start`/`done`/`cancelled`. New `GET /api/projects/:id/audit-status` endpoint. Frontend: `kronn:audit:<project_id>` checkpoint in localStorage, `ProjectCard` polls every 2 s on remount and repaints the progress bar without restarting the audit
+- **MCP pulse hint on projects** — when a project has 0 plugins AND hasn't been audited yet (`NoTemplate` / `TemplateInstalled` / `Bootstrapped`), a pulsing `.dash-mcp-hint` callout invites the user to add plugins before launching briefing/audit. Respects `prefers-reduced-motion`
+- **Emoji autocomplete in ChatInput** — typing `:ta` mid-sentence opens a ranked suggestion popover (`:tada:` 🎉, `:taco:` 🌮, …). Tab/Enter inserts the Unicode glyph directly (Discord/Slack UX). Mirrors the `@mention` keyboard model. Blocks false positives on timestamps (`12:30`) and URLs (`http://`). New `lib/emoji-autocomplete.ts` helper backed by `node-emoji`
+- **Emoji shortcode rendering in messages** — `:shortcode:` in agent output is rendered as the Unicode glyph via `remark-emoji` inside `MarkdownContent`. Unknown shortcodes pass through verbatim (no silent data loss)
+- **Syntax-highlighted diff viewer** — `GitPanel` diff view now highlights additions and context lines via `highlight.js` (core + 15 registered languages: TS/JS/Rust/Python/Go/Java/JSON/YAML/TOML/Markdown/CSS/HTML/Bash/SQL/XML). Deletions stay flat red — the point is what's being removed, not re-parsing stale code. Hunk headers, file meta (`diff --git`, `index …`, `+++`/`---`, renames, binary markers) rendered as dim italic chrome. Safe HTML injection via hljs-escaped output
+- **In-memory log ringbuffer + live viewer** — every `tracing` event is captured into a 2000-line ringbuffer (`core::log_buffer`) via a custom `BufferLayer`. No file on disk, no Docker socket required. New endpoints `GET /api/debug/logs?lines=N` and `POST /api/debug/logs/clear`
+- **Dedicated Debug settings card** — extracted from "Server & Security" into its own card between Server and Database in the Settings nav. Live log viewer (monospace, terminal vibe, 5-char level alignment) with Follow/Pause (auto-refresh 2 s + tail-f auto-scroll, respects user scroll), Refresh, Copy, Clear buttons. "N / 2000 lines" counter in header
+- **"LIVE" visual indicator when debug mode is on** — pulsing red badge next to the Debug card title AND pulsing dot next to "Debug" in the Settings sidebar nav. Removes any ambiguity about whether verbose capture is active (the checkbox alone wasn't loud enough). Respects `prefers-reduced-motion`
+- **Tracing init self-diagnostic** — first log line after boot now announces the filter in use (`tracing initialized — filter: kronn=debug,tower_http=debug`). Lets users confirm at a glance that debug_mode took effect
+- **One-click "Report a bug on GitHub"** — button in the Debug card opens a new tab with a pre-filled GitHub issue (title `[Bug] Kronn v0.4.1 on macOS`, body with env info + agent summary + last 200 log lines in a collapsible `<details>`, `bug` label). Client-side redaction of common secret patterns (`sk-*`, `ghp_*`/`gho_*`/`ghs_*`/`ghu_*`, `AIza*`, `Bearer *`, JSON `password`/`token`/`api_key`/`secret`) before URL construction. Auto-trims log lines to stay under the 6000-char URL budget. Secondary "View existing issues" link to avoid duplicates
+- **Debug mode** — `ServerConfig.debug_mode` persisted in `config.toml`. CLI `./kronn start --debug` writes `KRONN_RUST_LOG=kronn=debug,tower_http=debug` into `.env` for the current run (without touching config) AND auto-tails the logs after boot. `make start DEBUG=1` for direct use. `docker-compose.yml` now defaults `RUST_LOG` to `${KRONN_RUST_LOG:-}` (empty = backend picks based on `debug_mode`)
+- **Diagnostic logs for cross-platform issues** — tagged `target: "kronn::agent_detect"` and `target: "kronn::scanner"`. `detect_all()` dumps env vars (HOST_OS / HOST_HOME / HOST_BIN / host_label) at sweep start + per-agent summary at end. `find_binary()` logs PATH + host_dirs, PATH hits, macOS skip reasons, final "NOT FOUND". `resolve_host_path()` logs each alias tried + success/failure + final decision. `scan_paths` logs ghost-path filter count
+- **macOS APFS firmlink support** in the scanner — `resolve_host_path()` now tries 3 aliases for `/Users/X` paths: raw (`/Users/X`), APFS canonical (`/System/Volumes/Data/Users/X`), legacy (`/private/var/Users/X`). Prevents silent project-drop when a canonicalized path failed `strip_prefix`. New helper `host_home_aliases()`
+- **`/api/health` enriched** with `version` (from `env!("CARGO_PKG_VERSION")`) and `host_os` (from `detect_host_label_public()`) for the bug-report flow. Docker healthcheck ignores the body — backwards-safe
+
+### Changed
+- **ChatInput remount on discussion switch** — `<ChatInput key={activeDiscussion.id}>` in `DiscussionsPage` forces a fresh mount per discussion. Guarantees the non-controlled textarea can never leak content across discussions (the root cause of the reported "same draft in all discussions" bug). Also resets voice mode / mention popover / emoji popover / draft hint cleanly at switch
+- **macOS skip list extracted to `MACOS_HOST_BIN_SKIP` constant** in `agents/mod.rs`. The test `cross_agent_macos_skip_covers_npm_agents` now ENFORCES (no longer just documents) that every npm-installed agent is present — adding a new npm agent without updating the skip list is now a compile-time test failure
+- **Emoji insertion format** — picking an emoji from the autocomplete inserts the Unicode glyph (🎉) into the textarea instead of the `:tada:` shortcode. Matches Discord/Slack UX where users see exactly what they picked. Agents still receive the glyph directly; `remark-emoji` handles the reverse direction for agent output using shortcodes
+
+### Fixed
+- **macOS — `gemini` never detected** — `gemini` was missing from the macOS skip list in `find_binary()`, so the host's Darwin `gemini` binary was mounted into the Linux container and failed to execute. Now covered by `MACOS_HOST_BIN_SKIP` + entrypoint installs
+- **macOS — `gemini` + `copilot` never installed in the container** — `entrypoint.sh` only installed Linux versions of `kiro-cli`, `claude`, `codex`. Now also installs `@google/gemini-cli` and `@github/copilot` via npm when `KRONN_HOST_OS=macOS`
+- **Chat draft lost on tab/page navigation** — ChatInput was re-rendered (not remounted) on discussion switch, and the non-controlled textarea kept its DOM value. Fixed by adding `key={activeDiscussion.id}` (see Changed above)
+- **Chat draft bleed between discussions** — same root cause as above; the "same message in every discussion" bug is gone
+- **`remark-emoji` + `node-emoji` install** — initial `npm install` created a parasitic `package-lock.json` alongside `pnpm-lock.yaml` and left `node-emoji` unhoisted (pnpm strict mode), breaking the Docker build. Both deps now declared explicitly via `pnpm add`
+- **Debug viewer silently empty after restart** — `docker-compose.yml` resolves `RUST_LOG=${KRONN_RUST_LOG:-}` to an EMPTY STRING (not unset) when `KRONN_RUST_LOG` isn't defined, and `EnvFilter::try_from_default_env()` parses `""` into a filter that matches nothing — so flipping the debug toggle in Settings + restart produced zero captured events (stdout and BufferLayer both silenced). Fix in `main.rs`: treat whitespace-only `RUST_LOG` as "not set" so the `default_filter` derived from `config.server.debug_mode` kicks in
+
+### Infra
+- **`make bump V=x.y.z`** already existed — used to bump all 7 version files consistently (VERSION, Cargo.toml × 2, package.json × 2, tauri.conf.json, README)
+- **`make start DEBUG=1`** new target helper (`_apply-debug-flag`) that writes `KRONN_RUST_LOG` into `.env`
+
+### Tests
+- Backend: **1054** (1047 lib + 147 integration at session start + ~10 new). New: `MACOS_HOST_BIN_SKIP` enforcement, `gemini`/`copilot` regression, `host_home_aliases` on 4 cases, `resolve_host_path` with aliases, `AuditTracker` progress (6 tests), `/api/projects/:id/audit-status` integration (3 tests), `log_buffer` (10 tests incl. tracing dispatcher end-to-end)
+- Frontend: **610** (520 at session start + 90 new). New: `chat-drafts` (16), `ChatInput.draft` regression (8 incl. rerender-without-remount guard), `audit-resume` helper (10), `emoji-autocomplete` (18), `MessageBubble.emoji` (4 regression), `diff-syntax` (16), `bug-report` (18)
+- Build: `pnpm build` (Dockerfile pipeline) ✅ · `cargo clippy --lib --tests -- -D warnings` ✅ · `tsc --noEmit` ✅
+
+---
+
 ## [0.4.0] — 2026-04-14
 
 ### Added

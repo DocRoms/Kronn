@@ -121,6 +121,24 @@ if [ "${KRONN_HOST_OS:-}" = "macOS" ]; then
       npm install -g @openai/codex 2>/dev/null || true
     fi
   fi
+
+  # Same for Gemini CLI — bug reported 2026-04-15 where macOS users never
+  # saw Gemini detected because the host Darwin binary was silently
+  # skipped but nothing replaced it inside the container.
+  if ! command -v gemini >/dev/null 2>&1; then
+    echo "[entrypoint] macOS host detected: installing Linux gemini via npm..."
+    if command -v npm >/dev/null 2>&1; then
+      npm install -g @google/gemini-cli 2>/dev/null || true
+    fi
+  fi
+
+  # Same for GitHub Copilot CLI
+  if ! command -v copilot >/dev/null 2>&1; then
+    echo "[entrypoint] macOS host detected: installing Linux copilot via npm..."
+    if command -v npm >/dev/null 2>&1; then
+      npm install -g @github/copilot 2>/dev/null || true
+    fi
+  fi
 fi
 
 exec "$@"

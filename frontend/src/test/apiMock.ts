@@ -46,6 +46,7 @@ export const API_NAMESPACES = [
   'directives',
   'stats',
   'ollama',
+  'debugApi',
 ] as const;
 
 /** Flat top-level helpers (non-namespace exports). */
@@ -55,6 +56,7 @@ export const API_TOP_LEVEL_FNS = [
   'authHeaders',
   'setApiBase',
   'getApiBase',
+  'fetchHealth',
 ] as const;
 
 interface DefaultMock {
@@ -63,6 +65,7 @@ interface DefaultMock {
   authHeaders: AnyFn;
   setApiBase: AnyFn;
   getApiBase: AnyFn;
+  fetchHealth: AnyFn;
   setup: Record<string, AnyFn>;
   config: Record<string, AnyFn>;
   contacts: Record<string, AnyFn>;
@@ -77,6 +80,7 @@ interface DefaultMock {
   directives: Record<string, AnyFn>;
   stats: Record<string, AnyFn>;
   ollama: Record<string, AnyFn>;
+  debugApi: Record<string, AnyFn>;
 }
 
 /**
@@ -92,6 +96,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     authHeaders: vi.fn().mockReturnValue({}),
     setApiBase: vi.fn(),
     getApiBase: vi.fn().mockReturnValue(''),
+    fetchHealth: vi.fn().mockResolvedValue({ ok: true }),
 
     setup: {
       getStatus: resolve({ is_first_run: false, current_step: 'done', agents_detected: [], repos_detected: [], scan_paths_set: true }),
@@ -245,6 +250,11 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     ollama: {
       health: resolve({ status: 'not_installed', version: null, endpoint: 'http://localhost:11434', models_count: 0, hint: null }),
       models: resolve({ models: [] }),
+    },
+
+    debugApi: {
+      getLogs: resolve({ lines: [], buffered: 0, capacity: 2000, debug_mode: false }),
+      clearLogs: resolve(undefined),
     },
   };
 

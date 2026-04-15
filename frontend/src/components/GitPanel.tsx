@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { projects as projectsApi, discussions as discussionsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import ReactMarkdown from 'react-markdown';
+import { languageForPath, highlightLine, parseDiffLines } from '../lib/diff-syntax';
 import './GitPanel.css';
 import {
   GitBranch, GitCommit, GitPullRequest, Upload, RefreshCw, ChevronLeft,
@@ -279,15 +280,57 @@ export function GitPanel({ projectId, discussionId, onClose, terminalEnabled = f
           {diffLoading ? (
             <div className="git-center"><Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /></div>
           ) : (
-            <pre className="git-diff-pre">
-              {diffContent.split('\n').map((line, i) => {
-                let color = 'rgba(255,255,255,0.6)';
-                if (line.startsWith('+') && !line.startsWith('+++')) color = '#34d399';
-                else if (line.startsWith('-') && !line.startsWith('---')) color = '#ff4d6a';
-                else if (line.startsWith('@@')) color = '#60a5fa';
-                return <div key={i} style={{ color, minHeight: 18 }}>{line || ' '}</div>;
-              })}
-            </pre>
+            (() => {
+              // Resolve the language once per diff, not per line — hljs
+              // registration is already cached but the extension lookup
+              // itself is cheap-but-not-free.
+              const lang = languageForPath(diffPath);
+              const parsed = parseDiffLines(diffContent);
+              return (
+                <pre className="git-diff-pre">
+                  {parsed.map((line, i) => {
+                    // Deletion lines deliberately skip syntax highlighting:
+                    // the point is to show what's GOING AWAY, not to parse
+                    // stale code. Flat red is the clearest signal.
+                    if (line.kind === 'del') {
+                      return (
+                        <div key={i} className="git-diff-line git-diff-line-del">
+                          <span className="git-diff-prefix">-</span>
+                          <span className="git-diff-content">{line.content || '\u00A0'}</span>
+                        </div>
+                      );
+                    }
+                    if (line.kind === 'hunk') {
+                      return (
+                        <div key={i} className="git-diff-line git-diff-line-hunk">
+                          <span className="git-diff-content">{line.raw}</span>
+                        </div>
+                      );
+                    }
+                    if (line.kind === 'meta') {
+                      return (
+                        <div key={i} className="git-diff-line git-diff-line-meta">
+                          <span className="git-diff-content">{line.raw || '\u00A0'}</span>
+                        </div>
+                      );
+                    }
+                    // Additions + context → syntax highlighted.
+                    const prefix = line.kind === 'add' ? '+' : ' ';
+                    const kindClass = line.kind === 'add' ? 'git-diff-line-add' : 'git-diff-line-ctx';
+                    const html = highlightLine(line.content, lang);
+                    return (
+                      <div key={i} className={`git-diff-line ${kindClass}`}>
+                        <span className="git-diff-prefix">{prefix}</span>
+                        <span
+                          className="git-diff-content hljs"
+                          dangerouslySetInnerHTML={{ __html: html || '\u00A0' }}
+                        />
+                      </div>
+                    );
+                  })}
+                </pre>
+              );
+            })()
           )}
         </div>
       </div>

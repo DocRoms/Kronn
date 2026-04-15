@@ -1,6 +1,6 @@
 {
   "name": "kronn-frontend",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "private": true,
   "type": "module",
   "engines": {
@@ -18,11 +18,14 @@
   "dependencies": {
     "@diffusionstudio/vits-web": "^1.0.3",
     "@huggingface/transformers": "^3.8.1",
+    "highlight.js": "^11.11.1",
     "lucide-react": "^0.441.0",
+    "node-emoji": "^2.2.0",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "react-markdown": "^10.1.0",
     "react-router-dom": "^6.26.0",
+    "remark-emoji": "^5.0.2",
     "remark-gfm": "^4.0.1"
   },
   "devDependencies": {

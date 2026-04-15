@@ -153,6 +153,7 @@ pub fn default_config() -> AppConfig {
             bio: None,
             global_context: None,
             global_context_mode: "always".into(),
+            debug_mode: false,
         },
         tokens: TokensConfig {
             anthropic: None,
