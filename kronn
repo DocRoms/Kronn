@@ -36,6 +36,7 @@ source "$KRONN_DIR/lib/mcps.sh"
 source "$KRONN_DIR/lib/tron.sh"
 source "$KRONN_DIR/lib/analyze.sh"
 source "$KRONN_DIR/lib/repos.sh"
+source "$KRONN_DIR/lib/api-client.sh"
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -101,20 +102,20 @@ maybe_login_kiro() {
 cmd_start() {
     banner
 
-    # 1. Agent detection
-    select_agent
-
-    # 2. Web interface or CLI?
-    menu_choice "Usage mode" \
-        "Launch web interface" \
-        "Stay in CLI"
+    # Present the choice FIRST — agent detection is slow (~5-10s) and
+    # completely unnecessary when the user just wants to launch the web UI.
+    # The web interface has its own detection (instant, via the backend API).
+    menu_choice "How would you like to use Kronn?" \
+        "Launch web interface (recommended)" \
+        "Continue in CLI"
 
     if [[ "$REPLY" == "1" ]]; then
         cmd_web
         return
     fi
 
-    # 3. CLI flow: scan repos
+    # CLI flow: detect agents + scan repos (only needed for the CLI path)
+    select_agent
     cmd_repos
 }
 
@@ -150,7 +151,11 @@ cmd_web() {
         debug_requested=1
         info "Debug mode requested (--debug) — backend will log at debug level."
     fi
-    (cd "$KRONN_DIR" && make start "${make_args[@]}")
+    (cd "$KRONN_DIR" && make start ${make_args[@]+"${make_args[@]}"})
+    # Backend is now running — reset the API availability cache so
+    # subsequent commands in this session (status, agents, etc.) use
+    # the API instead of slow local fallback.
+    kronn_api_reset_cache
     maybe_login_kiro
 
     # Containers run detached (`docker compose up -d`) so there's no log
@@ -184,7 +189,7 @@ cmd_repos() {
 
     success "${#REPO_PATHS[@]} repository(ies) found"
 
-    # Loop: let user configure repos or launch web
+    # Loop: let user pick a repo, then choose what to do with it.
     while true; do
         select_repo
         local chosen=$REPLY
@@ -196,11 +201,190 @@ cmd_repos() {
         fi
 
         local idx=$((chosen - 1))
-        init_repo "${REPO_PATHS[$idx]}"
+        local repo_dir="${REPO_PATHS[$idx]}"
+        local repo_name="${REPO_NAMES[$idx]}"
 
-        # Refresh status after config
-        REPO_STATUS[$idx]=$(detect_ai_context "${REPO_PATHS[$idx]}")
+        _project_action_menu "$repo_dir" "$repo_name" "$idx"
     done
+}
+
+# Sub-menu for a selected project — mirrors the web dashboard's project card.
+# Actions adapt to the current state: template install only shows when needed,
+# audit/briefing only when the backend is running, etc.
+_project_action_menu() {
+    local repo_dir="$1" repo_name="$2" list_idx="$3"
+
+    while true; do
+        local repo_status
+        repo_status=$(detect_ai_context "$repo_dir")
+        REPO_STATUS[$list_idx]="$repo_status"
+
+        echo
+        step "$repo_name"
+        local color="$DIM"
+        case "$repo_status" in
+            Validated*) color="$GREEN" ;;
+            Audited*)   color="$GREEN" ;;
+            Template*)  color="$YELLOW" ;;
+            *MCP*)      color="$CYAN" ;;
+        esac
+        printf "  Status: ${color}%s${RESET}\n" "$repo_status"
+        echo
+
+        local -a options=()
+        local -a keys=()
+
+        # Template install — show when no ai/ or not yet audited
+        case "$repo_status" in
+            "not configured"|Template*)
+                options+=("${GREEN}▸${RESET} Install AI template")
+                keys+=("template")
+                ;;
+        esac
+
+        # Backend-dependent actions (audit, briefing, open dashboard)
+        if kronn_api_available; then
+            case "$repo_status" in
+                Template*|Audited*)
+                    options+=("${CYAN}▸${RESET} Launch AI audit ${DIM}(opens web dashboard)${RESET}")
+                    keys+=("audit")
+                    ;;
+            esac
+            case "$repo_status" in
+                "not configured"|Template*)
+                    options+=("${CYAN}▸${RESET} Launch briefing ${DIM}(opens web dashboard)${RESET}")
+                    keys+=("briefing")
+                    ;;
+            esac
+            options+=("${CYAN}▸${RESET} View plugins / MCPs ${DIM}(opens web dashboard)${RESET}")
+            keys+=("mcps")
+            options+=("${CYAN}▸${RESET} Open project in dashboard")
+            keys+=("dashboard")
+        else
+            # Local MCP view fallback
+            local mcp_file="$repo_dir/.mcp.json"
+            if [[ -f "$mcp_file" ]]; then
+                local mcount
+                mcount=$(grep -c '"command"' "$mcp_file" 2>/dev/null || echo 0)
+                options+=("${DIM}▸${RESET} View MCPs (${mcount} configured, .mcp.json)")
+                keys+=("mcps_local")
+            fi
+        fi
+
+        options+=("${DIM}← Back to project list${RESET}")
+        keys+=("back")
+
+        menu_choice "Action:" "${options[@]}"
+        local action="${keys[$((REPLY-1))]}"
+
+        # Clear the interactive menu remnants before running the action —
+        # menu_choice uses ANSI cursor tricks that leave ghost lines on
+        # screen. A simple terminal reset (scroll region + clear below)
+        # prevents the "text printed on top of the menu" visual glitch.
+        printf "\033[J"
+
+        case "$action" in
+            template)
+                init_repo "$repo_dir"
+                echo
+                printf "  ${DIM}Press Enter to continue...${RESET}"
+                read -r
+                ;;
+            audit|briefing|mcps|dashboard)
+                _open_project_in_browser "$repo_name" "$action"
+                echo
+                printf "  ${DIM}Press Enter to continue...${RESET}"
+                read -r
+                ;;
+            mcps_local)
+                _show_local_mcps "$repo_dir"
+                printf "  ${DIM}Press Enter to continue...${RESET}"
+                read -r
+                ;;
+            back)
+                break
+                ;;
+        esac
+    done
+}
+
+# Open the web dashboard on the right project. Uses the API to resolve
+# the project ID from its name, then opens `/#project-<id>` so the
+# Dashboard auto-expands and scrolls to the matching card.
+_open_project_in_browser() {
+    local repo_name="$1" action="$2"
+    local base_url="http://localhost:3140"
+    local url="$base_url"
+
+    # Try to resolve the project ID for deep-linking.
+    if kronn_api_available; then
+        local project_id=""
+        if command -v jq >/dev/null 2>&1; then
+            project_id=$(kronn_api_data GET /projects 2>/dev/null \
+                | jq -r --arg name "$repo_name" '.[] | select(.name == $name) | .id' 2>/dev/null \
+                | head -1)
+        elif command -v python3 >/dev/null 2>&1; then
+            project_id=$(kronn_api_data GET /projects 2>/dev/null \
+                | python3 -c "
+import sys, json
+name = '$repo_name'
+for p in json.load(sys.stdin):
+    if p['name'] == name:
+        print(p['id']); break
+" 2>/dev/null)
+        fi
+        if [[ -n "$project_id" ]]; then
+            url="${base_url}/#project-${project_id}"
+        fi
+    fi
+
+    info "Opening $repo_name in dashboard..."
+    printf "  ${DIM}%s${RESET}\n" "$url"
+
+    # Cross-platform open: wslview (WSL) / xdg-open (Linux) / open (macOS)
+    if command -v wslview >/dev/null 2>&1; then
+        wslview "$url" 2>/dev/null &
+    elif command -v xdg-open >/dev/null 2>&1; then
+        xdg-open "$url" 2>/dev/null &
+    elif command -v open >/dev/null 2>&1; then
+        open "$url" 2>/dev/null &
+    else
+        info "Open this URL in your browser: $url"
+    fi
+}
+
+# Quick view of .mcp.json when the backend isn't running.
+_show_local_mcps() {
+    local repo_dir="$1"
+    local mcp_file="$repo_dir/.mcp.json"
+
+    if [[ ! -f "$mcp_file" ]]; then
+        warn "No .mcp.json in this project."
+        return
+    fi
+
+    echo
+    info "MCPs from .mcp.json:"
+    # Extract server names from the JSON — lightweight, no jq dependency.
+    # Pattern: keys inside "mcpServers": { "name": { ... }, ... }
+    if command -v jq >/dev/null 2>&1; then
+        jq -r '.mcpServers // {} | keys[]' "$mcp_file" 2>/dev/null | while read -r name; do
+            printf "  ${GREEN}●${RESET} %s\n" "$name"
+        done
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -c "
+import json, sys
+try:
+    d = json.load(open('$mcp_file'))
+    for k in d.get('mcpServers', {}):
+        print(f'  ● {k}')
+except: pass
+"
+    else
+        printf "  ${DIM}(install jq or python3 to view MCP names)${RESET}\n"
+        printf "  ${DIM}%s${RESET}\n" "$mcp_file"
+    fi
+    echo
 }
 
 cmd_mcp() {
@@ -226,9 +410,31 @@ cmd_mcp() {
 
 cmd_status() {
     banner
+
+    # When the backend is running, delegate to the API — instant, complete
+    # (includes Ollama, debug_mode, DB stats, etc.), zero duplication.
+    if kronn_api_available; then
+        step "Kronn backend"
+        kronn_api_show_health
+
+        step "Agents (from backend)"
+        kronn_api_show_agents || warn "Failed to query agents API"
+
+        step "Database"
+        kronn_api_show_status || warn "Failed to query DB info API"
+
+        return
+    fi
+
+    # Fallback: backend not running — use local shell detection (slower,
+    # may lag behind the backend on newer agents, but functional without
+    # Docker).
+    info "Backend not running — using local detection (start backend for full info)."
+    echo
+
     load_config
 
-    step "Agents"
+    step "Agents (local detection)"
     detect_agents
     show_detected_agents || warn "No agent detected"
 
@@ -243,18 +449,52 @@ cmd_status() {
     for i in "${!REPO_NAMES[@]}"; do
         local name="${REPO_NAMES[$i]}"
         local status="${REPO_STATUS[$i]}"
-        if [[ "$status" == "not configured" ]]; then
-            printf "  ${DIM}%s — %s${RESET}\n" "$name" "$status"
-        else
-            printf "  ${GREEN}%s${RESET} — %s\n" "$name" "$status"
-        fi
+        local color="$DIM"
+        case "$status" in
+            Validated*) color="$GREEN" ;;
+            Audited*)   color="$GREEN" ;;
+            Template*)  color="$YELLOW" ;;
+            *MCP*)      color="$CYAN" ;;
+        esac
+        printf "  %s  ${color}%s${RESET}\n" "$name" "$status"
     done
+}
 
-    step "Secrets MCP"
-    if secrets_configured; then
-        success "Secrets configured in $KRONN_CONFIG_DIR/secrets.toml"
+cmd_agents() {
+    # Dedicated "just show me the agents" command — API first, local fallback.
+    if kronn_api_available; then
+        kronn_api_show_agents
     else
-        warn "Secrets not configured — run: kronn mcp secrets"
+        detect_agents
+        show_detected_agents || warn "No agent detected"
+        printf "\n  ${DIM}Tip: start the backend for full info (Ollama health, runtime probes): kronn start${RESET}\n"
+    fi
+}
+
+cmd_projects() {
+    # List projects — API only (projects live in the DB, no local fallback).
+    if ! kronn_api_available; then
+        warn "Backend not running. Start it first: kronn start"
+        return 1
+    fi
+    local json
+    json=$(kronn_api_data GET /projects) || { fail "Failed to query projects API"; return 1; }
+    if command -v jq >/dev/null 2>&1; then
+        local count
+        count=$(echo "$json" | jq 'length')
+        info "$count project(s):"
+        echo "$json" | jq -r '.[] | "  \(.name)  \u001b[2m\(.path)\u001b[0m  [\(.audit_status)]"'
+    elif command -v python3 >/dev/null 2>&1; then
+        echo "$json" | python3 -c "
+import sys, json
+D='\033[2m'; R='\033[0m'
+projects = json.load(sys.stdin)
+print(f'  {len(projects)} project(s):')
+for p in projects:
+    print(f'  {p[\"name\"]}  {D}{p[\"path\"]}{R}  [{p.get(\"audit_status\",\"?\")}]')
+"
+    else
+        echo "$json"
     fi
 }
 
@@ -300,7 +540,9 @@ cmd_help() {
     printf "  ${CYAN}stop${RESET}           Stop services\n"
     printf "  ${CYAN}restart${RESET}        Restart services\n"
     printf "  ${CYAN}logs${RESET}           Show logs\n"
-    printf "  ${CYAN}status${RESET}         Overview\n"
+    printf "  ${CYAN}status${RESET}         Overview (auto-delegates to API when backend is up)\n"
+    printf "  ${CYAN}agents${RESET}         List detected agents\n"
+    printf "  ${CYAN}projects${RESET}       List projects (requires backend)\n"
     printf "  ${CYAN}init [path]${RESET}    Configure a repository\n"
     printf "  ${CYAN}mcp sync${RESET}       Sync .mcp.json files\n"
     printf "  ${CYAN}mcp check${RESET}      Check MCP prerequisites\n"
@@ -429,6 +671,8 @@ main() {
         restart)     cmd_restart ;;
         logs)        cmd_logs ;;
         status)      cmd_status ;;
+        agents)      cmd_agents ;;
+        projects)    cmd_projects ;;
         init)        cmd_init "$@" ;;
         mcp)         cmd_mcp "$@" ;;
         web)         cmd_web ;;

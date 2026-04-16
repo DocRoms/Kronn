@@ -28,7 +28,7 @@ interface WorkflowsPageProps {
    * "sending" in the shared sendingMap so the sidebar spinner lights up for
    * all of them, not just the one we navigate to. Without this prop the
    * batch still works but only the navigated disc looks like it's running. */
-  onBatchLaunched?: (discIds: string[]) => void;
+  onBatchLaunched?: (discIds: string[], batchRunId: string) => void;
   /** When the user clicks a batch pastille in the discussion sidebar, the
    * Dashboard switches to this tab and sets this prop to the parent workflow
    * id. We auto-open its detail panel + switch to the 'workflows' sub-tab
@@ -383,7 +383,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       // already fired in the fan-out loop, doubling its response.
       // `onBatchLaunched` in Dashboard uses `setOpenDiscussionId`
       // which opens without auto-running.
-      onBatchLaunched?.(res.discussion_ids);
+      onBatchLaunched?.(res.discussion_ids, res.run_id);
       setBatchingQP(null);
       setBatchInputLines('');
     } catch (e) {

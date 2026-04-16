@@ -320,7 +320,7 @@ EOF
     assert_output "not configured"
 }
 
-@test "detect_ai_context: detects ai/ directory" {
+@test "detect_ai_context: detects ai/ as Template state" {
     _load_lib "repos.sh"
 
     mkdir -p "$TEST_TMPDIR/repo/ai"
@@ -328,10 +328,10 @@ EOF
 
     run detect_ai_context "$TEST_TMPDIR/repo"
     assert_success
-    assert_output --partial "ai/"
+    assert_output --partial "Template"
 }
 
-@test "detect_ai_context: detects redirectors" {
+@test "detect_ai_context: redirectors alone = not configured (need ai/index.md)" {
     _load_lib "repos.sh"
 
     mkdir -p "$TEST_TMPDIR/repo"
@@ -339,20 +339,7 @@ EOF
 
     run detect_ai_context "$TEST_TMPDIR/repo"
     assert_success
-    assert_output --partial "1 redirectors"
-}
-
-@test "detect_ai_context: counts multiple redirectors" {
-    _load_lib "repos.sh"
-
-    mkdir -p "$TEST_TMPDIR/repo"
-    echo "x" > "$TEST_TMPDIR/repo/CLAUDE.md"
-    echo "x" > "$TEST_TMPDIR/repo/.cursorrules"
-    echo "x" > "$TEST_TMPDIR/repo/.windsurfrules"
-
-    run detect_ai_context "$TEST_TMPDIR/repo"
-    assert_success
-    assert_output --partial "3 redirectors"
+    assert_output "not configured"
 }
 
 @test "detect_ai_context: detects MCP config" {
@@ -373,30 +360,28 @@ JSON
     assert_output --partial "2 MCPs"
 }
 
-@test "detect_ai_context: detects .claude/ directory" {
+@test "detect_ai_context: .claude/ alone is not configured" {
     _load_lib "repos.sh"
 
     mkdir -p "$TEST_TMPDIR/repo/.claude"
 
     run detect_ai_context "$TEST_TMPDIR/repo"
     assert_success
-    assert_output --partial ".claude/"
+    assert_output "not configured"
 }
 
-@test "detect_ai_context: combines all signals" {
+@test "detect_ai_context: combines audit state + MCPs with · separator" {
     _load_lib "repos.sh"
 
-    mkdir -p "$TEST_TMPDIR/repo/ai" "$TEST_TMPDIR/repo/.claude"
+    mkdir -p "$TEST_TMPDIR/repo/ai"
     echo "# Index" > "$TEST_TMPDIR/repo/ai/index.md"
-    echo "x" > "$TEST_TMPDIR/repo/CLAUDE.md"
     echo '{"mcpServers":{"gh":{"command":"npx"}}}' > "$TEST_TMPDIR/repo/.mcp.json"
 
     run detect_ai_context "$TEST_TMPDIR/repo"
     assert_success
-    assert_output --partial "ai/"
-    assert_output --partial "1 redirectors"
+    assert_output --partial "Template"
     assert_output --partial "1 MCPs"
-    assert_output --partial ".claude/"
+    assert_output --partial "·"
 }
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -436,7 +421,7 @@ JSON
 
     scan_repos "$TEST_TMPDIR/parent"
 
-    [[ "${REPO_STATUS[0]}" == *"ai/"* ]]
+    [[ "${REPO_STATUS[0]}" == *"Template"* ]]
 }
 
 @test "scan_repos: returns empty arrays for directory with no repos" {

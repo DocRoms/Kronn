@@ -417,6 +417,7 @@ pub fn create_batch_run(
             profile_ids: vec![],
             directive_ids: vec![],
             archived: false,
+            pinned: false,
             workspace_mode: workspace_mode.clone(),
             workspace_path: None,
             worktree_branch: None,

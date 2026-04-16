@@ -1956,3 +1956,38 @@
   margin: -8px 0 var(--kr-sp-4);
   font-family: var(--kr-font-mono);
 }
+
+/* ── QP Chain pills (WorkflowWizard BatchQuickPrompt step) ───────────── */
+.wf-chain-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px 2px 8px;
+  border-radius: var(--kr-r-md);
+  background: rgba(var(--kr-accent-rgb), 0.1);
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.3);
+  color: var(--kr-accent);
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+}
+.wf-chain-pos {
+  color: var(--kr-text-faint);
+  font-weight: 500;
+  font-family: var(--kr-font-mono);
+}
+.wf-chain-pill-remove {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  background: transparent;
+  border: none;
+  border-radius: var(--kr-r-sm);
+  color: inherit;
+  cursor: pointer;
+  opacity: 0.7;
+  transition: opacity 0.15s, color 0.15s;
+}
+.wf-chain-pill-remove:hover {
+  opacity: 1;
+  color: #ff9aa9;
+}

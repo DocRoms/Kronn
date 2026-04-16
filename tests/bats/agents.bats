@@ -247,3 +247,42 @@ setup() {
     run _check_node_version "kiro-cli"
     assert_success
 }
+
+# ─── Ollama presence (added 0.4.1) ──────────────────────────────────────────
+
+@test "ollama is in _AGENT_NAMES" {
+    # Regression guard — if someone drops ollama from the parallel arrays
+    # the CLI silently ignores local models.
+    local found=0
+    for name in "${_AGENT_NAMES[@]}"; do
+        [[ "$name" == "ollama" ]] && found=1
+    done
+    [[ "$found" -eq 1 ]]
+}
+
+@test "_agent_idx: resolves ollama" {
+    run _agent_idx "ollama"
+    assert_success
+    # Index must be valid (≥0); we don't hardcode position since it may
+    # shift if new agents are inserted before it.
+    local idx="$output"
+    [[ "$idx" -ge 0 ]]
+}
+
+@test "_check_node_version: returns 0 for ollama (no Node required)" {
+    run _check_node_version "ollama"
+    assert_success
+}
+
+@test "all parallel arrays have the same length (incl. ollama)" {
+    # Sanity: if one array is shorter than the others, detect_agents will
+    # read past the end and produce garbage.
+    local n=${#_AGENT_NAMES[@]}
+    [[ ${#_AGENT_ORIGINS[@]} -eq $n ]]
+    [[ ${#_AGENT_PKGS[@]} -eq $n ]]
+    [[ ${#_AGENT_LABELS[@]} -eq $n ]]
+    [[ ${#_AGENT_NODE_MINS[@]} -eq $n ]]
+    [[ ${#_AGENT_PATHS[@]} -eq $n ]]
+    [[ ${#_AGENT_VERSIONS[@]} -eq $n ]]
+    [[ ${#_AGENT_LATESTS[@]} -eq $n ]]
+}

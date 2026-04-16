@@ -86,7 +86,7 @@ const makeDiscussion = (id: string, msgCount: number): Discussion => ({
   participants: ['ClaudeCode'],
   messages: [],
   message_count: msgCount,
-  archived: false,
+  archived: false, pinned: false,
   workspace_mode: 'Direct',
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',

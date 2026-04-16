@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import '../pages/DiscussionsPage.css';
-import type { Discussion, AgentDetection, AgentType, Skill, Directive, ContextFile } from '../types/generated';
+import type { Discussion, AgentDetection, AgentType, Skill, Directive, ContextFile, QuickPrompt } from '../types/generated';
 import { isUsable } from '../lib/constants';
 import { audioBufferToFloat32, transcribeAudio } from '../lib/stt-engine';
 import { loadDraft, saveDraft, clearDraft } from '../lib/chat-drafts';
@@ -59,6 +59,12 @@ export interface ChatInputProps {
   onUploadFiles?: (files: File[]) => void;
   onDeleteContextFile?: (fileId: string) => void;
   uploadingFiles?: boolean;
+  /** QPs without variables — shown in the "chain" picker while sending. */
+  chainableQPs?: QuickPrompt[];
+  /** Currently queued QP (will auto-fire when the agent finishes). */
+  queuedQP?: QuickPrompt | null;
+  onQueueQP?: (qp: QuickPrompt) => void;
+  onCancelQueuedQP?: () => void;
   toast: ToastFn;
   t: (key: string, ...args: any[]) => string;
 }
@@ -84,6 +90,10 @@ export function ChatInput({
   onUploadFiles,
   onDeleteContextFile,
   uploadingFiles = false,
+  chainableQPs = [],
+  queuedQP = null,
+  onQueueQP,
+  onCancelQueuedQP,
   toast: _toast,
   t,
 }: ChatInputProps) {
@@ -250,6 +260,7 @@ export function ChatInput({
   const sttCancelledRef = useRef(false);
 
   const [showDebatePopover, setShowDebatePopover] = useState(false);
+  const [showQPPicker, setShowQPPicker] = useState(false);
   const [debateAgents, setDebateAgents] = useState<AgentType[]>([]);
   const [debateRounds, setDebateRounds] = useState(2);
   const [debateSkillIds, setDebateSkillIds] = useState<string[]>(['token-saver', 'devils-advocate']);
@@ -950,14 +961,63 @@ export function ChatInput({
           </span>
 
           {sending ? (
-            <button
-              className="disc-stop-btn"
-              onClick={onStop}
-              title={t('disc.stopThinking')}
-              aria-label={t('disc.stopThinking')}
-            >
-              <StopCircle size={16} />
-            </button>
+            <div className="flex-row gap-2" style={{ alignItems: 'center' }}>
+              {/* Queued QP badge — click to cancel */}
+              {queuedQP && onCancelQueuedQP && (
+                <button
+                  type="button"
+                  className="disc-queued-qp-badge"
+                  onClick={onCancelQueuedQP}
+                  title={t('disc.cancelQueuedQP')}
+                >
+                  <Zap size={10} />
+                  <span>{queuedQP.icon} {queuedQP.name}</span>
+                  <X size={9} />
+                </button>
+              )}
+              {/* Queue a QP picker — only QPs without variables */}
+              {!queuedQP && onQueueQP && chainableQPs.length > 0 && (
+                <div className="relative">
+                  <button
+                    type="button"
+                    className="disc-chain-qp-btn"
+                    onClick={() => setShowQPPicker(prev => !prev)}
+                    title={t('disc.chainQP')}
+                    aria-label={t('disc.chainQP')}
+                  >
+                    <Zap size={13} />
+                  </button>
+                  {showQPPicker && (
+                    <div className="disc-mention-popover disc-qp-picker">
+                      {chainableQPs.map(qp => (
+                        <button
+                          key={qp.id}
+                          type="button"
+                          className="disc-mention-item"
+                          onMouseDown={e => {
+                            e.preventDefault();
+                            onQueueQP(qp);
+                            setShowQPPicker(false);
+                          }}
+                        >
+                          <span>{qp.icon}</span>
+                          <span className="font-semibold">{qp.name}</span>
+                          {qp.description && <span className="text-muted text-xs" style={{ marginLeft: 4 }}>{qp.description}</span>}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+              <button
+                className="disc-stop-btn"
+                onClick={onStop}
+                title={t('disc.stopThinking')}
+                aria-label={t('disc.stopThinking')}
+              >
+                <StopCircle size={16} />
+              </button>
+            </div>
           ) : (
             <>
               {onUploadFiles && (

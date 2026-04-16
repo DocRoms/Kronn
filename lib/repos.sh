@@ -33,43 +33,34 @@ scan_repos() {
     done
 }
 
-# Detect AI context in a repo. Returns a status string.
+# Detect AI context in a repo. Returns a compact, dashboard-like status string.
+# Format: "Audited · 6 MCPs" or "No template" or "3 MCPs" — matches the web UI badges.
 detect_ai_context() {
     local repo_dir="$1"
     local parts=()
 
-    # ai/ folder
+    # Audit status — mirrors the 4-state badge from the web dashboard
     if [[ -d "$repo_dir/ai" && -f "$repo_dir/ai/index.md" ]]; then
-        parts+=("ai/")
+        if grep -q "KRONN:VALIDATED" "$repo_dir/ai/index.md" 2>/dev/null; then
+            parts+=("Validated")
+        elif [[ -f "$repo_dir/ai/checksums.json" ]]; then
+            parts+=("Audited")
+        else
+            parts+=("Template")
+        fi
     fi
 
-    # CLAUDE.md or other redirectors
-    local redirectors=0
-    for f in CLAUDE.md .cursorrules .windsurfrules .clinerules; do
-        [[ -f "$repo_dir/$f" ]] && ((redirectors++))
-    done
-    if (( redirectors > 0 )); then
-        parts+=("${redirectors} redirectors")
-    fi
-
-    # MCP config
+    # MCP count — the one metric users said they want
     local mcp_count=0
     if [[ -f "$repo_dir/.mcp.json" ]]; then
         mcp_count=$(grep -c '"command"' "$repo_dir/.mcp.json" 2>/dev/null || echo 0)
-        parts+=("${mcp_count} MCPs")
-    elif [[ -f "$repo_dir/.mcp.json.example" ]]; then
-        parts+=("MCP template")
-    fi
-
-    # .claude/ settings
-    if [[ -d "$repo_dir/.claude" ]]; then
-        parts+=(".claude/")
+        (( mcp_count > 0 )) && parts+=("${mcp_count} MCPs")
     fi
 
     if [[ ${#parts[@]} -eq 0 ]]; then
         echo "not configured"
     else
-        local IFS=" + "
+        local IFS=" · "
         echo "${parts[*]}"
     fi
 }
@@ -86,11 +77,15 @@ select_repo() {
         local name="${REPO_NAMES[$i]}"
         local status="${REPO_STATUS[$i]}"
 
-        if [[ "$status" == "not configured" ]]; then
-            options+=("${name} ${DIM}(${status})${RESET}")
-        else
-            options+=("${name} ${GREEN}(${status})${RESET}")
-        fi
+        # Color-code by audit state — matches the web UI badge palette
+        local color="$DIM"
+        case "$status" in
+            Validated*)  color="$GREEN" ;;
+            Audited*)    color="$GREEN" ;;
+            Template*)   color="$YELLOW" ;;
+            *MCP*)       color="$CYAN" ;;
+        esac
+        options+=("${name}  ${color}${status}${RESET}")
     done
 
     options+=("${CYAN}Launch Web interface${RESET}")

@@ -414,6 +414,9 @@ export interface WorkflowStep {
   batch_max_items?: number | null;
   /// "Direct" (default) or "Isolated" — per-child git worktree for parallel code writes.
   batch_workspace_mode?: string | null;
+  /** Quick Prompt IDs to fire sequentially after the initial one inside each
+   * child discussion. Progress only increments when the full chain finishes. */
+  batch_chain_prompt_ids?: string[];
   // ─── Notify fields (0.3.5) ─────────────────────────────────────────
   // Only meaningful when step_type.type === 'Notify'.
   notify_config?: NotifyConfig | null;
@@ -789,6 +792,7 @@ export interface Discussion {
   directive_ids?: string[];
   tier?: ModelTier;
   archived: boolean;
+  pinned: boolean;
   workspace_mode: string;
   workspace_path?: string | null;
   worktree_branch?: string | null;

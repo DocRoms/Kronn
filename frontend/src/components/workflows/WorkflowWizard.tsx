@@ -1148,6 +1148,70 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                             </label>
                           );
                         })()}
+                        {/* QP Chain (Phase 2) — run N more QPs sequentially in each child */}
+                        {(() => {
+                          const chain = step.batch_chain_prompt_ids ?? [];
+                          // Chain candidates: at most 1 variable. The backend
+                          // substitutes the batch item value (e.g. "EW-1234")
+                          // into that first var when the chain QP fires —
+                          // same mechanism as the primary QP. QPs with 2+ vars
+                          // are excluded because we only have one value per
+                          // batch item to substitute.
+                          const chainCandidates = availableQuickPrompts.filter(
+                            qp => qp.variables.length <= 1 && qp.id !== step.batch_quick_prompt_id && !chain.includes(qp.id),
+                          );
+                          return (
+                            <div className="mt-3">
+                              <label className="text-xs text-muted">{t('wiz.batchChain')}</label>
+                              <p className="text-xs text-ghost mb-2">{t('wiz.batchChainHint')}</p>
+                              {chain.length > 0 && (
+                                <div className="flex-row flex-wrap gap-2 mb-2">
+                                  {chain.map((qpId, chainIdx) => {
+                                    const qp = availableQuickPrompts.find(q => q.id === qpId);
+                                    const label = qp ? `${qp.icon} ${qp.name}` : `⚠️ ${qpId}`;
+                                    return (
+                                      <span key={`${qpId}-${chainIdx}`} className="wf-chain-pill">
+                                        <span className="wf-chain-pos">{chainIdx + 1}.</span>
+                                        <span>{label}</span>
+                                        <button
+                                          type="button"
+                                          className="wf-chain-pill-remove"
+                                          title={t('wiz.batchChainRemove')}
+                                          onClick={() => {
+                                            const next = [...chain];
+                                            next.splice(chainIdx, 1);
+                                            updateStep(i, { batch_chain_prompt_ids: next });
+                                          }}
+                                        >
+                                          <X size={10} />
+                                        </button>
+                                      </span>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                              {chainCandidates.length > 0 ? (
+                                <select
+                                  className="wf-select text-sm"
+                                  value=""
+                                  onChange={e => {
+                                    if (!e.target.value) return;
+                                    updateStep(i, { batch_chain_prompt_ids: [...chain, e.target.value] });
+                                  }}
+                                >
+                                  <option value="">{t('wiz.batchChainAdd')}</option>
+                                  {chainCandidates.map(qp => (
+                                    <option key={qp.id} value={qp.id}>
+                                      {qp.icon} {qp.name}
+                                    </option>
+                                  ))}
+                                </select>
+                              ) : (
+                                <p className="text-xs text-ghost">{t('wiz.batchChainEmpty')}</p>
+                              )}
+                            </div>
+                          );
+                        })()}
                       </>
                     )}
                   </div>

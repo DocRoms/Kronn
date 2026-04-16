@@ -7,6 +7,57 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.4.2] — 2026-04-17
+
+### Added
+- **Discussion favorites / pin** — star icon in the ChatHeader (always visible, click to toggle). Pinned discussions appear in a dedicated "Favorites" section at the top of the sidebar, cross-project, sorted by last activity. Small `★` indicator on sidebar items for pinned discussions. Migration 033 adds `discussions.pinned` column. `PATCH /api/discussions/:id` accepts `{ pinned: bool }`
+- **Unread badges on group headers** — the sidebar now shows an accent badge with the unread count on every group header (global, org, project), visible whether the group is collapsed or expanded. Previously, unread badges were only on individual discussion items (and clipped by overflow)
+- **QP Chain — Phase 2 (workflow engine)** — `batch_chain_prompt_ids: string[]` on `WorkflowStep`. When a `BatchQuickPrompt` step fans out to N discussions, each child now runs the initial QP **then the full chain sequentially** inside the same conversation. The batch progress counter only bumps when the ENTIRE chain finishes for a given discussion. `spawn_agent_run_with_chain(state, disc_id, chain_ids, batch_item)` injects each chain QP's prompt as a User message between runs (author `⚡ <qp.name>`) and **renders the QP template with the same batch item value** (e.g. `"EW-1234"`) that the primary QP received — so `analyse → review → summary` on ticket `EW-1234` propagates the ticket ID through all three QPs. Chain QPs may have up to 1 variable (the first variable gets the batch item). Phase 1 (queue-a-QP-mid-stream in a single discussion) remains available for manual use
+- **QP Chain — Workflow Wizard UI** — BatchQuickPrompt step form now has a "Chain more Quick Prompts (optional)" section. Chain QPs appear as ordered pills (`1. ⚡ Name`) with click-to-remove. Candidates = QPs with ≤ 1 variable (excluding the primary QP and already-chained). Hint explains the batch-item-value propagation. Also displayed as a labeled row in `WorkflowDetail` so configured chains are visible when inspecting an existing workflow
+- **QP Chain UI — ChatInput picker** — while the agent is streaming, a ⚡ button next to ⏹ opens a popover of chainable QPs (those with no variables). The queued QP shows as a pulsing accent badge that click-to-cancels. Auto-fires on the `sending: true → false` edge. Extracted as the `useQpChain` hook (`frontend/src/hooks/useQpChain.ts`, 7 dedicated tests) — ref-based `onFire` pattern so callers don't need to memoize their send handler
+- **rAF-batched stream writer hook** — `useRafBatchedStream` (`frontend/src/hooks/useRafBatchedStream.ts`, 5 tests). Collapses dozens of SSE token deltas per frame into one `setState` call. Extracted from `DiscussionsPage` (was inline there), now reusable for any future stream/chunk consumer
+- **Custom skill editing** — Settings → Skills now shows a ✏️ edit button on every custom skill card (previously only delete was available, forcing delete+recreate for a typo fix). Reuses the create-form with prefilled values; submit dispatches to `skillsApi.update()` instead of `create()`. The markdown body is stripped of its frontmatter before populating the textarea so each edit round doesn't nest a new `---` block. New i18n keys `skills.editCustom` + `skills.saveChanges` (fr/en/es)
+- **`.mcp.json` freshness guard** — `make_agent_stream` now re-syncs the project's `.mcp.json` to disk RIGHT BEFORE each agent run, plus logs an explicit warning if the file is missing when a project is set. Covers the case where MCPs were toggled/added after the last startup sync (notably hit batch discussions that spawned right after a new MCP config)
+- **CLI: Ollama detection** — the CLI now detects Ollama as the 7th agent. Install via `curl -fsSL https://ollama.com/install.sh | sh`. Parallel arrays sized dynamically (no more "unbound variable" on new agents)
+- **CLI: API-first hybrid mode** — when the backend is running, `kronn status`, `kronn agents`, `kronn projects` delegate to the REST API (instant, complete). Falls back to local shell detection when offline. New `lib/api-client.sh` wrapper with `kronn_api_available` probe + `kronn_api_show_agents` / `kronn_api_show_status` formatters
+- **CLI: project action menu** — selecting a project now opens a sub-menu: Install template, Launch audit, Launch briefing, View MCPs, Open in dashboard. Actions adapt to audit state. Deep-link: "Open in dashboard" scrolls directly to the project card via `#project-<id>` hash
+- **CLI: `--debug` auto-tails logs** — `./kronn start --debug` now streams logs automatically after boot. `./kronn logs` shows grep helpers. Help section explains where logs live
+- **Dashboard deep-link** — `http://localhost:3140/#project-<id>` auto-expands and smooth-scrolls to the matching project card. Waits for project list to load before scrolling (double-rAF timing). Hash cleaned after consumption
+
+### Changed
+- **`discussions.rs` extracted** — the ~3400-line monolith was split: pure agent/text helpers moved to `api/disc_helpers.rs` (9 fns, 15 tests — `agent_prompt_budget`, `auth_mode_for`, `agent_display_name`, `smart_truncate`, `summary_msg_threshold/cooldown`, `is_compact_agent`, `language_instruction`, `estimate_extra_context_len`), and pure prompt builders moved to `api/disc_prompts.rs` (3 fns + `OrchestrationContext`, 9 tests — `build_agent_prompt`, `build_orchestration_prompt`, `build_synthesis_prompt`). `discussions.rs` is now ~2880 lines (**-15 %**, -518 lines). Behaviour unchanged — extraction is pure, tested in isolation, zero runtime diff
+- **`DiscussionsPage.tsx` shrunk** — from 1783 → 1736 lines after extracting `useQpChain` and `useRafBatchedStream`. Same behaviour, cleaner separation of concerns
+- **Settings → Skills card — pill overflow fix** — long skill names (e.g. `euronews-front-conventions`) used to push the `~XXX tok` badge out of the 220 px card. Header row now wraps gracefully: title stays on top, pill cluster (category + builtin/custom + token estimate) wraps below if space is tight. `overflow: hidden` on the card itself as a belt-and-suspenders
+- **CLI: repo status display** — replaced verbose `ai/ 4 redirectors 6 MCPs .claude/` with compact dashboard-like format: `Validated · 9 MCPs` / `Audited · 6 MCPs` / `Template · 4 MCPs`. Color-coded by audit state (green/yellow/cyan/grey)
+- **CLI boot reorder** — `./kronn start` now asks "web UI vs CLI" BEFORE running agent detection. The web UI has its own detection (instant via the backend API), so the ~5-10 s CLI sweep is skipped when the user picks web. Pure UX win on the most common path
+- **CLI agent detection UX** — live progress line (`Scanning 3/7 — Vibe (Mistral)...`) replaced the frozen terminal. `show_detected_agents` prints every agent line immediately with a ⏳ placeholder, then updates each line in-place (ANSI `\033[NA` / `\033[NB` cursor moves) as the `npm view` update check returns. `check_agent_updates` (slow npm view × N) removed from the default flow — only runs when entering the manage-agents menu. Single-agent rescan after install/uninstall/update instead of full 7-agent sweep
+- **CLI: `--version` timeout** — reduced from 5s to 3s with `</dev/null` to prevent agents that read stdin (Copilot, Kiro) from hanging indefinitely
+
+### Fixed
+- **Batch focus on sidebar** — clicking a Quick Prompt batch launch now passes the parent `batch_run_id` back to `Dashboard`, which threads it through `setFocusBatchId`. The sidebar auto-expands the project group + the batch group + scrolls to it after the refetch settles. Previously only the first discussion was selected with no batch-group visibility
+- **Batch double-run** — `onBatchLaunched` used to set `setAutoRunDiscussionId`, triggering a second agent run for the first child (bug seen 2026-04-10: 7/6 ok on a 6-item batch). Now uses `setOpenDiscussionId` which opens without auto-running
+- **Unread badge + pin star clipped by title overflow** — `.disc-item-title` had `overflow: hidden` which clipped flex children (badge, star) on long titles. Title text now truncates in its own `<span>` while badge/star remain outside the overflow zone
+- **CLI: `make_args[@]: unbound variable` on macOS** — Bash 3.2 + `set -u` treats an empty array expansion as unbound. Fixed with `${make_args[@]+"${make_args[@]}"}` pattern (same as `remaining[@]` elsewhere)
+- **CLI: Copilot hangs during detection** — `copilot --version` reads from stdin indefinitely. Fixed with `</dev/null` + 3s timeout. Agent still detected with version `?`
+- **CLI: `_AGENT_LATESTS[$idx]: unbound variable`** — `detect_agents()` reset result arrays to 6 hardcoded elements after Ollama was added as 7th agent. Arrays now sized dynamically from `_AGENT_NAMES` length
+
+### Infra
+- **Tech-debt tracking** — three new detailed entries in `ai/tech-debt/`:
+  - `TD-20260417-models-monolith.md` — `backend/src/models/mod.rs` (~2225 L, 147 types) — planned split into 15 sub-modules (15 helpers `default_*` scattered, needs dedicated session)
+  - `TD-20260417-audit-monolith.md` — `backend/src/api/audit.rs` (~1966 L) — prerequisite: extract an `AuditEngine` abstraction before splitting handlers
+  - `TD-20260417-projects-monolith.md` — `backend/src/api/projects.rs` (~1819 L) — sub-directory split (crud/bootstrap/clone/git/…), lowest-risk of the three
+  - `TD-20260328-discussions-backend` status updated to partial-progress after the disc_helpers/disc_prompts extraction
+- **`ai/` docs refresh** — `repo-map.md` LOC figures, `index.md` Last-updated date + version
+- **CLI: project menu clears ANSI ghost lines** — `printf "\033[J"` after `menu_choice` + "Press Enter to continue" pause between action output and menu re-render. Fixes the "text printed on top of the old menu" visual glitch
+
+### Tests
+- Backend: **1090** (was 1026 in 0.4.1, **+64**) — +migration 033 coverage, +15 for `disc_helpers`, +9 for `disc_prompts`, +2 for `batch_chain_prompt_ids` (DB roundtrip + serde skip-if-empty)
+- Frontend: **629** (was 610, **+19**) — 7 for `useQpChain`, 5 for `useRafBatchedStream`, 6 for `ChatInput` QP-chain picker, 1 for `SettingsPage` custom-skill edit button
+- Shell: **195** (was 196 — 1 test removed during repos.sh refactor, 4 added for Ollama)
+- Build: `pnpm build` ✅ · `cargo clippy -- -D warnings` ✅ · `tsc --noEmit` ✅
+
+---
+
 ## [0.4.1] — 2026-04-15
 
 ### Added

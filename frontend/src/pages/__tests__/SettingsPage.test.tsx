@@ -194,6 +194,30 @@ describe('SettingsPage', () => {
     expect(body).toContain('Security auditing');
   });
 
+  it('custom skill card exposes Edit + Delete; builtin only Delete', async () => {
+    // Regression: before 2026-04-17, custom skills could only be deleted,
+    // not edited — users had to delete+recreate for a typo fix.
+    await wrap(<SettingsPage {...defaultProps} />);
+    const allButtons = document.querySelectorAll('.set-accordion-header');
+    allButtons.forEach(btn => fireEvent.click(btn));
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+    // Builtin skill (Rust) → no action buttons at all in its card header.
+    const rustCard = [...document.querySelectorAll('.set-item-card')].find(
+      card => card.textContent?.includes('Rust'),
+    );
+    expect(rustCard).toBeTruthy();
+    expect(rustCard!.querySelector('button[title="Modifier ce skill"]')).toBeNull();
+
+    // Custom skill (Security) → Edit button visible with the i18n title.
+    const secCard = [...document.querySelectorAll('.set-item-card')].find(
+      card => card.textContent?.includes('Security auditing'),
+    );
+    expect(secCard).toBeTruthy();
+    const editBtn = secCard!.querySelector('button[title="Modifier ce skill"]');
+    expect(editBtn).toBeTruthy();
+  });
+
   it('renders directive cards after opening accordion', async () => {
     await wrap(<SettingsPage {...defaultProps} />);
     // Directives are behind an accordion — open all
