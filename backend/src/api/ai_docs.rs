@@ -109,7 +109,7 @@ pub async fn search_ai_files(
         let mut results = Vec::new();
         search_ai_dir_recursive(&ai_dir, "ai", &q.to_lowercase(), &mut results);
         // Sort by match_count descending
-        results.sort_by(|a, b| b.match_count.cmp(&a.match_count));
+        results.sort_by_key(|r| std::cmp::Reverse(r.match_count));
         results
     }).await.unwrap_or_default();
 

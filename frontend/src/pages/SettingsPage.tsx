@@ -8,7 +8,7 @@ import type { AgentDetection, AgentsConfig, Project, Skill, Directive } from '..
 import type { ToastFn } from '../hooks/useToast';
 import {
   MessageSquare, Cpu, Zap, AlertTriangle, Save,
-  HardDrive, Plus, Trash2, Download, Upload, Check,
+  HardDrive, Plus, Trash2, Pencil, Download, Upload, Check,
   RefreshCw, X, Eye, EyeOff,
   Layers, FolderSearch, Filter, FileText,
   Shield, Globe, Copy, Server, Mic, Volume2, HelpCircle, ChevronRight,
@@ -77,6 +77,9 @@ export function SettingsPage({
   });
   const [availableSkills, setAvailableSkills] = useState<Skill[]>([]);
   const [showCreateSkill, setShowCreateSkill] = useState(false);
+  // Non-null when editing an existing custom skill — same form, different submit
+  // target. Cleared when the form closes.
+  const [editingSkillId, setEditingSkillId] = useState<string | null>(null);
   const [newSkillName, setNewSkillName] = useState('');
   const [newSkillDesc, setNewSkillDesc] = useState('');
   const [newSkillIcon, setNewSkillIcon] = useState('Star');
@@ -518,20 +521,43 @@ export function SettingsPage({
                   <div className="text-sm text-muted mb-3">{skill.description}</div>
                 )}
                 {!skill.is_builtin && (
-                  <button
-                    className="set-icon-btn text-error"
-                    style={{ padding: '2px 6px', borderColor: 'rgba(255,77,106,0.2)' }}
-                    onClick={async () => {
-                      if (!confirm(t('skills.deleteConfirm'))) return;
-                      try {
-                        await skillsApi.delete(skill.id);
-                        setAvailableSkills(prev => prev.filter(s => s.id !== skill.id));
-                        toast(t('skills.remove'), 'success');
-                      } catch (err) { console.warn('Settings action failed:', err); }
-                    }}
-                  >
-                    <Trash2 size={10} />
-                  </button>
+                  <div className="flex-row gap-2">
+                    <button
+                      className="set-icon-btn"
+                      style={{ padding: '2px 6px' }}
+                      title={t('skills.editCustom')}
+                      onClick={() => {
+                        // Strip the frontmatter before populating the textarea —
+                        // the backend re-generates it from the form fields on save.
+                        // Without stripping, each edit round would nest a new
+                        // frontmatter block inside the content body.
+                        const body = skill.content.replace(/^---\s*\n[\s\S]*?\n---\s*\n?/, '');
+                        setEditingSkillId(skill.id);
+                        setNewSkillName(skill.name);
+                        setNewSkillDesc(skill.description);
+                        setNewSkillIcon(skill.icon);
+                        setNewSkillCategory(skill.category);
+                        setNewSkillContent(body);
+                        setShowCreateSkill(true);
+                      }}
+                    >
+                      <Pencil size={10} />
+                    </button>
+                    <button
+                      className="set-icon-btn text-error"
+                      style={{ padding: '2px 6px', borderColor: 'rgba(255,77,106,0.2)' }}
+                      onClick={async () => {
+                        if (!confirm(t('skills.deleteConfirm'))) return;
+                        try {
+                          await skillsApi.delete(skill.id);
+                          setAvailableSkills(prev => prev.filter(s => s.id !== skill.id));
+                          toast(t('skills.remove'), 'success');
+                        } catch (err) { console.warn('Settings action failed:', err); }
+                      }}
+                    >
+                      <Trash2 size={10} />
+                    </button>
+                  </div>
                 )}
               </div>
             ))}
@@ -588,25 +614,43 @@ export function SettingsPage({
                   disabled={!newSkillName || !newSkillContent}
                   onClick={async () => {
                     try {
-                      const created = await skillsApi.create({
+                      const payload = {
                         name: newSkillName,
                         description: newSkillDesc,
                         icon: newSkillIcon,
                         category: newSkillCategory,
                         content: newSkillContent,
-                      });
-                      setAvailableSkills(prev => [...prev, created]);
+                      };
+                      if (editingSkillId) {
+                        // Backend update = delete + recreate. ID may shift if
+                        // name slug changed — replace in-place by filtering
+                        // out the old ID before appending the new record.
+                        const updated = await skillsApi.update(editingSkillId, payload);
+                        setAvailableSkills(prev => [
+                          ...prev.filter(s => s.id !== editingSkillId),
+                          updated,
+                        ]);
+                        toast(t('skills.saveChanges'), 'success');
+                      } else {
+                        const created = await skillsApi.create(payload);
+                        setAvailableSkills(prev => [...prev, created]);
+                        toast(t('skills.add'), 'success');
+                      }
                       setShowCreateSkill(false);
-                      setNewSkillName(''); setNewSkillIcon('Star'); setNewSkillContent('');
-                      toast(t('skills.add'), 'success');
+                      setEditingSkillId(null);
+                      setNewSkillName(''); setNewSkillDesc(''); setNewSkillIcon('Star'); setNewSkillContent('');
                     } catch (err) { console.warn('Settings action failed:', err); }
                   }}
                 >
-                  <Check size={12} /> {t('skills.add')}
+                  <Check size={12} /> {editingSkillId ? t('skills.saveChanges') : t('skills.add')}
                 </button>
                 <button
                   className="set-icon-btn"
-                  onClick={() => { setShowCreateSkill(false); setNewSkillName(''); setNewSkillIcon('Star'); setNewSkillContent(''); }}
+                  onClick={() => {
+                    setShowCreateSkill(false);
+                    setEditingSkillId(null);
+                    setNewSkillName(''); setNewSkillDesc(''); setNewSkillIcon('Star'); setNewSkillContent('');
+                  }}
                 >
                   <X size={12} />
                 </button>

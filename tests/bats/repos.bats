@@ -38,7 +38,9 @@ teardown() {
     echo "# Index" > "$TEST_TMPDIR/parent/configured/ai/index.md"
 
     scan_repos "$TEST_TMPDIR/parent"
-    [[ "${REPO_STATUS[0]}" == *"ai/"* ]]
+    # New format (0.4.1): audit state instead of "ai/" — ai/index.md present
+    # without checksums.json = "Template" state.
+    [[ "${REPO_STATUS[0]}" == *"Template"* ]]
 }
 
 @test "scan_repos: returns empty arrays for directory with no repos" {
@@ -89,13 +91,13 @@ teardown() {
     assert_output "not configured"
 }
 
-@test "detect_ai_context: detects ai/ directory" {
+@test "detect_ai_context: detects ai/ as Template state" {
     mkdir -p "$TEST_TMPDIR/repo/ai"
     echo "# Index" > "$TEST_TMPDIR/repo/ai/index.md"
 
     run detect_ai_context "$TEST_TMPDIR/repo"
     assert_success
-    assert_output --partial "ai/"
+    assert_output --partial "Template"
 }
 
 @test "detect_ai_context: requires ai/index.md (not just ai/ directory)" {
@@ -107,36 +109,35 @@ teardown() {
     assert_output "not configured"
 }
 
-@test "detect_ai_context: detects CLAUDE.md redirector" {
+@test "detect_ai_context: CLAUDE.md alone is not configured (need ai/index.md for audit status)" {
+    # Redirectors without ai/index.md aren't shown in the new compact format —
+    # the dashboard cares about audit state + MCP count, not raw file presence.
     mkdir -p "$TEST_TMPDIR/repo"
     echo "Read ai/index.md" > "$TEST_TMPDIR/repo/CLAUDE.md"
 
     run detect_ai_context "$TEST_TMPDIR/repo"
     assert_success
-    assert_output --partial "1 redirectors"
+    assert_output "not configured"
 }
 
-@test "detect_ai_context: counts multiple redirectors" {
-    mkdir -p "$TEST_TMPDIR/repo"
-    echo "x" > "$TEST_TMPDIR/repo/CLAUDE.md"
-    echo "x" > "$TEST_TMPDIR/repo/.cursorrules"
-    echo "x" > "$TEST_TMPDIR/repo/.windsurfrules"
+@test "detect_ai_context: Audited state when checksums.json exists" {
+    mkdir -p "$TEST_TMPDIR/repo/ai"
+    echo "# Index" > "$TEST_TMPDIR/repo/ai/index.md"
+    echo "{}" > "$TEST_TMPDIR/repo/ai/checksums.json"
 
     run detect_ai_context "$TEST_TMPDIR/repo"
     assert_success
-    assert_output --partial "3 redirectors"
+    assert_output --partial "Audited"
 }
 
-@test "detect_ai_context: detects all 4 redirectors" {
-    mkdir -p "$TEST_TMPDIR/repo"
-    echo "x" > "$TEST_TMPDIR/repo/CLAUDE.md"
-    echo "x" > "$TEST_TMPDIR/repo/.cursorrules"
-    echo "x" > "$TEST_TMPDIR/repo/.windsurfrules"
-    echo "x" > "$TEST_TMPDIR/repo/.clinerules"
+@test "detect_ai_context: Validated state when KRONN:VALIDATED marker present" {
+    mkdir -p "$TEST_TMPDIR/repo/ai"
+    echo -e "# Index\n<!-- KRONN:VALIDATED:2026-04-15 -->" > "$TEST_TMPDIR/repo/ai/index.md"
+    echo "{}" > "$TEST_TMPDIR/repo/ai/checksums.json"
 
     run detect_ai_context "$TEST_TMPDIR/repo"
     assert_success
-    assert_output --partial "4 redirectors"
+    assert_output --partial "Validated"
 }
 
 @test "detect_ai_context: detects MCP config with server count" {
@@ -175,27 +176,25 @@ JSON
     refute_output --partial "MCP template"
 }
 
-@test "detect_ai_context: detects .claude/ directory" {
+@test "detect_ai_context: .claude/ alone is not configured" {
+    # In the new compact format, .claude/ without ai/index.md is noise.
     mkdir -p "$TEST_TMPDIR/repo/.claude"
 
     run detect_ai_context "$TEST_TMPDIR/repo"
     assert_success
-    assert_output --partial ".claude/"
+    assert_output "not configured"
 }
 
-@test "detect_ai_context: combines all signals with + separator" {
-    mkdir -p "$TEST_TMPDIR/repo/ai" "$TEST_TMPDIR/repo/.claude"
+@test "detect_ai_context: combines audit state + MCP count with · separator" {
+    mkdir -p "$TEST_TMPDIR/repo/ai"
     echo "# Index" > "$TEST_TMPDIR/repo/ai/index.md"
-    echo "x" > "$TEST_TMPDIR/repo/CLAUDE.md"
     echo '{"mcpServers":{"gh":{"command":"npx"}}}' > "$TEST_TMPDIR/repo/.mcp.json"
 
     run detect_ai_context "$TEST_TMPDIR/repo"
     assert_success
-    assert_output --partial "ai/"
-    assert_output --partial "1 redirectors"
+    assert_output --partial "Template"
     assert_output --partial "1 MCPs"
-    assert_output --partial ".claude/"
-    assert_output --partial "+"
+    assert_output --partial "·"
 }
 
 # ─── ensure_gitignore ────────────────────────────────────────────────────────

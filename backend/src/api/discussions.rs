@@ -117,21 +117,13 @@ pub(crate) fn truncate_after_signal(text: &str, signal: &str) -> String {
     }
 }
 
-/// Per-agent prompt budget in characters.
-/// Leaves room for the agent's response within its context window.
-/// Conservative estimates — better to truncate safely than crash.
-fn agent_prompt_budget(agent_type: &AgentType) -> usize {
-    match agent_type {
-        AgentType::ClaudeCode => 400_000, // ~100K tokens, 200K+ window
-        AgentType::GeminiCli  => 800_000, // ~200K tokens, 1M window
-        AgentType::Codex      => 200_000, // ~50K tokens, GPT-5 128K+ window
-        AgentType::Kiro       => 400_000, // ~100K tokens, Claude via AWS Bedrock (200K window)
-        AgentType::CopilotCli => 200_000, // ~50K tokens, GPT-4o 128K window
-        AgentType::Vibe       =>  60_000, // ~15K tokens, Mistral 128K window (API mode)
-        AgentType::Ollama     => 100_000, // ~25K tokens, depends on model (llama3 128K window)
-        AgentType::Custom     =>  60_000, // reasonable default
-    }
-}
+use super::disc_helpers::{
+    agent_display_name, auth_mode_for, estimate_extra_context_len, summary_cooldown,
+    summary_msg_threshold,
+};
+use super::disc_prompts::{
+    build_agent_prompt, build_orchestration_prompt, build_synthesis_prompt, OrchestrationContext,
+};
 
 #[derive(Clone, Debug)]
 enum AgentStreamEvent {
@@ -266,6 +258,7 @@ pub async fn create(
         tier: req.tier,
         pin_first_message: false,
         archived: false,
+            pinned: false,
         workspace_mode: workspace_mode.clone(),
         workspace_path: None,
         worktree_branch: None,
@@ -346,6 +339,7 @@ pub async fn update(
 ) -> Json<ApiResponse<()>> {
     let title = req.title;
     let archived = req.archived;
+    let pinned = req.pinned;
     let skill_ids = req.skill_ids;
     let profile_ids = req.profile_ids;
     let directive_ids = req.directive_ids;
@@ -384,7 +378,7 @@ pub async fn update(
                 Some(id) => Some(id),       // real id = set project
             }
         });
-        let mut updated = crate::db::discussions::update_discussion(conn, &id, title.as_deref(), archived, pid_update)?;
+        let mut updated = crate::db::discussions::update_discussion(conn, &id, title.as_deref(), archived, pinned, pid_update)?;
         if let Some(ref ids) = skill_ids {
             updated = crate::db::discussions::update_discussion_skill_ids(conn, &id, ids)? || updated;
         }
@@ -744,9 +738,99 @@ pub async fn stop_agent(
 ///
 /// The `agent_semaphore` on `state` still caps concurrency across all fan-outs.
 pub async fn spawn_agent_run_background(state: AppState, discussion_id: String) {
-    let _sse = make_agent_stream(state, discussion_id, None).await;
-    // Drop the SSE stream — the agent keeps running via the detached task.
+    spawn_agent_run_with_chain(state, discussion_id, Vec::new(), None).await;
+}
+
+/// Spawn an agent run and, after it completes, execute chained Quick Prompts
+/// sequentially inside the SAME discussion. Each chain step:
+///
+/// 1. Load the QP → render its `prompt_template` with the batch item value
+///    substituted for the first variable (if any) → insert as a User message
+/// 2. Re-fire the agent (via `make_agent_stream`)
+/// 3. Wait for the agent to finish
+///
+/// The batch progress hook fires only after the final chain step.
+///
+/// `chain_prompt_ids` is the list of QP IDs to fire AFTER the initial run.
+/// Empty = no chain, same as `spawn_agent_run_background`.
+///
+/// `batch_item` is the raw item value (e.g. "EW-1234") that the primary
+/// QP consumed. When `Some`, every chain QP with a first variable gets
+/// that variable filled with the same value — so `analyse → review →
+/// summary` on ticket EW-1234 all receive `EW-1234` in their respective
+/// first var. When `None` (non-batch context), chain QPs are inserted
+/// verbatim; templates with unfilled `{{var}}` will reach the agent as-is.
+pub async fn spawn_agent_run_with_chain(
+    state: AppState,
+    discussion_id: String,
+    chain_prompt_ids: Vec<String>,
+    batch_item: Option<String>,
+) {
+    // First run — the initial QP prompt was already inserted by create_batch_run.
+    let _sse = make_agent_stream(state.clone(), discussion_id.clone(), None).await;
     drop(_sse);
+
+    // Chain: for each subsequent QP, inject its prompt and re-run the agent.
+    for (i, qp_id) in chain_prompt_ids.iter().enumerate() {
+        // Load the QP
+        let qp_id_clone = qp_id.clone();
+        let qp = match state.db.with_conn(move |conn| {
+            crate::db::quick_prompts::get_quick_prompt(conn, &qp_id_clone)
+        }).await {
+            Ok(Some(qp)) => qp,
+            Ok(None) => {
+                tracing::warn!("Chain QP '{}' not found — skipping (step {}/{})", qp_id, i + 1, chain_prompt_ids.len());
+                continue;
+            }
+            Err(e) => {
+                tracing::error!("Chain QP '{}' DB error: {} — aborting chain", qp_id, e);
+                break;
+            }
+        };
+
+        // Render the chain QP's template with the batch item value.
+        // Mirrors `render_qp_prompt` in `workflows::batch_step`: fills the
+        // first variable's `{{name}}` placeholder. Safe when the QP has no
+        // variables (replace is a no-op) or no batch item (skipped).
+        let rendered_content = match (&batch_item, qp.variables.first()) {
+            (Some(item), Some(first_var)) => {
+                let placeholder = format!("{{{{{}}}}}", first_var.name);
+                qp.prompt_template.replace(&placeholder, item)
+            }
+            _ => qp.prompt_template.clone(),
+        };
+
+        // Insert the QP prompt as a User message
+        let msg = crate::models::DiscussionMessage {
+            id: uuid::Uuid::new_v4().to_string(),
+            role: crate::models::MessageRole::User,
+            content: rendered_content,
+            agent_type: None,
+            timestamp: chrono::Utc::now(),
+            tokens_used: 0,
+            auth_mode: None,
+            model_tier: None,
+            cost_usd: None,
+            author_pseudo: Some(format!("⚡ {}", qp.name)),
+            author_avatar_email: None,
+        };
+        let disc_id_for_insert = discussion_id.clone();
+        if let Err(e) = state.db.with_conn(move |conn| {
+            crate::db::discussions::insert_message(conn, &disc_id_for_insert, &msg)
+        }).await {
+            tracing::error!("Failed to insert chain QP '{}' message: {} — aborting chain", qp.name, e);
+            break;
+        }
+
+        tracing::info!(
+            "Chain QP '{}'  ({}/{}) injected into disc {} — firing agent",
+            qp.name, i + 1, chain_prompt_ids.len(), discussion_id
+        );
+
+        // Re-fire the agent
+        let _sse = make_agent_stream(state.clone(), discussion_id.clone(), None).await;
+        drop(_sse);
+    }
 }
 
 /// Shared SSE stream builder
@@ -850,10 +934,54 @@ async fn make_agent_stream(
         }
     }
 
-    // For general discussions (no project), write .mcp.json + build MCP context
+    // For general discussions (no project), write .mcp.json + build MCP context.
+    // For project discussions, also ensure the .mcp.json is fresh on disk
+    // (covers the case where MCPs were added/toggled since the last sync).
     let global_mcp_context = if project_path.is_empty() {
+        tracing::debug!(target: "kronn::mcp", disc_id = %discussion_id, "no project — loading global MCPs only");
         super::disc_git::prepare_general_mcp(&state, &workspace_path).await
     } else {
+        // Re-sync the project's .mcp.json BEFORE the agent reads it.
+        // Without this, MCPs toggled/added after the last startup sync
+        // (or a batch discussion spawned right after a new MCP config)
+        // would have a stale or empty .mcp.json on disk.
+        if let Some(ref pid) = disc.project_id {
+            let secret = {
+                let cfg = state.config.read().await;
+                cfg.encryption_secret.clone()
+            };
+            if let Some(secret) = secret {
+                let pid = pid.clone();
+                let _ = state.db.with_conn(move |conn| {
+                    let _ = crate::core::mcp_scanner::sync_project_mcps_to_disk(conn, &pid, &secret);
+                    Ok::<_, anyhow::Error>(())
+                }).await;
+            }
+        }
+
+        // Log what the agent will see so debug-mode users can verify
+        let mcp_path = crate::core::scanner::resolve_host_path(&project_path).join(".mcp.json");
+        if mcp_path.exists() {
+            let server_count = std::fs::read_to_string(&mcp_path)
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|v| v.get("mcpServers").and_then(|m| m.as_object()).map(|m| m.len()))
+                .unwrap_or(0);
+            tracing::debug!(target: "kronn::mcp",
+                disc_id = %discussion_id,
+                project = %project_path,
+                mcp_json_servers = server_count,
+                "project .mcp.json found — {} MCP server(s) will be available to the agent",
+                server_count,
+            );
+        } else {
+            tracing::warn!(target: "kronn::mcp",
+                disc_id = %discussion_id,
+                project = %project_path,
+                "project .mcp.json NOT FOUND — agent will have NO MCP tools. \
+                 Check: is the project linked to any MCP config? Is the MCP global or project-scoped?",
+            );
+        }
         None
     };
 
@@ -2090,277 +2218,9 @@ pub async fn orchestrate(
     Sse::new(crate::core::sse_limits::bounded(stream))
 }
 
-fn auth_mode_for(agent_type: &AgentType, tokens: &TokensConfig) -> String {
-    let provider = match agent_type {
-        AgentType::ClaudeCode => "anthropic",
-        AgentType::Codex => "openai",
-        AgentType::GeminiCli => "google",
-        AgentType::Vibe => "mistral",
-        AgentType::Kiro => "aws",
-        AgentType::CopilotCli => "github",
-        AgentType::Ollama => "ollama",
-        AgentType::Custom => "",
-    };
-    let has_key = tokens.active_key_for(provider).is_some();
-    let is_disabled = tokens.disabled_overrides.iter().any(|d| d == provider);
-    if has_key && !is_disabled { "override".to_string() } else { "local".to_string() }
-}
-
-fn agent_display_name(agent_type: &AgentType) -> String {
-    match agent_type {
-        AgentType::ClaudeCode => "Claude Code".into(),
-        AgentType::Codex => "Codex".into(),
-        AgentType::Vibe => "Vibe".into(),
-        AgentType::GeminiCli => "Gemini CLI".into(),
-        AgentType::Kiro => "Kiro".into(),
-        AgentType::CopilotCli => "GitHub Copilot".into(),
-        AgentType::Ollama => "Ollama".into(),
-        AgentType::Custom => "Custom".into(),
-    }
-}
-
-/// Truncate text at the last sentence boundary before `max_len`, falling back to word boundary.
-/// Uses `floor_char_boundary` to avoid panicking on multi-byte UTF-8 (accents, emoji, CJK).
-fn smart_truncate(text: &str, max_len: usize) -> String {
-    if text.len() <= max_len {
-        return text.to_string();
-    }
-    // Safe boundary: never split inside a multi-byte character
-    let safe_len = text.floor_char_boundary(max_len);
-    let slice = &text[..safe_len];
-    // Try to cut at last sentence end
-    if let Some(pos) = slice.rfind(['.', '!', '?']) {
-        return text[..=pos].to_string();
-    }
-    // Fall back to last word boundary
-    if let Some(pos) = slice.rfind(' ') {
-        return format!("{}…", &text[..pos]);
-    }
-    format!("{}…", slice)
-}
-
-struct OrchestrationContext<'a> {
-    question: &'a str,
-    current_agent: &'a AgentType,
-    all_agents: &'a [String],
-    previous_rounds: &'a [Vec<(String, String)>],
-    round: u32,
-    max_rounds: u32,
-    lang: &'a str,
-    conversation_context: &'a str,
-}
-
-fn build_orchestration_prompt(ctx: &OrchestrationContext) -> String {
-    let agent_name = agent_display_name(ctx.current_agent);
-
-    // Conversation context section (prior exchanges before the debated question)
-    let conv_section = if ctx.conversation_context.is_empty() {
-        String::new()
-    } else {
-        match ctx.lang {
-            "fr" => format!("Contexte de la conversation precedente (ne pas repeter) :\n\n{}\n\n", ctx.conversation_context),
-            "es" => format!("Contexto de la conversacion anterior (no repetir) :\n\n{}\n\n", ctx.conversation_context),
-            _ => format!("Previous conversation context (do not repeat) :\n\n{}\n\n", ctx.conversation_context),
-        }
-    };
-
-    if ctx.round == 1 {
-        match ctx.lang {
-            "fr" => format!(
-                "Tu es {} dans un debat technique entre agents IA ({}).\n\
-                {}\
-                Donne ton point de vue unique sur la question ci-dessous.\n\
-                Sois concis et precis (max 200 mots). Ne repete PAS la question.\n\
-                Concentre-toi sur ton expertise specifique.\n\
-                Reponds en francais.\n\n\
-                Question : {}",
-                agent_name, ctx.all_agents.join(", "), conv_section, ctx.question
-            ),
-            "es" => format!(
-                "Eres {} en un debate tecnico entre agentes IA ({}).\n\
-                {}\
-                Da tu perspectiva unica sobre la pregunta.\n\
-                Se conciso y preciso (max 200 palabras). NO repitas la pregunta.\n\
-                Responde en espanol.\n\n\
-                Pregunta: {}",
-                agent_name, ctx.all_agents.join(", "), conv_section, ctx.question
-            ),
-            _ => format!(
-                "You are {} in a technical debate between AI agents ({}).\n\
-                {}\
-                Give your unique perspective on the question below.\n\
-                Be concise and precise (max 200 words). Do NOT repeat the question.\n\
-                Focus on your specific expertise and what you uniquely bring.\n\
-                Respond in English.\n\n\
-                Question: {}",
-                agent_name, ctx.all_agents.join(", "), conv_section, ctx.question
-            ),
-        }
-    } else {
-        let mut prompt = match ctx.lang {
-            "fr" => format!(
-                "Tu es {} au round {}/{} d'un debat technique ({}).\n\
-                Voici les echanges precedents :\n\n",
-                agent_name, ctx.round, ctx.max_rounds, ctx.all_agents.join(", ")
-            ),
-            "es" => format!(
-                "Eres {} en la ronda {}/{} de un debate tecnico ({}).\n\
-                Intercambios anteriores:\n\n",
-                agent_name, ctx.round, ctx.max_rounds, ctx.all_agents.join(", ")
-            ),
-            _ => format!(
-                "You are {} in round {}/{} of a technical debate ({}).\n\
-                Here are the previous exchanges:\n\n",
-                agent_name, ctx.round, ctx.max_rounds, ctx.all_agents.join(", ")
-            ),
-        };
-
-        if !ctx.conversation_context.is_empty() {
-            prompt.push_str(&conv_section);
-        }
-
-        for (r_idx, round_data) in ctx.previous_rounds.iter().enumerate() {
-            prompt.push_str(&format!("--- Round {} ---\n", r_idx + 1));
-            for (name, response) in round_data {
-                let truncated = smart_truncate(response, 500);
-                prompt.push_str(&format!("{}: {}\n\n", name, truncated));
-            }
-        }
-
-        match ctx.lang {
-            "fr" => prompt.push_str(&format!(
-                "Question originale : {}\n\n\
-                REGLES IMPORTANTES :\n\
-                - Ne repete PAS ce que les autres ont dit. Ne resume PAS les rounds precedents.\n\
-                - Ne parle QUE si tu as quelque chose de NOUVEAU : un desaccord, une nuance, une correction.\n\
-                - Si tu es d'accord avec tout, reponds juste : \"Je suis d'accord avec le consensus.\" et arrete-toi.\n\
-                - Si c'est le round {}/{}, donne ta position FINALE en 1-2 phrases.\n\
-                - Max 150 mots.\n\
-                Reponds en francais.",
-                ctx.question, ctx.round, ctx.max_rounds
-            )),
-            "es" => prompt.push_str(&format!(
-                "Pregunta original: {}\n\n\
-                REGLAS IMPORTANTES:\n\
-                - NO repitas lo que otros dijeron. NO resumas rondas anteriores.\n\
-                - Solo habla si tienes algo NUEVO: un desacuerdo, un matiz, una correccion.\n\
-                - Si estas de acuerdo con todo, responde: \"Estoy de acuerdo con el consenso.\" y para.\n\
-                - Si es la ronda {}/{}, da tu posicion FINAL en 1-2 frases.\n\
-                - Max 150 palabras.\n\
-                Responde en espanol.",
-                ctx.question, ctx.round, ctx.max_rounds
-            )),
-            _ => prompt.push_str(&format!(
-                "Original question: {}\n\n\
-                IMPORTANT RULES:\n\
-                - Do NOT repeat what others said. Do NOT summarize previous rounds.\n\
-                - Only speak if you have something NEW to add: a disagreement, a nuance, a correction.\n\
-                - If you agree with everything said, just state: \"I agree with the consensus.\" and stop.\n\
-                - If this is round {}/{}, give your FINAL position in 1-2 sentences.\n\
-                - Max 150 words.\n\
-                Respond in English.",
-                ctx.question, ctx.round, ctx.max_rounds
-            )),
-        }
-        prompt
-    }
-}
-
-fn build_synthesis_prompt(
-    question: &str,
-    all_rounds: &[Vec<(String, String)>],
-    lang: &str,
-) -> String {
-    let mut ctx = match lang {
-        "fr" => format!(
-            "Tu synthetises un debat technique entre agents IA.\n\n\
-            Question : {}\n\n",
-            question
-        ),
-        "es" => format!(
-            "Sintetizas un debate tecnico entre agentes IA.\n\n\
-            Pregunta: {}\n\n",
-            question
-        ),
-        _ => format!(
-            "You are synthesizing a technical debate between AI agents.\n\n\
-            Question: {}\n\n",
-            question
-        ),
-    };
-
-    let initial_label = match lang {
-        "fr" => "--- Positions initiales ---",
-        "es" => "--- Posiciones iniciales ---",
-        _ => "--- Initial positions ---",
-    };
-    let final_label = match lang {
-        "fr" => format!("--- Positions finales (round {}) ---", all_rounds.len()),
-        "es" => format!("--- Posiciones finales (ronda {}) ---", all_rounds.len()),
-        _ => format!("--- Final positions (round {}) ---", all_rounds.len()),
-    };
-
-    if let Some(first) = all_rounds.first() {
-        ctx.push_str(&format!("{}\n", initial_label));
-        for (name, response) in first {
-            ctx.push_str(&format!("{}: {}\n\n", name, smart_truncate(response, 400)));
-        }
-    }
-    if all_rounds.len() > 1 {
-        if let Some(last) = all_rounds.last() {
-            ctx.push_str(&format!("{}\n", final_label));
-            for (name, response) in last {
-                ctx.push_str(&format!("{}: {}\n\n", name, smart_truncate(response, 400)));
-            }
-        }
-    }
-
-    match lang {
-        "fr" => ctx.push_str(
-            "Produis une synthese claire et actionnable :\n\
-            1. Points d'ACCORD (convergences entre tous les agents)\n\
-            2. DESACCORDS restants (s'il y en a)\n\
-            3. RECOMMANDATION FINALE\n\
-            Sois concis et structure. Reponds en francais."
-        ),
-        "es" => ctx.push_str(
-            "Produce una sintesis clara y accionable:\n\
-            1. Puntos de ACUERDO (convergencias entre todos los agentes)\n\
-            2. DESACUERDOS restantes (si los hay)\n\
-            3. RECOMENDACION FINAL\n\
-            Se conciso y estructurado. Responde en espanol."
-        ),
-        _ => ctx.push_str(
-            "Produce a clear, actionable synthesis:\n\
-            1. Points of AGREEMENT (what all agents converge on)\n\
-            2. Remaining DISAGREEMENTS (if any)\n\
-            3. FINAL RECOMMENDATION\n\
-            Be concise and structured. Respond in English."
-        ),
-    }
-    ctx
-}
 
 /// Summary generation threshold: min messages before first summary.
 /// Adaptive: agents with large budgets can wait longer, small-budget agents need it sooner.
-fn summary_msg_threshold(agent_type: &AgentType) -> u32 {
-    let budget = agent_prompt_budget(agent_type);
-    if budget >= 200_000 {
-        12 // Large context (Claude Code, Kiro, Gemini) — summarize after 12 messages
-    } else if budget >= 40_000 {
-        8  // Medium context — summarize after 8 messages
-    } else {
-        4  // Small context (Codex, Vibe) — summarize after just 4 messages
-    }
-}
-
-/// Cooldown: min new messages since last summary before re-summarizing.
-/// Smaller for small-budget agents to keep the summary fresh.
-fn summary_cooldown(agent_type: &AgentType) -> u32 {
-    let budget = agent_prompt_budget(agent_type);
-    if budget >= 200_000 { 6 } else if budget >= 40_000 { 4 } else { 2 }
-}
-
 /// Background task: generate a conversation summary if the discussion is long enough.
 /// Uses the discussion's own agent in Economy tier. Fire-and-forget, errors are logged.
 async fn maybe_generate_summary(
@@ -2580,248 +2440,6 @@ async fn maybe_generate_summary(
     }
 }
 
-/// Estimate the size of extra_context (profiles + skills + directives + MCP)
-/// so that build_agent_prompt can budget the conversation history accordingly.
-/// Uses compact format for constrained agents (Codex, Kiro, Vibe).
-fn estimate_extra_context_len(
-    skill_ids: &[String],
-    directive_ids: &[String],
-    profile_ids: &[String],
-    project_path: &str,
-    mcp_override: Option<&str>,
-    agent_type: &AgentType,
-) -> usize {
-    let compact = is_compact_agent(agent_type);
-    let profiles_len = if compact {
-        crate::core::profiles::build_profiles_prompt_compact(profile_ids).len()
-    } else {
-        crate::core::profiles::build_profiles_prompt(profile_ids).len()
-    };
-    let skills_len = if compact {
-        crate::core::skills::build_skills_prompt_compact(skill_ids).len()
-    } else {
-        crate::core::skills::build_skills_prompt(skill_ids).len()
-    };
-    let directives_len = crate::core::directives::build_directives_prompt(directive_ids).len();
-    let mcp_len = if let Some(ctx) = mcp_override {
-        ctx.len()
-    } else if !project_path.is_empty() {
-        crate::core::mcp_scanner::read_all_mcp_contexts(project_path).len()
-    } else {
-        0
-    };
-    // Add separators between non-empty parts
-    profiles_len + skills_len + directives_len + mcp_len + 20
-}
-
-/// Agents with small context windows that need compact prompts.
-fn is_compact_agent(agent_type: &AgentType) -> bool {
-    matches!(agent_type, AgentType::Codex | AgentType::Kiro | AgentType::Vibe)
-}
-
-fn language_instruction(lang: &str) -> &'static str {
-    match lang {
-        "fr" => "[IMPORTANT] Tu DOIS répondre en français. Toutes tes réponses doivent être en français.",
-        "en" => "[IMPORTANT] You MUST respond in English. All your responses must be in English.",
-        "es" => "[IMPORTANTE] DEBES responder en español. Todas tus respuestas deben ser en español.",
-        "zh" => "[重要] 你必须用中文回答。你的所有回复都必须是中文。",
-        "br" => "[POUEZUS] Ret eo dit respont e brezhoneg. Holl da respontoù a rank bezañ e brezhoneg.",
-        _ => "[IMPORTANT] You MUST respond in English. All your responses must be in English.",
-    }
-}
-
-/// Build the agent prompt with conversation history, respecting the agent's prompt budget.
-///
-/// Strategy: always include the latest user message. Then fill backwards from recent
-/// messages until we hit the budget. If older messages are truncated, prepend a notice.
-/// `extra_context_len` is the size of profiles+skills+directives+MCP that will be
-/// added alongside this prompt (so we don't exceed the agent's total budget).
-fn build_agent_prompt(disc: &Discussion, agent_type: &AgentType, extra_context_len: usize) -> String {
-    let budget = agent_prompt_budget(agent_type).saturating_sub(extra_context_len);
-    let lang_instr = language_instruction(&disc.language);
-
-    // Include discussion title as context if it's meaningful (not auto-generated placeholder)
-    let title_label = match disc.language.as_str() {
-        "fr" => "Sujet de la discussion",
-        "es" => "Tema de la discusión",
-        _ => "Discussion topic",
-    };
-    let title_ctx = if !disc.title.is_empty()
-        && disc.title != "New discussion"
-        && disc.title != "Nouvelle discussion"
-        && !disc.title.starts_with("Bootstrap: ")
-    {
-        format!("{}: \"{}\"\n\n", title_label, disc.title)
-    } else {
-        String::new()
-    };
-
-    let user_msgs: Vec<_> = disc.messages.iter()
-        .filter(|m| matches!(m.role, MessageRole::User))
-        .collect();
-
-    if user_msgs.len() <= 1 {
-        let content = user_msgs.last().map(|m| m.content.clone()).unwrap_or_default();
-        // Language instruction at end only — LLMs weight recent text more heavily,
-        // and MCP context is injected via --append-system-prompt (separate from prompt).
-        return format!("{}{}\n\n{}", title_ctx, content, lang_instr);
-    }
-
-    // Fixed overhead: header + footer (localized by discussion language)
-    let prev_conv_label = match disc.language.as_str() {
-        "fr" => "Conversation précédente :\n\n",
-        "es" => "Conversación anterior:\n\n",
-        _ => "Previous conversation:\n\n",
-    };
-    let footer = match disc.language.as_str() {
-        "fr" => "Répondez au dernier message ci-dessus. Reponds en francais.",
-        "es" => "Responda al último mensaje anterior. Responda en español.",
-        "zh" => "请回复上面的最新用户消息。请用中文回答。",
-        "br" => "Respontet d'ar c'hemenn diwezhañ a-us. Respont e brezhoneg.",
-        _ => "Please respond to the latest user message above. Respond in English.",
-    };
-    // For agents that think they're in non-interactive mode (Gemini -p, Codex exec),
-    // clarify that this IS a multi-turn conversation managed by Kronn.
-    // Always include for pinned discussions (briefing/validation/bootstrap) since
-    // agents like Gemini detect -p mode and refuse to interact on the first message.
-    let interactive_hint = if user_msgs.len() > 1 || disc.pin_first_message {
-        match disc.language.as_str() {
-            "fr" => "NOTE: Tu es dans une conversation multi-tours geree par Kronn. Tu PEUX poser des questions et attendre des reponses. Chaque message te sera transmis avec l'historique complet.\n\n",
-            "es" => "NOTA: Estas en una conversacion multi-turno gestionada por Kronn. PUEDES hacer preguntas y esperar respuestas. Cada mensaje te sera transmitido con el historial completo.\n\n",
-            _ => "NOTE: You are in a multi-turn conversation managed by Kronn. You CAN ask questions and wait for answers. Each message will be sent to you with the full history.\n\n",
-        }
-    } else {
-        ""
-    };
-
-    let header = format!("{}{}{}", title_ctx, interactive_hint, prev_conv_label);
-    let overhead = header.len() + footer.len() + 100; // 100 = notice template space
-
-    // If pin_first_message is set, extract and pin the first non-system message
-    let non_system_msgs: Vec<_> = disc.messages.iter()
-        .filter(|m| !matches!(m.role, MessageRole::System))
-        .collect();
-
-    let pinned_block = if disc.pin_first_message {
-        non_system_msgs.first().map(|msg| {
-            format!(
-                "[INSTRUCTIONS DU PROTOCOLE — ne pas ignorer]\n{}\n[FIN INSTRUCTIONS]\n\n",
-                msg.content
-            )
-        }).unwrap_or_default()
-    } else {
-        String::new()
-    };
-
-    // If we have a cached summary, inject it and only include messages after the summary
-    let summary_block = if let Some(ref summary) = disc.summary_cache {
-        let idx = disc.summary_up_to_msg_idx.unwrap_or(0) as usize;
-        let summary_label = match disc.language.as_str() {
-            "fr" => format!("Résumé de la conversation précédente (messages 1-{}) :\n{}\n\n", idx, summary),
-            "es" => format!("Resumen de la conversación anterior (mensajes 1-{}):\n{}\n\n", idx, summary),
-            _ => format!("Summary of earlier conversation (messages 1-{}):\n{}\n\n", idx, summary),
-        };
-        summary_label
-    } else {
-        String::new()
-    };
-
-    let remaining_budget = budget.saturating_sub(overhead + pinned_block.len() + summary_block.len());
-
-    // Format messages (skip System). When a summary exists, skip messages already covered.
-    // When pin_first_message is set, skip index 0 (it's already pinned above).
-    let summary_covers_up_to = if disc.summary_cache.is_some() {
-        disc.summary_up_to_msg_idx.unwrap_or(0) as usize
-    } else {
-        0
-    };
-    let skip_pinned = if disc.pin_first_message { 1 } else { 0 };
-    let skip_from = summary_covers_up_to.max(skip_pinned);
-    let formatted_msgs: Vec<String> = non_system_msgs.iter()
-        .enumerate()
-        .filter(|(i, _)| *i >= skip_from)
-        .map(|(_, msg)| match msg.role {
-            MessageRole::User => format!("User: {}\n\n", msg.content),
-            MessageRole::Agent => {
-                let agent_label = msg.agent_type.as_ref()
-                    .map(agent_display_name)
-                    .unwrap_or_else(|| "Agent".into());
-                format!("{}: {}\n\n", agent_label, msg.content)
-            }
-            MessageRole::System => unreachable!(),
-        })
-        .collect();
-
-    // Always include the last message (latest user prompt). Walk backwards to fill budget.
-    let total_msgs = formatted_msgs.len();
-    let mut included_from_end = 0;
-    let mut cumulative_len = 0;
-
-    for msg in formatted_msgs.iter().rev() {
-        if cumulative_len + msg.len() > remaining_budget && included_from_end > 0 {
-            break;
-        }
-        cumulative_len += msg.len();
-        included_from_end += 1;
-    }
-
-    let start_idx = total_msgs - included_from_end;
-    let omitted_count = start_idx;
-
-    let mut prompt = header;
-
-    // Inject pinned message (protocol prompt) before everything else
-    if !pinned_block.is_empty() {
-        prompt.push_str(&pinned_block);
-    }
-
-    // Inject summary if available
-    if !summary_block.is_empty() {
-        prompt.push_str(&summary_block);
-    }
-
-    if omitted_count > 0 {
-        let has_summary = !summary_block.is_empty();
-        let omitted_notice = match disc.language.as_str() {
-            "fr" => format!(
-                "════════════════════════════════════════\n\
-                 CONTEXTE LIMITE : {} messages anterieurs non inclus{}\n\
-                 ════════════════════════════════════════\n\n",
-                omitted_count,
-                if has_summary { " (resume ci-dessus)" } else { " — demandez a l'utilisateur si besoin" }
-            ),
-            "es" => format!(
-                "════════════════════════════════════════\n\
-                 CONTEXTO LIMITADO: {} mensajes anteriores no incluidos{}\n\
-                 ════════════════════════════════════════\n\n",
-                omitted_count,
-                if has_summary { " (resumen arriba)" } else { " — pregunte al usuario si necesario" }
-            ),
-            _ => format!(
-                "════════════════════════════════════════\n\
-                 CONTEXT LIMITED: {} earlier messages not included{}\n\
-                 ════════════════════════════════════════\n\n",
-                omitted_count,
-                if has_summary { " (see summary above)" } else { " — ask user to recap if needed" }
-            ),
-        };
-        prompt.push_str(&omitted_notice);
-    }
-
-    if omitted_count > 0 {
-        tracing::info!(
-            "Prompt truncation: {} of {} messages omitted for {:?} (budget: {} chars, has_summary: {})",
-            omitted_count, total_msgs, agent_type, budget, !summary_block.is_empty()
-        );
-    }
-
-    for msg in &formatted_msgs[start_idx..] {
-        prompt.push_str(msg);
-    }
-
-    prompt.push_str(footer);
-    prompt
-}
 
 /// Detect common agent error patterns and return a user-friendly hint.
 pub(crate) fn detect_agent_error_hint(output: &str) -> Option<String> {

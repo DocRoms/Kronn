@@ -13,6 +13,8 @@ import { parseAgentQuestions } from '../lib/agent-question-parse';
 import { userError } from '../lib/userError';
 import type { Project, AgentDetection, Discussion, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile } from '../types/generated';
 import { useWebSocket } from '../hooks/useWebSocket';
+import { useQpChain } from '../hooks/useQpChain';
+import { useRafBatchedStream } from '../hooks/useRafBatchedStream';
 import { useT } from '../lib/I18nContext';
 import { AGENT_LABELS, agentColor, isAgentRestricted as isAgentRestrictedUtil, hasAgentFullAccess, getProjectGroup, isUsable } from '../lib/constants';
 import type { ToastFn } from '../hooks/useToast';
@@ -148,6 +150,7 @@ export function DiscussionsPage({
   const [availableDirectives, setAvailableDirectives] = useState<Directive[]>([]);
   const [expandedSummaryMsgId, setExpandedSummaryMsgId] = useState<string | null>(null);
   const [worktreeError, setWorktreeError] = useState<string | null>(null);
+
   const [contextFilesMap, setContextFilesMap] = useState<Record<string, ContextFile[]>>({});
   const [uploadingFiles, setUploadingFiles] = useState(false);
   const [contactsList, setContactsList] = useState<Contact[]>([]);
@@ -211,15 +214,10 @@ export function DiscussionsPage({
   const orchChunkBuffer = useRef<Record<string, string>>({});
   const orchRafId = useRef<number | null>(null);
 
-  // Batched streaming: accumulate chunks in a ref, flush to state via rAF
-  const streamBufferRef = useRef<Record<string, string>>({});
-  const rafIdRef = useRef<number | null>(null);
-  const flushStreamBuffer = useCallback(() => {
-    rafIdRef.current = null;
-    const buf = streamBufferRef.current;
-    if (Object.keys(buf).length === 0) return;
-    const snapshot = { ...buf };
-    streamBufferRef.current = {};
+  // Batched streaming: accumulate chunks in a ref, flush to state via rAF.
+  // Extracted to hooks/useRafBatchedStream.ts — collapses dozens of SSE
+  // deltas per frame into a single React state update.
+  const appendStreamChunk = useRafBatchedStream(snapshot => {
     setStreamingMap(prev => {
       const next = { ...prev };
       for (const [k, v] of Object.entries(snapshot)) {
@@ -227,13 +225,7 @@ export function DiscussionsPage({
       }
       return next;
     });
-  }, [setStreamingMap]);
-  const appendStreamChunk = useCallback((discId: string, text: string) => {
-    streamBufferRef.current[discId] = (streamBufferRef.current[discId] ?? '') + text;
-    if (rafIdRef.current === null) {
-      rafIdRef.current = requestAnimationFrame(flushStreamBuffer);
-    }
-  }, [flushStreamBuffer]);
+  });
 
   // Cache of fully-loaded discussions (with messages)
   const [loadedDiscussions, setLoadedDiscussions] = useState<Record<string, Discussion>>({});
@@ -779,6 +771,13 @@ export function DiscussionsPage({
     );
   };
 
+  // QP chain — load QPs, queue one mid-stream, auto-fire on the sending
+  // true→false edge. Extracted to hooks/useQpChain.ts.
+  const { chainableQPs, queuedQP, queueQP, cancelQueuedQP } = useQpChain({
+    sending,
+    onFire: handleSendMessage,
+  });
+
   const handleStop = () => {
     if (!activeDiscussionId) return;
     const discId = activeDiscussionId;
@@ -1088,6 +1087,14 @@ export function DiscussionsPage({
           onArchive={handleDiscArchive}
           onUnarchive={handleDiscUnarchive}
           onDelete={handleDiscDelete}
+          onTogglePin={async (discId, pinned) => {
+            try {
+              await discussionsApi.update(discId, { pinned });
+              refetchDiscussions();
+            } catch (e) {
+              toast(t('disc.pinError', userError(e)), 'error');
+            }
+          }}
           onNewDiscussion={() => setShowNewDiscussion(true)}
           onClose={() => setSidebarOpen(false)}
           onContactAdd={handleContactAdd}
@@ -1685,6 +1692,10 @@ export function DiscussionsPage({
               onUploadFiles={handleUploadFiles}
               onDeleteContextFile={handleDeleteContextFile}
               uploadingFiles={uploadingFiles}
+              chainableQPs={chainableQPs}
+              queuedQP={queuedQP}
+              onQueueQP={queueQP}
+              onCancelQueuedQP={cancelQueuedQP}
               toast={toast}
               t={t}
             />

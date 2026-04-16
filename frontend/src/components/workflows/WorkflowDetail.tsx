@@ -555,6 +555,25 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
               </span>
             )}
           </div>
+
+          {/* QP Chain (Phase 2) — show the sequenced follow-up QPs if any */}
+          {(step.batch_chain_prompt_ids?.length ?? 0) > 0 && (
+            <div className="wf-batch-step-row">
+              <span className="text-xs text-muted">{t('wf.batchStepChainLabel')}</span>
+              <div className="flex-row flex-wrap gap-2">
+                {step.batch_chain_prompt_ids!.map((qpId, chainIdx) => {
+                  const qp = quickPromptsById?.get(qpId);
+                  const label = qp ? `${qp.icon} ${qp.name}` : `⚠️ ${qpId}`;
+                  return (
+                    <span key={`${qpId}-${chainIdx}`} className="wf-chain-pill">
+                      <span className="wf-chain-pos">{chainIdx + 1}.</span>
+                      <span>{label}</span>
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </div>
       ) : (
         <>

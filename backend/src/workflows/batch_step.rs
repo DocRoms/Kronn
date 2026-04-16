@@ -176,13 +176,28 @@ pub async fn execute_batch_quick_prompt_step(
     let mut ws_rx = state.ws_broadcast.subscribe();
 
     // ── Fan out: spawn agent runs on every child discussion ─────────────
-    // Each call into `spawn_agent_run_background` runs its own detached
+    // Each call into `spawn_agent_run_with_chain` runs its own detached
     // `tokio::spawn`, so the work happens in parallel. The agent_semaphore
     // on AppState caps real concurrency.
-    for disc_id in &outcome.discussion_ids {
-        crate::api::discussions::spawn_agent_run_background(
+    //
+    // If `batch_chain_prompt_ids` is non-empty, each discussion will
+    // sequentially execute the chained QPs after the initial response —
+    // all inside the same conversation thread. Each chain QP receives the
+    // SAME raw batch item (e.g. "EW-1234") as its first variable, so an
+    // `analyse → review → summary` chain all runs on the same ticket.
+    // The batch progress counter only bumps when the ENTIRE chain
+    // finishes (the last `make_agent_stream` hits the batch_run_id hook
+    // in discussions.rs).
+    let chain_ids = step.batch_chain_prompt_ids.clone();
+    // `outcome.discussion_ids` is ordered identically to `items` (see
+    // `create_batch_run` in db/workflows.rs), so zipping by index is safe.
+    for (idx, disc_id) in outcome.discussion_ids.iter().enumerate() {
+        let batch_item = items.get(idx).cloned();
+        crate::api::discussions::spawn_agent_run_with_chain(
             state.clone(),
             disc_id.clone(),
+            chain_ids.clone(),
+            batch_item,
         ).await;
     }
 

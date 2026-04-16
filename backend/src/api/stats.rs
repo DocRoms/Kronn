@@ -84,7 +84,7 @@ pub async fn token_usage(
         let mut by_project: Vec<ProjectUsage> = project_map.into_iter().map(|(id, (name, tokens, cost))| {
             ProjectUsage { project_id: id, project_name: name, tokens_used: tokens, cost_usd: cost }
         }).collect();
-        by_project.sort_by(|a, b| b.tokens_used.cmp(&a.tokens_used));
+        by_project.sort_by_key(|p| std::cmp::Reverse(p.tokens_used));
 
         // ── 5. Top discussions ──
         let mut top_disc_stmt = conn.prepare(

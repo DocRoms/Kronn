@@ -35,7 +35,7 @@ const baseDiscussion: Discussion = {
   skill_ids: [],
   profile_ids: [],
   directive_ids: [],
-  archived: false,
+  archived: false, pinned: false,
   workspace_mode: 'Direct',
   workspace_path: null,
   worktree_branch: null,

@@ -1,5 +1,5 @@
 import { useState, useRef, memo } from 'react';
-import { ShieldCheck, Zap, Rocket, GitBranch, Loader2, Users, Users2, Square } from 'lucide-react';
+import { ShieldCheck, Zap, Rocket, GitBranch, Loader2, Users, Users2, Square, Star } from 'lucide-react';
 import type { Discussion } from '../types/generated';
 import { isValidationDisc } from '../lib/constants';
 import { formatRelativeTime } from '../lib/relativeTime';
@@ -21,6 +21,8 @@ export interface SwipeableDiscItemProps {
   onDelete: (discId: string) => void;
   /** Abort the running agent on this disc. Only rendered when `isSending`. */
   onStop?: (discId: string) => void;
+  /** Toggle pin/favorite on this discussion. */
+  onTogglePin?: (discId: string, pinned: boolean) => void;
   t: (key: string, ...args: any[]) => string;
   archiveLabel?: string;
 }
@@ -103,8 +105,14 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
             {isBootstrapDisc(disc.title) && <Rocket size={10} style={{ color: '#c8ff00', flexShrink: 0 }} />}
             {disc.workspace_mode === 'Isolated' && <GitBranch size={10} style={{ color: '#60a5fa', flexShrink: 0 }} />}
             {disc.shared_id && <Users2 size={10} style={{ color: '#34d399', flexShrink: 0 }} />}
-            {disc.title}
+            {/* Title text truncates; badge + star sit OUTSIDE the truncated
+                zone so they're always visible even on long titles. */}
+            <span className="disc-item-title-text">{disc.title}</span>
             {showBadge && <span className="disc-unseen-badge">{unseen}</span>}
+            {/* Pinned indicator (non-interactive) — just a small star to
+                show which discs are in Favorites. The toggle lives in
+                ChatHeader where there's room for a proper button. */}
+            {disc.pinned && <Star size={9} style={{ color: '#ffc800', fill: '#ffc800', flexShrink: 0 }} />}
           </div>
           <div className="disc-item-meta">
             {isSending && <Loader2 size={8} style={{ animation: 'spin 1s linear infinite', color: '#c8ff00' }} />}

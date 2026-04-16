@@ -374,12 +374,21 @@
 .disc-item-title {
   font-size: var(--kr-fs-base);
   font-weight: 500;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   display: flex;
   align-items: center;
   gap: 4px;
+  /* The title TEXT truncates, but the badge + pin star must NOT clip.
+     We use a nested <span> for the text (see below) and keep the flex
+     row itself overflow-visible so pills/icons stay fully rendered. */
+  min-width: 0; /* allow flex child to shrink */
+}
+
+.disc-item-title-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
 }
 
 .disc-item-meta {
@@ -423,6 +432,80 @@
   white-space: nowrap;
 }
 
+/* Pin/star button in the chat header — always visible, toggles on click.
+   Outline star when not pinned, filled yellow when pinned. */
+.disc-pin-header-btn {
+  background: none;
+  border: none;
+  padding: 2px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  border-radius: var(--kr-r-sm);
+  transition: background 0.15s;
+}
+.disc-pin-header-btn:hover {
+  background: rgba(255, 200, 0, 0.12);
+}
+
+/* ── QP chain picker (visible during streaming) ─────────── */
+.disc-chain-qp-btn {
+  background: rgba(var(--kr-accent-rgb), 0.1);
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.3);
+  border-radius: var(--kr-r-md);
+  color: var(--kr-accent);
+  cursor: pointer;
+  padding: 4px 6px;
+  display: flex;
+  align-items: center;
+  transition: background 0.15s;
+}
+.disc-chain-qp-btn:hover {
+  background: rgba(var(--kr-accent-rgb), 0.2);
+}
+
+.disc-qp-picker {
+  bottom: calc(100% + 6px);
+  right: 0;
+  left: auto;
+  min-width: 240px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+/* Badge for the currently queued QP — click to cancel. */
+.disc-queued-qp-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: var(--kr-r-sm);
+  background: rgba(var(--kr-accent-rgb), 0.12);
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.35);
+  color: var(--kr-accent);
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  animation: disc-queued-pulse 1.5s ease-in-out infinite;
+}
+.disc-queued-qp-badge:hover {
+  background: rgba(239, 68, 68, 0.15);
+  border-color: rgba(239, 68, 68, 0.4);
+  color: #ff9aa9;
+}
+
+@keyframes disc-queued-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(var(--kr-accent-rgb), 0.3); }
+  50%  { box-shadow: 0 0 0 3px rgba(var(--kr-accent-rgb), 0); }
+  100% { box-shadow: 0 0 0 0 rgba(var(--kr-accent-rgb), 0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .disc-queued-qp-badge { animation: none; }
+}
+
 .disc-unseen-badge {
   background: var(--kr-accent);
   color: var(--kr-bg-base);
@@ -433,6 +516,33 @@
   min-width: 14px;
   text-align: center;
   flex-shrink: 0;
+}
+
+/* Unseen badge on collapsed GROUP headers — same accent pill style as the
+   per-discussion badge above but positioned after the count. Lets users
+   spot "which group has unread messages" without expanding everything. */
+.disc-group-unseen {
+  background: var(--kr-accent);
+  color: var(--kr-bg-base);
+  font-size: 8px;
+  font-weight: 800;
+  border-radius: 6px;
+  padding: 1px 5px;
+  min-width: 14px;
+  text-align: center;
+  flex-shrink: 0;
+  margin-left: 4px;
+  animation: disc-group-unseen-pulse 2s ease-in-out 1;
+}
+
+@keyframes disc-group-unseen-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(var(--kr-accent-rgb), 0.5); }
+  50%  { box-shadow: 0 0 0 4px rgba(var(--kr-accent-rgb), 0); }
+  100% { box-shadow: 0 0 0 0 rgba(var(--kr-accent-rgb), 0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .disc-group-unseen { animation: none; }
 }
 
 /* ── Contacts ─────────────────────────────────────────── */

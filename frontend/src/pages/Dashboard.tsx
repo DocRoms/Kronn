@@ -83,6 +83,50 @@ export function Dashboard({ onReset }: DashboardProps) {
   }, []);
 
   const { data: projectList, initialLoading: projectsLoading, refetch } = useApi(() => projectsApi.list(), []);
+
+  // ─── Deep-link: #project-<id> hash → auto-expand + scroll ──────────
+  // Used by the CLI: `kronn` opens `http://localhost:3140/#project-<id>`
+  // so the dashboard scrolls directly to the right project card.
+  //
+  // Timing: consumed AFTER `projectList` is loaded (not on mount) because
+  // the ProjectCard DOM nodes don't exist until the fetch completes. A ref
+  // guards against re-firing on subsequent refetches.
+  const hashConsumedRef = useRef(false);
+  useEffect(() => {
+    if (hashConsumedRef.current) return;
+    if (!projectList || projectList.length === 0) return;
+
+    const hash = window.location.hash;
+    if (!hash.startsWith('#project-')) return;
+    const projectId = hash.slice('#project-'.length);
+    if (!projectId) return;
+
+    // Verify the project actually exists in the loaded list.
+    if (!projectList.some(p => p.id === projectId)) return;
+
+    hashConsumedRef.current = true;
+
+    // Ensure we're on the Projects page (not Discussions / MCPs / etc.)
+    setPage('projects');
+    // Expand the card...
+    setExpandedId(projectId);
+
+    // ...then scroll after React re-renders with the card open. Two rAF
+    // frames: one for React to commit the DOM, one for the browser to
+    // layout the expanded card.
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const el = document.getElementById(`project-${projectId}`);
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    });
+
+    // Clean the hash so a page refresh doesn't re-trigger.
+    if (window.history.replaceState) {
+      window.history.replaceState(null, '', window.location.pathname);
+    }
+  }, [projectList]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const { data: registry } = useApi(() => mcpsApi.registry(), []);
   const { data: mcpOverviewData, refetch: refetchMcps } = useApi(() => mcpsApi.overview(), []);
   const { data: agentList, refetch: refetchAgents } = useApi(() => agentsApi.detect(), []);
@@ -856,7 +900,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                 setPage('discussions');
               }}
               onNavigateDiscussion={(discId) => { setAutoRunDiscussionId(discId); setPage('discussions'); }}
-              onBatchLaunched={(discIds) => {
+              onBatchLaunched={(discIds, batchRunId) => {
                 // Mark every batch-child disc as sending so the sidebar
                 // spinner lights up for all of them in parallel, not just
                 // the one we navigate to. The parent (Dashboard) owns
@@ -872,16 +916,14 @@ export function Dashboard({ onReset }: DashboardProps) {
                   for (const id of discIds) next[id] = now;
                   return next;
                 });
-                // Open the first disc WITHOUT auto-running it. The disc
-                // is already running (we fired its POST /run in the
-                // fan-out loop); using setAutoRunDiscussionId here would
-                // trigger a SECOND run from DiscussionsPage's auto-run
-                // effect, giving that disc 2 agent replies and pushing
-                // the batch progress counter past the total (bug seen
-                // 2026-04-10: 7/6 ok on a 6-item batch, first disc had
-                // 3 messages instead of 2).
+                // Navigate to the discussions tab and focus the batch
+                // group in the sidebar — expand the project group + the
+                // batch group + scroll to it. `focusBatchId` is consumed
+                // by DiscussionsPage's useEffect which handles the expand
+                // + scroll after the refetch settles.
                 if (discIds.length > 0) {
                   setOpenDiscussionId(discIds[0]);
+                  setFocusBatchId(batchRunId);
                   setPage('discussions');
                 }
                 // Force a refetch so the new discs show up in the sidebar

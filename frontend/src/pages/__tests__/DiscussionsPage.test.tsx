@@ -75,6 +75,9 @@ vi.mock('../../lib/api', () => ({
   workflows: {
     listBatchRunSummaries: vi.fn().mockResolvedValue([]),
   },
+  quickPrompts: {
+    list: vi.fn().mockResolvedValue([]),
+  },
   config: {
     getUiLanguage: vi.fn().mockResolvedValue('fr'),
     saveUiLanguage: vi.fn().mockResolvedValue(undefined),
@@ -133,7 +136,7 @@ const makeListDiscussion = (id: string, msgCount: number): Discussion => ({
   participants: ['ClaudeCode'],
   messages: [],           // list endpoint returns empty messages
   message_count: msgCount, // but provides the count
-  archived: false,
+  archived: false, pinned: false,
   workspace_mode: 'Direct',
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
@@ -493,7 +496,7 @@ describe('DiscussionsPage', () => {
   it('archived discussions show count in Archives section header', async () => {
     const activeDisc: Discussion = {
       ...makeListDiscussion('d1', 3),
-      archived: false,
+      archived: false, pinned: false,
     };
     const archivedDisc: Discussion = {
       ...makeListDiscussion('d2', 5),

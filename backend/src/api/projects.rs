@@ -615,6 +615,7 @@ pub async fn bootstrap(
         ],
         directive_ids: vec![],
         archived: false,
+            pinned: false,
         workspace_mode: "Direct".into(),
         workspace_path: None,
         tier: if req.skill_ids.contains(&"bootstrap-architect".to_string()) {

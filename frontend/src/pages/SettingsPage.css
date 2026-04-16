@@ -808,6 +808,24 @@
   width: 220px;
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid var(--kr-border-light);
+  /* Stop 4-pill header rows (category + builtin/custom + token estimate + ...)
+     from pushing the card wider than its fixed 220px on long skill names. */
+  overflow: hidden;
+}
+
+/* The header row — title on left, pills on right. Let pills wrap under the
+   title when the name is long instead of overflowing the card. */
+.set-item-card > .flex-between {
+  flex-wrap: wrap;
+  row-gap: var(--kr-sp-2);
+  align-items: flex-start;
+}
+
+/* Keep the pill cluster tight and wrap-friendly; never shrink below its
+   content so we don't get a truncated "~608 to" badge. */
+.set-item-card > .flex-between > .flex-row {
+  flex-wrap: wrap;
+  flex-shrink: 0;
 }
 
 /* ── Profile card ──────────────────────────────────────── */

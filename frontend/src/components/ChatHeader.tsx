@@ -8,7 +8,7 @@ import {
   Cpu, GitBranch, Server,
   Trash2,
   Pencil, ShieldCheck, Check, Zap, FileText, Settings, Rocket,
-  Menu, Lock, Unlock, RefreshCw, Share2, Users2,
+  Menu, Lock, Unlock, RefreshCw, Share2, Users2, Star,
 } from 'lucide-react';
 
 const isBootstrapDisc = (title: string) => title.startsWith('Bootstrap: ');
@@ -112,6 +112,30 @@ export function ChatHeader({
       )}
       <div className="disc-chat-header-info">
         <div className="disc-chat-header-title">
+          {/* Pin / favorite toggle — always visible in the header so the user
+              can pin from inside the conversation. Outline = not pinned,
+              filled yellow = pinned. Sidebar shows the result in its
+              "Favorites" section at the top. */}
+          <button
+            type="button"
+            className="disc-pin-header-btn"
+            onClick={async () => {
+              try {
+                await discussionsApi.update(discussion.id, { pinned: !discussion.pinned });
+                onDiscussionUpdated();
+              } catch { /* silent — toast from parent */ }
+            }}
+            title={discussion.pinned ? t('disc.unpin') : t('disc.pin')}
+            aria-label={discussion.pinned ? t('disc.unpin') : t('disc.pin')}
+            aria-pressed={discussion.pinned}
+          >
+            <Star
+              size={14}
+              style={discussion.pinned
+                ? { color: '#ffc800', fill: '#ffc800' }
+                : { color: 'var(--kr-text-ghost)' }}
+            />
+          </button>
           {isValidationDisc(discussion.title) && <ShieldCheck size={14} className="text-accent flex-shrink-0" />}
           {isBriefingDisc(discussion.title) && <Zap size={14} className="text-info flex-shrink-0" />}
           {isBootstrapDisc(discussion.title) && <Rocket size={14} className="text-accent flex-shrink-0" />}

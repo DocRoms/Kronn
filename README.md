@@ -64,7 +64,7 @@ cd kronn
 
 Chat with agents in project context. Use `@claude` or `@codex` to target specific agents. **Debate mode**: agents discuss in configurable rounds (1-3) and a primary agent synthesizes.
 
-Persistent conversations backed by SQLite. Full i18n (French, English, Spanish). Claude Code streamed token-by-token with per-message tracking. **Switch agent mid-conversation** — click the agent name to switch; the new agent auto-summarizes and continues. Archive, retry, edit, search, swipe gestures, multi-line input.
+Persistent conversations backed by SQLite. Full i18n (French, English, Spanish). Claude Code streamed token-by-token with per-message tracking. **Switch agent mid-conversation** — click the agent name to switch; the new agent auto-summarizes and continues. **Favorites** — pin any discussion (star icon in header) to a dedicated "Favorites" section at the top of the sidebar. **Unread badges** on individual discussions AND group headers — never lose track of new messages. Archive, retry, edit, search, swipe gestures, multi-line input, emoji autocomplete (`:tada:` → 🎉).
 
 ![Multi-agent discussion with debate mode](docs/screenshots/kronn_multi-ai_discussion.png)
 
@@ -228,7 +228,9 @@ Auto-detected at setup with runtime probe fallback (npx). Per-agent permissions 
 ./kronn restart         # Stop and restart services
 ./kronn web             # Launch web interface directly
 ./kronn logs            # View service logs (Ctrl+C to detach)
-./kronn status          # Overview: agents, repos, MCP secrets
+./kronn status          # Overview (delegates to API when backend is up)
+./kronn agents          # List detected agents (API-first, local fallback)
+./kronn projects        # List projects with audit status (requires backend)
 ./kronn init [path]     # Configure AI context for a repo
 ./kronn mcp sync        # Sync MCP configs across repos
 ./kronn help            # Show help
@@ -306,9 +308,9 @@ scan_depth = 4
 <summary><strong>CI pipeline</strong></summary>
 
 GitHub Actions triggered by `ci-test` label on PRs:
-- **test-backend**: `cargo check` + `cargo clippy` + `cargo test` (~1064 tests)
-- **test-frontend**: `tsc --noEmit` + `pnpm test` (~610 tests, 48 suites)
-- **test-shell**: `make test-shell` (192 bats tests, 8 suites)
+- **test-backend**: `cargo check` + `cargo clippy` + `cargo test` (~1090 tests)
+- **test-frontend**: `tsc --noEmit` + `pnpm test` (~629 tests, 51 suites)
+- **test-shell**: `make test-shell` (195 bats tests, 8 suites)
 - **desktop-build**: `.github/workflows/desktop-build.yml` — builds Tauri installers for Windows, macOS, and Linux
 </details>
 

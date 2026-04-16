@@ -156,7 +156,8 @@ pub fn list_discussions_paginated(conn: &Connection, limit: Option<u32>, offset:
                 d.workspace_mode, d.workspace_path, d.worktree_branch,
                 d.summary_cache, d.summary_up_to_msg_idx, d.model_tier,
                 d.pin_first_message,
-                d.shared_id, d.shared_with_json, d.workflow_run_id
+                d.shared_id, d.shared_with_json, d.workflow_run_id,
+                d.pinned
          FROM discussions d ORDER BY d.updated_at DESC{}",
         match (limit, offset) {
             (Some(l), Some(o)) => format!(" LIMIT {} OFFSET {}", l, o),
@@ -186,6 +187,7 @@ pub fn list_discussions_paginated(conn: &Connection, limit: Option<u32>, offset:
             profile_ids: serde_json::from_str(&profile_ids_str).unwrap_or_default(),
             directive_ids: serde_json::from_str(&directive_ids_str).unwrap_or_default(),
             archived: row.get::<_, i32>(8).unwrap_or(0) != 0,
+            pinned: row.get::<_, i32>(23).unwrap_or(0) != 0,
             workspace_mode: row.get::<_, String>(13).unwrap_or_else(|_| "Direct".into()),
             workspace_path: row.get::<_, Option<String>>(14).unwrap_or(None),
             worktree_branch: row.get::<_, Option<String>>(15).unwrap_or(None),
@@ -231,7 +233,7 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
                 created_at, updated_at, archived, skill_ids_json, profile_ids_json, directive_ids_json,
                 workspace_mode, workspace_path, worktree_branch,
                 summary_cache, summary_up_to_msg_idx, model_tier, pin_first_message,
-                shared_id, shared_with_json, workflow_run_id
+                shared_id, shared_with_json, workflow_run_id, pinned
          FROM discussions WHERE id = ?1"
     )?;
 
@@ -255,6 +257,7 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
             profile_ids: serde_json::from_str(&profile_ids_str).unwrap_or_default(),
             directive_ids: serde_json::from_str(&directive_ids_str).unwrap_or_default(),
             archived: row.get::<_, i32>(8).unwrap_or(0) != 0,
+            pinned: row.get::<_, i32>(22).unwrap_or(0) != 0,
             workspace_mode: row.get::<_, String>(12).unwrap_or_else(|_| "Direct".into()),
             workspace_path: row.get::<_, Option<String>>(13).unwrap_or(None),
             worktree_branch: row.get::<_, Option<String>>(14).unwrap_or(None),
@@ -281,8 +284,8 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
 
 pub fn insert_discussion(conn: &Connection, disc: &Discussion) -> Result<()> {
     conn.execute(
-        "INSERT INTO discussions (id, project_id, title, agent, language, participants_json, created_at, updated_at, archived, skill_ids_json, profile_ids_json, directive_ids_json, workspace_mode, workspace_path, worktree_branch, model_tier, pin_first_message, shared_id, shared_with_json, workflow_run_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+        "INSERT INTO discussions (id, project_id, title, agent, language, participants_json, created_at, updated_at, archived, pinned, skill_ids_json, profile_ids_json, directive_ids_json, workspace_mode, workspace_path, worktree_branch, model_tier, pin_first_message, shared_id, shared_with_json, workflow_run_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
         params![
             disc.id,
             disc.project_id,
@@ -293,6 +296,7 @@ pub fn insert_discussion(conn: &Connection, disc: &Discussion) -> Result<()> {
             disc.created_at.to_rfc3339(),
             disc.updated_at.to_rfc3339(),
             disc.archived as i32,
+            disc.pinned as i32,
             serde_json::to_string(&disc.skill_ids)?,
             serde_json::to_string(&disc.profile_ids)?,
             serde_json::to_string(&disc.directive_ids)?,
@@ -314,16 +318,16 @@ pub fn delete_discussion(conn: &Connection, id: &str) -> Result<bool> {
     Ok(affected > 0)
 }
 
-pub fn update_discussion(conn: &Connection, id: &str, title: Option<&str>, archived: Option<bool>, project_id: Option<Option<&str>>) -> Result<bool> {
-    update_discussion_fields(conn, id, title, archived, None, None, None, project_id)
+pub fn update_discussion(conn: &Connection, id: &str, title: Option<&str>, archived: Option<bool>, pinned: Option<bool>, project_id: Option<Option<&str>>) -> Result<bool> {
+    update_discussion_fields(conn, id, title, archived, pinned, None, None, None, project_id)
 }
 
 pub fn update_discussion_skill_ids(conn: &Connection, id: &str, skill_ids: &[String]) -> Result<bool> {
-    update_discussion_fields(conn, id, None, None, Some(skill_ids), None, None, None)
+    update_discussion_fields(conn, id, None, None, None, Some(skill_ids), None, None, None)
 }
 
 pub fn update_discussion_profile_ids(conn: &Connection, id: &str, profile_ids: &[String]) -> Result<bool> {
-    update_discussion_fields(conn, id, None, None, None, Some(profile_ids), None, None)
+    update_discussion_fields(conn, id, None, None, None, None, Some(profile_ids), None, None)
 }
 
 pub fn update_discussion_tier(conn: &Connection, id: &str, tier: &ModelTier) -> Result<bool> {
@@ -343,7 +347,7 @@ pub fn update_discussion_agent(conn: &Connection, id: &str, agent: &AgentType) -
 }
 
 pub fn update_discussion_directive_ids(conn: &Connection, id: &str, directive_ids: &[String]) -> Result<bool> {
-    update_discussion_fields(conn, id, None, None, None, None, Some(directive_ids), None)
+    update_discussion_fields(conn, id, None, None, None, None, None, Some(directive_ids), None)
 }
 
 /// Update workspace_path and worktree_branch for a discussion (used after worktree creation).
@@ -356,7 +360,7 @@ pub fn update_discussion_workspace(conn: &Connection, id: &str, workspace_path: 
 }
 
 #[allow(clippy::too_many_arguments)]
-fn update_discussion_fields(conn: &Connection, id: &str, title: Option<&str>, archived: Option<bool>, skill_ids: Option<&[String]>, profile_ids: Option<&[String]>, directive_ids: Option<&[String]>, project_id: Option<Option<&str>>) -> Result<bool> {
+fn update_discussion_fields(conn: &Connection, id: &str, title: Option<&str>, archived: Option<bool>, pinned: Option<bool>, skill_ids: Option<&[String]>, profile_ids: Option<&[String]>, directive_ids: Option<&[String]>, project_id: Option<Option<&str>>) -> Result<bool> {
     let mut sets = Vec::new();
     let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
@@ -367,6 +371,10 @@ fn update_discussion_fields(conn: &Connection, id: &str, title: Option<&str>, ar
     if let Some(a) = archived {
         sets.push("archived = ?");
         values.push(Box::new(a as i32));
+    }
+    if let Some(p) = pinned {
+        sets.push("pinned = ?");
+        values.push(Box::new(p as i32));
     }
     if let Some(pid) = project_id {
         sets.push("project_id = ?");

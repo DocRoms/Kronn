@@ -906,6 +906,15 @@ pub struct WorkflowStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_workspace_mode: Option<String>,
 
+    /// Chain additional Quick Prompts after the initial one inside each
+    /// child discussion. Each QP is auto-sent as a User message once the
+    /// previous agent response completes, and the agent is re-fired.
+    /// The batch progress counter only increments after the ENTIRE chain
+    /// (initial QP + all chained QPs) finishes for a given discussion.
+    /// Example: `["qp-review", "qp-summary"]` after the primary `batch_quick_prompt_id`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub batch_chain_prompt_ids: Vec<String>,
+
     // ─── Notify fields ───────────────────────────────────────────────────
     // Only meaningful when `step_type == Notify`. Webhook-based workflow
     // finalizer: posts to an external URL with a rendered body. Zero agent
@@ -1509,6 +1518,10 @@ pub struct Discussion {
     pub directive_ids: Vec<String>,
     #[serde(default)]
     pub archived: bool,
+    /// User-pinned / favorite discussion — appears in a dedicated "Favorites"
+    /// section at the top of the sidebar regardless of project grouping.
+    #[serde(default)]
+    pub pinned: bool,
     #[serde(default = "default_workspace_mode")]
     pub workspace_mode: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1841,6 +1854,7 @@ pub struct CreateDiscussionRequest {
 pub struct UpdateDiscussionRequest {
     pub title: Option<String>,
     pub archived: Option<bool>,
+    pub pinned: Option<bool>,
     pub skill_ids: Option<Vec<String>>,
     pub profile_ids: Option<Vec<String>>,
     pub directive_ids: Option<Vec<String>>,

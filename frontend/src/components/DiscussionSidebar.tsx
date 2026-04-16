@@ -7,7 +7,7 @@ import { gravatarUrl } from '../lib/gravatar';
 import { formatRelativeTime } from '../lib/relativeTime';
 import type { ToastFn } from '../hooks/useToast';
 import {
-  Folder, ChevronLeft, ChevronRight, Plus, X, MessageSquare, Archive, Search, Users2, Trash2,
+  Folder, ChevronLeft, ChevronRight, Plus, X, MessageSquare, Archive, Search, Users2, Trash2, Star,
 } from 'lucide-react';
 
 export interface DiscussionSidebarProps {
@@ -24,6 +24,7 @@ export interface DiscussionSidebarProps {
   onArchive: (discId: string) => void;
   onUnarchive: (discId: string) => void;
   onDelete: (discId: string) => void;
+  onTogglePin: (discId: string, pinned: boolean) => void;
   onNewDiscussion: () => void;
   onClose: () => void;
   /** Called when the user clicks the ⏹ stop button inline on a disc that
@@ -80,6 +81,7 @@ export function DiscussionSidebar({
   onArchive,
   onUnarchive,
   onDelete,
+  onTogglePin,
   onNewDiscussion,
   onClose,
   onStopDiscussion,
@@ -125,6 +127,40 @@ export function DiscussionSidebar({
     }
     return { activeDiscByProject: activeMap, archivedDiscussions: archived };
   }, [discussions]);
+
+  // Unseen count PER GROUP KEY — used to badge collapsed group headers so
+  // the user can tell at a glance which group hides unread conversations.
+  // Keys mirror the ones used by `collapsedGroups`: `"__global__"` for
+  // global, `"org::OrgName"` for org headers, `projectId` for projects.
+  const unseenByGroup = useMemo(() => {
+    const map = new Map<string, number>();
+    const add = (key: string, count: number) => {
+      map.set(key, (map.get(key) ?? 0) + count);
+    };
+    for (const disc of discussions) {
+      if (disc.archived) continue;
+      if (disc.id === activeId) continue; // active disc is always "seen"
+      const total = disc.message_count ?? disc.messages.length;
+      const seen = lastSeenMsgCount[disc.id] ?? 0;
+      const unseen = total - seen;
+      if (unseen <= 0) continue;
+
+      // Global group
+      if (!disc.project_id) {
+        add('__global__', unseen);
+        continue;
+      }
+
+      // Project group + org group
+      add(disc.project_id, unseen);
+      const proj = projects.find(p => p.id === disc.project_id);
+      if (proj) {
+        const org = getProjectGroup(proj, t('disc.local'), t('disc.local'));
+        add(`org::${org}`, unseen);
+      }
+    }
+    return map;
+  }, [discussions, activeId, lastSeenMsgCount, projects, t]);
 
   // ─── Contact handlers ─────────────────────────────────────────────────
   const handleContactAdd = async () => {
@@ -251,6 +287,36 @@ export function DiscussionSidebar({
           ))}
         </div>
 
+        {/* Pinned / Favorites — always at the top, cross-project, never collapsed */}
+        {(() => {
+          const pinned = discussions.filter(d => d.pinned && !d.archived);
+          if (pinned.length === 0) return null;
+          return (
+            <div>
+              <div className="disc-group-header" data-no-border="true">
+                <Star size={10} style={{ color: '#ffc800' }} />
+                <span style={{ fontWeight: 600, fontSize: 'var(--kr-fs-sm)' }}>{t('disc.favorites')}</span>
+                <span className="disc-group-count">{pinned.length}</span>
+              </div>
+              {pinned.sort((a, b) => b.updated_at.localeCompare(a.updated_at)).map(disc => (
+                <SwipeableDiscItem
+                  key={`pin-${disc.id}`}
+                  disc={disc}
+                  isActive={disc.id === activeId}
+                  lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
+                  isSending={!!sendingMap[disc.id]}
+                  onSelect={onSelect}
+                  onArchive={onArchive}
+                  onDelete={onDelete}
+                  onStop={onStopDiscussion}
+                  onTogglePin={onTogglePin}
+                  t={t}
+                />
+              ))}
+            </div>
+          );
+        })()}
+
         {/* Global discussions (no project) */}
         {(() => {
           const globalDiscs = activeDiscByProject.get(null) ?? [];
@@ -267,6 +333,9 @@ export function DiscussionSidebar({
                 <ChevronRight size={10} className="disc-chevron" data-expanded={!isCollapsed} />
                 <MessageSquare size={10} /> {t('disc.general')}
                 <span className="disc-group-count">{globalDiscs.length}</span>
+                {(unseenByGroup.get('__global__') ?? 0) > 0 && (
+                  <span className="disc-group-unseen">{unseenByGroup.get('__global__')}</span>
+                )}
               </button>
               {!isCollapsed && globalDiscs.filter(d => !discSearchFilter || d.title.toLowerCase().includes(discSearchFilter.toLowerCase())).sort((a, b) => b.updated_at.localeCompare(a.updated_at)).map(disc => (
                 <SwipeableDiscItem
@@ -279,6 +348,7 @@ export function DiscussionSidebar({
                   onArchive={onArchive}
                   onDelete={onDelete}
                   onStop={onStopDiscussion}
+                  onTogglePin={onTogglePin}
                   t={t}
                 />
               ))}
@@ -325,6 +395,9 @@ export function DiscussionSidebar({
                     <ChevronRight size={9} className="disc-chevron" data-expanded={!isOrgCollapsed} />
                     {orgName}
                     <span className="disc-group-count">{orgDiscCount}</span>
+                    {(unseenByGroup.get(orgKey) ?? 0) > 0 && (
+                      <span className="disc-group-unseen">{unseenByGroup.get(orgKey)}</span>
+                    )}
                   </button>
                 )}
                 {!isOrgCollapsed && orgProjects.map(proj => {
@@ -340,6 +413,9 @@ export function DiscussionSidebar({
                         <ChevronRight size={10} className="disc-chevron" data-expanded={!isCollapsed} />
                         <Folder size={10} /> {proj.name}
                         <span className="disc-group-count">{projDiscs.length}</span>
+                        {(unseenByGroup.get(proj.id) ?? 0) > 0 && (
+                          <span className="disc-group-unseen">{unseenByGroup.get(proj.id)}</span>
+                        )}
                       </button>
                       {!isCollapsed && (() => {
                         // Filter + sort, then split into batch groups vs loose discs.

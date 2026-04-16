@@ -25,7 +25,10 @@ Kronn/
 │       │   ├── audit.rs        # AI audit pipeline (~1848L) — SSE audit, full_audit, drift, validation, briefing, cancel, skill detection
 │       │   ├── ai_docs.rs      # AI doc file browser (~184L) — list/search/read ai/ files
 │       │   ├── discover.rs     # Remote repo discovery (~426L) — GitHub/GitLab multi-source with token from MCPs
-│       │   ├── discussions.rs  # Discussion CRUD + SSE streaming + orchestration (~3900L). make_agent_stream checkpoints partial_response every 30s/100 chunks. /stop cancels via cancel_registry. /dismiss-partial force-recovers (shared path with boot recovery)
+│       │   ├── discussions.rs  # Discussion CRUD + SSE streaming + orchestration (~2880L). make_agent_stream checkpoints partial_response every 30s/100 chunks. /stop cancels via cancel_registry. /dismiss-partial force-recovers (shared path with boot recovery)
+│       │   ├── disc_helpers.rs # Pure agent/text helpers (~320L, 15 tests): agent_prompt_budget, auth_mode_for, agent_display_name, smart_truncate, summary_threshold/cooldown, is_compact_agent, language_instruction, estimate_extra_context_len
+│       │   ├── disc_prompts.rs # Pure prompt builders (~625L, 9 tests): build_agent_prompt, build_orchestration_prompt, build_synthesis_prompt, OrchestrationContext struct
+│       │   ├── disc_git.rs     # Shared git+MCP prep for general and project discussions
 │       │   ├── contacts.rs     # Contacts CRUD + invite codes + network info + ping
 │       │   ├── ws.rs           # WebSocket handler — peer-to-peer presence + auto-add unknown peers + PartialResponseRecovered / BatchRunProgress / BatchRunFinished broadcasts
 │       │   ├── mcps.rs         # MCP 3-tier API: overview, configs CRUD, registry, refresh, secrets
@@ -173,7 +176,11 @@ Kronn/
 │       │   └── index.css         # Barrel import for all CSS files
 │       ├── hooks/
 │       │   ├── useApi.ts       # Generic fetch hook with loading/error/refetch + race condition protection
-│       │   └── useToast.ts     # Toast notifications (success/error/info, auto-dismiss 4s, max 3 visible)
+│       │   ├── useToast.ts     # Toast notifications (success/error/info, auto-dismiss 4s, max 3 visible)
+│       │   ├── useWebSocket.ts # WebSocket subscription with auto-reconnect
+│       │   ├── useMediaQuery.ts # Responsive breakpoint helper
+│       │   ├── useQpChain.ts   # QP Chain Phase 1 — queue a Quick Prompt mid-stream, auto-fire on sending true→false edge (0.4.2)
+│       │   └── useRafBatchedStream.ts # Generic rAF-batched chunk streaming — collapses SSE deltas into one setState/frame (0.4.2)
 │       ├── lib/
 │       │   ├── api.ts          # API client (typed wrappers + SSE streaming helpers)
 │       │   ├── i18n.ts         # Lightweight i18n system (fr/en/es). Translation dictionaries + locale persistence (localStorage)
@@ -243,12 +250,13 @@ Kronn/
 ## Notes
 - `README.md` is not guaranteed to be up-to-date; prefer actual config files as source of truth.
 - `frontend/src/types/generated.ts` is auto-generated — never edit manually.
-- Dashboard.tsx (~674L) is the main UI shell (nav bar, page routing). Sub-pages: SettingsPage (~990L + 3 sections), DiscussionsPage (~1241L + 6 components), McpPage (~740L), WorkflowsPage (~373L + 3 components). Projects: ProjectList (~234L) + ProjectCard (~707L).
-- DiscussionsPage split (2026-03-28): ChatHeader, ChatInput, DiscussionSidebar, NewDiscussionForm, MessageBubble, SwipeableDiscItem — each < 700L.
+- Dashboard.tsx (~1017L) is the main UI shell. Sub-pages: SettingsPage (~1106L), DiscussionsPage (~1736L after 2026-04-17 hook split into useQpChain + useRafBatchedStream), McpPage (~791L), WorkflowsPage (~810L). Projects: ProjectList (~234L) + ProjectCard (~707L).
+- Hot files still above the TD watermark: `backend/src/models/mod.rs` (~2225L), `backend/src/api/audit.rs` (~1966L), `backend/src/api/projects.rs` (~1819L). `backend/src/api/discussions.rs` was 3400L; now 2880L after 2026-04-17 extraction of 9 pure helpers (`disc_helpers.rs`) and 3 prompt builders (`disc_prompts.rs`).
+- DiscussionsPage split (2026-03-28): ChatHeader, ChatInput (~1063L — mentions + STT + debate + QP chain picker), DiscussionSidebar, NewDiscussionForm, MessageBubble, SwipeableDiscItem, AgentQuestionForm. ChatInput is the biggest outlier.
 - CSS system: `src/styles/` (tokens, utilities, components) + per-page CSS. ~319 inline styles remain (dynamic only).
 - TTS/STT logic extracted into `lib/tts-*.ts` and `lib/stt-*.ts` modules (7 files, ~400 lines total). Web Workers for WASM inference run off the main thread.
 - Shared constants (AGENT_COLORS, AGENT_LABELS) extracted to `lib/constants.ts` — imported by Dashboard and WorkflowsPage.
-- Frontend tests in `__tests__/` directories alongside source (37 suites, 489 tests). See `ai/testing-quality.md`.
+- Frontend tests in `__tests__/` directories alongside source (51 suites, 629 tests as of 2026-04-17). See `ai/testing-quality.md`.
 - Shell tests in `tests/bats/` (8 suites, 186 tests via bats-core). See `ai/testing-quality.md`.
 - CI pipeline: `.github/workflows/ci-test.yml` triggered on push to main + all PRs (backend clippy/test + frontend tsc/test + shell bats + security scan). Desktop build: `.github/workflows/desktop-build.yml`.
 - `templates/` directory contains the AI context template files (ai/ skeleton, CLAUDE.md, .cursorrules, etc.) mounted at `/app/templates:ro` in Docker.

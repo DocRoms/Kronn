@@ -271,4 +271,4 @@ Redirectors to this file: `CLAUDE.md`, `GEMINI.md`, `AGENTS.md`, `.kiro/steering
 
 ## 11. Last updated
 
-AI context last reviewed: **2026-04-14** (v0.4.0).
+AI context last reviewed: **2026-04-17** (v0.4.2 WIP — QP Chain Phase 2 shipped, `discussions.rs` split into `disc_helpers.rs` + `disc_prompts.rs`, `useQpChain` + `useRafBatchedStream` hooks extracted, custom skill editing added; last released tag is 0.4.1).

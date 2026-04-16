@@ -45,6 +45,7 @@ fn sample_discussion(id: &str, project_id: Option<&str>) -> Discussion {
         profile_ids: vec![],
         directive_ids: vec![],
         archived: false,
+        pinned: false,
         workspace_mode: "Direct".into(),
         workspace_path: None,
         worktree_branch: None,
@@ -913,6 +914,7 @@ fn sample_workflow(id: &str) -> Workflow {
             batch_wait_for_completion: None,
             batch_max_items: None,
             batch_workspace_mode: None,
+            batch_chain_prompt_ids: vec![],
             notify_config: None,
         }],
         actions: vec![],
@@ -1447,6 +1449,7 @@ fn partial_response_set_then_recover_inserts_agent_message() {
         profile_ids: vec![],
         directive_ids: vec![],
         archived: false,
+        pinned: false,
         workspace_mode: "Direct".into(),
         workspace_path: None,
         worktree_branch: None,
@@ -1520,7 +1523,8 @@ fn partial_response_preserves_started_at_across_checkpoints() {
         agent: AgentType::ClaudeCode, language: "fr".into(),
         participants: vec![AgentType::ClaudeCode], messages: vec![], message_count: 0,
         skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
-        archived: false, workspace_mode: "Direct".into(),
+        archived: false,
+        pinned: false, workspace_mode: "Direct".into(),
         workspace_path: None, worktree_branch: None, tier: ModelTier::Default,
         pin_first_message: false, summary_cache: None, summary_up_to_msg_idx: None,
         shared_id: None, shared_with: vec![], workflow_run_id: None,
@@ -1567,7 +1571,8 @@ fn has_pending_partial_returns_true_when_set() {
         agent: AgentType::ClaudeCode, language: "fr".into(),
         participants: vec![AgentType::ClaudeCode], messages: vec![], message_count: 0,
         skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
-        archived: false, workspace_mode: "Direct".into(),
+        archived: false,
+        pinned: false, workspace_mode: "Direct".into(),
         workspace_path: None, worktree_branch: None, tier: ModelTier::Default,
         pin_first_message: false, summary_cache: None, summary_up_to_msg_idx: None,
         shared_id: None, shared_with: vec![], workflow_run_id: None,
@@ -1590,7 +1595,8 @@ fn partial_response_clear_with_none_wipes_column() {
         agent: AgentType::ClaudeCode, language: "fr".into(),
         participants: vec![AgentType::ClaudeCode], messages: vec![], message_count: 0,
         skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
-        archived: false, workspace_mode: "Direct".into(),
+        archived: false,
+        pinned: false, workspace_mode: "Direct".into(),
         workspace_path: None, worktree_branch: None, tier: ModelTier::Default,
         pin_first_message: false, summary_cache: None, summary_up_to_msg_idx: None,
         shared_id: None, shared_with: vec![], workflow_run_id: None,
@@ -1832,7 +1838,8 @@ fn workflow_multi_step_roundtrip() {
                 batch_wait_for_completion: None,
                 batch_max_items: None,
                 batch_workspace_mode: None,
-            notify_config: None,
+                batch_chain_prompt_ids: vec![],
+                notify_config: None,
             },
             WorkflowStep {
                 step_type: StepType::default(),
@@ -1859,7 +1866,8 @@ fn workflow_multi_step_roundtrip() {
                 batch_wait_for_completion: None,
                 batch_max_items: None,
                 batch_workspace_mode: None,
-            notify_config: None,
+                batch_chain_prompt_ids: vec![],
+                notify_config: None,
             },
             WorkflowStep {
                 step_type: StepType::default(),
@@ -1883,7 +1891,8 @@ fn workflow_multi_step_roundtrip() {
                 batch_wait_for_completion: None,
                 batch_max_items: None,
                 batch_workspace_mode: None,
-            notify_config: None,
+                batch_chain_prompt_ids: vec![],
+                notify_config: None,
             },
         ],
         actions: vec![],
@@ -1944,6 +1953,7 @@ fn workflow_update_steps_count() {
         batch_wait_for_completion: None,
         batch_max_items: None,
         batch_workspace_mode: None,
+        batch_chain_prompt_ids: vec![],
         notify_config: None,
     });
     crate::db::workflows::update_workflow(&conn, &wf).unwrap();
@@ -1952,6 +1962,68 @@ fn workflow_update_steps_count() {
     assert_eq!(loaded.steps.len(), 2);
     assert_eq!(loaded.steps[1].name, "step2");
     assert_eq!(loaded.steps[1].prompt_template, "Second step");
+}
+
+#[test]
+fn workflow_batch_chain_prompt_ids_roundtrip() {
+    // Regression: `batch_chain_prompt_ids` (QP Chain Phase 2) must survive a
+    // DB save/load cycle. Empty vec should serialize as missing (skip-if-empty)
+    // and still deserialize back to an empty vec.
+    let conn = test_db();
+    let now = Utc::now();
+    let mut wf = sample_workflow("wc1");
+    wf.steps[0].step_type = StepType::BatchQuickPrompt;
+    wf.steps[0].batch_quick_prompt_id = Some("qp-init".into());
+    wf.steps[0].batch_chain_prompt_ids = vec![
+        "qp-review".into(),
+        "qp-summary".into(),
+    ];
+    wf.created_at = now;
+    wf.updated_at = now;
+    crate::db::workflows::insert_workflow(&conn, &wf).unwrap();
+
+    let loaded = crate::db::workflows::get_workflow(&conn, "wc1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        loaded.steps[0].batch_chain_prompt_ids,
+        vec!["qp-review".to_string(), "qp-summary".to_string()],
+        "chain IDs must survive the roundtrip in order"
+    );
+
+    // Empty chain should also roundtrip cleanly (skip_serializing_if).
+    let wf_empty = sample_workflow("wc2");
+    crate::db::workflows::insert_workflow(&conn, &wf_empty).unwrap();
+    let loaded_empty = crate::db::workflows::get_workflow(&conn, "wc2")
+        .unwrap()
+        .unwrap();
+    assert!(
+        loaded_empty.steps[0].batch_chain_prompt_ids.is_empty(),
+        "empty chain must stay empty after roundtrip"
+    );
+}
+
+#[test]
+fn workflow_step_chain_serde_skip_empty() {
+    // `batch_chain_prompt_ids` has `skip_serializing_if = "Vec::is_empty"`.
+    // Empty = absent from the JSON payload (keeps existing workflow JSON
+    // stable for users who never configured a chain).
+    let mut step = sample_workflow("wcs1").steps.into_iter().next().unwrap();
+    step.batch_chain_prompt_ids = vec![];
+    let json = serde_json::to_string(&step).unwrap();
+    assert!(
+        !json.contains("batch_chain_prompt_ids"),
+        "empty chain vec must be skipped; got: {}",
+        json
+    );
+
+    step.batch_chain_prompt_ids = vec!["qp-a".into(), "qp-b".into()];
+    let json = serde_json::to_string(&step).unwrap();
+    assert!(
+        json.contains("\"batch_chain_prompt_ids\":[\"qp-a\",\"qp-b\"]"),
+        "non-empty chain must serialize in order; got: {}",
+        json
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2289,6 +2361,7 @@ fn cross_agent_db_round_trip_all_types() {
             profile_ids: vec![],
             directive_ids: vec![],
             archived: false,
+            pinned: false,
             workspace_mode: "Direct".into(),
             workspace_path: None,
             worktree_branch: None,

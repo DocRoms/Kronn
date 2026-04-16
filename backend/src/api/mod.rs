@@ -8,6 +8,8 @@ pub mod mcps;
 pub mod contacts;
 pub mod discussions;
 pub mod disc_git;
+pub mod disc_helpers;
+pub mod disc_prompts;
 pub mod workflows;
 pub mod stats;
 pub mod skills;
