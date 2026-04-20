@@ -97,6 +97,7 @@ async fn main() -> anyhow::Result<()> {
         audit_tracker: Arc::new(std::sync::Mutex::new(AuditTracker::default())),
         ws_broadcast: Arc::new(ws_tx),
         cancel_registry: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        oauth2_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
     // Workflow engine gets a clone of the state so it can spawn runs that

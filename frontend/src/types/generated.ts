@@ -289,12 +289,56 @@ export interface McpServer {
   description: string;
   transport: McpTransport;
   source: McpSource;
+  /** REST API capability (present for API-only plugins like Chartbeat,
+   *  or hybrid plugins that have both an MCP transport AND a REST API). */
+  api_spec?: ApiSpec | null;
 }
 
 export type McpTransport =
   | { Stdio: { command: string; args: string[] } }
   | { Sse: { url: string } }
-  | { Streamable: { url: string } };
+  | { Streamable: { url: string } }
+  | "ApiOnly";
+
+/** REST API capability for a plugin. */
+export interface ApiSpec {
+  base_url: string;
+  auth: ApiAuthKind;
+  endpoints: ApiEndpoint[];
+  docs_url?: string | null;
+  config_keys?: ApiConfigKey[];
+}
+
+export type ApiAuthKind =
+  | { ApiKeyQuery: { param_name: string; env_key: string } }
+  | { ApiKeyHeader: { header_name: string; env_key: string } }
+  | { Bearer: { env_key: string } }
+  | { OAuth2ClientCredentials: {
+      token_url: string;
+      client_id_env: string;
+      client_secret_env: string;
+      scope: string;
+      extra_headers?: OAuth2ExtraHeader[];
+    } }
+  | "None";
+
+export interface OAuth2ExtraHeader {
+  name: string;
+  value_template: string;
+}
+
+export interface ApiEndpoint {
+  path: string;
+  method: string;
+  description: string;
+}
+
+export interface ApiConfigKey {
+  env_key: string;
+  label: string;
+  placeholder: string;
+  description: string;
+}
 
 export type McpSource = "Registry" | "Detected" | "Manual";
 
@@ -358,6 +402,9 @@ export interface McpDefinition {
   token_help: string | null;
   publisher: string;
   official: boolean;
+  /** API capability (present for API-only plugins like Chartbeat, or
+   *  hybrid plugins). Mirrored onto `McpServer.api_spec` at seed time. */
+  api_spec?: ApiSpec | null;
 }
 
 // ─── Workflows ─────────────────────────────────────────────────────────────
@@ -802,6 +849,10 @@ export interface Discussion {
   shared_with?: string[];
   /** If set, this disc was spawned by a batch WorkflowRun — used for sidebar grouping */
   workflow_run_id?: string | null;
+  /** Test mode — branch the main repo was on before the user entered test mode. */
+  test_mode_restore_branch?: string | null;
+  /** Test mode — auto-stash ref (kronn:auto-<disc_id>) pushed on enter, popped on exit. */
+  test_mode_stash_ref?: string | null;
   created_at: string; // ISO 8601
   updated_at: string;
 }

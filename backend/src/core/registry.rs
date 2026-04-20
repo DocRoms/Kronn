@@ -1,4 +1,7 @@
-use crate::models::{McpDefinition, McpTransport};
+use crate::models::{
+    ApiAuthKind, ApiConfigKey, ApiEndpoint, ApiSpec, McpDefinition, McpTransport,
+    OAuth2ExtraHeader,
+};
 
 /// Return the built-in MCP registry — official servers only
 pub fn builtin_registry() -> Vec<McpDefinition> {
@@ -20,6 +23,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: false,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         McpDefinition {
             id: "mcp-gitlab".into(),
@@ -37,6 +41,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec!["@modelcontextprotocol/server-gitlab".into()],
             default_context: None,
+            api_spec: None,
         },
         // ── Databases ───────────────────────────────────────────────────────
         McpDefinition {
@@ -55,6 +60,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: false,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         McpDefinition {
             id: "mcp-sqlite".into(),
@@ -72,6 +78,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: false,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         McpDefinition {
             id: "mcp-redis".into(),
@@ -89,6 +96,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         McpDefinition {
             id: "mcp-mongodb".into(),
@@ -106,6 +114,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec!["mongodb/mongodb-mcp-server".into()],
             default_context: None,
+            api_spec: None,
         },
         // ── Cloud & Infra ───────────────────────────────────────────────────
         McpDefinition {
@@ -124,6 +133,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         McpDefinition {
             id: "mcp-aws-cloudwatch".into(),
@@ -141,6 +151,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         McpDefinition {
             id: "mcp-aws-api".into(),
@@ -158,6 +169,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         McpDefinition {
             id: "mcp-docker".into(),
@@ -175,6 +187,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         McpDefinition {
             id: "mcp-kubernetes".into(),
@@ -192,6 +205,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         // ── Search & Web ────────────────────────────────────────────────────
         McpDefinition {
@@ -210,6 +224,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: false,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         McpDefinition {
             id: "mcp-fetch".into(),
@@ -227,6 +242,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: false,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         // ── Analytics & Monitoring ──────────────────────────────────────────
         McpDefinition {
@@ -245,6 +261,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         McpDefinition {
             id: "mcp-grafana".into(),
@@ -262,6 +279,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         // ── Communication ───────────────────────────────────────────────────
         McpDefinition {
@@ -280,6 +298,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: false,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         McpDefinition {
             id: "mcp-microsoft-365".into(),
@@ -300,6 +319,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: false,
             alt_packages: vec!["@merill/lokka".into(), "@pnp/cli-microsoft365-mcp-server".into()],
             default_context: None,
+            api_spec: None,
         },
         // ── Project Management ──────────────────────────────────────────────
         McpDefinition {
@@ -317,6 +337,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         McpDefinition {
             id: "mcp-atlassian".into(),
@@ -337,6 +358,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         // ── Design ──────────────────────────────────────────────────────────
         McpDefinition {
@@ -355,6 +377,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         McpDefinition {
             id: "mcp-drawio".into(),
@@ -372,6 +395,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         // ── Files & Utilities ───────────────────────────────────────────────
         McpDefinition {
@@ -390,6 +414,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: false,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         // Puppeteer removed — use Playwright (mcp-playwright) instead.
         McpDefinition {
@@ -408,6 +433,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         McpDefinition {
             id: "mcp-playwright".into(),
@@ -425,6 +451,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         McpDefinition {
             id: "mcp-context7".into(),
@@ -442,6 +469,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         // ── Payments ───────────────────────────────────────────────────────
         McpDefinition {
@@ -460,6 +488,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         // ── Knowledge & Docs ──────────────────────────────────────────────
         McpDefinition {
@@ -478,6 +507,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         // ── BaaS ──────────────────────────────────────────────────────────
         McpDefinition {
@@ -496,6 +526,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         // ── SEO ───────────────────────────────────────────────────────────
         McpDefinition {
@@ -514,6 +545,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         // ── Git (local) ──────────────────────────────────────────────────
         McpDefinition {
@@ -532,6 +564,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: false,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         // ── Email ─────────────────────────────────────────────────────────
         McpDefinition {
@@ -550,6 +583,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         // ── AI & Reasoning ───────────────────────────────────────────────
         McpDefinition {
@@ -568,6 +602,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: false,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         McpDefinition {
             id: "mcp-qdrant".into(),
@@ -585,6 +620,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         McpDefinition {
             id: "mcp-sequential-thinking".into(),
@@ -602,6 +638,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: false,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         // ── Browser (cloud) ─────────────────────────────────────────────
         McpDefinition {
@@ -620,6 +657,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         // ── Cloud — Azure ───────────────────────────────────────────────
         McpDefinition {
@@ -638,6 +676,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         // ── Search ──────────────────────────────────────────────────────
         McpDefinition {
@@ -656,6 +695,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         McpDefinition {
             id: "mcp-perplexity".into(),
@@ -673,6 +713,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         McpDefinition {
             id: "mcp-datagouv".into(),
@@ -689,6 +730,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         // ── Scraping ────────────────────────────────────────────────────
         McpDefinition {
@@ -707,6 +749,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         // ── Sandbox ─────────────────────────────────────────────────────
         McpDefinition {
@@ -725,6 +768,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         // ── Cloud — Google ────────────────────────────────────────────
         McpDefinition {
@@ -743,6 +787,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: false,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         McpDefinition {
             id: "mcp-bigquery".into(),
@@ -760,6 +805,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: false,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         McpDefinition {
             id: "mcp-google-analytics".into(),
@@ -777,6 +823,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: false,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         // ── Database (serverless) ─────────────────────────────────────
         McpDefinition {
@@ -795,6 +842,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         // ── Observability ─────────────────────────────────────────────
         McpDefinition {
@@ -813,6 +861,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         McpDefinition {
             id: "mcp-fastly".into(),
@@ -825,7 +874,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             env_keys: vec![],
             tags: vec!["cdn".into(), "cache".into(), "infrastructure".into(), "edge".into(), "waf".into()],
             token_url: Some("https://manage.fastly.com/account/personal/tokens".into()),
-            token_help: Some("Requires Fastly CLI installed (brew install fastly/tap/fastly or https://developer.fastly.com/reference/cli/). Then run: fastly profile create <name> and enter your API token. No env var needed — auth is read from CLI profiles.".into()),
+            token_help: Some("Requires the Fastly CLI installed on the host (the MCP shells out to it). Install: `brew install fastly/tap/fastly` (macOS) or the tarball from https://github.com/fastly/cli/releases (Linux/WSL — prefer this over `npm i -g @fastly/cli` which ships a JS wrapper that breaks inside Docker). Then `fastly profile create <name>` and paste your API token. No env var needed — auth is read from CLI profiles.".into()),
             publisher: "Fastly".into(),
             official: true,
             alt_packages: vec!["fastly-mcp-server".into()],
@@ -835,27 +884,111 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
 
 **Server:** Official Fastly MCP (Go binary wrapping Fastly CLI)
 
-## Performance rules
+## 0. If `fastly CLI not found in PATH` — READ FIRST
 
-- **Results are often very large** (100K+ chars for service listings). Always use `fastly_result_read` with small `limit` (5-10) or `fastly_result_query` with filters to reduce output.
-- If a result exceeds token limits and gets saved to disk, parse the file with `jq` or `python3`:
-  ```
-  jq '.[0].text | fromjson | .data[] | {Name, ServiceID, ActiveVersion}' <file>
-  ```
-- The MCP result format is `[{"type": "text", "text": "<JSON_STRING>"}]` where the inner JSON has a `data` key containing the actual array.
+The MCP shells out to the `fastly` CLI under the hood. Inside Kronn's Docker
+container, three symptoms point to the same root cause:
 
-## Common operations
+- `fastly_execute` returns *"fastly CLI not found in PATH"*
+- `which fastly` inside the container: not found
+- But on the host, `fastly version` works fine
 
-- List services: `fastly_execute(command: "service", args: ["list"], flags: [{"name": "json"}])`
-- Purge all: `fastly_execute(command: "purge", args: ["--all"], flags: [{"name": "service-id", "value": "<ID>"}])`
-- Show domain: `fastly_execute(command: "domain", args: ["list"], flags: [{"name": "service-id", "value": "<ID>"}, {"name": "version", "value": "active"}])`
+**Root cause**: on Linux/WSL, `npm i -g @fastly/cli` installs a JS wrapper
+(`/usr/local/bin/fastly` → `../lib/node_modules/@fastly/cli/fastly.js`).
+Kronn mounts `/usr/local/bin` but, until v0.5.0, did NOT mount
+`/usr/local/lib`, so the relative symlink resolved to a non-existent
+path inside the container. v0.5.0+ adds the `/host-bin/lib` mount which
+fixes this transparently — if the problem persists, verify you're on
+an up-to-date Kronn image (`./kronn version` / `make start`).
 
-## Rules
+**Alternative fix that works on any Kronn version**: replace the JS
+wrapper with the standalone Go binary from
+[fastly/cli releases](https://github.com/fastly/cli/releases). The Go
+binary is self-contained → no symlink gymnastics → works from any
+mount layout.
+
+Verify auth after install:
+```bash
+fastly profile list          # shows configured profiles
+fastly auth list             # shows active tokens
+fastly service list --json   # smoke test against the API
+```
+
+## 1. Performance rules (result size)
+
+Service listings return 100K+ chars easily. Mitigations, in order of
+effectiveness:
+
+- `fastly_result_summary` first — get a digest before reading anything
+- `fastly_result_query` with filters (see tool spec)
+- `fastly_result_read` with small `limit` (5-10) for pagination
+
+If a result overflows to disk, parse with `jq` or `python3`:
+```bash
+jq '.[0].text | fromjson | .data[] | {Name, ServiceID, ActiveVersion}' <file>
+```
+
+The MCP result format is `[{"type": "text", "text": "<JSON_STRING>"}]`
+— the inner JSON has a `data` key containing the actual array.
+
+## 2. Common operations
+
+```
+# List services
+fastly_execute(command: "service", args: ["list"], flags: [{"name": "json"}])
+
+# Stats — historical traffic for a service (by service-id, minute granularity)
+fastly_execute(
+  command: "stats",
+  args: ["historical"],
+  flags: [
+    {"name": "service", "value": "<SERVICE_ID>"},
+    {"name": "from",    "value": "2026-04-20 14:00:00"},
+    {"name": "to",      "value": "2026-04-20 18:00:00"},
+    {"name": "by",      "value": "minute"},
+    {"name": "json"}
+  ]
+)
+
+# Real-time stats (rolling window) — useful to correlate live traffic anomalies
+fastly_execute(command: "stats", args: ["realtime"], flags: [{"name": "service", "value": "<SERVICE_ID>"}, {"name": "json"}])
+
+# Purge by surrogate key
+fastly_execute(command: "purge", args: ["--key", "<KEY>"], flags: [{"name": "service-id", "value": "<ID>"}])
+
+# Domain listing
+fastly_execute(command: "domain", args: ["list"], flags: [{"name": "service-id", "value": "<ID>"}, {"name": "version", "value": "active"}])
+```
+
+## 3. Traffic-correlation playbook
+
+When the user reports a traffic anomaly in an external analytics tool
+(Chartbeat, GA, etc.) and asks "is it the site or a Discover-style
+referrer chute?", Fastly stats are the tie-breaker:
+
+1. Find the service whose domain matches — `service list --json`, grep on
+   domain name. Sub-domains often have their own service ID.
+2. Pull `stats historical` at minute granularity over the suspect window.
+3. Compare *hits* (edge requests served) vs *cache_miss* (backend hits):
+   - Stable hits, normal cache ratio → the site was healthy; the dip
+     is upstream (referrer algorithm, editorial, etc.).
+   - Hit drop mirroring the analytics drop, cache ratio stable → traffic
+     really fell at the edge — not a measurement artefact.
+   - Hit drop + cache miss spike → origin slow / 5xx → site issue.
+
+Surface both the Chartbeat-style number AND the Fastly hit number in
+the final report so the user can judge for themselves.
+
+## 4. Rules
 
 - Always use `--json` flag when available to get structured output
 - Never purge without explicit user confirmation
 - Prefer `fastly_result_summary` to get an overview before reading full results
+- If the CLI reports "no profile selected" → the token is missing;
+  stop and ask the user to run `fastly profile create` rather than
+  guessing a service id
 "#.into()),
+            api_spec: None,
         },
         McpDefinition {
             id: "mcp-tavily".into(),
@@ -873,6 +1006,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         McpDefinition {
             id: "mcp-google-colab".into(),
@@ -890,6 +1024,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         // ── Code Quality & Security ──────────────────────────────────
         McpDefinition {
@@ -912,6 +1047,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         // ── Infrastructure as Code ──────────────────────────────────
         McpDefinition {
@@ -932,6 +1068,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         // ── Hosting & Deployment ────────────────────────────────────
         McpDefinition {
@@ -949,6 +1086,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
         },
         // ── Data Federation ─────────────────────────────────────────
         McpDefinition {
@@ -967,6 +1105,549 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             official: true,
             alt_packages: vec![],
             default_context: None,
+            api_spec: None,
+        },
+
+        // ── API-only plugins (no MCP server exists — agent uses curl) ────
+        //
+        // Chartbeat exposes a REST-only API (live dashboard, historical
+        // traffic, engagement, authors…). No official MCP, so we register
+        // it as API-only: transport = ApiOnly, api_spec carries the
+        // endpoints + auth + docs link. `env_keys` lists BOTH the secret
+        // (CHARTBEAT_API_KEY) and non-secret config (CHARTBEAT_HOST),
+        // stored together in the encrypted env blob — the UI renders the
+        // latter as a plain input via `api_spec.config_keys`.
+        McpDefinition {
+            id: "api-chartbeat".into(),
+            name: "Chartbeat".into(),
+            description: "Real-time & historical analytics for editorial sites — Top pages live, engagement, referrers, authors. Live API is synchronous; historical API is async (submit → status → fetch).".into(),
+            transport: McpTransport::ApiOnly,
+            env_keys: vec!["CHARTBEAT_API_KEY".into(), "CHARTBEAT_HOST".into()],
+            tags: vec!["analytics".into(), "api".into(), "editorial".into(), "traffic".into()],
+            token_url: Some("https://chartbeat.com/publishing/my-account/".into()),
+            token_help: Some("API key from Chartbeat account settings (select 'all' scope for full access). HOST = site tracked in Chartbeat (e.g. example.com). One plugin instance per site — duplicate the plugin to track multiple hosts. Sub-domains (de.example.com) are queried by setting `host=de.example.com`, provided the API key has access to them.".into()),
+            publisher: "Chartbeat".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: Some(r#"# Chartbeat — Usage Context
+
+> Instructions for agents calling the **Chartbeat** API via curl.
+
+Chartbeat has **two API families with DIFFERENT auth mechanisms and
+call patterns**. Using the wrong auth on the wrong endpoint is the #1
+source of 401/404 confusion — read §1 and §2 before composing anything.
+
+## 1. Live Publishing API — `apikey=` query param, synchronous
+
+All `/live/...` endpoints. Direct GET, JSON response.
+
+```bash
+curl -s "https://api.chartbeat.com/live/quickstats/v4?apikey=<KEY>&host=example.com"
+```
+
+`host` selects the tracked site. For multi-locale sites pass the
+concrete sub-domain (`host=de.example.com` for a German edition). The
+plugin config stores a default `host` but agents SHOULD override per
+question when the user mentions another edition.
+
+## 2. Historical / Query API — `X-CB-AK` HEADER, ASYNCHRONOUS
+
+**Critical**: historical endpoints do NOT accept `apikey` as a query
+parameter. They require the header `X-CB-AK: <KEY>`. Passing the key
+in the URL on `/historical/...` or `/query/...` returns 401 or 404
+that LOOK like access errors — it's just the wrong auth channel.
+
+Two endpoint shapes observed in the wild, both asynchronous:
+
+- **Modern**: `/query/v2/submit/page/` then `/query/v2/status/?query_id=<id>` then `/query/v2/fetch/?query_id=<id>`
+- **Legacy**: `/historical/traffic/series/` (accepts the header directly, returns data synchronously in most cases — but still OK to retry with the modern flow if it doesn't)
+
+### The 3-step async flow (modern, `/query/v2/...`)
+
+```bash
+# 1. Submit — returns { "query_id": "..." }
+curl -s "https://api.chartbeat.com/query/v2/submit/page/?host=example.com&start=2026-04-13&end=2026-04-20" \
+     -H "X-CB-AK: <KEY>"
+
+# 2. Poll status — { "status": "running" | "completed" | "failed" }
+curl -s "https://api.chartbeat.com/query/v2/status/?query_id=<QID>" -H "X-CB-AK: <KEY>"
+
+# 3. Fetch the actual data once status=completed
+curl -s "https://api.chartbeat.com/query/v2/fetch/?query_id=<QID>" -H "X-CB-AK: <KEY>"
+```
+
+### Polling loop template
+
+```bash
+qid=$(curl -s "https://api.chartbeat.com/query/v2/submit/page/?host=example.com&start=2026-04-13&end=2026-04-20" \
+  -H "X-CB-AK: <KEY>" | jq -r .query_id)
+deadline=$(($(date +%s) + 30))
+while :; do
+  st=$(curl -s "https://api.chartbeat.com/query/v2/status/?query_id=$qid" -H "X-CB-AK: <KEY>" | jq -r .status)
+  [ "$st" = "completed" ] && break
+  [ "$st" = "failed" ] && { echo "query failed"; exit 1; }
+  [ $(date +%s) -ge $deadline ] && { echo "timeout"; exit 1; }
+  sleep 1
+done
+curl -s "https://api.chartbeat.com/query/v2/fetch/?query_id=$qid" -H "X-CB-AK: <KEY>"
+```
+
+### Legacy historical — still works with the header
+
+```bash
+# /historical/traffic/series/ accepts the header, returns series JSON directly.
+curl -s "https://api.chartbeat.com/historical/traffic/series/?host=example.com&start=2026-04-19&end=2026-04-20&frequency=hour" \
+     -H "X-CB-AK: <KEY>"
+```
+
+Prefer `/query/v2/...` for new queries; fall back to `/historical/...`
+only if the modern path returns 404 for the specific metric.
+
+## 3. Granularity for analysing dips
+
+Live Publishing exposes traffic at **5-minute granularity** through
+`/live/recent/v3` and friends. When the user says *"I see a dip
+between 16h and 17h20"*, don't stop at hourly historical data — pull
+minute-level live series, otherwise you miss the shape of the dip
+(gradual vs brutal) and the rebound. 0-values at isolated timestamps
+are almost always **API data gaps**, not real zero-traffic moments.
+
+## 4. Host vs sub-domain — common pitfall
+
+- `host=example.com` only sees the root-domain traffic. It does NOT
+  aggregate sub-domains automatically.
+- Regional editions use the full host: `host=de.example.com`. Check
+  the site's client-side Chartbeat config to learn the exact host
+  string (often `${locale}.${base}` built from a `Locale` helper).
+- A 404 on `/historical/...` is almost always a wrong-auth or
+  wrong-endpoint issue, NOT an API-key scope limit. Verify by:
+  (a) switching to the header-based auth, (b) trying `/query/v2/...`
+  variant, (c) checking the user's API key scope page shows `all`.
+
+## 5. Params that work on both families
+
+- `host=...` — tracked site (required)
+- `limit=N` — cap rows
+- `sections=news,sport` — filter
+- `path=/article/xxx` — single URL filter
+- `start=YYYY-MM-DD` / `end=YYYY-MM-DD` — date range
+- `frequency=minute|hour|day` — time-series granularity
+
+Official docs: https://docs.chartbeat.com/cbp/api/historical-api/getting-started-with-our-historical-api
+"#.into()),
+            api_spec: Some(ApiSpec {
+                base_url: "https://api.chartbeat.com".into(),
+                auth: ApiAuthKind::ApiKeyQuery {
+                    param_name: "apikey".into(),
+                    env_key: "CHARTBEAT_API_KEY".into(),
+                },
+                docs_url: Some("https://help.chartbeat.com/hc/en-us/articles/360045337214-Guide-to-Chartbeat-APIs".into()),
+                config_keys: vec![
+                    ApiConfigKey {
+                        env_key: "CHARTBEAT_HOST".into(),
+                        label: "Host (default)".into(),
+                        placeholder: "domain.tld".into(),
+                        description: "Default site tracked in Chartbeat (e.g. example.com). Passed as `host=<value>` on each request. Agents can override per-call when the user asks about a regional edition (e.g. `host=de.example.com`). Duplicate the plugin to track unrelated sites.".into(),
+                    },
+                ],
+                endpoints: vec![
+                    // ── Live Publishing API (synchronous GET, apikey= query param) ──
+                    ApiEndpoint { path: "/live/dashapi/v4".into(),           method: "GET".into(), description: "[LIVE · apikey= · sync] Full live dashboard snapshot (visits, engagement, top pages)".into() },
+                    ApiEndpoint { path: "/live/toppages/v4".into(),          method: "GET".into(), description: "[LIVE · apikey= · sync] Top pages right now, ranked by concurrents".into() },
+                    ApiEndpoint { path: "/live/quickstats/v4".into(),        method: "GET".into(), description: "[LIVE · apikey= · sync] Aggregate stats (visits, engaged time, referrer types)".into() },
+                    ApiEndpoint { path: "/live/recent/v3".into(),            method: "GET".into(), description: "[LIVE · apikey= · sync] Recent visitor activity (5-min granularity — ideal for short-window dip analysis)".into() },
+                    ApiEndpoint { path: "/live/referrers/v3".into(),         method: "GET".into(), description: "[LIVE · apikey= · sync] Top referrers bringing traffic now".into() },
+                    ApiEndpoint { path: "/live/top_geo/v3".into(),           method: "GET".into(), description: "[LIVE · apikey= · sync] Top countries / regions".into() },
+                    ApiEndpoint { path: "/live/summary/v3".into(),           method: "GET".into(), description: "[LIVE · apikey= · sync] Concise traffic summary for a section".into() },
+                    ApiEndpoint { path: "/live/social/v3".into(),            method: "GET".into(), description: "[LIVE · apikey= · sync] Social-network referrers breakdown".into() },
+                    ApiEndpoint { path: "/live/top_devices/v3".into(),       method: "GET".into(), description: "[LIVE · apikey= · sync] Top device types".into() },
+                    ApiEndpoint { path: "/live/video/sources/v1".into(),     method: "GET".into(), description: "[LIVE · apikey= · sync] Live video sources".into() },
+                    ApiEndpoint { path: "/live/video/top_videos/v1".into(),  method: "GET".into(), description: "[LIVE · apikey= · sync] Live top videos".into() },
+                    // ── Historical / Query — `X-CB-AK` HEADER, async submit/status/fetch ──
+                    ApiEndpoint { path: "/query/v2/submit/page/".into(),     method: "GET".into(), description: "[QUERY · X-CB-AK · async-submit] Modern historical query — returns {query_id}. Use header auth, NOT apikey= param.".into() },
+                    ApiEndpoint { path: "/query/v2/status/".into(),          method: "GET".into(), description: "[QUERY · X-CB-AK · async-status] ?query_id=<id> → {status: running|completed|failed}".into() },
+                    ApiEndpoint { path: "/query/v2/fetch/".into(),           method: "GET".into(), description: "[QUERY · X-CB-AK · async-fetch] ?query_id=<id> → final data (poll /status/ until completed first)".into() },
+                    ApiEndpoint { path: "/historical/traffic/series/".into(),method: "GET".into(), description: "[HIST-legacy · X-CB-AK · often sync] Traffic time series with frequency=hour|minute|day. Accepts the header and usually returns data without the submit/fetch dance.".into() },
+                    ApiEndpoint { path: "/historical/traffic/stats/".into(), method: "GET".into(), description: "[HIST-legacy · X-CB-AK] Aggregate historical traffic stats (legacy; prefer /query/v2/submit/page/ for new code)".into() },
+                    ApiEndpoint { path: "/historical/topreferrers/".into(),  method: "GET".into(), description: "[HIST-legacy · X-CB-AK] Top referrers over a date range".into() },
+                    ApiEndpoint { path: "/historical/authors/".into(),       method: "GET".into(), description: "[HIST-legacy · X-CB-AK] Author performance over a date range".into() },
+                ],
+            }),
+        },
+
+        // ─────────────────────────────────────────────────────────────────
+        // Adobe Analytics Reporting 2.0 — second API plugin. Demonstrates
+        // the OAuth2 client-credentials auth path (Kronn mints + caches
+        // the bearer token automatically before injection).
+        // ─────────────────────────────────────────────────────────────────
+        McpDefinition {
+            id: "api-adobe-analytics".into(),
+            name: "Adobe Analytics".into(),
+            description: "Adobe Analytics Reporting API 2.0 — page views, visitors, segments, realtime. OAuth2 S2S with Kronn-managed bearer token refresh.".into(),
+            transport: McpTransport::ApiOnly,
+            env_keys: vec![
+                "ADOBE_CLIENT_ID".into(),
+                "ADOBE_CLIENT_SECRET".into(),
+                "ADOBE_ORG_ID".into(),
+                "ADOBE_COMPANY_ID".into(),
+                "ADOBE_RSID".into(),
+            ],
+            tags: vec!["analytics".into(), "api".into(), "editorial".into(), "traffic".into(), "oauth2".into()],
+            token_url: Some("https://developer.adobe.com/console/projects".into()),
+            token_help: Some("1) Create a project in Adobe Developer Console → add Analytics API → configure OAuth2 Server-to-Server (replaces the deprecated JWT flow). 2) Copy Client ID, Client Secret, and Organization ID. 3) Find your Company ID in Analytics (URL after /company/ on analytics.adobe.com). 4) Pick a Report Suite ID (RSID) for this instance. Kronn handles the Bearer token refresh automatically — no manual renewal.".into()),
+            publisher: "Adobe".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: Some(r#"# Adobe Analytics Reporting 2.0 — Usage Context
+
+> Instructions for agents calling the **Adobe Analytics Reporting API 2.0**
+> via curl. Kronn mints + caches the bearer token automatically.
+
+## 1. How Kronn handles auth (so you don't have to)
+
+Kronn exchanges `ADOBE_CLIENT_ID` + `ADOBE_CLIENT_SECRET` against
+Adobe IMS (`https://ims-na1.adobelogin.com/ims/token/v3`) on every
+discussion start (and on refresh when the 24h token is close to
+expiring). The fresh bearer is injected into this context block as
+`Authorization: Bearer <token>`. You just copy-paste it.
+
+If the context says **"TOKEN UNAVAILABLE"**, stop and tell the user
+— their `ADOBE_CLIENT_ID` / `SECRET` / `ORG_ID` are wrong or the
+Adobe project isn't authorized for the Analytics API.
+
+Three headers on EVERY Adobe call (Kronn surfaces them above; copy them
+verbatim):
+- `Authorization: Bearer <access_token>` (Kronn-managed)
+- `x-api-key: <client_id>` (Adobe requires both)
+- `x-proxy-global-company-id: <company_id>` (the analytics tenant)
+
+Also:
+- `Content-Type: application/json` on POST bodies
+
+## 2. Base URL
+
+```
+https://analytics.adobe.io/api/<ADOBE_COMPANY_ID>/
+```
+
+Kronn interpolates `<ADOBE_COMPANY_ID>` automatically in the Base URL
+field above. Endpoints are relative to that: `/reports`, `/dimensions`,
+`/metrics`, etc.
+
+## 3. The main endpoint — `POST /reports`
+
+This is where 90 % of analyses go. It accepts a JSON body describing:
+- `rsid`: the report suite (set `ADOBE_RSID` in the plugin config)
+- `globalFilters`: at minimum a `dateRange` (ISO 8601 interval)
+- `metrics`: what to count (`metrics/pageviews`, `metrics/visits`, etc.)
+- `dimension`: ONE dimension to break down by (page, section, device…)
+- `settings`: `{ "limit": 50 }` typical
+
+### Pageviews by page over yesterday
+
+```bash
+curl -s -X POST "https://analytics.adobe.io/api/<COMPANY_ID>/reports" \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "x-api-key: <CLIENT_ID>" \
+  -H "x-proxy-global-company-id: <COMPANY_ID>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "rsid": "<RSID>",
+    "globalFilters": [
+      { "type": "dateRange", "dateRange": "2026-04-20T00:00:00/2026-04-20T23:59:59" }
+    ],
+    "metricContainer": {
+      "metrics": [ { "id": "metrics/pageviews", "columnId": "0" } ]
+    },
+    "dimension": "variables/page",
+    "settings": { "limit": 50, "page": 0 }
+  }'
+```
+
+### Trended (time series) — minute granularity
+
+Replace `dimension` with a time dimension:
+- `variables/daterangeminute`  — per-minute
+- `variables/daterangehour`    — per-hour
+- `variables/daterangeday`     — per-day
+
+```bash
+# Pageviews per minute on a tight window (dip analysis)
+-d '{
+  "rsid": "<RSID>",
+  "globalFilters": [
+    { "type": "dateRange", "dateRange": "2026-04-20T14:00:00/2026-04-20T17:00:00" }
+  ],
+  "metricContainer": {
+    "metrics": [ { "id": "metrics/pageviews", "columnId": "0" } ]
+  },
+  "dimension": "variables/daterangeminute",
+  "settings": { "limit": 180 }
+}'
+```
+
+### Segmenting
+
+Apply a segment UUID (see `/segments` to list) as a `globalFilter`:
+```json
+{ "type": "segment", "segmentId": "s300000000_63abcdef1234" }
+```
+
+## 4. Other useful endpoints
+
+- `GET /dimensions?rsid=<RSID>` — available dimensions for the RSID
+- `GET /metrics?rsid=<RSID>` — available metrics
+- `GET /segments?rsid=<RSID>` — saved segments
+- `POST /reports/realtime` — realtime reports (last 15-30 min, different body shape)
+- `GET /calculatedmetrics?rsids=<RSID>` — user-defined calculated metrics
+- `GET /users/me` — smoke test: should return your Adobe user object
+
+Full schema: [Adobe Analytics 2.0 API docs](https://developer.adobe.com/analytics-apis/docs/2.0/)
+
+## 5. Common pitfalls
+
+- **`401` on a freshly-started Kronn**: the token was already requested
+  but the Adobe project isn't linked to the Analytics product profile.
+  Fix it in Adobe Admin Console → Products → Analytics → Permissions.
+- **`403 "Forbidden"`**: the user doesn't have access to the RSID you
+  requested. Try a different RSID or escalate to Adobe admin.
+- **Rate limits**: 120 requests/minute per client_id per tenant on
+  Reporting 2.0. Don't fan out parallel queries for minute-by-minute —
+  one trended query with 60-180 rows is cheaper.
+- **Huge responses**: a `/reports` with `limit=200` on a wide
+  dimension can return 1 MB+. Prefer `limit=25-50` + pagination via
+  `settings.page` when digging deep.
+
+## 6. What NOT to do
+
+- Do NOT call `/reports/realtime` for historical data — it's capped at
+  the last ~30 min.
+- Do NOT fan out one call per day to build a week's trend — one call
+  with `variables/daterangeday` + 7-day range returns all 7 points.
+- Do NOT leak the bearer token back to the user. It's valid for 24h
+  but still a live credential.
+"#.into()),
+            api_spec: Some(ApiSpec {
+                // Company ID is path-interpolated — Kronn substitutes
+                // `{ADOBE_COMPANY_ID}` at prompt-build time so the agent
+                // sees the actual URL it must call.
+                base_url: "https://analytics.adobe.io/api/{ADOBE_COMPANY_ID}".into(),
+                auth: ApiAuthKind::OAuth2ClientCredentials {
+                    token_url: "https://ims-na1.adobelogin.com/ims/token/v3".into(),
+                    client_id_env: "ADOBE_CLIENT_ID".into(),
+                    client_secret_env: "ADOBE_CLIENT_SECRET".into(),
+                    // Adobe IMS uses COMMA separators (not spaces like RFC).
+                    scope: "openid,AdobeID,additional_info.projectedProductContext,session,read_organizations,additional_info.roles".into(),
+                    extra_headers: vec![
+                        OAuth2ExtraHeader {
+                            name: "x-api-key".into(),
+                            value_template: "{ADOBE_CLIENT_ID}".into(),
+                        },
+                        OAuth2ExtraHeader {
+                            name: "x-proxy-global-company-id".into(),
+                            value_template: "{ADOBE_COMPANY_ID}".into(),
+                        },
+                    ],
+                },
+                docs_url: Some("https://developer.adobe.com/analytics-apis/docs/2.0/".into()),
+                config_keys: vec![
+                    ApiConfigKey {
+                        env_key: "ADOBE_COMPANY_ID".into(),
+                        label: "Company ID".into(),
+                        placeholder: "mycompany".into(),
+                        description: "Adobe Analytics tenant identifier (the segment after `/company/` in the Analytics dashboard URL). Interpolated into the Base URL + the x-proxy-global-company-id header.".into(),
+                    },
+                    ApiConfigKey {
+                        env_key: "ADOBE_ORG_ID".into(),
+                        label: "Organization ID (IMS)".into(),
+                        placeholder: "ABCDEF1234567890@AdobeOrg".into(),
+                        description: "Adobe IMS organization identifier — found in the Developer Console project overview. Used during OAuth2 exchange.".into(),
+                    },
+                    ApiConfigKey {
+                        env_key: "ADOBE_RSID".into(),
+                        label: "Report Suite ID (default)".into(),
+                        placeholder: "examplecompanyprod".into(),
+                        description: "Default Analytics report suite queried by `/reports` calls. Agents can override per-call when the user asks about another property.".into(),
+                    },
+                ],
+                endpoints: vec![
+                    ApiEndpoint { path: "/reports".into(),                method: "POST".into(), description: "[REPORT · OAuth2 · sync] Main reporting endpoint — JSON body declares rsid, metrics, dimension, dateRange, segments. 90% of analyses go here.".into() },
+                    ApiEndpoint { path: "/reports/realtime".into(),       method: "POST".into(), description: "[REALTIME · OAuth2 · sync] Real-time reports (last 15-30 min only). Different body shape from /reports.".into() },
+                    ApiEndpoint { path: "/dimensions".into(),             method: "GET".into(),  description: "[META · OAuth2 · sync] ?rsid=<RSID> → list of available dimensions for the report suite".into() },
+                    ApiEndpoint { path: "/metrics".into(),                method: "GET".into(),  description: "[META · OAuth2 · sync] ?rsid=<RSID> → list of available metrics".into() },
+                    ApiEndpoint { path: "/segments".into(),               method: "GET".into(),  description: "[META · OAuth2 · sync] ?rsid=<RSID> → saved segments (copy segmentId into /reports' globalFilters).".into() },
+                    ApiEndpoint { path: "/calculatedmetrics".into(),      method: "GET".into(),  description: "[META · OAuth2 · sync] ?rsids=<RSID> → user-defined calculated metrics".into() },
+                    ApiEndpoint { path: "/users/me".into(),               method: "GET".into(),  description: "[SMOKE · OAuth2 · sync] Current user profile — use as a health check".into() },
+                ],
+            }),
+        },
+
+        // ─────────────────────────────────────────────────────────────────
+        // Google Programmable Search (Custom Search JSON API) — third API
+        // plugin. No MCP equivalent. Single-endpoint search over a curated
+        // set of sites (or the whole web) defined by a Programmable Search
+        // Engine ID (CX). Useful for SEO monitoring, competitive SERP
+        // research, or site-scoped search from workflows.
+        // ─────────────────────────────────────────────────────────────────
+        McpDefinition {
+            id: "api-google-search".into(),
+            name: "Google Search".into(),
+            description: "Google Programmable Search (Custom Search JSON API) — site-scoped or whole-web SERP. 100 queries/day free (paid beyond). Single endpoint; rich filters (dateRestrict, siteSearch, lr, gl, searchType=image).".into(),
+            transport: McpTransport::ApiOnly,
+            env_keys: vec![
+                "GOOGLE_SEARCH_API_KEY".into(),
+                "GOOGLE_SEARCH_CX".into(),
+            ],
+            tags: vec!["search".into(), "api".into(), "seo".into(), "editorial".into()],
+            token_url: Some("https://console.cloud.google.com/apis/credentials".into()),
+            token_help: Some("1) Create an API key at Google Cloud Console (Credentials page) and enable the 'Custom Search API'. 2) Create a Programmable Search Engine at https://programmablesearchengine.google.com/, configure which sites it searches (or 'Search the entire web'), copy the Search Engine ID (cx). 3) Free tier: 100 queries/day. Beyond that, $5 per 1000 queries, capped at 10 000/day. Quota billed per project.".into()),
+            publisher: "Google".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: Some(r#"# Google Programmable Search — Usage Context
+
+> Instructions for agents calling the Google Custom Search JSON API via curl.
+
+## 1. One endpoint, many modes
+
+```
+GET https://www.googleapis.com/customsearch/v1
+  ?key=<API_KEY>
+  &cx=<SEARCH_ENGINE_ID>
+  &q=<query>
+  [&num=10 &start=1 &lr=lang_fr &gl=fr &safe=off]
+```
+
+The API has ONE path. Everything else is query parameters. Kronn
+pre-fills `key=` and `cx=` above — you just add `q=...` and whatever
+filters the question requires.
+
+## 2. Quota — read carefully before scripting
+
+- **100 queries/day free.** After that the project must have billing
+  enabled; $5 per 1000 queries, max 10 000/day.
+- Quota is **per project**, not per user, not per cx. If you batch a
+  workflow over 100 pages, you burn the free tier in one run.
+- Every call counts, including failed ones (except HTTP 429).
+- There is NO "preview" mode — no way to check quota remaining before
+  a call. Budget pessimistically; prefer `num=10` (max) over multiple
+  paginated calls.
+
+When the user asks for "top 100 SERPs", the honest answer is: 10 calls
+× `num=10` with `start=1, 11, 21, …, 91` = 10 units of quota, one day
+of the free tier. Confirm before going deep.
+
+## 3. Key parameters
+
+| Param | What | Example |
+|-------|------|---------|
+| `q` | Query (required) | `q=euronews+mid-article+video` |
+| `num` | Results per call (1-10) | `num=10` |
+| `start` | 1-based offset for pagination | `start=11` (page 2) |
+| `lr` | Language restrict | `lr=lang_fr` |
+| `gl` | Geo (country code boost, 2 letters) | `gl=fr` |
+| `dateRestrict` | Relative time | `dateRestrict=d7` (7 days) · `w2` · `m6` · `y1` |
+| `siteSearch` | Scope to one domain | `siteSearch=example.com` |
+| `siteSearchFilter` | `i` include / `e` exclude (needs siteSearch) | `siteSearchFilter=e` |
+| `searchType=image` | Image search mode | add `searchType=image` |
+| `safe` | `active` / `off` | `safe=off` |
+| `sort` | `date` or similar | `sort=date` |
+
+The `exactTerms`, `excludeTerms`, `orTerms` params also exist when the
+natural `q` becomes too clunky.
+
+## 4. Response shape
+
+```json
+{
+  "kind": "customsearch#search",
+  "searchInformation": { "totalResults": "12300", "searchTime": 0.34 },
+  "items": [
+    {
+      "title": "…",
+      "link": "https://example.com/…",
+      "displayLink": "example.com",
+      "snippet": "…",
+      "pagemap": { "metatags": [ { "og:title": "…" } ] }
+    },
+    …
+  ]
+}
+```
+
+`pagemap` carries OpenGraph / structured-data enrichment when the page
+exposes it — great for SEO competitive analysis without fetching each
+URL yourself.
+
+## 5. Common use-cases (pre-composed curls)
+
+### Where does our site rank for query X?
+
+```bash
+curl -s "https://www.googleapis.com/customsearch/v1\
+?key=<KEY>&cx=<CX>&q=euronews+vertical+video&num=10&gl=fr" \
+| jq '.items[] | {rank: .cacheId, link, title}'
+```
+
+### Recent news on a topic (7-day window)
+
+```bash
+curl -s "https://www.googleapis.com/customsearch/v1\
+?key=<KEY>&cx=<CX>&q=climate+policy&num=10&dateRestrict=d7&sort=date" \
+| jq '.items[] | {link, title, published: .pagemap.metatags[0]["article:published_time"]}'
+```
+
+### Site-scoped search (only your domain)
+
+```bash
+curl -s "https://www.googleapis.com/customsearch/v1\
+?key=<KEY>&cx=<CX>&q=EV+batteries&siteSearch=example.com&num=10"
+```
+
+## 6. `cx` variants — when the agent hits a wall
+
+- A CX configured with "Search the entire web" works like the real
+  Google SERP but with the 10-result limit.
+- A CX scoped to specific sites returns 0 results if the query doesn't
+  match them — an empty `items` is correct, not a bug.
+- The `/siterestrict/customsearch/v1` path exists for CX engines whose
+  config locks them to specific sites; performance difference is nil.
+  Only use it if the Programmable Search Engine UI tells you to.
+
+## 7. Pitfalls
+
+- **HTTP 403 "dailyLimitExceeded"**: you hit the 100/day free cap. Tell
+  the user, stop. Don't retry.
+- **Empty `items` array**: NOT an error — the query just had no
+  matches. Surface that plainly.
+- **429**: rate-limiting burst. Back off 1-2s and retry once, no more.
+- **Never leak the API key** back to the user. It's billable.
+
+Official docs: https://developers.google.com/custom-search/v1/reference/rest
+"#.into()),
+            api_spec: Some(ApiSpec {
+                base_url: "https://www.googleapis.com/customsearch/v1".into(),
+                auth: ApiAuthKind::ApiKeyQuery {
+                    param_name: "key".into(),
+                    env_key: "GOOGLE_SEARCH_API_KEY".into(),
+                },
+                docs_url: Some("https://developers.google.com/custom-search/v1/reference/rest".into()),
+                config_keys: vec![
+                    ApiConfigKey {
+                        env_key: "GOOGLE_SEARCH_CX".into(),
+                        label: "Search Engine ID (cx)".into(),
+                        placeholder: "a0b1c2d3e4f5g6h7i".into(),
+                        description: "Programmable Search Engine ID (cx) — create or manage at https://programmablesearchengine.google.com/. Non-secret. Passed as `cx=<value>` on every call. Duplicate the plugin to use several engines (e.g. one scoped to your site, one whole-web).".into(),
+                    },
+                ],
+                endpoints: vec![
+                    ApiEndpoint {
+                        path: "".into(),
+                        method: "GET".into(),
+                        description: "[SEARCH · apikey= · sync] The one and only endpoint. Pass q=<query>, num=1-10, start=<offset>, plus any filter (dateRestrict, siteSearch, lr, gl, searchType=image). See default_context for the complete param matrix.".into(),
+                    },
+                ],
+            }),
         },
     ]
 }

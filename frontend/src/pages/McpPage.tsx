@@ -6,7 +6,20 @@ import type { Project, McpConfigDisplay, McpDefinition, McpOverview } from '../t
 import {
   Puzzle, Plus, Trash2, Eye, Check, RefreshCw, Square, CheckSquare,
   X, Key, Pencil, FileText, ExternalLink, Save, Search, ArrowDownAZ, ArrowDownZA,
+  Plug, Globe,
 } from 'lucide-react';
+
+/** Derive plugin kind from transport + api_spec presence. */
+type PluginKind = 'mcp' | 'api' | 'hybrid';
+function pluginKind(m: { transport: McpDefinition['transport']; api_spec?: import('../types/generated').ApiSpec | null }): PluginKind {
+  const hasApi = !!m.api_spec;
+  // McpTransport is a discriminated union; the API-only sentinel is the
+  // string literal "ApiOnly" (not a { tag: ... } object).
+  const isApiOnly = (m.transport as unknown) === 'ApiOnly';
+  if (isApiOnly) return 'api';
+  if (hasApi) return 'hybrid';
+  return 'mcp';
+}
 import './McpPage.css';
 
 const slugify = (label: string) => label.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
@@ -65,6 +78,16 @@ const ENV_PLACEHOLDERS: Record<string, string> = {
   // PostgreSQL
   DATABASE_URL: 'postgresql://user:pass@localhost:5432/db',
   POSTGRES_CONNECTION_STRING: 'postgresql://user:pass@localhost:5432/db',
+  // Chartbeat (API plugin)
+  CHARTBEAT_API_KEY: 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx (32-char key from chartbeat.com account)',
+  CHARTBEAT_HOST: 'domain.tld (the site tracked in Chartbeat)',
+  // Adobe Analytics (OAuth2 S2S) — placeholders intentionally don't match Adobe's
+  // real secret prefixes (p8e-, s8e-) so GitHub's secret-scanner push protection
+  // doesn't flag this file when the repo is pushed.
+  ADOBE_CLIENT_ID: 'your-adobe-client-id (from Adobe Developer Console project)',
+  ADOBE_CLIENT_SECRET: 'your-adobe-client-secret (generated in the same project)',
+  // Google Programmable Search — ditto, avoid the AIza prefix that Google real keys use.
+  GOOGLE_SEARCH_API_KEY: 'your-google-cloud-api-key (from console.cloud.google.com → APIs & Credentials)',
   // Generic patterns
   API_KEY: 'your-api-key',
   API_TOKEN: 'your-api-token',
@@ -99,6 +122,10 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
   const [showAddMcp, setShowAddMcp] = useState(false);
   const [addMcpSearch, setAddMcpSearch] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+  // Plugin-kind filter (MCP / API / all). Sits next to the category pills so
+  // the user can quickly narrow to API plugins when Chartbeat-style HTTP
+  // plugins are what they want, without scrolling through 50+ MCP tiles.
+  const [kindFilter, setKindFilter] = useState<PluginKind | null>(null);
   const [addMcpSelected, setAddMcpSelected] = useState<string | null>(null);
   const [addMcpLabel, setAddMcpLabel] = useState('');
   const [addMcpEnv, setAddMcpEnv] = useState<Record<string, string>>({});
@@ -395,6 +422,28 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                   <>
                     <div className="mcp-cat-pills">
                       <button
+                        className={`mcp-cat-pill${!kindFilter ? ' mcp-cat-pill-active' : ''}`}
+                        onClick={() => setKindFilter(null)}
+                        title={t('mcp.kind.allTooltip')}
+                      >
+                        {t('mcp.kind.all')}
+                      </button>
+                      <button
+                        className={`mcp-cat-pill${kindFilter === 'mcp' ? ' mcp-cat-pill-active' : ''}`}
+                        onClick={() => setKindFilter(kindFilter === 'mcp' ? null : 'mcp')}
+                        title={t('mcp.kind.mcpTooltip')}
+                      >
+                        <Plug size={10} /> {t('mcp.kind.mcp')}
+                      </button>
+                      <button
+                        className={`mcp-cat-pill${kindFilter === 'api' ? ' mcp-cat-pill-active' : ''}`}
+                        onClick={() => setKindFilter(kindFilter === 'api' ? null : 'api')}
+                        title={t('mcp.kind.apiTooltip')}
+                      >
+                        <Globe size={10} /> {t('mcp.kind.api')}
+                      </button>
+                      <span className="mcp-cat-pill-sep">·</span>
+                      <button
                         className={`mcp-cat-pill${!selectedCategory ? ' mcp-cat-pill-active' : ''}`}
                         onClick={() => setSelectedCategory(null)}
                       >
@@ -416,6 +465,16 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                           .filter(m => {
                             // Category filter
                             if (selectedCategory && selectedCategory !== cat) return false;
+                            // Kind filter (MCP / API): `mcp` keeps pure MCP +
+                            // hybrid (since hybrid *is* an MCP too); `api`
+                            // keeps pure API + hybrid. Rationale: a user
+                            // looking for "plugins with API" shouldn't miss
+                            // Jira if Jira has both.
+                            if (kindFilter) {
+                              const k = pluginKind(m);
+                              if (kindFilter === 'mcp' && k === 'api') return false;
+                              if (kindFilter === 'api' && k === 'mcp') return false;
+                            }
                             // Text search filter
                             if (addMcpSearch && !m.name.toLowerCase().includes(addMcpSearch.toLowerCase()) && !m.tags.some(tag => tag.toLowerCase().includes(addMcpSearch.toLowerCase()))) return false;
                             return true;
@@ -446,6 +505,20 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                                 </div>
                                 <div className="mcp-registry-card-desc">{m.description}</div>
                                 <div className="mcp-registry-card-meta">
+                                  {(() => {
+                                    const kind = pluginKind(m);
+                                    const label = kind === 'api'
+                                      ? t('mcp.kind.api')
+                                      : kind === 'hybrid'
+                                        ? t('mcp.kind.hybrid')
+                                        : t('mcp.kind.mcp');
+                                    const Icon = kind === 'mcp' ? Plug : kind === 'api' ? Globe : Puzzle;
+                                    return (
+                                      <span className={`mcp-kind-badge mcp-kind-badge-${kind}`} title={t(`mcp.kind.${kind}Tooltip`)}>
+                                        <Icon size={9} /> {label}
+                                      </span>
+                                    );
+                                  })()}
                                   <span className={`mcp-origin-badge ${m.official ? 'mcp-origin-official' : 'mcp-origin-community'}`}>
                                     {m.official ? t('mcp.official') : t('mcp.community')} — {m.publisher}
                                   </span>
@@ -498,33 +571,55 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                   </div>
                   {envKeys.map(k => {
                     const isVisible = addVisibleFields.has(k);
-                    const hint = ENV_PLACEHOLDERS[k]
+                    // Prefer per-plugin metadata (api_spec.config_keys) over
+                    // the global ENV_PLACEHOLDERS map — that way any future
+                    // API plugin gets meaningful placeholders via its own
+                    // registry entry, no code change needed here.
+                    const configKey = selectedDef?.api_spec?.config_keys?.find(c => c.env_key === k);
+                    const hint = configKey?.placeholder
+                      ?? ENV_PLACEHOLDERS[k]
                       ?? ENV_PLACEHOLDERS[k.replace(/^.*_/, '')] // fallback: match suffix (e.g. _API_KEY → API_KEY)
                       ?? t('mcp.value');
+                    // Non-secret config keys are rendered as plain text
+                    // (no masking) — they're not credentials and hiding
+                    // them behind dots just makes the form unusable.
+                    const isPlainTextConfig = !!configKey;
                     return (
-                      <div key={k} className="flex-row gap-4 mb-2">
-                        <span className="mcp-env-key-label">{k}</span>
-                        <div className="mcp-env-input-wrap">
-                          <input
-                            className="input mcp-input-mono mcp-input-with-eye"
-                            value={addMcpEnv[k] ?? ''}
-                            onChange={(e) => setAddMcpEnv(prev => ({ ...prev, [k]: e.target.value }))}
-                            placeholder={hint}
-                            type={isVisible ? 'text' : 'password'}
-                          />
-                          <button
-                            type="button"
-                            className="mcp-eye-btn"
-                            onClick={() => setAddVisibleFields(prev => {
-                              const next = new Set(prev);
-                              next.has(k) ? next.delete(k) : next.add(k);
-                              return next;
-                            })}
-                            tabIndex={-1}
-                          >
-                            <Eye size={12} style={{ color: isVisible ? 'var(--kr-accent)' : 'rgba(255,255,255,0.25)' }} />
-                          </button>
+                      <div key={k} className="mb-2">
+                        <div className="flex-row gap-4">
+                          <span className="mcp-env-key-label">{configKey?.label ?? k}</span>
+                          <div className="mcp-env-input-wrap">
+                            <input
+                              className="input mcp-input-mono mcp-input-with-eye"
+                              value={addMcpEnv[k] ?? ''}
+                              onChange={(e) => setAddMcpEnv(prev => ({ ...prev, [k]: e.target.value }))}
+                              placeholder={hint}
+                              type={isPlainTextConfig || isVisible ? 'text' : 'password'}
+                            />
+                            {!isPlainTextConfig && (
+                              <button
+                                type="button"
+                                className="mcp-eye-btn"
+                                onClick={() => setAddVisibleFields(prev => {
+                                  const next = new Set(prev);
+                                  next.has(k) ? next.delete(k) : next.add(k);
+                                  return next;
+                                })}
+                                tabIndex={-1}
+                              >
+                                <Eye size={12} style={{ color: isVisible ? 'var(--kr-accent)' : 'rgba(255,255,255,0.25)' }} />
+                              </button>
+                            )}
+                          </div>
                         </div>
+                        {/* Inline description from api_spec.config_keys
+                            (e.g. Chartbeat host explains "the site tracked
+                            in Chartbeat"). Static ENV_PLACEHOLDERS map has
+                            no equivalent, so this only fires for API
+                            plugins. */}
+                        {configKey?.description && (
+                          <div className="mcp-env-key-desc">{configKey.description}</div>
+                        )}
                       </div>
                     );
                   })}

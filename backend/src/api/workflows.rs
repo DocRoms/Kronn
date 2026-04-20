@@ -804,24 +804,43 @@ pub async fn cancel_run(
         n
     };
 
-    // 3. Also mark any running child batch runs as Cancelled in the DB so the
-    //    sidebar stops showing them as "in progress" even though no one is
-    //    actively writing to them anymore. We don't touch discussions — they
-    //    get their Cancelled/Failed status from the agent-task finally path.
+    // 3. Force-mark this run AND any Running child batch runs as Cancelled in
+    //    the DB. The token cancel (step 1) is best-effort — when it fires
+    //    inside a deep `await` (e.g. waiting on child batch completion via
+    //    ws_broadcast), the runner may never reach its status-writing path,
+    //    leaving the row stuck on "Running" forever. Without this DB update,
+    //    a second cancel click returns `run_cancelled=false` (token already
+    //    consumed) and the user sees nothing happen. Idempotent: the
+    //    `WHERE status = 'Running'` clause no-ops finished runs.
+    //
+    //    We don't touch discussions — they get their Cancelled/Failed status
+    //    from the agent-task finally path on their own tokens.
     let run_id_for_db2 = run_id.clone();
-    let _ = state.db.with_conn(move |conn| {
-        conn.execute(
+    let forced_statuses = state.db.with_conn(move |conn| {
+        let parent_n = conn.execute(
+            "UPDATE workflow_runs SET status = 'Cancelled', finished_at = datetime('now') \
+             WHERE id = ?1 AND status = 'Running'",
+            rusqlite::params![&run_id_for_db2],
+        )?;
+        let children_n = conn.execute(
             "UPDATE workflow_runs SET status = 'Cancelled', finished_at = datetime('now') \
              WHERE parent_run_id = ?1 AND status = 'Running'",
             rusqlite::params![&run_id_for_db2],
         )?;
-        Ok(())
-    }).await;
+        Ok((parent_n, children_n))
+    }).await.unwrap_or((0, 0));
 
     tracing::info!(
-        "Cancel run {}: run_cancelled={}, {} child disc agents stopped",
-        run_id, run_cancelled, child_discs_cancelled
+        "Cancel run {}: token_triggered={}, {} child disc agents stopped, \
+         parent_forced={}, child_batches_forced={}",
+        run_id, run_cancelled, child_discs_cancelled,
+        forced_statuses.0, forced_statuses.1,
     );
+
+    // From the user's point of view, "cancel worked" if either the in-memory
+    // token fired OR we had to forcibly mark the orphaned DB row. The UI
+    // uses this to decide between "stopping…" and "nothing to stop" toasts.
+    let run_cancelled = run_cancelled || forced_statuses.0 > 0;
 
     Json(ApiResponse::ok(CancelRunResponse {
         run_cancelled,

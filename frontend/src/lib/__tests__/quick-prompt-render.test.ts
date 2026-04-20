@@ -27,8 +27,8 @@ describe('Quick Prompt renderTemplate', () => {
 
   it('handles multiple variables', () => {
     expect(renderTemplate('{{action}} ticket {{ticket}} on {{repo}}', {
-      action: 'Review', ticket: 'PROJ-456', repo: 'front_euronews',
-    })).toBe('Review ticket PROJ-456 on front_euronews');
+      action: 'Review', ticket: 'PROJ-456', repo: 'acme-frontend',
+    })).toBe('Review ticket PROJ-456 on acme-frontend');
   });
 
   it('renders conditional section when variable is filled', () => {

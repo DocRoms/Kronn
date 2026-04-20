@@ -465,13 +465,88 @@
   background: rgba(var(--kr-accent-rgb), 0.2);
 }
 
+/* Popover: anchored above + right of the ⚡ trigger. `disc-mention-popover`
+   used to double as the container, but its styles (light-text-on-dark +
+   no hover feedback) left items visually flat — and, because
+   `.disc-mention-item` has no `:hover`, hovering gave zero affordance, so
+   a hovered name on a sibling bright element could read as "white on
+   white". Dedicated classes below fix layout, contrast, and hover. */
 .disc-qp-picker {
+  position: absolute;
   bottom: calc(100% + 6px);
   right: 0;
   left: auto;
-  min-width: 240px;
-  max-height: 200px;
+  min-width: 280px;
+  max-width: 360px;
+  max-height: 260px;
   overflow-y: auto;
+  background: var(--kr-bg-elevated);
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.25);
+  border-radius: var(--kr-r-md);
+  box-shadow: var(--kr-shadow-lg);
+  padding: 4px;
+  z-index: 10;
+}
+.disc-qp-picker-header {
+  padding: 6px 10px 4px;
+  font-size: var(--kr-fs-2xs);
+  font-weight: 600;
+  color: var(--kr-text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  margin-bottom: 4px;
+}
+.disc-qp-picker-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  color: var(--kr-text-primary);
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  transition: background 0.12s;
+}
+.disc-qp-picker-item:hover,
+.disc-qp-picker-item:focus-visible {
+  background: rgba(var(--kr-accent-rgb), 0.14);
+  outline: none;
+}
+.disc-qp-picker-icon {
+  flex-shrink: 0;
+  font-size: 16px;
+  line-height: 1.2;
+  width: 20px;
+  text-align: center;
+}
+.disc-qp-picker-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+.disc-qp-picker-name {
+  font-weight: 600;
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.disc-qp-picker-desc {
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-tertiary);
+  line-height: 1.35;
+  margin-top: 2px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 /* Badge for the currently queued QP — click to cancel. */
@@ -2730,6 +2805,7 @@
 
 /* ── Shared icon button ───────────────────────────────── */
 .disc-icon-btn {
+  position: relative; /* anchor for .disc-icon-btn-badge overlay */
   background: none;
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: var(--kr-r-sm);
@@ -2739,6 +2815,286 @@
   display: flex;
   align-items: center;
   font-size: var(--kr-fs-sm);
+}
+
+/* ── Test mode (worktree swap) ─────────────────────────────── */
+
+.disc-test-mode-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  margin-left: 4px;
+  background: rgba(var(--kr-accent-rgb), 0.12);
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.3);
+  border-radius: var(--kr-r-sm);
+  color: var(--kr-accent);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.disc-test-mode-btn:hover {
+  background: rgba(var(--kr-accent-rgb), 0.22);
+  border-color: rgba(var(--kr-accent-rgb), 0.5);
+}
+/* Inline info glyph after the label — hints "there's a tooltip with more" */
+.disc-test-mode-btn-hint {
+  display: inline-flex;
+  align-items: center;
+  opacity: 0.6;
+}
+
+/* Global banner pinned at the top of the chat area when ANY discussion is
+   in test mode. Dual vocabulary: big user-friendly headline + a technical
+   subline (branch, restore, worktree) for devs. */
+.test-mode-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  margin: var(--kr-sp-2) var(--kr-sp-3) 0;
+  background: rgba(var(--kr-accent-rgb), 0.10);
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.35);
+  border-radius: var(--kr-r-md);
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-sm);
+}
+.test-mode-banner-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: rgba(var(--kr-accent-rgb), 0.20);
+  color: var(--kr-accent);
+}
+.test-mode-banner-body { flex: 1; min-width: 0; }
+.test-mode-banner-headline {
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+.test-mode-banner-subline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-tertiary);
+  flex-wrap: wrap;
+}
+.test-mode-banner-subline code {
+  background: rgba(0, 0, 0, 0.25);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+.test-mode-banner-sep { opacity: 0.45; }
+.test-mode-banner-disc {
+  font-style: italic;
+  opacity: 0.75;
+}
+.test-mode-banner-exit {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 12px;
+  background: var(--kr-accent);
+  color: #000;
+  border: none;
+  border-radius: var(--kr-r-sm);
+  font-weight: 600;
+  font-size: var(--kr-fs-2xs);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.test-mode-banner-exit:hover:not(:disabled) { filter: brightness(1.1); }
+.test-mode-banner-exit:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+/* ── Preflight modal (blocker + remediation choices) ───────── */
+
+.test-mode-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--kr-z-modal);
+  background: var(--kr-bg-overlay);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--kr-sp-4);
+}
+.test-mode-modal {
+  background: var(--kr-bg-elevated);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--kr-r-md);
+  width: 100%;
+  max-width: 520px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+}
+.test-mode-modal-header {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.test-mode-modal-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: rgba(255, 193, 77, 0.15);
+  color: rgb(255, 193, 77);
+  flex-shrink: 0;
+}
+.test-mode-modal-header h3 {
+  flex: 1;
+  margin: 0;
+  font-size: var(--kr-fs-base);
+  font-weight: 600;
+  color: var(--kr-text-primary);
+}
+.test-mode-modal-close {
+  background: none;
+  border: none;
+  color: var(--kr-text-tertiary);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+}
+.test-mode-modal-close:hover { color: var(--kr-text-primary); background: rgba(255, 255, 255, 0.05); }
+
+.test-mode-modal-body {
+  padding: var(--kr-sp-4);
+  overflow-y: auto;
+}
+.test-mode-modal-explain {
+  margin: 0 0 var(--kr-sp-3);
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-secondary);
+  line-height: 1.5;
+}
+.test-mode-modal-files {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: var(--kr-r-sm);
+  background: rgba(0, 0, 0, 0.2);
+  max-height: 180px;
+  overflow-y: auto;
+}
+.test-mode-modal-files li {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  padding: 4px 10px;
+  font-size: var(--kr-fs-2xs);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+}
+.test-mode-modal-files li:last-child { border-bottom: none; }
+.test-mode-modal-file-status {
+  background: rgba(255, 255, 255, 0.08);
+  padding: 0 5px;
+  border-radius: 3px;
+  font-family: monospace;
+  min-width: 24px;
+  text-align: center;
+  color: var(--kr-accent);
+}
+.test-mode-modal-file-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--kr-text-secondary);
+}
+.test-mode-modal-files-more {
+  font-style: italic;
+  color: var(--kr-text-tertiary);
+  padding: 4px 10px;
+}
+
+.test-mode-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--kr-sp-2);
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(0, 0, 0, 0.15);
+  flex-wrap: wrap;
+}
+.test-mode-modal-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border-radius: var(--kr-r-sm);
+  font-size: var(--kr-fs-sm);
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--kr-text-primary);
+}
+/* Primary variant MUST come before the generic hover rule, and its hover
+   MUST keep the accent background explicitly — otherwise the generic
+   `:hover` selector (higher specificity by pseudo-class count) overrides
+   it and leaves black text on faint white ≈ invisible. */
+.test-mode-modal-btn.primary {
+  background: var(--kr-accent);
+  color: #000;
+  border-color: var(--kr-accent);
+}
+.test-mode-modal-btn.primary:hover:not(:disabled) {
+  background: var(--kr-accent);
+  filter: brightness(1.1);
+}
+.test-mode-modal-btn.ghost {
+  background: transparent;
+}
+.test-mode-modal-btn.ghost:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+}
+.test-mode-modal-btn:disabled { opacity: 0.5; cursor: wait; }
+
+/* Count badge overlaid on .disc-icon-btn — used by the git-panel icon to
+   signal uncommitted files in an Isolated worktree. Pulses on first render
+   so the user notices when an agent run left files uncommitted. */
+.disc-icon-btn-badge {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 7px;
+  background: var(--kr-accent);
+  color: #000;
+  border: 1px solid var(--kr-bg-base);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 12px;
+  text-align: center;
+  pointer-events: none;
+  animation: disc-icon-btn-badge-pulse 1.4s ease-out 1;
+}
+
+@keyframes disc-icon-btn-badge-pulse {
+  0%   { transform: scale(0.6); opacity: 0; }
+  60%  { transform: scale(1.15); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
 }
 
 .disc-scan-btn {

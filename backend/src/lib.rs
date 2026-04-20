@@ -123,6 +123,11 @@ pub struct AppState {
     /// `run_id` (from the workflow runner). Tokens are inserted when work
     /// starts and removed in its finally-block — see the Registry impl below.
     pub cancel_registry: Arc<Mutex<HashMap<String, tokio_util::sync::CancellationToken>>>,
+    /// OAuth2 access-token cache for API plugins. Keyed by `mcp_configs.id`,
+    /// value is the bearer token + its absolute expiry. In-memory only —
+    /// on restart, tokens are lost and re-exchanged on first use (one HTTP
+    /// call per active OAuth2 plugin). See `core::oauth2_cache`.
+    pub oauth2_cache: Arc<tokio::sync::Mutex<HashMap<String, crate::core::oauth2_cache::CachedToken>>>,
 }
 
 /// Helpers to manage the cancel registry without leaking mutex details all
@@ -431,6 +436,8 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/discussions/:id/exec", post(api::disc_git::disc_exec))
         .route("/api/discussions/:id/worktree-unlock", post(api::disc_git::worktree_unlock))
         .route("/api/discussions/:id/worktree-lock", post(api::disc_git::worktree_lock))
+        .route("/api/discussions/:id/test-mode/enter", post(api::disc_git::test_mode_enter))
+        .route("/api/discussions/:id/test-mode/exit", post(api::disc_git::test_mode_exit))
         // ── Context Files ──
         .route("/api/discussions/:id/context-files", get(api::discussions::list_context_files).post(api::discussions::upload_context_file))
         .route("/api/discussions/:id/context-files/:file_id", delete(api::discussions::delete_context_file))

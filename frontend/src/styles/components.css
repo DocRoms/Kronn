@@ -251,6 +251,31 @@
   border: 1px solid rgba(240, 160, 48, 0.3);
 }
 
+/* ── Plugin kind badge (MCP / API / hybrid) ─────────────────────────────── */
+.mcp-kind-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 0.7rem;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+.mcp-kind-badge-mcp {
+  color: #60a5fa;
+  border: 1px solid rgba(96, 165, 250, 0.35);
+}
+.mcp-kind-badge-api {
+  color: #c084fc;
+  border: 1px solid rgba(192, 132, 252, 0.35);
+}
+.mcp-kind-badge-hybrid {
+  color: #e8eaed;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: linear-gradient(90deg, rgba(96, 165, 250, 0.12), rgba(192, 132, 252, 0.12));
+}
+
 /* ── MCP load indicator (shared: Plugins page + Project cards) ─────────── */
 .mcp-load-ok { color: var(--kr-success, #4ade80); }
 .mcp-load-warn { color: var(--kr-warning, #f0a030); }

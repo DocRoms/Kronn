@@ -71,6 +71,7 @@ pub async fn create_config(
                 description: def.description.clone(),
                 transport: def.transport.clone(),
                 source: McpSource::Registry,
+                api_spec: def.api_spec.clone(),
             };
             db::mcps::upsert_server(conn, &s)?;
             s
@@ -376,6 +377,7 @@ pub async fn refresh(
                 description: def.description.clone(),
                 transport: def.transport.clone(),
                 source: McpSource::Registry,
+                api_spec: def.api_spec.clone(),
             };
             // Only upsert if server already exists in DB
             let exists = db::mcps::list_servers(conn)?
@@ -445,12 +447,16 @@ pub async fn refresh(
                     (format!("detected:{}", name), name.clone(), desc, McpSource::Detected, transport.clone())
                 };
 
+                // `.mcp.json` detection never surfaces API-only plugins —
+                // they live exclusively in the Kronn catalog, not on disk —
+                // so api_spec is always None on this path.
                 let server = McpServer {
                     id: server_id.clone(),
                     name: server_name,
                     description,
                     transport: server_transport,
                     source,
+                    api_spec: None,
                 };
                 db::mcps::upsert_server(conn, &server)?;
 
@@ -921,6 +927,7 @@ fn migrate_detected_to_registry(conn: &Connection, reg: &[McpDefinition]) -> any
                 description: def.description.clone(),
                 transport: def.transport.clone(),
                 source: McpSource::Registry,
+                api_spec: def.api_spec.clone(),
             };
             db::mcps::upsert_server(conn, &new_server)?;
 
@@ -1028,6 +1035,7 @@ mod tests {
             official: false,
             alt_packages: alt.iter().map(|s| s.to_string()).collect(),
             default_context: None,
+            api_spec: None,
         }
     }
 

@@ -988,21 +988,27 @@ export function ChatInput({
                     <Zap size={13} />
                   </button>
                   {showQPPicker && (
-                    <div className="disc-mention-popover disc-qp-picker">
+                    <div className="disc-qp-picker" role="menu">
+                      <div className="disc-qp-picker-header">{t('disc.chainQP')}</div>
                       {chainableQPs.map(qp => (
                         <button
                           key={qp.id}
                           type="button"
-                          className="disc-mention-item"
+                          role="menuitem"
+                          className="disc-qp-picker-item"
                           onMouseDown={e => {
                             e.preventDefault();
                             onQueueQP(qp);
                             setShowQPPicker(false);
                           }}
                         >
-                          <span>{qp.icon}</span>
-                          <span className="font-semibold">{qp.name}</span>
-                          {qp.description && <span className="text-muted text-xs" style={{ marginLeft: 4 }}>{qp.description}</span>}
+                          <span className="disc-qp-picker-icon">{qp.icon}</span>
+                          <span className="disc-qp-picker-meta">
+                            <span className="disc-qp-picker-name">{qp.name}</span>
+                            {qp.description && (
+                              <span className="disc-qp-picker-desc">{qp.description}</span>
+                            )}
+                          </span>
                         </button>
                       ))}
                     </div>

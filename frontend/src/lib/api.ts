@@ -68,7 +68,7 @@ import type {
   OllamaHealthResponse,
   OllamaModelsResponse,
 } from '../types/generated';
-import type { DiscoverKeysResponse } from '../types/extensions';
+import type { DiscoverKeysResponse, TestModeEnterResult, TestModeExitResponse } from '../types/extensions';
 
 // ─── Auth token ──────────────────────────────────────────────────────────────
 
@@ -578,6 +578,14 @@ export const discussions = {
   exec: (id: string, command: string) => api<{ stdout: string; stderr: string; exit_code: number }>('POST', `/discussions/${id}/exec`, { command }),
   worktreeUnlock: (id: string) => api<string>('POST', `/discussions/${id}/worktree-unlock`, {}),
   worktreeLock: (id: string) => api<string>('POST', `/discussions/${id}/worktree-lock`, {}),
+  // High-level "try this version in my IDE" flow — orchestrates unlock +
+  // checkout + optional stash. The response envelope carries either success
+  // or a structured preflight blocker (worktree dirty, main dirty, detached
+  // HEAD) that the UI matches on `status` to pick the right modal.
+  testModeEnter: (id: string, opts?: { stash_dirty?: boolean; force?: boolean }) =>
+    api<TestModeEnterResult>('POST', `/discussions/${id}/test-mode/enter`, opts ?? {}),
+  testModeExit: (id: string) =>
+    api<TestModeExitResponse>('POST', `/discussions/${id}/test-mode/exit`, {}),
 
   // ── Context Files ──
   listContextFiles: (id: string) => api<ContextFile[]>('GET', `/discussions/${id}/context-files`),

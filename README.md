@@ -72,21 +72,23 @@ Persistent conversations backed by SQLite. Full i18n (French, English, Spanish).
 
 Share discussions between Kronn instances via WebSocket. Replicated model: each peer stores a full copy, messages sync in real-time. Auto-detection of Tailscale, VPN, and LAN networks. Network diagnostics on connection failures.
 
-### MCP Management
+### Plugins — MCP + API (new in 0.5)
 
-A 3-tier architecture with encrypted secrets:
+A 3-tier architecture with encrypted secrets, now covering two kinds of plugins:
 
 ```
-Server (type)  →  Config (instance + secrets)  →  Project (N:N)
+Plugin (MCP / API / hybrid)  →  Config (instance + secrets)  →  Project (N:N)
 ```
 
-**53 built-in servers** covering Git, databases, cloud & infra, browsers, monitoring, communication, project management, design, payments, knowledge bases, AI reasoning, SEO, code quality, IaC, and hosting. [Full list →](docs/mcps.md)
+**56 built-in plugins** — 53 MCPs + 3 API plugins (**Chartbeat**, **Adobe Analytics**, **Google Search**). MCPs expose tools to the agent via `.mcp.json` sync; API plugins ship their endpoints + auth + curl example directly into the agent's system prompt, so the agent calls them via Bash (no MCP server required). OAuth2 client-credentials is supported out of the box (Adobe IMS today, extensible to Google Analytics / Salesforce / any RFC 6749 provider): Kronn mints + caches the bearer token, the agent never sees the secret. A single plugin can offer both MCP and API (hybrid) — useful for services like Jira that have an MCP server AND a REST API. [Full list →](docs/mcps.md)
 
 - **Auto-detection** from existing `.mcp.json` files across projects
-- **Disk sync for all agents** — `.mcp.json` (Claude), `.kiro/settings/mcp.json` (Kiro), `.gemini/settings.json` (Gemini), `.vibe/config.toml` (Vibe), `~/.codex/config.toml` (Codex), `~/.copilot/mcp-config.json` (Copilot)
+- **Disk sync for MCP plugins** — `.mcp.json` (Claude), `.kiro/settings/mcp.json` (Kiro), `.gemini/settings.json` (Gemini), `.vibe/config.toml` (Vibe), `~/.codex/config.toml` (Codex), `~/.copilot/mcp-config.json` (Copilot)
+- **Prompt injection for API plugins** — no `.mcp.json` write; a `## REST APIs available` section with credentials + endpoints + curl template appears in the agent's `--append-system-prompt`
 - **Smart dedup** — detects when the same MCP uses different runtimes (e.g. npm package vs Go binary) and merges them automatically
-- **Inline secret editing** with per-field visibility toggles and token generation links
+- **Inline secret editing** with per-field visibility toggles; API plugins' non-secret config keys (host, workspace id, etc.) render as plain text with placeholders + descriptions sourced from the plugin definition
 - **Global configs** — mark a config as global to deploy to all projects at once
+- **Kind filter** in the Plugins UI: `All | 🔌 MCP | 🌐 API` pills above the category row
 
 ![MCP management with encrypted secrets](docs/screenshots/mcps.png)
 
@@ -193,7 +195,7 @@ All models downloaded on first use and cached locally.
 
 - **Usage Dashboard** — real-time token consumption and cost estimation across all providers. Summary cards, provider breakdown bar, per-project horizontal bars, daily history chart (30 days, stacked by provider). Toggle between token count and USD cost view. Filter by discussions or workflows. Click a discussion name to navigate directly to it
 - **Project Bootstrap** — create a new project from scratch with an AI architect guiding Vision → Architecture → Stack → MVP → Action Plan
-- **Worktree Isolation** — each discussion/workflow runs in its own git worktree. Lock/Unlock for local testing
+- **Worktree Isolation + Test Mode** — each discussion/workflow runs in its own git worktree. One-click **🧪 Test mode** (0.5) swaps your main repo to the discussion's branch so you can try the code in your IDE without leaving Kronn; the agent is paused, a global banner shows the active test, and exiting restores your previous branch + pops the auto-stash + re-creates the worktree. Triple preflight (worktree dirty, main dirty, detached HEAD) with a modal that lets you pick _stash and proceed_ / _commit first_ / _cancel_ — rollback on any failure
 - **Agent Incompatibility** — Kronn tracks per-agent limitations and auto-excludes incompatible agents from steps
 - **Guided Tour** — 17-step interactive onboarding for new users. Auto-launched on first visit, replayable from "?" button. 4 learn-by-doing steps where the user clicks the real UI (pulse animation). Spotlight overlay with auto-positioned tooltips. Keyboard navigation (Escape/arrows). Mobile-responsive
 

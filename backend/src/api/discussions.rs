@@ -267,6 +267,8 @@ pub async fn create(
         shared_id: None,
         shared_with: vec![],
         workflow_run_id: None,
+        test_mode_restore_branch: None,
+        test_mode_stash_ref: None,
         created_at: now,
         updated_at: now,
     };
@@ -982,7 +984,95 @@ async fn make_agent_stream(
                  Check: is the project linked to any MCP config? Is the MCP global or project-scoped?",
             );
         }
-        None
+
+        // Build the API plugin block and — if present — combine with the
+        // disk-read MCP context so both reach the agent via
+        // `mcp_context_override`. Without this, API plugins never surface
+        // because `.mcp.json` doesn't carry them by design.
+        let api_block = if let Some(ref pid) = disc.project_id {
+            let secret = {
+                let cfg = state.config.read().await;
+                cfg.encryption_secret.clone()
+            };
+            match secret {
+                Some(secret) => {
+                    let pid = pid.clone();
+                    let secret_c = secret.clone();
+                    // Step 1 (blocking): decrypt configs from the DB.
+                    let mut plugins = state.db.with_conn(move |conn| {
+                        crate::core::mcp_scanner::collect_active_api_plugins(
+                            conn, &pid, &secret_c,
+                        )
+                    }).await.unwrap_or_default();
+
+                    // Step 2 (async): for every plugin whose auth is
+                    // OAuth2ClientCredentials, resolve a fresh bearer token
+                    // via the cache. We inject the result under the virtual
+                    // env keys `__access_token__` / `__token_error__` so the
+                    // sync context builder can read them without knowing
+                    // the auth flow. Per-plugin isolation: one bad token
+                    // doesn't hide the others.
+                    for (server, env) in plugins.iter_mut() {
+                        if let Some(ref spec) = server.api_spec {
+                            if matches!(spec.auth, crate::models::ApiAuthKind::OAuth2ClientCredentials { .. }) {
+                                // Look up the config id from the server id +
+                                // the project — we need it as the cache key.
+                                // `server.id` is stable per registry entry;
+                                // multiple configs on the same server would
+                                // overwrite each other if we keyed on it.
+                                // Find the actual config id via the DB.
+                                let server_id = server.id.clone();
+                                let pid2 = disc.project_id.clone().unwrap_or_default();
+                                let config_id = state.db.with_conn(move |conn| {
+                                    let configs = crate::db::mcps::list_configs(conn)?;
+                                    let id = configs.iter()
+                                        .find(|c| c.server_id == server_id
+                                            && (c.is_global || c.project_ids.iter().any(|p| p == &pid2)))
+                                        .map(|c| c.id.clone());
+                                    Ok(id)
+                                }).await.ok().flatten().unwrap_or_else(|| server.id.clone());
+                                match crate::core::oauth2_cache::resolve_token(
+                                    &state.oauth2_cache, &config_id, &spec.auth, env,
+                                ).await {
+                                    Ok(tok) => { env.insert("__access_token__".into(), tok); }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "OAuth2 token exchange failed for plugin '{}' config {}: {}",
+                                            server.name, config_id, e
+                                        );
+                                        env.insert("__token_error__".into(), e);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Step 3 (sync): render the block.
+                    crate::core::mcp_scanner::build_api_context_block(&plugins)
+                }
+                None => String::new(),
+            }
+        } else {
+            String::new()
+        };
+
+        if api_block.is_empty() {
+            // No API plugins active — let runner.rs fall back to reading
+            // MCP contexts from disk (unchanged legacy path).
+            None
+        } else {
+            // At least one API plugin active — we must pre-combine the
+            // disk-read MCP context with the API block, since
+            // `mcp_context_override = Some(...)` short-circuits the
+            // disk read in runner.rs.
+            let disk_ctx = crate::core::mcp_scanner::read_all_mcp_contexts(&project_path);
+            let combined = if disk_ctx.is_empty() {
+                api_block
+            } else {
+                format!("{}\n{}", disk_ctx, api_block)
+            };
+            Some(combined)
+        }
     };
 
     // Load context files for prompt injection
@@ -1159,6 +1249,20 @@ async fn make_agent_stream(
                 // We then kill the child and save the partial response with
                 // a footer so the user sees what happened.
                 let mut stopped_on_cancel: bool = false;
+                // Runaway-repeat detector — guards against Claude Opus
+                // extended-thinking decoder loops (observed on EW-7189:
+                // `</thinking>\n` × 6349 in one stream). When the same
+                // non-trivial delta arrives N times in a row we kill the
+                // child. `strip_thinking_leaks` in the parser normally
+                // catches the known leak, but the same mechanic could
+                // trigger on any other repeating token, so the detector
+                // stays kind-agnostic. Counts only post-strip text (empty
+                // chunks become `Skip` and never hit this loop).
+                let mut last_text_delta = String::new();
+                let mut repeat_delta_count: u32 = 0;
+                let mut stopped_on_loop: bool = false;
+                const MAX_REPEAT_DELTAS: u32 = 50;
+                const REPEAT_MIN_LEN: usize = 3;
 
                 // Stall timeout pattern: the `tokio::time::sleep(stall_timeout)` future
                 // is created fresh on each iteration of the `while let` loop because the
@@ -1193,6 +1297,30 @@ async fn make_agent_stream(
                     if is_stream_json {
                         match runner::parse_claude_stream_line(&line) {
                             runner::StreamJsonEvent::Text(text) => {
+                                // Loop-repeat detection — see constants above.
+                                // Non-whitespace deltas of >= REPEAT_MIN_LEN are
+                                // the dangerous ones; whitespace/very short
+                                // deltas (". ", "\n") can repeat legitimately
+                                // in formatted output without signalling a
+                                // decoder loop.
+                                if text.len() >= REPEAT_MIN_LEN && !text.trim().is_empty() {
+                                    if text == last_text_delta {
+                                        repeat_delta_count += 1;
+                                        if repeat_delta_count >= MAX_REPEAT_DELTAS {
+                                            tracing::warn!(
+                                                "Agent stream entered a decoder loop — same delta {:?} repeated {} times, aborting",
+                                                text.chars().take(40).collect::<String>(),
+                                                repeat_delta_count,
+                                            );
+                                            stopped_on_loop = true;
+                                            was_interrupted = true;
+                                            break;
+                                        }
+                                    } else {
+                                        last_text_delta = text.clone();
+                                        repeat_delta_count = 1;
+                                    }
+                                }
                                 full_response.push_str(&text);
                                 chunks_since_checkpoint += 1;
                                 // Throttled checkpoint to DB (Option A) — survives backend restart
@@ -1297,9 +1425,9 @@ async fn make_agent_stream(
                 log_task.abort();
 
                 // Kill agent on timeout/stall OR terminal signal OR size cap
-                // OR user-triggered cancel (process may still be running and
-                // producing output at this point).
-                if was_interrupted || stopped_on_signal.is_some() || stopped_on_size || stopped_on_cancel {
+                // OR user-triggered cancel OR decoder-loop detection
+                // (process may still be running and producing output here).
+                if was_interrupted || stopped_on_signal.is_some() || stopped_on_size || stopped_on_cancel || stopped_on_loop {
                     let _ = process.child.kill().await;
                 }
 
@@ -1327,12 +1455,24 @@ async fn make_agent_stream(
                 let stderr_lines = process.captured_stderr_flushed().await;
                 let stderr_text = stderr_lines.join("\n");
 
-                // Mark partial responses with actionable hint
-                if was_interrupted && !full_response.is_empty() {
+                // Mark partial responses with actionable hint. `stopped_on_loop`
+                // also sets `was_interrupted`, but its dedicated footer below
+                // is more specific — skip the generic stall footer when a
+                // loop was detected.
+                if was_interrupted && !stopped_on_loop && !full_response.is_empty() {
                     full_response.push_str(&format!(
                         "\n\n---\n⚠️ **Partial response** — the agent was interrupted after {} min without output. \
                         You can increase the timeout in **Config > Server > Agent inactivity timeout**.",
                         stall_timeout_min
+                    ));
+                }
+                if stopped_on_loop {
+                    full_response.push_str(&format!(
+                        "\n\n---\n🔁 **Decoder loop detected** — the agent emitted the same token {} times \
+                        in a row and was killed to stop the pollution. This is a known failure mode \
+                        (often extended-thinking leak on Opus). Try re-running with a fresh prompt — \
+                        adjusting the question wording usually avoids it.",
+                        MAX_REPEAT_DELTAS
                     ));
                 }
                 if stopped_on_size {
@@ -1627,6 +1767,13 @@ async fn run_agent_streaming(
     let deadline = tokio::time::Instant::now() + AGENT_GLOBAL_TIMEOUT;
 
     let mut signal_stop = false;
+    // Same decoder-loop detector as the main stream loop. Orchestration runs
+    // use the same Claude model and can exhibit the same failure mode; we
+    // break out and return whatever text arrived before the loop started.
+    let mut last_text_delta = String::new();
+    let mut repeat_delta_count: u32 = 0;
+    const MAX_REPEAT_DELTAS: u32 = 50;
+    const REPEAT_MIN_LEN: usize = 3;
     loop {
         tokio::select! {
             line = process.next_line() => {
@@ -1635,6 +1782,26 @@ async fn run_agent_streaming(
                         if is_stream_json {
                             match runner::parse_claude_stream_line(&line) {
                                 runner::StreamJsonEvent::Text(text) => {
+                                    // Decoder-loop guard — same mechanic as the main
+                                    // stream loop (see MAX_REPEAT_DELTAS above).
+                                    if text.len() >= REPEAT_MIN_LEN && !text.trim().is_empty() {
+                                        if text == last_text_delta {
+                                            repeat_delta_count += 1;
+                                            if repeat_delta_count >= MAX_REPEAT_DELTAS {
+                                                tracing::warn!(
+                                                    "Orchestration agent entered a decoder loop — delta {:?} repeated {} times, aborting",
+                                                    text.chars().take(40).collect::<String>(),
+                                                    repeat_delta_count,
+                                                );
+                                                let _ = process.child.kill().await;
+                                                full_response.push_str("\n\n---\n🔁 **Decoder loop detected** — agent killed.");
+                                                break;
+                                            }
+                                        } else {
+                                            last_text_delta = text.clone();
+                                            repeat_delta_count = 1;
+                                        }
+                                    }
                                     full_response.push_str(&text);
                                     if !tx.is_closed() {
                                         let chunk = serde_json::json!({

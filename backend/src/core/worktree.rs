@@ -498,6 +498,214 @@ pub fn validate_worktree(worktree_path: &str) -> bool {
     Path::new(worktree_path).exists()
 }
 
+// ── Test mode helpers ────────────────────────────────────────────────────────
+//
+// These wrap plain `git` calls used by the `test-mode/enter` + `exit`
+// endpoints (see `api::disc_git`). They stay here (rather than in
+// `api::git_ops`) because they operate on the same repo / worktree layout
+// the rest of this module owns, and share the same sync `Command` wrappers.
+
+/// Short description of a file that `git status --porcelain` considers
+/// uncommitted in a given tree. Used to report dirty state back to the UI
+/// so the user can see exactly what is at risk before confirming an action.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DirtyFile {
+    pub path: String,
+    /// Porcelain v1 status code — two chars, index + worktree. `??` means
+    /// untracked. We surface as-is; the UI translates to human text.
+    pub status: String,
+}
+
+/// Current state of the repository at `repo_path` — what the user will see
+/// if they `cd` into it right now. Used by `test-mode/enter` to decide
+/// whether to block, stash, or proceed cleanly.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MainRepoState {
+    /// Current branch, e.g. `main` or `feature/x`. Empty string if detached HEAD.
+    pub current_branch: String,
+    /// True when HEAD is not pointing at a named branch (e.g. after a manual
+    /// `git checkout <sha>`). We don't block, but the UI warns.
+    pub is_detached: bool,
+    /// Uncommitted + untracked files, porcelain output.
+    pub dirty_files: Vec<DirtyFile>,
+}
+
+/// Parse `git status --porcelain=v1` output into a list of dirty files.
+///
+/// Porcelain v1 format: `XY <path>` — two-char status code, space, path.
+/// Some status lines carry a rename (` -> `) — we keep the target side (the
+/// actual file the user needs to be aware of) and discard the arrow.
+fn parse_porcelain(stdout: &str) -> Vec<DirtyFile> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            if line.len() < 4 {
+                return None;
+            }
+            let status = line[..2].to_string();
+            let rest = line[3..].trim();
+            // Rename / copy lines look like "R  old -> new" — keep only `new`.
+            // Rename / copy lines look like "R  old -> new" — keep only `new`.
+            // `rsplit` iterates right-to-left, so `next()` gives the post-arrow
+            // side; for plain lines it returns the whole thing.
+            let path = rest.rsplit(" -> ").next().unwrap_or(rest).to_string();
+            Some(DirtyFile { path, status })
+        })
+        .collect()
+}
+
+/// Check whether the given worktree has uncommitted changes (modified,
+/// staged, or untracked).
+///
+/// Used as preflight #1 on `test-mode/enter`: if an agent left the worktree
+/// dirty, unlocking it would lose the changes. We surface the list so the UI
+/// can block with a "commit first" CTA rather than a blind refusal.
+pub fn worktree_dirty_files(worktree_path: &Path) -> Result<Vec<DirtyFile>, String> {
+    let output = sync_cmd("git")
+        .args(["status", "--porcelain=v1"])
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|e| format!("git status failed in worktree: {}", e))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git status failed in worktree ({}): {}",
+            worktree_path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(parse_porcelain(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// Snapshot the main repo's state (current branch + dirty files).
+///
+/// Used as preflight #2 + #3 on `test-mode/enter`. Returns an empty
+/// `current_branch` and `is_detached = true` when HEAD is not on a named
+/// branch — the UI warns but does not block.
+pub fn main_repo_state(repo_path: &Path) -> Result<MainRepoState, String> {
+    // Branch / detached HEAD detection. `symbolic-ref -q HEAD` returns
+    // "refs/heads/<name>" on a branch and fails (exit 1) on detached HEAD —
+    // that's how we distinguish the two states without parsing `git status`.
+    let sym = sync_cmd("git")
+        .args(["symbolic-ref", "-q", "--short", "HEAD"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("git symbolic-ref failed: {}", e))?;
+    let (current_branch, is_detached) = if sym.status.success() {
+        (String::from_utf8_lossy(&sym.stdout).trim().to_string(), false)
+    } else {
+        (String::new(), true)
+    };
+
+    let status = sync_cmd("git")
+        .args(["status", "--porcelain=v1"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("git status failed: {}", e))?;
+    if !status.status.success() {
+        return Err(format!(
+            "git status failed in repo ({}): {}",
+            repo_path.display(),
+            String::from_utf8_lossy(&status.stderr)
+        ));
+    }
+    let dirty_files = parse_porcelain(&String::from_utf8_lossy(&status.stdout));
+    Ok(MainRepoState { current_branch, is_detached, dirty_files })
+}
+
+/// `git checkout <branch>` in the main repo.
+///
+/// We run plain `checkout` (not `-f`) — the caller guarantees the repo is
+/// clean (via `main_repo_state`) or has stashed beforehand. If checkout
+/// fails (conflict, unknown branch, etc.), we return the stderr verbatim so
+/// the caller can surface a precise error to the user instead of a
+/// generic 500.
+pub fn checkout_branch(repo_path: &Path, branch: &str) -> Result<(), String> {
+    let output = sync_cmd("git")
+        .args(["checkout", branch])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("git checkout failed: {}", e))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git checkout {} failed: {}",
+            branch,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+/// `git stash push -u -m <message>`. Includes untracked files so nothing is
+/// left behind when the user enters test mode.
+///
+/// Returns `true` if something was actually stashed (there were changes to
+/// stash), `false` if the working tree was already clean — mirrors git's
+/// own behavior where `stash push` on a clean tree succeeds but does
+/// nothing. The caller stores the message only when `true` so a later
+/// `stash_pop_by_message` can find the exact stash even if the user stashed
+/// manually in between.
+pub fn stash_push(repo_path: &Path, message: &str) -> Result<bool, String> {
+    let output = sync_cmd("git")
+        .args(["stash", "push", "-u", "-m", message])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("git stash push failed: {}", e))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git stash push failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // git prints "No local changes to save" (on stdout) when the tree is
+    // already clean. Anything else (e.g. "Saved working directory...")
+    // means a stash was created.
+    Ok(!stdout.contains("No local changes to save"))
+}
+
+/// Pop the stash whose message matches `message` (exact match).
+///
+/// Used by `test-mode/exit` to restore the user's pre-test state. If the
+/// stash has disappeared (user popped it manually, cleared stashes, etc.)
+/// we report a clear error — we do NOT guess which stash to pop, it's
+/// safer to tell the user than to restore the wrong thing.
+pub fn stash_pop_by_message(repo_path: &Path, message: &str) -> Result<(), String> {
+    // Find the stash ref matching the message. `git stash list` output
+    // looks like: `stash@{0}: On main: <message>`.
+    let list = sync_cmd("git")
+        .args(["stash", "list"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("git stash list failed: {}", e))?;
+    if !list.status.success() {
+        return Err("git stash list failed".into());
+    }
+    let list_str = String::from_utf8_lossy(&list.stdout);
+    let stash_ref = list_str
+        .lines()
+        .find(|l| l.contains(message))
+        .and_then(|l| l.split(':').next())
+        .ok_or_else(|| format!(
+            "stash '{}' not found — was it dropped manually? \
+             Run `git stash list` to inspect, then `git stash pop <ref>`.",
+            message
+        ))?;
+
+    let output = sync_cmd("git")
+        .args(["stash", "pop", stash_ref])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("git stash pop failed: {}", e))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git stash pop {} failed (conflicts?): {}",
+            stash_ref,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -809,5 +1017,134 @@ mod tests {
         let repo = make_test_repo("validate");
         let info = create_discussion_worktree(repo.path(), "proj", "val-test", "main").unwrap();
         assert!(validate_worktree(&info.path));
+    }
+
+    // ── Test-mode helpers ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_porcelain_basic_shapes() {
+        // Explicit \n join — a multi-line literal with `"\` would let the
+        // line-continuation escape eat the leading space on the " M" line.
+        let out = [" M src/lib.rs", "?? newfile.txt", "A  staged.rs", "R  old.rs -> new.rs"].join("\n");
+        let files = parse_porcelain(&out);
+        assert_eq!(files.len(), 4);
+        assert_eq!(files[0].status, " M");
+        assert_eq!(files[0].path, "src/lib.rs");
+        assert_eq!(files[1].status, "??");
+        assert_eq!(files[1].path, "newfile.txt");
+        assert_eq!(files[3].status, "R ");
+        // Rename: we keep the target filename (post-arrow).
+        assert_eq!(files[3].path, "new.rs");
+    }
+
+    #[test]
+    fn test_worktree_dirty_files_empty_on_clean_repo() {
+        let repo = make_test_repo("dirty-clean");
+        let files = worktree_dirty_files(repo.path()).unwrap();
+        assert!(files.is_empty(), "clean repo should report no dirty files");
+    }
+
+    #[test]
+    fn test_worktree_dirty_files_detects_modified_and_untracked() {
+        let repo = make_test_repo("dirty-mod");
+        // Modify tracked file + add untracked file.
+        fs::write(repo.path().join("README.md"), "# modified").unwrap();
+        fs::write(repo.path().join("new.txt"), "hello").unwrap();
+        let files = worktree_dirty_files(repo.path()).unwrap();
+        let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        assert!(paths.contains(&"README.md"));
+        assert!(paths.contains(&"new.txt"));
+    }
+
+    #[test]
+    fn test_main_repo_state_on_named_branch() {
+        let repo = make_test_repo("state-branch");
+        let state = main_repo_state(repo.path()).unwrap();
+        assert_eq!(state.current_branch, "main");
+        assert!(!state.is_detached);
+        assert!(state.dirty_files.is_empty());
+    }
+
+    #[test]
+    fn test_main_repo_state_detects_detached_head() {
+        let repo = make_test_repo("state-detached");
+        // Move HEAD to the commit SHA directly → detached HEAD state.
+        let sha_out = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repo.path()).output().unwrap();
+        let sha = String::from_utf8_lossy(&sha_out.stdout).trim().to_string();
+        std::process::Command::new("git")
+            .args(["checkout", &sha])
+            .current_dir(repo.path()).output().unwrap();
+        let state = main_repo_state(repo.path()).unwrap();
+        assert!(state.is_detached, "should report detached HEAD");
+        assert_eq!(state.current_branch, "");
+    }
+
+    #[test]
+    fn test_main_repo_state_reports_dirty_files() {
+        let repo = make_test_repo("state-dirty");
+        fs::write(repo.path().join("foo.txt"), "x").unwrap();
+        let state = main_repo_state(repo.path()).unwrap();
+        assert!(!state.dirty_files.is_empty());
+        assert!(state.dirty_files.iter().any(|f| f.path == "foo.txt"));
+    }
+
+    #[test]
+    fn test_checkout_branch_succeeds_on_existing_branch() {
+        let repo = make_test_repo("checkout-ok");
+        // Create a second branch and switch back to main.
+        std::process::Command::new("git")
+            .args(["checkout", "-b", "feat/x"])
+            .current_dir(repo.path()).output().unwrap();
+        std::process::Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(repo.path()).output().unwrap();
+
+        assert!(checkout_branch(repo.path(), "feat/x").is_ok());
+        let state = main_repo_state(repo.path()).unwrap();
+        assert_eq!(state.current_branch, "feat/x");
+    }
+
+    #[test]
+    fn test_checkout_branch_reports_error_on_unknown_branch() {
+        let repo = make_test_repo("checkout-fail");
+        let err = checkout_branch(repo.path(), "does/not/exist").unwrap_err();
+        assert!(
+            err.contains("checkout") && err.contains("does/not/exist"),
+            "error should mention the failed checkout + branch: {}", err
+        );
+    }
+
+    #[test]
+    fn test_stash_push_returns_false_on_clean_tree() {
+        let repo = make_test_repo("stash-clean");
+        let stashed = stash_push(repo.path(), "kronn:test").unwrap();
+        assert!(!stashed, "nothing to stash on a clean tree");
+    }
+
+    #[test]
+    fn test_stash_push_and_pop_round_trip() {
+        let repo = make_test_repo("stash-roundtrip");
+        fs::write(repo.path().join("wip.txt"), "in-progress").unwrap();
+
+        let stashed = stash_push(repo.path(), "kronn:auto-d123").unwrap();
+        assert!(stashed);
+        // Tree is now clean and file is gone from disk.
+        assert!(worktree_dirty_files(repo.path()).unwrap().is_empty());
+        assert!(!repo.path().join("wip.txt").exists());
+
+        // Pop it back by its message.
+        stash_pop_by_message(repo.path(), "kronn:auto-d123").unwrap();
+        assert!(repo.path().join("wip.txt").exists());
+        let dirty = worktree_dirty_files(repo.path()).unwrap();
+        assert!(dirty.iter().any(|f| f.path == "wip.txt"));
+    }
+
+    #[test]
+    fn test_stash_pop_by_message_missing_stash_returns_clear_error() {
+        let repo = make_test_repo("stash-missing");
+        let err = stash_pop_by_message(repo.path(), "kronn:not-there").unwrap_err();
+        assert!(err.contains("not found"), "error should be user-friendly: {}", err);
     }
 }

@@ -428,6 +428,8 @@ pub fn create_batch_run(
             shared_id: None,
             shared_with: vec![],
             workflow_run_id: Some(run_id.clone()),
+            test_mode_restore_branch: None,
+            test_mode_stash_ref: None,
             created_at: now,
             updated_at: now,
         };
