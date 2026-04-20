@@ -1,6 +1,6 @@
 - **ID**: TD-20260403-mcp-naming-migration
 - **Area**: Backend
-- **Problem (fact)**: Branch `feat/optimize-import-export-cross-OS` changed MCP key naming from `server.name.to_lowercase()` to `config.label`. This is a silent breaking change for existing projects: their `enabledMcpjsonServers` whitelist references old keys (e.g. "github" → now "github Euronews"). MCPs with old keys won't be whitelisted after re-sync.
+- **Problem (fact)**: Branch `feat/optimize-import-export-cross-OS` changed MCP key naming from `server.name.to_lowercase()` to `config.label`. This is a silent breaking change for existing projects: their `enabledMcpjsonServers` whitelist references old keys (e.g. "github" → now "github Acme"). MCPs with old keys won't be whitelisted after re-sync.
 - **Why we can't fix now (constraint)**: The label-based naming is actually better (handles multiple configs per server). But migration of existing enabledMcpjsonServers entries is needed.
 - **Impact**: correctness — MCPs silently disabled after Kronn re-sync on projects with old-style whitelist entries
 - **Where (pointers)**: `backend/src/core/mcp_scanner.rs` → `sync_project_mcps_to_disk()`, `sync_claude_enabled_servers()`

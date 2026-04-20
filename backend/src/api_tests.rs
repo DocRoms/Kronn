@@ -34,6 +34,7 @@ mod tests {
             audit_tracker: Arc::new(std::sync::Mutex::new(AuditTracker::default())),
             ws_broadcast: Arc::new(ws_tx),
             cancel_registry: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        oauth2_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -52,6 +53,7 @@ mod tests {
             audit_tracker: Arc::new(std::sync::Mutex::new(AuditTracker::default())),
             ws_broadcast: Arc::new(ws_tx),
             cancel_registry: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        oauth2_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -516,6 +518,8 @@ mod tests {
             shared_id: None,
             shared_with: vec![],
         workflow_run_id: None,
+        test_mode_restore_branch: None,
+        test_mode_stash_ref: None,
                 created_at: now,
                 updated_at: now,
             };
@@ -645,6 +649,8 @@ mod tests {
             shared_id: None,
             shared_with: vec![],
         workflow_run_id: None,
+        test_mode_restore_branch: None,
+        test_mode_stash_ref: None,
                 created_at: now, updated_at: now,
             };
             crate::db::discussions::insert_discussion(conn, &disc)?;
@@ -872,6 +878,8 @@ mod tests {
             shared_id: None,
             shared_with: vec![],
         workflow_run_id: None,
+        test_mode_restore_branch: None,
+        test_mode_stash_ref: None,
                     created_at: now, updated_at: now,
                 };
                 crate::db::discussions::insert_discussion(conn, &disc)?;
@@ -1529,6 +1537,8 @@ mod tests {
             shared_id: None,
             shared_with: vec![],
         workflow_run_id: None,
+        test_mode_restore_branch: None,
+        test_mode_stash_ref: None,
                 created_at: now, updated_at: now,
             };
             crate::db::discussions::insert_discussion(conn, &disc)?;

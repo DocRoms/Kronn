@@ -40,14 +40,25 @@ mod tests {
 
     #[test]
     fn registry_ids_follow_naming_convention() {
+        // Prefixes signal the plugin kind to anyone reading the DB or logs:
+        //   `mcp-*` → plugin has an MCP transport (may also have api_spec)
+        //   `api-*` → plugin is API-only (transport == ApiOnly)
         let reg = builtin_registry();
         for m in &reg {
-            assert!(m.id.starts_with("mcp-"),
-                "MCP id '{}' must start with 'mcp-' prefix", m.id);
+            assert!(m.id.starts_with("mcp-") || m.id.starts_with("api-"),
+                "Plugin id '{}' must start with 'mcp-' or 'api-' prefix", m.id);
             assert!(!m.id.contains(' '),
-                "MCP id '{}' must not contain spaces", m.id);
+                "Plugin id '{}' must not contain spaces", m.id);
             assert_eq!(m.id, m.id.to_lowercase(),
-                "MCP id '{}' must be lowercase", m.id);
+                "Plugin id '{}' must be lowercase", m.id);
+            // Consistency: api-* plugins must have api_spec, and their
+            // transport must be ApiOnly.
+            if m.id.starts_with("api-") {
+                assert!(m.api_spec.is_some(),
+                    "Plugin '{}' uses `api-` prefix but has no api_spec", m.id);
+                assert!(matches!(m.transport, McpTransport::ApiOnly),
+                    "Plugin '{}' uses `api-` prefix but transport is not ApiOnly", m.id);
+            }
         }
     }
 

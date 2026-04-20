@@ -236,6 +236,62 @@ pub fn build_synthesis_prompt(
 /// truncated, prepend a notice. `extra_context_len` is the size of
 /// profiles + skills + directives + MCP that will be added alongside
 /// this prompt (so we don't exceed the agent's total budget).
+/// Notice injected when the discussion runs in an isolated git worktree.
+///
+/// Without it, agents (especially Claude Code) touch files but don't commit —
+/// the branch stays at the base commit and the user sees nothing when they
+/// check out the branch from outside the worktree. The notice names the branch
+/// explicitly and asks for a final commit, which gets the default behavior
+/// right in ~80% of runs. The UI badge on the git-panel icon is the safety
+/// net for the remaining cases.
+fn isolated_worktree_notice(disc: &Discussion) -> String {
+    if disc.workspace_mode != "Isolated" {
+        return String::new();
+    }
+    let branch = match disc.worktree_branch.as_deref() {
+        Some(b) if !b.is_empty() => b,
+        _ => return String::new(),
+    };
+    match disc.language.as_str() {
+        "fr" => format!(
+            "[ISOLATION GIT — branche dédiée]\n\
+             Tu travailles dans un worktree sur la branche `{}`. Toute \
+             modification de fichier reste locale au worktree tant que tu ne \
+             commits pas. Après avoir terminé tes modifications :\n\
+             1. `git status` pour lister les fichiers touchés\n\
+             2. `git add <fichiers>` (ou `git add -A` si tout est pertinent)\n\
+             3. `git commit -m \"<message descriptif>\"`\n\
+             Sans ce commit, la branche reste vide côté utilisateur. Ne push pas \
+             sauf demande explicite.\n\n",
+            branch
+        ),
+        "es" => format!(
+            "[AISLAMIENTO GIT — rama dedicada]\n\
+             Trabajas en un worktree en la rama `{}`. Cualquier modificación \
+             de archivo queda local al worktree hasta que hagas commit. Al \
+             terminar tus cambios :\n\
+             1. `git status` para listar los archivos modificados\n\
+             2. `git add <archivos>` (o `git add -A` si todo es relevante)\n\
+             3. `git commit -m \"<mensaje descriptivo>\"`\n\
+             Sin este commit, la rama permanece vacía para el usuario. No hagas \
+             push salvo petición explícita.\n\n",
+            branch
+        ),
+        _ => format!(
+            "[GIT ISOLATION — dedicated branch]\n\
+             You are working in a worktree on branch `{}`. File modifications \
+             stay local to the worktree until you commit. Once your changes \
+             are done:\n\
+             1. `git status` to list touched files\n\
+             2. `git add <files>` (or `git add -A` if all relevant)\n\
+             3. `git commit -m \"<descriptive message>\"`\n\
+             Without this commit, the branch stays empty from the user's \
+             perspective. Do not push unless explicitly asked.\n\n",
+            branch
+        ),
+    }
+}
+
 pub fn build_agent_prompt(
     disc: &Discussion,
     agent_type: &AgentType,
@@ -260,6 +316,8 @@ pub fn build_agent_prompt(
         String::new()
     };
 
+    let worktree_notice = isolated_worktree_notice(disc);
+
     let user_msgs: Vec<_> = disc
         .messages
         .iter()
@@ -270,7 +328,7 @@ pub fn build_agent_prompt(
         let content = user_msgs.last().map(|m| m.content.clone()).unwrap_or_default();
         // Language instruction at end only — LLMs weight recent text more heavily,
         // and MCP context is injected via --append-system-prompt (separate from prompt).
-        return format!("{}{}\n\n{}", title_ctx, content, lang_instr);
+        return format!("{}{}{}\n\n{}", title_ctx, worktree_notice, content, lang_instr);
     }
 
     // Fixed overhead: header + footer (localized by discussion language)
@@ -300,7 +358,7 @@ pub fn build_agent_prompt(
         ""
     };
 
-    let header = format!("{}{}{}", title_ctx, interactive_hint, prev_conv_label);
+    let header = format!("{}{}{}{}", title_ctx, worktree_notice, interactive_hint, prev_conv_label);
     let overhead = header.len() + footer.len() + 100; // 100 = notice template space
 
     // If pin_first_message is set, extract and pin the first non-system message
@@ -466,6 +524,8 @@ mod tests {
             shared_id: None,
             shared_with: vec![],
             workflow_run_id: None,
+            test_mode_restore_branch: None,
+            test_mode_stash_ref: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }
@@ -533,6 +593,54 @@ mod tests {
         disc.title = "New discussion".into();
         let prompt = build_agent_prompt(&disc, &AgentType::ClaudeCode, 0);
         assert!(!prompt.contains("Discussion topic"));
+    }
+
+    #[test]
+    fn agent_prompt_isolated_mode_injects_worktree_notice_short_form() {
+        // Single-message path: notice must be present with the branch name when Isolated.
+        let mut disc = disc_with_messages(vec![user_msg("add a feature")], "en");
+        disc.workspace_mode = "Isolated".into();
+        disc.worktree_branch = Some("kronn/add-feature".into());
+        let prompt = build_agent_prompt(&disc, &AgentType::ClaudeCode, 0);
+        assert!(prompt.contains("GIT ISOLATION"), "notice heading missing: {}", prompt);
+        assert!(prompt.contains("kronn/add-feature"), "branch name missing: {}", prompt);
+        assert!(prompt.contains("git commit"), "commit instruction missing");
+    }
+
+    #[test]
+    fn agent_prompt_isolated_mode_injects_worktree_notice_multi_form() {
+        // Multi-message path: notice must land in the header (before "Previous conversation").
+        let msgs = vec![user_msg("first"), user_msg("follow-up")];
+        let mut disc = disc_with_messages(msgs, "fr");
+        disc.workspace_mode = "Isolated".into();
+        disc.worktree_branch = Some("kronn/ui-theme".into());
+        let prompt = build_agent_prompt(&disc, &AgentType::ClaudeCode, 0);
+        assert!(prompt.contains("ISOLATION GIT"));
+        assert!(prompt.contains("kronn/ui-theme"));
+        // Notice must precede the conversation history to set expectations early.
+        let notice_pos = prompt.find("ISOLATION GIT").unwrap();
+        let conv_pos = prompt.find("Conversation précédente").unwrap();
+        assert!(notice_pos < conv_pos, "worktree notice should precede conversation");
+    }
+
+    #[test]
+    fn agent_prompt_direct_mode_omits_worktree_notice() {
+        // Default workspace_mode = "Direct" → no notice injected.
+        let disc = disc_with_messages(vec![user_msg("hello")], "en");
+        let prompt = build_agent_prompt(&disc, &AgentType::ClaudeCode, 0);
+        assert!(!prompt.contains("GIT ISOLATION"));
+        assert!(!prompt.contains("worktree"));
+    }
+
+    #[test]
+    fn agent_prompt_isolated_without_branch_skips_notice() {
+        // Defensive path: workspace_mode set to Isolated but branch missing
+        // (e.g. mid-migration, broken DB row) → no notice, no panic.
+        let mut disc = disc_with_messages(vec![user_msg("hello")], "en");
+        disc.workspace_mode = "Isolated".into();
+        disc.worktree_branch = None;
+        let prompt = build_agent_prompt(&disc, &AgentType::ClaudeCode, 0);
+        assert!(!prompt.contains("GIT ISOLATION"));
     }
 
     #[test]

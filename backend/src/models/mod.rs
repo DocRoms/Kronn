@@ -605,8 +605,12 @@ pub struct AuditTodo {
 // MCP (Model Context Protocol) — New 3-tier model
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// An MCP server type (e.g. "GitHub", "Atlassian", "Context7")
-/// Represents the abstract definition — command + args template.
+/// An MCP server type (e.g. "GitHub", "Atlassian", "Context7").
+///
+/// A plugin can have MCP capability (via `transport`), API capability (via
+/// `api_spec`), or BOTH — e.g. Jira exposes both a `@modelcontextprotocol`
+/// server and a REST API, and a hybrid plugin lets the agent pick the
+/// right tool. API-only plugins use `McpTransport::ApiOnly` as a sentinel.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct McpServer {
@@ -615,6 +619,11 @@ pub struct McpServer {
     pub description: String,
     pub transport: McpTransport,
     pub source: McpSource,
+    /// When present, the plugin exposes a REST API. Emitted into the agent's
+    /// `--append-system-prompt` as a `=== AVAILABLE APIs ===` block so the
+    /// agent can call it via curl (vs. MCP-style tools). NULL = MCP only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_spec: Option<ApiSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -623,6 +632,103 @@ pub enum McpTransport {
     Stdio { command: String, args: Vec<String> },
     Sse { url: String },
     Streamable { url: String },
+    /// Plugin has no MCP transport — it's API-only. The sync code MUST skip
+    /// these when writing `.mcp.json`; everything relevant lives in
+    /// `api_spec` and gets injected into the prompt instead.
+    ApiOnly,
+}
+
+/// REST API capability for a plugin.
+///
+/// Stored on `McpServer` to let a plugin expose an HTTP API alongside (or
+/// instead of) an MCP transport. The value is serialized into the
+/// `mcp_servers.api_spec_json` column (migration 035) and reused by the
+/// prompt-injection path that emits `=== AVAILABLE APIs ===` blocks.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ApiSpec {
+    pub base_url: String,
+    pub auth: ApiAuthKind,
+    /// Short list of the most useful endpoints. Not exhaustive — the UI
+    /// surfaces `docs_url` for the full reference. Agents may call
+    /// undocumented endpoints if they know the path; this list is
+    /// primarily a hint + curl example.
+    pub endpoints: Vec<ApiEndpoint>,
+    /// URL of the vendor's API reference documentation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docs_url: Option<String>,
+    /// Additional config keys the user must provide on top of the credential
+    /// (e.g. Chartbeat's `host=example.com`). Stored alongside the secret
+    /// in the config's encrypted env, surfaced in the prompt injection so
+    /// the agent has the exact curl arguments to use.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config_keys: Vec<ApiConfigKey>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub enum ApiAuthKind {
+    /// API key passed as a query parameter, e.g. `?apikey=...` (Chartbeat).
+    ApiKeyQuery { param_name: String, env_key: String },
+    /// API key passed as a header, e.g. `X-API-Key: ...`.
+    ApiKeyHeader { header_name: String, env_key: String },
+    /// Bearer token in `Authorization: Bearer ...`.
+    Bearer { env_key: String },
+    /// OAuth2 client-credentials grant — Kronn exchanges `client_id` +
+    /// `client_secret` against `token_url` to get a short-lived
+    /// `access_token`, caches it until expiry, and injects a fresh
+    /// `Authorization: Bearer <token>` into the agent's prompt.
+    ///
+    /// `extra_headers` lets the spec declare other headers Kronn should
+    /// surface to the agent (e.g. Adobe's `x-api-key: <client_id>` +
+    /// `x-proxy-global-company-id: <company_id>`). Values can reference
+    /// any env key from the config via `{ENV_KEY}` placeholders and are
+    /// substituted at injection time.
+    OAuth2ClientCredentials {
+        token_url: String,
+        client_id_env: String,
+        client_secret_env: String,
+        scope: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        extra_headers: Vec<OAuth2ExtraHeader>,
+    },
+    /// No auth (public endpoints).
+    None,
+}
+
+/// Static header rendered alongside the `Authorization: Bearer` from an
+/// OAuth2 exchange. Used for providers (Adobe Analytics, some Salesforce
+/// endpoints) that require extra identification headers beyond the
+/// bearer token. `value_template` supports `{ENV_KEY}` substitution from
+/// the config's env map.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct OAuth2ExtraHeader {
+    pub name: String,
+    pub value_template: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ApiEndpoint {
+    pub path: String,
+    /// `"GET"`, `"POST"`, etc. Kept free-form to avoid constraining agents
+    /// that want to call a rare verb.
+    pub method: String,
+    pub description: String,
+}
+
+/// A non-secret parameter the plugin instance needs (e.g. host, workspace id).
+/// Stored in the same encrypted env blob as the API key, but the UI renders
+/// these as plain inputs (no mask), and they're surfaced in the prompt
+/// injection alongside the auth so the agent can build full URLs.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ApiConfigKey {
+    pub env_key: String,
+    pub label: String,
+    pub placeholder: String,
+    pub description: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -709,6 +815,12 @@ pub struct McpDefinition {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(skip)]
     pub default_context: Option<String>,
+    /// API capability declaration when the plugin exposes a REST API
+    /// (pure-API like Chartbeat, or hybrid like Jira which has both an MCP
+    /// and a REST API). Mirrored onto the corresponding `McpServer.api_spec`
+    /// at seed time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_spec: Option<ApiSpec>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1552,6 +1664,18 @@ pub struct Discussion {
     /// Null for manual discussions created outside of a batch workflow.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_run_id: Option<String>,
+    /// Test mode — branch the main repo was on before the user entered test
+    /// mode. `Some` means the user is actively testing this discussion's
+    /// branch in their main repo; `None` means normal worktree operation.
+    /// Used by `test-mode/exit` to checkout back to the user's prior state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_mode_restore_branch: Option<String>,
+    /// Test mode — if the main repo was dirty at enter time and the user opted
+    /// in to auto-stash, this holds the stash message (e.g.
+    /// `kronn:auto-<disc_id>`) so `exit` can pop the exact stash.
+    /// `None` when the main repo was clean or the user declined the stash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_mode_stash_ref: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

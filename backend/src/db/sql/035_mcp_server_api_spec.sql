@@ -1,0 +1,11 @@
+-- Plugin kind extension — add API capability alongside MCP.
+--
+-- An mcp_servers row can now represent:
+--   - a pure MCP plugin   : transport != 'api_only' AND api_spec_json IS NULL
+--   - a pure API plugin   : transport  = 'api_only' AND api_spec_json IS NOT NULL
+--   - a hybrid MCP+API    : transport != 'api_only' AND api_spec_json IS NOT NULL
+--
+-- Existing rows default to NULL, preserving the 53 MCP-only plugins as-is.
+-- The sync code writes API-capable plugins into `--append-system-prompt`
+-- (curl examples) rather than `.mcp.json`.
+ALTER TABLE mcp_servers ADD COLUMN api_spec_json TEXT;

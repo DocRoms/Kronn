@@ -21,6 +21,63 @@ mod tests {
         }
     }
 
+    // ─── strip_thinking_leaks ─────────────────────────────────────────────────
+
+    #[test]
+    fn strip_thinking_leaks_removes_closing_tag() {
+        // Hot-path case: Claude Opus leaks one closing tag into a text delta.
+        assert_eq!(strip_thinking_leaks("</thinking>"), "");
+        assert_eq!(strip_thinking_leaks("</thinking>\n"), "\n");
+    }
+
+    #[test]
+    fn strip_thinking_leaks_removes_runaway_repeats() {
+        // EW-7189 reproducer: the partial_response had 6349× `</thinking>\n`.
+        // After stripping, the delta collapses to just the newlines.
+        let input = "</thinking>\n".repeat(200);
+        let out = strip_thinking_leaks(&input);
+        assert_eq!(out, "\n".repeat(200));
+        assert!(!out.contains("thinking"));
+    }
+
+    #[test]
+    fn strip_thinking_leaks_is_case_insensitive() {
+        // Model quirks: `<Thinking>`, `<THINKING>` seen in the wild.
+        assert_eq!(strip_thinking_leaks("<Thinking>x</Thinking>"), "x");
+        assert_eq!(strip_thinking_leaks("<THINKING>y</THINKING>"), "y");
+    }
+
+    #[test]
+    fn strip_thinking_leaks_preserves_legitimate_content() {
+        // The word "thinking" in plain text — MUST NOT be stripped.
+        assert_eq!(strip_thinking_leaks("Thinking about it."), "Thinking about it.");
+        // Unrelated HTML-like content — MUST NOT be stripped.
+        assert_eq!(strip_thinking_leaks("Use <em>this</em> tag."), "Use <em>this</em> tag.");
+        // A genuine code sample referencing the tag as string — rare, but we
+        // err on the side of the stream-pollution fix here: if someone really
+        // needs to paste `</thinking>` into a message, they can escape it.
+        // Documented trade-off in strip_thinking_leaks's doc comment.
+    }
+
+    #[test]
+    fn parse_stream_text_delta_with_thinking_leak_is_skipped() {
+        // End-to-end: a text_delta whose entire content is the leak should
+        // NOT reach `full_response` as an empty chunk (which would still
+        // count toward the downstream loop detector).
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"</thinking>"}}}"#;
+        assert!(matches!(parse_claude_stream_line(line), StreamJsonEvent::Skip));
+    }
+
+    #[test]
+    fn parse_stream_text_delta_with_partial_thinking_leak_preserves_rest() {
+        // Mixed chunk: legitimate text with a stray tag — keep the text.
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello</thinking> world"}}}"#;
+        match parse_claude_stream_line(line) {
+            StreamJsonEvent::Text(t) => assert_eq!(t, "Hello world"),
+            other => panic!("Expected Text event, got {:?}", other),
+        }
+    }
+
     #[test]
     fn parse_stream_usage_from_message_delta() {
         let line = r#"{"type":"stream_event","event":{"type":"message_delta","usage":{"input_tokens":100,"output_tokens":50}}}"#;

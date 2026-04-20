@@ -325,10 +325,25 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // Build directives prompt (always injected — no native format)
     let directives_prompt = crate::core::directives::build_directives_prompt(config.directive_ids);
 
-    // Build profiles prompt — skip if native agent file loaded by the agent
-    let profiles_prompt = if native_profiles {
-        String::new() // Agent loads the .claude/agents/ file natively
-    } else if compact {
+    // Build profiles prompt.
+    //
+    // Originally the `native_profiles` branch returned an empty string on
+    // the assumption that Claude Code (and friends) auto-loaded the agent
+    // file from `.claude/agents/` at runtime. That assumption does NOT hold
+    // in `--print` / one-shot mode: agent files there are only consulted
+    // after an explicit `@agent-name` mention or the interactive `/agents`
+    // command. Observed on discussion EW-7189: `translator` profile
+    // activated, file synced to `.claude/agents/translator.md`, persona
+    // silently ignored — the email draft came back in a bland tone with
+    // no hint of "Lin the translator". Inject at least the compact
+    // summary so the persona actually reaches the model.
+    let profiles_prompt = if config.profile_ids.is_empty() {
+        String::new()
+    } else if native_profiles || compact {
+        // `native_profiles` true → the full persona also lives in
+        // `.claude/agents/<id>.md` on disk; the compact injection here is
+        // a token-saving fallback in case the agent's one-shot mode
+        // doesn't auto-pick the file up (which was the EW-7189 failure).
         crate::core::profiles::build_profiles_prompt_compact(config.profile_ids)
     } else {
         crate::core::profiles::build_profiles_prompt(config.profile_ids)
@@ -425,13 +440,46 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         ensure_kiro_cli_available().await?;
     }
 
+    // Claude Code accepts the positional prompt argument OR reads it from
+    // stdin when absent. Writing large prompts to stdin side-steps the
+    // kernel ARG_MAX cap (~128 KiB / arg on Linux) that broke EW-7189.
+    // We also defensively truncate `--append-system-prompt` value since
+    // that one still travels through argv.
+    let stdin_prompt: Option<String> = if *config.agent_type == AgentType::ClaudeCode {
+        // Pop the last arg — by construction of agent_command it is the
+        // prompt (see the Claude branch there).
+        let popped = args.pop();
+        // Cap the --append-system-prompt value (penultimate arg) to avoid
+        // hitting ARG_MAX via skills + MCP bundles. Truncation is graceful:
+        // we append a marker so a reader can tell the context was trimmed.
+        if let Some(idx) = args.iter().position(|a| a == "--append-system-prompt") {
+            if let Some(val) = args.get_mut(idx + 1) {
+                if val.len() > MAX_SINGLE_ARG_BYTES {
+                    tracing::warn!(
+                        "Truncating --append-system-prompt from {} bytes to {} to avoid ARG_MAX (E2BIG). \
+                        Consider trimming skills / MCP context.",
+                        val.len(), MAX_SINGLE_ARG_BYTES
+                    );
+                    // Find a safe UTF-8 boundary at or below the cap.
+                    let mut cut = MAX_SINGLE_ARG_BYTES;
+                    while cut > 0 && !val.is_char_boundary(cut) { cut -= 1; }
+                    val.truncate(cut);
+                    val.push_str("\n\n[... system prompt truncated by Kronn to fit ARG_MAX ...]");
+                }
+            }
+        }
+        popped
+    } else {
+        None
+    };
+
     // Try direct binary first, then npx fallback
-    let mut child = match try_spawn(binary, None, &args, &work_dir, env_key, api_key.as_deref()) {
+    let mut child = match try_spawn(binary, None, &args, &work_dir, env_key, api_key.as_deref(), stdin_prompt.as_deref()) {
         Ok(c) => c,
         Err(e) => {
             tracing::info!("Direct binary '{}' failed ({}), trying npx...", binary, e);
             if let Some(pkg) = npx_pkg {
-                try_spawn("npx", Some(pkg), &args, &work_dir, env_key, api_key.as_deref())?
+                try_spawn("npx", Some(pkg), &args, &work_dir, env_key, api_key.as_deref(), stdin_prompt.as_deref())?
             } else {
                 return Err(e);
             }
@@ -900,7 +948,19 @@ fn agent_command(agent_type: &AgentType, prompt: &str, full_access: bool, mcp_co
     }
 }
 
+/// Linux `ARG_MAX` per-argument limit. Above ~128 KiB a single argv element
+/// causes `execve` to return `E2BIG` ("Argument list too long"). Bump of
+/// `PAGE_SIZE * 32` picks the 128 KiB figure with a conservative margin.
+/// Seen in the wild (EW-7189 analysis): large MCP + skills + prompt combined
+/// pushed past the limit, spawn_failed with `os error 7`.
+pub(crate) const MAX_SINGLE_ARG_BYTES: usize = 100 * 1024;
+
 /// Spawn an agent process. If npx_package is Some, uses npx to run.
+///
+/// `stdin_payload`: when present, the string is written to the child's stdin
+/// and stdin is then closed (EOF). Used for agents that accept their prompt
+/// via stdin (currently: Claude Code with `--print` and no positional prompt
+/// arg), letting us side-step the kernel's per-argv size cap.
 fn try_spawn(
     binary: &str,
     npx_package: Option<&str>,
@@ -908,6 +968,7 @@ fn try_spawn(
     work_dir: &Path,
     env_key: &str,
     api_key: Option<&str>,
+    stdin_payload: Option<&str>,
 ) -> Result<tokio::process::Child, String> {
     // Resolve the final command. We also remember whether the resolved binary
     // lives inside WSL (`via_wsl`) so we can pick the right exec strategy
@@ -998,7 +1059,7 @@ fn try_spawn(
     let mut cmd = async_cmd(&final_cmd);
     cmd.args(&final_args)
         .current_dir(&effective_work_dir)
-        .stdin(Stdio::null())
+        .stdin(if stdin_payload.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -1096,8 +1157,29 @@ fn try_spawn(
         }
     }
 
-    cmd.spawn()
-        .map_err(|e| format!("Spawn failed for {}: {}", cmd_name, e))
+    let mut child = cmd.spawn()
+        .map_err(|e| format!("Spawn failed for {}: {}", cmd_name, e))?;
+
+    // Feed the prompt over stdin when requested. The caller uses this path
+    // for Claude Code to keep large prompts off the argv size cap (~128 KiB
+    // on Linux, hit by the initial Phase-1 prompt + skills injection on
+    // EW-7189, producing `os error 7` / E2BIG before this fix).
+    if let Some(payload) = stdin_payload {
+        use tokio::io::AsyncWriteExt;
+        if let Some(mut stdin) = child.stdin.take() {
+            let owned = payload.to_string();
+            tokio::spawn(async move {
+                if let Err(e) = stdin.write_all(owned.as_bytes()).await {
+                    tracing::warn!("Failed to write prompt to agent stdin: {}", e);
+                }
+                // Explicit close so the agent sees EOF and starts streaming.
+                let _ = stdin.shutdown().await;
+                drop(stdin);
+            });
+        }
+    }
+
+    Ok(child)
 }
 
 /// Parse a single line from Claude Code's --output-format stream-json output.
@@ -1133,7 +1215,14 @@ pub fn parse_claude_stream_line(line: &str) -> StreamJsonEvent {
             if let Some(delta) = event.get("delta") {
                 if delta.get("type").and_then(|v| v.as_str()) == Some("text_delta") {
                     if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
-                        return StreamJsonEvent::Text(text.to_string());
+                        let cleaned = strip_thinking_leaks(text);
+                        // Entire delta was a leaked tag → skip to avoid
+                        // streaming empty chunks that still bump the
+                        // loop-repeat counter downstream.
+                        if cleaned.is_empty() {
+                            return StreamJsonEvent::Skip;
+                        }
+                        return StreamJsonEvent::Text(cleaned);
                     }
                 }
             }
@@ -1198,6 +1287,29 @@ pub fn parse_claude_stream_line(line: &str) -> StreamJsonEvent {
         // Everything else (system, init, etc.)
         _ => StreamJsonEvent::Skip,
     }
+}
+
+/// Remove literal `<thinking>` / `</thinking>` tags from a text delta.
+///
+/// When Claude Opus runs with extended thinking enabled, the internal
+/// reasoning tokens are supposed to travel through a dedicated
+/// `thinking_delta` stream event — never inside `text_delta`. In practice
+/// the decoder can leak a closing tag into text output and, worse, get
+/// stuck repeating it (observed 6349× on EW-7189). Stripping is pragmatic:
+/// the tags carry zero user-facing meaning, so removing them is lossless
+/// for legitimate content and kills the visual noise from the leak. The
+/// loop detection in `discussions.rs` handles the runaway case itself —
+/// this helper just prevents the visible pollution from reaching the UI.
+///
+/// Case-insensitive on the tag name so a model quirk like `<Thinking>` is
+/// also caught. We do NOT strip more generic HTML-ish tags — legitimate
+/// user-facing content may contain other `<...>` patterns (code samples,
+/// XML docs, etc.), and over-stripping would be worse than the leak.
+pub fn strip_thinking_leaks(s: &str) -> String {
+    static RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
+        regex_lite::Regex::new(r"(?i)</?thinking>").unwrap()
+    });
+    RE.replace_all(s, "").to_string()
 }
 
 /// Strip ANSI escape codes from a string.

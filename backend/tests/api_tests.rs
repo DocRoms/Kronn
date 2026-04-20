@@ -39,6 +39,7 @@ fn test_state() -> AppState {
         audit_tracker: Arc::new(std::sync::Mutex::new(kronn::AuditTracker::default())),
         ws_broadcast: Arc::new(ws_tx),
         cancel_registry: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        oauth2_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     }
 }
 
@@ -792,6 +793,94 @@ async fn workflow_cancel_run_idempotent_on_already_finished() {
     assert_eq!(json["success"], true);
     assert_eq!(json["data"]["run_cancelled"], false);
     assert_eq!(json["data"]["child_discs_cancelled"], 0);
+}
+
+#[tokio::test]
+async fn workflow_cancel_run_forces_db_status_on_orphaned_run() {
+    // Regression: a run stuck in "Running" in the DB with no token registered
+    // (e.g. runner crashed mid-await, or backend was restarted) must still be
+    // marked Cancelled by the endpoint. Before this fix, the user saw
+    // `run_cancelled=false` silently and the sidebar kept showing "running"
+    // forever — no way to escape without direct DB surgery.
+    let state = test_state();
+    state.db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO workflows (id, name, project_id, trigger_json, steps_json, actions_json,
+             safety_json, workspace_config_json, concurrency_limit, enabled, created_at, updated_at)
+             VALUES ('wf-orphan', 'W', NULL, '\"Manual\"', '[]', '[]', '{}', NULL, NULL, 0,
+             datetime('now'), datetime('now'))",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO workflow_runs (id, workflow_id, status, step_results_json, tokens_used,
+             started_at, run_type, batch_total, batch_completed, batch_failed)
+             VALUES ('orphan-run', 'wf-orphan', 'Running', '[]', 0, datetime('now'),
+             'linear', 0, 0, 0)",
+            [],
+        )?;
+        Ok(())
+    }).await.unwrap();
+
+    // No token in cancel_registry — simulates runner death / restart.
+    let (status, json) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/workflows/wf-orphan/runs/orphan-run/cancel",
+        serde_json::json!({}),
+    ).await;
+
+    assert_eq!(status, StatusCode::OK);
+    // From the user's POV the cancel worked — the orphan row was rescued.
+    assert_eq!(json["data"]["run_cancelled"], true,
+        "orphaned run (no token) should still report cancelled when DB forced");
+
+    // DB row must now say Cancelled, with a finished_at timestamp.
+    let (status_s, finished_at): (String, Option<String>) = state.db.with_conn(|conn| {
+        Ok(conn.query_row(
+            "SELECT status, finished_at FROM workflow_runs WHERE id = 'orphan-run'",
+            [],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+        )?)
+    }).await.unwrap();
+    assert_eq!(status_s, "Cancelled");
+    assert!(finished_at.is_some(), "finished_at must be set");
+}
+
+#[tokio::test]
+async fn workflow_cancel_run_second_click_works_when_token_already_consumed() {
+    // Real-world scenario from production (Auto-analyse des 50 derniers
+    // tickets JIRA): first click triggered the token (run_cancelled=true)
+    // but the runner was blocked on a deep await (waiting on batch children
+    // via ws_broadcast) and never wrote status = Cancelled to the DB. On
+    // the second click, the token is gone from the registry. Without the
+    // forced DB update, the endpoint returned false and the user was stuck.
+    let state = test_state();
+    state.db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO workflows (id, name, project_id, trigger_json, steps_json, actions_json,
+             safety_json, workspace_config_json, concurrency_limit, enabled, created_at, updated_at)
+             VALUES ('wf-stuck', 'W', NULL, '\"Manual\"', '[]', '[]', '{}', NULL, NULL, 0,
+             datetime('now'), datetime('now'))",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO workflow_runs (id, workflow_id, status, step_results_json, tokens_used,
+             started_at, run_type, batch_total, batch_completed, batch_failed)
+             VALUES ('stuck-run', 'wf-stuck', 'Running', '[]', 0, datetime('now'),
+             'linear', 0, 0, 0)",
+            [],
+        )?;
+        Ok(())
+    }).await.unwrap();
+
+    // No token registered → simulates the second-click path.
+    let (_, json) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/workflows/wf-stuck/runs/stuck-run/cancel",
+        serde_json::json!({}),
+    ).await;
+
+    // The user-facing field must be true — the row did get rescued.
+    assert_eq!(json["data"]["run_cancelled"], true);
 }
 
 #[tokio::test]
@@ -3210,6 +3299,8 @@ async fn ws_chat_message_inserts_into_shared_discussion() {
         shared_id: Some("shared-abc-123".into()),
         shared_with: vec![],
         workflow_run_id: None,
+        test_mode_restore_branch: None,
+        test_mode_stash_ref: None,
         created_at: now,
         updated_at: now,
     };
@@ -3324,6 +3415,8 @@ async fn ws_chat_message_idempotent() {
         shared_id: Some("shared-idem-001".into()),
         shared_with: vec![],
         workflow_run_id: None,
+        test_mode_restore_branch: None,
+        test_mode_stash_ref: None,
         created_at: now,
         updated_at: now,
     };
@@ -4115,4 +4208,136 @@ async fn audit_status_isolates_projects() {
     assert_eq!(a["data"]["kind"], "full");
     assert_eq!(b["data"]["step_index"], 0);
     assert_eq!(b["data"]["kind"], "partial");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Test mode (enter / exit) — DB-only error paths
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// The happy-path tests would need a real on-disk git repo with a worktree
+// (worktree_dirty_files, checkout_branch, stash_push all shell out to `git`).
+// Those helpers are already covered by unit tests in `core::worktree::tests`.
+// Here we verify the endpoint plumbing: DB reads, preflight short-circuits,
+// and the response envelope shape the UI relies on.
+
+async fn insert_test_mode_discussion(
+    state: &kronn::AppState,
+    id: &str,
+    workspace_mode: &str,
+    worktree_branch: Option<&str>,
+    restore_branch: Option<&str>,
+) {
+    let now = chrono::Utc::now();
+    let disc = kronn::models::Discussion {
+        id: id.into(),
+        project_id: None,
+        title: "TestMode disc".into(),
+        agent: kronn::models::AgentType::ClaudeCode,
+        language: "en".into(),
+        participants: vec![],
+        messages: vec![],
+        message_count: 0,
+        skill_ids: vec![],
+        profile_ids: vec![],
+        directive_ids: vec![],
+        archived: false,
+        pinned: false,
+        workspace_mode: workspace_mode.into(),
+        workspace_path: None,
+        worktree_branch: worktree_branch.map(String::from),
+        tier: kronn::models::ModelTier::Default,
+        pin_first_message: false,
+        summary_cache: None,
+        summary_up_to_msg_idx: None,
+        shared_id: None,
+        shared_with: vec![],
+        workflow_run_id: None,
+        test_mode_restore_branch: restore_branch.map(String::from),
+        test_mode_stash_ref: None,
+        created_at: now,
+        updated_at: now,
+    };
+    let d = disc.clone();
+    state.db.with_conn(move |conn| kronn::db::discussions::insert_discussion(conn, &d))
+        .await.unwrap();
+}
+
+#[tokio::test]
+async fn test_mode_enter_returns_error_for_unknown_discussion() {
+    let app = test_app();
+    let (status, json) = post_json(
+        app, "/api/discussions/does-not-exist/test-mode/enter", serde_json::json!({}),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    // Envelope uses ApiResponse::err (success=false) for missing resources.
+    assert_eq!(json["success"], false);
+    assert!(json["error"].as_str().unwrap().contains("not found"));
+}
+
+#[tokio::test]
+async fn test_mode_enter_blocks_with_no_branch_when_direct_mode() {
+    let state = test_state();
+    insert_test_mode_discussion(&state, "disc-direct", "Direct", None, None).await;
+    let app = kronn::build_router(state);
+
+    let (_, json) = post_json(
+        app, "/api/discussions/disc-direct/test-mode/enter", serde_json::json!({}),
+    ).await;
+    assert_eq!(json["success"], true, "preflight blockers ride on success=true");
+    assert_eq!(json["data"]["status"], "blocked");
+    assert_eq!(json["data"]["kind"], "NoBranch");
+}
+
+#[tokio::test]
+async fn test_mode_enter_blocks_when_already_testing() {
+    let state = test_state();
+    insert_test_mode_discussion(
+        &state, "disc-already", "Isolated",
+        Some("kronn/feat-x"), Some("main"), // restore_branch set → already in test mode
+    ).await;
+    let app = kronn::build_router(state);
+
+    let (_, json) = post_json(
+        app, "/api/discussions/disc-already/test-mode/enter", serde_json::json!({}),
+    ).await;
+    assert_eq!(json["success"], true);
+    assert_eq!(json["data"]["status"], "blocked");
+    assert_eq!(json["data"]["kind"], "AlreadyInTestMode");
+}
+
+#[tokio::test]
+async fn test_mode_exit_errors_when_not_in_test_mode() {
+    let state = test_state();
+    insert_test_mode_discussion(
+        &state, "disc-not-testing", "Isolated",
+        Some("kronn/feat-x"), None, // restore_branch = None → not testing
+    ).await;
+    let app = kronn::build_router(state);
+
+    let (_, json) = post_json(
+        app, "/api/discussions/disc-not-testing/test-mode/exit", serde_json::json!({}),
+    ).await;
+    assert_eq!(json["success"], false);
+    assert!(json["error"].as_str().unwrap().contains("Not in test mode"));
+}
+
+#[tokio::test]
+async fn test_mode_enter_shape_matches_ts_envelope() {
+    // Contract: both success and blocker responses expose a `status` tag +
+    // envelope fields the frontend switches on. If this test drifts the TS
+    // types and the UI modal will silently break.
+    let state = test_state();
+    insert_test_mode_discussion(&state, "disc-shape", "Direct", None, None).await;
+    let app = kronn::build_router(state);
+
+    let (_, json) = post_json(
+        app, "/api/discussions/disc-shape/test-mode/enter", serde_json::json!({}),
+    ).await;
+    let data = &json["data"];
+    // Tag exists and is one of the two variants the UI handles.
+    let tag = data["status"].as_str().unwrap();
+    assert!(tag == "ok" || tag == "blocked", "unexpected envelope tag: {}", tag);
+    // Blocker payload has kind + message.
+    assert!(data["kind"].is_string());
+    assert!(data["message"].is_string());
 }

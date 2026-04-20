@@ -234,6 +234,10 @@ pub fn write_general_mcp_json(
             McpTransport::Sse { url } | McpTransport::Streamable { url } => {
                 McpServerEntry { command: None, args: None, url: Some(url.clone()), env }
             }
+            // API-only plugins never get written to .mcp.json — their
+            // capability is surfaced to the agent via prompt injection in
+            // `build_api_context_block` (see api_context.rs). Skip silently.
+            McpTransport::ApiOnly => continue,
         };
         let key = config.label.clone();
         mcp_servers.insert(key, entry);
@@ -359,6 +363,11 @@ pub fn sync_project_mcps_to_disk(
                     env,
                 }
             }
+            // API-only plugins are not written to `.mcp.json` — their
+            // capability is surfaced to agents via prompt injection. Skip
+            // silently so the rest of the sync (other MCPs on the same
+            // project) continues normally.
+            McpTransport::ApiOnly => continue,
         };
 
         // Always use config label as key — avoids case mismatch between
@@ -461,14 +470,23 @@ pub fn sync_project_mcps_to_disk(
         }
 
         // Auto-create MCP context files from registry defaults (if available).
-        // Only writes when: (1) the config was actually synced (command available),
-        // (2) the registry provides a default_context, (3) no file exists yet.
-        // This prevents creating context for a registry server (e.g. Go binary)
-        // when the actually synced server is a different variant (e.g. npm package).
+        // Writes when: (1) the config was synced (command available) OR the
+        // plugin is API-only (nothing to sync to .mcp.json — its capability
+        // surfaces via prompt injection instead); AND (2) the registry
+        // provides a default_context; AND (3) no file exists yet.
+        // This prevents creating context for a registry server (e.g. Go
+        // binary) when the actually synced server is a different variant
+        // (e.g. npm package), while still seeding API plugins like
+        // Chartbeat whose context is equally valuable to the agent.
         {
             let registry = crate::core::registry::builtin_registry();
+            let servers_for_kind = crate::db::mcps::list_servers(conn).unwrap_or_default();
             for config in &configs {
-                if !synced_config_ids.contains(&config.id) {
+                let is_api_only = servers_for_kind.iter()
+                    .find(|s| s.id == config.server_id)
+                    .map(|s| matches!(s.transport, crate::models::McpTransport::ApiOnly))
+                    .unwrap_or(false);
+                if !synced_config_ids.contains(&config.id) && !is_api_only {
                     continue;
                 }
                 let slug = slugify_label(&config.label);
@@ -610,6 +628,9 @@ fn sync_vibe_project_config(
                 url: Some(url.clone()),
                 env,
             },
+            // API-only plugins don't appear in Vibe's MCP config — they're
+            // surfaced via agent prompt injection. Skip silently.
+            McpTransport::ApiOnly => continue,
         };
         entries.push(entry);
     }
@@ -1232,6 +1253,238 @@ pub fn read_all_mcp_contexts(project_path: &str) -> String {
     result
 }
 
+/// Substitute `{ENV_KEY}` placeholders in a template with values from the
+/// config's env map. Used by:
+/// - `ApiSpec.base_url` for path-style interpolation (Adobe's `.../api/{ADOBE_COMPANY_ID}/reports`)
+/// - `OAuth2ExtraHeader.value_template` for headers like `x-api-key: {ADOBE_CLIENT_ID}`
+///
+/// Missing keys render as `<NOT_CONFIGURED>` so the agent sees the gap
+/// rather than sending a half-composed URL.
+fn interpolate_env_template(template: &str, env: &std::collections::HashMap<String, String>) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find('{') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        if let Some(end) = after.find('}') {
+            let key = &after[..end];
+            match env.get(key) {
+                Some(v) => out.push_str(v),
+                None => {
+                    out.push_str("<NOT_CONFIGURED:");
+                    out.push_str(key);
+                    out.push('>');
+                }
+            }
+            rest = &after[end + 1..];
+        } else {
+            // Unclosed `{` — keep verbatim to avoid silent data loss.
+            out.push('{');
+            out.push_str(after);
+            break;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Build the `=== AVAILABLE APIs ===` section from active API plugins.
+///
+/// This is how API-only plugins (and the API side of hybrid plugins) reach
+/// the agent — they aren't in `.mcp.json`, so the MCP context block above
+/// can't surface them. Emitted as a parallel section with curl examples and
+/// inlined credentials so the agent can call endpoints directly via Bash.
+///
+/// `plugins_with_env` must already be decrypted by the caller — this
+/// function is pure (no DB, no secret) so it can be unit-tested cheaply.
+pub fn build_api_context_block(
+    plugins_with_env: &[ActiveApiPlugin],
+) -> String {
+    use crate::models::{ApiAuthKind, ApiSpec};
+
+    // Filter to plugins that actually have an ApiSpec — a hybrid plugin's
+    // MCP side stays in .mcp.json (handled elsewhere), but its API side
+    // surfaces here. Pure MCP plugins (api_spec = None) get skipped.
+    let api_plugins: Vec<(&crate::models::McpServer, &std::collections::HashMap<String, String>, &ApiSpec)> =
+        plugins_with_env.iter()
+            .filter_map(|(s, env)| s.api_spec.as_ref().map(|spec| (s, env, spec)))
+            .collect();
+
+    if api_plugins.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::from("## REST APIs available\n\n");
+    out.push_str("The following plugins are HTTP APIs (not MCP tools). Call them via `curl` from Bash.\n");
+    out.push_str("Auth + non-secret config are pre-filled below; never print the credentials back to the user.\n\n");
+
+    for (server, env, spec) in api_plugins {
+        out.push_str(&format!("### {}\n", server.name));
+        // If the base URL contains `{ENV_KEY}` placeholders, render the
+        // resolved form so the agent sees the actual URL it must call.
+        // Chartbeat has no placeholders → this is a no-op.
+        let resolved_base = interpolate_env_template(&spec.base_url, env);
+        out.push_str(&format!("Base URL: `{}`\n", resolved_base));
+
+        // Auth — we inject the literal credential. This is the same trust
+        // level as `.mcp.json` already gets; the agent needs the value to
+        // craft a working request. The prompt instruction above asks the
+        // agent not to echo it back.
+        match &spec.auth {
+            ApiAuthKind::ApiKeyQuery { param_name, env_key } => {
+                let val = env.get(env_key).map(|s| s.as_str()).unwrap_or("<MISSING>");
+                out.push_str(&format!("Auth: pass `{}={}` as a query parameter on every request.\n", param_name, val));
+            }
+            ApiAuthKind::ApiKeyHeader { header_name, env_key } => {
+                let val = env.get(env_key).map(|s| s.as_str()).unwrap_or("<MISSING>");
+                out.push_str(&format!("Auth: send header `{}: {}` on every request.\n", header_name, val));
+            }
+            ApiAuthKind::Bearer { env_key } => {
+                let val = env.get(env_key).map(|s| s.as_str()).unwrap_or("<MISSING>");
+                out.push_str(&format!("Auth: send header `Authorization: Bearer {}` on every request.\n", val));
+            }
+            ApiAuthKind::OAuth2ClientCredentials { extra_headers, .. } => {
+                // By this point the async resolver (see make_agent_stream)
+                // has already called `core::oauth2_cache::resolve_token`
+                // and stashed the result under the virtual key
+                // `__access_token__` in this plugin's env map. If it's
+                // missing, token exchange failed earlier — we surface
+                // that inline so the agent knows to stop rather than
+                // fire unauthenticated requests.
+                match env.get("__access_token__") {
+                    Some(tok) => {
+                        out.push_str(&format!("Auth: send header `Authorization: Bearer {}` on every request (Kronn refreshes this token automatically before it expires).\n", tok));
+                    }
+                    None => {
+                        let err = env.get("__token_error__").cloned().unwrap_or_else(|| "unknown error".into());
+                        out.push_str(&format!("Auth: **TOKEN UNAVAILABLE — {}**. Do not attempt API calls; tell the user and stop.\n", err));
+                    }
+                }
+                // Extra headers (e.g. Adobe's x-api-key, x-proxy-global-company-id).
+                // value_template supports `{ENV_KEY}` substitution from the
+                // config's env map so one plugin spec covers both the secret
+                // (client_id echoed as x-api-key) and non-secret keys.
+                for eh in extra_headers {
+                    let rendered = interpolate_env_template(&eh.value_template, env);
+                    out.push_str(&format!("Also send header `{}: {}` on every request.\n", eh.name, rendered));
+                }
+            }
+            ApiAuthKind::None => {
+                out.push_str("Auth: none (public endpoints).\n");
+            }
+        }
+
+        // Non-secret config keys (e.g. Chartbeat's host, Adobe's company_id).
+        // Two ways to use them: (a) query param by convention for simple
+        // plugins, (b) interpolation into `base_url` when the plugin spec
+        // opts in via `{ENV_KEY}` placeholders in the URL. The display
+        // message adapts so the agent knows which it is.
+        if !spec.config_keys.is_empty() {
+            let is_in_url = spec.base_url.contains('{');
+            if is_in_url {
+                out.push_str("Config (already interpolated into Base URL above):\n");
+            } else {
+                out.push_str("Config (pass as query params):\n");
+            }
+            for k in &spec.config_keys {
+                let val = env.get(&k.env_key).map(|s| s.as_str()).unwrap_or("");
+                let val_display = if val.is_empty() { "<not-configured>" } else { val };
+                out.push_str(&format!("- `{}={}`  ({})\n", k.env_key.to_lowercase(), val_display, k.description));
+            }
+        }
+
+        // Resolved base URL — substitute {ENV_KEY} placeholders (Adobe uses
+        // this to put the company_id in the path). Chartbeat has no
+        // placeholders → the template equals the literal URL.
+        let resolved_base = interpolate_env_template(&spec.base_url, env);
+
+        // Endpoint list — curl example on the first one so the agent has a
+        // template to copy. The rest are one-liners.
+        out.push_str("Endpoints:\n");
+        for (i, ep) in spec.endpoints.iter().enumerate() {
+            out.push_str(&format!("- `{} {}` — {}\n", ep.method, ep.path, ep.description));
+            if i == 0 {
+                let mut sample_url = format!("{}{}", resolved_base, ep.path);
+                let mut params: Vec<String> = Vec::new();
+                // Only fold auth + config_keys into query params when the
+                // base URL did NOT template them in (i.e. the plugin opted
+                // for path-style interpolation).
+                let is_templated = spec.base_url.contains('{');
+                if let ApiAuthKind::ApiKeyQuery { param_name, env_key } = &spec.auth {
+                    let val = env.get(env_key).map(|s| s.as_str()).unwrap_or("<KEY>");
+                    params.push(format!("{}={}", param_name, val));
+                }
+                if !is_templated {
+                    for k in &spec.config_keys {
+                        let val = env.get(&k.env_key).map(|s| s.as_str()).unwrap_or("");
+                        if !val.is_empty() {
+                            params.push(format!("{}={}", k.env_key.to_lowercase(), val));
+                        }
+                    }
+                }
+                if !params.is_empty() {
+                    sample_url.push('?');
+                    sample_url.push_str(&params.join("&"));
+                }
+                out.push_str(&format!("  Example: `curl -s \"{}\"`\n", sample_url));
+            }
+        }
+
+        if let Some(docs) = &spec.docs_url {
+            out.push_str(&format!("Full reference: {}\n", docs));
+        }
+        out.push('\n');
+    }
+
+    out
+}
+
+/// Collect active API-capable plugins for a project + decrypt their env.
+///
+/// Returns `(server, decrypted_env)` pairs ready for
+/// [`build_api_context_block`]. A "hybrid" plugin (MCP + API) appears here
+/// as well — the MCP side is handled by `sync_project_mcps_to_disk`
+/// separately. On a decryption failure for one config, that entry is
+/// dropped (logged) — we don't want one broken config to suppress the
+/// whole block for the project.
+/// One active API plugin bound to its decrypted env map. Exported as a
+/// named alias so the signature of [`collect_active_api_plugins`] and the
+/// matching `build_api_context_block` input both stay readable (and keep
+/// clippy's `type_complexity` lint quiet on the return type).
+pub type ActiveApiPlugin = (crate::models::McpServer, std::collections::HashMap<String, String>);
+
+pub fn collect_active_api_plugins(
+    conn: &rusqlite::Connection,
+    project_id: &str,
+    secret: &str,
+) -> Result<Vec<ActiveApiPlugin>, anyhow::Error> {
+    let servers = crate::db::mcps::list_servers(conn)?;
+    let configs = crate::db::mcps::list_configs(conn)?;
+    let server_map: std::collections::HashMap<&str, &crate::models::McpServer> =
+        servers.iter().map(|s| (s.id.as_str(), s)).collect();
+
+    let mut out: Vec<ActiveApiPlugin> =
+        Vec::new();
+    for config in &configs {
+        let on_project = config.is_global || config.project_ids.iter().any(|pid| pid == project_id);
+        if !on_project { continue; }
+        let Some(server) = server_map.get(config.server_id.as_str()) else { continue };
+        if server.api_spec.is_none() { continue; }
+        let env = match crate::db::mcps::decrypt_env(&config.env_encrypted, secret) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(
+                    "API plugin '{}' config {} decrypt failed ({}), skipping",
+                    server.name, config.id, e
+                );
+                continue;
+            }
+        };
+        out.push(((*server).clone(), env));
+    }
+    Ok(out)
+}
+
 /// Read a single MCP context file content.
 pub fn read_mcp_context(project_path: &str, slug: &str) -> Option<String> {
     let resolved = resolve_host_path(project_path);
@@ -1319,6 +1572,8 @@ fn is_localhost_remote(server: &crate::models::McpServer) -> bool {
             url.contains("localhost") || url.contains("127.0.0.1") || url.contains("[::1]")
         }
         McpTransport::Stdio { .. } => false,
+        // API-only plugins don't expose a local URL; nothing to check.
+        McpTransport::ApiOnly => false,
     }
 }
 

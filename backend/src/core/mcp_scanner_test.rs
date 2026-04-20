@@ -410,6 +410,7 @@ mod tests {
                     args: vec!["-y".into(), "@modelcontextprotocol/server-gitlab".into()],
                 },
                 source: McpSource::Registry,
+                api_spec: None,
             },
             McpServer {
                 id: "mcp-github".into(),
@@ -420,6 +421,7 @@ mod tests {
                     args: vec!["-y".into(), "@modelcontextprotocol/server-github".into()],
                 },
                 source: McpSource::Registry,
+                api_spec: None,
             },
         ];
 
@@ -443,6 +445,7 @@ mod tests {
                     args: vec!["-y".into(), "@modelcontextprotocol/server-github".into()],
                 },
                 source: McpSource::Registry,
+                api_spec: None,
             },
             McpServer {
                 id: "mcp-context7".into(), name: "Context7".into(), description: "".into(),
@@ -451,6 +454,7 @@ mod tests {
                     args: vec!["-y".into(), "@upstash/context7-mcp".into()],
                 },
                 source: McpSource::Registry,
+                api_spec: None,
             },
         ];
 
@@ -468,6 +472,7 @@ mod tests {
                 id: "detected:data-gouv".into(), name: "data.gouv.fr".into(), description: "".into(),
                 transport: McpTransport::Sse { url: "http://localhost:8000/sse".into() },
                 source: McpSource::Detected,
+                api_spec: None,
             },
         ];
 
@@ -517,6 +522,7 @@ mod tests {
                 id: "detected:data-gouv".into(), name: "data.gouv.fr".into(), description: "".into(),
                 transport: McpTransport::Sse { url: "http://localhost:8000/sse".into() },
                 source: McpSource::Detected,
+                api_spec: None,
             },
             McpServer {
                 id: "mcp-github".into(), name: "GitHub".into(), description: "".into(),
@@ -525,6 +531,7 @@ mod tests {
                     args: vec!["-y".into(), "@modelcontextprotocol/server-github".into()],
                 },
                 source: McpSource::Registry,
+                api_spec: None,
             },
         ];
 
@@ -543,6 +550,7 @@ mod tests {
             id: "local-svc".into(), name: "Local".into(), description: "".into(),
             transport: McpTransport::Streamable { url: "http://127.0.0.1:3000/mcp".into() },
             source: McpSource::Detected,
+            api_spec: None,
         }];
 
         let incomp = get_incompatibilities(&servers);
@@ -558,6 +566,7 @@ mod tests {
             id: "remote-svc".into(), name: "Remote".into(), description: "".into(),
             transport: McpTransport::Sse { url: "https://api.example.com/mcp".into() },
             source: McpSource::Detected,
+            api_spec: None,
         }];
 
         let incomp = get_incompatibilities(&servers);
@@ -1007,5 +1016,434 @@ args = ["@example/old-mcp"]
         assert!(result.get("enabledMcpjsonServers").is_none(), "should not create list");
 
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    // ─── build_api_context_block (API plugin prompt injection) ───────────
+
+    fn api_server(id: &str, base: &str) -> (crate::models::McpServer, HashMap<String, String>) {
+        use crate::models::*;
+        let server = McpServer {
+            id: id.into(),
+            name: "TestApi".into(),
+            description: "test".into(),
+            transport: McpTransport::ApiOnly,
+            source: McpSource::Registry,
+            api_spec: Some(ApiSpec {
+                base_url: base.into(),
+                auth: ApiAuthKind::ApiKeyQuery {
+                    param_name: "apikey".into(),
+                    env_key: "TEST_API_KEY".into(),
+                },
+                endpoints: vec![
+                    ApiEndpoint { path: "/hello".into(), method: "GET".into(), description: "Hello".into() },
+                    ApiEndpoint { path: "/ping".into(), method: "GET".into(), description: "Ping".into() },
+                ],
+                docs_url: Some("https://example.com/api-docs".into()),
+                config_keys: vec![ApiConfigKey {
+                    env_key: "TEST_HOST".into(),
+                    label: "Host".into(),
+                    placeholder: "example.com".into(),
+                    description: "Host tracked".into(),
+                }],
+            }),
+        };
+        let mut env = HashMap::new();
+        env.insert("TEST_API_KEY".into(), "supersecret-123".into());
+        env.insert("TEST_HOST".into(), "example.com".into());
+        (server, env)
+    }
+
+    #[test]
+    fn build_api_context_block_empty_when_no_api_plugins() {
+        // Pure MCP server (no api_spec) → block collapses to "".
+        use crate::models::*;
+        let mcp = McpServer {
+            id: "mcp-only".into(), name: "MCP".into(), description: "".into(),
+            transport: McpTransport::Stdio { command: "x".into(), args: vec![] },
+            source: McpSource::Registry, api_spec: None,
+        };
+        let out = build_api_context_block(&[(mcp, HashMap::new())]);
+        assert!(out.is_empty(), "pure MCP plugin must not emit API block");
+    }
+
+    #[test]
+    fn build_api_context_block_emits_curl_example_with_credentials() {
+        let (server, env) = api_server("api-test", "https://api.example.com");
+        let out = build_api_context_block(&[(server, env)]);
+        assert!(out.contains("REST APIs available"), "header present");
+        assert!(out.contains("https://api.example.com"), "base URL rendered");
+        assert!(out.contains("/hello"), "endpoint path listed");
+        assert!(out.contains("/ping"), "second endpoint listed");
+        // Credentials are inlined in the curl example so the agent can
+        // copy-paste the shape (as the doc comment promises).
+        assert!(out.contains("apikey=supersecret-123"), "api key inlined");
+        assert!(out.contains("test_host=example.com"), "config key inlined");
+        // Docs URL linked so the agent can self-extend beyond the 18
+        // endpoints we seeded.
+        assert!(out.contains("https://example.com/api-docs"), "docs link present");
+    }
+
+    #[test]
+    fn build_api_context_block_marks_missing_credentials() {
+        use crate::models::*;
+        // Server with api_spec but an empty env → the example should flag
+        // the missing key so the agent knows to abort rather than call
+        // with `<MISSING>` as the literal key.
+        let server = McpServer {
+            id: "api-broken".into(), name: "Broken".into(), description: "".into(),
+            transport: McpTransport::ApiOnly, source: McpSource::Registry,
+            api_spec: Some(ApiSpec {
+                base_url: "https://example.com".into(),
+                auth: ApiAuthKind::Bearer { env_key: "MISSING_TOKEN".into() },
+                endpoints: vec![ApiEndpoint { path: "/".into(), method: "GET".into(), description: "".into() }],
+                docs_url: None,
+                config_keys: vec![],
+            }),
+        };
+        let out = build_api_context_block(&[(server, HashMap::new())]);
+        assert!(out.contains("<MISSING>"), "missing credential flagged");
+    }
+
+    #[test]
+    fn build_api_context_block_lists_multiple_plugins() {
+        let (s1, e1) = api_server("api-1", "https://a.example.com");
+        let (s2, e2) = api_server("api-2", "https://b.example.com");
+        let out = build_api_context_block(&[(s1, e1), (s2, e2)]);
+        assert!(out.contains("https://a.example.com"));
+        assert!(out.contains("https://b.example.com"));
+    }
+
+    #[test]
+    fn chartbeat_builtin_has_api_spec_with_expected_endpoints() {
+        // Regression guard: if someone accidentally strips the Chartbeat
+        // api_spec (or the registry loader misses it), the builtin won't
+        // be callable. Verify key endpoints are present.
+        let reg = crate::core::registry::builtin_registry();
+        let chartbeat = reg.iter().find(|d| d.id == "api-chartbeat")
+            .expect("Chartbeat must be in the builtin registry");
+        let spec = chartbeat.api_spec.as_ref()
+            .expect("Chartbeat must have api_spec populated");
+        assert_eq!(spec.base_url, "https://api.chartbeat.com");
+        let paths: Vec<&str> = spec.endpoints.iter().map(|e| e.path.as_str()).collect();
+        // A sample of the most-used endpoints — if any disappear, the
+        // prompt injection block will be weaker. Keep them.
+        assert!(paths.contains(&"/live/toppages/v4"));
+        assert!(paths.contains(&"/live/quickstats/v4"));
+        // Modern Query API (async, header-auth) — these were corrected
+        // after observing the live behaviour during the "Chartbeat"
+        // discussion. Agents must be able to see both the 3-step flow
+        // and a legacy fallback.
+        assert!(paths.contains(&"/query/v2/submit/page/"));
+        assert!(paths.contains(&"/query/v2/status/"));
+        assert!(paths.contains(&"/query/v2/fetch/"));
+        assert!(paths.contains(&"/historical/traffic/series/"));
+        assert!(spec.docs_url.is_some(), "docs_url mandatory so agent can self-extend");
+        // Host is exposed as a config key so the user enters it per-instance.
+        assert!(spec.config_keys.iter().any(|k| k.env_key == "CHARTBEAT_HOST"));
+    }
+
+    #[test]
+    fn google_search_builtin_has_apikey_auth_and_cx_config_key() {
+        // Regression guard: Google Programmable Search is the lightweight
+        // example in the API-plugin catalog — apikey= query param + a
+        // non-secret cx config. The UX promise (the cx field renders as
+        // plain text with its own placeholder, the key masked) depends on
+        // both `config_keys` carrying cx AND `env_keys` listing both.
+        use crate::models::ApiAuthKind;
+        let reg = crate::core::registry::builtin_registry();
+        let gs = reg.iter().find(|d| d.id == "api-google-search")
+            .expect("Google Search must be in the builtin registry");
+        let spec = gs.api_spec.as_ref()
+            .expect("Google Search must have api_spec populated");
+        assert_eq!(spec.base_url, "https://www.googleapis.com/customsearch/v1");
+        match &spec.auth {
+            ApiAuthKind::ApiKeyQuery { param_name, env_key } => {
+                assert_eq!(param_name, "key", "Google uses `key=` param by convention");
+                assert_eq!(env_key, "GOOGLE_SEARCH_API_KEY");
+            }
+            other => panic!("Google Search must use ApiKeyQuery, got {:?}", other),
+        }
+        // The cx must be exposed as a non-secret config key so the user
+        // enters it per-instance (different Programmable Search Engines
+        // for different scopes — e.g. whole-web vs site-scoped).
+        assert!(spec.config_keys.iter().any(|k| k.env_key == "GOOGLE_SEARCH_CX"),
+            "GOOGLE_SEARCH_CX must be a config_key (non-secret, per-engine)");
+        // Transport MUST be ApiOnly so the sync branch-skip fires on it
+        // (no .mcp.json write).
+        assert!(matches!(gs.transport, crate::models::McpTransport::ApiOnly));
+        // docs_url is mandatory — agents hit quota ceilings regularly and
+        // the official reference is the authoritative source.
+        assert!(spec.docs_url.is_some());
+    }
+
+    #[test]
+    fn adobe_analytics_builtin_has_oauth2_auth_and_company_id_template() {
+        // Regression guard: the Adobe entry drove the OAuth2 + path-
+        // templating plumbing. Protect the contract (auth kind, IMS token
+        // URL, base URL interpolation, required extra headers) so a future
+        // refactor can't silently break the Chartbeat × Adobe analytics
+        // cross-analysis flow the user relies on.
+        use crate::models::ApiAuthKind;
+        let reg = crate::core::registry::builtin_registry();
+        let adobe = reg.iter().find(|d| d.id == "api-adobe-analytics")
+            .expect("Adobe Analytics must be in the builtin registry");
+        let spec = adobe.api_spec.as_ref()
+            .expect("Adobe Analytics must have api_spec populated");
+
+        // Base URL MUST template the company_id so the agent sees the
+        // tenant-scoped URL inside the prompt injection.
+        assert!(spec.base_url.contains("{ADOBE_COMPANY_ID}"),
+            "base_url must template the company id: {}", spec.base_url);
+
+        // Auth is OAuth2 + required extra headers.
+        match &spec.auth {
+            ApiAuthKind::OAuth2ClientCredentials {
+                token_url, client_id_env, client_secret_env, scope, extra_headers
+            } => {
+                assert!(token_url.contains("ims-na1.adobelogin.com"),
+                    "Adobe IMS endpoint required: {}", token_url);
+                assert_eq!(client_id_env, "ADOBE_CLIENT_ID");
+                assert_eq!(client_secret_env, "ADOBE_CLIENT_SECRET");
+                // Adobe uses COMMA-separated scopes (not spaces like RFC).
+                // If this ever flips to spaces, IMS returns
+                // "invalid_scope" — quickly catches a copy-paste drift.
+                assert!(scope.contains(","), "Adobe IMS wants comma-separated scopes");
+                // The two required headers beyond Authorization: Bearer.
+                let hdr_names: Vec<&str> = extra_headers.iter().map(|h| h.name.as_str()).collect();
+                assert!(hdr_names.contains(&"x-api-key"), "missing x-api-key header");
+                assert!(hdr_names.contains(&"x-proxy-global-company-id"),
+                    "missing x-proxy-global-company-id header");
+            }
+            other => panic!("Adobe must use OAuth2ClientCredentials, got {:?}", other),
+        }
+
+        // Endpoints — the bare minimum for reporting + metadata.
+        let paths: Vec<&str> = spec.endpoints.iter().map(|e| e.path.as_str()).collect();
+        assert!(paths.contains(&"/reports"), "core /reports endpoint missing");
+        assert!(paths.contains(&"/users/me"), "smoke-test endpoint missing");
+
+        // Non-secret config surfaces in the add-plugin form.
+        let cfg_keys: Vec<&str> = spec.config_keys.iter().map(|k| k.env_key.as_str()).collect();
+        assert!(cfg_keys.contains(&"ADOBE_COMPANY_ID"));
+        assert!(cfg_keys.contains(&"ADOBE_RSID"));
+    }
+
+    // ── Template interpolation for API plugins ──────────────────────────
+
+    #[test]
+    fn interpolate_env_template_substitutes_keys() {
+        use std::collections::HashMap;
+        let mut env = HashMap::new();
+        env.insert("ADOBE_COMPANY_ID".to_string(), "examplecorp".to_string());
+        env.insert("ADOBE_CLIENT_ID".to_string(), "abc-client-id".to_string());
+
+        // Full round-trip for Adobe's base URL shape.
+        let rendered = build_api_context_block(&[]); // touch public fn
+        let _ = rendered;
+        // Indirect smoke: force an API plugin through the builder and
+        // check the resolved URL via the rendered block.
+        let srv = crate::models::McpServer {
+            id: "api-test".into(), name: "T".into(), description: "".into(),
+            transport: crate::models::McpTransport::ApiOnly,
+            source: crate::models::McpSource::Registry,
+            api_spec: Some(crate::models::ApiSpec {
+                base_url: "https://ex.com/api/{ADOBE_COMPANY_ID}".into(),
+                auth: crate::models::ApiAuthKind::OAuth2ClientCredentials {
+                    token_url: "https://ex.com/token".into(),
+                    client_id_env: "ADOBE_CLIENT_ID".into(),
+                    client_secret_env: "ADOBE_CLIENT_SECRET".into(),
+                    scope: "read".into(),
+                    extra_headers: vec![crate::models::OAuth2ExtraHeader {
+                        name: "x-api-key".into(),
+                        value_template: "{ADOBE_CLIENT_ID}".into(),
+                    }],
+                },
+                endpoints: vec![crate::models::ApiEndpoint {
+                    path: "/reports".into(),
+                    method: "POST".into(),
+                    description: "main".into(),
+                }],
+                docs_url: None,
+                config_keys: vec![],
+            }),
+        };
+        let mut env_with_token = env.clone();
+        env_with_token.insert("__access_token__".into(), "access-xyz".into());
+        let out = build_api_context_block(&[(srv.clone(), env_with_token.clone())]);
+        // Base URL should be interpolated (no remaining `{` from the tpl).
+        assert!(out.contains("https://ex.com/api/examplecorp"),
+            "base_url interpolation failed: {}", out);
+        // Extra header rendered with the real client_id.
+        assert!(out.contains("x-api-key: abc-client-id"),
+            "extra header template not interpolated: {}", out);
+        // Bearer surfaced from the virtual __access_token__ key.
+        assert!(out.contains("Authorization: Bearer access-xyz"),
+            "access token not surfaced: {}", out);
+    }
+
+    #[test]
+    fn interpolate_env_template_flags_missing_key() {
+        // If the user never filled ADOBE_COMPANY_ID, the prompt should
+        // NOT silently render a half-URL — it must include an explicit
+        // <NOT_CONFIGURED:...> marker so the agent stops rather than
+        // firing a 404.
+        let srv = crate::models::McpServer {
+            id: "api-broken".into(), name: "T".into(), description: "".into(),
+            transport: crate::models::McpTransport::ApiOnly,
+            source: crate::models::McpSource::Registry,
+            api_spec: Some(crate::models::ApiSpec {
+                base_url: "https://ex.com/api/{MISSING_KEY}".into(),
+                auth: crate::models::ApiAuthKind::Bearer { env_key: "TOK".into() },
+                endpoints: vec![crate::models::ApiEndpoint {
+                    path: "/x".into(), method: "GET".into(), description: "".into(),
+                }],
+                docs_url: None,
+                config_keys: vec![],
+            }),
+        };
+        let mut env = std::collections::HashMap::new();
+        env.insert("TOK".to_string(), "t".to_string());
+        let out = build_api_context_block(&[(srv, env)]);
+        assert!(out.contains("<NOT_CONFIGURED:MISSING_KEY>"),
+            "missing key should be flagged in output: {}", out);
+    }
+
+    #[test]
+    fn oauth2_block_surfaces_token_error_instead_of_silent_failure() {
+        // If token exchange failed upstream, the virtual __token_error__
+        // key is populated instead of __access_token__. The context must
+        // surface a TOKEN UNAVAILABLE message so the agent doesn't fire
+        // unauthenticated requests.
+        let srv = crate::models::McpServer {
+            id: "api-oauth-failed".into(), name: "T".into(), description: "".into(),
+            transport: crate::models::McpTransport::ApiOnly,
+            source: crate::models::McpSource::Registry,
+            api_spec: Some(crate::models::ApiSpec {
+                base_url: "https://ex.com".into(),
+                auth: crate::models::ApiAuthKind::OAuth2ClientCredentials {
+                    token_url: "https://ex.com/token".into(),
+                    client_id_env: "CID".into(),
+                    client_secret_env: "CS".into(),
+                    scope: "read".into(),
+                    extra_headers: vec![],
+                },
+                endpoints: vec![crate::models::ApiEndpoint {
+                    path: "/x".into(), method: "GET".into(), description: "".into(),
+                }],
+                docs_url: None,
+                config_keys: vec![],
+            }),
+        };
+        let mut env = std::collections::HashMap::new();
+        env.insert("__token_error__".into(), "token exchange failed (401): invalid_client".into());
+        let out = build_api_context_block(&[(srv, env)]);
+        assert!(out.contains("TOKEN UNAVAILABLE"));
+        assert!(out.contains("invalid_client"));
+    }
+
+    #[test]
+    fn oauth2_plugin_not_written_to_mcp_json() {
+        // Regression: the disk-sync pipeline MUST skip plugins whose
+        // transport is `ApiOnly`, whether their auth is a simple apikey
+        // (Chartbeat) or OAuth2ClientCredentials (Adobe). If we ever
+        // flip this by accident, a stray `api-adobe-analytics` entry
+        // would land in `.mcp.json` and Claude Code would try to spawn
+        // it as if it were an MCP server — noisy, confusing, and a
+        // silent leak of client_id/client_secret on disk.
+        let reg = crate::core::registry::builtin_registry();
+        let adobe = reg.iter().find(|d| d.id == "api-adobe-analytics")
+            .expect("Adobe Analytics must be in the builtin registry");
+        // Transport MUST be ApiOnly so the sync branch-skip fires.
+        assert!(matches!(adobe.transport, crate::models::McpTransport::ApiOnly),
+            "Adobe must have transport = ApiOnly, got {:?}", adobe.transport);
+        // Belt-and-suspenders: the Chartbeat entry must also be ApiOnly
+        // — if someone later promotes it to hybrid, they must take care
+        // of the sync path explicitly.
+        let chartbeat = reg.iter().find(|d| d.id == "api-chartbeat").unwrap();
+        assert!(matches!(chartbeat.transport, crate::models::McpTransport::ApiOnly));
+    }
+
+    #[test]
+    fn oauth2_plugin_renders_extra_headers_even_without_config_keys_in_url() {
+        // Ensures the extra_headers rendering is independent from the
+        // base_url templating path — an OAuth2 plugin with a static base
+        // URL but extra headers (no Adobe-style {COMPANY_ID} path) must
+        // still surface `x-api-key: <literal>` in the prompt.
+        let srv = crate::models::McpServer {
+            id: "api-oauth-static".into(), name: "StaticOAuth".into(), description: "".into(),
+            transport: crate::models::McpTransport::ApiOnly,
+            source: crate::models::McpSource::Registry,
+            api_spec: Some(crate::models::ApiSpec {
+                base_url: "https://static.example.com/api".into(), // no templating
+                auth: crate::models::ApiAuthKind::OAuth2ClientCredentials {
+                    token_url: "https://static.example.com/token".into(),
+                    client_id_env: "CID".into(),
+                    client_secret_env: "CS".into(),
+                    scope: "read".into(),
+                    extra_headers: vec![crate::models::OAuth2ExtraHeader {
+                        name: "x-api-key".into(),
+                        value_template: "{CID}".into(),
+                    }],
+                },
+                endpoints: vec![crate::models::ApiEndpoint {
+                    path: "/ping".into(), method: "GET".into(), description: "ping".into(),
+                }],
+                docs_url: None,
+                config_keys: vec![],
+            }),
+        };
+        let mut env = std::collections::HashMap::new();
+        env.insert("CID".into(), "client-xyz".into());
+        env.insert("__access_token__".into(), "tok-123".into());
+        let out = build_api_context_block(&[(srv, env)]);
+        assert!(out.contains("Authorization: Bearer tok-123"));
+        assert!(out.contains("x-api-key: client-xyz"),
+            "extra_header must render with the interpolated secret: {}", out);
+    }
+
+    #[test]
+    fn oauth2_multiple_plugins_isolated_auth_states() {
+        // When two OAuth2 plugins are active and one has a token error,
+        // the other must still render its token correctly. No cross-
+        // contamination via the virtual keys.
+        let mk_srv = |id: &str, base: &str| crate::models::McpServer {
+            id: id.into(), name: id.into(), description: "".into(),
+            transport: crate::models::McpTransport::ApiOnly,
+            source: crate::models::McpSource::Registry,
+            api_spec: Some(crate::models::ApiSpec {
+                base_url: base.into(),
+                auth: crate::models::ApiAuthKind::OAuth2ClientCredentials {
+                    token_url: "https://ex/token".into(),
+                    client_id_env: "CID".into(),
+                    client_secret_env: "CS".into(),
+                    scope: "read".into(),
+                    extra_headers: vec![],
+                },
+                endpoints: vec![crate::models::ApiEndpoint {
+                    path: "/x".into(), method: "GET".into(), description: "".into(),
+                }],
+                docs_url: None,
+                config_keys: vec![],
+            }),
+        };
+        let srv_ok = mk_srv("ok-plugin", "https://a.com");
+        let srv_broken = mk_srv("broken-plugin", "https://b.com");
+
+        let mut env_ok = std::collections::HashMap::new();
+        env_ok.insert("__access_token__".into(), "valid-token".into());
+        let mut env_broken = std::collections::HashMap::new();
+        env_broken.insert("__token_error__".into(), "invalid_client".into());
+
+        let out = build_api_context_block(&[(srv_ok, env_ok), (srv_broken, env_broken)]);
+        // Healthy plugin renders its bearer normally.
+        assert!(out.contains("Authorization: Bearer valid-token"));
+        // Broken one renders TOKEN UNAVAILABLE WITHOUT leaking the good token.
+        assert!(out.contains("TOKEN UNAVAILABLE"));
+        // Guard: the broken-plugin section must NOT accidentally contain
+        // the other plugin's token. Only one Bearer line per plugin —
+        // `valid-token` must appear exactly once, under the ok-plugin
+        // section. We count occurrences to catch any accidental leak.
+        assert_eq!(out.matches("valid-token").count(), 1,
+            "valid-token should appear exactly once (under ok-plugin). Output:\n{}", out);
     }
 }

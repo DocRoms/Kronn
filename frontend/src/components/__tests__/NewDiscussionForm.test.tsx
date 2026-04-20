@@ -14,9 +14,9 @@ vi.mock('../../lib/I18nContext', () => ({
 }));
 
 const PROJECT_WITH_REPO: Project = {
-  id: 'proj-git', name: 'front_euronews',
-  path: '/repos/front_euronews',
-  repo_url: 'git@github.com:Euronews-tech/front_euronews.git',
+  id: 'proj-git', name: 'acme-frontend',
+  path: '/repos/acme-frontend',
+  repo_url: 'git@github.com:acme-org/acme-frontend.git',
   token_override: null,
   ai_config: { detected: false, configs: [] },
   audit_status: 'NoTemplate',

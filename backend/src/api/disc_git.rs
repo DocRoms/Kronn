@@ -278,6 +278,319 @@ pub async fn worktree_lock(
     }
 }
 
+// ── Test mode (user-facing wrapper around unlock/lock + main-repo checkout) ──
+//
+// The two endpoints below orchestrate the existing `worktree_unlock` /
+// `worktree_lock` handlers with a `git checkout` in the main repo, so a
+// non-dev user can "try the AI's version in my IDE" and "come back to
+// where I was" in two clicks. Preflights:
+//   1. worktree dirty  → block (would lose agent's changes if unlocked)
+//   2. main repo dirty → require opt-in stash OR block
+//   3. detached HEAD   → warn (no block — user confirmed via `force`)
+// On error at any step we rollback (re-lock + pop stash) so the user is
+// never left in a half-switched state.
+
+#[derive(serde::Deserialize, Default)]
+pub struct TestModeEnterRequest {
+    /// If the main repo has uncommitted changes, stash them under
+    /// `kronn:auto-<disc_id>` so the checkout can proceed. `exit` pops
+    /// this stash back. Without this flag (default false) we refuse.
+    #[serde(default)]
+    pub stash_dirty: bool,
+    /// Acknowledge the detached-HEAD warning and proceed anyway. Has no
+    /// effect when the repo is on a named branch.
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(serde::Serialize)]
+pub struct TestModeEnterResponse {
+    pub previous_branch: String,
+    pub tested_branch: String,
+    pub stashed: bool,
+    pub was_detached: bool,
+}
+
+/// Envelope wrapping either a successful enter or a structured preflight
+/// blocker. Using a dedicated enum (rather than `ApiResponse::err(...)`)
+/// lets the UI match on `kind` to show the right modal (commit CTA vs
+/// stash-or-cancel dialog) instead of parsing free-form error strings.
+#[derive(serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum TestModeEnterResult {
+    Ok(TestModeEnterResponse),
+    Blocked(TestModeBlocker),
+}
+
+#[derive(serde::Serialize)]
+pub struct TestModeExitResponse {
+    pub restored_branch: String,
+    pub unstashed: bool,
+    pub worktree_restored: bool,
+}
+
+#[derive(serde::Serialize)]
+pub struct TestModeBlocker {
+    /// Machine-readable kind: "WorktreeDirty" | "MainDirty" | "Detached" |
+    /// "AlreadyInTestMode" | "NotIsolated" | "NoBranch" | "NoProject".
+    /// The UI maps this to the right modal / error toast.
+    pub kind: String,
+    /// Human-readable explanation, already localized? No — we keep English
+    /// here for consistency with other API errors, UI translates via
+    /// kind-based keys. This string is the fallback for unknown kinds.
+    pub message: String,
+    /// Optional per-kind details (dirty file list, current branch name…).
+    /// Serialized as raw JSON so each kind can shape its own payload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
+}
+
+/// POST /api/discussions/:id/test-mode/enter
+pub async fn test_mode_enter(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<TestModeEnterRequest>,
+) -> Json<ApiResponse<TestModeEnterResult>> {
+    // Inline shortcut — preflight blockers travel inside `ApiResponse::ok`
+    // because the request itself succeeded (we answered with a reason);
+    // only infra failures use `ApiResponse::err(...)`. The UI matches on
+    // `status: "blocked"` (tag) to show the right modal.
+    let blocked = |kind: &str, message: String, details: Option<serde_json::Value>| {
+        Json(ApiResponse::ok(TestModeEnterResult::Blocked(TestModeBlocker {
+            kind: kind.into(), message, details,
+        })))
+    };
+
+    let did = id.clone();
+    let disc = match state.db.with_conn(move |conn| crate::db::discussions::get_discussion(conn, &did)).await {
+        Ok(Some(d)) => d,
+        Ok(None) => return Json(ApiResponse::err("Discussion not found")),
+        Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
+    };
+
+    if disc.test_mode_restore_branch.is_some() {
+        return blocked("AlreadyInTestMode", "Already in test mode — call /test-mode/exit first".into(), None);
+    }
+
+    let branch = match &disc.worktree_branch {
+        Some(b) if !b.is_empty() => b.clone(),
+        _ => return blocked("NoBranch", "Discussion has no worktree branch — switch to Isolated mode first".into(), None),
+    };
+
+    let pid = match &disc.project_id {
+        Some(p) => p.clone(),
+        None => return blocked("NoProject", "Discussion has no project".into(), None),
+    };
+
+    let project = match state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &pid)).await {
+        Ok(Some(p)) => p,
+        _ => return Json(ApiResponse::err("Project not found")),
+    };
+
+    let repo_path = crate::core::scanner::resolve_host_path(&project.path);
+
+    // ── Preflight #1: worktree must be clean ────────────────────────────
+    if let Some(ref wp) = disc.workspace_path {
+        let wt_resolved = crate::core::scanner::resolve_host_path(wp);
+        match crate::core::worktree::worktree_dirty_files(&wt_resolved) {
+            Ok(files) if !files.is_empty() => {
+                let count = files.len();
+                return blocked(
+                    "WorktreeDirty",
+                    format!("Worktree has {} uncommitted file(s) — commit them first", count),
+                    Some(serde_json::json!({ "files": files })),
+                );
+            }
+            Err(e) => return Json(ApiResponse::err(format!("Failed to check worktree: {}", e))),
+            _ => {}
+        }
+    }
+
+    // ── Preflight #2 + #3: main repo state ──────────────────────────────
+    let state_before = match crate::core::worktree::main_repo_state(&repo_path) {
+        Ok(s) => s,
+        Err(e) => return Json(ApiResponse::err(format!("Failed to check main repo: {}", e))),
+    };
+
+    if state_before.is_detached && !req.force {
+        return blocked(
+            "Detached",
+            "Main repo is in detached HEAD state — pass force=true to proceed".into(),
+            None,
+        );
+    }
+
+    let mut stashed = false;
+    let stash_message = format!("kronn:auto-{}", disc.id);
+    if !state_before.dirty_files.is_empty() {
+        if !req.stash_dirty {
+            return blocked(
+                "MainDirty",
+                format!(
+                    "Main repo has {} uncommitted file(s) on `{}` — commit, stash, or re-run with stash_dirty=true",
+                    state_before.dirty_files.len(),
+                    if state_before.current_branch.is_empty() { "detached" } else { &state_before.current_branch }
+                ),
+                Some(serde_json::json!({
+                    "files": state_before.dirty_files,
+                    "current_branch": state_before.current_branch,
+                })),
+            );
+        }
+        match crate::core::worktree::stash_push(&repo_path, &stash_message) {
+            Ok(true) => { stashed = true; }
+            Ok(false) => {} // no-op, tree cleaned itself between checks
+            Err(e) => return Json(ApiResponse::err(format!("Failed to stash dirty files: {}", e))),
+        }
+    }
+
+    // ── Unlock worktree (must happen BEFORE checkout, so the branch is
+    //    free to be checked out in the main repo) ───────────────────────
+    if let Some(ref wp) = disc.workspace_path {
+        if let Err(e) = crate::core::worktree::remove_discussion_worktree(&repo_path, wp, false) {
+            if stashed {
+                let _ = crate::core::worktree::stash_pop_by_message(&repo_path, &stash_message);
+            }
+            return Json(ApiResponse::err(format!("Failed to unlock worktree: {}", e)));
+        }
+        let did = disc.id.clone();
+        let _ = state.db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE discussions SET workspace_path = NULL WHERE id = ?1",
+                rusqlite::params![did],
+            )?;
+            Ok(())
+        }).await;
+    }
+
+    // ── Checkout the discussion branch in the main repo ─────────────────
+    if let Err(e) = crate::core::worktree::checkout_branch(&repo_path, &branch) {
+        // Full rollback: re-create worktree + pop stash.
+        let _ = crate::core::worktree::reattach_worktree(&repo_path, &project.name, &disc.title, &branch);
+        if stashed {
+            let _ = crate::core::worktree::stash_pop_by_message(&repo_path, &stash_message);
+        }
+        return Json(ApiResponse::err(format!("Checkout failed, rolled back: {}", e)));
+    }
+
+    // ── Persist test-mode state in DB ────────────────────────────────────
+    let previous_branch = state_before.current_branch.clone();
+    let restore = previous_branch.clone();
+    let stash_ref_clone = if stashed { Some(stash_message.clone()) } else { None };
+    let did = disc.id.clone();
+    let _ = state.db.with_conn(move |conn| {
+        crate::db::discussions::update_discussion_test_mode(
+            conn, &did, Some(&restore), stash_ref_clone.as_deref(),
+        )
+    }).await;
+
+    tracing::info!(
+        "Test mode ON for disc '{}': main repo {} → {} (stashed={})",
+        disc.title, previous_branch, branch, stashed
+    );
+
+    Json(ApiResponse::ok(TestModeEnterResult::Ok(TestModeEnterResponse {
+        previous_branch,
+        tested_branch: branch,
+        stashed,
+        was_detached: state_before.is_detached,
+    })))
+}
+
+/// POST /api/discussions/:id/test-mode/exit
+pub async fn test_mode_exit(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<TestModeExitResponse>> {
+    let did = id.clone();
+    let disc = match state.db.with_conn(move |conn| crate::db::discussions::get_discussion(conn, &did)).await {
+        Ok(Some(d)) => d,
+        Ok(None) => return Json(ApiResponse::err("Discussion not found")),
+        Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
+    };
+
+    let restore_branch = match &disc.test_mode_restore_branch {
+        Some(b) if !b.is_empty() => b.clone(),
+        _ => return Json(ApiResponse::err("Not in test mode")),
+    };
+    let stash_ref = disc.test_mode_stash_ref.clone();
+
+    let pid = match &disc.project_id {
+        Some(p) => p.clone(),
+        None => return Json(ApiResponse::err("Discussion has no project")),
+    };
+    let project = match state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &pid)).await {
+        Ok(Some(p)) => p,
+        _ => return Json(ApiResponse::err("Project not found")),
+    };
+    let repo_path = crate::core::scanner::resolve_host_path(&project.path);
+
+    // Checkout the user's previous branch. If this fails we stop here —
+    // the user needs to resolve whatever conflict is blocking it manually
+    // (probably they committed to the branch during the test).
+    if let Err(e) = crate::core::worktree::checkout_branch(&repo_path, &restore_branch) {
+        return Json(ApiResponse::err(format!(
+            "Failed to checkout back to `{}`: {}. Resolve manually, then call /test-mode/exit again.",
+            restore_branch, e
+        )));
+    }
+
+    // Pop the stash if we had one. On conflict we warn but leave the
+    // stash intact — the user can pop it manually once they've sorted it.
+    let mut unstashed = false;
+    let mut stash_warn: Option<String> = None;
+    if let Some(ref msg) = stash_ref {
+        match crate::core::worktree::stash_pop_by_message(&repo_path, msg) {
+            Ok(()) => { unstashed = true; }
+            Err(e) => { stash_warn = Some(e); }
+        }
+    }
+
+    // Re-create the worktree so the discussion can keep working.
+    let worktree_branch = disc.worktree_branch.clone().unwrap_or_default();
+    let mut worktree_restored = false;
+    if !worktree_branch.is_empty() {
+        match crate::core::worktree::reattach_worktree(&repo_path, &project.name, &disc.title, &worktree_branch) {
+            Ok(info) => {
+                worktree_restored = true;
+                let did = disc.id.clone();
+                let wp = info.path.clone();
+                let wb = info.branch.clone();
+                let _ = state.db.with_conn(move |conn| {
+                    crate::db::discussions::update_discussion_workspace(conn, &did, &wp, &wb)
+                }).await;
+            }
+            Err(e) => {
+                tracing::warn!("Failed to restore worktree for '{}': {}", disc.title, e);
+            }
+        }
+    }
+
+    // Clear test-mode tracking fields.
+    let did = disc.id.clone();
+    let _ = state.db.with_conn(move |conn| {
+        crate::db::discussions::update_discussion_test_mode(conn, &did, None, None)
+    }).await;
+
+    tracing::info!(
+        "Test mode OFF for disc '{}': restored `{}` (unstashed={}, worktree={})",
+        disc.title, restore_branch, unstashed, worktree_restored
+    );
+
+    if let Some(warn) = stash_warn {
+        return Json(ApiResponse::err(format!(
+            "Exited test mode (back on `{}`) but stash pop failed: {}. Your work is safe — run `git stash list` to find it.",
+            restore_branch, warn
+        )));
+    }
+
+    Json(ApiResponse::ok(TestModeExitResponse {
+        restored_branch: restore_branch,
+        unstashed,
+        worktree_restored,
+    }))
+}
+
 pub async fn disc_exec(
     State(state): State<AppState>,
     Path(id): Path<String>,

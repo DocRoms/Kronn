@@ -56,6 +56,8 @@ fn sample_discussion(id: &str, project_id: Option<&str>) -> Discussion {
             shared_id: None,
             shared_with: vec![],
         workflow_run_id: None,
+        test_mode_restore_branch: None,
+        test_mode_stash_ref: None,
         created_at: now,
         updated_at: now,
     }
@@ -493,6 +495,7 @@ fn mcp_server_upsert_and_list() {
             args: vec!["-y".into(), "test-pkg".into()],
         },
         source: McpSource::Registry,
+        api_spec: None,
     };
     crate::db::mcps::upsert_server(&conn, &server).unwrap();
 
@@ -517,6 +520,7 @@ fn mcp_config_insert_with_projects() {
         id: "srv1".into(), name: "S".into(), description: "".into(),
         transport: McpTransport::Sse { url: "http://localhost".into() },
         source: McpSource::Manual,
+        api_spec: None,
     };
     crate::db::mcps::upsert_server(&conn, &server).unwrap();
     crate::db::projects::insert_project(&conn, &sample_project("p1", "Proj1")).unwrap();
@@ -541,6 +545,7 @@ fn mcp_configs_for_project_includes_global() {
         id: "srv1".into(), name: "S".into(), description: "".into(),
         transport: McpTransport::Stdio { command: "test".into(), args: vec![] },
         source: McpSource::Registry,
+        api_spec: None,
     };
     crate::db::mcps::upsert_server(&conn, &server).unwrap();
     crate::db::projects::insert_project(&conn, &sample_project("p1", "P1")).unwrap();
@@ -599,6 +604,7 @@ fn mcp_config_hash_deterministic() {
         id: "srv".into(), name: "S".into(), description: "".into(),
         transport: McpTransport::Stdio { command: "npx".into(), args: vec!["-y".into(), "pkg".into()] },
         source: McpSource::Registry,
+        api_spec: None,
     };
     let mut env = std::collections::HashMap::new();
     env.insert("K".into(), "V".into());
@@ -614,6 +620,7 @@ fn mcp_config_hash_differs_on_env() {
         id: "srv".into(), name: "S".into(), description: "".into(),
         transport: McpTransport::Stdio { command: "npx".into(), args: vec![] },
         source: McpSource::Registry,
+        api_spec: None,
     };
     let mut env1 = std::collections::HashMap::new();
     env1.insert("K".into(), "V1".into());
@@ -638,6 +645,7 @@ fn mcp_config_update_env_persists() {
         id: "srv1".into(), name: "GitHub".into(), description: "".into(),
         transport: McpTransport::Stdio { command: "npx".into(), args: vec!["-y".into(), "pkg".into()] },
         source: McpSource::Registry,
+        api_spec: None,
     };
     crate::db::mcps::upsert_server(&conn, &server).unwrap();
 
@@ -703,6 +711,7 @@ fn mcp_config_global_visible_to_all_projects() {
         id: "srv1".into(), name: "Sentry".into(), description: "".into(),
         transport: McpTransport::Stdio { command: "npx".into(), args: vec![] },
         source: McpSource::Registry,
+        api_spec: None,
     };
     crate::db::mcps::upsert_server(&conn, &server).unwrap();
     crate::db::projects::insert_project(&conn, &sample_project("p1", "ProjectA")).unwrap();
@@ -749,6 +758,7 @@ fn mcp_set_config_projects_relinks() {
         id: "srv1".into(), name: "S".into(), description: "".into(),
         transport: McpTransport::Stdio { command: "test".into(), args: vec![] },
         source: McpSource::Registry,
+        api_spec: None,
     };
     crate::db::mcps::upsert_server(&conn, &server).unwrap();
     crate::db::projects::insert_project(&conn, &sample_project("p1", "P1")).unwrap();
@@ -787,6 +797,7 @@ fn mcp_delete_config_removes_project_links() {
         id: "srv1".into(), name: "S".into(), description: "".into(),
         transport: McpTransport::Stdio { command: "test".into(), args: vec![] },
         source: McpSource::Registry,
+        api_spec: None,
     };
     crate::db::mcps::upsert_server(&conn, &server).unwrap();
     crate::db::projects::insert_project(&conn, &sample_project("p1", "P1")).unwrap();
@@ -815,6 +826,7 @@ fn mcp_config_update_global_flag_changes_visibility() {
         id: "srv1".into(), name: "S".into(), description: "".into(),
         transport: McpTransport::Stdio { command: "test".into(), args: vec![] },
         source: McpSource::Registry,
+        api_spec: None,
     };
     crate::db::mcps::upsert_server(&conn, &server).unwrap();
     crate::db::projects::insert_project(&conn, &sample_project("p1", "P1")).unwrap();
@@ -849,6 +861,7 @@ fn mcp_config_hash_changes_on_env_update() {
         id: "srv".into(), name: "S".into(), description: "".into(),
         transport: McpTransport::Stdio { command: "npx".into(), args: vec!["-y".into(), "pkg".into()] },
         source: McpSource::Registry,
+        api_spec: None,
     };
 
     let mut env_old = std::collections::HashMap::new();
@@ -869,6 +882,7 @@ fn mcp_config_hash_changes_on_args_override() {
         id: "srv".into(), name: "S".into(), description: "".into(),
         transport: McpTransport::Stdio { command: "npx".into(), args: vec!["-y".into(), "pkg".into()] },
         source: McpSource::Registry,
+        api_spec: None,
     };
     let env = std::collections::HashMap::new();
 
@@ -1460,6 +1474,8 @@ fn partial_response_set_then_recover_inserts_agent_message() {
         shared_id: None,
         shared_with: vec![],
         workflow_run_id: None,
+        test_mode_restore_branch: None,
+        test_mode_stash_ref: None,
         created_at: now,
         updated_at: now,
     };
@@ -1528,6 +1544,7 @@ fn partial_response_preserves_started_at_across_checkpoints() {
         workspace_path: None, worktree_branch: None, tier: ModelTier::Default,
         pin_first_message: false, summary_cache: None, summary_up_to_msg_idx: None,
         shared_id: None, shared_with: vec![], workflow_run_id: None,
+        test_mode_restore_branch: None, test_mode_stash_ref: None,
         created_at: now, updated_at: now,
     };
     crate::db::discussions::insert_discussion(&conn, &disc).unwrap();
@@ -1576,6 +1593,7 @@ fn has_pending_partial_returns_true_when_set() {
         workspace_path: None, worktree_branch: None, tier: ModelTier::Default,
         pin_first_message: false, summary_cache: None, summary_up_to_msg_idx: None,
         shared_id: None, shared_with: vec![], workflow_run_id: None,
+        test_mode_restore_branch: None, test_mode_stash_ref: None,
         created_at: now, updated_at: now,
     };
     crate::db::discussions::insert_discussion(&conn, &disc).unwrap();
@@ -1600,6 +1618,7 @@ fn partial_response_clear_with_none_wipes_column() {
         workspace_path: None, worktree_branch: None, tier: ModelTier::Default,
         pin_first_message: false, summary_cache: None, summary_up_to_msg_idx: None,
         shared_id: None, shared_with: vec![], workflow_run_id: None,
+        test_mode_restore_branch: None, test_mode_stash_ref: None,
         created_at: now, updated_at: now,
     };
     crate::db::discussions::insert_discussion(&conn, &disc).unwrap();
@@ -2046,6 +2065,7 @@ fn mcp_config_display_secrets_broken_when_decrypt_fails() {
             args: vec!["-y".into(), "test-pkg".into()],
         },
         source: McpSource::Registry,
+        api_spec: None,
     };
     crate::db::mcps::upsert_server(&conn, &server).unwrap();
 
@@ -2088,6 +2108,7 @@ fn mcp_config_display_secrets_ok_when_decrypt_succeeds() {
             args: vec!["-y".into(), "test-pkg".into()],
         },
         source: McpSource::Registry,
+        api_spec: None,
     };
     crate::db::mcps::upsert_server(&conn, &server).unwrap();
 
@@ -2129,6 +2150,7 @@ fn mcp_config_display_secrets_broken_false_when_no_env() {
             args: vec!["-y".into(), "test-pkg".into()],
         },
         source: McpSource::Registry,
+        api_spec: None,
     };
     crate::db::mcps::upsert_server(&conn, &server).unwrap();
 
@@ -2230,7 +2252,7 @@ fn quick_prompt_crud() {
                 description: Some("Identifiant Jira du ticket à analyser".into()), required: true,
             },
             crate::models::PromptVariable {
-                name: "project".into(), label: "Projet".into(), placeholder: "front_euronews".into(),
+                name: "project".into(), label: "Projet".into(), placeholder: "acme-frontend".into(),
                 description: None, required: true,
             },
         ],
@@ -2372,6 +2394,8 @@ fn cross_agent_db_round_trip_all_types() {
             shared_id: None,
             shared_with: vec![],
             workflow_run_id: None,
+            test_mode_restore_branch: None,
+            test_mode_stash_ref: None,
             created_at: now,
             updated_at: now,
         };

@@ -4,6 +4,9 @@ import { MessageBubble, MarkdownContent } from '../components/MessageBubble';
 import { ChatInput } from '../components/ChatInput';
 import { discussions as discussionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, contacts as contactsApi, workflows as workflowsApi } from '../lib/api';
 import { GitPanel } from '../components/GitPanel';
+import { TestModeBanner } from '../components/TestModeBanner';
+import { TestModeModal } from '../components/TestModeModal';
+import type { TestModeBlocker } from '../types/extensions';
 import { ChatHeader } from '../components/ChatHeader';
 import { DiscussionSidebar } from '../components/DiscussionSidebar';
 import { NewDiscussionForm } from '../components/NewDiscussionForm';
@@ -129,6 +132,14 @@ export function DiscussionsPage({
   const [activeDiscussionId, setActiveDiscussionId] = useState<string | null>(initialActiveDiscussionId ?? null);
   const [showNewDiscussion, setShowNewDiscussion] = useState(false);
   const [showGitPanel, setShowGitPanel] = useState(false);
+  const [pendingFilesCount, setPendingFilesCount] = useState(0);
+  // Test mode (worktree swap-in-main flow). `busy` guards against
+  // double-clicks on enter/exit which would race with the backend's
+  // rollback logic. The blocker state drives the preflight modal that
+  // lets the user pick stash-and-proceed / commit-first / cancel.
+  const [testModeBusy, setTestModeBusy] = useState(false);
+  const [testModeBlocker, setTestModeBlocker] = useState<TestModeBlocker | null>(null);
+  const [testModePendingDiscId, setTestModePendingDiscId] = useState<string | null>(null);
   const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState('');
   const [collapsedDiscGroups, setCollapsedDiscGroups] = useState<Set<string>>(() => {
@@ -472,6 +483,27 @@ export function DiscussionsPage({
       chatEndRef.current?.scrollIntoView({ behavior: 'instant' as ScrollBehavior });
     });
   }, [activeDiscussionId]);
+
+  // Refresh the pending-files count on the git-panel icon for Isolated
+  // discussions. Fires on: discussion switch, every new message (typically
+  // after an agent reply lands), and when the agent run ends (sending: true
+  // → false). Silent on failure — the badge just stays at its last value.
+  useEffect(() => {
+    if (!activeDiscussion || activeDiscussion.workspace_mode !== 'Isolated') {
+      setPendingFilesCount(0);
+      return;
+    }
+    if (sending) return; // let the stream finish before polling
+    let cancelled = false;
+    discussionsApi.gitStatus(activeDiscussion.id)
+      .then((res: any) => {
+        if (cancelled) return;
+        const files = res?.files ?? [];
+        setPendingFilesCount(Array.isArray(files) ? files.length : 0);
+      })
+      .catch(() => { /* keep last count on transient errors */ });
+    return () => { cancelled = true; };
+  }, [activeDiscussion?.id, activeDiscussion?.messages.length, activeDiscussion?.workspace_mode, sending]);
 
   // Handle prefill from parent (e.g. "validate audit" button on Projects page)
   useEffect(() => {
@@ -934,6 +966,59 @@ export function DiscussionsPage({
     });
   }, []);
 
+  // ─── Test mode (worktree swap) ───────────────────────────────────────────
+  // Enter retries with options set by the preflight modal (phase 5).
+  // Initial call has no opts; a blocker response opens the modal, which
+  // invokes this again with stash_dirty / force once the user acknowledges.
+  const handleRequestTestMode = useCallback(async (
+    discId: string,
+    opts: { stash_dirty?: boolean; force?: boolean } = {},
+  ) => {
+    if (testModeBusy) return;
+    setTestModeBusy(true);
+    try {
+      const res = await discussionsApi.testModeEnter(discId, opts);
+      if (res.status === 'blocked') {
+        // Open the preflight modal — it reads `res.kind` to pick the
+        // right set of buttons (stash, commit first, proceed anyway).
+        setTestModeBlocker(res);
+        setTestModePendingDiscId(discId);
+        return;
+      }
+      setTestModeBlocker(null);
+      setTestModePendingDiscId(null);
+      refetchDiscussions();
+      toast(t('testMode.enterSuccess', res.tested_branch), 'success');
+    } catch (e) {
+      toast(t('testMode.enterError', userError(e)), 'error');
+    } finally {
+      setTestModeBusy(false);
+    }
+  }, [testModeBusy, refetchDiscussions, toast, t]);
+
+  const handleExitTestMode = useCallback(async (discId: string) => {
+    if (testModeBusy) return;
+    setTestModeBusy(true);
+    try {
+      const res = await discussionsApi.testModeExit(discId);
+      refetchDiscussions();
+      toast(t('testMode.exitSuccess', res.restored_branch), 'success');
+    } catch (e) {
+      // Server returns a descriptive error (stash conflict, checkout
+      // failure) — pass it through so the user can act on it.
+      toast(t('testMode.exitError', userError(e)), 'error');
+    } finally {
+      setTestModeBusy(false);
+    }
+  }, [testModeBusy, refetchDiscussions, toast, t]);
+
+  // Find the (single) discussion currently in test mode. Only one can be
+  // active at a time — the main repo can only be on one branch. If the DB
+  // ever contains more than one (shouldn't happen), we show the first;
+  // the `exit` call will clear its fields and `refetchDiscussions` will
+  // surface the next one if any.
+  const discussionInTestMode = allDiscussions.find(d => !!d.test_mode_restore_branch);
+
   const handleContactAdd = useCallback(async (code: string) => {
     const result = await contactsApi.add(code);
     setContactsList(prev => [...prev, result.contact]);
@@ -1143,6 +1228,34 @@ export function DiscussionsPage({
 
       {/* Main area */}
       <div className="disc-chat-area">
+        {/* Global test-mode banner — pinned at the top of the chat area
+            regardless of which discussion is active, so switching discs
+            doesn't hide the "your main repo is on branch X" state. */}
+        {discussionInTestMode && (
+          <TestModeBanner
+            discussion={discussionInTestMode}
+            busy={testModeBusy}
+            onExit={() => { void handleExitTestMode(discussionInTestMode.id); }}
+            t={t}
+          />
+        )}
+        {/* Preflight modal — opens when `test-mode/enter` responds with a
+            blocker. Shows the offending files + lets the user pick the
+            remediation path. */}
+        {testModeBlocker && testModePendingDiscId && (
+          <TestModeModal
+            blocker={testModeBlocker}
+            busy={testModeBusy}
+            onRetry={(opts) => { void handleRequestTestMode(testModePendingDiscId, opts); }}
+            onGoCommit={() => {
+              setTestModeBlocker(null);
+              setTestModePendingDiscId(null);
+              setShowGitPanel(true);
+            }}
+            onCancel={() => { setTestModeBlocker(null); setTestModePendingDiscId(null); }}
+            t={t}
+          />
+        )}
         {/* New discussion form */}
         {showNewDiscussion && (
           <NewDiscussionForm
@@ -1174,6 +1287,8 @@ export function DiscussionsPage({
               showGitPanel={showGitPanel}
               isMobile={isMobile}
               sending={sending}
+              pendingFilesCount={pendingFilesCount}
+              onRequestTestMode={() => { void handleRequestTestMode(activeDiscussion.id); }}
               onToggleGitPanel={() => setShowGitPanel(prev => !prev)}
               onToggleSidebar={() => setSidebarOpen(true)}
               onDelete={async (discId) => {

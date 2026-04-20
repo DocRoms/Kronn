@@ -418,6 +418,8 @@ fn handle_discussion_invite(
         shared_id: Some(shared_discussion_id.to_string()),
         shared_with: vec![],
         workflow_run_id: None,
+        test_mode_restore_branch: None,
+        test_mode_stash_ref: None,
         created_at: now,
         updated_at: now,
     };

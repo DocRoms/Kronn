@@ -86,8 +86,9 @@ Kronn/
 │       │   ├── mod.rs          # Re-exports
 │       │   ├── config.rs       # Config load/save (~/.config/kronn/)
 │       │   ├── scanner.rs      # Git repo scanner + AI audit detection (detect_audit_status, count_ai_todos). WSL UNC paths (\\wsl.localhost\...) run git via wsl.exe
-│       │   ├── registry.rs     # MCP registry (48 built-in official servers, grouped by category, with token_url/token_help)
-│       │   ├── mcp_scanner.rs  # Multi-agent MCP sync + MCP injection. read_all_mcp_contexts() reads .mcp.json + context files. Disk sync: .mcp.json (Claude), .vibe/config.toml (Vibe), ~/.codex/config.toml (Codex). .gitignore safety
+│       │   ├── registry.rs     # Plugin registry — 53 MCPs + 3 API plugins (api-chartbeat, api-adobe-analytics, api-google-search). Each McpDefinition carries optional api_spec with base_url (supports {ENV_KEY} templating), auth (inc. OAuth2ClientCredentials with extra_headers), endpoints, docs_url, config_keys.
+│       │   ├── mcp_scanner.rs  # Multi-agent MCP sync + MCP/API prompt injection. read_all_mcp_contexts() reads .mcp.json + context files. build_api_context_block() renders `## REST APIs available` from API plugins. collect_active_api_plugins() decrypts + returns active configs. interpolate_env_template() substitutes {ENV_KEY} in base_url + header templates. Disk sync: .mcp.json (Claude), .vibe/config.toml (Vibe), ~/.codex/config.toml (Codex). ApiOnly transport is a silent skip.
+│       │   ├── oauth2_cache.rs # OAuth2 client-credentials token cache + exchanger (0.5.0). In-memory HashMap<config_id, CachedToken> behind a tokio::sync::Mutex. resolve_token() checks cache → exchanges on miss/expiry → returns bearer. 30s safety margin before provider expiry. Error-transparent: token-exchange failures are bubbled up as human-readable strings for prompt injection.
 │       │   ├── native_files.rs # Native SKILL.md + agent file sync. Writes skills to .claude/skills/, .agents/skills/, .gemini/skills/. Profiles to .claude/agents/, .gemini/agents/, .codex/agents/. Additive sync for discussions, full cleanup at startup.
 │       │   ├── tailscale.rs   # Network & VPN auto-detection (Tailscale, VPN, LAN IPs). KRONN_HOST_IPS env for Docker. Used for multi-user invite codes.
 │       │   ├── ws_client.rs   # WebSocket client manager: outbound connections to contacts with exponential backoff. Auto-reconnects.
@@ -151,6 +152,8 @@ Kronn/
 │       │   ├── MessageBubble.tsx # Message bubble (329L) — user/agent/system, markdown, TTS, edit, copy, retry
 │       │   ├── SwipeableDiscItem.tsx  # Swipeable sidebar item (110L) — swipe-to-archive/delete
 │       │   ├── AgentQuestionForm.tsx  # Structured agent questions (0.3.5) — renders mini-form above ChatInput when agent asks {{var}}: questions
+│       │   ├── TestModeBanner.tsx # Global "test mode" banner (0.5.0) — pinned at top of chat area whenever any disc has its branch checked out in main. Single exit path.
+│       │   ├── TestModeModal.tsx  # Preflight modal (0.5.0) — action matrix per blocker kind (WorktreeDirty → "open git panel", MainDirty → stash-and-proceed / commit-first / cancel, Detached → force-proceed)
 │       │   ├── tour/             # Guided tour / onboarding overlay (0.3.6)
 │       │   │   ├── TourProvider.tsx      # Context + state machine + useTour() hook. waitForClick listener, cross-page nav
 │       │   │   ├── TourOverlay.tsx       # Portal to body: spotlight (box-shadow cutout) + tooltip card + group label

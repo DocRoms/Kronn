@@ -573,4 +573,22 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("builtin"));
     }
+
+    // Regression guard: the compact profile prompt MUST carry the persona
+    // identity (name + role) so that callers using it as a fallback when
+    // native agent files don't get auto-loaded (see EW-7189) still push
+    // the persona into the model context. A silent empty result would
+    // re-introduce the "translator activated but ignored" bug.
+    #[test]
+    fn build_profiles_prompt_compact_includes_persona_and_role() {
+        let prompt = build_profiles_prompt_compact(&["translator".into()]);
+        assert!(!prompt.is_empty(), "compact prompt must not be empty for a known profile");
+        assert!(prompt.contains("Lin"), "persona_name missing: {}", prompt);
+        assert!(prompt.to_lowercase().contains("translator"), "role missing: {}", prompt);
+    }
+
+    #[test]
+    fn build_profiles_prompt_compact_empty_for_no_ids() {
+        assert!(build_profiles_prompt_compact(&[]).is_empty());
+    }
 }

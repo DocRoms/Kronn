@@ -53,6 +53,8 @@ pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> 
         ("031_partial_response", include_str!("sql/031_partial_response.sql")),
         ("032_partial_response_started_at", include_str!("sql/032_partial_response_started_at.sql")),
         ("033_discussion_pinned", include_str!("sql/033_discussion_pinned.sql")),
+        ("034_test_mode_fields", include_str!("sql/034_test_mode_fields.sql")),
+        ("035_mcp_server_api_spec", include_str!("sql/035_mcp_server_api_spec.sql")),
     ];
 
     // Check if there are pending migrations before backing up

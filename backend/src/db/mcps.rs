@@ -9,7 +9,7 @@ use crate::core::crypto;
 
 pub fn list_servers(conn: &Connection) -> Result<Vec<McpServer>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, description, transport, command, args_json, url, source
+        "SELECT id, name, description, transport, command, args_json, url, source, api_spec_json
          FROM mcp_servers ORDER BY name"
     )?;
 
@@ -19,6 +19,7 @@ pub fn list_servers(conn: &Connection) -> Result<Vec<McpServer>> {
         let args_json: String = row.get(5)?;
         let url: Option<String> = row.get(6)?;
         let source_str: String = row.get(7)?;
+        let api_spec_json: Option<String> = row.get(8)?;
 
         let transport = match transport_type.as_str() {
             "stdio" => McpTransport::Stdio {
@@ -31,6 +32,7 @@ pub fn list_servers(conn: &Connection) -> Result<Vec<McpServer>> {
             "streamable" => McpTransport::Streamable {
                 url: url.unwrap_or_default(),
             },
+            "api_only" => McpTransport::ApiOnly,
             _ => McpTransport::Stdio {
                 command: command.unwrap_or_default(),
                 args: serde_json::from_str(&args_json).unwrap_or_default(),
@@ -43,12 +45,19 @@ pub fn list_servers(conn: &Connection) -> Result<Vec<McpServer>> {
             _ => McpSource::Detected,
         };
 
+        // Parse api_spec_json — silent fallback to None on malformed JSON so
+        // one corrupt row doesn't break the whole plugin list load.
+        let api_spec = api_spec_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<crate::models::ApiSpec>(raw).ok());
+
         Ok(McpServer {
             id: row.get(0)?,
             name: row.get(1)?,
             description: row.get(2)?,
             transport,
             source,
+            api_spec,
         })
     })?.filter_map(|r| r.ok()).collect();
 
@@ -65,6 +74,7 @@ pub fn upsert_server(conn: &Connection, server: &McpServer) -> Result<()> {
         ),
         McpTransport::Sse { url } => ("sse", None, "[]".to_string(), Some(url.clone())),
         McpTransport::Streamable { url } => ("streamable", None, "[]".to_string(), Some(url.clone())),
+        McpTransport::ApiOnly => ("api_only", None, "[]".to_string(), None),
     };
 
     let source_str = match server.source {
@@ -73,9 +83,13 @@ pub fn upsert_server(conn: &Connection, server: &McpServer) -> Result<()> {
         McpSource::Manual => "manual",
     };
 
+    let api_spec_json = server.api_spec.as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
+
     conn.execute(
-        "INSERT INTO mcp_servers (id, name, description, transport, command, args_json, url, source)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        "INSERT INTO mcp_servers (id, name, description, transport, command, args_json, url, source, api_spec_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(id) DO UPDATE SET
            name = excluded.name,
            description = excluded.description,
@@ -83,7 +97,8 @@ pub fn upsert_server(conn: &Connection, server: &McpServer) -> Result<()> {
            command = excluded.command,
            args_json = excluded.args_json,
            url = excluded.url,
-           source = excluded.source",
+           source = excluded.source,
+           api_spec_json = excluded.api_spec_json",
         params![
             server.id,
             server.name,
@@ -93,6 +108,7 @@ pub fn upsert_server(conn: &Connection, server: &McpServer) -> Result<()> {
             args_json,
             url,
             source_str,
+            api_spec_json,
         ],
     )?;
     Ok(())
@@ -333,6 +349,9 @@ pub fn compute_config_hash(server: &McpServer, env: &HashMap<String, String>, ar
         }
         McpTransport::Sse { url } => parts.push(format!("sse:{}", url)),
         McpTransport::Streamable { url } => parts.push(format!("streamable:{}", url)),
+        // API-only plugins use the server id as identity — they can't
+        // collide with MCP-transport configs because the env keys differ.
+        McpTransport::ApiOnly => parts.push(format!("api_only:{}", server.id)),
     }
 
     // Args override

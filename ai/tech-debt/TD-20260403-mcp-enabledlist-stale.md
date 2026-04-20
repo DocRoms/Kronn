@@ -1,6 +1,6 @@
 - **ID**: TD-20260403-mcp-enabledlist-stale
 - **Area**: Backend
-- **Problem (fact)**: `sync_claude_enabled_servers()` only ADDS entries to `enabledMcpjsonServers` in `.claude/settings.local.json`, never removes stale ones. Over time the whitelist accumulates orphan entries from MCPs that were unlinked or renamed. Example: front_euronews has 7 stale entries (fetch, resend, Git, fastly, Playwright, cloudwatch, figma).
+- **Problem (fact)**: `sync_claude_enabled_servers()` only ADDS entries to `enabledMcpjsonServers` in `.claude/settings.local.json`, never removes stale ones. Over time the whitelist accumulates orphan entries from MCPs that were unlinked or renamed. Example: one project had 7 stale entries (fetch, resend, Git, fastly, Playwright, cloudwatch, figma).
 - **Why we can't fix now (constraint)**: Removing entries risks disabling user-added MCPs that Kronn doesn't know about (e.g. manually added via Claude Code `/mcp`). Need a strategy to distinguish Kronn-managed vs user-managed entries.
 - **Impact**: dev friction (confusing whitelist), minor correctness risk if renamed MCP loses its old entry
 - **Where (pointers)**: `backend/src/core/mcp_scanner.rs` → `sync_claude_enabled_servers()`

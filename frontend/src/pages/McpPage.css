@@ -211,6 +211,28 @@
   font-size: var(--kr-fs-2xs);
   color: var(--kr-text-faint);
   margin-top: auto;
+  flex-wrap: wrap;
+}
+
+/* Separator dot between MCP/API kind pills and category pills. */
+.mcp-cat-pill-sep {
+  color: var(--kr-text-faint);
+  margin: 0 2px;
+  opacity: 0.5;
+}
+
+/* Inline description rendered under an API plugin's config key field.
+   Sourced from `api_spec.config_keys.description` — gives the user a
+   one-line explanation of what the field is for without cluttering
+   the label. */
+.mcp-env-key-desc {
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-tertiary);
+  margin-top: 4px;
+  /* Align under the input (label width 180px + row gap). */
+  margin-left: calc(180px + var(--kr-sp-4));
+  line-height: 1.4;
+  font-style: italic;
 }
 
 /* ── Form fields ────────────────────────────────────────── */

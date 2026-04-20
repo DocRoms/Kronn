@@ -9,6 +9,7 @@ import {
   Trash2,
   Pencil, ShieldCheck, Check, Zap, FileText, Settings, Rocket,
   Menu, Lock, Unlock, RefreshCw, Share2, Users2, Star,
+  FlaskConical, Info,
 } from 'lucide-react';
 
 const isBootstrapDisc = (title: string) => title.startsWith('Bootstrap: ');
@@ -26,6 +27,13 @@ export interface ChatHeaderProps {
   showGitPanel: boolean;
   isMobile: boolean;
   sending: boolean;
+  /// Number of uncommitted files in the discussion worktree (Isolated mode
+  /// only — caller passes 0 for Direct mode). Drives the badge on the
+  /// git-panel icon; nudges the user to commit when the agent didn't.
+  pendingFilesCount: number;
+  /// User-friendly "Tester cette version" CTA: parent owns the call so it
+  /// can open the preflight modal if the server returns a blocker.
+  onRequestTestMode: () => void;
   onToggleGitPanel: () => void;
   onToggleSidebar: () => void;
   onDelete: (discId: string) => void;
@@ -49,6 +57,8 @@ export function ChatHeader({
   showGitPanel,
   isMobile,
   sending,
+  pendingFilesCount,
+  onRequestTestMode,
   onToggleGitPanel,
   onToggleSidebar,
   onDelete,
@@ -257,6 +267,25 @@ export function ChatHeader({
                 {discussion.workspace_path ? <Unlock size={9} /> : <Lock size={9} />}
               </button>
             </span>
+          )}
+          {/* Test-mode CTA — only while the worktree is active and we're
+              not already testing. Hidden in Direct mode (no branch to swap)
+              and while in test mode (global banner is the exit path). */}
+          {discussion.workspace_mode === 'Isolated'
+            && discussion.worktree_branch
+            && !!discussion.workspace_path
+            && !discussion.test_mode_restore_branch && (
+            <button
+              className="disc-test-mode-btn"
+              onClick={onRequestTestMode}
+              title={t('testMode.ctaTooltip')}
+            >
+              <FlaskConical size={11} />
+              <span>{t('testMode.cta')}</span>
+              <span className="disc-test-mode-btn-hint" aria-hidden="true">
+                <Info size={9} />
+              </span>
+            </button>
           )}
           {(discussion.profile_ids?.length ?? 0) > 0 && (
             <>
@@ -629,10 +658,17 @@ export function ChatHeader({
           <button
             className="disc-icon-btn" style={{ color: showGitPanel ? '#c8ff00' : undefined }}
             onClick={onToggleGitPanel}
-            title={t('git.filesBtn')}
+            title={pendingFilesCount > 0
+              ? t('git.pendingFilesTooltip', pendingFilesCount)
+              : t('git.filesBtn')}
             aria-label={t('git.filesBtn')}
           >
             <GitBranch size={13} />
+            {pendingFilesCount > 0 && (
+              <span className="disc-icon-btn-badge" aria-label={t('git.pendingFilesTooltip', pendingFilesCount)}>
+                {pendingFilesCount > 9 ? '9+' : pendingFilesCount}
+              </span>
+            )}
           </button>
         )}
         {/* Share button */}
