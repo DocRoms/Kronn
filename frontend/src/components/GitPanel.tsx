@@ -47,11 +47,11 @@ const STATUS_ICONS: Record<string, typeof FileEdit> = {
 };
 
 const STATUS_COLORS: Record<string, string> = {
-  modified: '#fbbf24',
-  added: '#34d399',
-  deleted: '#ff4d6a',
-  renamed: '#60a5fa',
-  copied: '#60a5fa',
+  modified: 'var(--kr-warning-soft)',
+  added: 'var(--kr-success)',
+  deleted: 'var(--kr-error)',
+  renamed: 'var(--kr-info)',
+  copied: 'var(--kr-info)',
   untracked: 'var(--kr-text-dim)',
 };
 
@@ -538,11 +538,11 @@ export function GitPanel({ projectId, discussionId, onClose, terminalEnabled = f
                   />
                   <div className="git-commit-options">
                     <label className="git-commit-option-label">
-                      <input type="checkbox" checked={commitAmend} onChange={e => setCommitAmend(e.target.checked)} style={{ accentColor: '#c8ff00' }} />
+                      <input type="checkbox" checked={commitAmend} onChange={e => setCommitAmend(e.target.checked)} style={{ accentColor: 'var(--kr-accent-ink)' }} />
                       {t('git.amend')}
                     </label>
                     <label className="git-commit-option-label">
-                      <input type="checkbox" checked={commitSign} onChange={e => setCommitSign(e.target.checked)} style={{ accentColor: '#c8ff00' }} />
+                      <input type="checkbox" checked={commitSign} onChange={e => setCommitSign(e.target.checked)} style={{ accentColor: 'var(--kr-accent-ink)' }} />
                       {t('git.sign')}
                     </label>
                   </div>
@@ -561,7 +561,7 @@ export function GitPanel({ projectId, discussionId, onClose, terminalEnabled = f
               <div className="git-file-list">
                 {status.files.map(file => {
                   const Icon = STATUS_ICONS[file.status] || FileX;
-                  const color = STATUS_COLORS[file.status] || 'rgba(255,255,255,0.4)';
+                  const color = STATUS_COLORS[file.status] || 'var(--kr-text-faint)';
                   return (
                     <div key={file.path} className="git-file-row">
                       {showCommit && (
@@ -569,7 +569,7 @@ export function GitPanel({ projectId, discussionId, onClose, terminalEnabled = f
                           type="checkbox"
                           checked={selectedFiles.includes(file.path)}
                           onChange={() => toggleFile(file.path)}
-                          style={{ marginRight: 6, accentColor: '#c8ff00' }}
+                          style={{ marginRight: 6, accentColor: 'var(--kr-accent-ink)' }}
                         />
                       )}
                       <Icon size={12} style={{ color }} className="flex-shrink-0" />

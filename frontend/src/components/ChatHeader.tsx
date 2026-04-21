@@ -11,6 +11,8 @@ import {
   Menu, Lock, Unlock, RefreshCw, Share2, Users2, Star,
   FlaskConical, Info,
 } from 'lucide-react';
+import { MatrixText } from './MatrixText';
+import { ProfileTooltip } from './ProfileTooltip';
 
 const isBootstrapDisc = (title: string) => title.startsWith('Bootstrap: ');
 const isBriefingDisc = (title: string) => title.startsWith('Briefing');
@@ -142,7 +144,7 @@ export function ChatHeader({
             <Star
               size={14}
               style={discussion.pinned
-                ? { color: '#ffc800', fill: '#ffc800' }
+                ? { color: 'var(--kr-warning)', fill: 'var(--kr-warning)' }
                 : { color: 'var(--kr-text-ghost)' }}
             />
           </button>
@@ -183,7 +185,7 @@ export function ChatHeader({
               }}
               title={(isValidationDisc(discussion.title) || isBootstrapDisc(discussion.title) || isBriefingDisc(discussion.title)) ? undefined : t('disc.editTitle')}
             >
-              {discussion.title}
+              <MatrixText text={discussion.title} />
             </span>
           )}
           {!isValidationDisc(discussion.title) && !isBootstrapDisc(discussion.title) && !isBriefingDisc(discussion.title) && (
@@ -237,7 +239,7 @@ export function ChatHeader({
                   >
                     <Cpu size={10} style={{ color: agentColor(a.agent_type) }} />
                     {a.name}
-                    {a.agent_type === discussion.agent && <Check size={10} style={{ marginLeft: 'auto', color: '#c8ff00' }} />}
+                    {a.agent_type === discussion.agent && <Check size={10} style={{ marginLeft: 'auto', color: 'var(--kr-accent-ink)' }} />}
                   </button>
                 ))}
               </div>
@@ -434,7 +436,7 @@ export function ChatHeader({
         {/* MCP info button */}
         <div className="relative">
           <button
-            className="disc-icon-btn" style={{ color: showMcpPopover ? '#00d4ff' : undefined }}
+            className="disc-icon-btn" style={{ color: showMcpPopover ? 'var(--kr-cyan)' : undefined }}
             onClick={() => { setShowMcpPopover(prev => { if (prev) setMcpSearchFilter(''); return !prev; }); setShowProfileEditor(false); }}
             title={t('disc.mcps')}
             aria-label={t('disc.mcps')}
@@ -489,11 +491,11 @@ export function ChatHeader({
                         title={incomp ? `\u26a0 ${incomp.reason}` : isApiOnly ? 'Non disponible en mode API' : undefined}
                         className="disc-mcp-item"
                         style={{
-                          color: incomp ? '#ff6b6b' : isApiOnly ? 'rgba(255,255,255,0.25)' : '#e8eaed',
+                          color: incomp ? 'var(--kr-error)' : isApiOnly ? 'var(--kr-text-ghost)' : 'var(--kr-text-primary)',
                           opacity: incomp ? 0.7 : isApiOnly ? 0.5 : 1,
                         }}
                       >
-                        <Server size={9} style={{ color: incomp ? '#ff6b6b' : isApiOnly ? 'var(--kr-text-ghost)' : '#00d4ff' }} className="flex-shrink-0" />
+                        <Server size={9} style={{ color: incomp ? 'var(--kr-error)' : isApiOnly ? 'var(--kr-text-ghost)' : 'var(--kr-cyan)' }} className="flex-shrink-0" />
                         {c.label}
                         {incomp && <span className="disc-mcp-incompatible">incompatible</span>}
                         <span className="disc-mcp-item-name">{c.server_name}</span>
@@ -509,7 +511,7 @@ export function ChatHeader({
         {/* Edit profiles/skills button */}
         <div className="relative">
           <button
-            className="disc-icon-btn" style={{ color: showProfileEditor ? '#a78bfa' : undefined }}
+            className="disc-icon-btn" style={{ color: showProfileEditor ? 'var(--kr-purple-soft)' : undefined }}
             onClick={() => { setShowProfileEditor(prev => !prev); setShowMcpPopover(false); }}
             title={t('disc.editConfig')}
             aria-label={t('disc.editConfig')}
@@ -551,24 +553,26 @@ export function ChatHeader({
                     {availableProfiles.map(profile => {
                       const active = (discussion.profile_ids ?? []).includes(profile.id);
                       return (
-                        <button key={profile.id} title={profile.role}
-                          className="disc-toggle-pill"
-                          data-active={active}
-                          data-color="purple"
-                          style={{
-                            borderColor: active ? (profile.color || 'rgba(139,92,246,0.4)') : undefined,
-                            background: active ? `${profile.color}15` : undefined,
-                            color: active ? (profile.color || '#a78bfa') : undefined,
-                          }}
-                          onClick={async () => {
-                            const current = discussion.profile_ids ?? [];
-                            const next = active ? current.filter((id: string) => id !== profile.id) : [...current, profile.id];
-                            await discussionsApi.update(discussion.id, { profile_ids: next });
-                            onDiscussionUpdated();
-                          }}>
-                          {active && <Check size={8} />}
-                          {profile.avatar} {profile.persona_name || profile.name}
-                        </button>
+                        <ProfileTooltip key={profile.id} profile={profile}>
+                          <button
+                            className="disc-toggle-pill"
+                            data-active={active}
+                            data-color="purple"
+                            style={{
+                              borderColor: active ? (profile.color || 'rgba(var(--kr-purple-rgb), 0.4)') : undefined,
+                              background: active ? `${profile.color}15` : undefined,
+                              color: active ? (profile.color || 'var(--kr-purple-soft)') : undefined,
+                            }}
+                            onClick={async () => {
+                              const current = discussion.profile_ids ?? [];
+                              const next = active ? current.filter((id: string) => id !== profile.id) : [...current, profile.id];
+                              await discussionsApi.update(discussion.id, { profile_ids: next });
+                              onDiscussionUpdated();
+                            }}>
+                            {active && <Check size={8} />}
+                            {profile.avatar} {profile.persona_name || profile.name}
+                          </button>
+                        </ProfileTooltip>
                       );
                     })}
                   </div>
@@ -656,7 +660,7 @@ export function ChatHeader({
 
         {discussion.project_id && (
           <button
-            className="disc-icon-btn" style={{ color: showGitPanel ? '#c8ff00' : undefined }}
+            className="disc-icon-btn" style={{ color: showGitPanel ? 'var(--kr-accent-ink)' : undefined }}
             onClick={onToggleGitPanel}
             title={pendingFilesCount > 0
               ? t('git.pendingFilesTooltip', pendingFilesCount)
@@ -710,7 +714,7 @@ export function ChatHeader({
           </div>
         )}
         <button
-          className="disc-icon-btn" style={{ color: '#ff4d6a' }}
+          className="disc-icon-btn" style={{ color: 'var(--kr-error)' }}
           onClick={() => onDelete(discussion.id)}
           aria-label="Delete discussion"
         >

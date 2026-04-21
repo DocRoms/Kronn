@@ -198,6 +198,13 @@ All models downloaded on first use and cached locally.
 - **Worktree Isolation + Test Mode** — each discussion/workflow runs in its own git worktree. One-click **🧪 Test mode** (0.5) swaps your main repo to the discussion's branch so you can try the code in your IDE without leaving Kronn; the agent is paused, a global banner shows the active test, and exiting restores your previous branch + pops the auto-stash + re-creates the worktree. Triple preflight (worktree dirty, main dirty, detached HEAD) with a modal that lets you pick _stash and proceed_ / _commit first_ / _cancel_ — rollback on any failure
 - **Agent Incompatibility** — Kronn tracks per-agent limitations and auto-excludes incompatible agents from steps
 - **Guided Tour** — 17-step interactive onboarding for new users. Auto-launched on first visit, replayable from "?" button. 4 learn-by-doing steps where the user clicks the real UI (pulse animation). Spotlight overlay with auto-positioned tooltips. Keyboard navigation (Escape/arrows). Mobile-responsive
+- **Secret unlock area** — a hidden zone in Settings (revealed by a
+  well-known arcade input sequence entered on the Settings page)
+  accepts short codes that ship with each release. A single code can
+  unlock a theme, a profile, or both at once. Lets the maintainer
+  ship early-access palettes and personas for testers without
+  exposing them in the default UI. Codes are never distributed with
+  the source — only their hashes
 
 ---
 

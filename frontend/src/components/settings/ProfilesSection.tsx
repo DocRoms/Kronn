@@ -25,7 +25,14 @@ export function ProfilesSection({ toast, t }: ProfilesSectionProps) {
   const [editingPersonaValue, setEditingPersonaValue] = useState('');
 
   useEffect(() => {
-    profilesApi.list().then(setAvailableProfiles).catch(e => console.warn('Failed to load profiles:', e));
+    const refetch = () => profilesApi.list()
+      .then(setAvailableProfiles)
+      .catch(e => console.warn('Failed to load profiles:', e));
+    refetch();
+    // Secret-code unlock can add profiles mid-session (e.g. Batman);
+    // refetch so the list stays in sync without a full page reload.
+    window.addEventListener('kronn:profiles-changed', refetch);
+    return () => window.removeEventListener('kronn:profiles-changed', refetch);
   }, []);
 
   return (
@@ -128,7 +135,7 @@ export function ProfilesSection({ toast, t }: ProfilesSectionProps) {
                 {!profile.is_builtin && (
                   <button
                     className="set-icon-btn text-error"
-                    style={{ padding: '2px 6px', borderColor: 'rgba(255,77,106,0.2)' }}
+                    style={{ padding: '2px 6px', borderColor: 'rgba(var(--kr-error-rgb), 0.2)' }}
                     onClick={async () => {
                       if (!confirm(t('profiles.deleteConfirm'))) return;
                       try {

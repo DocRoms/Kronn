@@ -4,6 +4,7 @@ import type { Discussion } from '../types/generated';
 import { isValidationDisc } from '../lib/constants';
 import { formatRelativeTime } from '../lib/relativeTime';
 import { useT } from '../lib/I18nContext';
+import { MatrixText } from './MatrixText';
 import '../pages/DiscussionsPage.css';
 
 const isBootstrapDisc = (title: string) => title.startsWith('Bootstrap: ');
@@ -100,22 +101,22 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
       >
         <div className="disc-item-content">
           <div className="disc-item-title">
-            {isValidationDisc(disc.title) && <ShieldCheck size={10} style={{ color: '#c8ff00', flexShrink: 0 }} />}
-            {isBriefingDisc(disc.title) && <Zap size={10} style={{ color: '#60a5fa', flexShrink: 0 }} />}
-            {isBootstrapDisc(disc.title) && <Rocket size={10} style={{ color: '#c8ff00', flexShrink: 0 }} />}
-            {disc.workspace_mode === 'Isolated' && <GitBranch size={10} style={{ color: '#60a5fa', flexShrink: 0 }} />}
-            {disc.shared_id && <Users2 size={10} style={{ color: '#34d399', flexShrink: 0 }} />}
+            {isValidationDisc(disc.title) && <ShieldCheck size={10} style={{ color: 'var(--kr-accent-ink)', flexShrink: 0 }} />}
+            {isBriefingDisc(disc.title) && <Zap size={10} style={{ color: 'var(--kr-info)', flexShrink: 0 }} />}
+            {isBootstrapDisc(disc.title) && <Rocket size={10} style={{ color: 'var(--kr-accent-ink)', flexShrink: 0 }} />}
+            {disc.workspace_mode === 'Isolated' && <GitBranch size={10} style={{ color: 'var(--kr-info)', flexShrink: 0 }} />}
+            {disc.shared_id && <Users2 size={10} style={{ color: 'var(--kr-success)', flexShrink: 0 }} />}
             {/* Title text truncates; badge + star sit OUTSIDE the truncated
                 zone so they're always visible even on long titles. */}
-            <span className="disc-item-title-text">{disc.title}</span>
+            <span className="disc-item-title-text"><MatrixText text={disc.title} /></span>
             {showBadge && <span className="disc-unseen-badge">{unseen}</span>}
             {/* Pinned indicator (non-interactive) — just a small star to
                 show which discs are in Favorites. The toggle lives in
                 ChatHeader where there's room for a proper button. */}
-            {disc.pinned && <Star size={9} style={{ color: '#ffc800', fill: '#ffc800', flexShrink: 0 }} />}
+            {disc.pinned && <Star size={9} style={{ color: 'var(--kr-warning)', fill: 'var(--kr-warning)', flexShrink: 0 }} />}
           </div>
           <div className="disc-item-meta">
-            {isSending && <Loader2 size={8} style={{ animation: 'spin 1s linear infinite', color: '#c8ff00' }} />}
+            {isSending && <Loader2 size={8} style={{ animation: 'spin 1s linear infinite', color: 'var(--kr-accent-ink)' }} />}
             {isSending && onStop && (
               <button
                 type="button"
@@ -131,7 +132,7 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
               </button>
             )}
             {(disc.participants?.length ?? 0) > 1 && (
-              <Users size={8} style={{ color: '#8b5cf6' }} />
+              <Users size={8} style={{ color: 'var(--kr-purple)' }} />
             )}
             {disc.message_count ?? disc.messages.length} msg · {disc.agent}
             {relativeWhen && (

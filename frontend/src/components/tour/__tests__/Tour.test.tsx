@@ -136,4 +136,61 @@ describe('Guided Tour', () => {
     expect(Number(screen.getByTestId('total').textContent)).toBe(TOUR_STEPS.length);
     expect(TOUR_STEPS.length).toBeGreaterThanOrEqual(10);
   });
+
+  // ─── Step persistence / resume ─────────────────────────────────────
+
+  it('persists the current step to localStorage when advancing', async () => {
+    renderTour();
+    fireEvent.click(screen.getByTestId('start'));
+    expect(screen.getByTestId('step').textContent).toBe('0');
+    // Step 0 → 1: advancing runs navigateToStep which awaits
+    // waitForElement up to 2s when the selector isn't in the DOM
+    // (the test harness doesn't render the real pages).
+    await act(async () => {
+      fireEvent.keyDown(document, { key: 'ArrowRight' });
+      await new Promise(r => setTimeout(r, 2500));
+    });
+    expect(localStorage.getItem('kronn:tour-step')).toBe('1');
+  });
+
+  it('clears the saved step when the tour is completed (skip)', () => {
+    localStorage.setItem('kronn:tour-step', '3');
+    renderTour();
+    fireEvent.click(screen.getByTestId('skip'));
+    expect(localStorage.getItem('kronn:tour-step')).toBeNull();
+    // And the completion flag is set.
+    expect(localStorage.getItem(STORAGE_KEY)).toBe('true');
+  });
+
+  it('auto-resumes from a saved step when starting the tour', async () => {
+    localStorage.setItem('kronn:tour-step', '3');
+    renderTour();
+    // Explicit non-forced start — resumeStep is read from localStorage.
+    const tourRef = { start: null as null | ((force?: boolean) => void) };
+    const GrabStart = () => {
+      const tour = useTour();
+      tourRef.start = tour.start;
+      return null;
+    };
+    render(
+      <TourProvider setPage={setPage}>
+        <TestConsumer />
+        <GrabStart />
+      </TourProvider>
+    );
+    act(() => { tourRef.start?.(false); });
+    // Wait for navigateToStep to settle (50ms kickoff + 300ms page wait
+    // + 2s waitForElement timeout).
+    await act(async () => { await new Promise(r => setTimeout(r, 2500)); });
+    expect(localStorage.getItem('kronn:tour-step')).toBe('3');
+  });
+
+  it('start(force=true) always restarts at step 0 regardless of saved step', () => {
+    localStorage.setItem(STORAGE_KEY, 'true');
+    localStorage.setItem('kronn:tour-step', '5');
+    renderTour();
+    fireEvent.click(screen.getByTestId('start'));
+    expect(Number(screen.getByTestId('step').textContent)).toBe(0);
+    expect(localStorage.getItem('kronn:tour-step')).toBe('0');
+  });
 });

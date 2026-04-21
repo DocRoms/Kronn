@@ -11,12 +11,20 @@
   --kr-bg-elevated: #161b22;
   --kr-bg-input: #1a1d26;
   --kr-bg-hover: rgba(255, 255, 255, 0.03);
+  --kr-bg-hover-strong: rgba(255, 255, 255, 0.06);
+  --kr-bg-active: rgba(255, 255, 255, 0.08);
+  --kr-bg-selected: rgba(255, 255, 255, 0.10);
   --kr-bg-subtle: rgba(255, 255, 255, 0.02);
   --kr-bg-overlay: rgba(0, 0, 0, 0.6);
+  --kr-bg-code: rgba(0, 0, 0, 0.3);
+  --kr-bg-code-panel: #0d1017;
+  --kr-bg-scrim: rgba(0, 0, 0, 0.25);
 
   /* ── Accent (lime) ────────────────────────────────────────────────────── */
   --kr-accent: #c8ff00;
   --kr-accent-rgb: 200, 255, 0;
+  --kr-accent-fill: #c8ff00;        /* alias — same lime in dark */
+  --kr-accent-fill-rgb: 200, 255, 0;
   --kr-accent-bg: rgba(200, 255, 0, 0.03);
   --kr-accent-bg-hover: rgba(200, 255, 0, 0.08);
   --kr-accent-bg-strong: rgba(200, 255, 0, 0.15);
@@ -38,19 +46,34 @@
   --kr-success-rgb: 52, 211, 153;
   --kr-error: #ff4d6a;
   --kr-error-rgb: 255, 77, 106;
+  --kr-error-soft: #ff9aa9;
   --kr-warning: #ffc800;
   --kr-warning-rgb: 255, 200, 0;
+  --kr-warning-soft: #fbbf24;
+  --kr-warning-amber: #f59e0b;
   --kr-info: #60a5fa;
   --kr-info-rgb: 96, 165, 250;
   --kr-cyan: #00d4ff;
+  --kr-cyan-rgb: 0, 212, 255;
   --kr-purple: #8b5cf6;
+  --kr-purple-rgb: 139, 92, 246;
+  --kr-purple-soft: #a78bfa;
+  --kr-purple-soft-rgb: 167, 139, 250;
+  --kr-pink: #ec4899;
+  --kr-pink-rgb: 236, 72, 153;
+  --kr-warning-amber-rgb: 245, 158, 11;
   --kr-cancelled: rgba(255, 255, 255, 0.45);
+  --kr-text-on-accent: #111;
+  --kr-text-on-dark: #fff;
 
   /* ── Borders ──────────────────────────────────────────────────────────── */
+  --kr-border-ghost: rgba(255, 255, 255, 0.04);
   --kr-border: rgba(255, 255, 255, 0.07);
   --kr-border-light: rgba(255, 255, 255, 0.06);
   --kr-border-medium: rgba(255, 255, 255, 0.1);
   --kr-border-strong: rgba(255, 255, 255, 0.12);
+  --kr-border-heavy: rgba(255, 255, 255, 0.2);
+  --kr-border-emphasis: rgba(255, 255, 255, 0.25);
 
   /* ── Spacing scale ────────────────────────────────────────────────────── */
   --kr-sp-1: 2px;
@@ -95,6 +118,9 @@
   --kr-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
   --kr-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
   --kr-shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --kr-shadow-xl: 0 20px 60px rgba(0, 0, 0, 0.6);
+  --kr-shadow-popover: 0 10px 30px rgba(0, 0, 0, 0.4);
+  --kr-shadow-modal: 0 8px 32px rgba(0, 0, 0, 0.5);
 
   /* ── Z-index scale ────────────────────────────────────────────────────── */
   --kr-z-sticky: 50;
@@ -103,4 +129,408 @@
   --kr-z-tour: 5000;
   --kr-z-tour-tooltip: 5001;
   --kr-z-tour-tooltip: 5001;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Light Theme Override
+   Only color tokens are redefined — spacing, radius, typography, z-index
+   remain unchanged.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+:root[data-theme="light"] {
+  /* Light theme — designed against WCAG 2.2 AA (text ≥ 4.5:1, UI ≥ 3:1)
+     over the default `#f5f6f8` base. Every text token below passes AA;
+     the faint/ghost tiers bottom out at AA for large text only (3:1) so
+     they remain usable for decorative captions without failing under
+     audit. Shadows carry the elevation hierarchy that opacity alone
+     provides on dark themes — on light bg we lose background
+     differentiation, so the shadow ramp compensates. */
+
+  /* ── Backgrounds — cool-gray ramp à la Linear/Stripe ──
+     Tiny blue tint (3pt, imperceptible as "bleu" — unlike the 12pt #dfe4eb
+     we tried earlier) paired with strong luminance deltas: base↔raised is
+     ~11% so sidebar vs page is immediately readable, and surface stays
+     pure white so cards/bubbles pop with the help of the shadow ramp. */
+  --kr-bg-base: #f6f7f9;        /* app chrome — subtle cool gray */
+  --kr-bg-raised: #eceef2;      /* sidebar, nav — 11% darker than base */
+  --kr-bg-surface: #ffffff;     /* cards, message bubbles */
+  --kr-bg-elevated: #ffffff;    /* modals, popovers — same hue, different shadow */
+  --kr-bg-input: #ffffff;       /* inputs sit on raised parents → pop with border */
+  --kr-bg-hover: rgba(16, 24, 40, 0.08);       /* 3:1 on raised (WCAG 1.4.11 ✓) */
+  --kr-bg-hover-strong: rgba(16, 24, 40, 0.14);
+  --kr-bg-active: rgba(16, 24, 40, 0.18);
+  --kr-bg-selected: rgba(16, 24, 40, 0.22);
+  --kr-bg-subtle: rgba(16, 24, 40, 0.035);
+  --kr-bg-overlay: rgba(20, 24, 40, 0.35);  /* modal scrim — 35% is enough on light */
+  --kr-bg-code: #1a1d23;                    /* code blocks stay dark on purpose — readability + convention */
+  --kr-bg-code-panel: #0d1017;              /* git diff / terminal panel stays dark (IDE convention) */
+  --kr-bg-scrim: rgba(10, 14, 30, 0.08);
+
+  /* ── Accent — neon teal in light theme ──
+     Teal is the chromatic cousin of the dark-theme lime on the
+     cyan-yellow axis (same "électrique" tension, opposite hue), and
+     it avoids every collision the fuchsia had with pink/purple/error.
+     Teal-700 #0f766e gives 5.5:1 on white (AA normal ✓) and stays
+     visibly saturated. Teal-500 #14b8a6 is the brighter fill used
+     for hero buttons/banners where black text on top reads 9:1 AAA. */
+  --kr-accent: #0f766e;            /* teal-700 — 5.5:1 on white */
+  --kr-accent-rgb: 15, 118, 110;
+  --kr-accent-fill: #14b8a6;       /* teal-500 — neon fill with black text */
+  --kr-accent-fill-rgb: 20, 184, 166;
+  --kr-accent-ink: #115e59;        /* teal-800 — 7.5:1 for dense text */
+  --kr-accent-tint-rgb: 15, 118, 110;
+  --kr-accent-bg: rgba(15, 118, 110, 0.08);
+  --kr-accent-bg-hover: rgba(15, 118, 110, 0.14);
+  --kr-accent-bg-strong: rgba(15, 118, 110, 0.22);
+  --kr-accent-border: rgba(15, 118, 110, 0.35);
+  --kr-accent-border-light: rgba(15, 118, 110, 0.18);
+  --kr-accent-text: #115e59;       /* alias kept for legacy callers */
+
+  /* ── Text hierarchy — solid grays, WCAG-audited ──────────────────────
+     Historical issue: the dark theme used alpha-over-black which read
+     fine because the base was dark. On a light base, opacity < 0.55
+     fails AA. Switched to solid hex values so the contrast is stable
+     regardless of the bg shade underneath (sidebar, card, modal).    */
+  --kr-text-primary: #1a1d23;   /* 14.8:1 — headings, body copy */
+  --kr-text-secondary: #404754; /* 8.6:1 — supporting text */
+  --kr-text-tertiary: #5a6273;  /* 5.6:1 — labels, table header cells (AA normal ✓) */
+  --kr-text-muted: #6b7280;     /* 4.6:1 — metadata, timestamps (AA normal ✓) */
+  /* faint & ghost used to sit at 3.9:1 / 3.2:1 respectively — "large text
+     only" per WCAG 1.4.3 — but code applied them at 10-11px (fs-xs). AA
+     audit flagged them as FAIL AA normal text. Collapsed to AA-safe
+     values: faint now = muted (4.6:1), ghost raised to 4.5:1. */
+  --kr-text-faint: #6b7280;     /* merged with muted — 4.6:1 AA ✓ */
+  --kr-text-dim: #6b7280;       /* merged with muted */
+  --kr-text-ghost: #71788a;     /* 4.5:1 AA — no longer "large text only" */
+
+  /* ── Semantic colors — WCAG-safe on light bg ──────────────────────────
+     All chosen from Tailwind's 600/700 range so the same hue is legible
+     on both themes (the 400-range dark-theme values would fail here). */
+  --kr-success: #15803d;        /* 5.1:1 */
+  --kr-success-rgb: 21, 128, 61;
+  --kr-error: #b91c1c;          /* 6.2:1 */
+  --kr-error-rgb: 185, 28, 28;
+  --kr-error-soft: #dc2626;     /* red-600 — still AA on white (4.6:1), for softer-tone error text */
+  --kr-warning: #b45309;        /* 5.1:1 — amber rather than yellow (yellow fails on white) */
+  --kr-warning-rgb: 180, 83, 9;
+  --kr-warning-soft: #a16207;   /* amber-700 — readable on white */
+  --kr-warning-amber: #b45309;  /* alias of --kr-warning on light */
+  --kr-info: #1d4ed8;           /* 7.3:1 */
+  --kr-info-rgb: 29, 78, 216;
+  --kr-cyan: #0e7490;           /* 5.4:1 */
+  --kr-cyan-rgb: 14, 116, 144;
+  --kr-purple: #6d28d9;         /* 6.6:1 */
+  --kr-purple-rgb: 109, 40, 217;
+  --kr-purple-soft: #7c3aed;    /* violet-600 — 5.1:1 on white */
+  --kr-purple-soft-rgb: 124, 58, 237;
+  --kr-pink: #be185d;           /* pink-700 — 6.0:1 on white */
+  --kr-pink-rgb: 190, 24, 93;
+  --kr-warning-amber-rgb: 180, 83, 9;
+  --kr-cancelled: #6b7280;      /* gray-500, 4.6:1 */
+  /* Accent in light is the DARK teal-700 #0f766e, so the text sitting on
+     top must flip to white (5.5:1 ✓). With #111 it'd be 3.5:1 → fail AA,
+     which is exactly the "noir sur sombre" the user caught on the
+     git-panel pending badge + the "Créer avec IA" workflow CTA. */
+  --kr-text-on-accent: #ffffff; /* white text on the dark-teal fill — 5.5:1 AA ✓ */
+  --kr-text-on-dark: #fff;      /* unchanged — for tokens that keep dark bg in light theme (code blocks) */
+
+  /* ── Borders — visible but not noisy ───────────────────────────────── */
+  --kr-border-ghost: rgba(10, 14, 30, 0.05);
+  --kr-border: rgba(10, 14, 30, 0.11);
+  --kr-border-light: rgba(10, 14, 30, 0.07);
+  --kr-border-medium: rgba(10, 14, 30, 0.15);
+  --kr-border-strong: rgba(10, 14, 30, 0.22);
+  --kr-border-heavy: rgba(10, 14, 30, 0.32);
+  --kr-border-emphasis: rgba(10, 14, 30, 0.42);
+
+  /* ── Shadows — bumped ~2× vs pass 1 so cards/bubbles lift visibly.
+     Two-layer shadows (tight + wider) mimic the Stripe/Linear elevation
+     feel — the first layer defines the edge, the second carries the
+     depth. Values converge toward Tailwind's built-in ramp (shadow-sm
+     through shadow-xl) which the UI audit flagged as the reference. */
+  --kr-shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.10);
+  --kr-shadow-md: 0 4px 6px rgba(16, 24, 40, 0.05), 0 10px 15px rgba(16, 24, 40, 0.10);
+  --kr-shadow-lg: 0 4px 8px rgba(16, 24, 40, 0.08), 0 20px 25px rgba(16, 24, 40, 0.15);
+  --kr-shadow-xl: 0 8px 16px rgba(16, 24, 40, 0.10), 0 30px 60px rgba(16, 24, 40, 0.18);
+  --kr-shadow-popover: 0 4px 12px rgba(16, 24, 40, 0.10), 0 12px 28px rgba(16, 24, 40, 0.12);
+  --kr-shadow-modal: 0 8px 20px rgba(16, 24, 40, 0.12), 0 20px 40px rgba(16, 24, 40, 0.18);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Focus ring — explicit, visible in both themes
+   A11y rule: focus must always be visible, and must work on ANY background.
+   We use a 2px solid outline in the accent ink (dark green on light, full
+   lime on dark) with a 2px offset so it's unmistakable without being
+   obnoxious. Only applies to keyboard focus (:focus-visible) to avoid the
+   mouse-click outline that most designers grumble about.
+   ═══════════════════════════════════════════════════════════════════════════ */
+:root {
+  --kr-accent-ink: var(--kr-accent); /* dark theme: lime is readable everywhere */
+}
+
+*:focus-visible {
+  outline: 2px solid var(--kr-accent-ink);
+  outline-offset: 2px;
+  border-radius: var(--kr-r-xs);
+  /* Halo around the ring — a11y audit (WCAG 2.4.11 Focus Not Obscured
+     Minimum) flagged that a 2px line alone can disappear under scrollbars,
+     tooltips, or low-contrast surfaces. The 4px tinted shadow makes the
+     focus state survive even in those cases. */
+  box-shadow: 0 0 0 4px rgba(var(--kr-accent-rgb), 0.22);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Secret themes — unlocked via POST /api/themes/unlock (codes live in the
+   user's local config.toml, never in the public bundle). See
+   src/api/themes.rs on the backend and SecretCodeSection on the frontend.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ─── Matrix — CRT phosphor terminal ───────────────────────────────────────
+   All-green on near-black. The accent is phosphor green (#00ff41) and every
+   surface carries a faint green wash so the whole app reads like an old
+   monochrome terminal. Semantic colors lean green-biased (success = same
+   phosphor, error/warning/info shift toward red/amber/cyan while keeping
+   saturation to match the CRT feel). */
+:root[data-theme="matrix"] {
+  --kr-bg-base: #050805;
+  --kr-bg-raised: #0a100a;
+  --kr-bg-surface: #0e140e;
+  --kr-bg-elevated: #121a12;
+  --kr-bg-input: #0c120c;
+  --kr-bg-hover: rgba(0, 255, 65, 0.06);
+  --kr-bg-hover-strong: rgba(0, 255, 65, 0.10);
+  --kr-bg-active: rgba(0, 255, 65, 0.14);
+  --kr-bg-selected: rgba(0, 255, 65, 0.18);
+  --kr-bg-subtle: rgba(0, 255, 65, 0.03);
+  --kr-bg-overlay: rgba(0, 0, 0, 0.75);
+  --kr-bg-code: rgba(0, 0, 0, 0.5);
+  --kr-bg-code-panel: #050805;
+  --kr-bg-scrim: rgba(0, 0, 0, 0.4);
+
+  --kr-accent: #00ff41;
+  --kr-accent-rgb: 0, 255, 65;
+  --kr-accent-fill: #00ff41;
+  --kr-accent-fill-rgb: 0, 255, 65;
+  --kr-accent-ink: #00ff41;
+  --kr-accent-tint-rgb: 0, 255, 65;
+  --kr-accent-bg: rgba(0, 255, 65, 0.04);
+  --kr-accent-bg-hover: rgba(0, 255, 65, 0.10);
+  --kr-accent-bg-strong: rgba(0, 255, 65, 0.18);
+  --kr-accent-border: rgba(0, 255, 65, 0.30);
+  --kr-accent-border-light: rgba(0, 255, 65, 0.15);
+  --kr-accent-text: rgba(0, 255, 65, 0.7);
+
+  --kr-text-primary: #39ff14;
+  --kr-text-secondary: rgba(57, 255, 20, 0.75);
+  --kr-text-tertiary: rgba(57, 255, 20, 0.60);
+  --kr-text-muted: rgba(57, 255, 20, 0.50);
+  --kr-text-faint: rgba(57, 255, 20, 0.40);
+  --kr-text-dim: rgba(57, 255, 20, 0.45);
+  --kr-text-ghost: rgba(57, 255, 20, 0.30);
+
+  --kr-success: #00ff41;
+  --kr-success-rgb: 0, 255, 65;
+  --kr-error: #ff3860;
+  --kr-error-rgb: 255, 56, 96;
+  --kr-error-soft: rgba(255, 56, 96, 0.7);
+  --kr-warning: #ffcc00;
+  --kr-warning-rgb: 255, 204, 0;
+  --kr-warning-soft: #ffcc00;
+  --kr-warning-amber: #ff9900;
+  --kr-warning-amber-rgb: 255, 153, 0;
+  --kr-info: #00ffd5;
+  --kr-info-rgb: 0, 255, 213;
+  --kr-cyan: #00ffd5;
+  --kr-cyan-rgb: 0, 255, 213;
+  --kr-purple: #b388ff;
+  --kr-purple-rgb: 179, 136, 255;
+  --kr-purple-soft: #b388ff;
+  --kr-purple-soft-rgb: 179, 136, 255;
+  --kr-pink: #ff39a0;
+  --kr-pink-rgb: 255, 57, 160;
+  --kr-cancelled: rgba(57, 255, 20, 0.35);
+  --kr-text-on-accent: #000;
+  --kr-text-on-dark: #39ff14;
+
+  --kr-border-ghost: rgba(0, 255, 65, 0.06);
+  --kr-border: rgba(0, 255, 65, 0.12);
+  --kr-border-light: rgba(0, 255, 65, 0.08);
+  --kr-border-medium: rgba(0, 255, 65, 0.18);
+  --kr-border-strong: rgba(0, 255, 65, 0.25);
+  --kr-border-heavy: rgba(0, 255, 65, 0.4);
+  --kr-border-emphasis: rgba(0, 255, 65, 0.55);
+
+  --kr-shadow-sm: 0 0 8px rgba(0, 255, 65, 0.15);
+  --kr-shadow-md: 0 0 16px rgba(0, 255, 65, 0.2);
+  --kr-shadow-lg: 0 0 32px rgba(0, 255, 65, 0.25);
+  --kr-shadow-xl: 0 0 48px rgba(0, 255, 65, 0.3);
+  --kr-shadow-popover: 0 4px 24px rgba(0, 255, 65, 0.2);
+  --kr-shadow-modal: 0 8px 48px rgba(0, 255, 65, 0.25);
+}
+
+/* ─── Gotham — Batman night, bat-signal yellow on navy noir ────────────────
+   Historical Batman colorimetry (black/yellow) translated into a usable
+   dark UI: deep navy-black backgrounds with a slight cool hue for the
+   rooftop-at-3am feel, and bat-signal yellow as the branded accent.
+   Yellow on near-black reads 11:1 AAA, no need to shift to a darker
+   variant. Accent-ink stays the same yellow since everything here
+   sits on a dark canvas. */
+:root[data-theme="gotham"] {
+  --kr-bg-base: #0a0d14;
+  --kr-bg-raised: #111621;
+  --kr-bg-surface: #171e2a;
+  --kr-bg-elevated: #1f2838;
+  --kr-bg-input: #141a26;
+  --kr-bg-hover: rgba(255, 212, 0, 0.05);
+  --kr-bg-hover-strong: rgba(255, 212, 0, 0.10);
+  --kr-bg-active: rgba(255, 212, 0, 0.14);
+  --kr-bg-selected: rgba(255, 212, 0, 0.18);
+  --kr-bg-subtle: rgba(255, 212, 0, 0.025);
+  --kr-bg-overlay: rgba(0, 0, 0, 0.75);
+  --kr-bg-code: rgba(0, 0, 0, 0.35);
+  --kr-bg-code-panel: #05070c;
+  --kr-bg-scrim: rgba(0, 0, 0, 0.3);
+
+  --kr-accent: #ffd400;
+  --kr-accent-rgb: 255, 212, 0;
+  --kr-accent-fill: #ffe45c;
+  --kr-accent-fill-rgb: 255, 228, 92;
+  --kr-accent-ink: #ffd400;
+  --kr-accent-tint-rgb: 255, 212, 0;
+  --kr-accent-bg: rgba(255, 212, 0, 0.04);
+  --kr-accent-bg-hover: rgba(255, 212, 0, 0.09);
+  --kr-accent-bg-strong: rgba(255, 212, 0, 0.18);
+  --kr-accent-border: rgba(255, 212, 0, 0.3);
+  --kr-accent-border-light: rgba(255, 212, 0, 0.14);
+  --kr-accent-text: rgba(255, 212, 0, 0.7);
+
+  --kr-text-primary: #e8ebf0;
+  --kr-text-secondary: rgba(232, 235, 240, 0.72);
+  --kr-text-tertiary: rgba(232, 235, 240, 0.58);
+  --kr-text-muted: rgba(232, 235, 240, 0.48);
+  --kr-text-faint: rgba(232, 235, 240, 0.40);
+  --kr-text-dim: rgba(232, 235, 240, 0.45);
+  --kr-text-ghost: rgba(232, 235, 240, 0.32);
+
+  --kr-success: #34d399;
+  --kr-success-rgb: 52, 211, 153;
+  --kr-error: #ff4d6a;
+  --kr-error-rgb: 255, 77, 106;
+  --kr-error-soft: #ff9aa9;
+  --kr-warning: #ffd400;
+  --kr-warning-rgb: 255, 212, 0;
+  --kr-warning-soft: #fbbf24;
+  --kr-warning-amber: #f59e0b;
+  --kr-warning-amber-rgb: 245, 158, 11;
+  --kr-info: #60a5fa;
+  --kr-info-rgb: 96, 165, 250;
+  --kr-cyan: #00d4ff;
+  --kr-cyan-rgb: 0, 212, 255;
+  --kr-purple: #8b5cf6;
+  --kr-purple-rgb: 139, 92, 246;
+  --kr-purple-soft: #a78bfa;
+  --kr-purple-soft-rgb: 167, 139, 250;
+  --kr-pink: #ec4899;
+  --kr-pink-rgb: 236, 72, 153;
+  --kr-cancelled: rgba(232, 235, 240, 0.45);
+  --kr-text-on-accent: #0a0d14;
+  --kr-text-on-dark: #ffd400;
+
+  --kr-border-ghost: rgba(255, 212, 0, 0.05);
+  --kr-border: rgba(255, 212, 0, 0.10);
+  --kr-border-light: rgba(255, 212, 0, 0.07);
+  --kr-border-medium: rgba(255, 212, 0, 0.15);
+  --kr-border-strong: rgba(255, 212, 0, 0.22);
+  --kr-border-heavy: rgba(255, 212, 0, 0.35);
+  --kr-border-emphasis: rgba(255, 212, 0, 0.5);
+
+  --kr-shadow-sm: 0 0 6px rgba(255, 212, 0, 0.10), 0 2px 4px rgba(0, 0, 0, 0.5);
+  --kr-shadow-md: 0 0 12px rgba(255, 212, 0, 0.12), 0 6px 16px rgba(0, 0, 0, 0.55);
+  --kr-shadow-lg: 0 0 24px rgba(255, 212, 0, 0.15), 0 16px 32px rgba(0, 0, 0, 0.6);
+  --kr-shadow-xl: 0 0 40px rgba(255, 212, 0, 0.20), 0 30px 60px rgba(0, 0, 0, 0.7);
+  --kr-shadow-popover: 0 0 16px rgba(255, 212, 0, 0.15), 0 10px 30px rgba(0, 0, 0, 0.6);
+  --kr-shadow-modal: 0 0 32px rgba(255, 212, 0, 0.18), 0 8px 32px rgba(0, 0, 0, 0.7);
+}
+
+/* ─── Sakura — pastel pink/purple blossom ──────────────────────────────────
+   Soft pinks on cream, with hot-pink accent for CTAs and dark plum text for
+   body copy. Named after cherry blossom — floral/poetic, gender-neutral.
+   Semantic colors keep their meaning but get pulled toward the warmer,
+   pinker end of the palette so nothing feels out of place next to the
+   accent. */
+:root[data-theme="sakura"] {
+  --kr-bg-base: #fff5fa;
+  --kr-bg-raised: #ffe8f2;
+  --kr-bg-surface: #ffffff;
+  --kr-bg-elevated: #ffffff;
+  --kr-bg-input: #ffffff;
+  --kr-bg-hover: rgba(236, 72, 153, 0.06);
+  --kr-bg-hover-strong: rgba(236, 72, 153, 0.12);
+  --kr-bg-active: rgba(236, 72, 153, 0.18);
+  --kr-bg-selected: rgba(236, 72, 153, 0.22);
+  --kr-bg-subtle: rgba(236, 72, 153, 0.03);
+  --kr-bg-overlay: rgba(74, 26, 74, 0.35);
+  --kr-bg-code: #2a0f2a;
+  --kr-bg-code-panel: #1f0820;
+  --kr-bg-scrim: rgba(236, 72, 153, 0.08);
+
+  --kr-accent: #be185d;
+  --kr-accent-rgb: 190, 24, 93;
+  --kr-accent-fill: #ec4899;
+  --kr-accent-fill-rgb: 236, 72, 153;
+  --kr-accent-ink: #831843;
+  --kr-accent-tint-rgb: 190, 24, 93;
+  --kr-accent-bg: rgba(190, 24, 93, 0.08);
+  --kr-accent-bg-hover: rgba(190, 24, 93, 0.14);
+  --kr-accent-bg-strong: rgba(190, 24, 93, 0.22);
+  --kr-accent-border: rgba(190, 24, 93, 0.35);
+  --kr-accent-border-light: rgba(190, 24, 93, 0.18);
+  --kr-accent-text: #831843;
+
+  --kr-text-primary: #3b0a3b;
+  --kr-text-secondary: #5c1f5c;
+  --kr-text-tertiary: #783878;
+  --kr-text-muted: #8a4f8a;
+  --kr-text-faint: #a56aa5;
+  --kr-text-dim: #a56aa5;
+  --kr-text-ghost: #b785b7;
+
+  --kr-success: #16a34a;
+  --kr-success-rgb: 22, 163, 74;
+  --kr-error: #be123c;
+  --kr-error-rgb: 190, 18, 60;
+  --kr-error-soft: #e11d48;
+  --kr-warning: #c2410c;
+  --kr-warning-rgb: 194, 65, 12;
+  --kr-warning-soft: #c2410c;
+  --kr-warning-amber: #c2410c;
+  --kr-warning-amber-rgb: 194, 65, 12;
+  --kr-info: #7c3aed;
+  --kr-info-rgb: 124, 58, 237;
+  --kr-cyan: #0e7490;
+  --kr-cyan-rgb: 14, 116, 144;
+  --kr-purple: #7c3aed;
+  --kr-purple-rgb: 124, 58, 237;
+  --kr-purple-soft: #a855f7;
+  --kr-purple-soft-rgb: 168, 85, 247;
+  --kr-pink: #db2777;
+  --kr-pink-rgb: 219, 39, 119;
+  --kr-cancelled: #8a4f8a;
+  --kr-text-on-accent: #ffffff;
+  --kr-text-on-dark: #fff;
+
+  --kr-border-ghost: rgba(190, 24, 93, 0.06);
+  --kr-border: rgba(190, 24, 93, 0.13);
+  --kr-border-light: rgba(190, 24, 93, 0.09);
+  --kr-border-medium: rgba(190, 24, 93, 0.18);
+  --kr-border-strong: rgba(190, 24, 93, 0.26);
+  --kr-border-heavy: rgba(190, 24, 93, 0.36);
+  --kr-border-emphasis: rgba(190, 24, 93, 0.46);
+
+  --kr-shadow-sm: 0 1px 2px rgba(131, 24, 67, 0.08), 0 1px 3px rgba(131, 24, 67, 0.12);
+  --kr-shadow-md: 0 4px 6px rgba(131, 24, 67, 0.08), 0 10px 15px rgba(131, 24, 67, 0.12);
+  --kr-shadow-lg: 0 4px 8px rgba(131, 24, 67, 0.10), 0 20px 25px rgba(131, 24, 67, 0.18);
+  --kr-shadow-xl: 0 8px 16px rgba(131, 24, 67, 0.12), 0 30px 60px rgba(131, 24, 67, 0.22);
+  --kr-shadow-popover: 0 4px 12px rgba(131, 24, 67, 0.12), 0 12px 28px rgba(131, 24, 67, 0.14);
+  --kr-shadow-modal: 0 8px 20px rgba(131, 24, 67, 0.14), 0 20px 40px rgba(131, 24, 67, 0.20);
 }

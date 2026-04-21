@@ -7,7 +7,7 @@
   border: 1px solid var(--kr-border-light);
   border-radius: var(--kr-r-lg);
   overflow: hidden;
-  background: rgba(0, 0, 0, 0.2);
+  background: var(--kr-bg-scrim);
 }
 
 /* ── Loading / empty ─────────────────────────────────── */
@@ -37,7 +37,7 @@
 
 .aidoc-search-wrap {
   padding: 6px 6px 4px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid var(--kr-border-ghost);
 }
 
 .aidoc-search-box {
@@ -48,15 +48,15 @@
   position: absolute;
   left: 7px;
   top: 6px;
-  color: rgba(255, 255, 255, 0.25);
+  color: var(--kr-text-ghost);
   pointer-events: none;
 }
 
 .aidoc-search-input {
   width: 100%;
   padding: 4px 22px 4px 22px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--kr-bg-hover);
+  border: 1px solid var(--kr-border);
   border-radius: var(--kr-r-sm);
   color: var(--kr-text-primary);
   font-size: var(--kr-fs-xs);
@@ -91,7 +91,7 @@
 }
 
 .aidoc-search-files-count {
-  color: rgba(255, 255, 255, 0.25);
+  color: var(--kr-text-ghost);
   margin-left: 2px;
 }
 
@@ -193,7 +193,7 @@
   align-items: center;
   justify-content: space-between;
   padding: 6px 12px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid var(--kr-border-ghost);
   flex-shrink: 0;
   gap: var(--kr-sp-4);
 }
@@ -246,13 +246,13 @@
 .aidoc-md ul { margin: 4px 0; padding-left: 20px; }
 .aidoc-md ol { margin: 4px 0; padding-left: 20px; }
 .aidoc-md li { margin: 2px 0; }
-.aidoc-md code { background: rgba(255, 255, 255, 0.08); padding: 1px 5px; border-radius: 4px; font-size: 12px; font-family: monospace; }
-.aidoc-md pre { background: rgba(0, 0, 0, 0.3); padding: 10px 12px; border-radius: 8px; overflow-x: auto; margin: 6px 0; border: 1px solid var(--kr-border-light); }
+.aidoc-md code { background: var(--kr-bg-active); padding: 1px 5px; border-radius: 4px; font-size: 12px; font-family: monospace; }
+.aidoc-md pre { background: var(--kr-bg-code); color: var(--kr-text-on-dark); padding: 10px 12px; border-radius: 8px; overflow-x: auto; margin: 6px 0; border: 1px solid var(--kr-border-light); --kr-accent: #c8ff00; }
 .aidoc-md pre code, .aidoc-md-pre-code { background: none; padding: 0; font-size: 12px; font-family: monospace; color: var(--kr-accent); }
 .aidoc-md table { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 12px; }
-.aidoc-md th { border: 1px solid rgba(255, 255, 255, 0.12); padding: 6px 10px; background: rgba(255, 255, 255, 0.05); font-weight: 600; text-align: left; }
-.aidoc-md td { border: 1px solid rgba(255, 255, 255, 0.08); padding: 5px 10px; }
+.aidoc-md th { border: 1px solid var(--kr-border-strong); padding: 6px 10px; background: var(--kr-bg-hover); font-weight: 600; text-align: left; }
+.aidoc-md td { border: 1px solid var(--kr-border); padding: 5px 10px; }
 .aidoc-md blockquote { border-left: 3px solid rgba(var(--kr-accent-rgb), 0.3); margin: 6px 0; padding-left: 12px; color: var(--kr-text-secondary); }
 .aidoc-md hr { border: none; border-top: 1px solid var(--kr-border-medium); margin: 10px 0; }
 .aidoc-md a { color: var(--kr-accent); text-decoration: underline; }
-.aidoc-md strong { font-weight: 700; color: #f0f0f0; }
+.aidoc-md strong { font-weight: 700; color: var(--kr-text-primary); }

@@ -5,12 +5,12 @@ import { Trash2, ChevronRight, Square } from 'lucide-react';
 import '../../pages/WorkflowsPage.css';
 
 const STATUS_COLORS: Record<string, string> = {
-  Pending: '#ffc800',
-  Running: '#00d4ff',
-  Success: '#34d399',
-  Failed: '#ff4d6a',
+  Pending: 'var(--kr-warning)',
+  Running: 'var(--kr-cyan)',
+  Success: 'var(--kr-success)',
+  Failed: 'var(--kr-error)',
   Cancelled: 'var(--kr-cancelled)',
-  WaitingApproval: '#c8ff00',
+  WaitingApproval: 'var(--kr-accent-ink)',
 };
 
 export interface RunDetailProps {
@@ -40,9 +40,9 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel }: RunDetailP
       <div className="flex-row gap-4">
         <span
           className="wf-step-dot"
-          style={{ width: 8, height: 8, background: STATUS_COLORS[run.status] ?? '#888' }}
+          style={{ width: 8, height: 8, background: STATUS_COLORS[run.status] ?? 'var(--kr-text-faint)' }}
         />
-        <span className="font-semibold text-base" style={{ color: STATUS_COLORS[run.status] ?? '#888' }}>
+        <span className="font-semibold text-base" style={{ color: STATUS_COLORS[run.status] ?? 'var(--kr-text-faint)' }}>
           {run.status}
         </span>
         <span className="text-xs text-muted flex-1">
@@ -85,13 +85,13 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel }: RunDetailP
                 <span
                   className="wf-step-dot"
                   style={{
-                    background: completed ? (STATUS_COLORS[completed.status] ?? '#888') : isNext ? '#ffc800' : 'var(--kr-border-medium)',
+                    background: completed ? (STATUS_COLORS[completed.status] ?? 'var(--kr-text-faint)') : isNext ? 'var(--kr-warning)' : 'var(--kr-border-medium)',
                     animation: isNext ? 'pulse 1.5s ease-in-out infinite' : undefined,
                   }}
                 />
                 <span style={{
                   fontWeight: isNext ? 600 : 400,
-                  color: completed ? 'rgba(255,255,255,0.6)' : isNext ? '#ffc800' : 'rgba(255,255,255,0.25)',
+                  color: completed ? 'var(--kr-text-secondary)' : isNext ? 'var(--kr-warning)' : 'var(--kr-text-ghost)',
                 }}>
                   {ws_step.name}
                 </span>
@@ -114,7 +114,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel }: RunDetailP
                 {completed && completed.duration_ms > 0 && (
                   <span className="text-ghost text-xs">{(completed.duration_ms / 1000).toFixed(1)}s</span>
                 )}
-                {isNext && <span className="text-2xs" style={{ color: 'rgba(255,200,0,0.5)' }}>running...</span>}
+                {isNext && <span className="text-2xs" style={{ color: 'rgba(var(--kr-warning-rgb), 0.5)' }}>running...</span>}
               </div>
             );
           })}
@@ -136,7 +136,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel }: RunDetailP
                 >
                   <span
                     className="wf-step-result-dot"
-                    style={{ background: STATUS_COLORS[sr.status] ?? '#888' }}
+                    style={{ background: STATUS_COLORS[sr.status] ?? 'var(--kr-text-faint)' }}
                   />
                   <span className="font-semibold">{sr.step_name}</span>
                   <span className="text-ghost">
@@ -148,7 +148,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel }: RunDetailP
                     </span>
                   )}
                   {!sr.condition_result && sr.status === 'Success' && i < run.step_results.length - 1 && (
-                    <span className="text-2xs" style={{ color: 'rgba(52,211,153,0.5)' }}>&rarr; suite</span>
+                    <span className="text-2xs" style={{ color: 'rgba(var(--kr-success-rgb), 0.5)' }}>&rarr; suite</span>
                   )}
                   <span className="flex-1" />
                   {!isExpanded && sr.output && (
@@ -165,7 +165,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel }: RunDetailP
                       {sr.output || t('wf.noOutput')}
                     </div>
                     <div className="flex-row gap-6 mt-3 text-xs text-faint">
-                      <span>{t('wf.status')}: <span style={{ color: STATUS_COLORS[sr.status] ?? '#888' }}>{sr.status}</span></span>
+                      <span>{t('wf.status')}: <span style={{ color: STATUS_COLORS[sr.status] ?? 'var(--kr-text-faint)' }}>{sr.status}</span></span>
                       {sr.duration_ms > 0 && <span>{t('wf.duration')}: {(sr.duration_ms / 1000).toFixed(1)}s</span>}
                       {sr.tokens_used > 0 && <span>Tokens: {sr.tokens_used}</span>}
                       {sr.condition_result && <span>Condition: <span className="text-warning">{conditionLabel(sr.condition_result)}</span></span>}

@@ -1,5 +1,7 @@
-import { useState, useRef, useMemo, memo } from 'react';
+import { useState, useRef, useMemo, useEffect, memo } from 'react';
 import ReactMarkdown from 'react-markdown';
+import { useTheme } from '../lib/ThemeContext';
+import { MatrixText } from './MatrixText';
 import remarkGfm from 'remark-gfm';
 import remarkEmoji from 'remark-emoji';
 import '../pages/DiscussionsPage.css';
@@ -52,6 +54,23 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
     onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onExpandSummary, onNavigate, t } = props;
   const isUser = msg.role === 'User';
   const agentType = msg.agent_type ?? defaultAgent;
+
+  // Matrix theme — when the discussion first loads, decode the user's
+  // LAST message as plain scrambled text before swapping to the normal
+  // Markdown rendering. Gives the "you are in the system" feel without
+  // disturbing agent answers or older history. Only runs once per
+  // MessageBubble mount, under the matrix theme, for the last user msg.
+  const { theme } = useTheme();
+  const [decodeDone, setDecodeDone] = useState(false);
+  const isMatrixLastUser = theme === 'matrix' && isUser && isLastUser;
+  useEffect(() => {
+    if (!isMatrixLastUser) { setDecodeDone(true); return; }
+    setDecodeDone(false);
+    // Slightly longer than the title decode (28 frames) because
+    // message content is longer — gives every char time to settle.
+    const timer = setTimeout(() => setDecodeDone(true), 700);
+    return () => clearTimeout(timer);
+  }, [isMatrixLastUser, msg.id]);
 
   const copyBtn = (size: number, showLabel: boolean) => (
     <button
@@ -107,7 +126,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
           </div>
         )}
         {msg.role === 'System' && (
-          <div className="disc-msg-agent-label" style={{ color: msg.content.startsWith('summary cached') ? '#34d399' : '#ff4d6a' }}>
+          <div className="disc-msg-agent-label" style={{ color: msg.content.startsWith('summary cached') ? 'var(--kr-success)' : 'var(--kr-error)' }}>
             {msg.content.startsWith('summary cached') ? <Zap size={10} /> : <AlertTriangle size={10} />}
             {' '}{msg.content.startsWith('summary cached') ? t('disc.summaryCached') : t('disc.system')}
             {msg.content.startsWith('summary cached') && summaryCache && (
@@ -136,12 +155,19 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
               autoFocus
             />
             <div className="disc-edit-actions">
-              <button className="disc-icon-btn" style={{ fontSize: 11, padding: '4px 10px', color: 'rgba(255,255,255,0.4)' }} onClick={onEditCancel}>{t('disc.cancel')}</button>
+              <button className="disc-icon-btn" style={{ fontSize: 11, padding: '4px 10px', color: 'var(--kr-text-faint)' }} onClick={onEditCancel}>{t('disc.cancel')}</button>
               <button className="disc-scan-btn" style={{ fontSize: 11, padding: '4px 10px' }} onClick={onEditSubmit} disabled={!editingText.trim()}>
                 <Send size={10} /> {t('disc.resend')}
                 <span className="text-2xs opacity-50" style={{ marginLeft: 4 }}>Ctrl+Enter</span>
               </button>
             </div>
+          </div>
+        ) : isMatrixLastUser && !decodeDone ? (
+          // Matrix: render as plain scrambled text for ~700ms before
+          // flipping to Markdown. Markdown parse is skipped during
+          // decode — fewer re-renders through ReactMarkdown.
+          <div className="matrix-text" data-decoding="true" style={{ whiteSpace: 'pre-wrap' }}>
+            <MatrixText text={msg.content} />
           </div>
         ) : (
           <MarkdownContent content={msg.content.replace(/KRONN:(BRIEFING_COMPLETE|VALIDATION_COMPLETE|BOOTSTRAP_COMPLETE|WORKFLOW_READY|REPO_READY|ARCHITECTURE_READY|PLAN_READY|STRUCTURE_READY|ISSUES_READY|ISSUES_CREATED)/gi, '').trim()} />
@@ -168,7 +194,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
         )}
         {RE_PARTIAL_RESPONSE.test(msg.content) && (
           <div className="disc-auth-error-cta">
-            <button className="disc-scan-btn" style={{ fontSize: 11, padding: '5px 12px', borderColor: 'rgba(245,158,11,0.3)', background: 'rgba(245,158,11,0.08)', color: '#f59e0b' }} onClick={() => onNavigate('settings', { scrollTo: 'settings-server' })}>
+            <button className="disc-scan-btn" style={{ fontSize: 11, padding: '5px 12px', borderColor: 'rgba(var(--kr-warning-amber-rgb), 0.3)', background: 'rgba(var(--kr-warning-amber-rgb), 0.08)', color: 'var(--kr-warning-amber)' }} onClick={() => onNavigate('settings', { scrollTo: 'settings-server' })}>
               <Settings size={11} /> {t('disc.editTimeout')}
             </button>
           </div>

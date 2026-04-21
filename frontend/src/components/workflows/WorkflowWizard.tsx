@@ -211,10 +211,15 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   const [suggestionsLoading, setSuggestionsLoading] = useState(false);
 
   useEffect(() => {
+    const refetchProfiles = () => profilesApi.list()
+      .then(setAvailableProfiles)
+      .catch(e => console.warn('Failed to load profiles:', e));
     skillsApi.list().then(setAvailableSkills).catch(e => console.warn('Failed to load skills:', e));
-    profilesApi.list().then(setAvailableProfiles).catch(e => console.warn('Failed to load profiles:', e));
+    refetchProfiles();
     directivesApi.list().then(setAvailableDirectives).catch(e => console.warn('Failed to load directives:', e));
     quickPromptsApi.list().then(setAvailableQuickPrompts).catch(e => console.warn('Failed to load quick prompts:', e));
+    window.addEventListener('kronn:profiles-changed', refetchProfiles);
+    return () => window.removeEventListener('kronn:profiles-changed', refetchProfiles);
   }, []);
 
   // Fetch suggestions when project changes
@@ -431,7 +436,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
         {WIZARD_STEPS.map((label, i) => (
           <div key={i} className="flex-1 text-center">
             <div className="wf-wizard-progress-segment" data-active={i <= wizardStep} />
-            <span className="text-xs" style={{ color: i <= wizardStep ? '#c8ff00' : 'var(--kr-text-dim)' }}>
+            <span className="text-xs" style={{ color: i <= wizardStep ? 'var(--kr-accent-ink)' : 'var(--kr-text-dim)' }}>
               {label}
             </span>
           </div>
@@ -1359,9 +1364,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                             data-selected={selected}
                             style={selected ? {
                               fontWeight: 600,
-                              border: `1px solid ${profile.color || 'rgba(139,92,246,0.4)'}`,
+                              border: `1px solid ${profile.color || 'rgba(var(--kr-purple-rgb), 0.4)'}`,
                               background: `${profile.color}15`,
-                              color: profile.color || '#a78bfa',
+                              color: profile.color || 'var(--kr-purple-soft)',
                             } : undefined}
                             title={profile.role}
                           >
@@ -1410,7 +1415,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                 {/* Advanced toggle */}
                 <button
                   className="wf-advanced-toggle"
-                  style={{ color: hasAdvanced ? '#c8ff00' : 'rgba(255,255,255,0.25)' }}
+                  style={{ color: hasAdvanced ? 'var(--kr-accent-ink)' : 'var(--kr-text-ghost)' }}
                   onClick={() => setExpandedStepAdvanced(isAdvOpen ? null : i)}
                 >
                   <Settings size={10} />
@@ -1558,7 +1563,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                           <span className="text-xs text-dim" style={{ whiteSpace: 'nowrap' }}>{t('wiz.ifContains')}</span>
                           <input
                             className="wf-input flex-1 text-sm"
-                            style={{ borderColor: !cond.contains ? 'rgba(255,77,106,0.4)' : undefined }}
+                            style={{ borderColor: !cond.contains ? 'rgba(var(--kr-error-rgb), 0.4)' : undefined }}
                             value={cond.contains}
                             onChange={e => updateCondition(i, j, { contains: e.target.value })}
                             placeholder="NO_RESULTS (obligatoire)"
@@ -1669,7 +1674,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           {/* Expert options toggle */}
           <button
             className="wf-advanced-toggle"
-            style={{ color: showExpertConfig ? '#c8ff00' : 'rgba(255,255,255,0.25)' }}
+            style={{ color: showExpertConfig ? 'var(--kr-accent-ink)' : 'var(--kr-text-ghost)' }}
             onClick={() => setShowExpertConfig(!showExpertConfig)}
           >
             <Settings size={10} />
@@ -1748,7 +1753,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             return (
             <div key={i} className="wf-summary-row" style={{ paddingLeft: 20 }}>
               {i + 1}. <span className="wf-summary-step-type" data-type={typeData}>{typeLabel}</span>
-              <span className="font-semibold" style={{ color: isBatch ? '#888' : (AGENT_COLORS[s.agent] ?? '#888') }}>{s.name}</span>
+              <span className="font-semibold" style={{ color: isBatch ? 'var(--kr-text-faint)' : (AGENT_COLORS[s.agent] ?? 'var(--kr-text-faint)') }}>{s.name}</span>
               {isBatch
                 ? <span className="text-dim text-xs"> ({qpName ?? t('wiz.batchQPPickerEmpty')})</span>
                 : <> ({AGENT_LABELS[s.agent] ?? s.agent})</>

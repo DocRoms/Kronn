@@ -37,11 +37,11 @@
 .btn-accent:hover:not(:disabled) { background: rgba(var(--kr-accent-rgb), 0.15); }
 
 .btn-secondary {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--kr-bg-hover);
   color: var(--kr-text-secondary);
   border-color: var(--kr-border-medium);
 }
-.btn-secondary:hover:not(:disabled) { background: rgba(255, 255, 255, 0.08); }
+.btn-secondary:hover:not(:disabled) { background: var(--kr-bg-active); }
 
 .btn-danger {
   background: rgba(var(--kr-error-rgb), 0.08);
@@ -55,7 +55,7 @@
   color: var(--kr-text-muted);
   border-color: transparent;
 }
-.btn-ghost:hover:not(:disabled) { background: rgba(255, 255, 255, 0.05); color: var(--kr-text-secondary); }
+.btn-ghost:hover:not(:disabled) { background: var(--kr-bg-hover); color: var(--kr-text-secondary); }
 
 .btn-icon {
   padding: var(--kr-sp-2) var(--kr-sp-3);
@@ -99,7 +99,7 @@
   font-size: var(--kr-fs-sm);
   font-family: inherit;
   color: var(--kr-text-primary);
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--kr-bg-hover);
   border: 1px solid var(--kr-border-medium);
   border-radius: var(--kr-r-md);
   outline: none;
@@ -119,7 +119,7 @@
   font-size: var(--kr-fs-sm);
   font-family: inherit;
   color: var(--kr-text-primary);
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--kr-bg-hover);
   border: 1px solid var(--kr-border-medium);
   border-radius: var(--kr-r-md);
   outline: none;
@@ -166,7 +166,7 @@
   border: 1px solid rgba(var(--kr-info-rgb), 0.2);
 }
 .badge-muted {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--kr-bg-hover);
   color: var(--kr-text-muted);
   border: 1px solid var(--kr-border-light);
 }
@@ -175,7 +175,7 @@
 .code {
   font-family: var(--kr-font-mono);
   font-size: var(--kr-fs-sm);
-  background: rgba(0, 0, 0, 0.3);
+  background: var(--kr-bg-code);
   padding: var(--kr-sp-3) var(--kr-sp-5);
   border-radius: var(--kr-r-md);
   word-break: break-all;
@@ -243,12 +243,12 @@
   letter-spacing: 0.02em;
 }
 .mcp-origin-official {
-  color: var(--kr-success, #4ade80);
-  border: 1px solid rgba(74, 222, 128, 0.3);
+  color: var(--kr-success);
+  border: 1px solid rgba(var(--kr-success-rgb), 0.3);
 }
 .mcp-origin-community {
-  color: var(--kr-warning, #f0a030);
-  border: 1px solid rgba(240, 160, 48, 0.3);
+  color: var(--kr-warning);
+  border: 1px solid rgba(var(--kr-warning-amber-rgb), 0.3);
 }
 
 /* ── Plugin kind badge (MCP / API / hybrid) ─────────────────────────────── */
@@ -263,20 +263,20 @@
   letter-spacing: 0.02em;
 }
 .mcp-kind-badge-mcp {
-  color: #60a5fa;
-  border: 1px solid rgba(96, 165, 250, 0.35);
+  color: var(--kr-info);
+  border: 1px solid rgba(var(--kr-info-rgb), 0.35);
 }
 .mcp-kind-badge-api {
-  color: #c084fc;
-  border: 1px solid rgba(192, 132, 252, 0.35);
+  color: var(--kr-purple-soft);
+  border: 1px solid rgba(var(--kr-purple-soft-rgb), 0.35);
 }
 .mcp-kind-badge-hybrid {
-  color: #e8eaed;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  background: linear-gradient(90deg, rgba(96, 165, 250, 0.12), rgba(192, 132, 252, 0.12));
+  color: var(--kr-text-primary);
+  border: 1px solid var(--kr-border-heavy);
+  background: linear-gradient(90deg, rgba(var(--kr-info-rgb), 0.12), rgba(var(--kr-purple-soft-rgb), 0.12));
 }
 
 /* ── MCP load indicator (shared: Plugins page + Project cards) ─────────── */
-.mcp-load-ok { color: var(--kr-success, #4ade80); }
-.mcp-load-warn { color: var(--kr-warning, #f0a030); }
-.mcp-load-danger { color: var(--kr-error, #ff4d6a); }
+.mcp-load-ok { color: var(--kr-success); }
+.mcp-load-warn { color: var(--kr-warning); }
+.mcp-load-danger { color: var(--kr-error); }

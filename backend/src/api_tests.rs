@@ -1588,4 +1588,208 @@ mod tests {
         assert!(!body["success"].as_bool().unwrap_or(true),
             "start-briefing on nonexistent project should return error: {body}");
     }
+
+    // ─── Secret theme unlock ─────────────────────────────────────────────
+
+    /// With a theme/code pair configured locally, the matching code
+    /// returns the theme in the unlocks array.
+    #[tokio::test]
+    async fn theme_unlock_valid_code_returns_theme_name() {
+        let state = test_state();
+        {
+            let mut cfg = state.config.write().await;
+            cfg.secret_themes.insert("matrix".into(), "alpha-code".into());
+            cfg.secret_themes.insert("sakura".into(), "beta-code".into());
+        }
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/themes/unlock")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::json!({"code": "alpha-code"}).to_string()))
+            .unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["success"], true, "unexpected response: {body}");
+        let unlocks = body["data"]["unlocks"].as_array().expect("unlocks array");
+        assert_eq!(unlocks.len(), 1, "expected 1 unlock, got {body}");
+        assert_eq!(unlocks[0]["kind"], "theme");
+        assert_eq!(unlocks[0]["name"], "matrix");
+    }
+
+    /// Wrong code → generic error, no enumeration of valid themes in
+    /// the response (so a brute-forcer can't learn configured names).
+    #[tokio::test]
+    async fn theme_unlock_wrong_code_returns_generic_error() {
+        let state = test_state();
+        {
+            let mut cfg = state.config.write().await;
+            cfg.secret_themes.insert("matrix".into(), "alpha-code".into());
+        }
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/themes/unlock")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::json!({"code": "wrong-guess"}).to_string()))
+            .unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["success"], false);
+        // Error message must not leak configured theme names.
+        let err = body["error"].as_str().unwrap_or_default();
+        assert!(!err.to_lowercase().contains("matrix"),
+            "error message leaks theme name: {err}");
+    }
+
+    /// Empty / whitespace-only code is rejected up front — no DB lookup.
+    #[tokio::test]
+    async fn theme_unlock_empty_code_rejected() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/themes/unlock")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::json!({"code": "   "}).to_string()))
+            .unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["success"], false);
+    }
+
+    /// With no `[secret_themes]` table configured, ANY code fails —
+    /// proves the default-empty HashMap doesn't accidentally match.
+    #[tokio::test]
+    async fn theme_unlock_no_codes_configured_always_fails() {
+        let state = test_state();
+        // Intentionally do not populate secret_themes.
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/themes/unlock")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::json!({"code": "anything"}).to_string()))
+            .unwrap();
+        let (_, body) = send(state, false, req).await;
+        assert_eq!(body["success"], false);
+    }
+
+    /// End-to-end: matching via the config.toml plaintext fallback
+    /// returns the theme in the new unlocks-array shape.
+    #[tokio::test]
+    async fn theme_unlock_plaintext_fallback_returns_unlocks_array() {
+        let state = test_state();
+        {
+            let mut cfg = state.config.write().await;
+            cfg.secret_themes.insert("sakura".into(), "hello".into());
+        }
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/themes/unlock")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::json!({"code": "hello"}).to_string()))
+            .unwrap();
+        let (_, body) = send(state, false, req).await;
+        assert_eq!(body["success"], true, "unlock path broke: {body}");
+        let unlocks = body["data"]["unlocks"].as_array().expect("unlocks array");
+        assert_eq!(unlocks.len(), 1);
+        assert_eq!(unlocks[0]["kind"], "theme");
+        assert_eq!(unlocks[0]["name"], "sakura");
+    }
+
+    /// The kronnBatman built-in code is a BUNDLE — single input code
+    /// matches two entries (one profile, one theme) and both come back
+    /// in the response. Also persists `batman` into
+    /// `config.unlocked_profiles` so subsequent /api/profiles includes it.
+    #[tokio::test]
+    async fn theme_unlock_batman_bundle_unlocks_profile_and_theme() {
+        let state = test_state();
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/themes/unlock")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::json!({"code": "kronnBatman"}).to_string()))
+            .unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["success"], true, "kronnBatman rejected: {body}");
+
+        let unlocks = body["data"]["unlocks"].as_array().expect("unlocks array");
+        assert_eq!(unlocks.len(), 2, "bundle should yield 2 entries: {body}");
+        // Order is fixed by array declaration: profile first, theme second
+        let kinds: Vec<&str> = unlocks.iter().map(|u| u["kind"].as_str().unwrap()).collect();
+        let names: Vec<&str> = unlocks.iter().map(|u| u["name"].as_str().unwrap()).collect();
+        assert!(kinds.contains(&"profile"));
+        assert!(kinds.contains(&"theme"));
+        assert!(names.contains(&"batman"));
+        assert!(names.contains(&"gotham"));
+
+        // And the profile was persisted to config.
+        let cfg = state.config.read().await;
+        assert!(cfg.unlocked_profiles.iter().any(|p| p == "batman"),
+            "batman must be in unlocked_profiles after unlock, got {:?}", cfg.unlocked_profiles);
+    }
+
+    /// Batman is hidden from GET /api/profiles until unlocked, and
+    /// shows up afterwards. Verifies the secret-profile filter in
+    /// both states from the caller perspective.
+    #[tokio::test]
+    async fn profiles_batman_hidden_until_unlocked() {
+        let state = test_state();
+
+        // Pre-unlock: batman NOT in the list.
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/profiles")
+            .body(Body::empty())
+            .unwrap();
+        let (_, body) = send(state.clone(), false, req).await;
+        let profiles = body["data"].as_array().expect("profiles array");
+        assert!(!profiles.iter().any(|p| p["id"] == "batman"),
+            "batman leaked in pre-unlock list");
+
+        // Flip the flag manually (same as what unlock does).
+        state.config.write().await.unlocked_profiles.push("batman".into());
+
+        // Post-unlock: batman visible.
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/profiles")
+            .body(Body::empty())
+            .unwrap();
+        let (_, body) = send(state, false, req).await;
+        let profiles = body["data"].as_array().expect("profiles array");
+        let batman = profiles.iter().find(|p| p["id"] == "batman")
+            .expect("batman must be visible after unlock");
+        // Sanity: frontmatter-derived fields made it through.
+        assert_eq!(batman["avatar"], "🦇");
+        assert_eq!(batman["color"], "#ffd400");
+    }
+
+    /// GET /api/profiles/:id returns "not found" for a locked secret
+    /// profile — same error as a truly-missing id, so a probing user
+    /// cannot distinguish "locked" from "nonexistent".
+    #[tokio::test]
+    async fn profile_get_batman_404s_when_locked() {
+        let state = test_state();
+        // locked
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/profiles/batman")
+            .body(Body::empty())
+            .unwrap();
+        let (_, body) = send(state.clone(), false, req).await;
+        assert_eq!(body["success"], false);
+
+        // unlock then fetch
+        state.config.write().await.unlocked_profiles.push("batman".into());
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/profiles/batman")
+            .body(Body::empty())
+            .unwrap();
+        let (_, body) = send(state, false, req).await;
+        assert_eq!(body["success"], true, "batman unfetchable post-unlock: {body}");
+        assert_eq!(body["data"]["id"], "batman");
+    }
 }

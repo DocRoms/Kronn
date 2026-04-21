@@ -43,6 +43,7 @@ This folder (`ai/`) contains AI-optimized project context (not human docs). Use 
 | Add new API endpoint | `ai/repo-map.md`, `ai/architecture/overview.md` |
 | Workflow engine work | `ai/architecture/overview.md`, `ai/inconsistencies-tech-debt.md`, `ai/coding-rules.md` |
 | Docker / deployment | `ai/operations/debug-operations.md` |
+| Secret themes / unlock-gated features | `ai/operations/secret-themes.md` |
 | Fix known issue | `ai/inconsistencies-tech-debt.md` |
 
 #### Tier 2 — For needs not covered above (max 3 files)

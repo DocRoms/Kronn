@@ -312,7 +312,7 @@
   left: 10px;
   top: 50%;
   transform: translateY(-50%);
-  color: rgba(255, 255, 255, 0.25);
+  color: var(--kr-text-ghost);
   pointer-events: none;
 }
 
@@ -355,10 +355,11 @@
   border: 1px solid var(--kr-border);
   border-radius: var(--kr-r-xl);
   padding: var(--kr-sp-7);
+  box-shadow: var(--kr-shadow-sm);
   display: flex;
   flex-direction: column;
   gap: var(--kr-sp-4);
-  transition: border-color 0.15s;
+  transition: border-color 0.15s, box-shadow 0.15s;
 }
 
 .mcp-installed-card:hover {
@@ -407,7 +408,7 @@
 }
 
 .mcp-scope-none {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--kr-bg-hover);
   color: var(--kr-text-faint);
 }
 
@@ -634,7 +635,7 @@
 .mcp-toggle-global {
   border: 1px solid var(--kr-border);
   background: transparent;
-  color: rgba(255, 255, 255, 0.25);
+  color: var(--kr-text-ghost);
 }
 
 .mcp-toggle-global-active {
@@ -646,7 +647,7 @@
 .mcp-toggle-general {
   border: 1px solid var(--kr-border);
   background: transparent;
-  color: rgba(255, 255, 255, 0.25);
+  color: var(--kr-text-ghost);
 }
 
 .mcp-toggle-general-active {
@@ -656,7 +657,7 @@
 }
 
 .mcp-separator {
-  color: rgba(255, 255, 255, 0.12);
+  color: var(--kr-text-ghost);
   font-size: var(--kr-fs-sm);
 }
 

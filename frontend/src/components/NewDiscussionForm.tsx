@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import '../pages/DiscussionsPage.css';
+import { ProfileTooltip } from './ProfileTooltip';
 import { skills as skillsApi, profiles as profilesApi, directives as directivesApi } from '../lib/api';
 import type { Project, AgentDetection, AgentType, AgentsConfig, Skill, AgentProfile, Directive } from '../types/generated';
 import { AGENT_LABELS, isAgentRestricted as isAgentRestrictedUtil, isUsable, isHiddenPath } from '../lib/constants';
@@ -82,11 +83,18 @@ export function NewDiscussionForm({
 
   // ─── Effects ─────────────────────────────────────────────────────────────
 
-  // Fetch available skills, profiles, directives
+  // Fetch available skills, profiles, directives. Also re-fetch
+  // profiles on `kronn:profiles-changed` so a secret-code unlock
+  // (e.g. Batman) flips the picker without a reload.
   useEffect(() => {
+    const refetchProfiles = () => profilesApi.list()
+      .then(setAvailableProfiles)
+      .catch(e => console.warn('Failed to load profiles:', e));
     skillsApi.list().then(setAvailableSkills).catch(e => console.warn('Failed to load skills:', e));
-    profilesApi.list().then(setAvailableProfiles).catch(e => console.warn('Failed to load profiles:', e));
+    refetchProfiles();
     directivesApi.list().then(setAvailableDirectives).catch(e => console.warn('Failed to load directives:', e));
+    window.addEventListener('kronn:profiles-changed', refetchProfiles);
+    return () => window.removeEventListener('kronn:profiles-changed', refetchProfiles);
   }, []);
 
   // Auto-select first installed agent if current selection is invalid
@@ -198,7 +206,7 @@ export function NewDiscussionForm({
 
         {newDiscAgent && isAgentRestricted(newDiscAgent as AgentType) && (
           <div className="disc-restricted-warn">
-            <AlertTriangle size={11} style={{ color: '#ffb400', flexShrink: 0 }} />
+            <AlertTriangle size={11} style={{ color: 'var(--kr-warning)', flexShrink: 0 }} />
             <span className="disc-restricted-warn-text">
               {t('config.restrictedAgent', AGENT_LABELS[newDiscAgent] ?? newDiscAgent)}
               {' — '}
@@ -350,8 +358,13 @@ export function NewDiscussionForm({
 
                 {/* Profiles accordion */}
                 {availableProfiles.length > 0 && (
-                  <div className="disc-advanced-section">
-                    <button type="button" className="disc-advanced-section-toggle" onClick={() => setExpandedAdvanced(prev => prev === 'profiles' ? null : 'profiles')}>
+                  <div className="disc-advanced-section" data-tour-id="disc-form-profiles">
+                    <button
+                      type="button"
+                      className="disc-advanced-section-toggle"
+                      data-tour-id="disc-form-profiles-toggle"
+                      onClick={() => setExpandedAdvanced(prev => prev === 'profiles' ? null : 'profiles')}
+                    >
                       <ChevronRight size={9} className="disc-chevron" data-expanded={expandedAdvanced === 'profiles'} />
                       <UserCircle size={10} />
                       <span>{t('profiles.select')}</span>
@@ -362,16 +375,24 @@ export function NewDiscussionForm({
                         <button type="button" className="disc-chip" data-active={newDiscProfileIds.length === 0} data-color="purple" onClick={() => setNewDiscProfileIds([])}>
                           {t('profiles.none')}
                         </button>
-                        {availableProfiles.map(profile => {
+                        {availableProfiles.map((profile, idx) => {
                           const selected = newDiscProfileIds.includes(profile.id);
                           return (
-                            <button key={profile.id} type="button" className="disc-chip" data-active={selected} data-color="purple"
-                              onClick={() => setNewDiscProfileIds(prev => selected ? prev.filter(id => id !== profile.id) : [...prev, profile.id])}
-                              title={profile.role}
-                              style={selected && profile.color ? { borderColor: profile.color, background: `${profile.color}15`, color: profile.color } : undefined}
-                            >
-                              {selected && <Check size={9} />} {profile.avatar} {profile.persona_name || profile.name}
-                            </button>
+                            <ProfileTooltip key={profile.id} profile={profile}>
+                              <button
+                                type="button"
+                                className="disc-chip"
+                                data-active={selected}
+                                data-color="purple"
+                                // First chip gets a stable tour id so the
+                                // guided tour can anchor on a real element.
+                                {...(idx === 0 ? { 'data-tour-id': 'disc-form-profile-chip' } : {})}
+                                onClick={() => setNewDiscProfileIds(prev => selected ? prev.filter(id => id !== profile.id) : [...prev, profile.id])}
+                                style={selected && profile.color ? { borderColor: profile.color, background: `${profile.color}15`, color: profile.color } : undefined}
+                              >
+                                {selected && <Check size={9} />} {profile.avatar} {profile.persona_name || profile.name}
+                              </button>
+                            </ProfileTooltip>
                           );
                         })}
                       </div>

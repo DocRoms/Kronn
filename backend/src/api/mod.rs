@@ -20,3 +20,4 @@ pub mod ws;
 pub mod quick_prompts;
 pub mod ollama;
 pub mod debug;
+pub mod themes;

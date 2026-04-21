@@ -6,7 +6,7 @@
 .tour-spotlight {
   position: fixed;
   border-radius: var(--kr-r-lg);
-  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.7);
+  box-shadow: 0 0 0 9999px var(--kr-bg-overlay);
   transition: top 0.35s ease, left 0.35s ease, width 0.35s ease, height 0.35s ease;
   z-index: var(--kr-z-tour);
   pointer-events: none;
@@ -29,7 +29,7 @@
 /* Full-dim backdrop for centered steps (welcome / finale) where there
    is no spotlight element casting the box-shadow darkness. */
 .tour-backdrop[data-dimmed="true"] {
-  background: rgba(0, 0, 0, 0.7);
+  background: var(--kr-bg-overlay);
 }
 
 /* Target element elevation — visual hint only. The actual click-through

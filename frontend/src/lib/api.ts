@@ -955,6 +955,24 @@ export const debugApi = {
   clearLogs: () => api<void>('POST', '/debug/logs/clear'),
 };
 
+/** Shape of each entry returned by POST /api/themes/unlock. A single
+ *  code may unlock several items in one shot (bundle codes, e.g.
+ *  Batman unlocks a profile + a theme together), so the response
+ *  `unlocks` is always an array. */
+export interface UnlockedItem {
+  kind: 'theme' | 'profile';
+  name: string;
+}
+
+/** Secret-code unlock. Codes themselves never appear in this bundle —
+ *  this call just shuttles a user-typed string to /api/themes/unlock and
+ *  gets back `{ unlocks: [{ kind, name }, ...] }` on success. Throws
+ *  (via api<>) if the backend rejects the code. */
+export const themes = {
+  unlock: (code: string) =>
+    api<{ unlocks: UnlockedItem[] }>('POST', '/themes/unlock', { code }),
+};
+
 /** Shape of `/api/health` — the endpoint predates the `ApiResponse<T>`
  *  wrapper so it returns its payload directly. Used by the Debug > Report
  *  a bug flow to stamp version + host_os into the issue template. */

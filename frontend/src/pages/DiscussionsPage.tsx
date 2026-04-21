@@ -317,13 +317,18 @@ export function DiscussionsPage({
   // to disappear. Controllers are cleaned up by cleanupStream (on SSE done)
   // or by the explicit Stop button (handleStop).
 
-  // Fetch available skills, profiles, directives & contacts
+  // Fetch available skills, profiles, directives & contacts.
+  // Re-fetch profiles on secret-code unlock so Batman shows up in
+  // ChatHeader without a page reload.
   useEffect(() => {
+    const refetchProfiles = () => profilesApi.list().then(setAvailableProfiles).catch(() => {});
     skillsApi.list().then(setAvailableSkills).catch(() => {});
-    profilesApi.list().then(setAvailableProfiles).catch(() => {});
+    refetchProfiles();
     directivesApi.list().then(setAvailableDirectives).catch(() => {});
     contactsApi.list().then(setContactsList).catch(() => {});
     refetchBatchSummaries();
+    window.addEventListener('kronn:profiles-changed', refetchProfiles);
+    return () => window.removeEventListener('kronn:profiles-changed', refetchProfiles);
   }, [refetchBatchSummaries]);
 
   // WebSocket-based real-time events (presence, chat, invites)
@@ -1738,7 +1743,7 @@ export function DiscussionsPage({
             {/* Disabled agent banner */}
             {activeAgentDisabled && activeDiscussion && (
               <div className="disc-agent-disabled-banner">
-                <AlertTriangle size={12} style={{ color: '#ffc800', flexShrink: 0 }} />
+                <AlertTriangle size={12} style={{ color: 'var(--kr-warning)', flexShrink: 0 }} />
                 <span className="disc-agent-disabled-text">
                   {t('disc.agentDisabled', AGENT_LABELS[activeDiscussion.agent] ?? activeDiscussion.agent)}
                   {' — '}

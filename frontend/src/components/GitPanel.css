@@ -6,8 +6,41 @@
   height: 100%;
   display: flex;
   flex-direction: column;
-  background: #0d1017;
-  border-left: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--kr-bg-code-panel);
+  border-left: 1px solid var(--kr-border);
+  /* Panel stays dark in both themes (IDE convention) — pin the text tokens
+     to their dark-theme values so content inside remains readable. */
+  --kr-text-primary: #e8eaed;
+  --kr-text-secondary: rgba(255, 255, 255, 0.6);
+  --kr-text-tertiary: rgba(255, 255, 255, 0.5);
+  --kr-text-muted: rgba(255, 255, 255, 0.45);
+  --kr-text-faint: rgba(255, 255, 255, 0.4);
+  --kr-text-ghost: rgba(255, 255, 255, 0.35);
+  --kr-border: rgba(255, 255, 255, 0.07);
+  --kr-border-light: rgba(255, 255, 255, 0.06);
+  --kr-border-medium: rgba(255, 255, 255, 0.1);
+  --kr-bg-hover: rgba(255, 255, 255, 0.03);
+  --kr-bg-hover-strong: rgba(255, 255, 255, 0.06);
+  --kr-bg-active: rgba(255, 255, 255, 0.08);
+  /* Accent also needs to stay lime inside this always-dark panel —
+     badges/buttons would be unreadable otherwise when the app is in
+     light theme (olive tint on dark bg = near-invisible). */
+  --kr-accent: #c8ff00;
+  --kr-accent-rgb: 200, 255, 0;
+  --kr-accent-ink: #c8ff00;
+  --kr-accent-text: rgba(200, 255, 0, 0.6);
+  --kr-error: #ff4d6a;
+  --kr-error-rgb: 255, 77, 106;
+  --kr-success: #34d399;
+  --kr-success-rgb: 52, 211, 153;
+  --kr-info: #60a5fa;
+  --kr-info-rgb: 96, 165, 250;
+  --kr-warning: #ffc800;
+  --kr-warning-rgb: 255, 200, 0;
+  --kr-warning-soft: #fbbf24;
+  --kr-purple: #8b5cf6;
+  --kr-purple-rgb: 139, 92, 246;
+  --kr-purple-soft: #a78bfa;
 }
 
 .git-header {
@@ -74,7 +107,7 @@
   background: rgba(var(--kr-warning-rgb), 0.06);
   border: 1px solid rgba(var(--kr-warning-rgb), 0.15);
   font-size: var(--kr-fs-sm);
-  color: rgba(255, 200, 0, 0.8);
+  color: rgba(var(--kr-warning-rgb), 0.8);
   display: flex;
   align-items: center;
   gap: var(--kr-sp-3);
@@ -130,7 +163,7 @@
   font-size: var(--kr-fs-base);
   font-family: inherit;
   border: 1px solid var(--kr-border-medium);
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--kr-bg-hover);
   color: var(--kr-text-primary);
 }
 
@@ -139,7 +172,7 @@
   margin: 4px 12px;
   padding: 8px 10px;
   border-radius: var(--kr-r-md);
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--kr-bg-subtle);
   border: 1px solid var(--kr-border-light);
 }
 
@@ -238,8 +271,8 @@
 }
 
 .git-small-btn-pr {
-  border-color: rgba(139, 92, 246, 0.3);
-  color: #a78bfa;
+  border-color: rgba(var(--kr-purple-rgb), 0.3);
+  color: var(--kr-purple-soft);
 }
 
 /* ── PR link ─────────────────────────────────────────── */
@@ -257,7 +290,7 @@
 }
 
 .git-pr-link {
-  color: #a78bfa;
+  color: var(--kr-purple-soft);
   text-decoration: underline;
   font-size: var(--kr-fs-sm);
   flex: 1;
@@ -270,8 +303,8 @@
   margin: 4px 12px;
   padding: 10px 12px;
   border-radius: var(--kr-r-lg);
-  background: rgba(139, 92, 246, 0.04);
-  border: 1px solid rgba(139, 92, 246, 0.15);
+  background: rgba(var(--kr-purple-rgb), 0.04);
+  border: 1px solid rgba(var(--kr-purple-rgb), 0.15);
   display: flex;
   flex-direction: column;
 }
@@ -286,7 +319,7 @@
 .git-pr-form-title {
   font-size: var(--kr-fs-sm);
   font-weight: 600;
-  color: #a78bfa;
+  color: var(--kr-purple-soft);
   display: flex;
   align-items: center;
   gap: 4px;
@@ -308,7 +341,7 @@
   font-size: var(--kr-fs-2xs);
   font-family: inherit;
   cursor: pointer;
-  border: 1px solid rgba(139, 92, 246, 0.2);
+  border: 1px solid rgba(var(--kr-purple-rgb), 0.2);
 }
 
 .git-pr-tab:first-child {
@@ -320,8 +353,8 @@
 }
 
 .git-pr-tab[data-active="true"] {
-  background: rgba(139, 92, 246, 0.15);
-  color: #a78bfa;
+  background: rgba(var(--kr-purple-rgb), 0.15);
+  color: var(--kr-purple-soft);
 }
 
 .git-pr-tab[data-active="false"] {
@@ -332,10 +365,10 @@
 .git-pr-preview {
   padding: 8px 10px;
   border-radius: var(--kr-r-md);
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--kr-bg-subtle);
   border: 1px solid var(--kr-border-light);
   font-size: var(--kr-fs-base);
-  color: rgba(255, 255, 255, 0.7);
+  color: var(--kr-text-secondary);
   min-height: 180px;
   max-height: 300px;
   overflow-y: auto;
@@ -359,9 +392,9 @@
   margin-top: 6px;
   width: 100%;
   justify-content: center;
-  border-color: rgba(139, 92, 246, 0.3);
-  background: rgba(139, 92, 246, 0.1);
-  color: #a78bfa;
+  border-color: rgba(var(--kr-purple-rgb), 0.3);
+  background: rgba(var(--kr-purple-rgb), 0.1);
+  color: var(--kr-purple-soft);
 }
 
 /* ── Diff view ───────────────────────────────────────── */
@@ -410,12 +443,12 @@
 
 /* Addition: subtle green background + full syntax highlighting via .hljs */
 .git-diff-line-add {
-  background: rgba(34, 197, 94, 0.12);
-  border-left: 2px solid rgba(52, 211, 153, 0.65);
+  background: rgba(var(--kr-success-rgb), 0.12);
+  border-left: 2px solid rgba(var(--kr-success-rgb), 0.65);
   padding-left: 4px;
 }
 .git-diff-line-add .git-diff-prefix {
-  color: #34d399;
+  color: var(--kr-success);
   opacity: 1;
 }
 
@@ -424,39 +457,39 @@
   background: transparent;
   border-left: 2px solid transparent;
   padding-left: 4px;
-  color: rgba(255, 255, 255, 0.75);
+  color: var(--kr-text-secondary);
 }
 
 /* Deletion: flat red, NO syntax highlighting — the user only needs to
    know the line is going away, not re-parse stale code. */
 .git-diff-line-del {
-  background: rgba(239, 68, 68, 0.14);
-  border-left: 2px solid rgba(255, 77, 106, 0.65);
+  background: rgba(var(--kr-error-rgb), 0.14);
+  border-left: 2px solid rgba(var(--kr-error-rgb), 0.65);
   padding-left: 4px;
-  color: #ff9aa9;
+  color: var(--kr-error-soft);
 }
 .git-diff-line-del .git-diff-prefix {
-  color: #ff4d6a;
+  color: var(--kr-error);
   opacity: 1;
 }
 .git-diff-line-del .git-diff-content {
-  color: #ff9aa9; /* uniformly red — no hljs tokens inside `del` */
+  color: var(--kr-error-soft); /* uniformly red — no hljs tokens inside `del` */
 }
 
 /* Hunk header (@@ -1,3 +1,4 @@) — info-blue, stands out as section break */
 .git-diff-line-hunk {
-  color: #60a5fa;
+  color: var(--kr-info);
   margin-top: 4px;
   padding-top: 2px;
   padding-bottom: 2px;
-  border-top: 1px dashed rgba(96, 165, 250, 0.25);
+  border-top: 1px dashed rgba(var(--kr-info-rgb), 0.25);
   font-weight: 600;
 }
 
 /* File meta (diff --git, index, +++, ---, rename, binary) — dim grey,
    rendered verbatim; these lines aren't content, just git chrome. */
 .git-diff-line-meta {
-  color: rgba(255, 255, 255, 0.4);
+  color: var(--kr-text-faint);
   font-style: italic;
 }
 
@@ -479,7 +512,7 @@
 .hljs-meta-string                         { color: #56b6c2; }
 .hljs-emphasis                            { font-style: italic; }
 .hljs-strong                              { font-weight: bold; }
-.hljs-deletion                            { color: #ff4d6a; }
+.hljs-deletion                            { color: var(--kr-error); }
 
 /* ── Status messages ─────────────────────────────────── */
 .git-empty {
@@ -496,7 +529,7 @@
   background: rgba(var(--kr-error-rgb), 0.08);
   border: 1px solid rgba(var(--kr-error-rgb), 0.2);
   font-size: var(--kr-fs-sm);
-  color: #ff8a9e;
+  color: var(--kr-error-soft);
 }
 
 .git-success {
@@ -532,7 +565,7 @@
   display: flex;
   flex-direction: column;
   max-height: 200px;
-  border-top: 1px solid rgba(255, 255, 255, 0.04);
+  border-top: 1px solid var(--kr-border-ghost);
 }
 
 .git-term-output {
@@ -558,7 +591,7 @@
 }
 
 .git-term-pre-error {
-  color: #ff8a9e;
+  color: var(--kr-error-soft);
 }
 
 .git-term-pre-warning {
@@ -570,7 +603,7 @@
   align-items: center;
   gap: 6px;
   padding: 4px 10px 6px;
-  border-top: 1px solid rgba(255, 255, 255, 0.04);
+  border-top: 1px solid var(--kr-border-ghost);
 }
 
 .git-term-prompt {

@@ -48,20 +48,20 @@ export class ErrorBoundary extends Component<Props, State> {
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 12,
           padding: '40px 20px', textAlign: 'center',
-          background: 'rgba(255,68,68,0.05)', border: '1px solid rgba(255,68,68,0.15)', borderRadius: 12,
+          background: 'rgba(var(--kr-error-rgb), 0.05)', border: '1px solid rgba(var(--kr-error-rgb), 0.15)', borderRadius: 12,
           margin: 16,
         }}>
-          <span style={{ color: '#ff4444', fontSize: 14, fontFamily: 'JetBrains Mono, monospace', fontWeight: 600 }}>
+          <span style={{ color: 'var(--kr-error)', fontSize: 14, fontFamily: 'JetBrains Mono, monospace', fontWeight: 600 }}>
             {this.props.label ? `${this.props.label} — ` : ''}{getErrorMessage()}
           </span>
-          <pre style={{ color: 'rgba(255,255,255,0.4)', fontSize: 11, maxWidth: '60vw', overflow: 'auto', margin: 0 }}>
+          <pre style={{ color: 'var(--kr-text-faint)', fontSize: 11, maxWidth: '60vw', overflow: 'auto', margin: 0 }}>
             {this.state.error.message}
           </pre>
           <button
             onClick={() => this.setState({ error: null })}
             style={{
-              padding: '6px 14px', cursor: 'pointer', background: 'rgba(200,255,0,0.1)',
-              color: '#c8ff00', border: '1px solid rgba(200,255,0,0.3)', borderRadius: 4,
+              padding: '6px 14px', cursor: 'pointer', background: 'var(--kr-accent-bg-hover)',
+              color: 'var(--kr-accent-ink)', border: '1px solid var(--kr-accent-border)', borderRadius: 4,
               fontFamily: 'JetBrains Mono, monospace', fontSize: 12,
             }}
           >
@@ -73,13 +73,13 @@ export class ErrorBoundary extends Component<Props, State> {
 
     return (
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', flexDirection: 'column', gap: 16 }}>
-        <span style={{ color: '#ff4444', fontSize: 15, fontFamily: 'JetBrains Mono, monospace' }}>
+        <span style={{ color: 'var(--kr-error)', fontSize: 15, fontFamily: 'JetBrains Mono, monospace' }}>
           {getErrorMessage()}
         </span>
-        <pre style={{ color: 'rgba(255,255,255,0.5)', fontSize: 12, maxWidth: '80vw', overflow: 'auto' }}>
+        <pre style={{ color: 'var(--kr-text-tertiary)', fontSize: 12, maxWidth: '80vw', overflow: 'auto' }}>
           {this.state.error.message}
         </pre>
-        <button onClick={() => window.location.reload()} style={{ padding: '8px 16px', cursor: 'pointer', background: '#c8ff00', color: '#000', border: 'none', borderRadius: 4, fontFamily: 'JetBrains Mono, monospace' }}>
+        <button onClick={() => window.location.reload()} style={{ padding: '8px 16px', cursor: 'pointer', background: 'var(--kr-accent)', color: 'var(--kr-text-on-accent)', border: 'none', borderRadius: 4, fontFamily: 'JetBrains Mono, monospace' }}>
           Reload
         </button>
       </div>

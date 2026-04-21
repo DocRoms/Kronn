@@ -20,6 +20,7 @@ function pluginKind(m: { transport: McpDefinition['transport']; api_spec?: impor
   if (hasApi) return 'hybrid';
   return 'mcp';
 }
+import { MatrixText } from '../components/MatrixText';
 import './McpPage.css';
 
 const slugify = (label: string) => label.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
@@ -357,7 +358,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
     <div>
       <div className="mcp-page-header">
         <div>
-          <h1 className="mcp-h1">{t('mcp.title')} <span className="mcp-subtitle">{t('mcp.subtitle')}</span></h1>
+          <h1 className="mcp-h1"><MatrixText text={t('mcp.title')} /> <span className="mcp-subtitle"><MatrixText text={t('mcp.subtitle')} /></span></h1>
           <p className="mcp-meta">
             {totalConfigs} {totalConfigs > 1 ? t('mcp.configPlural') : t('mcp.config')} · {servers.length} {servers.length > 1 ? t('mcp.serverPlural') : t('mcp.server')} · {globalConfigs.length} {globalConfigs.length > 1 ? t('mcp.globalPlural') : t('mcp.global')}
           </p>
@@ -607,7 +608,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                                 })}
                                 tabIndex={-1}
                               >
-                                <Eye size={12} style={{ color: isVisible ? 'var(--kr-accent)' : 'rgba(255,255,255,0.25)' }} />
+                                <Eye size={12} style={{ color: isVisible ? 'var(--kr-accent-ink)' : 'var(--kr-text-ghost)' }} />
                               </button>
                             )}
                           </div>
@@ -714,7 +715,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                             : <span className="mcp-scope-badge mcp-scope-none">{t('wiz.noProject')}</span>
                         }
                         {cfg.env_keys.length > 0 && <span className="mcp-installed-keys"><Key size={9} /> {cfg.env_keys.length}</span>}
-                        {cfg.secrets_broken && <span className="mcp-scope-badge" style={{ color: 'var(--kr-warning, #f0a030)', borderColor: 'rgba(240,160,48,0.3)' }} title={t('mcp.secretsBroken')}>⚠ {t('mcp.secretsBrokenShort')}</span>}
+                        {cfg.secrets_broken && <span className="mcp-scope-badge" style={{ color: 'var(--kr-warning)', borderColor: 'rgba(var(--kr-warning-rgb), 0.3)' }} title={t('mcp.secretsBroken')}>⚠ {t('mcp.secretsBrokenShort')}</span>}
                       </div>
                     </div>
                   </div>
@@ -744,7 +745,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                       {serverIncomp.length > 0 && <span className="mcp-server-incompat">{serverIncomp.map(i => `⚠ ${i.agent}: ${i.reason}`).join(' · ')}</span>}
                     </div>
                     <div className="flex-row gap-3">
-                      <button className="mcp-btn-action" style={{ color: 'var(--kr-error)', borderColor: 'rgba(255,77,106,0.3)' }} onClick={() => { handleDeleteMcpConfig(cfg.id); setSelectedConfigId(null); }}><Trash2 size={12} /> {t('mcp.deleteConfig')}</button>
+                      <button className="mcp-btn-action" style={{ color: 'var(--kr-error)', borderColor: 'rgba(var(--kr-error-rgb), 0.3)' }} onClick={() => { handleDeleteMcpConfig(cfg.id); setSelectedConfigId(null); }}><Trash2 size={12} /> {t('mcp.deleteConfig')}</button>
                       <button className="mcp-icon-btn" onClick={() => setSelectedConfigId(null)} aria-label="Close"><X size={14} /></button>
                     </div>
                   </div>
@@ -764,12 +765,12 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                             <label className="mcp-detail-field-label">{k}</label>
                             <div className="flex-row gap-3">
                               <input className="input mcp-input-mono flex-1" value={editingEnvId === cfg.id ? (editingEnv[k] ?? '') : '••••••••'} onChange={e => setEditingEnv(prev => ({ ...prev, [k]: e.target.value }))} type={editingEnvId === cfg.id && visibleFields.has(k) ? 'text' : 'password'} placeholder={t('mcp.value')} readOnly={editingEnvId !== cfg.id} onClick={() => { if (editingEnvId !== cfg.id) handleStartEditSecrets(cfg.id); }} />
-                              <button className="mcp-icon-btn" onClick={async () => { if (editingEnvId !== cfg.id) { const ok = await handleStartEditSecrets(cfg.id); if (!ok) return; setVisibleFields(prev => new Set(prev).add(k)); } else { toggleFieldVisibility(k); } }} title={visibleFields.has(k) ? t('mcp.hide') : t('mcp.show')}><Eye size={12} style={{ color: visibleFields.has(k) ? 'var(--kr-accent)' : 'rgba(255,255,255,0.25)' }} /></button>
+                              <button className="mcp-icon-btn" onClick={async () => { if (editingEnvId !== cfg.id) { const ok = await handleStartEditSecrets(cfg.id); if (!ok) return; setVisibleFields(prev => new Set(prev).add(k)); } else { toggleFieldVisibility(k); } }} title={visibleFields.has(k) ? t('mcp.hide') : t('mcp.show')}><Eye size={12} style={{ color: visibleFields.has(k) ? 'var(--kr-accent-ink)' : 'var(--kr-text-ghost)' }} /></button>
                             </div>
                           </div>
                         ))}
                         {editingEnvError && editingEnvId === cfg.id && (
-                          <div className="mcp-env-warning" style={{ color: 'var(--kr-warning, #f0a030)', fontSize: '0.8rem', marginTop: 6 }}>{editingEnvError}</div>
+                          <div className="mcp-env-warning" style={{ color: 'var(--kr-warning)', fontSize: '0.8rem', marginTop: 6 }}>{editingEnvError}</div>
                         )}
                         {editingEnvId === cfg.id && (
                           <div className="flex-row gap-3 mt-4">
