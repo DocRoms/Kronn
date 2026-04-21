@@ -20,8 +20,8 @@ import {
 } from 'lucide-react';
 
 const STATUS_COLORS: Record<string, string> = {
-  Pending: '#ffc800', Running: '#00d4ff', Success: '#34d399',
-  Failed: '#ff4d6a', Cancelled: 'var(--kr-cancelled)', WaitingApproval: '#c8ff00',
+  Pending: 'var(--kr-warning)', Running: 'var(--kr-cyan)', Success: 'var(--kr-success)',
+  Failed: 'var(--kr-error)', Cancelled: 'var(--kr-cancelled)', WaitingApproval: 'var(--kr-accent-ink)',
 };
 
 /** Agents that can run audits/briefings (need filesystem access + CLI mode). Excludes Vibe (API-only). */
@@ -351,7 +351,7 @@ export function ProjectCard({
   return (
     <div id={`project-${proj.id}`} className="dash-card" data-active={isOpen || auditActive}>
       <button className="dash-card-header" onClick={onToggleOpen} aria-expanded={isOpen}>
-        <ChevronRight size={14} style={{ color: '#c8ff00', transform: isOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s' }} />
+        <ChevronRight size={14} style={{ color: 'var(--kr-accent-ink)', transform: isOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s' }} />
         <div className="flex-1">
           <div className="flex-row gap-3 flex-wrap">
             <span className="dash-proj-name">{proj.name}</span>
@@ -533,7 +533,7 @@ export function ProjectCard({
                 ))}
                 {projMcps.length === 0 && !shouldPulseMcpHint && (
                   <div className="dash-row-empty">
-                    {t('projects.noMcp').split(' — ')[0]} — <button className="dash-icon-btn" style={{ fontSize: 11, color: '#c8ff00', display: 'inline-flex' }} onClick={() => onNavigate('mcps')}>{t('projects.noMcp').split(' — ')[1]}</button>
+                    {t('projects.noMcp').split(' — ')[0]} — <button className="dash-icon-btn" style={{ fontSize: 11, color: 'var(--kr-accent-ink)', display: 'inline-flex' }} onClick={() => onNavigate('mcps')}>{t('projects.noMcp').split(' — ')[1]}</button>
                   </div>
                 )}
               </>
@@ -563,7 +563,7 @@ export function ProjectCard({
                         {wf.trigger_type} · {wf.step_count} step{wf.step_count > 1 ? 's' : ''}
                       </span>
                       {wf.last_run && (
-                        <span className="dash-row-detail-sm" style={{ color: STATUS_COLORS[wf.last_run.status] ?? '#888' }}>
+                        <span className="dash-row-detail-sm" style={{ color: STATUS_COLORS[wf.last_run.status] ?? 'var(--kr-text-faint)' }}>
                           {wf.last_run.status}
                         </span>
                       )}
@@ -580,7 +580,7 @@ export function ProjectCard({
                 ))}
                 {projWorkflows.length === 0 && (
                   <div className="dash-row-empty">
-                    {t('projects.noWorkflows').split(' — ')[0]} — <button className="dash-icon-btn" style={{ fontSize: 11, color: '#c8ff00', display: 'inline-flex' }} onClick={() => onNavigate('workflows')}>{t('projects.noWorkflows').split(' — ')[1]}</button>
+                    {t('projects.noWorkflows').split(' — ')[0]} — <button className="dash-icon-btn" style={{ fontSize: 11, color: 'var(--kr-accent-ink)', display: 'inline-flex' }} onClick={() => onNavigate('workflows')}>{t('projects.noWorkflows').split(' — ')[1]}</button>
                   </div>
                 )}
               </>

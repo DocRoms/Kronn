@@ -16,6 +16,7 @@ import {
 import { WorkflowDetail } from '../components/workflows/WorkflowDetail';
 import { WorkflowWizard } from '../components/workflows/WorkflowWizard';
 import { QuickPromptForm } from '../components/workflows/QuickPromptForm';
+import { MatrixText } from '../components/MatrixText';
 import './WorkflowsPage.css';
 
 interface WorkflowsPageProps {
@@ -50,12 +51,12 @@ const TRIGGER_LABELS: Record<string, string> = {
 };
 
 const STATUS_COLORS: Record<string, string> = {
-  Pending: '#ffc800',
-  Running: '#00d4ff',
-  Success: '#34d399',
-  Failed: '#ff4d6a',
+  Pending: 'var(--kr-warning)',
+  Running: 'var(--kr-cyan)',
+  Success: 'var(--kr-success)',
+  Failed: 'var(--kr-error)',
   Cancelled: 'var(--kr-cancelled)',
-  WaitingApproval: '#c8ff00',
+  WaitingApproval: 'var(--kr-accent-ink)',
 };
 
 export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, configLanguage, onNavigateDiscussion, onBatchLaunched, initialSelectedWorkflowId, onInitialSelectionConsumed, onNavigateToBatch, toast: toastProp }: WorkflowsPageProps) {
@@ -398,7 +399,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     <div>
       <div className="flex-between mb-4">
         <div>
-          <h1 className="wf-h1">{t('wf.title')}</h1>
+          <h1 className="wf-h1"><MatrixText text={t('wf.title')} /></h1>
         </div>
         {tab === 'workflows' ? (
         <div className="flex-row gap-3">
@@ -519,7 +520,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                       <span className="font-semibold text-md flex-1">{wf.name}</span>
                       <button
                         className="wf-icon-btn"
-                        style={{ color: wf.enabled ? '#34d399' : 'var(--kr-text-dim)' }}
+                        style={{ color: wf.enabled ? 'var(--kr-success)' : 'var(--kr-text-dim)' }}
                         onClick={(e) => { e.stopPropagation(); handleToggle(wf); }}
                         title={wf.enabled ? t('wf.active') : t('wf.inactive')}
                         aria-pressed={wf.enabled}
@@ -541,7 +542,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
 
                     {wf.last_run && (
                       <div className="flex-row gap-3 mt-3 text-xs">
-                        <span style={{ color: STATUS_COLORS[wf.last_run.status] ?? '#888' }}>
+                        <span style={{ color: STATUS_COLORS[wf.last_run.status] ?? 'var(--kr-text-faint)' }}>
                           {wf.last_run.status}
                         </span>
                         <span className="text-ghost">

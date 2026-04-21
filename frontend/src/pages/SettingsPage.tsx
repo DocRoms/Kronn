@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
+import { useKonamiCode } from '../hooks/useKonamiCode';
 import { version as appVersion } from '../../package.json';
 import { config as configApi, skills as skillsApi, directives as directivesApi } from '../lib/api';
 import { useApi } from '../hooks/useApi';
@@ -12,15 +13,18 @@ import {
   RefreshCw, X, Eye, EyeOff,
   Layers, FolderSearch, Filter, FileText,
   Shield, Globe, Copy, Server, Mic, Volume2, HelpCircle, ChevronRight,
+  Sun, Moon, Monitor, Terminal, Heart, Key,
 } from 'lucide-react';
 import { STT_MODELS, getSttModelId, setSttModelId } from '../lib/stt-models';
 import { TTS_VOICES, getTtsVoiceId, setTtsVoiceId } from '../lib/tts-models';
 import { setAuthToken } from '../lib/api';
+import { useTheme, type ThemeMode } from '../lib/ThemeContext';
 import { AgentsSection } from '../components/settings/AgentsSection';
 import { IdentitySection } from '../components/settings/IdentitySection';
 import { ProfilesSection } from '../components/settings/ProfilesSection';
 import { UsageSection } from '../components/settings/UsageSection';
 import { DebugSection } from '../components/settings/DebugSection';
+import { MatrixText } from '../components/MatrixText';
 import './SettingsPage.css';
 
 /** Output languages for agents (sent to backend, not related to UI i18n) */
@@ -61,6 +65,73 @@ export function SettingsPage({
   toast,
 }: SettingsPageProps) {
   const { t, locale, setLocale } = useT();
+  const { theme, setTheme, unlockedThemes, unlockTheme } = useTheme();
+
+  // Secret-code state — local to the appearance card. The code is never
+  // stored (UX: if the user refreshes, they can re-enter — keeps codes
+  // from hanging around in memory or localStorage between sessions).
+  const [secretCode, setSecretCode] = useState('');
+  const [secretSubmitting, setSecretSubmitting] = useState(false);
+
+  // The Secret Code row is hidden by default — it reveals itself when
+  // the user enters the Konami code (↑↑↓↓←→←→BA) anywhere on the page.
+  // Persisted across sessions so the reveal "sticks" on a given device.
+  // Tampering doesn't matter: the input just fronts /api/themes/unlock,
+  // which a curious user could hit with curl anyway.
+  const [secretRevealed, setSecretRevealed] = useState(() => {
+    try { return localStorage.getItem('kronn:secretInputRevealed') === '1'; }
+    catch { return false; }
+  });
+  const handleKonamiReveal = useCallback(() => {
+    setSecretRevealed(prev => {
+      if (prev) return prev;
+      try { localStorage.setItem('kronn:secretInputRevealed', '1'); } catch { /* noop */ }
+      toast(t('config.konamiReveal'), 'info');
+      return true;
+    });
+  }, [toast, t]);
+  useKonamiCode(handleKonamiReveal);
+  const handleUnlockSubmit = async () => {
+    const code = secretCode.trim();
+    if (!code) return;
+    setSecretSubmitting(true);
+    try {
+      const unlocks = await unlockTheme(code);
+      setSecretCode('');
+
+      // Apply last theme in the bundle (if any) so the user sees the
+      // result immediately. For bundles (e.g. kronnBatman → gotham +
+      // batman profile) this picks gotham which is thematically tied
+      // to the profile.
+      const themeUnlock = unlocks.find(u => u.kind === 'theme');
+      if (themeUnlock) {
+        setTheme(themeUnlock.name as ThemeMode);
+      }
+
+      // Tell every consumer of the profile list to refetch — Batman is
+      // now visible via GET /api/profiles. NewDiscussionForm, ChatHeader,
+      // WorkflowWizard, and ProfilesSection all listen to this event.
+      const profileUnlocks = unlocks.filter(u => u.kind === 'profile');
+      if (profileUnlocks.length > 0) {
+        window.dispatchEvent(new CustomEvent('kronn:profiles-changed'));
+      }
+
+      // Toast — one per unlocked item so the user knows what's new.
+      // Profiles get a playful message, themes the existing one.
+      for (const u of unlocks) {
+        if (u.kind === 'profile' && u.name === 'batman') {
+          toast(t('config.batmanRecruited'), 'success');
+        } else if (u.kind === 'theme') {
+          toast(t('config.secretUnlocked', u.name), 'success');
+        }
+      }
+    } catch {
+      // Generic toast — do not hint whether codes exist or not.
+      toast(t('config.secretInvalid'), 'error');
+    } finally {
+      setSecretSubmitting(false);
+    }
+  };
 
   // Internal state
   const [, setForceRender] = useState(0);
@@ -134,12 +205,13 @@ export function SettingsPage({
 
   return (
     <div>
-      <h1 className="set-h1">Configuration</h1>
+      <h1 className="set-h1"><MatrixText text="Configuration" /></h1>
       <p className="set-meta mb-9">{t('config.subtitle')}</p>
 
       {/* Section navigation */}
       <div className="set-nav">
         {[
+          { id: 'settings-appearance', label: t('config.appearance') },
           { id: 'settings-languages', label: 'Languages' },
           { id: 'settings-voice', label: t('settings.voice') },
           { id: 'settings-scan', label: 'Scan' },
@@ -160,6 +232,85 @@ export function SettingsPage({
             {s.live && <span className="set-nav-live-dot" aria-hidden="true" />}
           </button>
         ))}
+      </div>
+
+      {/* Appearance / Theme */}
+      <div id="settings-appearance" className="set-card">
+        <div className="set-section">
+          <div className="flex-row gap-4 mb-4">
+            <Sun size={14} className="text-accent" />
+            <span className="font-semibold text-lg">{t('config.appearance')}</span>
+          </div>
+          <p className="set-hint">
+            {t('config.appearanceHint')}
+          </p>
+          <div className="flex-row gap-4" style={{ flexWrap: 'wrap' }}>
+            {(() => {
+              // Always-available themes first; unlocked secret themes append
+              // in the order the user unlocked them. The secret block is
+              // only rendered when at least one is unlocked — the picker
+              // stays identical to before for users who never entered a code.
+              const base: { mode: ThemeMode; label: string; icon: React.ReactNode }[] = [
+                { mode: 'system', label: t('config.themeSystem'), icon: <Monitor size={14} /> },
+                { mode: 'light', label: t('config.themeLight'), icon: <Sun size={14} /> },
+                { mode: 'dark', label: t('config.themeDark'), icon: <Moon size={14} /> },
+              ];
+              const secretMeta: Record<string, { label: string; icon: React.ReactNode }> = {
+                matrix: { label: t('config.themeMatrix'), icon: <Terminal size={14} /> },
+                sakura: { label: t('config.themeSakura'), icon: <Heart size={14} /> },
+                gotham: { label: t('config.themeGotham'), icon: <span style={{ fontSize: 14, lineHeight: 1 }}>🦇</span> },
+              };
+              const secret = unlockedThemes
+                .filter(m => secretMeta[m])
+                .map(m => ({ mode: m, ...secretMeta[m] }));
+              return [...base, ...secret].map(opt => (
+                <button
+                  key={opt.mode}
+                  className="set-choice-btn"
+                  data-active={theme === opt.mode}
+                  onClick={() => setTheme(opt.mode)}
+                >
+                  {opt.icon} {opt.label}
+                </button>
+              ));
+            })()}
+          </div>
+
+          {/* Secret Code — hidden by default; revealed by the Konami
+              code (see useKonamiCode above). The input itself trades a
+              code for a hidden theme via POST /api/themes/unlock.
+              The whole row is mounted only when `secretRevealed` is
+              true, so pre-Konami users never even see it in the DOM. */}
+          {secretRevealed && (
+            <div
+              className="flex-row gap-3 mt-4"
+              style={{ alignItems: 'center', flexWrap: 'wrap' }}
+            >
+              <Key size={12} className="text-faint flex-shrink-0" />
+              <span className="text-xs text-muted">{t('config.secretLabel')}</span>
+              <input
+                type="password"
+                className="input"
+                style={{ flex: '0 1 180px', fontSize: 'var(--kr-fs-sm)' }}
+                placeholder={t('config.secretPlaceholder')}
+                value={secretCode}
+                onChange={e => setSecretCode(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') handleUnlockSubmit(); }}
+                disabled={secretSubmitting}
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <button
+                type="button"
+                className="set-choice-btn"
+                onClick={handleUnlockSubmit}
+                disabled={secretSubmitting || !secretCode.trim()}
+              >
+                {t('config.secretSubmit')}
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* UI Language */}
@@ -545,7 +696,7 @@ export function SettingsPage({
                     </button>
                     <button
                       className="set-icon-btn text-error"
-                      style={{ padding: '2px 6px', borderColor: 'rgba(255,77,106,0.2)' }}
+                      style={{ padding: '2px 6px', borderColor: 'rgba(var(--kr-error-rgb), 0.2)' }}
                       onClick={async () => {
                         if (!confirm(t('skills.deleteConfirm'))) return;
                         try {
@@ -667,7 +818,7 @@ export function SettingsPage({
         <div className="set-accordion-section" id="settings-profiles">
           <button className="set-accordion-header" onClick={() => toggleAccordion('profiles')} aria-expanded={configAccordion.has('profiles')}>
             <ChevronRight size={12} className="set-accordion-chevron" data-expanded={configAccordion.has('profiles')} />
-            <Layers size={14} style={{ color: '#8b5cf6' }} />
+            <Layers size={14} style={{ color: 'var(--kr-purple)' }} />
             <span className="font-semibold text-base">{t('profiles.title')}</span>
           </button>
           {configAccordion.has('profiles') && (
@@ -681,7 +832,7 @@ export function SettingsPage({
         <div className="set-accordion-section" id="settings-directives">
           <button className="set-accordion-header" onClick={() => toggleAccordion('directives')} aria-expanded={configAccordion.has('directives')}>
             <ChevronRight size={12} className="set-accordion-chevron" data-expanded={configAccordion.has('directives')} />
-            <FileText size={14} style={{ color: '#f59e0b' }} />
+            <FileText size={14} style={{ color: 'var(--kr-warning-amber)' }} />
             <span className="font-semibold text-base">{t('directives.title')}</span>
             <span className="set-accordion-count">{availableDirectives.length}</span>
           </button>
@@ -715,14 +866,14 @@ export function SettingsPage({
                   <div className="text-sm text-muted mb-2">{directive.description}</div>
                 )}
                 {(directive.conflicts ?? []).length > 0 && (
-                  <div className="text-2xs mb-2" style={{ color: 'rgba(255,77,106,0.6)' }}>
+                  <div className="text-2xs mb-2" style={{ color: 'rgba(var(--kr-error-rgb), 0.6)' }}>
                     ⚠ {t('directives.conflicts')}: {(directive.conflicts ?? []).join(', ')}
                   </div>
                 )}
                 {!directive.is_builtin && (
                   <button
                     className="set-icon-btn text-error"
-                    style={{ padding: '2px 6px', borderColor: 'rgba(255,77,106,0.2)' }}
+                    style={{ padding: '2px 6px', borderColor: 'rgba(var(--kr-error-rgb), 0.2)' }}
                     onClick={async () => {
                       if (!confirm(t('directives.deleteConfirm'))) return;
                       try {
@@ -977,7 +1128,7 @@ export function SettingsPage({
             {serverStallTimeout > 10 && (
               <div className="set-warning-callout">
                 <AlertTriangle size={12} className="text-warning flex-shrink-0" />
-                <span className="text-xs" style={{ color: 'rgba(245,158,11,0.8)', lineHeight: 1.4 }}>
+                <span className="text-xs" style={{ color: 'rgba(var(--kr-warning-amber-rgb), 0.8)', lineHeight: 1.4 }}>
                   {t('settings.stallTimeoutWarning')}
                 </span>
               </div>

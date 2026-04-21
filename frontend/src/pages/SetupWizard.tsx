@@ -221,7 +221,7 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
                         </div>
                       ) : agent.runtime_available ? (
                         <div className="setup-agent-meta">
-                          <span style={{ color: 'rgba(52,211,153,0.7)' }}>runtime OK</span>
+                          <span style={{ color: 'rgba(var(--kr-success-rgb), 0.7)' }}>runtime OK</span>
                           <span className="text-ghost text-xs"> — via npx</span>
                         </div>
                       ) : (

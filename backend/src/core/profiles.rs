@@ -75,7 +75,23 @@ const BUILTIN_PROFILES: &[BuiltinProfile] = &[
     BuiltinProfile { id: "staff-engineer", content: include_str!("../profiles/staff-engineer.md") },
     // Communication
     BuiltinProfile { id: "translator", content: include_str!("../profiles/translator.md") },
+    // ── Secret / unlock-gated ──
+    // Filtered out of the public profile list unless the operator
+    // has unlocked the id via a secret code (see api/unlock.rs).
+    BuiltinProfile { id: "batman", content: include_str!("../profiles/batman.md") },
 ];
+
+/// IDs of built-in profiles that are NOT visible until unlocked via a
+/// secret code. `api/profiles.rs` filters the public list against
+/// `config.unlocked_profiles`; an id listed here but not in the config
+/// will be hidden from `GET /api/profiles` and 404'd from `GET
+/// /api/profiles/:id`.
+pub const SECRET_PROFILE_IDS: &[&str] = &["batman"];
+
+/// True if the profile id corresponds to a secret built-in.
+pub fn is_secret_profile(id: &str) -> bool {
+    SECRET_PROFILE_IDS.contains(&id)
+}
 
 // ─── Frontmatter parsing ────────────────────────────────────────────────────
 

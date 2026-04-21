@@ -49,9 +49,9 @@ export function OllamaCard({ t }: OllamaCardProps) {
   useEffect(() => { refresh(); }, [refresh]);
 
   const statusColor = health?.status === 'online'
-    ? '#34d399'
+    ? 'var(--kr-success)'
     : health?.status === 'offline' || health?.status === 'unreachable'
-      ? '#ffc800'
+      ? 'var(--kr-warning)'
       : 'var(--kr-text-ghost)';
 
   const statusLabel = health?.status === 'online'
@@ -145,7 +145,7 @@ export function OllamaCard({ t }: OllamaCardProps) {
               <div className="set-ollama-model-list">
                 {models.map(m => (
                   <div key={m.name} className="set-ollama-model-row">
-                    <Check size={9} style={{ color: '#34d399', flexShrink: 0 }} />
+                    <Check size={9} style={{ color: 'var(--kr-success)', flexShrink: 0 }} />
                     <code className="set-ollama-model-name">{m.name}</code>
                     <span className="text-ghost text-2xs">{m.size}</span>
                   </div>

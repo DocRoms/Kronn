@@ -46,18 +46,18 @@ export function useToast() {
             padding: '10px 16px',
             borderRadius: 8,
             fontSize: 13,
-            color: '#fff',
+            color: 'var(--kr-text-on-dark)',
             background: t.type === 'error'
-              ? 'rgba(220,50,50,0.95)'
+              ? 'rgba(var(--kr-error-rgb), 0.95)'
               : t.type === 'success'
-                ? 'rgba(50,180,50,0.95)'
-                : 'rgba(0,180,200,0.95)',
+                ? 'rgba(var(--kr-success-rgb), 0.95)'
+                : 'rgba(var(--kr-cyan-rgb), 0.95)',
             border: `1px solid ${
               t.type === 'error'
-                ? 'rgba(255,80,80,0.3)'
+                ? 'rgba(var(--kr-error-rgb), 0.3)'
                 : t.type === 'success'
-                  ? 'rgba(80,255,80,0.3)'
-                  : 'rgba(80,200,255,0.3)'
+                  ? 'rgba(var(--kr-success-rgb), 0.3)'
+                  : 'rgba(var(--kr-cyan-rgb), 0.3)'
             }`,
             backdropFilter: 'blur(10px)',
             maxWidth: 350,

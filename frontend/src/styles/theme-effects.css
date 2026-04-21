@@ -1,0 +1,147 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   Theme effects — CSS-only animations for secret themes.
+   Rendered by <ThemeEffects /> at the App root, gated by the active theme
+   via the container's data-theme attribute. `pointer-events: none` on every
+   effect layer so they never block clicks.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.theme-effects-root {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1; /* above page bg, below modals/tooltips */
+  overflow: hidden;
+}
+
+/* ─── Sakura — petals falling ──────────────────────────────────────────────
+   Six 🌸 absolute-positioned sprites, each with its own duration + delay +
+   horizontal drift. `--start-x` and `--end-x` let us stagger horizontal
+   paths without JS: every petal drifts a different amount side-to-side.
+   Animation is a single `translate + rotate` keyframe set, parametrized by
+   CSS vars. `animation-iteration-count: infinite` keeps the loop going. */
+@keyframes sakura-fall {
+  0% {
+    transform: translate(var(--start-x, 0), -10vh) rotate(0deg);
+    opacity: 0;
+  }
+  5% {
+    opacity: var(--max-opacity, 0.8);
+  }
+  95% {
+    opacity: var(--max-opacity, 0.8);
+  }
+  100% {
+    transform: translate(var(--end-x, 0), 110vh) rotate(var(--spin, 720deg));
+    opacity: 0;
+  }
+}
+
+/* Two-layer petal: outer carries the falling animation, inner carries
+   the wind-push transform (set via JS). Because CSS composes transforms
+   multiplicatively across nested elements, both can animate at once
+   without fighting for the same `transform` slot. */
+.sakura-petal {
+  position: absolute;
+  top: 0;
+  font-size: var(--petal-size, 22px);
+  user-select: none;
+  animation: sakura-fall var(--duration, 18s) linear var(--delay, 0s) infinite;
+  will-change: transform, opacity;
+  filter: drop-shadow(0 1px 2px rgba(190, 24, 93, 0.3));
+}
+
+.sakura-petal-inner {
+  display: inline-block;
+  will-change: transform;
+  /* Default transition — overridden inline by the mouse handler when
+     applying / releasing a push. Kept here for the initial render and
+     any programmatic reset. */
+  transition: transform 1.4s ease-out;
+}
+
+/* ─── Batman — bat-signal ambient sweep + occasional bats ─────────────────
+   (a) Bat-signal: a large soft radial-gradient circle that slowly drifts
+   diagonally across the viewport, 30s round-trip. Anchored to a fixed
+   div that takes full viewport; the gradient itself animates via
+   translate. Very low-opacity so it doesn't fight content.
+   (b) Bats: three 🦇 sprites that fly across the top of the viewport
+   from right to left, staggered so one appears every ~10s. */
+@keyframes bat-signal-drift {
+  0% {
+    transform: translate(-20vw, 20vh);
+  }
+  50% {
+    transform: translate(40vw, 60vh);
+  }
+  100% {
+    transform: translate(-20vw, 20vh);
+  }
+}
+
+.bat-signal {
+  position: absolute;
+  width: 80vw;
+  height: 80vh;
+  top: -10vh;
+  left: -10vw;
+  background: radial-gradient(
+    circle at center,
+    rgba(255, 212, 0, 0.09) 0%,
+    rgba(255, 212, 0, 0.04) 20%,
+    transparent 40%
+  );
+  animation: bat-signal-drift 30s ease-in-out infinite;
+  will-change: transform;
+}
+
+@keyframes bat-fly {
+  0% {
+    transform: translate(110vw, var(--fly-y, 15vh)) scale(1, 1);
+    opacity: 0;
+  }
+  5% {
+    opacity: var(--max-opacity, 0.55);
+  }
+  50% {
+    transform: translate(50vw, calc(var(--fly-y, 15vh) - 3vh)) scale(-1, 1);
+  }
+  95% {
+    opacity: var(--max-opacity, 0.55);
+  }
+  100% {
+    transform: translate(-10vw, calc(var(--fly-y, 15vh) + 2vh)) scale(-1, 1);
+    opacity: 0;
+  }
+}
+
+.bat {
+  position: absolute;
+  top: 0;
+  left: 0;
+  font-size: var(--bat-size, 18px);
+  user-select: none;
+  /* Cycle is long + staggered delays → bats appear rarely, not spammy. */
+  animation: bat-fly var(--duration, 18s) linear var(--delay, 0s) infinite;
+  will-change: transform, opacity;
+  filter: drop-shadow(0 0 4px rgba(255, 212, 0, 0.3));
+}
+
+/* ─── Matrix decode — text transform effect ──────────────────────────────
+   The decoding itself runs in JS (useMatrixDecode hook) so it can pick
+   the target text and scramble per-char. The only CSS here is an
+   optional glow applied while the text is mid-decode. */
+.matrix-text[data-decoding="true"] {
+  text-shadow: 0 0 4px rgba(0, 255, 65, 0.55);
+}
+
+/* Reduced motion — disable animated sprites entirely but keep the static
+   palette. Pulsing backgrounds + falling sprites can trigger vestibular
+   symptoms; the themes still read "sakura" and "batman" without them. */
+@media (prefers-reduced-motion: reduce) {
+  .sakura-petal,
+  .bat,
+  .bat-signal {
+    animation: none;
+    opacity: 0;
+  }
+}

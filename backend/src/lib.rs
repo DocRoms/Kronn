@@ -390,6 +390,8 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // ── Debug (log ringbuffer — backs Settings > Debug viewer) ──
         .route("/api/debug/logs", get(api::debug::get_logs))
         .route("/api/debug/logs/clear", post(api::debug::clear_logs))
+        // ── Secret themes (hidden palette unlock via code) ──
+        .route("/api/themes/unlock", post(api::themes::unlock))
         // ── MCPs ──
         .route("/api/mcps", get(api::mcps::overview))
         .route("/api/mcps/registry", get(api::mcps::list_registry))

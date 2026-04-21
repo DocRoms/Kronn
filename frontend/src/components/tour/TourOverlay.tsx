@@ -16,6 +16,7 @@ export function TourOverlay() {
     currentStep?.position,
     isMobile,
     currentStep?.pulse ?? false,
+    currentStep?.tooltipAnchor,
   );
 
   if (!isActive || !currentStep) return null;

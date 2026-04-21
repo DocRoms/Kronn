@@ -90,7 +90,7 @@ export function IdentitySection({ toast, t }: IdentitySectionProps) {
               />
               <div className="set-hint-xs">
                 {t('settings.avatarHint')}{' '}
-                <a href="https://gravatar.com" target="_blank" rel="noopener noreferrer" style={{ color: 'rgba(200,255,0,0.5)' }}>gravatar.com</a>
+                <a href="https://gravatar.com" target="_blank" rel="noopener noreferrer" style={{ color: 'rgba(var(--kr-accent-rgb), 0.5)' }}>gravatar.com</a>
               </div>
             </div>
             <div style={{ marginTop: 12 }}>
@@ -171,7 +171,7 @@ export function IdentitySection({ toast, t }: IdentitySectionProps) {
         {/* Invite code for multi-user */}
         {pseudo && (
           <div className="set-invite-box">
-            <div className="flex-row gap-3 text-sm font-semibold mb-3" style={{ color: 'rgba(200,255,0,0.6)' }}>
+            <div className="flex-row gap-3 text-sm font-semibold mb-3" style={{ color: 'rgba(var(--kr-accent-rgb), 0.6)' }}>
               {t('contacts.inviteCode')}
               {networkInfo?.tailscale_ip && networkInfo.advertised_host === networkInfo.tailscale_ip && (
                 <span className="set-tailscale-badge">
@@ -215,17 +215,17 @@ export function IdentitySection({ toast, t }: IdentitySectionProps) {
           </div>
           <div className="text-sm text-muted" style={{ lineHeight: 1.6 }}>
             <div className="mb-3">
-              <span style={{ color: 'rgba(200,255,0,0.6)', fontWeight: 600 }}>1.</span> {t('contacts.guideStep1')}{' '}
-              <a href="https://tailscale.com" target="_blank" rel="noopener noreferrer" style={{ color: 'rgba(52,211,153,0.7)', textDecoration: 'none' }}>tailscale.com</a>
+              <span style={{ color: 'rgba(var(--kr-accent-rgb), 0.6)', fontWeight: 600 }}>1.</span> {t('contacts.guideStep1')}{' '}
+              <a href="https://tailscale.com" target="_blank" rel="noopener noreferrer" style={{ color: 'rgba(var(--kr-success-rgb), 0.7)', textDecoration: 'none' }}>tailscale.com</a>
             </div>
             <div className="mb-3">
-              <span style={{ color: 'rgba(200,255,0,0.6)', fontWeight: 600 }}>2.</span> {t('contacts.guideStep2')}
+              <span style={{ color: 'rgba(var(--kr-accent-rgb), 0.6)', fontWeight: 600 }}>2.</span> {t('contacts.guideStep2')}
             </div>
             <div className="mb-3">
-              <span style={{ color: 'rgba(200,255,0,0.6)', fontWeight: 600 }}>3.</span> {t('contacts.guideStep3')}
+              <span style={{ color: 'rgba(var(--kr-accent-rgb), 0.6)', fontWeight: 600 }}>3.</span> {t('contacts.guideStep3')}
             </div>
             <div>
-              <span style={{ color: 'rgba(200,255,0,0.6)', fontWeight: 600 }}>4.</span> {t('contacts.guideStep4')}
+              <span style={{ color: 'rgba(var(--kr-accent-rgb), 0.6)', fontWeight: 600 }}>4.</span> {t('contacts.guideStep4')}
             </div>
           </div>
           {/* Detected IPs */}

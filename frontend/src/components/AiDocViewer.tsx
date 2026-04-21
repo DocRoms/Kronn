@@ -354,7 +354,7 @@ function applyHighlights(container: HTMLElement, query: string, activeIdx: numbe
 
       const mark = document.createElement('mark');
       mark.setAttribute(HL_ATTR, String(globalIdx));
-      mark.style.background = isActive ? 'rgba(200,255,0,0.5)' : 'rgba(200,255,0,0.18)';
+      mark.style.background = isActive ? 'rgba(var(--kr-accent-rgb), 0.5)' : 'rgba(var(--kr-accent-rgb), 0.18)';
       mark.style.color = 'inherit';
       mark.style.borderRadius = '2px';
       mark.style.padding = '0 1px';

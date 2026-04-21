@@ -159,7 +159,7 @@ export function AgentsSection({
                   </div>
                 )}
                 {!agent.installed && agent.runtime_available && (
-                  <div className="text-xs mt-2" style={{ color: 'rgba(52,211,153,0.5)' }}>
+                  <div className="text-xs mt-2" style={{ color: 'rgba(var(--kr-success-rgb), 0.5)' }}>
                     runtime OK <span className="text-ghost">— via npx</span>
                   </div>
                 )}
@@ -273,9 +273,9 @@ export function AgentsSection({
                     >
                       {isDisabled
                         ? <Play size={10} className="text-ghost" />
-                        : <StopCircle size={10} style={{ color: 'rgba(52,211,153,0.5)' }} />}
+                        : <StopCircle size={10} style={{ color: 'rgba(var(--kr-success-rgb), 0.5)' }} />}
                     </button>
-                    <span className="text-xs" style={{ color: isDisabled ? 'rgba(255,255,255,0.25)' : 'rgba(52,211,153,0.6)' }}>
+                    <span className="text-xs" style={{ color: isDisabled ? 'var(--kr-text-ghost)' : 'rgba(var(--kr-success-rgb), 0.6)' }}>
                       {isDisabled ? t('config.overrideDisabled') : t('config.overrideActive')}
                     </span>
                     <a
@@ -295,7 +295,7 @@ export function AgentsSection({
                   return (
                   <div key={k.id} className="set-key-row" style={{ opacity: isDisabled ? 0.4 : 1 }}>
                     {k.active ? (
-                      <Check size={9} style={{ color: 'rgba(52,211,153,0.7)' }} className="flex-shrink-0" />
+                      <Check size={9} style={{ color: 'rgba(var(--kr-success-rgb), 0.7)' }} className="flex-shrink-0" />
                     ) : (
                       <button className="set-icon-btn set-icon-btn-bare" title={t('config.activateKey')} aria-label={t('config.activateKey')}
                         onClick={async () => { try { await configApi.activateApiKey(k.id); } catch (err) { console.warn('Settings action failed:', err); } refetchTokens(); }}>
@@ -486,7 +486,7 @@ export function AgentsSection({
                     <span className="text-xs text-muted font-semibold">{t('disc.modelTier')}</span>
                     {models.modelsUrl && (
                       <a href={models.modelsUrl} target="_blank" rel="noopener noreferrer"
-                        className="flex-row gap-1 text-2xs" style={{ color: 'rgba(100,180,255,0.5)', textDecoration: 'none' }}
+                        className="flex-row gap-1 text-2xs" style={{ color: 'rgba(var(--kr-info-rgb), 0.5)', textDecoration: 'none' }}
                         title={t('config.viewModels')}
                       >
                         <ExternalLink size={8} /> {t('config.viewModels')}
@@ -494,8 +494,8 @@ export function AgentsSection({
                     )}
                   </div>
                   <div className="flex-row gap-5">
-                    {renderSelect('economy', models.economy, '\u26A1', 'rgba(52,211,153,0.6)')}
-                    {renderSelect('reasoning', models.reasoning, '\uD83E\uDDE0', 'rgba(245,158,11,0.6)')}
+                    {renderSelect('economy', models.economy, '\u26A1', 'rgba(var(--kr-success-rgb), 0.6)')}
+                    {renderSelect('reasoning', models.reasoning, '\uD83E\uDDE0', 'rgba(var(--kr-warning-amber-rgb), 0.6)')}
                   </div>
                 </div>
               );
@@ -506,7 +506,7 @@ export function AgentsSection({
         })}
         {/* Best practices links */}
         <div className="set-best-practices">
-          <div className="flex-row gap-3 text-sm font-semibold mb-4" style={{ color: 'rgba(200,255,0,0.6)' }}>
+          <div className="flex-row gap-3 text-sm font-semibold mb-4" style={{ color: 'rgba(var(--kr-accent-rgb), 0.6)' }}>
             <ExternalLink size={10} /> {t('config.bestPractices')}
           </div>
           <div className="flex-wrap text-xs" style={{ gap: '6px 16px' }}>

@@ -9,17 +9,31 @@ use crate::core::profiles;
 use crate::models::*;
 use crate::AppState;
 
-/// GET /api/profiles — list all profiles (builtin + custom)
-pub async fn list(_state: State<AppState>) -> Json<ApiResponse<Vec<AgentProfile>>> {
-    let all = profiles::list_all_profiles();
-    Json(ApiResponse::ok(all))
+/// GET /api/profiles — list all profiles (builtin + custom), minus any
+/// secret built-in that the operator hasn't unlocked.
+pub async fn list(state: State<AppState>) -> Json<ApiResponse<Vec<AgentProfile>>> {
+    let unlocked = state.config.read().await.unlocked_profiles.clone();
+    let visible: Vec<_> = profiles::list_all_profiles()
+        .into_iter()
+        .filter(|p| !profiles::is_secret_profile(&p.id) || unlocked.iter().any(|u| u == &p.id))
+        .collect();
+    Json(ApiResponse::ok(visible))
 }
 
-/// GET /api/profiles/:id — get a single profile
+/// GET /api/profiles/:id — get a single profile. Returns 404 (via
+/// ApiResponse::err) if the id is a secret and not unlocked — same
+/// payload shape as a truly missing profile, so an attacker probing
+/// ids can't distinguish "locked" from "doesn't exist".
 pub async fn get(
     Path(id): Path<String>,
-    _state: State<AppState>,
+    state: State<AppState>,
 ) -> Json<ApiResponse<AgentProfile>> {
+    if profiles::is_secret_profile(&id) {
+        let unlocked = state.config.read().await.unlocked_profiles.clone();
+        if !unlocked.iter().any(|u| u == &id) {
+            return Json(ApiResponse::err("Profile not found"));
+        }
+    }
     match profiles::get_profile(&id) {
         Some(profile) => Json(ApiResponse::ok(profile)),
         None => Json(ApiResponse::err("Profile not found")),

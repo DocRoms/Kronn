@@ -20,11 +20,36 @@ export interface TourStep {
   pulse?: boolean;
   beforeStep?: () => void;
   afterStep?: () => void;
+  /** When set, the tooltip card is positioned relative to THIS element's
+   *  bounding rect instead of `selector`'s. Use it when the spotlight
+   *  target is a small control nested inside a larger container (e.g. a
+   *  button inside a form card) — the spotlight still anchors on the
+   *  small target so the user sees what to click, but the tooltip sits
+   *  OUTSIDE the container so it never covers the content the user is
+   *  trying to interact with. */
+  tooltipAnchor?: string;
 }
 
 function closeModal() {
   const close = document.querySelector<HTMLElement>('.dash-modal-close');
   if (close) close.click();
+}
+
+/** Expand the Profiles accordion inside the new-discussion form so the
+ *  tour's next step can anchor on a real (visible) chip. No-op if the
+ *  accordion is already open or the form isn't mounted. Called as a
+ *  `beforeStep` on the step that highlights the accordion contents. */
+function openProfilesAccordion() {
+  // Only click if the chevron is still in "collapsed" state — double-
+  // triggering would re-collapse the accordion and hide the chips we
+  // want to highlight.
+  const toggle = document.querySelector<HTMLElement>(
+    '[data-tour-id="disc-form-profiles-toggle"]',
+  );
+  if (!toggle) return;
+  const chevron = toggle.querySelector<HTMLElement>('.disc-chevron');
+  const alreadyOpen = chevron?.dataset.expanded === 'true';
+  if (!alreadyOpen) toggle.click();
 }
 
 export const TOUR_STEPS: TourStep[] = [
@@ -137,6 +162,47 @@ export const TOUR_STEPS: TourStep[] = [
     descKey: 'tour.discForm.desc',
     position: 'left',
     group: 'Discussions',
+  },
+  // ── Profiles — learn-by-doing, stays in the new-discussion form ──
+  // Previous attempt drew a static tooltip that sat ON TOP of the form
+  // so the user couldn't see the actual target. New interactive flow:
+  //   1. Highlight the accordion toggle + waitForClick → user opens it
+  //      themselves (so they feel the affordance + the form is
+  //      visible below the tooltip).
+  //   2. Highlight the first profile chip + waitForClick → user picks
+  //      one to proceed (concrete action instead of "read this blurb").
+  // waitForClick keeps the tour paused on the spotlight until the user
+  // performs the gesture; a pulse animation makes the target obvious.
+  {
+    id: 'disc-form-profiles',
+    page: 'discussions',
+    selector: '[data-tour-id="disc-form-profiles-toggle"]',
+    // Spotlight pins on the tiny toggle; tooltip positions against
+    // the whole form card so it never overlaps form content.
+    tooltipAnchor: '.disc-new-card',
+    titleKey: 'tour.discProfiles.title',
+    descKey: 'tour.discProfiles.desc',
+    position: 'left',
+    waitForClick: true,
+    pulse: true,
+    group: 'Discussions',
+  },
+  {
+    id: 'disc-form-profile-chip',
+    page: 'discussions',
+    selector: '[data-tour-id="disc-form-profile-chip"]',
+    tooltipAnchor: '.disc-new-card',
+    titleKey: 'tour.discProfileChip.title',
+    descKey: 'tour.discProfileChip.desc',
+    position: 'left',
+    waitForClick: true,
+    pulse: true,
+    group: 'Discussions',
+    // Safety net: if the user navigated backward and closed the
+    // accordion between step 12 and step 13, re-open it so the chip
+    // is visible (and the spotlight can anchor on a real, visible
+    // element rather than a hidden one with 0×0 bounding box).
+    beforeStep: openProfilesAccordion,
   },
 
   // ── Acte 4 : Automatisation ───────────────────────────────────────

@@ -213,6 +213,8 @@ pub fn default_config() -> AppConfig {
         tts_voices: std::collections::HashMap::new(),
         disabled_agents: vec![],
         encryption_secret: Some(super::crypto::generate_secret()),
+        secret_themes: std::collections::HashMap::new(),
+        unlocked_profiles: Vec::new(),
     }
 }
 
@@ -225,6 +227,14 @@ pub async fn is_first_run() -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Tests that mutate `KRONN_DATA_DIR` (a process-wide env var) must
+    /// run serialized — parallel execution would have them stomp each
+    /// other's paths and see the wrong file on read-back. Uses
+    /// `tokio::sync::Mutex` rather than `std::sync::Mutex` because the
+    /// guard is held across `.await` points (save + load), which
+    /// clippy's `await_holding_lock` lint rejects with a std mutex.
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[test]
     fn default_config_is_valid() {
@@ -256,9 +266,49 @@ mod tests {
         );
     }
 
+    /// A Batman unlock writes "batman" into config.unlocked_profiles AND
+    /// persists — a backend restart must NOT reset it. Also checks
+    /// secret_themes round-trips (operator-local plaintext overrides).
+    #[tokio::test]
+    async fn secret_theme_fields_survive_save_and_reload() {
+        let _lock = ENV_LOCK.lock().await;
+        let tmp = std::env::temp_dir().join(format!(
+            "kronn-secret-fields-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+
+        let mut cfg = default_config();
+        cfg.unlocked_profiles.push("batman".into());
+        cfg.secret_themes.insert("matrix".into(), "some-local-code".into());
+        save(&cfg).await.expect("save must succeed");
+
+        let reloaded = load().await.expect("load Ok").expect("Some after save");
+        assert!(
+            reloaded.unlocked_profiles.iter().any(|p| p == "batman"),
+            "unlocked_profiles lost across save/load: {:?}",
+            reloaded.unlocked_profiles
+        );
+        assert_eq!(
+            reloaded.secret_themes.get("matrix").map(String::as_str),
+            Some("some-local-code"),
+            "secret_themes.matrix lost across save/load: {:?}",
+            reloaded.secret_themes
+        );
+
+        std::env::remove_var("KRONN_DATA_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn save_chmods_dir_700_and_file_600_on_unix() {
+        let _lock = ENV_LOCK.lock().await;
         // Real save() round-trip via KRONN_DATA_DIR override so we don't
         // touch the user's real ~/.config/kronn during tests.
         use std::os::unix::fs::PermissionsExt;

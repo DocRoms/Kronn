@@ -473,7 +473,7 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
             <Layers size={10} /> {t('wiz.stepTypeBatchQP')}
           </span>
         ) : (
-          <span className="text-xs font-semibold" style={{ color: AGENT_COLORS[step.agent] ?? '#888' }}>
+          <span className="text-xs font-semibold" style={{ color: AGENT_COLORS[step.agent] ?? 'var(--kr-text-faint)' }}>
             {AGENT_LABELS[step.agent] ?? step.agent}
           </span>
         )}
@@ -893,8 +893,8 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
       {liveRun && liveRun.workflowId === workflow.id && !liveRun.finished && (
         <div className="wf-live-run">
           <div className="flex-row gap-4 mb-5">
-            <Loader2 size={12} className="wf-spin" style={{ color: '#00d4ff' }} />
-            <span className="text-base font-bold" style={{ color: '#00d4ff' }}>
+            <Loader2 size={12} className="wf-spin" style={{ color: 'var(--kr-cyan)' }} />
+            <span className="text-base font-bold" style={{ color: 'var(--kr-cyan)' }}>
               {t('wf.running')}
             </span>
             {liveRun.totalSteps > 0 && (
@@ -977,7 +977,7 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
             ? <Check size={12} className="text-success" />
             : <X size={12} className="text-error" />
           }
-          <span className="text-base font-semibold" style={{ color: liveRun.status === 'Success' ? '#34d399' : '#ff4d6a' }}>
+          <span className="text-base font-semibold" style={{ color: liveRun.status === 'Success' ? 'var(--kr-success)' : 'var(--kr-error)' }}>
             {t('wf.runDone', liveRun.status ?? '')}
           </span>
           <span className="text-xs text-dim">

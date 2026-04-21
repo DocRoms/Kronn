@@ -3,7 +3,29 @@ import { TOUR_STEPS, type Page, type TourStep } from './tourSteps';
 import { waitForElement } from './useTourPositioning';
 
 const STORAGE_KEY = 'kronn:tour-completed';
+/** Step index where the user left off, persisted so an accidental
+ *  refresh / tab close mid-tour picks up exactly where they stopped.
+ *  Cleared on `complete()` so a full replay always starts at step 0. */
+const STORAGE_KEY_STEP = 'kronn:tour-step';
 const AUTO_START_DELAY = 800;
+
+function loadResumeStep(): number {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_STEP);
+    if (!raw) return 0;
+    const n = parseInt(raw, 10);
+    if (!Number.isFinite(n) || n < 0 || n >= TOUR_STEPS.length) return 0;
+    return n;
+  } catch { return 0; }
+}
+
+function saveResumeStep(stepIndex: number) {
+  try { localStorage.setItem(STORAGE_KEY_STEP, String(stepIndex)); } catch { /* noop */ }
+}
+
+function clearResumeStep() {
+  try { localStorage.removeItem(STORAGE_KEY_STEP); } catch { /* noop */ }
+}
 
 interface TourContextValue {
   isActive: boolean;
@@ -57,6 +79,8 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
     setActive(false);
     setStepIndex(0);
     localStorage.setItem(STORAGE_KEY, 'true');
+    // Mid-tour progress no longer needed — next launch starts fresh.
+    clearResumeStep();
   }, [active, cleanupClickListener]);
 
   // Core navigation — called for every step transition
@@ -117,6 +141,7 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
     }
 
     setStepIndex(targetIndex);
+    saveResumeStep(targetIndex);
     navigatingRef.current = false;
   }, [setPage, cleanupClickListener, complete]);
 
@@ -140,12 +165,25 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
     if (!force && localStorage.getItem(STORAGE_KEY)) return;
     cleanupClickListener();
     navigatingRef.current = false;
+    // A manual replay (force=true, e.g. the "?" help button) always
+    // restarts at step 0 — the user asked for a fresh run. An auto-
+    // resume after a refresh picks up where the user left off.
+    const resumeStep = force ? 0 : loadResumeStep();
     setStepIndex(0);
+    saveResumeStep(resumeStep);
     setActive(true);
     setPage(TOUR_STEPS[0].page);
-  }, [setPage, cleanupClickListener]);
+    // If resuming mid-tour, drive the full navigation pipeline so the
+    // target step's `beforeStep` hook (and any page switch) runs —
+    // otherwise a refresh inside the profiles sub-flow would land on
+    // a collapsed accordion and an invisible selector.
+    if (resumeStep > 0) {
+      setTimeout(() => { navigateToStep(resumeStep); }, 50);
+    }
+  }, [setPage, cleanupClickListener, navigateToStep]);
 
-  // Auto-launch on first visit
+  // Auto-launch on first visit, OR resume a tour the user abandoned
+  // before completing it (saved step > 0 and no completion flag).
   useEffect(() => {
     if (localStorage.getItem(STORAGE_KEY)) return;
     const timer = setTimeout(() => start(), AUTO_START_DELAY);

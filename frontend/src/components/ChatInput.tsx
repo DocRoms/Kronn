@@ -825,7 +825,7 @@ export function ChatInput({
                       <label key={a.name} className="disc-debate-agent-label"
                         style={{
                           cursor: isPrincipal ? 'default' : 'pointer',
-                          color: checked ? '#e8eaed' : 'rgba(255,255,255,0.4)',
+                          color: checked ? 'var(--kr-text-primary)' : 'var(--kr-text-faint)',
                         }}>
                         <input
                           type="checkbox"
@@ -839,9 +839,9 @@ export function ChatInput({
                                 : [...prev, a.agent_type]
                             );
                           }}
-                          style={{ accentColor: '#8b5cf6' }}
+                          style={{ accentColor: 'var(--kr-purple)' }}
                         />
-                        <Cpu size={11} style={{ color: isPrincipal ? '#c8ff00' : '#8b5cf6' }} />
+                        <Cpu size={11} style={{ color: isPrincipal ? 'var(--kr-accent-ink)' : 'var(--kr-purple)' }} />
                         {a.name}
                         {isPrincipal && (
                           <span className="disc-debate-agent-main">{t('debate.main')}</span>

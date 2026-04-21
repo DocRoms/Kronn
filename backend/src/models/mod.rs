@@ -49,6 +49,22 @@ pub struct AppConfig {
     #[serde(default)]
     #[ts(skip)]
     pub encryption_secret: Option<String>,
+    /// Secret theme unlock codes (theme_name → code). Read-only from the
+    /// server — users populate this table in their local
+    /// `~/.config/kronn/config.toml` to enable hidden themes for testers.
+    /// The values are NEVER exported to TypeScript and NEVER returned by
+    /// any endpoint — only consumed during POST /api/themes/unlock. The
+    /// public bundle therefore cannot leak them to a curious user.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    #[ts(skip)]
+    pub secret_themes: std::collections::HashMap<String, String>,
+    /// Profile IDs the operator has unlocked via a secret code. Secret
+    /// builtins (e.g. "batman") are filtered out of `GET /api/profiles`
+    /// when their id is not listed here — unlock adds the id and
+    /// persists the config so the profile sticks across restarts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(skip)]
+    pub unlocked_profiles: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

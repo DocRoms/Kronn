@@ -7,6 +7,7 @@ import type { Project, AgentDetection, DriftCheckResponse, Discussion, Skill, Mc
 import {
   Folder, ChevronDown, Eye, Search, X,
 } from 'lucide-react';
+import { MatrixText } from './MatrixText';
 
 const isAiReady = (p: Project) => p.audit_status !== 'NoTemplate';
 
@@ -98,7 +99,7 @@ export function ProjectList({
     <div>
       <div className="dash-page-header">
         <div>
-          <h1 className="dash-h1">{t('projects.title')}</h1>
+          <h1 className="dash-h1"><MatrixText text={t('projects.title')} /></h1>
           <p className="dash-meta">
             {aiCount}/{visibleProjects.length} {t('projects.aiReady')}
             {hiddenProjects.length > 0 && (
@@ -109,7 +110,7 @@ export function ProjectList({
         <div className="flex-row gap-4">
           {hiddenProjects.length > 0 && (
             <button className="dash-icon-btn" onClick={() => setShowHidden(!showHidden)} title={showHidden ? t('projects.hideHidden') : t('projects.showHidden')} aria-label={showHidden ? t('projects.hideHidden') : t('projects.showHidden')}>
-              <Eye size={14} style={{ color: showHidden ? '#c8ff00' : undefined }} />
+              <Eye size={14} style={{ color: showHidden ? 'var(--kr-accent-ink)' : undefined }} />
             </button>
           )}
         </div>
@@ -223,7 +224,7 @@ export function ProjectList({
 
       {displayProjects.length === 0 && (
         <div className="dash-card dash-empty">
-          <Folder size={32} style={{ color: 'rgba(255,255,255,0.15)', marginBottom: 12 }} />
+          <Folder size={32} style={{ color: 'var(--kr-text-ghost)', marginBottom: 12 }} />
           <p className="dash-empty-text">
             {projectSearch ? t('projects.emptySearch') : t('projects.emptyHint')}
           </p>

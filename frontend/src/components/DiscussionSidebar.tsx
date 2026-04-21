@@ -294,7 +294,7 @@ export function DiscussionSidebar({
           return (
             <div>
               <div className="disc-group-header" data-no-border="true">
-                <Star size={10} style={{ color: '#ffc800' }} />
+                <Star size={10} style={{ color: 'var(--kr-warning)' }} />
                 <span style={{ fontWeight: 600, fontSize: 'var(--kr-fs-sm)' }}>{t('disc.favorites')}</span>
                 <span className="disc-group-count">{pinned.length}</span>
               </div>

@@ -3,6 +3,8 @@ import ReactDOM from 'react-dom/client';
 import './styles/index.css';
 import { App } from './App';
 import { I18nProvider } from './lib/I18nContext';
+import { ThemeProvider } from './lib/ThemeContext';
+import { ThemeEffects } from './components/ThemeEffects';
 import { setApiBase } from './lib/api';
 
 // Detect Tauri desktop mode and configure API base URL
@@ -22,9 +24,12 @@ async function initApiBase() {
 initApiBase().then(() => {
   ReactDOM.createRoot(document.getElementById('root')!).render(
     <React.StrictMode>
-      <I18nProvider>
-        <App />
-      </I18nProvider>
+      <ThemeProvider>
+        <I18nProvider>
+          <ThemeEffects />
+          <App />
+        </I18nProvider>
+      </ThemeProvider>
     </React.StrictMode>,
   );
 });

@@ -7,6 +7,176 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [Unreleased]
+
+Post-0.5.0 polish + playful additions: the light theme got a proper
+expert-led rework, a hidden-unlock system was added for early-access
+testing, and three secret themes ship with a small interactive layer.
+
+### Added
+- **Secret unlock system** — A hidden area in Settings (only revealed
+  after the Konami code `↑ ↑ ↓ ↓ ← → ← → B A` is entered on the page)
+  exposes an input that accepts short codes. Codes are hashed
+  server-side (`SHA-256` committed in `BUILT_IN_UNLOCK_HASHES`) and
+  resolve to one or several unlocks — a code can unlock a theme, a
+  profile, or **bundle both in one shot**. Shared with testers
+  out-of-band. Operators can also add local plaintext overrides in
+  `~/.config/kronn/config.toml` `[secret_themes]` for quick testing
+  without a release. Generic `invalid code` error on miss so probers
+  can't enumerate configured unlocks. Theme unlocks persist in
+  `localStorage`; profile unlocks persist in
+  `AppConfig.unlocked_profiles` (written to `config.toml` on success)
+  so the profile survives restarts and shows up in `GET /api/profiles`
+- **Three secret themes (hidden until unlocked)** — each adds a full
+  `:root[data-theme="<name>"]` palette override:
+  - **Matrix** — CRT phosphor aesthetic (near-black bg, phosphor green
+    accent, green-biased text hierarchy, glow shadows). Ships with a
+    JS decoding effect: titles scramble (katakana + digits + ASCII)
+    then settle one-shot on mount and on occasional global pulses
+    (8-14 s jitter, 15 % chance per title per pulse). The user's last
+    message scrambles briefly when a discussion is opened
+  - **Sakura** — pastel pink/purple blossom palette (warm white bg,
+    hot-pink accent, dark-plum text). Ships with 6 falling `🌸`
+    petals, each randomized on init (duration / drift / size /
+    spin / opacity). Mouse proximity (≤ 90 px) pushes petals away
+    with a proportional force — feels like breath on the sakura
+  - **Gotham** — deep navy-noir bg with bat-signal yellow accent.
+    Ships with an ambient bat-signal radial gradient drifting across
+    the viewport (30 s round-trip) and 3 `🦇` that fly right-to-left
+    with staggered delays so one appears every ~5-10 s
+- **Batman profile — first secret built-in profile** — hidden until
+  unlocked via the same input as themes (bundle code also unlocks the
+  Gotham theme, so one unlock = profile + palette).
+  `backend/src/profiles/batman.md` defines the persona in French: "le
+  plus grand détective du monde", methodological investigator that
+  collects physical evidence first, consults all configured MCPs +
+  APIs, cross-checks against other repos via GitHub MCP / Context7,
+  delegates to sub-agents as expert witnesses, and signs every report
+  *"Je suis Batman."*. Surfaces `SECRET_PROFILE_IDS` in
+  `core/profiles.rs` + visibility gating in `api/profiles.rs` so
+  locked secret profiles 404 identically to missing ones —
+  brute-forcing IDs reveals nothing
+- **Light theme — properly accessible rebuild** — a full expert-led
+  rework after the initial hasty refactor had the accent lime leak
+  onto pale lime tints ("jaune sur vert clair" illegibility). New
+  palette: teal-700 `#0f766e` accent (5.5:1 AA, chromatic cousin of
+  the dark-theme lime on the cyan-yellow axis — same "électrique"
+  tension without the contrast fail), cool-gray ramp
+  (`#f6f7f9` / `#eceef2` / `#ffffff` with 11 % luminance delta so
+  cards visibly lift), hovers bumped to `rgba(16,24,40,0.08+)` for
+  WCAG 1.4.11 conformance on raised surfaces, shadow ramp doubled in
+  thickness (two-layer with tight + wide), `--kr-text-on-accent`
+  flipped to white in light (so black-on-dark-teal illegibility
+  disappears). Every semantic hex flipped to Tailwind 600/700 range.
+  `text-faint` merged with `text-muted` and `text-ghost` raised to
+  4.5:1 to fix a fail flagged by the A11y audit where 10-11 px labels
+  fell below AA normal text. Focus ring gets a
+  `box-shadow: 0 0 0 4px rgba(accent, 0.22)` halo (WCAG 2.4.11 Focus
+  Not Obscured Minimum)
+- **`config.appearance` picker — unlocked themes appear inline** —
+  once a secret theme is unlocked it slots in alongside system / light
+  / dark with its own icon (Terminal for Matrix, Heart for Sakura,
+  `🦇` for Gotham). The picker transparently re-uses the existing
+  `set-choice-btn` styling
+- **Theme-effects overlay infrastructure** — `<ThemeEffects />` mounts
+  once at the app root and renders the right decorative layer based
+  on the current theme. `pointer-events: none` + `aria-hidden="true"`
+  on every sprite so clicks pass through and screen readers ignore
+  them. `@media (prefers-reduced-motion: reduce)` disables all
+  sprites + sidecar effects so the user keeps the palette without the
+  motion
+- **`useMatrixDecode` / `<MatrixText>`** — hook + wrapper component
+  that replace a target string with a one-shot scramble animation
+  (~470 ms) when the matrix theme is active, falling back to plain
+  text otherwise. Applied to page `<h1>` headers, discussion titles
+  in the sidebar, and the chat header title. Listens to the global
+  `matrix:pulse` event for occasional re-scrambles so long-lived
+  pages stay alive
+- **Global `matrix:pulse` scheduler** — emitted from `<ThemeEffects />`
+  every 8-14 s (jitter) while the matrix theme is active. Every
+  `<MatrixText />` instance rolls a 15 % dice per pulse to decide
+  whether to re-scramble — with ~20 visible titles, ~3 scrambles per
+  pulse → sensation of aliveness without synchronized robotic mass
+  updates
+- **`useKonamiCode(onUnlock)` hook** — sequence-matching keyboard
+  listener (accepts both lowercase and uppercase B/A, resets on wrong
+  key but a fresh `↑` re-starts as step 1). Skips when the event
+  target is `INPUT` / `TEXTAREA` / `contenteditable` so typing with
+  arrow keys never advances the sequence accidentally. 6 unit tests
+- **`kronn:profiles-changed` window event** — fired by the Secret Code
+  submit handler whenever a profile unlock lands. The 4 consumers of
+  `GET /api/profiles` (ProfilesSection, NewDiscussionForm,
+  DiscussionsPage, WorkflowWizard) listen and refetch — Batman
+  appears everywhere in real time without a page reload
+
+### Changed
+- **`POST /api/themes/unlock` response shape — `{ unlocks: [{kind, name}, ...] }`**
+  (was single `{ theme }`). A single code may now match multiple rows
+  in `BUILT_IN_UNLOCK_HASHES`, enabling bundles like
+  kronnBatman → profile + theme together. Frontend `themes.unlock()`
+  returns the array unchanged and the `ThemeContext` dispatches per
+  kind. Operator-local plaintext theme overrides still resolve via
+  `config.secret_themes`; profiles always go through built-in hashes
+- **`AppConfig` gained `unlocked_profiles: Vec<String>`** + `secret_themes:
+  HashMap<String, String>`, both `#[ts(skip)]` so codes never leak to
+  the TypeScript bundle. `default_config()` initializes them empty.
+  Zero migration — absence → default
+- **Dark theme unchanged** — every light-theme fix is gated under
+  `:root[data-theme="light"]`, the dark variables are untouched (the
+  lime `#c8ff00` + black-on-lime contract stays 14:1 AAA)
+
+### Fixed
+- **Light theme — black text on dark accent illegibility** —
+  `var(--kr-accent)` is now dark teal in light, so
+  `color: var(--kr-text-on-accent) = #111` on it gave 3.5:1 (FAIL AA).
+  User caught the regression on the pending-files badge and the
+  "Créer avec IA" workflow CTA. Flipped `--kr-text-on-accent` to
+  `#ffffff` in light, preserving 5.5:1 on the teal background while
+  keeping 14:1 on the lime dark-theme fill
+- **Light theme — sidebar blue cast** — the second-pass ramp
+  (`#e3e4eb` for raised) read as "bleu" because `B=235 > R=223`.
+  Neutralized to equal-channel gray `#e3e3e3` first, then the
+  third-pass expert rework landed on `#eceef2` (3-pt cool tint,
+  perceptually neutral)
+- **Light theme — hovers indistinguishable from idle** —
+  `rgba(0,0,0,0.06)` on raised gave 1.13:1 (FAIL WCAG 1.4.11 which
+  requires 3:1 for state indicators). Bumped to
+  `rgba(16,24,40,0.08)` on idle / `0.14` on strong / `0.18` on active
+  — all pass 3:1 now
+- **Light theme — bubble agent white-on-white** — white bubbles on
+  near-white base (`#f5f6f8`) had no visual separation. Base darkened
+  to `#f6f7f9` with 11 % delta to surface; agent bubble border
+  tightened to `--kr-border-strong` + explicit `box-shadow` so the
+  bubble now crisply lifts off the page
+- **Light theme — active discussion almost identical to idle** —
+  `.disc-item[data-active="true"]` used `rgba(accent, 0.06)` which
+  gave near-imperceptible tint in light. Bumped to `0.18` + added
+  `font-weight: 500`. Dark theme kept at `0.18` too (18 % lime tint
+  on `#0e1117` reads distinctly without being harsh)
+- **Light theme — flat neutrals `#ededed`/`#e3e3e3` read "dated"** —
+  the R=G=B neutrals that were picked to kill the blue cast felt
+  clinical per the UI audit. Final palette retains 3-pt cool tint
+  (matches Linear / Vercel / Stripe dashboards without any "blue
+  cast") — imperceptible at first glance but gives backgrounds a
+  subtle alive feel
+
+### Developer experience
+- **AI docs — secret-themes guide** — `ai/operations/secret-themes.md`
+  explains the unlock system, how to add a new theme, how to add a
+  new secret profile, and enumerates the security caveats (hash is
+  SHA-256 unsalted on purpose so contributors can regenerate with
+  `sha256sum`; codes ≥ 12 chars for dictionary resistance). Linked
+  from `ai/index.md` Tier 1 table
+- **Tests** — net **+12 backend** tests (built-in hash path, bundle
+  unlock persistence, secret-profile filter, locked-id 404, hash
+  determinism canary) + **+16 frontend** (Konami sequence matching,
+  matrix decode edge cases + pulse re-scrambles, theme unlock bundle
+  flow, tampered localStorage defense, gracefully degraded when
+  previously-unlocked theme no longer in unlocked list). Totals:
+  **1143 backend lib / 677 frontend** — all green
+
+---
+
 ## [0.5.0] — 2026-04-20
 
 Major release: worktree test-mode UX, API plugins (Chartbeat as first), crash-recovery fixes, QP "Analyse de ticket Jira" hardening.

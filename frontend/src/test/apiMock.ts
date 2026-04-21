@@ -47,6 +47,7 @@ export const API_NAMESPACES = [
   'stats',
   'ollama',
   'debugApi',
+  'themes',
 ] as const;
 
 /** Flat top-level helpers (non-namespace exports). */
@@ -81,6 +82,7 @@ interface DefaultMock {
   stats: Record<string, AnyFn>;
   ollama: Record<string, AnyFn>;
   debugApi: Record<string, AnyFn>;
+  themes: Record<string, AnyFn>;
 }
 
 /**
@@ -255,6 +257,10 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     debugApi: {
       getLogs: resolve({ lines: [], buffered: 0, capacity: 2000, debug_mode: false }),
       clearLogs: resolve(undefined),
+    },
+
+    themes: {
+      unlock: resolve({ theme: 'matrix' }),
     },
   };
 

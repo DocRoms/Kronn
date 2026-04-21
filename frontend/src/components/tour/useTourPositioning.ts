@@ -19,6 +19,11 @@ export function useTourPositioning(
   preferredPosition?: 'top' | 'bottom' | 'left' | 'right',
   isMobile = false,
   pulse = false,
+  /** Optional secondary selector — when set, the tooltip card is
+   *  positioned relative to THIS element's rect instead of the main
+   *  target. Lets the spotlight pin on a tiny inner control while the
+   *  tooltip sits outside the surrounding container. */
+  tooltipAnchor?: string,
 ): PositionResult {
   const [result, setResult] = useState<PositionResult>({
     spotlight: null,
@@ -76,7 +81,7 @@ export function useTourPositioning(
       return;
     }
 
-    // Spotlight rect (with padding)
+    // Spotlight rect (with padding) — always pinned on the main target.
     const spotlight: React.CSSProperties = {
       top: rect.top - PADDING,
       left: rect.left - PADDING,
@@ -90,15 +95,25 @@ export function useTourPositioning(
       return;
     }
 
+    // The tooltip is positioned around a different rect when a
+    // `tooltipAnchor` is provided — usually a parent container — so the
+    // tooltip can sit OUTSIDE the container while the spotlight stays
+    // on the inner target. Falls back to the target rect when the
+    // anchor doesn't exist (yet), which keeps first paint sane.
+    const anchorEl = tooltipAnchor
+      ? document.querySelector<HTMLElement>(tooltipAnchor)
+      : null;
+    const anchorRect = anchorEl ? anchorEl.getBoundingClientRect() : rect;
+
     const vw = window.innerWidth;
     const vh = window.innerHeight;
     const tooltipW = 340;
     const tooltipH = 200; // estimated
 
-    const spaceTop = rect.top;
-    const spaceBottom = vh - rect.bottom;
-    const spaceLeft = rect.left;
-    const spaceRight = vw - rect.right;
+    const spaceTop = anchorRect.top;
+    const spaceBottom = vh - anchorRect.bottom;
+    const spaceLeft = anchorRect.left;
+    const spaceRight = vw - anchorRect.right;
 
     // Try preferred, then bottom, top, right, left
     const candidates: ('bottom' | 'top' | 'right' | 'left')[] = preferredPosition
@@ -114,29 +129,29 @@ export function useTourPositioning(
     }
 
     const tooltip: React.CSSProperties = {};
-    const centerX = rect.left + rect.width / 2 - tooltipW / 2;
+    const centerX = anchorRect.left + anchorRect.width / 2 - tooltipW / 2;
 
     switch (pos) {
       case 'bottom':
-        tooltip.top = rect.bottom + TOOLTIP_GAP;
+        tooltip.top = anchorRect.bottom + TOOLTIP_GAP;
         tooltip.left = Math.max(VIEWPORT_MARGIN, Math.min(centerX, vw - tooltipW - VIEWPORT_MARGIN));
         break;
       case 'top':
-        tooltip.top = rect.top - tooltipH - TOOLTIP_GAP;
+        tooltip.top = anchorRect.top - tooltipH - TOOLTIP_GAP;
         tooltip.left = Math.max(VIEWPORT_MARGIN, Math.min(centerX, vw - tooltipW - VIEWPORT_MARGIN));
         break;
       case 'right':
-        tooltip.top = Math.max(VIEWPORT_MARGIN, rect.top + rect.height / 2 - tooltipH / 2);
-        tooltip.left = rect.right + TOOLTIP_GAP;
+        tooltip.top = Math.max(VIEWPORT_MARGIN, anchorRect.top + anchorRect.height / 2 - tooltipH / 2);
+        tooltip.left = anchorRect.right + TOOLTIP_GAP;
         break;
       case 'left':
-        tooltip.top = Math.max(VIEWPORT_MARGIN, rect.top + rect.height / 2 - tooltipH / 2);
-        tooltip.left = rect.left - tooltipW - TOOLTIP_GAP;
+        tooltip.top = Math.max(VIEWPORT_MARGIN, anchorRect.top + anchorRect.height / 2 - tooltipH / 2);
+        tooltip.left = anchorRect.left - tooltipW - TOOLTIP_GAP;
         break;
     }
 
     setResult({ spotlight, tooltip, position: pos });
-  }, [selector, preferredPosition, isMobile, pulse, cleanupPrev]);
+  }, [selector, preferredPosition, isMobile, pulse, cleanupPrev, tooltipAnchor]);
 
   useEffect(() => {
     measure();
