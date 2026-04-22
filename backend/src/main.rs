@@ -1,7 +1,7 @@
 use std::sync::Arc;
-use tokio::sync::{RwLock, Semaphore};
+use tokio::sync::RwLock;
 
-use kronn::{build_router, core::{config, mcp_scanner}, db::Database, workflows::WorkflowEngine, AppState, AuditTracker, DEFAULT_MAX_CONCURRENT_AGENTS};
+use kronn::{build_router, core::{config, mcp_scanner}, db::Database, workflows::WorkflowEngine, AppState, DEFAULT_MAX_CONCURRENT_AGENTS};
 
 // ─── Main ───────────────────────────────────────────────────────────────────
 
@@ -87,18 +87,10 @@ async fn main() -> anyhow::Result<()> {
     let database = Arc::new(Database::open().expect("Failed to open database"));
     tracing::info!("Database opened at {}/kronn.db", config::config_dir().unwrap().display());
 
-    // Build state first (no longer holds workflow_engine — broken circular dep)
+    // Build state via the shared factory — keep both mains in sync when
+    // new runtime fields are added to AppState (see lib.rs doc).
     let config_arc = Arc::new(RwLock::new(app_config));
-    let (ws_tx, _) = tokio::sync::broadcast::channel::<kronn::models::WsMessage>(256);
-    let state = AppState {
-        config: config_arc,
-        db: database,
-        agent_semaphore: Arc::new(Semaphore::new(max_agents)),
-        audit_tracker: Arc::new(std::sync::Mutex::new(AuditTracker::default())),
-        ws_broadcast: Arc::new(ws_tx),
-        cancel_registry: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        oauth2_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-    };
+    let state = AppState::new_defaults(config_arc, database, max_agents);
 
     // Workflow engine gets a clone of the state so it can spawn runs that
     // need full access (batch fan-out, ws broadcasts, agent semaphore).

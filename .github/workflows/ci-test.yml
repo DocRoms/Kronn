@@ -36,6 +36,62 @@ jobs:
         # No sccache for clippy — cached artifacts can replay stale lint warnings
         # even when the source has changed (sccache hashes deps/flags, not source content)
 
+      # ── Desktop crate compile-check ────────────────────────────────────
+      # backend/ and desktop/src-tauri/ are separate crates (no root
+      # workspace). cargo clippy above only covers backend → desktop
+      # could silently drift and only break at release time
+      # (desktop-build.yml runs on v* tags). This check catches the
+      # drift at PR time. The 0.5.0 regression that motivated adding it:
+      # a new field on AppState was added + initialized in backend::main
+      # but forgotten in desktop::main, so the backend crate compiled
+      # fine but `cargo tauri build` broke all 4 desktop OS targets.
+      - name: Install Linux deps for desktop compile check
+        # webkit2gtk-4.1 / libsoup-3.0 / javascriptcoregtk-4.1 are
+        # linked via pkg-config by tauri/glib-sys build scripts. Must
+        # match the set installed in desktop-build.yml so both paths
+        # compile identically.
+        run: |
+          sudo add-apt-repository -y universe
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libsoup-3.0-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            patchelf \
+            file
+
+      # `include_dir!("../../frontend/dist")` in desktop/src-tauri/src/main.rs
+      # is expanded at compile time — Tauri also reads `frontendDist`
+      # from tauri.conf.json during `generate_context!`. Both panic if
+      # the dir doesn't exist, so we need a real frontend build before
+      # the check. We install pnpm + build frontend (production `dist/`).
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install pnpm
+        run: npm install -g pnpm
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend (produces frontend/dist/)
+        working-directory: frontend
+        run: pnpm build
+
+      - name: cargo check — desktop crate
+        working-directory: desktop/src-tauri
+        run: cargo check --locked
+        # --locked so a drift in Cargo.lock vs Cargo.toml also fails here,
+        # not just at release.
+
       # ── Anti-regression lints ─────────────────────────────────────────
       #
       # These grep-based checks catch patterns that clippy can't:
