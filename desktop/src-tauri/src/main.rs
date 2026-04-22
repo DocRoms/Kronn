@@ -2,7 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::sync::Arc;
-use tokio::sync::{RwLock, Semaphore};
+use tokio::sync::RwLock;
 
 use kronn::{
     build_router,
@@ -10,7 +10,7 @@ use kronn::{
     db::Database,
     models::ApiKey,
     workflows::WorkflowEngine,
-    AppState, AuditTracker, DEFAULT_MAX_CONCURRENT_AGENTS,
+    AppState, DEFAULT_MAX_CONCURRENT_AGENTS,
 };
 
 // Embed frontend/dist/ into the binary at compile time.
@@ -462,17 +462,10 @@ async fn start_backend(port: u16, dist_dir: std::path::PathBuf) -> anyhow::Resul
     // Open database
     let database = Arc::new(Database::open().expect("Failed to open database"));
 
-    // Build state
-    let (ws_tx, _) = tokio::sync::broadcast::channel(256);
+    // Build state via the shared factory — any new AppState field gets
+    // picked up here automatically (see kronn::AppState::new_defaults).
     let config_arc = Arc::new(RwLock::new(app_config));
-    let state = AppState {
-        config: config_arc,
-        db: database.clone(),
-        agent_semaphore: Arc::new(Semaphore::new(max_agents)),
-        audit_tracker: Arc::new(std::sync::Mutex::new(AuditTracker::default())),
-        ws_broadcast: Arc::new(ws_tx),
-        cancel_registry: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-    };
+    let state = AppState::new_defaults(config_arc, database.clone(), max_agents);
 
     // Workflow engine gets a clone of the state (same pattern as backend main.rs)
     let workflow_engine = Arc::new(WorkflowEngine::new(state.clone()));

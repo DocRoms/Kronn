@@ -130,6 +130,38 @@ pub struct AppState {
     pub oauth2_cache: Arc<tokio::sync::Mutex<HashMap<String, crate::core::oauth2_cache::CachedToken>>>,
 }
 
+impl AppState {
+    /// Canonical factory for an `AppState` — default-initializes every
+    /// runtime field (semaphore, trackers, broadcast channel, cancel
+    /// registry, OAuth2 cache) from the two caller-supplied inputs.
+    ///
+    /// **Use this from every main (backend + desktop) instead of
+    /// constructing `AppState { ... }` inline.** Struct-literal
+    /// construction got us bitten in 0.5.0: when the `oauth2_cache`
+    /// field was added to `AppState`, `backend::main` was updated but
+    /// `desktop/src-tauri/main` was missed — the backend crate
+    /// compiled, `cargo tauri build` broke all 4 desktop OS targets at
+    /// release time. A single factory makes drift impossible. Tests
+    /// also use this (via `test_state()`) so the happy path is always
+    /// exercised.
+    pub fn new_defaults(
+        config: Arc<RwLock<AppConfig>>,
+        db: Arc<Database>,
+        max_agents: usize,
+    ) -> Self {
+        let (ws_tx, _) = tokio::sync::broadcast::channel::<crate::models::WsMessage>(256);
+        Self {
+            config,
+            db,
+            agent_semaphore: Arc::new(Semaphore::new(max_agents)),
+            audit_tracker: Arc::new(Mutex::new(AuditTracker::default())),
+            ws_broadcast: Arc::new(ws_tx),
+            cancel_registry: Arc::new(Mutex::new(HashMap::new())),
+            oauth2_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        }
+    }
+}
+
 /// Helpers to manage the cancel registry without leaking mutex details all
 /// over the code. Keep this file-local so the registry convention stays
 /// consistent (RAII-style insertion + cleanup on drop).

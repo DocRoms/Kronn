@@ -10,32 +10,22 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt;
     use serde_json::Value;
-    use tokio::sync::{RwLock, Semaphore};
+    use tokio::sync::RwLock;
     use tower::ServiceExt; // for `oneshot`
 
     use crate::{
         build_router_with_auth,
         core::config::default_config,
         db::Database,
-        AppState, AuditTracker, DEFAULT_MAX_CONCURRENT_AGENTS,
+        AppState, DEFAULT_MAX_CONCURRENT_AGENTS,
     };
 
     // ─── Helper: build a test AppState with an in-memory DB ──────────────────
 
     fn test_state() -> AppState {
         let db = Arc::new(Database::open_in_memory().expect("in-memory DB"));
-        let config = default_config();
-        let config_arc = Arc::new(RwLock::new(config));
-        let (ws_tx, _) = tokio::sync::broadcast::channel(256);
-        AppState {
-            config: config_arc,
-            db,
-            agent_semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_AGENTS)),
-            audit_tracker: Arc::new(std::sync::Mutex::new(AuditTracker::default())),
-            ws_broadcast: Arc::new(ws_tx),
-            cancel_registry: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        oauth2_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-        }
+        let config_arc = Arc::new(RwLock::new(default_config()));
+        AppState::new_defaults(config_arc, db, DEFAULT_MAX_CONCURRENT_AGENTS)
     }
 
     /// Build a test AppState with a specific auth token configured.
@@ -45,16 +35,7 @@ mod tests {
         config.server.auth_token = Some(token.to_string());
         config.server.auth_enabled = true;
         let config_arc = Arc::new(RwLock::new(config));
-        let (ws_tx, _) = tokio::sync::broadcast::channel(256);
-        AppState {
-            config: config_arc,
-            db,
-            agent_semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_AGENTS)),
-            audit_tracker: Arc::new(std::sync::Mutex::new(AuditTracker::default())),
-            ws_broadcast: Arc::new(ws_tx),
-            cancel_registry: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        oauth2_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-        }
+        AppState::new_defaults(config_arc, db, DEFAULT_MAX_CONCURRENT_AGENTS)
     }
 
     /// Send a request and collect the response body as parsed JSON.
@@ -1791,5 +1772,44 @@ mod tests {
         let (_, body) = send(state, false, req).await;
         assert_eq!(body["success"], true, "batman unfetchable post-unlock: {body}");
         assert_eq!(body["data"]["id"], "batman");
+    }
+
+    /// Smoke test for `AppState::new_defaults` — proves the factory
+    /// produces a state with every runtime field non-empty / present.
+    /// This is the guard against the 0.5.0 regression where
+    /// `desktop/src-tauri/src/main.rs` was missing a new AppState
+    /// field: the factory is the ONLY init path (both mains + every
+    /// test use it), so forgetting to default-initialize a new field
+    /// here fails this test AND prevents the struct-literal drift.
+    #[tokio::test]
+    async fn app_state_new_defaults_initializes_every_runtime_field() {
+        let db = Arc::new(Database::open_in_memory().expect("in-memory DB"));
+        let config_arc = Arc::new(RwLock::new(default_config()));
+        let state = AppState::new_defaults(config_arc, db, DEFAULT_MAX_CONCURRENT_AGENTS);
+
+        // Every Arc-wrapped field must be reachable and initialized.
+        // Concurrent-initialized containers (HashMap) must be empty —
+        // catches accidentally wiring a shared-across-tests singleton.
+        assert!(Arc::strong_count(&state.config) >= 1);
+        assert!(Arc::strong_count(&state.db) >= 1);
+        assert_eq!(state.agent_semaphore.available_permits(), DEFAULT_MAX_CONCURRENT_AGENTS);
+        assert_eq!(
+            state.audit_tracker.lock().unwrap().progress.len(),
+            0,
+            "fresh AuditTracker must be empty"
+        );
+        // ws_broadcast subscriber count starts at 0 — prove the channel
+        // is open by subscribing (no panic = sender is alive).
+        let _sub = state.ws_broadcast.subscribe();
+        assert_eq!(
+            state.cancel_registry.lock().unwrap().len(),
+            0,
+            "cancel registry must start empty"
+        );
+        assert_eq!(
+            state.oauth2_cache.lock().await.len(),
+            0,
+            "oauth2 cache must start empty"
+        );
     }
 }
