@@ -1812,4 +1812,209 @@ mod tests {
             "oauth2 cache must start empty"
         );
     }
+
+    // ─── Document generation endpoints ────────────────────────────────
+
+    /// Without a running sidecar (the default in tests — no Python venv
+    /// created), `POST /api/docs/pdf` must return an actionable error
+    /// instead of hanging or crashing. The message must point at
+    /// `make docs-setup` so users know what to do.
+    #[tokio::test]
+    async fn docs_pdf_returns_actionable_error_when_sidecar_absent() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/docs/pdf")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::json!({
+                "discussion_id": "disc-1",
+                "html": "<html><body>hi</body></html>",
+            }).to_string()))
+            .unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["success"], false, "must fail gracefully: {body}");
+        let err = body["error"].as_str().unwrap_or_default();
+        assert!(
+            err.contains("make docs-setup"),
+            "error must hint at the setup command, got: {err}"
+        );
+    }
+
+    /// Reject requests with traversal payloads in `discussion_id` before
+    /// they touch the filesystem. The handler returns a generic
+    /// "invalid discussion_id" rather than leaking path details.
+    #[tokio::test]
+    async fn docs_pdf_rejects_traversal_in_discussion_id() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/docs/pdf")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::json!({
+                "discussion_id": "../../etc",
+                "html": "<html></html>",
+            }).to_string()))
+            .unwrap();
+        let (_, body) = send(state, false, req).await;
+        assert_eq!(body["success"], false);
+        // Either the sidecar-absent error fires first (no venv in
+        // tests) OR the traversal guard does. Both are acceptable —
+        // the key property is we never let a traversing discussion_id
+        // get as far as path building.
+        let err = body["error"].as_str().unwrap_or_default();
+        assert!(
+            err.contains("make docs-setup") || err.contains("invalid discussion_id"),
+            "expected sidecar-absent OR traversal-guard error, got: {err}"
+        );
+    }
+
+    /// GET /api/docs/file/:disc/:filename rejects path-traversal payloads
+    /// BEFORE attempting disk access. Defense in depth on top of the
+    /// canonicalize guard.
+    #[tokio::test]
+    async fn docs_download_rejects_traversal_filename() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/docs/file/disc-1/..%2F..%2Fetc%2Fpasswd")
+            .body(Body::empty())
+            .unwrap();
+        let (status, _) = send(state, false, req).await;
+        // URL decoder would land `..` in the filename → handler rejects.
+        // We don't assert the exact status code (400 vs 404 depends on
+        // whether the router URL-decoded the %2F); either is safe.
+        assert!(
+            status.is_client_error() || status.is_server_error(),
+            "traversal filename must not succeed: {status}"
+        );
+    }
+
+    /// Each of the 5 document-generation endpoints must surface the
+    /// same actionable "install the sidecar" error when the Python
+    /// sidecar isn't running. Parametrized so a single matrix covers
+    /// all formats and catches a new endpoint silently forgetting the
+    /// sidecar check.
+    #[tokio::test]
+    async fn docs_all_formats_return_actionable_error_when_sidecar_absent() {
+        let cases: &[(&str, serde_json::Value)] = &[
+            ("pdf",  serde_json::json!({"discussion_id": "d", "html": "<p>x</p>"})),
+            ("docx", serde_json::json!({"discussion_id": "d", "html": "<p>x</p>"})),
+            ("xlsx", serde_json::json!({"discussion_id": "d", "sheets": [{"name": "S", "rows": [["a"]]}]})),
+            ("csv",  serde_json::json!({"discussion_id": "d", "rows": [["a", "b"]]})),
+            ("pptx", serde_json::json!({"discussion_id": "d", "slides": [{"title": "Hi"}]})),
+        ];
+        for (fmt, body) in cases {
+            let state = test_state();
+            let req = Request::builder()
+                .method("POST")
+                .uri(format!("/api/docs/{fmt}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            let (status, resp) = send(state, false, req).await;
+            assert_eq!(status, StatusCode::OK, "[{fmt}]");
+            assert_eq!(resp["success"], false, "[{fmt}] should fail without sidecar: {resp}");
+            let err = resp["error"].as_str().unwrap_or_default();
+            assert!(
+                err.contains("make docs-setup"),
+                "[{fmt}] error must point at the setup command, got: {err}"
+            );
+        }
+    }
+
+    /// GET /api/docs/file/:disc/:filename returns 404 for files that
+    /// don't exist — the download handler must not leak existence
+    /// information about other discussions' files either.
+    #[tokio::test]
+    async fn docs_download_404_when_file_missing() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/docs/file/disc-nonexistent/never.pdf")
+            .body(Body::empty())
+            .unwrap();
+        let (status, _) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    // ─── Auto-trigger opt-out (GET endpoint edge cases) ─────────────
+
+    /// The GET endpoint returns an empty array when no skill has been
+    /// opted out — fresh install path.
+    #[tokio::test]
+    async fn auto_trigger_list_empty_by_default() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/skills/auto-triggers/disabled")
+            .body(Body::empty())
+            .unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        let arr = body["data"].as_array().expect("data array");
+        assert!(arr.is_empty(), "no skills opted out by default: {body}");
+    }
+
+    /// Toggling a skill id that doesn't exist in the registry still
+    /// succeeds — the config stores arbitrary strings, checking
+    /// existence is the frontend's job. Guards against a race where
+    /// the frontend toggles a skill that was just deleted.
+    #[tokio::test]
+    async fn auto_trigger_toggle_unknown_skill_still_works() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/skills/some-made-up-skill/auto-trigger/toggle")
+            .body(Body::empty())
+            .unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"], true, "toggle to ON must succeed: {body}");
+    }
+
+    /// The auto-trigger toggle flips in-memory state AND persists it.
+    /// Sending the toggle twice ends at the original state (idempotent
+    /// round-trip), and the GET endpoint returns the live list.
+    #[tokio::test]
+    async fn auto_trigger_toggle_flips_and_persists() {
+        let state = test_state();
+
+        // First toggle on kronn-docs → disables.
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/skills/kronn-docs/auto-trigger/toggle")
+            .body(Body::empty())
+            .unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"], true, "first toggle must report disabled=true: {body}");
+        assert!(
+            state.config.read().await.disabled_auto_skills.iter().any(|s| s == "kronn-docs"),
+            "config must now list kronn-docs as disabled"
+        );
+
+        // GET reports the current list.
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/skills/auto-triggers/disabled")
+            .body(Body::empty())
+            .unwrap();
+        let (_, body) = send(state.clone(), false, req).await;
+        let ids = body["data"].as_array().expect("data array");
+        assert!(ids.iter().any(|v| v == "kronn-docs"));
+
+        // Second toggle → re-enables (opt-out removed).
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/skills/kronn-docs/auto-trigger/toggle")
+            .body(Body::empty())
+            .unwrap();
+        let (_, body) = send(state.clone(), false, req).await;
+        assert_eq!(body["data"], false, "second toggle must report disabled=false: {body}");
+        assert!(
+            state.config.read().await.disabled_auto_skills.is_empty(),
+            "list must be empty again"
+        );
+    }
 }

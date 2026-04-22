@@ -39,6 +39,7 @@ const BUILTIN_SKILLS: &[BuiltinSkill] = &[
     BuiltinSkill { id: "mobile", content: include_str!("../skills/mobile.md") },
     BuiltinSkill { id: "workflow-architect", content: include_str!("../skills/workflow-architect.md") },
     BuiltinSkill { id: "bootstrap-architect", content: include_str!("../skills/bootstrap-architect.md") },
+    BuiltinSkill { id: "kronn-docs", content: include_str!("../skills/kronn-docs.md") },
     // Business
     BuiltinSkill { id: "seo", content: include_str!("../skills/seo.md") },
     BuiltinSkill { id: "web-performance", content: include_str!("../skills/web-performance.md") },
@@ -69,8 +70,15 @@ fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Skill> 
     let mut category = SkillCategory::Domain;
     let mut license: Option<String> = None;
     let mut allowed_tools: Option<String> = None;
+    let auto_triggers = parse_auto_triggers_block(yaml_str);
 
     for line in yaml_str.lines() {
+        // Skip lines that are nested under a known block — line-based
+        // scalar extraction shouldn't accidentally pick up e.g. the
+        // `name:` inside an `auto_triggers:` sub-map.
+        if line.starts_with(' ') || line.starts_with('\t') {
+            continue;
+        }
         let line = line.trim();
         if let Some(val) = line.strip_prefix("name:") {
             name = val.trim().to_string();
@@ -113,7 +121,92 @@ fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Skill> 
         token_estimate,
         license,
         allowed_tools,
+        auto_triggers,
     })
+}
+
+/// Extract the optional `auto_triggers:` YAML sub-map from a frontmatter
+/// string. Avoids pulling in serde_yaml for this one block — a minimal
+/// indentation-based state machine is enough since frontmatter is tiny
+/// and we control the convention (see `kronn-docs.md`).
+///
+/// Shape understood:
+///
+/// ```yaml
+/// auto_triggers:
+///   common:
+///     - "pattern1"
+///     - "pattern2"
+///   fr:
+///     - "génér.+(rapport|fichier)"
+///   en:
+///     - "generate.+(report|file)"
+/// ```
+fn parse_auto_triggers_block(yaml: &str) -> Option<crate::models::AutoTriggers> {
+    let mut in_block = false;
+    let mut current_bucket: Option<String> = None;
+    let mut common: Vec<String> = Vec::new();
+    let mut locales: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+
+    for line in yaml.lines() {
+        // Track entry/exit of the `auto_triggers:` block by indentation.
+        if !in_block {
+            if line.trim_start().starts_with("auto_triggers:")
+                && line.chars().take_while(|c| c.is_whitespace()).count() == 0
+            {
+                in_block = true;
+            }
+            continue;
+        }
+        // A non-indented line means we left the block.
+        if !line.is_empty()
+            && !line.starts_with(' ')
+            && !line.starts_with('\t')
+        {
+            break;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() { continue; }
+
+        // "- pattern" → value for the current bucket.
+        if let Some(rest) = trimmed.strip_prefix("- ") {
+            let value = strip_yaml_scalar(rest);
+            match current_bucket.as_deref() {
+                Some("common") => common.push(value),
+                Some(key) => locales.entry(key.to_string()).or_default().push(value),
+                None => tracing::warn!("auto_triggers: list item without parent key: {trimmed}"),
+            }
+            continue;
+        }
+        // "bucket:" → start a new bucket (common / fr / en / es / ...).
+        if let Some(key) = trimmed.strip_suffix(':') {
+            current_bucket = Some(key.to_string());
+        }
+    }
+
+    if common.is_empty() && locales.is_empty() {
+        None
+    } else {
+        Some(crate::models::AutoTriggers { common, locales })
+    }
+}
+
+/// Unwrap a YAML scalar value: strip matching outer quotes and decode
+/// the `\\` → `\` escape so regex patterns written as `"\\b"` in YAML
+/// arrive as the literal 2-char sequence `\b` expected by JS `RegExp`.
+fn strip_yaml_scalar(s: &str) -> String {
+    let s = s.trim();
+    if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
+        let inner = &s[1..s.len() - 1];
+        // Conservative unescape: only `\\` → `\` and `\"` → `"`.
+        // Anything else (`\n`, `\t`, `\u{...}`) is extremely unlikely in
+        // a regex trigger list and not worth a full YAML parser.
+        inner.replace("\\\\", "\\").replace("\\\"", "\"")
+    } else if s.len() >= 2 && s.starts_with('\'') && s.ends_with('\'') {
+        s[1..s.len() - 1].to_string()
+    } else {
+        s.to_string()
+    }
 }
 
 // ─── Public API ─────────────────────────────────────────────────────────────
@@ -525,5 +618,60 @@ mod tests {
         let skill = parse_skill_markdown("multi", raw, false).unwrap();
         assert!(skill.content.contains("Line 1"));
         assert!(skill.content.contains("Line 3"));
+    }
+
+    #[test]
+    fn parse_auto_triggers_full_yaml_block() {
+        // Realistic block with common + FR + EN patterns. YAML-escaped
+        // backslashes land as single backslashes so regexes work in JS.
+        let raw = r#"---
+name: Kronn Docs
+icon: 📄
+category: domain
+auto_triggers:
+  common:
+    - "\\b(pdf|docx?|xlsx?)\\b"
+  fr:
+    - "génér.+(fichier|rapport)"
+  en:
+    - "generate.+(file|report)"
+---
+body content"#;
+        let skill = parse_skill_markdown("kronn-docs", raw, true).unwrap();
+        let at = skill.auto_triggers.as_ref().expect("auto_triggers must parse");
+        assert_eq!(at.common.len(), 1, "common patterns: {:?}", at.common);
+        // YAML `"\\b(pdf|docx?|xlsx?)\\b"` → runtime string `\b(pdf|docx?|xlsx?)\b`
+        assert_eq!(at.common[0], r"\b(pdf|docx?|xlsx?)\b", "got: {}", at.common[0]);
+
+        let fr = at.locales.get("fr").expect("fr bucket");
+        assert_eq!(fr.len(), 1);
+        assert!(fr[0].contains("génér"), "accents preserved: {}", fr[0]);
+        let en = at.locales.get("en").expect("en bucket");
+        assert_eq!(en.len(), 1);
+    }
+
+    #[test]
+    fn parse_auto_triggers_absent_yields_none() {
+        let raw = "---\nname: Plain\nicon: P\ncategory: language\n---\nbody";
+        let skill = parse_skill_markdown("plain", raw, true).unwrap();
+        assert!(skill.auto_triggers.is_none());
+    }
+
+    #[test]
+    fn parse_auto_triggers_does_not_swallow_siblings() {
+        // The `name:` after `auto_triggers:` block-level must be seen,
+        // not treated as a nested trigger-bucket heading.
+        let raw = r#"---
+auto_triggers:
+  common:
+    - "pdf"
+name: After
+icon: A
+category: domain
+---
+body"#;
+        let skill = parse_skill_markdown("after", raw, true).unwrap();
+        assert_eq!(skill.name, "After");
+        assert_eq!(skill.auto_triggers.as_ref().unwrap().common, vec!["pdf".to_string()]);
     }
 }

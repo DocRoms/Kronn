@@ -3307,3 +3307,151 @@
 }
 
 /* keyframes spin + pulse defined globally in reset.css */
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Doc Preview — agent-authored HTML rendered inline in a chat bubble.
+   Triggered by a ```kronn-doc-preview fence in the message markdown.
+   Sandboxed iframe → safe display ; export buttons call /api/docs/* .
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.doc-preview {
+  margin: var(--kr-sp-5) 0;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-lg);
+  background: var(--kr-bg-elevated);
+  overflow: hidden;
+}
+
+.doc-preview-header {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-3) var(--kr-sp-6);
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-muted);
+  background: var(--kr-bg-hover);
+  border-bottom: 1px solid var(--kr-border-light);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.doc-preview-iframe {
+  display: block;
+  width: 100%;
+  height: 400px;
+  border: 0;
+  background: #fff;
+}
+
+.doc-preview-actions {
+  display: flex;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-4) var(--kr-sp-6);
+  border-top: 1px solid var(--kr-border-light);
+  background: var(--kr-bg-subtle);
+}
+
+.doc-preview-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  padding: var(--kr-sp-3) var(--kr-sp-6);
+  border-radius: var(--kr-r-md);
+  border: 1px solid var(--kr-accent-border);
+  background: rgba(var(--kr-accent-rgb), 0.08);
+  color: var(--kr-accent);
+  font-family: inherit;
+  font-size: var(--kr-fs-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.doc-preview-btn:hover:not(:disabled) {
+  background: rgba(var(--kr-accent-rgb), 0.14);
+  border-color: var(--kr-accent);
+}
+
+.doc-preview-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.doc-preview-spinner {
+  animation: spin 1s linear infinite;
+}
+
+.doc-preview-download {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-4) var(--kr-sp-6);
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-success);
+  text-decoration: none;
+  border-top: 1px solid var(--kr-border-light);
+  background: rgba(var(--kr-success-rgb), 0.06);
+}
+
+.doc-preview-download:hover {
+  background: rgba(var(--kr-success-rgb), 0.12);
+  text-decoration: underline;
+}
+
+.doc-preview-size {
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+}
+
+.doc-preview-error {
+  padding: var(--kr-sp-4) var(--kr-sp-6);
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-error);
+  background: rgba(var(--kr-error-rgb), 0.06);
+  border-top: 1px solid rgba(var(--kr-error-rgb), 0.2);
+  white-space: pre-wrap;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Doc Data Export — XLSX / CSV / PPTX card.
+   Triggered by a ```kronn-doc-data fence in the message markdown.
+   Structured-data payloads have no HTML, so no preview iframe — just a
+   compact header (format + summary) and a single export button.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.doc-data-export {
+  margin: var(--kr-sp-5) 0;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-lg);
+  background: var(--kr-bg-elevated);
+  overflow: hidden;
+}
+
+.doc-data-export-header {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-3) var(--kr-sp-6);
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-muted);
+  background: var(--kr-bg-hover);
+  border-bottom: 1px solid var(--kr-border-light);
+}
+
+.doc-data-export-label {
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--kr-text-primary);
+}
+
+.doc-data-export-summary {
+  color: var(--kr-text-muted);
+}
+
+.doc-data-export-actions {
+  display: flex;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-4) var(--kr-sp-6);
+  background: var(--kr-bg-subtle);
+}

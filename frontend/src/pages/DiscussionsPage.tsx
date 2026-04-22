@@ -1393,6 +1393,7 @@ export function DiscussionsPage({
                     onRetry={handleRetry}
                     onExpandSummary={handleMsgExpandSummary}
                     onNavigate={onNavigate}
+                    discussionId={activeDiscussion.id}
                     t={t}
                   />
                 );

@@ -1,0 +1,27 @@
+[project]
+name = "kronn-docs"
+version = "0.1.0"
+description = "Kronn document-generation sidecar: PDF / DOCX / XLSX / CSV / PPTX from HTML or structured JSON."
+requires-python = ">=3.10"
+dependencies = [
+  # HTTP framework + runtime.
+  "fastapi>=0.110,<0.120",
+  "uvicorn[standard]>=0.29,<0.40",
+  # PDF: HTML + CSS + Paged Media → PDF.
+  "weasyprint>=62,<65",
+  # DOCX: HTML tag mapping goes through a soup, so we need a parser
+  # (beautifulsoup4 with stdlib 'html.parser' = no native deps).
+  "python-docx>=1.1,<2",
+  "beautifulsoup4>=4.12,<5",
+  # XLSX: pure-Python Excel writer (no libreoffice dep).
+  "XlsxWriter>=3.2,<4",
+  # PPTX: PowerPoint Open-XML generator.
+  "python-pptx>=1.0,<2",
+]
+
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["kronn_docs"]

@@ -2,6 +2,8 @@ import { useState, useRef, useMemo, useEffect, memo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { useTheme } from '../lib/ThemeContext';
 import { MatrixText } from './MatrixText';
+import { DocPreview } from './DocPreview';
+import { DocDataExport } from './DocDataExport';
 import remarkGfm from 'remark-gfm';
 import remarkEmoji from 'remark-emoji';
 import '../pages/DiscussionsPage.css';
@@ -45,13 +47,17 @@ export interface MessageBubbleProps {
   onRetry: () => void;
   onExpandSummary: (msgId: string) => void;
   onNavigate: (page: string, opts?: { scrollTo?: string }) => void;
+  /** Discussion id, threaded through to MarkdownContent so the
+   *  `kronn-doc-preview` fence handler knows which generated-files
+   *  directory to target when the user clicks "Export PDF". */
+  discussionId?: string;
   t: (key: string, ...args: any[]) => string;
 }
 
 export const MessageBubble = memo(function MessageBubble(props: MessageBubbleProps) {
   const { msg, isLastUser, isLastAgent, isEditing, isCopied, isTtsActive, ttsState: tts, isExpandedSummary,
     prevUserTs, defaultAgent, summaryCache, language, sending, editingText, hasFullAccess,
-    onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onExpandSummary, onNavigate, t } = props;
+    onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onExpandSummary, onNavigate, discussionId, t } = props;
   const isUser = msg.role === 'User';
   const agentType = msg.agent_type ?? defaultAgent;
 
@@ -170,7 +176,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             <MatrixText text={msg.content} />
           </div>
         ) : (
-          <MarkdownContent content={msg.content.replace(/KRONN:(BRIEFING_COMPLETE|VALIDATION_COMPLETE|BOOTSTRAP_COMPLETE|WORKFLOW_READY|REPO_READY|ARCHITECTURE_READY|PLAN_READY|STRUCTURE_READY|ISSUES_READY|ISSUES_CREATED)/gi, '').trim()} />
+          <MarkdownContent content={msg.content.replace(/KRONN:(BRIEFING_COMPLETE|VALIDATION_COMPLETE|BOOTSTRAP_COMPLETE|WORKFLOW_READY|REPO_READY|ARCHITECTURE_READY|PLAN_READY|STRUCTURE_READY|ISSUES_READY|ISSUES_CREATED)/gi, '').trim()} discussionId={discussionId} />
         )}
         {msg.role === 'Agent' && (
           <button
@@ -320,12 +326,57 @@ const mdComponents = {
 // portable (some CLIs choke on raw multi-byte emoji sequences).
 const remarkPluginsList = [remarkGfm, remarkEmoji];
 
-export const MarkdownContent = memo(({ content }: { content: string }) => (
-  <div className="disc-md">
-    <ReactMarkdown remarkPlugins={remarkPluginsList} components={mdComponents}>
-      {content}
-    </ReactMarkdown>
-  </div>
-));
+export const MarkdownContent = memo(({ content, discussionId }: { content: string; discussionId?: string }) => {
+  // Override the `pre` handler when we have a discussion id: fenced
+  // blocks tagged `kronn-doc-preview` get replaced with the DocPreview
+  // component (sandboxed iframe + export buttons). Everything else
+  // renders through the shared mdComponents table above.
+  const components = useMemo(() => {
+    if (!discussionId) return mdComponents;
+    return {
+      ...mdComponents,
+      pre: ({ children }: any) => {
+        const codeEl = Array.isArray(children) ? children[0] : children;
+        const className: string = codeEl?.props?.className ?? '';
+        if (className.includes('language-kronn-doc-preview')) {
+          // `children` of a fenced block is typically a string (or an
+          // array with one string); coerce safely.
+          const raw = codeEl.props.children;
+          const html = Array.isArray(raw) ? raw.join('') : String(raw ?? '');
+          return <DocPreview html={html.trim()} discussionId={discussionId} />;
+        }
+        if (className.includes('language-kronn-doc-data')) {
+          // Parsed payload must carry a `format` discriminator ∈ {csv,xlsx,pptx}.
+          // Malformed JSON or unknown format → fall through to a regular
+          // code block so the chat keeps rendering instead of blowing up.
+          const raw = codeEl.props.children;
+          const text = Array.isArray(raw) ? raw.join('') : String(raw ?? '');
+          try {
+            const parsed = JSON.parse(text);
+            const { format, ...payload } = parsed;
+            if (format === 'csv' || format === 'xlsx' || format === 'pptx') {
+              return <DocDataExport payload={payload} format={format} discussionId={discussionId} />;
+            }
+          } catch {
+            // fall through to raw code render
+          }
+        }
+        return (
+          <CopyableBlock tag="pre">
+            <pre>{children}</pre>
+          </CopyableBlock>
+        );
+      },
+    };
+  }, [discussionId]);
+
+  return (
+    <div className="disc-md">
+      <ReactMarkdown remarkPlugins={remarkPluginsList} components={components}>
+        {content}
+      </ReactMarkdown>
+    </div>
+  );
+});
 
 // ─── Inline style constants removed — all styles now in DiscussionsPage.css ──

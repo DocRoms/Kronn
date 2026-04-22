@@ -223,6 +223,29 @@ test-shell:
 	@echo "$(CYAN)▸ Running shell tests...$(RESET)"
 	@./tests/bats/run.sh
 
+## ─── Sidecars (Python helpers) ──────────────────────────────────────────────
+
+## Install the kronn-docs sidecar (document generation: PDF/DOCX/XLSX/CSV/PPTX).
+## Creates a dedicated venv at ~/.kronn/venv/docs and installs the pinned deps.
+## Idempotent — reruns just upgrade deps in place.
+docs-setup:
+	@echo "$(CYAN)▸ Setting up kronn-docs sidecar...$(RESET)"
+	@command -v python3 >/dev/null 2>&1 || { echo "$(RED)python3 is required$(RESET)"; exit 1; }
+	@mkdir -p $$HOME/.kronn/venv
+	@if [ ! -d $$HOME/.kronn/venv/docs ]; then \
+		echo "  · Creating venv at ~/.kronn/venv/docs"; \
+		python3 -m venv $$HOME/.kronn/venv/docs; \
+	fi
+	@echo "  · Installing kronn-docs + deps (this may take ~1-2 min on first run)"
+	@$$HOME/.kronn/venv/docs/bin/pip install --quiet --upgrade pip
+	@$$HOME/.kronn/venv/docs/bin/pip install --quiet -e backend/sidecars/docs
+	@echo "$(GREEN)▸ kronn-docs sidecar ready.$(RESET)"
+	@echo "  WeasyPrint needs cairo/pango/gdk-pixbuf system libs on your OS —"
+	@echo "  if PDF generation fails with a 'library not found' error, install them:"
+	@echo "    apt:  sudo apt install libcairo2 libpango-1.0-0 libpangoft2-1.0-0 libgdk-pixbuf-2.0-0"
+	@echo "    brew: brew install cairo pango gdk-pixbuf libffi"
+	@echo "    win:  use the GTK+ runtime (see weasyprint.readthedocs.io)"
+
 ## ─── Desktop app (Tauri) ────────────────────────────────────────────────────
 
 ## Build the desktop app for the current platform
@@ -286,6 +309,16 @@ endif
 	@sed -i 's/"version": ".*"/"version": "$(V)"/' desktop/package.json
 	@sed -i 's/"version": ".*"/"version": "$(V)"/' desktop/src-tauri/tauri.conf.json
 	@sed -i 's/Kronn v[0-9]\+\.[0-9]\+\.[0-9]\+/Kronn v$(V)/' README.md
+	@# Sync Cargo.lock workspace entries so `cargo check --locked` stays green in CI.
+	@# `cargo update --workspace --offline` only touches local package versions in the
+	@# lock file — no network, no dep bumps. Required after editing a workspace
+	@# member's own `version` in Cargo.toml.
+	@echo "$(YELLOW)▸ Syncing Cargo.lock files...$(RESET)"
+	@cd backend && cargo update --workspace --offline >/dev/null 2>&1 || \
+		{ echo "$(YELLOW)  backend: offline failed, retrying online$(RESET)"; cd ../backend && cargo update --workspace >/dev/null; }
+	@cd desktop/src-tauri && cargo update --workspace --offline >/dev/null 2>&1 || \
+		{ echo "$(YELLOW)  desktop: offline failed, retrying online$(RESET)"; cd ../../desktop/src-tauri && cargo update --workspace >/dev/null; }
 	@echo "$(GREEN)✓ Version bumped to $(V) in all files$(RESET)"
 	@echo "  Files updated: VERSION, backend/Cargo.toml, desktop/src-tauri/Cargo.toml,"
 	@echo "  frontend/package.json, desktop/package.json, desktop/src-tauri/tauri.conf.json, README.md"
+	@echo "  + Cargo.lock (backend, desktop/src-tauri) synced via cargo update --workspace"

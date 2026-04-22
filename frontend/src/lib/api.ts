@@ -973,6 +973,64 @@ export const themes = {
     api<{ unlocks: UnlockedItem[] }>('POST', '/themes/unlock', { code }),
 };
 
+/** Document generation — proxies to the kronn-docs Python sidecar via
+ *  the backend. Every call resolves to a relative `download_url` the
+ *  frontend can link directly; don't build your own paths from `path`
+ *  (which is the absolute disk location, useful only for logging). */
+export interface GeneratePdfRequest {
+  discussion_id: string;
+  html: string;
+  filename?: string;
+  page_size?: string;
+}
+export interface GenerateDocxRequest {
+  discussion_id: string;
+  html: string;
+  filename?: string;
+}
+export interface GenerateXlsxRequest {
+  discussion_id: string;
+  sheets: Array<{ name: string; rows: Array<Array<string | number | boolean | null>> }>;
+  filename?: string;
+}
+export interface GenerateCsvRequest {
+  discussion_id: string;
+  rows: Array<Array<string | number | boolean | null>>;
+  delimiter?: string;
+  filename?: string;
+}
+export interface GeneratePptxRequest {
+  discussion_id: string;
+  slides: Array<{ title?: string; content?: string; bullets?: string[] }>;
+  filename?: string;
+}
+export interface GeneratedDocInfo {
+  path: string;
+  download_url: string;
+  size_bytes: number;
+}
+export const docs = {
+  generatePdf: (req: GeneratePdfRequest) =>
+    api<GeneratedDocInfo>('POST', '/docs/pdf', req),
+  generateDocx: (req: GenerateDocxRequest) =>
+    api<GeneratedDocInfo>('POST', '/docs/docx', req),
+  generateXlsx: (req: GenerateXlsxRequest) =>
+    api<GeneratedDocInfo>('POST', '/docs/xlsx', req),
+  generateCsv: (req: GenerateCsvRequest) =>
+    api<GeneratedDocInfo>('POST', '/docs/csv', req),
+  generatePptx: (req: GeneratePptxRequest) =>
+    api<GeneratedDocInfo>('POST', '/docs/pptx', req),
+};
+
+/** Auto-trigger opt-out — per-skill toggle. The `disabled` list is the
+ *  skill IDs for which keyword-based auto-activation is OFF. A `toggle`
+ *  returns the new `disabled` boolean for that specific skill. */
+export const autoTriggersApi = {
+  listDisabled: () => api<string[]>('GET', '/skills/auto-triggers/disabled'),
+  toggle: (skillId: string) =>
+    api<boolean>('POST', `/skills/${encodeURIComponent(skillId)}/auto-trigger/toggle`),
+};
+
 /** Shape of `/api/health` — the endpoint predates the `ApiResponse<T>`
  *  wrapper so it returns its payload directly. Used by the Debug > Report
  *  a bug flow to stamp version + host_os into the issue template. */

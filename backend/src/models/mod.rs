@@ -65,6 +65,15 @@ pub struct AppConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[ts(skip)]
     pub unlocked_profiles: Vec<String>,
+    /// Skill IDs for which the frontend must NOT auto-activate even when
+    /// the user's message matches the skill's `auto_triggers` regexes.
+    /// Read by the frontend's `detectTriggeredSkills` filter and by the
+    /// Settings UI toggle. Empty by default — every skill opts in by
+    /// virtue of declaring triggers, the config lets the operator opt
+    /// out per-skill without editing the skill file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(skip)]
+    pub disabled_auto_skills: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -1295,6 +1304,41 @@ pub struct Skill {
     /// agentskills.io: space-delimited list of pre-approved tools (e.g. "Bash Read Grep").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_tools: Option<String>,
+    /// Optional auto-activation trigger regexes keyed by locale. When
+    /// the user types a message matching one of these patterns, the
+    /// frontend auto-adds this skill to the current discussion. The
+    /// `common` entry always applies; the locale-specific entries
+    /// apply when the discussion's language matches. See the YAML
+    /// frontmatter convention in `backend/src/skills/kronn-docs.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_triggers: Option<AutoTriggers>,
+}
+
+/// Auto-trigger regex buckets declared in a skill's frontmatter YAML.
+///
+/// ```yaml
+/// auto_triggers:
+///   common:
+///     - "\\b(pdf|docx?|xlsx?)\\b"
+///   fr:
+///     - "génér.+(fichier|rapport)"
+///   en:
+///     - "generate.+(file|report)"
+/// ```
+///
+/// The frontend combines `common` + the entry matching the discussion
+/// language (or `en` as fallback) into a single regex list, and tests
+/// every pattern against the pending message.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AutoTriggers {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub common: Vec<String>,
+    /// Per-locale patterns keyed by IETF language tag (`fr`, `en`, `es`,
+    /// ...). Additional locales can be added without a code change.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    #[ts(type = "Record<string, string[]>")]
+    pub locales: std::collections::HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, TS)]

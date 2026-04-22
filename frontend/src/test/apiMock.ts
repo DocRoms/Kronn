@@ -48,6 +48,8 @@ export const API_NAMESPACES = [
   'ollama',
   'debugApi',
   'themes',
+  'docs',
+  'autoTriggersApi',
 ] as const;
 
 /** Flat top-level helpers (non-namespace exports). */
@@ -83,6 +85,8 @@ interface DefaultMock {
   ollama: Record<string, AnyFn>;
   debugApi: Record<string, AnyFn>;
   themes: Record<string, AnyFn>;
+  docs: Record<string, AnyFn>;
+  autoTriggersApi: Record<string, AnyFn>;
 }
 
 /**
@@ -261,6 +265,19 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
 
     themes: {
       unlock: resolve({ theme: 'matrix' }),
+    },
+
+    docs: {
+      generatePdf: resolve({ path: '/tmp/x.pdf', download_url: '/api/docs/file/x/x.pdf', size_bytes: 1234 }),
+      generateDocx: resolve({ path: '/tmp/x.docx', download_url: '/api/docs/file/x/x.docx', size_bytes: 1234 }),
+      generateXlsx: resolve({ path: '/tmp/x.xlsx', download_url: '/api/docs/file/x/x.xlsx', size_bytes: 1234 }),
+      generateCsv: resolve({ path: '/tmp/x.csv', download_url: '/api/docs/file/x/x.csv', size_bytes: 1234 }),
+      generatePptx: resolve({ path: '/tmp/x.pptx', download_url: '/api/docs/file/x/x.pptx', size_bytes: 1234 }),
+    },
+
+    autoTriggersApi: {
+      listDisabled: resolve([]),
+      toggle: resolve(false),
     },
   };
 

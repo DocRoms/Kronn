@@ -101,6 +101,10 @@ vi.mock('../../lib/api', () => ({
     update: vi.fn(),
     delete: vi.fn(),
   },
+  autoTriggersApi: {
+    listDisabled: vi.fn().mockResolvedValue([]),
+    toggle: vi.fn().mockResolvedValue(false),
+  },
   contacts: {
     networkInfo: vi.fn().mockResolvedValue({ tailscale_ip: null, advertised_host: null, detected_ips: [] }),
     list: vi.fn().mockResolvedValue([]),

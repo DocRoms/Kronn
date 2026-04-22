@@ -215,6 +215,7 @@ pub fn default_config() -> AppConfig {
         encryption_secret: Some(super::crypto::generate_secret()),
         secret_themes: std::collections::HashMap::new(),
         unlocked_profiles: Vec::new(),
+        disabled_auto_skills: Vec::new(),
     }
 }
 
