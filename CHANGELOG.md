@@ -7,9 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [Unreleased]
-
-Post-0.5.0 polish + playful additions: the light theme got a proper
+## [0.5.0]
+Polish + playful additions: the light theme got a proper
 expert-led rework, a hidden-unlock system was added for early-access
 testing, and three secret themes ship with a small interactive layer.
 
