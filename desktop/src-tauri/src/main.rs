@@ -467,6 +467,13 @@ async fn start_backend(port: u16, dist_dir: std::path::PathBuf) -> anyhow::Resul
     let config_arc = Arc::new(RwLock::new(app_config));
     let state = AppState::new_defaults(config_arc, database.clone(), max_agents);
 
+    // Fire up the kronn-docs sidecar in the background — best-effort,
+    // skips gracefully if the Python venv isn't set up.
+    {
+        let sc = state.docs_sidecar.clone();
+        tokio::spawn(async move { sc.start().await });
+    }
+
     // Workflow engine gets a clone of the state (same pattern as backend main.rs)
     let workflow_engine = Arc::new(WorkflowEngine::new(state.clone()));
 

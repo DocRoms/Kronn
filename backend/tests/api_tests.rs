@@ -31,16 +31,7 @@ fn test_state() -> AppState {
     let mut cfg = kronn::core::config::default_config();
     cfg.server.auth_token = None; // Disable auth for tests
     let config = Arc::new(RwLock::new(cfg));
-    let (ws_tx, _) = tokio::sync::broadcast::channel(256);
-    AppState {
-        config,
-        db,
-        agent_semaphore: Arc::new(tokio::sync::Semaphore::new(DEFAULT_MAX_CONCURRENT_AGENTS)),
-        audit_tracker: Arc::new(std::sync::Mutex::new(kronn::AuditTracker::default())),
-        ws_broadcast: Arc::new(ws_tx),
-        cancel_registry: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        oauth2_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-    }
+    AppState::new_defaults(config, db, DEFAULT_MAX_CONCURRENT_AGENTS)
 }
 
 /// Build a test router backed by an in-memory database (auth disabled).

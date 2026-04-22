@@ -64,3 +64,41 @@ pub async fn delete(
         Err(e) => Json(ApiResponse::err(e)),
     }
 }
+
+/// GET /api/skills/auto-triggers/disabled — returns the list of skill
+/// IDs for which auto-activation (keyword-based) is OFF. The frontend
+/// fetches this once on mount and filters its local
+/// `detectTriggeredSkills()` output against it.
+pub async fn list_disabled_auto(
+    state: State<AppState>,
+) -> Json<ApiResponse<Vec<String>>> {
+    let ids = state.config.read().await.disabled_auto_skills.clone();
+    Json(ApiResponse::ok(ids))
+}
+
+/// POST /api/skills/:id/auto-trigger/toggle — flips the opt-out state
+/// for one skill. Returns the new `disabled` boolean (true = auto-
+/// activation is OFF for this skill, false = default/enabled).
+/// Idempotent: sending twice ends up where it started. Also persists
+/// to config.toml so the choice survives restarts.
+pub async fn toggle_auto_trigger(
+    Path(id): Path<String>,
+    state: State<AppState>,
+) -> Json<ApiResponse<bool>> {
+    let mut cfg = state.config.write().await;
+    let pos = cfg.disabled_auto_skills.iter().position(|s| s == &id);
+    let now_disabled = match pos {
+        Some(i) => {
+            cfg.disabled_auto_skills.remove(i);
+            false
+        }
+        None => {
+            cfg.disabled_auto_skills.push(id.clone());
+            true
+        }
+    };
+    if let Err(e) = crate::core::config::save(&cfg).await {
+        tracing::warn!("Failed to persist disabled_auto_skills toggle: {e}");
+    }
+    Json(ApiResponse::ok(now_disabled))
+}

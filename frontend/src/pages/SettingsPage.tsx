@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useKonamiCode } from '../hooks/useKonamiCode';
 import { version as appVersion } from '../../package.json';
-import { config as configApi, skills as skillsApi, directives as directivesApi } from '../lib/api';
+import { config as configApi, skills as skillsApi, directives as directivesApi, autoTriggersApi } from '../lib/api';
 import { useApi } from '../hooks/useApi';
 import { useT } from '../lib/I18nContext';
 import { UI_LOCALES } from '../lib/i18n';
@@ -147,6 +147,29 @@ export function SettingsPage({
     return next;
   });
   const [availableSkills, setAvailableSkills] = useState<Skill[]>([]);
+  // Operator opt-out list for skill auto-activation. Populated at mount
+  // and kept in sync after each toggle — ChatInput listens to the same
+  // window event so it picks up the change without a page reload.
+  const [disabledAutoSkills, setDisabledAutoSkills] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    autoTriggersApi.listDisabled()
+      .then(ids => setDisabledAutoSkills(new Set(ids)))
+      .catch(e => console.warn('load disabled auto-skills:', e));
+  }, []);
+  const toggleAutoTrigger = async (skillId: string) => {
+    try {
+      const nowDisabled = await autoTriggersApi.toggle(skillId);
+      setDisabledAutoSkills(prev => {
+        const next = new Set(prev);
+        if (nowDisabled) next.add(skillId); else next.delete(skillId);
+        return next;
+      });
+      window.dispatchEvent(new CustomEvent('kronn:auto-trigger-changed'));
+    } catch (e) {
+      console.warn('toggle auto-trigger failed:', e);
+      toast(t('skills.autoToggleFailed'), 'error');
+    }
+  };
   const [showCreateSkill, setShowCreateSkill] = useState(false);
   // Non-null when editing an existing custom skill — same form, different submit
   // target. Cleared when the form closes.
@@ -670,6 +693,27 @@ export function SettingsPage({
                 </div>
                 {skill.description && (
                   <div className="text-sm text-muted mb-3">{skill.description}</div>
+                )}
+                {/* Auto-activation toggle — only relevant when the skill
+                    declares `auto_triggers` in its YAML frontmatter.
+                    Displayed as a compact switch-row so it doesn't
+                    crowd the card. */}
+                {skill.auto_triggers && (
+                  <div className="flex-row gap-2 mb-3" style={{ alignItems: 'center' }}>
+                    <button
+                      type="button"
+                      className="set-choice-btn"
+                      style={{ padding: '2px 8px', fontSize: 'var(--kr-fs-xs)' }}
+                      data-active={!disabledAutoSkills.has(skill.id)}
+                      onClick={() => toggleAutoTrigger(skill.id)}
+                      title={t('skills.autoTriggerHint')}
+                    >
+                      <Zap size={9} />
+                      {disabledAutoSkills.has(skill.id)
+                        ? t('skills.autoTriggerOff')
+                        : t('skills.autoTriggerOn')}
+                    </button>
+                  </div>
                 )}
                 {!skill.is_builtin && (
                   <div className="flex-row gap-2">

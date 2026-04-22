@@ -757,6 +757,19 @@ export interface Skill {
   license: string | null;
   /** agentskills.io: space-delimited list of pre-approved tools */
   allowed_tools: string | null;
+  /** Auto-activation regexes by locale, declared in the skill's YAML
+   *  frontmatter. When a message in the relevant locale matches any
+   *  pattern, the frontend auto-adds this skill to the discussion. */
+  auto_triggers?: AutoTriggers | null;
+}
+
+export interface AutoTriggers {
+  /** Patterns that apply regardless of the discussion language.
+   *  Usually language-independent tokens (format names, brand names). */
+  common?: string[];
+  /** Per-locale pattern buckets keyed by IETF language tag
+   *  (`fr`, `en`, `es`, …). */
+  locales?: Record<string, string[]>;
 }
 
 export interface CreateSkillRequest {

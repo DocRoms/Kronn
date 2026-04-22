@@ -4,12 +4,17 @@
 //! These helpers apply the `CREATE_NO_WINDOW` flag so background processes (git, wsl.exe, etc.)
 //! run invisibly — critical for the Tauri desktop app experience.
 
+use std::ffi::OsStr;
+
 /// Windows: CREATE_NO_WINDOW flag prevents a console window from appearing.
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// Create a `tokio::process::Command` that won't flash a console window on Windows.
-pub fn async_cmd(program: &str) -> tokio::process::Command {
+///
+/// Accepts anything `Command::new` accepts (`&str`, `String`, `&Path`, `PathBuf`, …)
+/// so callers don't have to round-trip through `.to_str()` to invoke a binary by path.
+pub fn async_cmd<S: AsRef<OsStr>>(program: S) -> tokio::process::Command {
     #[allow(unused_mut)]
     let mut cmd = tokio::process::Command::new(program);
     #[cfg(target_os = "windows")]
@@ -18,7 +23,9 @@ pub fn async_cmd(program: &str) -> tokio::process::Command {
 }
 
 /// Create a `std::process::Command` that won't flash a console window on Windows.
-pub fn sync_cmd(program: &str) -> std::process::Command {
+///
+/// Accepts anything `Command::new` accepts (`&str`, `String`, `&Path`, `PathBuf`, …).
+pub fn sync_cmd<S: AsRef<OsStr>>(program: S) -> std::process::Command {
     #[allow(unused_mut)]
     let mut cmd = std::process::Command::new(program);
     #[cfg(target_os = "windows")]

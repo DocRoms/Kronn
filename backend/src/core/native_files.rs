@@ -493,6 +493,7 @@ mod tests {
             token_estimate: 150,
             license: None,
             allowed_tools: None,
+            auto_triggers: None,
         }
     }
 

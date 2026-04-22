@@ -40,6 +40,7 @@ Kronn/
 │       │   ├── skills.rs       # Skills API: list, create, update, delete
 │       │   ├── profiles.rs     # Profiles API: list, create, update, delete, persona-name override
 │       │   ├── directives.rs   # Directives API: list, create, update, delete
+│       │   ├── docs.rs         # Kronn Docs proxy (post-0.5.0) — 5 endpoints POST /api/docs/{pdf,docx,xlsx,csv,pptx} + GET /api/docs/file/:disc/:filename. All POSTs go through proxy_to_sidecar() helper. Filename sanitization (alphanumerics + -_ space, UUID suffix, extension forced) + canonicalize check against path traversal. Output dir: ~/.kronn/generated/<discussion_id>/. Graceful "Document sidecar unavailable" error when the Python venv is missing.
 │       │   └── git_ops.rs      # Shared git helpers (838L) — used by projects + discussions
 │       ├── agents/             # Agent runner (CLI execution)
 │       │   ├── mod.rs          # Agent detection: PATH → KRONN_HOST_BIN (with .cmd/.exe extension matching) → WSL (via bash -lc). Version detection handles WSL paths. Runtime probe (npx fallback, 5min cache). 6 agents: Claude, Codex, Vibe, Gemini, Kiro, Copilot
@@ -90,6 +91,7 @@ Kronn/
 │       │   ├── mcp_scanner.rs  # Multi-agent MCP sync + MCP/API prompt injection. read_all_mcp_contexts() reads .mcp.json + context files. build_api_context_block() renders `## REST APIs available` from API plugins. collect_active_api_plugins() decrypts + returns active configs. interpolate_env_template() substitutes {ENV_KEY} in base_url + header templates. Disk sync: .mcp.json (Claude), .vibe/config.toml (Vibe), ~/.codex/config.toml (Codex). ApiOnly transport is a silent skip.
 │       │   ├── oauth2_cache.rs # OAuth2 client-credentials token cache + exchanger (0.5.0). In-memory HashMap<config_id, CachedToken> behind a tokio::sync::Mutex. resolve_token() checks cache → exchanges on miss/expiry → returns bearer. 30s safety margin before provider expiry. Error-transparent: token-exchange failures are bubbled up as human-readable strings for prompt injection.
 │       │   ├── native_files.rs # Native SKILL.md + agent file sync. Writes skills to .claude/skills/, .agents/skills/, .gemini/skills/. Profiles to .claude/agents/, .gemini/agents/, .codex/agents/. Additive sync for discussions, full cleanup at startup.
+│       │   ├── docs_sidecar.rs # Kronn Docs sidecar manager (0.5.1) — spawns backend/sidecars/docs/ Python process on a random loopback port, reads stdout until "KRONN_DOCS_READY <port>" marker, exposes handle() → base_url for proxy. Gracefully degrades when the venv is missing (returns None; API handlers surface a "Document sidecar unavailable" error).
 │       │   ├── tailscale.rs   # Network & VPN auto-detection (Tailscale, VPN, LAN IPs). KRONN_HOST_IPS env for Docker. Used for multi-user invite codes.
 │       │   ├── ws_client.rs   # WebSocket client manager: outbound connections to contacts with exponential backoff. Auto-reconnects.
 │       │   ├── crypto.rs       # AES-256-GCM encryption for MCP secrets
@@ -114,7 +116,8 @@ Kronn/
 │       │   ├── green-it-expert.md # Technical: environmental efficiency
 │       │   ├── data-engineer.md # Technical: data pipelines
 │       │   ├── tech-lead.md    # Technical: architecture & leadership
-│       │   └── json-output.md  # Meta: force JSON-only output
+│       │   ├── json-output.md  # Meta: force JSON-only output
+│       │   └── kronn-docs.md    # Document generation skill (0.5.1) — describes kronn-doc-preview + kronn-doc-data fences, per-format JSON shapes, direct API fallback. YAML frontmatter carries auto_triggers (common/fr/en/es regex buckets) for client-side auto-activation.
 │       └── workflows/          # Workflow engine (implemented)
 │           ├── mod.rs          # WorkflowEngine: background polling loop (30s ticks), trigger checking, concurrency
 │           ├── trigger.rs      # Cron evaluation, tracker polling frequency
@@ -127,6 +130,8 @@ Kronn/
 │           └── tracker/
 │               ├── mod.rs      # TrackerSource trait (poll, update_status, comment, create_pr)
 │               └── github.rs   # GitHub API v3 implementation (reqwest + rustls)
+│   └── sidecars/
+│       └── docs/                # Python document-generation sidecar (0.5.1) — FastAPI + uvicorn. Installed via `make docs-setup` into .venv; prints `KRONN_DOCS_READY <port>` to stdout on ready. Deps: WeasyPrint (PDF), python-docx + BeautifulSoup (DOCX), XlsxWriter (XLSX), stdlib csv (CSV), python-pptx (PPTX).
 │
 ├── frontend/                   # React + TypeScript (Vite)
 │   ├── package.json            # engines: node>=24 (LTS)
@@ -149,7 +154,9 @@ Kronn/
 │       │   ├── ChatInput.tsx     # Chat input composer (695L) — textarea, @mentions, voice STT, debate popover, send/stop
 │       │   ├── DiscussionSidebar.tsx # Sidebar (346L) — discussion list, contacts, search, archives
 │       │   ├── NewDiscussionForm.tsx  # New discussion form (447L) — project/agent/skills/profiles/directives selection
-│       │   ├── MessageBubble.tsx # Message bubble (329L) — user/agent/system, markdown, TTS, edit, copy, retry
+│       │   ├── MessageBubble.tsx # Message bubble (329L) — user/agent/system, markdown, TTS, edit, copy, retry. MarkdownContent intercepts `kronn-doc-preview` (→ DocPreview) and `kronn-doc-data` (→ DocDataExport) fences; malformed JSON falls back to <pre>.
+│       │   ├── DocPreview.tsx    # HTML doc preview + export (0.5.1) — sandboxed iframe (empty `sandbox=""`) renders the agent-authored HTML, two buttons export PDF / DOCX via /api/docs/{pdf,docx}. Per-format state (idle/loading/ready/error).
+│       │   ├── DocDataExport.tsx # Structured-data export (0.5.1) — JSON payload card for CSV / XLSX / PPTX (no iframe). Header shows format + summary (row/sheet/slide count), single "Export" button per card.
 │       │   ├── SwipeableDiscItem.tsx  # Swipeable sidebar item (110L) — swipe-to-archive/delete
 │       │   ├── AgentQuestionForm.tsx  # Structured agent questions (0.3.5) — renders mini-form above ChatInput when agent asks {{var}}: questions
 │       │   ├── TestModeBanner.tsx # Global "test mode" banner (0.5.0) — pinned at top of chat area whenever any disc has its branch checked out in main. Single exit path.

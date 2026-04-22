@@ -92,6 +92,14 @@ async fn main() -> anyhow::Result<()> {
     let config_arc = Arc::new(RwLock::new(app_config));
     let state = AppState::new_defaults(config_arc, database, max_agents);
 
+    // Fire up the kronn-docs sidecar in the background — its start is
+    // best-effort (graceful skip if deps are missing) so we don't block
+    // the backend boot on it.
+    {
+        let sc = state.docs_sidecar.clone();
+        tokio::spawn(async move { sc.start().await });
+    }
+
     // Workflow engine gets a clone of the state so it can spawn runs that
     // need full access (batch fan-out, ws broadcasts, agent semaphore).
     let workflow_engine = Arc::new(WorkflowEngine::new(state.clone()));

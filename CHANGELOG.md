@@ -7,13 +7,60 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [Unreleased]
+## [0.5.1] - 2026-04-22
 
-Post-0.5.0 polish + playful additions: the light theme got a proper
+Polish + playful additions on top of 0.5.0: the light theme got a proper
 expert-led rework, a hidden-unlock system was added for early-access
-testing, and three secret themes ship with a small interactive layer.
+testing, three secret themes ship with a small interactive layer, and
+agents can now generate PDF / DOCX / XLSX / CSV / PPTX files directly
+from the conversation without the user installing anything.
 
 ### Added
+- **Document generation — Kronn Docs** — Agents can now
+  produce five file formats from a discussion without any external
+  tooling on the user's side. Ships as a Python sidecar
+  (`backend/sidecars/docs/`) spawned at backend startup: WeasyPrint for
+  PDF, python-docx + BeautifulSoup for DOCX (HTML → Word mapping of
+  headings / paragraphs / lists / tables / inline formatting), XlsxWriter
+  for XLSX, stdlib `csv` for CSV, python-pptx for PPTX (Title+Content
+  layout, bullets preferred over content-split). Sidecar binds to a
+  random loopback port and prints `KRONN_DOCS_READY <port>` to stdout
+  for deterministic startup. Rust side exposes
+  `POST /api/docs/{pdf,docx,xlsx,csv,pptx}` and
+  `GET /api/docs/file/:disc/:filename`; all five handlers go through a
+  single `proxy_to_sidecar()` helper so adding a format = one arm.
+  Filename sanitization (alphanumeric + `-_ ` only, UUID suffix,
+  extension forced) + canonicalize check defend against path traversal.
+  Graceful "Document sidecar unavailable — run `make docs-setup`" error
+  when the venv isn't installed (the sidecar is opt-in, not a hard
+  dependency). New skill `kronn-docs.md` tells the agent about the two
+  fence conventions and the direct-API fallback. Auto-activation: the
+  skill ships with `auto_triggers.common/fr/en/es` regex buckets that
+  detect "génère un rapport PDF" / "create a presentation" / "exporta
+  hoja xlsx" etc.; matched skills auto-inject into the system prompt
+  (user can opt out per-skill in Settings → `auto_triggers.disabled`)
+- **DocPreview component (HTML-based formats)** — when the agent wraps
+  a full HTML document in a ```` ```kronn-doc-preview ```` fenced code
+  block, the frontend intercepts it in `MessageBubble`'s
+  `MarkdownContent` and renders a sandboxed iframe (empty `sandbox=""`
+  — no scripts, no same-origin, no forms) with two export buttons
+  below: 📄 PDF and 📝 DOCX. The same HTML is the payload for both
+  endpoints — one preview, two formats. Per-format state with
+  independent loading / ready / error rows so the user can export
+  both and get two distinct download links
+- **DocDataExport component (structured formats)** — a second fence
+  ```` ```kronn-doc-data ```` carries a JSON payload with a `format`
+  discriminator (`csv | xlsx | pptx`). No iframe — a spreadsheet or
+  slide deck in an iframe looks worse than the real app — just a
+  compact header (format + summary: row count / sheet count / slide
+  count) and a single "Export" button. Malformed JSON or unknown
+  format discriminator falls back cleanly to a regular `<pre>` so a
+  broken message doesn't blow up the chat
+- **Auto-trigger opt-out** — Settings → Skills gains a per-skill toggle
+  backed by `POST/DELETE /api/auto-triggers`. Disabled skills stay
+  visible but stop contributing to prompt injection even when their
+  regexes match, letting the user neutralize a noisy auto-trigger
+  without removing the skill itself
 - **Secret unlock system** — A hidden area in Settings (only revealed
   after the Konami code `↑ ↑ ↓ ↓ ← → ← → B A` is entered on the page)
   exposes an input that accepts short codes. Codes are hashed
@@ -160,7 +207,27 @@ testing, and three secret themes ship with a small interactive layer.
   cast") — imperceptible at first glance but gives backgrounds a
   subtle alive feel
 
+### Security
+- **RUSTSEC-2026-0104 — `rustls-webpki` 0.103.12 → 0.103.13** in
+  both `backend/Cargo.lock` and `desktop/src-tauri/Cargo.lock`.
+  Reachable panic in CRL parsing; pulled transitively via `rustls`
+  (→ `reqwest`, `hyper-rustls`, `tokio-tungstenite`, `quinn`). No API
+  surface change
+- **Direct `rand` dependency removed** — crypto.rs was the only
+  consumer (`OsRng.fill_bytes()` for nonce + key generation), and
+  `aes-gcm` already re-exports the required `RngCore` trait via its
+  own `rand_core`. One less path to `rand 0.8` (RUSTSEC-2026-0097
+  "unsound with a custom logger using `rand::rng()`"). A transitive
+  path via `axum 0.7 → tungstenite 0.24` remains; it's a tolerated
+  warning pending an axum 0.8 migration
+
 ### Developer experience
+- **`make bump` keeps `Cargo.lock` in sync** — after editing the
+  workspace-member `version` fields, the target now runs
+  `cargo update --workspace --offline` on both backend and
+  `desktop/src-tauri` (with an online fallback on cold-cache runs).
+  Fixes a case where a fresh bump left `cargo check --locked`
+  broken in CI
 - **AI docs — secret-themes guide** — `ai/operations/secret-themes.md`
   explains the unlock system, how to add a new theme, how to add a
   new secret profile, and enumerates the security caveats (hash is

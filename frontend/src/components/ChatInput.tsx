@@ -5,6 +5,8 @@ import { isUsable } from '../lib/constants';
 import { audioBufferToFloat32, transcribeAudio } from '../lib/stt-engine';
 import { loadDraft, saveDraft, clearDraft } from '../lib/chat-drafts';
 import { formatRelativeTime } from '../lib/relativeTime';
+import { discussions as discussionsApi, autoTriggersApi } from '../lib/api';
+import { detectTriggeredSkills } from '../lib/autoTriggers';
 import {
   findEmojiQuery, searchEmojis, applyEmojiReplacement,
   type EmojiQuery, type EmojiSuggestion,
@@ -94,10 +96,26 @@ export function ChatInput({
   queuedQP = null,
   onQueueQP,
   onCancelQueuedQP,
-  toast: _toast,
+  toast,
   t,
 }: ChatInputProps) {
   const isMobile = useIsMobile();
+
+  // ── Auto-trigger opt-out list ────────────────────────────────────────
+  // Pulled once on mount + on external toggle events. The `Set` is
+  // consumed by `detectTriggeredSkills()` to skip skills the operator
+  // has opted out of in Settings > Skills > ⚡ toggle.
+  const [disabledAutoSkills, setDisabledAutoSkills] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    const refetch = () => {
+      autoTriggersApi.listDisabled()
+        .then(ids => setDisabledAutoSkills(new Set(ids)))
+        .catch(e => console.warn('fetch disabled auto-skills failed:', e));
+    };
+    refetch();
+    window.addEventListener('kronn:auto-trigger-changed', refetch);
+    return () => window.removeEventListener('kronn:auto-trigger-changed', refetch);
+  }, []);
 
   // ─── Internal state ──────────────────────────────────────────────────────
   const [chatInput, setChatInput] = useState('');
@@ -286,11 +304,46 @@ export function ChatInput({
   };
 
   // ─── Send handler ────────────────────────────────────────────────────────
-  const handleSendMessage = useCallback(() => {
+  const handleSendMessage = useCallback(async () => {
     const inputVal = chatInputValueRef.current;
     if (!discussion || !inputVal.trim() || sending) return;
     const msg = inputVal.trim();
     const { targetAgent } = parseMention(msg);
+
+    // ── Auto-trigger skills based on message keywords ──
+    // Every skill can declare regex triggers in its frontmatter
+    // (see `backend/src/skills/kronn-docs.md`). If the pending
+    // message matches a trigger for a skill that's not yet active,
+    // we add it to `discussion.skill_ids` BEFORE firing onSend so
+    // the backend picks it up on the same turn. Non-blocking: if
+    // the update fails we still send the message (better to lose
+    // the auto-activation than the whole message).
+    const locale = discussion.language ?? 'fr';
+    const triggered = detectTriggeredSkills(
+      msg,
+      availableSkills,
+      discussion.skill_ids ?? [],
+      locale,
+      disabledAutoSkills,
+    );
+    if (triggered.length > 0) {
+      const nextSkillIds = [
+        ...(discussion.skill_ids ?? []),
+        ...triggered.map(s => s.id),
+      ];
+      try {
+        await discussionsApi.update(discussion.id, { skill_ids: nextSkillIds });
+        for (const s of triggered) {
+          toast(t('skills.autoActivated', s.name), 'info');
+        }
+        // Let the rest of the UI (sidebar, header chips) refetch the
+        // discussion so the new skill_ids show up immediately.
+        window.dispatchEvent(new CustomEvent('kronn:discussion-updated'));
+      } catch (e) {
+        console.warn('auto-activate skills failed:', e);
+      }
+    }
+
     // Drop the persisted draft BEFORE we clear the textarea: if the onSend
     // callback throws synchronously we still don't want to leave a stale
     // draft around (the user sees the message in the chat anyway).
@@ -304,7 +357,7 @@ export function ChatInput({
     setMentionQuery(null);
     onSend(msg, targetAgent);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [discussion, sending, onSend, updateChatInput, AGENT_MENTIONS]);
+  }, [discussion, sending, onSend, updateChatInput, AGENT_MENTIONS, availableSkills, toast, t, disabledAutoSkills]);
 
   handleSendMessageRef.current = handleSendMessage;
 

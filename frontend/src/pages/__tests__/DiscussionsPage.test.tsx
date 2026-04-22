@@ -52,6 +52,10 @@ vi.mock('../../lib/api', () => ({
     update: vi.fn(),
     delete: vi.fn(),
   },
+  autoTriggersApi: {
+    listDisabled: vi.fn().mockResolvedValue([]),
+    toggle: vi.fn().mockResolvedValue(false),
+  },
   profiles: {
     list: vi.fn().mockResolvedValue([]),
     get: vi.fn(),

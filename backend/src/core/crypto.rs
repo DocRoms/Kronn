@@ -1,9 +1,8 @@
 use aes_gcm::{
-    aead::{Aead, KeyInit, OsRng},
+    aead::{rand_core::RngCore, Aead, KeyInit, OsRng},
     Aes256Gcm, Nonce,
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
-use rand::RngCore;
 
 const NONCE_LEN: usize = 12;
 

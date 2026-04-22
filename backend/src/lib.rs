@@ -128,6 +128,12 @@ pub struct AppState {
     /// on restart, tokens are lost and re-exchanged on first use (one HTTP
     /// call per active OAuth2 plugin). See `core::oauth2_cache`.
     pub oauth2_cache: Arc<tokio::sync::Mutex<HashMap<String, crate::core::oauth2_cache::CachedToken>>>,
+    /// Handle to the kronn-docs Python sidecar (PDF/DOCX/XLSX/… gen).
+    /// Always allocated — whether the sidecar is actually running is
+    /// stored INSIDE the handle. Routes in `api::docs` probe it at
+    /// call time and return a 503 hint if the sidecar was never
+    /// brought up (e.g. `make docs-setup` was never run).
+    pub docs_sidecar: Arc<crate::core::docs_sidecar::DocsSidecar>,
 }
 
 impl AppState {
@@ -158,6 +164,7 @@ impl AppState {
             ws_broadcast: Arc::new(ws_tx),
             cancel_registry: Arc::new(Mutex::new(HashMap::new())),
             oauth2_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            docs_sidecar: Arc::new(crate::core::docs_sidecar::DocsSidecar::new()),
         }
     }
 }
@@ -424,6 +431,13 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/debug/logs/clear", post(api::debug::clear_logs))
         // ── Secret themes (hidden palette unlock via code) ──
         .route("/api/themes/unlock", post(api::themes::unlock))
+        // ── Document generation (5 formats through the Python sidecar) ──
+        .route("/api/docs/pdf", post(api::docs::generate_pdf))
+        .route("/api/docs/docx", post(api::docs::generate_docx))
+        .route("/api/docs/xlsx", post(api::docs::generate_xlsx))
+        .route("/api/docs/csv", post(api::docs::generate_csv))
+        .route("/api/docs/pptx", post(api::docs::generate_pptx))
+        .route("/api/docs/file/:discussion_id/:filename", get(api::docs::download_file))
         // ── MCPs ──
         .route("/api/mcps", get(api::mcps::overview))
         .route("/api/mcps/registry", get(api::mcps::list_registry))
@@ -486,6 +500,8 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // ── Skills ──
         .route("/api/skills", get(api::skills::list).post(api::skills::create))
         .route("/api/skills/:id", put(api::skills::update).delete(api::skills::delete))
+        .route("/api/skills/auto-triggers/disabled", get(api::skills::list_disabled_auto))
+        .route("/api/skills/:id/auto-trigger/toggle", post(api::skills::toggle_auto_trigger))
         // ── Profiles ──
         .route("/api/profiles", get(api::profiles::list).post(api::profiles::create))
         .route("/api/profiles/:id", get(api::profiles::get).put(api::profiles::update).delete(api::profiles::delete))
