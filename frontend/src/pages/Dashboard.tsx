@@ -16,6 +16,7 @@ import { fetchSttModelId } from '../lib/stt-models';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 import { McpPage } from './McpPage';
 import { WorkflowsPage } from './WorkflowsPage';
+import { ActiveRunsPopover } from '../components/workflows/ActiveRunsPopover';
 import { SettingsPage } from './SettingsPage';
 import { DiscussionsPage } from './DiscussionsPage';
 import { ProjectList } from '../components/ProjectList';
@@ -61,6 +62,7 @@ export function Dashboard({ onReset }: DashboardProps) {
   // WorkflowsPage via this prop. It's cleared right after consumption so the
   // navigation only fires once per click.
   const [openWorkflowId, setOpenWorkflowId] = useState<string | null>(null);
+  const [activeRunsPopoverOpen, setActiveRunsPopoverOpen] = useState(false);
   // Reverse direction: when a "📋 View N discussions" chip on a workflow run
   // is clicked, we hand the batch run id to DiscussionsPage so the sidebar
   // expands the matching batch group + scrolls to it.
@@ -431,21 +433,75 @@ export function Dashboard({ onReset }: DashboardProps) {
           ['mcps', Puzzle, t('nav.mcps')],
           ['workflows', Workflow, t('nav.workflows')],
           ['settings', Settings, t('nav.config')],
-        ] as [string, typeof Folder, string][]).map(([id, Icon, label]) => (
-          <button key={id} className="dash-nav-btn" data-active={page === id} data-mobile={isMobile} data-tour-id={`nav-${id}`} onClick={() => { setPage(id as Page); if (id !== 'mcps') setMcpSelectedConfigId(null); }} title={label}>
-            {id === 'workflows' && runningWorkflows > 0
-              ? <Loader2 size={isMobile ? 16 : 14} style={{ animation: 'spin 1s linear infinite' }} className="text-accent" />
-              : <Icon size={isMobile ? 16 : 14} />
-            }
-            {!isMobile && <>{' '}{label}</>}
-            {id === 'discussions' && totalUnseen > 0 && (
-              <span className="dash-nav-badge">{totalUnseen}</span>
-            )}
-            {id === 'workflows' && runningWorkflows > 0 && (
-              <span className="dash-nav-badge">{runningWorkflows}</span>
-            )}
-          </button>
-        ))}
+        ] as [string, typeof Folder, string][]).map(([id, Icon, label]) => {
+          const btn = (
+            <button
+              key={id === 'workflows' ? undefined : id}
+              className="dash-nav-btn"
+              data-active={page === id}
+              data-mobile={isMobile}
+              data-tour-id={`nav-${id}`}
+              // Stop the mousedown so the popover's outside-click handler
+              // doesn't fire when the user re-clicks the nav button to toggle
+              // it closed — without this the outside-close + onClick-toggle
+              // race leaves the popover stuck open.
+              onMouseDown={id === 'workflows' ? (e) => e.stopPropagation() : undefined}
+              onClick={() => {
+                // When workflows are running, hijack the nav click to open the
+                // active-runs popover instead of navigating — single-click
+                // access to Stop from any page. Normal nav still works when
+                // nothing is running, or when we're already on the page.
+                if (id === 'workflows' && runningWorkflows > 0 && page !== 'workflows') {
+                  setActiveRunsPopoverOpen(o => !o);
+                  return;
+                }
+                setPage(id as Page);
+                if (id !== 'mcps') setMcpSelectedConfigId(null);
+              }}
+              title={label}
+            >
+              {id === 'workflows' && runningWorkflows > 0
+                ? <Loader2 size={isMobile ? 16 : 14} style={{ animation: 'spin 1s linear infinite' }} className="text-accent" />
+                : <Icon size={isMobile ? 16 : 14} />
+              }
+              {!isMobile && <>{' '}{label}</>}
+              {id === 'discussions' && totalUnseen > 0 && (
+                <span className="dash-nav-badge">{totalUnseen}</span>
+              )}
+              {id === 'workflows' && runningWorkflows > 0 && (
+                <span className="dash-nav-badge">{runningWorkflows}</span>
+              )}
+            </button>
+          );
+          if (id === 'workflows') {
+            return (
+              <div
+                key={id}
+                className="dash-nav-workflows-wrap"
+                style={{ position: 'relative', display: 'inline-flex' }}
+              >
+                {btn}
+                {activeRunsPopoverOpen && (
+                  <ActiveRunsPopover
+                    workflows={workflowList ?? []}
+                    onClose={() => setActiveRunsPopoverOpen(false)}
+                    onNavigateToWorkflow={(wfId) => {
+                      setOpenWorkflowId(wfId);
+                      setPage('workflows');
+                      setActiveRunsPopoverOpen(false);
+                    }}
+                    onViewAllWorkflows={() => {
+                      setPage('workflows');
+                      setActiveRunsPopoverOpen(false);
+                    }}
+                    onAfterCancel={() => { refetchWorkflows(); }}
+                  />
+                )}
+              </div>
+            );
+          }
+          return btn;
+        })}
         </div>
         <div className="dash-nav-spacer" data-mobile={isMobile} />
         <button className="dash-scan-btn" data-tour-id="new-project-btn" onClick={() => setShowBootstrap(true)} title={t('projects.bootstrap')}>

@@ -10,7 +10,7 @@ import type {
 } from '../types/generated';
 import {
   Plus, Trash2, Play, Loader2, ChevronLeft, ChevronRight, ChevronDown,
-  Clock, GitBranch, Zap, Eye, Layers, X,
+  Clock, GitBranch, Zap, Eye, Layers, X, Square,
   ToggleLeft, ToggleRight,
 } from 'lucide-react';
 import { WorkflowDetail } from '../components/workflows/WorkflowDetail';
@@ -84,6 +84,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const [detailRuns, setDetailRuns] = useState<WorkflowRun[]>([]);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [triggering, setTriggering] = useState<string | null>(null);
+  const [cancellingRunIds, setCancellingRunIds] = useState<Set<string>>(new Set());
 
   // Live run state for SSE streaming
   const [liveRun, setLiveRun] = useState<{
@@ -217,6 +218,23 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     } catch (e) {
       console.warn('Workflow action failed:', e);
     }
+  };
+
+  // Inline Stop on a workflow card. Silent refresh — the card's last_run
+  // status will flip to Cancelled at the next refetch tick.
+  const handleCancelRun = async (workflowId: string, runId: string) => {
+    setCancellingRunIds(prev => {
+      const next = new Set(prev);
+      next.add(runId);
+      return next;
+    });
+    try {
+      await workflowsApi.cancelRun(workflowId, runId);
+    } catch {
+      // Refetch reconciles the UI; errors here mean the run was already
+      // finished or the registry lost the token — nothing actionable.
+    }
+    refetch();
   };
 
   const handleDelete = async (id: string) => {
@@ -552,6 +570,21 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                           <span className="text-ghost">
                             · {wf.last_run.tokens_used} tokens
                           </span>
+                        )}
+                        {(wf.last_run.status === 'Running' || wf.last_run.status === 'Pending') && (
+                          <button
+                            className="wf-card-stop-btn"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void handleCancelRun(wf.id, wf.last_run!.id);
+                            }}
+                            disabled={cancellingRunIds.has(wf.last_run.id)}
+                            title={t('wf.cancelRun')}
+                            aria-label={t('wf.cancelRun')}
+                          >
+                            <Square size={9} style={{ fill: 'currentColor' }} />
+                            {cancellingRunIds.has(wf.last_run.id) ? t('wf.cancelling') : t('wf.cancelRun')}
+                          </button>
                         )}
                       </div>
                     )}

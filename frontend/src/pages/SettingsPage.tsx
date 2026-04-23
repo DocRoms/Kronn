@@ -13,7 +13,7 @@ import {
   RefreshCw, X, Eye, EyeOff,
   Layers, FolderSearch, Filter, FileText,
   Shield, Globe, Copy, Server, Mic, Volume2, HelpCircle, ChevronRight,
-  Sun, Moon, Monitor, Terminal, Heart, Key,
+  Sun, Moon, Monitor, Terminal, Heart, Key, ExternalLink,
 } from 'lucide-react';
 import { STT_MODELS, getSttModelId, setSttModelId } from '../lib/stt-models';
 import { TTS_VOICES, getTtsVoiceId, setTtsVoiceId } from '../lib/tts-models';
@@ -670,7 +670,7 @@ export function SettingsPage({
           <div className="set-accordion-body">
           <div className="set-section">
 
-          <div className="flex-wrap mb-8" style={{ gap: 10, maxHeight: 400, overflowY: 'auto', overflowX: 'hidden' }}>
+          <div className="flex-wrap mb-8" style={{ gap: 10 }}>
             {availableSkills.map(skill => (
               <div key={skill.id} className="set-item-card">
                 <div className="flex-between mb-2">
@@ -883,7 +883,7 @@ export function SettingsPage({
           {configAccordion.has('directives') && (
           <div className="set-accordion-body">
           <div className="set-section">
-          <div className="flex-wrap mb-8" style={{ gap: 10, maxHeight: 400, overflowY: 'auto', overflowX: 'hidden' }}>
+          <div className="flex-wrap mb-8" style={{ gap: 10 }}>
             {availableDirectives.map(directive => (
               <div key={directive.id} className="set-item-card">
                 <div className="flex-between mb-2">
@@ -908,6 +908,21 @@ export function SettingsPage({
                 </div>
                 {directive.description && (
                   <div className="text-sm text-muted mb-2">{directive.description}</div>
+                )}
+                {directive.source_url && (
+                  <a
+                    href={directive.source_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-xs"
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 4,
+                      color: 'var(--kr-accent)', textDecoration: 'none',
+                      marginBottom: 8,
+                    }}
+                  >
+                    <ExternalLink size={10} /> {t('directives.source')}
+                  </a>
                 )}
                 {(directive.conflicts ?? []).length > 0 && (
                   <div className="text-2xs mb-2" style={{ color: 'rgba(var(--kr-error-rgb), 0.6)' }}>

@@ -187,8 +187,8 @@ Dashboard tabs (current / planned):
 | Projets | Done | Project list, AI audit pipeline (template → audit → validation), project bootstrap (create from scratch), MCP overview, per-project workflows/skills/doc viewer |
 | Discussions | Done | Single/multi-agent chat, @mentions, orchestration, global discussions, archive/unarchive (swipe gestures), inline title editing, disabled agent detection. **⏹ Stop agent** button (CancellationToken via `AppState.cancel_registry`, CancelGuard RAII). **Partial response recovery (0.3.5)**: agent output checkpointed every ~30s/~100 chunks into `discussions.partial_response` (+ `partial_response_started_at` for chronological order). Backend restart converts dangling partials into Agent messages with "⚠️ Réflexion interrompue" footer + broadcasts `WsMessage::PartialResponseRecovered`. `POST /api/discussions/:id/dismiss-partial` for manual recovery. `send_message` refuses a new run while a partial is pending (`partial_pending` SSE error → frontend waits or dismisses). **Structured agent questions (0.3.5)**: `{{var}}: question` patterns in agent messages auto-render a mini-form (`AgentQuestionForm`) above ChatInput. **0.5.0 — Test mode (worktree swap-in-main)**: `🧪 Tester cette version` CTA in the ChatHeader swaps the main repo to the discussion's branch, global banner stays pinned while active, single-click exit restores previous branch + pops auto-stash + re-creates the worktree. Triple preflight (worktree dirty, main dirty, detached HEAD) with a dedicated modal for the MainDirty case (stash-and-proceed / commit-first / cancel). `POST /api/discussions/:id/test-mode/{enter,exit}` return tagged envelopes. Persistent across reboots via migration 034. **0.5.0 — Decoder-loop detection**: agent streams now kill the child after 50 consecutive identical non-whitespace deltas (fixes Claude Opus extended-thinking `</thinking>`-loop leaking 76 KB into one response on EW-7189). Parser-level strip of literal `<thinking>` tags is the first line of defense. **0.5.0 — Prompt over stdin for Claude Code**: `start_agent_with_config` writes the prompt to `stdin` instead of argv, bypassing Linux `ARG_MAX` (~128 KiB). `--append-system-prompt` still travels via argv but truncates at 100 KiB with a clear marker. **Split into 8 components**: DiscussionsPage (orchestrator) + ChatHeader, ChatInput, DiscussionSidebar, NewDiscussionForm, MessageBubble, SwipeableDiscItem, AgentQuestionForm — plus 2 test-mode components (`TestModeBanner`, `TestModeModal`) in 0.5.0 |
 | Plugins | Done | Plugin registry — card grid + category pills, inline detail panel, per-project navigation. **0.5.0 — plugin kind: MCP \| API \| hybrid** (see §12). **56 plugins: 53 MCPs + 3 API plugins** (Chartbeat `apikey` query, Adobe Analytics OAuth2 S2S, Google Search `apikey` query). Per-card badges `🔌 MCP` / `🌐 API` / `MCP + API`. Kind-filter pills `All \| MCP \| API` on top. Publisher origin badges (official/community). Per-project MCP load indicator (green/orange/red). Env placeholders with realistic hints (sourced from `api_spec.config_keys` for API plugins, else static map). Eye toggle on add form; API plugins auto-expose non-secret fields as plain text with inline description. OAuth2 plugins get Kronn-managed bearer refresh transparent to the agent. Recent additions: MongoDB, Kubernetes, Qdrant, Perplexity, Microsoft 365, Chartbeat, Adobe Analytics, Google Search. Puppeteer removed (use Playwright). |
-| Automatisation | Done | Two tabs: **Workflows** + **Quick Prompts**. Workflows: list (grouped by project), creation wizard (simple 3-step + advanced 5-step), detail + runs with live SSE, manual trigger, run deletion. MCP-based suggestions (10 templates). Structured inter-step contracts. AI Architect ("Create with AI" → discussion → `KRONN:WORKFLOW_READY`). Test step (dry-run + live streaming, state survives tab switches via module-level tracker). Starter templates (6 examples). Raw cron editor. **⏹ Cancel run** with cascade to child batch discussions via `parent_run_id`. **Notify step (0.3.5)**: `StepType::Notify` with webhook support (POST/PUT/GET), zero tokens, template rendering in URL + body. **Quick Prompts**: reusable prompt templates with `{{variables}}` and conditional sections `{{#var}}text{{/var}}`. Launch creates a discussion with rendered prompt and dynamic title. **Batch Quick Prompts (0.3.5)**: fan-out to N items (tickets / list / resolved template), each child gets its own discussion + optional worktree, aggregated in sidebar groups. Dry-run preview with per-item rendered prompt + per-item test button. |
-| Config | Done | Multi-key API management (incl. Mistral/Vibe API keys), token usage tracking, language, agent detection + permissions, agent usage dashboard links, Directives CRUD with live cards, DB management (**export ZIP** with data.json + config.toml, **import ZIP/JSON** with config merge + path remapping). **Global context (0.3.5)**: markdown textarea + mode dropdown (always/no_project/never), injected into agent prompts via `ServerConfig.global_context`. Skills/Profiles are now managed per-project on the Project page. **Skill auto-trigger opt-out (0.5.1)**: per-skill toggle backed by `auto_triggers` table — disable a skill from contributing to prompt injection without removing it. |
+| Automatisation | Done | Two tabs: **Workflows** + **Quick Prompts**. Workflows: list (grouped by project), creation wizard (simple 3-step + advanced 5-step), detail + runs with live SSE, manual trigger, run deletion. MCP-based suggestions (10 templates). Structured inter-step contracts. AI Architect ("Create with AI" → discussion → `KRONN:WORKFLOW_READY`). Test step (dry-run + live streaming, state survives tab switches via module-level tracker). Starter templates (6 examples). Raw cron editor. **⏹ Cancel run** with cascade to child batch discussions via `parent_run_id`. **Notify step (0.3.5)**: `StepType::Notify` with webhook support (POST/PUT/GET), zero tokens, template rendering in URL + body. **Quick Prompts**: reusable prompt templates with `{{variables}}` and conditional sections `{{#var}}text{{/var}}`. Launch creates a discussion with rendered prompt and dynamic title. **Batch Quick Prompts (0.3.5)**: fan-out to N items (tickets / list / resolved template), each child gets its own discussion + optional worktree, aggregated in sidebar groups. Dry-run preview with per-item rendered prompt + per-item test button. **Active-runs popover (0.5.1)**: `ActiveRunsPopover` hijacks the nav-icon click when `runningWorkflows > 0` — renders a tray listing every live run (workflow name + project + live elapsed timer + one-click `⏹ Arrêter`) without leaving the current page. Inline `⏹ Stop` button also present on every `.wf-card` whose `last_run.status === Running \| Pending` (`stopPropagation` guards against opening the detail panel). `onMouseDown` stop on the nav button prevents the outside-click-closes-popover race. |
+| Config | Done | Multi-key API management (incl. Mistral/Vibe API keys), token usage tracking, language, agent detection + permissions, agent usage dashboard links, Directives CRUD with live cards, DB management (**export ZIP** with data.json + config.toml, **import ZIP/JSON** with config merge + path remapping). **Global context (0.3.5)**: markdown textarea + mode dropdown (always/no_project/never), injected into agent prompts via `ServerConfig.global_context`. Skills/Profiles are now managed per-project on the Project page. **Skill auto-trigger opt-out (0.5.1)**: per-skill toggle backed by `auto_triggers` table — disable a skill from contributing to prompt injection without removing it. **RTK integration (0.5.1)** in the Agents section: `<CompressionSection />` card at the top with 3 activation states, one-click "Activate on all compatible agents" CTA, install modal with copy-paste curl when the binary is absent, live savings counter + 3-card expand (tokens / ratio / samples), sobriety (?) tooltip nuancing the "eco mode" label. Per-agent badge inline next to the version: 🟢 `RTK actif` / 🟡 hook missing / ⚪ not installed / italic `Non pris en charge par RTK` (Kiro, Copilot CLI, Vibe). See §13. |
 
 Note: the old "Agents" tab has been merged into Config. Nav order: Projets → Discussions → Plugins → Workflows → Config. **"?" button** in nav replays the guided tour.
 
@@ -314,7 +314,67 @@ Auto-activation: the skill carries `auto_triggers.common/fr/en/es` regex buckets
 
 ---
 
-## 10. Multi-agent configuration
+## 10. RTK integration (0.5.1) — "Mode économique"
+
+RTK (Rust Token Killer, `github.com/rtk-ai/rtk`) is a Rust shell-output compressor that intercepts commands like `git`, `cargo`, `ls`, test runners and rewrites their output before it reaches the LLM. Measured ~89% compression on the author's local fleet. Kronn ships a first-class integration covering detection, activation, and savings readout.
+
+**Scope — what Kronn does NOT do**: we do not wrap or intercept agent shell calls ourselves. The agent CLI (Claude Code, Codex, Gemini CLI) is the process that executes Bash tool calls, and it runs its *own* `Command::new("bash")`. RTK installs per-agent hooks that those CLIs invoke; Kronn detects + activates + observes, never proxies. This is the correct separation of concerns: RTK owns the format of each hook, Kronn owns the UX.
+
+### What's wired
+
+- **`backend/src/core/rtk_detect.rs`** — read-only scan of the host.
+  - `rtk_binary_available()` → `which rtk`
+  - `rtk_hook_configured_for(agent_type)` → scans the per-agent config file:
+    - Claude Code → `~/.claude/settings.json`
+    - Codex → `~/.codex/AGENTS.md` (NOT `config.toml` — RTK injects into the AGENTS.md preamble)
+    - Gemini CLI → shell rc (bash/zsh/fish/profile) — `gemini_shell_rc_mentions_rtk()`
+    - Kiro, Copilot CLI, Vibe, Ollama → `None` (not in RTK's supported list, or no shell to hook)
+  - HOME resolution uses `$HOME` (NOT `KRONN_HOST_HOME`). In Docker `/home/kronn/.claude` etc. are bind-mounted rw from the host, so reading through the container HOME lands on the real host file. Overriding with `KRONN_HOST_HOME` (the host path, e.g. `/home/priol`) points at a path that doesn't exist inside the container and silently returns false everywhere.
+
+- **`backend/src/models/mod.rs`** — `AgentDetection` gets `rtk_available: bool` and `rtk_hook_configured: bool` alongside `runtime_available`. Both have `#[serde(default)]` so older configs deserialize cleanly.
+
+- **`backend/src/api/rtk.rs`** — two endpoints:
+  - `POST /api/rtk/activate` — body `{ agents: AgentType[] }`. Filters to RTK-supported agents (Claude Code / Codex / Gemini CLI), spawns one `rtk init` per agent with the right flag matrix:
+    - Claude Code: `rtk init -g --auto-patch --hook-only`
+    - Codex: `rtk init -g --codex --auto-patch` (no `--hook-only` — incompatible with `--codex`, same for `--gemini`)
+    - Gemini: `rtk init -g --gemini --auto-patch`
+    `--auto-patch` is mandatory for non-interactive. Returns `{ success, stdout, stderr, per_agent: RtkAgentActivation[] }` with stdout/stderr concatenated by agent for toast display.
+  - `GET /api/rtk/savings` — reads `rtk gain --all --format json`, navigates to `summary.{total_saved, avg_savings_pct, total_commands}` (RTK 0.37 shape, validated by a test). Returns `{ available, total_tokens_saved, ratio_percent, sample_count }`. `available: false` when anything fails so the UI hides cleanly.
+
+- **Pre-flight** — `POST /api/rtk/activate` calls `std::fs::create_dir_all($HOME/.config/rtk)` before spawning, because in Docker the chain `~/.config/rtk/` may not exist and RTK errors out with "Permission denied" when mkdir crosses a uid boundary. The Dockerfile also pre-creates `/home/kronn/.config` and `chown`s it to the app user.
+
+- **`backend/Dockerfile`** — RTK 0.37.1 pinned, curl-installed, `dpkg --print-architecture` pattern shared with `glab`, `bun`, `uv`. arm64 target (`aarch64-unknown-linux-musl`) already wired even though compose publishes x86_64 today.
+
+- **`docker-compose.yml`** — bind mounts `~/.config/rtk` and `~/.local/share/rtk` rw. Without these the `rtk gain` call inside the container reads an empty SQLite while the user's real stats live on the host.
+
+- **Frontend** (`frontend/src/components/settings/CompressionSection.tsx`) — single card at the top of AgentsSection. States by `configured/applicable` count (0/N amber, partial neutral, N/N green). Savings counter shows only when RTK reports `available: true` with `total > 0`. Details expand renders 3 stat cards. Install modal (when `!rtk_available`) shows the curl command + GitHub link for the user to pass to their tech colleague. Attribution always visible: "Propulsé par RTK (open source)".
+
+- **Per-agent badge** (`frontend/src/components/settings/AgentsSection.tsx`) — rendered inline next to each agent version. 3 states for RTK-applicable agents, italic "Non pris en charge par RTK" for the rest.
+
+- **Sobriety tooltip** — (?) button next to the "Mode économique" title reveals a paragraph: *"L'usage le plus sobre reste de ne pas utiliser d'IA. Si vous en utilisez, RTK compresse..."*. Acknowledges the eco-mode wording could oversell.
+
+### Bug history worth remembering
+
+Documented so future iterations don't rediscover them:
+
+1. `rtk init -g` alone → only wires Claude Code. Need per-agent flags (`--codex`, `--gemini`).
+2. No `--auto-patch` → prompt waits forever, exits 0, nothing happened ("RTK activated" lying toast).
+3. `HOME=$KRONN_HOST_HOME` override → tries `mkdir /home/priol/.claude` inside the container, "failed to create directory". Leave HOME alone.
+4. `--hook-only` with `--codex`/`--gemini` → "cannot be combined". The hook IS the flow for non-default agents.
+5. Codex detection path `.codex/config.toml` → wrong, RTK writes to `.codex/AGENTS.md`.
+6. `rtk gain` parser looking at top-level keys → wrong, RTK 0.37 nests under `summary.*`.
+7. Docker container's `rtk` reads `/home/kronn/.config/rtk/` → without bind mount, disjoint from host SQLite, savings counter always zero.
+
+Regression tests in `backend/src/core/rtk_detect.rs::tests` and `backend/src/api/rtk.rs::tests` (incl. embedded real-payload JSON). Don't remove them without a very good reason.
+
+### Out of scope (intentionally)
+
+- **RTK timeseries / sparkline** — `daily[]`/`weekly[]`/`monthly[]` arrays are available in `rtk gain` JSON but the UI only surfaces `summary.*`. Reason: RTK is 0.x (breaking changes unannounced), and the counter covers 80% of the perceived value. Revisit when RTK hits 1.0.
+- **Scoping RTK savings by discussion / agent** — RTK's SQLite is global, Kronn doesn't instrument per-message. "Compression par discussion Kronn" requires a `ContextCompressor` trait that intercepts at the MCP output / workflow-step output level (the "désagentification" vision). See `ai/decisions.md` for the longer note.
+
+---
+
+## 11. Multi-agent configuration
 
 Redirectors to this file: `CLAUDE.md`, `GEMINI.md`, `AGENTS.md`, `.kiro/steering/instructions.md`, `.vibe/instructions.md`, `.cursorrules`, `.cursor/rules/repo-instructions.mdc`, `.github/copilot-instructions.md`, `.windsurfrules`, `.clinerules`.
 
@@ -322,6 +382,6 @@ Redirectors to this file: `CLAUDE.md`, `GEMINI.md`, `AGENTS.md`, `.kiro/steering
 
 ---
 
-## 11. Last updated
+## 12. Last updated
 
-AI context last reviewed: **2026-04-22** (v0.5.1 released — Kronn Docs: Python sidecar + 5 format endpoints + skill auto-triggers + per-skill opt-out + DocPreview / DocDataExport fences. Light theme expert rework + secret unlock system + 3 hidden themes + Batman profile).
+AI context last reviewed: **2026-04-23** (v0.5.1 in preparation — adds on top of Kronn Docs / secret themes: workflow ActiveRunsPopover + inline Stop on cards, RTK (Rust Token Killer) integration with per-agent detection / activation / savings counter / sobriety-nuanced "Mode économique" UI, and a toast refactor where errors are persistent and stderr ships as a copyable payload).

@@ -5,4 +5,16 @@ export type AgentDetection = { name: string, agent_type: AgentType, installed: b
 /**
  * Agent is runnable via npx/uvx fallback even when no local binary is found
  */
-runtime_available: boolean, };
+runtime_available: boolean, 
+/**
+ * `rtk` binary found on the host (PATH). Same value for every agent
+ * detection in a given sweep, but kept per-agent so the frontend can
+ * render the state inline without a separate endpoint.
+ */
+rtk_available: boolean, 
+/**
+ * The agent's own config file declares an RTK hook. Always `false` for
+ * agents that have no shell-exec (API-only agents like Vibe) or no
+ * hookable config (Ollama) — they're considered non-applicable.
+ */
+rtk_hook_configured: boolean, };

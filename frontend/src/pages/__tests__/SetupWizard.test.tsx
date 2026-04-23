@@ -44,7 +44,7 @@ const makeAgent = (overrides: Partial<AgentDetection> = {}): AgentDetection => (
   install_command: null,
   host_managed: false,
   host_label: null,
-  runtime_available: false,
+  runtime_available: false, rtk_available: false, rtk_hook_configured: false,
   ...overrides,
 });
 
@@ -137,7 +137,7 @@ describe('SetupWizard — step 0 (agents detection)', () => {
       name: 'Gemini CLI',
       agent_type: 'GeminiCli',
       installed: false,
-      runtime_available: false,
+      runtime_available: false, rtk_available: false, rtk_hook_configured: false,
       install_command: 'npm install -g @google/gemini-cli',
     });
     vi.mocked(agentsApi.detect).mockResolvedValue([agent]);

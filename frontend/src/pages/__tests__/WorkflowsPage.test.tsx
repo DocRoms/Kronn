@@ -15,6 +15,7 @@ const mockWorkflowsApi = vi.hoisted(() => ({
   getRun: vi.fn(),
   deleteRun: vi.fn(),
   deleteAllRuns: vi.fn(),
+  cancelRun: vi.fn().mockResolvedValue({ run_cancelled: true, child_discs_cancelled: 0 }),
   triggerStream: vi.fn(),
 }));
 
@@ -370,5 +371,94 @@ describe('WorkflowsPage', () => {
 
     // Summary should show the workflow name and cron info
     expect(document.body.textContent).toContain('Quick Task');
+  });
+
+  // ─── Inline Stop button on a running workflow card ──────────────────
+  it('shows an inline Stop button on a running workflow card and calls cancelRun on click', async () => {
+    const runningSummary: WorkflowSummary = {
+      id: 'wf-run',
+      name: 'RunningAlpha',
+      project_id: null,
+      project_name: null,
+      trigger_type: 'manual',
+      step_count: 1,
+      enabled: true,
+      last_run: {
+        id: 'run-abc',
+        status: 'Running',
+        started_at: '2026-01-01T00:00:00Z',
+        finished_at: null,
+        tokens_used: 0,
+      },
+      created_at: '2026-01-01T00:00:00Z',
+    };
+    const idleSummary: WorkflowSummary = {
+      id: 'wf-idle',
+      name: 'IdleBeta',
+      project_id: null,
+      project_name: null,
+      trigger_type: 'manual',
+      step_count: 1,
+      enabled: true,
+      last_run: {
+        id: 'run-xyz',
+        status: 'Success',
+        started_at: '2026-01-01T00:00:00Z',
+        finished_at: '2026-01-01T00:10:00Z',
+        tokens_used: 42,
+      },
+      created_at: '2026-01-01T00:00:00Z',
+    };
+    mockWorkflowsApi.list.mockResolvedValue([runningSummary, idleSummary]);
+    mockWorkflowsApi.cancelRun.mockClear();
+
+    await wrap(
+      <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />
+    );
+
+    // The running card renders a Stop button; the idle card does NOT.
+    // There is exactly one inline .wf-card-stop-btn in the DOM.
+    const stopButtons = document.querySelectorAll('.wf-card-stop-btn');
+    expect(stopButtons.length).toBe(1);
+
+    await act(async () => { fireEvent.click(stopButtons[0]); });
+    await waitFor(() => expect(mockWorkflowsApi.cancelRun).toHaveBeenCalledTimes(1));
+    expect(mockWorkflowsApi.cancelRun).toHaveBeenCalledWith('wf-run', 'run-abc');
+  });
+
+  it('inline Stop click does not open the workflow detail panel', async () => {
+    const runningSummary: WorkflowSummary = {
+      id: 'wf-run',
+      name: 'RunningAlpha',
+      project_id: null,
+      project_name: null,
+      trigger_type: 'manual',
+      step_count: 1,
+      enabled: true,
+      last_run: {
+        id: 'run-abc',
+        status: 'Running',
+        started_at: '2026-01-01T00:00:00Z',
+        finished_at: null,
+        tokens_used: 0,
+      },
+      created_at: '2026-01-01T00:00:00Z',
+    };
+    mockWorkflowsApi.list.mockResolvedValue([runningSummary]);
+    // If openDetail fires, workflows.get would be called — we assert it is NOT.
+    mockWorkflowsApi.get.mockClear();
+    mockWorkflowsApi.cancelRun.mockClear();
+
+    await wrap(
+      <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />
+    );
+
+    const stopButton = document.querySelector('.wf-card-stop-btn');
+    expect(stopButton).not.toBeNull();
+    await act(async () => { fireEvent.click(stopButton!); });
+
+    await waitFor(() => expect(mockWorkflowsApi.cancelRun).toHaveBeenCalled());
+    // openDetail would have fetched the full Workflow — it must not have.
+    expect(mockWorkflowsApi.get).not.toHaveBeenCalled();
   });
 });

@@ -148,6 +148,10 @@ export interface AgentDetection {
   host_label: string | null;
   /** Agent is runnable via npx/uvx fallback even when no local binary is found */
   runtime_available: boolean;
+  /** `rtk` binary found on the host (PATH). Same value for every agent detection in a given sweep. */
+  rtk_available: boolean;
+  /** Agent's config file declares an RTK hook. Always false for API-only (Vibe) or hookless (Ollama) agents. */
+  rtk_hook_configured: boolean;
 }
 
 export type AgentType = "ClaudeCode" | "Codex" | "Vibe" | "GeminiCli" | "Kiro" | "CopilotCli" | "Ollama" | "Custom";
@@ -825,6 +829,8 @@ export interface Directive {
   is_builtin: boolean;
   conflicts?: string[];
   token_estimate: number;
+  /** Optional URL to the upstream project for third-party adaptations (e.g. Caveman). */
+  source_url?: string | null;
 }
 
 export interface CreateDirectiveRequest {

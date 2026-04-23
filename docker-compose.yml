@@ -45,6 +45,12 @@ services:
       - ${HOME}/.copilot:/home/kronn/.copilot:rw              # GitHub Copilot auth + config
       - ${HOME}/.gemini:/home/kronn/.gemini:rw                # Gemini CLI auth + project registry + settings
       - ${HOME}/.local/share/kiro-cli:/home/kronn/.local/share/kiro-cli:rw  # Kiro SQLite data
+      # RTK (Rust Token Killer) — share host's config + stats so `rtk gain`
+      # inside the container reads the same SQLite the user's CLI writes to.
+      # Without these, /api/rtk/savings always reports zero even when the
+      # user has thousands of compressions on the host.
+      - ${HOME}/.config/rtk:/home/kronn/.config/rtk:rw
+      - ${HOME}/.local/share/rtk:/home/kronn/.local/share/rtk:rw
       - ./templates:/app/templates:ro                   # AI context templates for project init
     environment:
       - KRONN_TEMPLATES_DIR=/app/templates

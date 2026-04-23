@@ -927,6 +927,44 @@ export const stats = {
   agentUsage: () => api<AgentUsageSummary[]>('GET', '/stats/agent-usage'),
 };
 
+// ─── RTK (Rust Token Killer — host-side compression proxy) ────────────────
+
+export interface RtkAgentActivation {
+  agent_type: AgentType;
+  success: boolean;
+  stdout: string;
+  stderr: string;
+}
+
+/** Response shape of `POST /api/rtk/activate` — kept here rather than in
+ *  `types/generated.ts` because the backend struct isn't consumed by any
+ *  generated type downstream, so maintaining it inline is cheaper. */
+export interface RtkActivateResponse {
+  success: boolean;
+  stdout: string;
+  stderr: string;
+  per_agent: RtkAgentActivation[];
+}
+
+/** Response shape of `GET /api/rtk/savings`. `available: false` means RTK
+ *  isn't readable and the frontend should hide the counter entirely. */
+export interface RtkSavings {
+  available: boolean;
+  total_tokens_saved: number;
+  ratio_percent: number;
+  sample_count: number;
+}
+
+export const rtk = {
+  /** Wire RTK hooks into each supported agent. The backend filters to
+   *  agents RTK actually supports (Claude Code, Codex, Gemini CLI at the
+   *  time of writing) and spawns one `rtk init -g ...` per agent. */
+  activate: (agents: AgentType[]) =>
+    api<RtkActivateResponse>('POST', '/rtk/activate', { agents }),
+  /** Read the global savings counter RTK keeps in its own SQLite. */
+  savings: () => api<RtkSavings>('GET', '/rtk/savings'),
+};
+
 // ─── Ollama (local LLM) ────────────────────────────────────────────────────
 
 export const ollama = {

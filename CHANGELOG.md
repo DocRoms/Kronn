@@ -7,15 +7,108 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [0.5.1] - 2026-04-22
+## [0.5.1] - 2026-04-23
 
 Polish + playful additions on top of 0.5.0: the light theme got a proper
 expert-led rework, a hidden-unlock system was added for early-access
-testing, three secret themes ship with a small interactive layer, and
-agents can now generate PDF / DOCX / XLSX / CSV / PPTX files directly
-from the conversation without the user installing anything.
+testing, three secret themes ship with a small interactive layer, agents
+can now generate PDF / DOCX / XLSX / CSV / PPTX files directly from the
+conversation without the user installing anything, and the release
+closes with three user-facing hygiene wins: an in-nav "active runs"
+popover that one-clicks a running workflow to Stop, a first-class RTK
+(Rust Token Killer) integration that cuts agent shell outputs by ~90%
+before they hit the model, and a toast refactor that turns errors into
+copyable, sticky notifications the user can actually read.
 
 ### Added
+- **Active-runs popover in the nav** — When one or more workflow runs
+  are in flight, clicking the Automatisation tab (which now spins a
+  Loader2 icon + counter badge) no longer navigates to the list but
+  opens a popover listing every live run with its project name, live
+  elapsed timer (front-computed so it ticks every second without
+  hitting the network), a one-click `⏹ Arrêter` button, and a
+  "Voir tous les workflows" footer for the classical route. Stop
+  feedback is immediate (button swaps to `⏳ Arrêt…` and disables),
+  no modal confirm — the UX designer + a lambda-user persona both
+  validated that friction-free kill is the whole point. `Esc` +
+  click-outside close the popover; a tiny `stopPropagation` on the
+  nav button's `mousedown` prevents the opening-click-closes-itself
+  race. Runs-in-flight polling stays at 3 s (existing behavior),
+  the popover reads from the same `workflowsApi.list()` cache.
+  Already-on-the-page fallback: a matching `⏹ Stop` button inline on
+  every `.wf-card` whose `last_run.status === Running | Pending`
+- **RTK (Rust Token Killer) integration** — Kronn now detects, wires,
+  and reports on RTK, a Rust shell-output compressor that cuts ~89%
+  of tokens on commands like `git`, `cargo`, `ls`, test runners. The
+  integration ships in three layers:
+  - **Detection** (`backend/src/core/rtk_detect.rs`): extends
+    `AgentDetection` with `rtk_available` (binary on PATH) and
+    `rtk_hook_configured` (per-agent hook file scan). Paths come
+    from RTK's own docs — Claude Code = `~/.claude/settings.json`,
+    Codex = `~/.codex/AGENTS.md` (not `config.toml`, caught on the
+    first iteration), Gemini = shell-rc scan (bash/zsh/fish/profile),
+    rest = `None` (Kiro, Copilot CLI, Vibe, Ollama are not in RTK's
+    supported list — the badge explicitly reads "Non pris en charge
+    par RTK")
+  - **Activation** (`POST /api/rtk/activate`): takes an `agents[]`
+    body, filters to RTK-compatible types, and spawns **one**
+    `rtk init -g <flag> --auto-patch [--hook-only]` per agent. The
+    matrix was extracted from the RTK README and defensive-fixed
+    after two iterations caught: (a) `rtk init -g` alone only covers
+    Claude Code, not Codex / Gemini; (b) `--hook-only` can't be
+    combined with `--codex` or `--gemini` (they *are* the hook).
+    `--auto-patch` is mandatory for non-interactive — without it the
+    command waits on a TTY prompt the backend can't answer and
+    exits 0 having done nothing ("RTK activated" lying toast)
+  - **Savings counter** (`GET /api/rtk/savings`): parses
+    `rtk gain --all --format json`, digs into `summary.total_saved`
+    / `summary.avg_savings_pct` / `summary.total_commands`. Real-
+    payload test embedded as a regression guard — the first parser
+    looked at non-existent top-level keys and systematically
+    returned zero. Tolerant to JSON reshape: falls back on
+    generic-name keys (`tokens_saved`, `ratio`, `sample_count`),
+    `available: false` when anything goes wrong so the UI hides
+    cleanly rather than showing a misleading "0 tokens saved"
+- **CompressionSection component** — a single card at the top of
+  Settings → Agents rendering "Mode économique" (rebranded from
+  "RTK" for non-technical users, attribution kept in the
+  footer: "Propulsé par RTK (open source)" → GitHub). Three states
+  drive the CTA copy:
+  - **0/N configured** → amber card, "Activer sur les N agents
+    compatibles"
+  - **partial** → neutral, "Activer sur les X restants"
+  - **all configured** → green, no CTA, savings counter visible
+  Plus an "Install RTK" modal when the binary isn't on PATH (copy-
+  paste curl command + link to GitHub to reassure the tech
+  colleague). A **(?) info button** next to the title reveals a
+  sobriety-numérique note in italics — *"L'usage le plus sobre
+  reste de ne pas utiliser d'IA. Si vous en utilisez, RTK
+  compresse..."* — because claiming "eco mode" without caveats
+  doesn't match the product's values
+- **Per-agent RTK badge** in the agent list row: 🟢 `RTK actif`
+  / 🟡 `RTK — hook non configuré` / ⚪ `RTK non installé` / italic
+  `Non pris en charge par RTK` for Kiro / Copilot CLI / Vibe /
+  unsupported agents. Each badge is a link to the RTK repo so the
+  user can read what the thing actually does
+- **"Détails" expand on the savings counter** — 3 stat cards
+  (Tokens économisés, Ratio moyen, Commandes compressées) pulled
+  from the same `GET /api/rtk/savings` call, hidden behind a chevron
+  toggle so the minimal UI stays a one-liner until a user wants the
+  breakdown
+- **Dockerfile — RTK bundled in the backend image** — pinned 0.37.1,
+  same `dpkg --print-architecture` pattern used for `glab` / `bun`
+  / `uv`. Adds both `x86_64-unknown-linux-musl` and
+  `aarch64-unknown-linux-musl` targets — the image is still
+  single-arch at publish time but the `case` switch is arm64-ready
+  for the first user on Apple Silicon self-host. New pre-created
+  directory `/home/kronn/.config` chowned to the app user so RTK's
+  own config writes don't trip a cross-uid permission wall
+- **docker-compose RTK bind-mounts** — `~/.config/rtk`
+  and `~/.local/share/rtk` mount into the container rw so
+  `rtk gain` inside reads the same SQLite the user's shell wrote
+  to on the host. Without these, the savings counter reports zero
+  even with thousands of host-side compressions
+
 - **Document generation — Kronn Docs** — Agents can now
   produce five file formats from a discussion without any external
   tooling on the user's side. Ships as a Python sidecar
@@ -157,6 +250,20 @@ from the conversation without the user installing anything.
   appears everywhere in real time without a page reload
 
 ### Changed
+- **Toast system — errors are now persistent and copyable by
+  default** — `useToast` gains a third argument
+  `options?: { persistent?: boolean; copyable?: string }` and the
+  defaults now differ per type: `success` = 3 s auto-dismiss, `info`
+  = 5 s auto-dismiss, **`error` = sticky with a mandatory X close
+  button**. When a `copyable` payload is passed, it renders below
+  the title in a monospace `<pre>` (selectable, scrollable, max
+  240 px) with a Copy button that swaps its icon to a Check for
+  1 s on click. Matches a validated UX-expert + lambda-user pair:
+  asymmetric treatment because a success confirms an action the
+  user already took, whereas an error interrupts flow and needs
+  diagnostic time. Hook file moved from `useToast.ts` →
+  `useToast.tsx` (JSX + new dependencies `Copy` / `Check` / `X`
+  from `lucide-react`), consumer API retro-compat
 - **`POST /api/themes/unlock` response shape — `{ unlocks: [{kind, name}, ...] }`**
   (was single `{ theme }`). A single code may now match multiple rows
   in `BUILT_IN_UNLOCK_HASHES`, enabling bundles like
@@ -173,6 +280,35 @@ from the conversation without the user installing anything.
   lime `#c8ff00` + black-on-lime contract stays 14:1 AAA)
 
 ### Fixed
+- **RTK activation in Docker** — three successive bugs caught
+  while iterating with a real user:
+  1. First spawn passed no `--auto-patch` → `rtk init` waited on a
+     TTY, exited 0, nothing happened. Frontend reported "RTK
+     activated" falsely
+  2. Second spawn overrode `HOME=$KRONN_HOST_HOME` (the *host*
+     path e.g. `/home/priol`) which doesn't exist inside the
+     container. RTK tried `mkdir /home/priol/.claude` and errored
+     with "failed to create directory". The correct move is to
+     leave HOME alone — the container already bind-mounts the
+     right `.claude` / `.codex` / `.gemini` dirs from the host
+  3. Third spawn added `--hook-only` to every agent. RTK rejects
+     `--codex --hook-only` / `--gemini --hook-only` with
+     "cannot be combined" because those flows *are* the hook. The
+     flag now only applies to the Claude default command
+- **Codex RTK detection path** — the first-pass detector looked
+  in `.codex/config.toml`, RTK actually writes to
+  `.codex/AGENTS.md`. Fixed with a regression test
+  (`codex_reads_agents_md_not_config_toml`) that asserts
+  AGENTS.md is the source of truth even when config.toml happens
+  to mention RTK
+- **`/api/rtk/savings` returned zero even with thousands of
+  compressions** — the parser looked for `tokens_saved` at the
+  JSON root but RTK 0.37 nests everything under
+  `summary.{total_saved, avg_savings_pct, total_commands}`. The
+  zero-returning path triggered the counter-hiding branch in the
+  UI, so the section looked empty. Fix: navigate to `summary.*`
+  with fallbacks on legacy keys + a regression test embedding the
+  real user-provided JSON payload
 - **Light theme — black text on dark accent illegibility** —
   `var(--kr-accent)` is now dark teal in light, so
   `color: var(--kr-text-on-accent) = #111` on it gave 3.5:1 (FAIL AA).
@@ -234,13 +370,19 @@ from the conversation without the user installing anything.
   SHA-256 unsalted on purpose so contributors can regenerate with
   `sha256sum`; codes ≥ 12 chars for dictionary resistance). Linked
   from `ai/index.md` Tier 1 table
-- **Tests** — net **+12 backend** tests (built-in hash path, bundle
-  unlock persistence, secret-profile filter, locked-id 404, hash
-  determinism canary) + **+16 frontend** (Konami sequence matching,
-  matrix decode edge cases + pulse re-scrambles, theme unlock bundle
-  flow, tampered localStorage defense, gracefully degraded when
-  previously-unlocked theme no longer in unlocked list). Totals:
-  **1143 backend lib / 677 frontend** — all green
+- **Tests** — net **+35 backend** tests (secret-unlock: built-in hash
+  path, bundle unlock persistence, secret-profile filter, locked-id
+  404, hash determinism canary + RTK: binary detection, hook paths per
+  agent incl. shell-rc scan for Gemini, regression for `.codex/
+  AGENTS.md` not `config.toml`, unsupported agents always false,
+  real-payload parse of `rtk gain --all --format json`, per-agent
+  activation args) + **+79 frontend** (secret-unlock: Konami sequence,
+  matrix decode edge cases, theme unlock bundle, tampered localStorage
+  defense + workflow: ActiveRunsPopover 9 tests, inline Stop button on
+  wf-card + stopPropagation + CompressionSection 16 tests covering
+  the 3 states, install modal, sobriety tooltip, toast error stderr
+  forwarding). Totals: **1178 backend lib / 756 frontend** — all
+  green
 
 ---
 

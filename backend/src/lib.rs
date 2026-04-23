@@ -423,6 +423,9 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/agents/install", post(api::agents::install))
         .route("/api/agents/uninstall", post(api::agents::uninstall))
         .route("/api/agents/toggle", post(api::agents::toggle))
+        // ── RTK (Rust Token Killer) — host-side compression proxy ──
+        .route("/api/rtk/activate", post(api::rtk::activate))
+        .route("/api/rtk/savings", get(api::rtk::savings))
         // ── Ollama (local LLM) ──
         .route("/api/ollama/health", get(api::ollama::health))
         .route("/api/ollama/models", get(api::ollama::models))

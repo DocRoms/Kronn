@@ -49,7 +49,7 @@ const AGENT: AgentDetection = {
   install_command: null,
   host_managed: false,
   host_label: null,
-  runtime_available: false,
+  runtime_available: false, rtk_available: false, rtk_hook_configured: false,
 };
 
 const mount = (projects: Project[]) => {

@@ -383,6 +383,16 @@ pub struct AgentDetection {
     /// Agent is runnable via npx/uvx fallback even when no local binary is found
     #[serde(default)]
     pub runtime_available: bool,
+    /// `rtk` binary found on the host (PATH). Same value for every agent
+    /// detection in a given sweep, but kept per-agent so the frontend can
+    /// render the state inline without a separate endpoint.
+    #[serde(default)]
+    pub rtk_available: bool,
+    /// The agent's own config file declares an RTK hook. Always `false` for
+    /// agents that have no shell-exec (API-only agents like Vibe) or no
+    /// hookable config (Ollama) — they're considered non-applicable.
+    #[serde(default)]
+    pub rtk_hook_configured: bool,
 }
 
 fn default_true() -> bool { true }
@@ -1426,6 +1436,12 @@ pub struct Directive {
     pub conflicts: Vec<String>,
     /// Estimated token cost when injected into an agent prompt (~4 chars = 1 token).
     pub token_estimate: u32,
+    /// Optional URL to the source project — set on directives that adapt
+    /// third-party prompts (e.g. Caveman → github.com/JuliusBrussee/caveman).
+    /// Surfaces as a small "↗ Source" link in the settings card. MIT-licensed
+    /// adaptations should include this for attribution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize, TS)]

@@ -68,6 +68,21 @@ RUN BUN_ARCH=$(dpkg --print-architecture | sed 's/amd64/x64/' | sed 's/arm64/aar
 COPY --from=ghcr.io/astral-sh/uv:0.5.14 /uv /usr/local/bin/uv
 COPY --from=ghcr.io/astral-sh/uv:0.5.14 /uvx /usr/local/bin/uvx
 
+# Install RTK (Rust Token Killer) — compresses shell outputs from agents
+# before they reach the LLM context. Pinned: RTK is 0.x, each bump is
+# manual + validated against regression fixtures in backend/tests.
+ARG RTK_VERSION=0.37.1
+RUN ARCH=$(dpkg --print-architecture) && \
+    case "$ARCH" in \
+      amd64) RTK_TARGET=x86_64-unknown-linux-musl ;; \
+      arm64) RTK_TARGET=aarch64-unknown-linux-musl ;; \
+      *) echo "Unsupported arch for RTK: $ARCH" && exit 1 ;; \
+    esac && \
+    curl -fsSL -o /tmp/rtk.tar.gz "https://github.com/rtk-ai/rtk/releases/download/v${RTK_VERSION}/rtk-${RTK_TARGET}.tar.gz" && \
+    tar -xzf /tmp/rtk.tar.gz -C /usr/local/bin rtk && \
+    chmod +x /usr/local/bin/rtk && \
+    rm /tmp/rtk.tar.gz
+
 COPY --from=builder /usr/local/bin/kronn /usr/local/bin/kronn
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
@@ -78,8 +93,8 @@ RUN mkdir -p /data && chown kronn:kronn /data
 
 # Pre-create directories that volumes will mount into
 RUN mkdir -p /home/kronn/.local/bin /home/kronn/.local/share/uv \
-    /home/kronn/.npm /home/kronn/.cache/uv \
-    && chown -R kronn:kronn /home/kronn/.local /home/kronn/.npm /home/kronn/.cache
+    /home/kronn/.npm /home/kronn/.cache/uv /home/kronn/.config \
+    && chown -R kronn:kronn /home/kronn/.local /home/kronn/.npm /home/kronn/.cache /home/kronn/.config
 
 # Allow kronn user to create symlinks in /home (for host-path compatibility).
 # Agent configs mounted from the host may contain absolute host paths
