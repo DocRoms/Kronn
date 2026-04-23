@@ -22,3 +22,4 @@ pub mod ollama;
 pub mod debug;
 pub mod themes;
 pub mod docs;
+pub mod rtk;

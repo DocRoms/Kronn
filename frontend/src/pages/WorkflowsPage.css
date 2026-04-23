@@ -260,6 +260,194 @@
   border-color: rgba(var(--kr-error-rgb), 0.55);
 }
 
+/* ── Inline stop button on workflow cards (list) ─────── */
+.wf-card-stop-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  margin-left: auto;
+  background: rgba(var(--kr-error-rgb), 0.08);
+  border: 1px solid rgba(var(--kr-error-rgb), 0.3);
+  border-radius: 10px;
+  color: var(--kr-error);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.wf-card-stop-btn:hover:not(:disabled) {
+  background: rgba(var(--kr-error-rgb), 0.18);
+  border-color: rgba(var(--kr-error-rgb), 0.55);
+}
+
+.wf-card-stop-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+/* ── Active-runs popover (nav) ───────────────────────── */
+.wf-active-runs-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 100;
+  min-width: 280px;
+  max-width: 360px;
+  background: var(--kr-bg-raised);
+  border: 1px solid var(--kr-border-soft);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  overflow: hidden;
+}
+
+.wf-active-runs-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--kr-border-soft);
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  color: var(--kr-text-secondary);
+}
+
+.wf-active-runs-title {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.wf-active-runs-close {
+  display: inline-flex;
+  padding: 2px;
+  background: transparent;
+  border: none;
+  color: var(--kr-text-ghost);
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.wf-active-runs-close:hover {
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
+}
+
+.wf-active-runs-empty {
+  padding: 16px 12px;
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-ghost);
+  text-align: center;
+}
+
+.wf-active-runs-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.wf-active-runs-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--kr-border-soft);
+}
+
+.wf-active-runs-item:last-child {
+  border-bottom: none;
+}
+
+.wf-active-runs-item-body {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+}
+
+.wf-active-runs-item-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.wf-active-runs-item-name {
+  font-size: var(--kr-fs-sm);
+  font-weight: 500;
+  color: var(--kr-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wf-active-runs-item-meta {
+  display: flex;
+  gap: 4px;
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-ghost);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wf-active-runs-item-sep {
+  opacity: 0.6;
+}
+
+.wf-active-runs-stop-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  background: rgba(var(--kr-error-rgb), 0.08);
+  border: 1px solid rgba(var(--kr-error-rgb), 0.3);
+  border-radius: 10px;
+  color: var(--kr-error);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+  flex-shrink: 0;
+}
+
+.wf-active-runs-stop-btn:hover:not(:disabled) {
+  background: rgba(var(--kr-error-rgb), 0.18);
+  border-color: rgba(var(--kr-error-rgb), 0.55);
+}
+
+.wf-active-runs-stop-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.wf-active-runs-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 8px 12px;
+  background: transparent;
+  border: none;
+  border-top: 1px solid var(--kr-border-soft);
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-secondary);
+  cursor: pointer;
+  text-align: left;
+}
+
+.wf-active-runs-footer:hover {
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
+}
+
 /* ── Run step progress dots ────────────────────────────── */
 .wf-step-dot {
   width: 6px;

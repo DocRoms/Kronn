@@ -219,7 +219,15 @@ Project-specific terms. For deep dives, follow the linked `ai/architecture/` fil
 
 **Discussion title editing** — Inline rename via double-click or pencil icon in chat header. Saves via `PATCH /api/discussions/:id`.
 
-**Toast notifications** — `useToast()` hook in `frontend/src/hooks/useToast.ts`. Returns `{ toast, ToastContainer }`. Types: `success` (green), `error` (red), `info` (blue). Auto-dismiss 4s, max 3 visible, slide-in animation. Replaces all `alert()` calls.
+**Toast notifications** — `useToast()` hook in `frontend/src/hooks/useToast.tsx`. Returns `{ toast, ToastContainer }`. Types: `success` (green), `error` (red), `info` (blue). As of 0.5.1, errors are **persistent by default** (user dismisses via X) with optional `copyable: string` rendering a monospace `<pre>` + copy button; success/info still auto-dismiss (3s/5s). Max 3 visible, slide-in animation. Replaces all `alert()` calls. Signature: `toast(message, type?, options?: { persistent?, copyable? })`.
+
+**RTK (Rust Token Killer)** — External Rust tool (`github.com/rtk-ai/rtk`) that hooks into AI agent CLIs and compresses shell-command outputs (git, cargo, ls, test runners) before they reach the LLM. ~89 % compression observed. Kronn integrates RTK as the "Mode économique" section in Settings > Agents — see §10 of `ai/index.md` for the full contract (detection paths per agent, activation flags, savings parser). Kronn does NOT wrap agent shell calls itself; RTK owns the hook format, Kronn owns the detection + activation UX + savings readout.
+
+**CompressionSection** — React component (`frontend/src/components/settings/CompressionSection.tsx`) rendering the "Mode économique" card at the top of the Agents list. Three activation states (none/partial/all), one-click CTA, install modal when RTK binary is absent, live savings counter from `GET /api/rtk/savings`, 3-card details expand, sobriety (?) tooltip. Attribution always visible: "Propulsé par RTK (open source)".
+
+**ActiveRunsPopover** — React component (`frontend/src/components/workflows/ActiveRunsPopover.tsx`) rendered from the Dashboard nav when `runningWorkflows > 0`. Clicking the Automatisation nav button opens it instead of navigating; lists every running/pending workflow run with a live elapsed timer and a one-click `⏹ Arrêter`. Closed by Esc, outside-click, or re-click (the nav button swallows `mousedown` to avoid the outside-close + onClick-toggle race).
+
+**ActiveRunsPopover savings parser** — Defensive JSON navigator in `backend/src/api/rtk.rs::savings` that handles RTK 0.37 shape (`summary.total_saved` / `summary.avg_savings_pct` / `summary.total_commands`) with fallbacks on legacy top-level keys. Returns `available: false` when parsing fails so the UI cleanly hides the counter. A regression test embeds a real user-provided payload.
 
 **Agent stall timeout** — Configurable in `ServerConfig`, default 5 minutes, range 1–60 minutes. If an agent produces no output for this duration, the process is killed and the step/message is marked as failed.
 

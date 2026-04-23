@@ -5,4 +5,11 @@ export type Directive = { id: string, name: string, description: string, icon: s
 /**
  * Estimated token cost when injected into an agent prompt (~4 chars = 1 token).
  */
-token_estimate: number, };
+token_estimate: number, 
+/**
+ * Optional URL to the source project — set on directives that adapt
+ * third-party prompts (e.g. Caveman → github.com/JuliusBrussee/caveman).
+ * Surfaces as a small "↗ Source" link in the settings card. MIT-licensed
+ * adaptations should include this for attribution.
+ */
+source_url: string | null, };

@@ -785,7 +785,7 @@ describe('DiscussionsPage', () => {
       install_command: null,
       host_managed: false,
       host_label: null,
-      runtime_available: false,
+      runtime_available: false, rtk_available: false, rtk_hook_configured: false,
     };
 
     const fullDisc: Discussion = {
@@ -855,7 +855,7 @@ describe('DiscussionsPage', () => {
       install_command: null,
       host_managed: false,
       host_label: null,
-      runtime_available: false,
+      runtime_available: false, rtk_available: false, rtk_hook_configured: false,
     };
 
     const lifted = liftedProps();
@@ -918,7 +918,7 @@ describe('DiscussionsPage', () => {
     await wrap(
       <DiscussionsPage
         projects={[]}
-        agents={[{ agent_type: 'ClaudeCode', name: 'Claude Code', installed: true, enabled: true, path: null, version: null, latest_version: null, origin: 'npm', install_command: null, host_managed: false, host_label: null, runtime_available: true }]}
+        agents={[{ agent_type: 'ClaudeCode', name: 'Claude Code', installed: true, enabled: true, path: null, version: null, latest_version: null, origin: 'npm', install_command: null, host_managed: false, host_label: null, runtime_available: true, rtk_available: false, rtk_hook_configured: false }]}
         allDiscussions={[makeListDiscussion('d-copy', 2)]}
         configLanguage="fr"
         agentAccess={null}
@@ -949,7 +949,7 @@ describe('DiscussionsPage', () => {
     await wrap(
       <DiscussionsPage
         projects={[]}
-        agents={[{ agent_type: 'ClaudeCode', name: 'Claude Code', installed: true, enabled: true, path: null, version: null, latest_version: null, origin: 'npm', install_command: null, host_managed: false, host_label: null, runtime_available: true }]}
+        agents={[{ agent_type: 'ClaudeCode', name: 'Claude Code', installed: true, enabled: true, path: null, version: null, latest_version: null, origin: 'npm', install_command: null, host_managed: false, host_label: null, runtime_available: true, rtk_available: false, rtk_hook_configured: false }]}
         allDiscussions={[makeListDiscussion('d-time', 2)]}
         configLanguage="fr"
         agentAccess={null}
@@ -980,7 +980,7 @@ describe('DiscussionsPage', () => {
     await wrap(
       <DiscussionsPage
         projects={[]}
-        agents={[{ agent_type: 'ClaudeCode', name: 'Claude Code', installed: true, enabled: true, path: null, version: null, latest_version: null, origin: 'npm', install_command: null, host_managed: false, host_label: null, runtime_available: true }]}
+        agents={[{ agent_type: 'ClaudeCode', name: 'Claude Code', installed: true, enabled: true, path: null, version: null, latest_version: null, origin: 'npm', install_command: null, host_managed: false, host_label: null, runtime_available: true, rtk_available: false, rtk_hook_configured: false }]}
         allDiscussions={[makeListDiscussion('d-overflow', 2)]}
         configLanguage="fr"
         agentAccess={null}
@@ -1012,8 +1012,8 @@ describe('DiscussionsPage', () => {
       <DiscussionsPage
         projects={[]}
         agents={[
-          { agent_type: 'ClaudeCode', name: 'Claude Code', installed: true, enabled: true, path: null, version: null, latest_version: null, origin: 'npm', install_command: null, host_managed: false, host_label: null, runtime_available: true },
-          { agent_type: 'GeminiCli', name: 'Gemini CLI', installed: true, enabled: true, path: null, version: null, latest_version: null, origin: 'npm', install_command: null, host_managed: false, host_label: null, runtime_available: true },
+          { agent_type: 'ClaudeCode', name: 'Claude Code', installed: true, enabled: true, path: null, version: null, latest_version: null, origin: 'npm', install_command: null, host_managed: false, host_label: null, runtime_available: true, rtk_available: false, rtk_hook_configured: false },
+          { agent_type: 'GeminiCli', name: 'Gemini CLI', installed: true, enabled: true, path: null, version: null, latest_version: null, origin: 'npm', install_command: null, host_managed: false, host_label: null, runtime_available: true, rtk_available: false, rtk_hook_configured: false },
         ]}
         allDiscussions={[makeListDiscussion('d-switch', 2)]}
         configLanguage="fr"
@@ -1088,9 +1088,9 @@ describe('DiscussionsPage', () => {
       <DiscussionsPage
         projects={[]}
         agents={[
-          { agent_type: 'ClaudeCode', name: 'Claude Code', installed: true, enabled: true, path: null, version: null, latest_version: null, origin: 'npm', install_command: null, host_managed: false, host_label: null, runtime_available: true },
-          { agent_type: 'Codex', name: 'Codex', installed: true, enabled: true, path: null, version: null, latest_version: null, origin: 'npm', install_command: null, host_managed: false, host_label: null, runtime_available: true },
-          { agent_type: 'GeminiCli', name: 'Gemini CLI', installed: true, enabled: true, path: null, version: null, latest_version: null, origin: 'npm', install_command: null, host_managed: false, host_label: null, runtime_available: true },
+          { agent_type: 'ClaudeCode', name: 'Claude Code', installed: true, enabled: true, path: null, version: null, latest_version: null, origin: 'npm', install_command: null, host_managed: false, host_label: null, runtime_available: true, rtk_available: false, rtk_hook_configured: false },
+          { agent_type: 'Codex', name: 'Codex', installed: true, enabled: true, path: null, version: null, latest_version: null, origin: 'npm', install_command: null, host_managed: false, host_label: null, runtime_available: true, rtk_available: false, rtk_hook_configured: false },
+          { agent_type: 'GeminiCli', name: 'Gemini CLI', installed: true, enabled: true, path: null, version: null, latest_version: null, origin: 'npm', install_command: null, host_managed: false, host_label: null, runtime_available: true, rtk_available: false, rtk_hook_configured: false },
         ]}
         allDiscussions={[makeListDiscussion('d-dropdown', 2)]}
         configLanguage="fr"

@@ -26,6 +26,7 @@ const BUILTIN_DIRECTIVES: &[BuiltinDirective] = &[
     BuiltinDirective { id: "step-by-step", content: include_str!("../directives/step-by-step.md") },
     BuiltinDirective { id: "verbose", content: include_str!("../directives/verbose.md") },
     BuiltinDirective { id: "diff-only", content: include_str!("../directives/diff-only.md") },
+    BuiltinDirective { id: "caveman", content: include_str!("../directives/caveman.md") },
 ];
 
 // ─── Frontmatter parsing ────────────────────────────────────────────────────
@@ -47,6 +48,7 @@ fn parse_directive_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Dir
     let mut icon = String::new();
     let mut category = DirectiveCategory::Output;
     let mut conflicts = Vec::new();
+    let mut source_url: Option<String> = None;
 
     for line in yaml_str.lines() {
         let line = line.trim();
@@ -68,6 +70,11 @@ fn parse_directive_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Dir
                 let inner = val.trim_start_matches('[').trim_end_matches(']');
                 conflicts = inner.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
             }
+        } else if let Some(val) = line.strip_prefix("source_url:") {
+            let val = val.trim();
+            if !val.is_empty() {
+                source_url = Some(val.to_string());
+            }
         }
     }
 
@@ -88,6 +95,7 @@ fn parse_directive_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Dir
         is_builtin,
         conflicts,
         token_estimate,
+        source_url,
     })
 }
 
@@ -249,7 +257,7 @@ mod tests {
     #[test]
     fn parse_builtin_directives() {
         let directives = list_all_directives();
-        assert!(directives.len() >= 7, "Expected at least 7 builtin directives, got {}", directives.len());
+        assert!(directives.len() >= 8, "Expected at least 8 builtin directives, got {}", directives.len());
 
         let token_saver = directives.iter().find(|d| d.id == "token-saver").unwrap();
         assert_eq!(token_saver.name, "Token Saver");
@@ -258,6 +266,24 @@ mod tests {
         assert!(token_saver.is_builtin);
         assert!(!token_saver.content.is_empty());
         assert!(token_saver.conflicts.contains(&"verbose".to_string()));
+        // Token Saver has no source_url — it's a Kronn-native directive.
+        assert!(token_saver.source_url.is_none());
+    }
+
+    #[test]
+    fn caveman_directive_carries_source_url_and_attributes_upstream() {
+        // Caveman is adapted from a third-party project (MIT). The UI
+        // surfaces `source_url` as a clickable "↗ Source" link so the
+        // user can read the original. Removing the attribution without
+        // the project's consent would break license terms.
+        let d = get_directive("caveman").expect("caveman directive missing");
+        assert_eq!(d.name, "Caveman");
+        assert_eq!(
+            d.source_url.as_deref(),
+            Some("https://github.com/JuliusBrussee/caveman"),
+        );
+        // Telegraphic style conflicts with Verbose by design.
+        assert!(d.conflicts.iter().any(|c| c == "verbose"));
     }
 
     #[test]

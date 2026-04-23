@@ -127,6 +127,8 @@ steps:
 
 **Level 3 — Tracker-driven (Issue → PR)** and **Level 4 — Manual trigger**: see [Workflow documentation](docs/workflows.md).
 
+**One-click stop** — when a workflow is running, clicking the nav icon opens an **Active Runs popover** listing every in-flight run (name, project, live elapsed timer, `⏹ Arrêter` button) from any page. A matching inline Stop button appears on each running workflow card in the list. No modal, no navigation — kill in one click.
+
 <details>
 <summary><strong>Symphony compatibility</strong></summary>
 
@@ -193,6 +195,7 @@ All models downloaded on first use and cached locally.
 
 ### More Features
 
+- **RTK integration — "Mode économique" (0.5.1)** — Kronn detects, wires, and reports on [RTK (Rust Token Killer)](https://github.com/rtk-ai/rtk), a shell-output compressor that cuts ~89% of tokens on commands like `git`, `cargo`, `ls`, test runners. Settings → Agents ships a `<CompressionSection />` with a one-click "Activate on all compatible agents" CTA (spawns the right `rtk init -g ...` per agent), a per-agent badge (🟢 active / 🟡 hook missing / ⚪ not installed / italic "Non pris en charge par RTK" for Kiro / Copilot CLI / Vibe), and a live counter pulling `rtk gain --all --format json` with an expandable 3-card breakdown (tokens saved / avg ratio / commands compressed). A (?) tooltip nuances the "eco mode" claim: the most sustainable AI is no AI — if you do use it, RTK reduces the footprint. Ships bundled in the Docker image (0.37.1 pinned, arm64-ready), host-side `~/.config/rtk` + `~/.local/share/rtk` bind-mounted so stats match what `rtk gain` shows on the host
 - **Document generation — Kronn Docs (0.5.1)** — Agents produce PDF / DOCX / XLSX / CSV / PPTX files directly from the chat with zero install on the user side. A Python sidecar (WeasyPrint + python-docx + XlsxWriter + python-pptx) is spawned by the backend; the agent wraps content in a ```` ```kronn-doc-preview ```` fence (HTML → PDF/DOCX with live sandboxed preview) or a ```` ```kronn-doc-data ```` fence (JSON → XLSX/CSV/PPTX with row/sheet/slide summary). Skill `kronn-docs` auto-activates on FR/EN/ES prompts like "génère un rapport PDF" / "create a spreadsheet" / "exporta una presentación" — per-skill opt-out in Settings
 - **Usage Dashboard** — real-time token consumption and cost estimation across all providers. Summary cards, provider breakdown bar, per-project horizontal bars, daily history chart (30 days, stacked by provider). Toggle between token count and USD cost view. Filter by discussions or workflows. Click a discussion name to navigate directly to it
 - **Project Bootstrap** — create a new project from scratch with an AI architect guiding Vision → Architecture → Stack → MVP → Action Plan

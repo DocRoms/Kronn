@@ -50,6 +50,7 @@ export const API_NAMESPACES = [
   'themes',
   'docs',
   'autoTriggersApi',
+  'rtk',
 ] as const;
 
 /** Flat top-level helpers (non-namespace exports). */
@@ -87,6 +88,7 @@ interface DefaultMock {
   themes: Record<string, AnyFn>;
   docs: Record<string, AnyFn>;
   autoTriggersApi: Record<string, AnyFn>;
+  rtk: Record<string, AnyFn>;
 }
 
 /**
@@ -223,6 +225,11 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       create: resolve({}),
       update: resolve({}),
       delete: resolve(undefined),
+    },
+
+    rtk: {
+      activate: resolve({ success: true, stdout: '', stderr: '' }),
+      savings: resolve({ available: false, total_tokens_saved: 0, ratio_percent: 0, sample_count: 0 }),
     },
 
     skills: {

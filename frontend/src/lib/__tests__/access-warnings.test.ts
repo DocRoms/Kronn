@@ -185,7 +185,7 @@ const makeAgent = (type: AgentType, overrides: Partial<AgentDetection> = {}): Ag
   agent_type: type,
   name: type,
   installed: true,
-  runtime_available: false,
+  runtime_available: false, rtk_available: false, rtk_hook_configured: false,
   enabled: true,
   path: null,
   version: null,
@@ -228,7 +228,7 @@ describe('isAgentDisabled (conversation input guard)', () => {
   });
 
   it('returns true for disabled + runtime available', () => {
-    const agents = [makeAgent('Codex', { installed: false, runtime_available: true, enabled: false })];
+    const agents = [makeAgent('Codex', { installed: false, runtime_available: true, rtk_available: false, rtk_hook_configured: false, enabled: false })];
     expect(isAgentDisabled('Codex', agents)).toBe(true);
   });
 });

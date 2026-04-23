@@ -166,6 +166,12 @@ async fn detect_agent(def: &AgentDef) -> AgentDetection {
     // Check standard PATH first, then host-mounted bin directories
     let found = find_binary(def.binary);
 
+    // RTK detection is agent-type-scoped: the binary check is global but the
+    // hook check reads the specific agent's config file. Agents with no
+    // shell-exec (Vibe) or no hookable config (Ollama) will return false.
+    let rtk_available = crate::core::rtk_detect::rtk_binary_available();
+    let rtk_hook_configured = crate::core::rtk_detect::rtk_hook_configured_for(&def.agent_type);
+
     if let Some(loc) = found {
         // Version detection may fail if symlinks are broken inside container
         let version = get_version_from(&loc.path).await.ok();
@@ -189,6 +195,8 @@ async fn detect_agent(def: &AgentDef) -> AgentDetection {
             host_managed: loc.host_managed,
             host_label,
             runtime_available: true,
+            rtk_available,
+            rtk_hook_configured,
         }
     } else {
         // No local binary — probe npx/uvx fallback
@@ -206,6 +214,8 @@ async fn detect_agent(def: &AgentDef) -> AgentDetection {
             host_managed: false,
             host_label: None,
             runtime_available,
+            rtk_available,
+            rtk_hook_configured,
         }
     }
 }

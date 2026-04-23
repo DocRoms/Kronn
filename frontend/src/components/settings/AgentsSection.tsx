@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { config as configApi, agents as agentsApi } from '../../lib/api';
 import { OllamaCard } from './OllamaCard';
+import { CompressionSection } from './CompressionSection';
 import { useApi } from '../../hooks/useApi';
 import type { AgentDetection, AgentsConfig, ModelTiersConfig } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
@@ -102,6 +103,8 @@ export function AgentsSection({
           ) : null;
         })()}
 
+        <CompressionSection agents={agents} onActivated={refetchAgents} toast={toast} t={t} />
+
         {agents.map(agent => {
           // Ollama gets its own dedicated card with health check + model picker
           if (agent.agent_type === 'Ollama') {
@@ -152,6 +155,48 @@ export function AgentsSection({
                   {agent.latest_version && agent.latest_version !== agent.version && (
                     <span className="set-update-badge">&#x2B06; {agent.latest_version}</span>
                   )}
+                  {(agent.installed || agent.runtime_available) && (() => {
+                    // Agents RTK doesn't support or can't hook. Mirrors
+                    // `rtk_flag_for` in backend/src/api/rtk.rs and
+                    // `RTK_APPLICABLE` in CompressionSection.tsx.
+                    //   - Vibe: API-only (no shell to hook), "planned" in RTK docs.
+                    //   - Kiro: not in RTK's supported agents list.
+                    //   - CopilotCli: RTK's `--copilot` flag targets VS Code
+                    //     Copilot Chat, not the `@github/copilot` CLI.
+                    // Ollama has its own card and never hits this branch.
+                    const notApplicable = agent.agent_type === 'Vibe'
+                      || agent.agent_type === 'Kiro'
+                      || agent.agent_type === 'CopilotCli';
+                    if (notApplicable) {
+                      return (
+                        <span
+                          className="set-agent-rtk-badge"
+                          data-state="not-applicable"
+                          title={t('config.rtk.badgeNotApplicable')}
+                        >
+                          {t('config.rtk.badgeNotApplicable')}
+                        </span>
+                      );
+                    }
+                    const state = !agent.rtk_available ? 'not-installed'
+                      : agent.rtk_hook_configured ? 'active'
+                      : 'missing';
+                    const label = state === 'active' ? t('config.rtk.badgeActive')
+                      : state === 'missing' ? t('config.rtk.badgeMissing')
+                      : t('config.rtk.badgeNotInstalled');
+                    return (
+                      <a
+                        href="https://github.com/rtk-ai/rtk"
+                        target="_blank"
+                        rel="noreferrer"
+                        className="set-agent-rtk-badge"
+                        data-state={state}
+                        title={t('config.rtk.aboutLink')}
+                      >
+                        {label}
+                      </a>
+                    );
+                  })()}
                 </div>
                 {!agent.installed && !agent.runtime_available && (
                   <div className="text-xs text-faint mt-2">
