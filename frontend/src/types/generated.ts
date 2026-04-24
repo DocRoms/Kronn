@@ -317,6 +317,7 @@ export type ApiAuthKind =
   | { ApiKeyQuery: { param_name: string; env_key: string } }
   | { ApiKeyHeader: { header_name: string; env_key: string } }
   | { Bearer: { env_key: string } }
+  | { Basic: { user_env: string; password_env: string } }
   | { OAuth2ClientCredentials: {
       token_url: string;
       client_id_env: string;
@@ -471,6 +472,22 @@ export interface WorkflowStep {
   // ─── Notify fields (0.3.5) ─────────────────────────────────────────
   // Only meaningful when step_type.type === 'Notify'.
   notify_config?: NotifyConfig | null;
+  // ─── ApiCall fields (désagentification — 0.5.2) ────────────────────
+  // Only meaningful when step_type.type === 'ApiCall'. See
+  // ai/operations/deagent-apicall.md for the full contract.
+  api_plugin_slug?: string | null;
+  api_config_id?: string | null;
+  api_endpoint_path?: string | null;
+  api_method?: string | null;
+  api_path_params?: Record<string, string> | null;
+  api_query?: Record<string, string> | null;
+  api_headers?: Record<string, string> | null;
+  api_body?: unknown | null;
+  api_extract?: ExtractSpec | null;
+  api_pagination?: PaginationSpec | null;
+  api_timeout_ms?: number | null;
+  api_max_retries?: number | null;
+  api_output_var?: string | null;
 }
 
 /** Configuration for a Notify webhook step (zero agent tokens). */
@@ -480,6 +497,24 @@ export interface NotifyConfig {
   headers: Record<string, string>;
   body_template: string;
 }
+
+/** JSONPath extraction spec for an ApiCall step's JSON response. */
+export interface ExtractSpec {
+  /** JSONPath expression, e.g. `$.issues[*].key`. */
+  path: string;
+  /** Default value when path resolves to nothing. */
+  fallback?: unknown | null;
+  /** If true, empty extraction → `status: NO_RESULTS` (for on_result routing). */
+  fail_on_empty?: boolean;
+}
+
+/** Pagination strategy for an ApiCall step. */
+export type PaginationSpec =
+  | { type: "None" }
+  | { type: "Auto"; max_pages?: number | null }
+  | { type: "Offset"; start_param: string; limit_param: string; limit: number; total_path: string; max_pages?: number | null }
+  | { type: "Cursor"; cursor_param: string; next_path: string; max_pages?: number | null }
+  | { type: "Page"; page_param: string; page_size_param: string; page_size: number; has_more_path: string; max_pages?: number | null };
 
 export type StepType =
   | { type: "Agent" }
@@ -575,6 +610,15 @@ export interface StepResult {
    * null/undefined = FreeText step, the concept does not apply.
    */
   envelope_detected?: boolean | null;
+  /** Snapshot of `step.step_type.type` at execution time. `null` for
+   *  rows written before this field existed. */
+  step_kind?: string | null;
+  /** Snapshot of `step.agent` for Agent steps. */
+  step_agent?: AgentType | null;
+  /** Snapshot of `step.api_plugin_slug` for ApiCall steps. */
+  step_api_plugin_slug?: string | null;
+  /** Snapshot of `step.api_endpoint_path` for ApiCall steps. */
+  step_api_endpoint_path?: string | null;
 }
 
 export interface WorkflowSummary {

@@ -911,6 +911,31 @@
   cursor: wait;
 }
 
+.set-compression-uninstall {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  color: var(--kr-text-ghost);
+  border: 1px solid var(--kr-border-soft);
+  font-size: var(--kr-fs-xs);
+  cursor: pointer;
+  transition: all 0.12s;
+}
+
+.set-compression-uninstall:hover:not(:disabled) {
+  border-color: rgba(var(--kr-error-rgb), 0.4);
+  color: rgba(var(--kr-error-rgb), 0.95);
+  background: rgba(var(--kr-error-rgb), 0.05);
+}
+
+.set-compression-uninstall:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .set-compression-attrib {
   font-size: var(--kr-fs-xs);
   color: var(--kr-text-ghost);

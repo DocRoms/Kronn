@@ -130,6 +130,22 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => tracing::warn!("Orphan scan failed: {}", e),
     }
 
+    // ── Registry sync ─────────────────────────────────────────────────────
+    // Re-mirror registry-managed fields (`api_spec`, `description`,
+    // `transport`) onto existing DB rows so users who configured a plugin
+    // before a registry enrichment (e.g. GitHub gained `api_spec` after
+    // its initial config was saved) don't have to click "Refresh registry"
+    // by hand for the workflow wizard to see the new capability.
+    let synced = state.db.with_conn(|conn| {
+        let registry = kronn::core::registry::builtin_registry();
+        kronn::db::mcps::sync_registry_servers_to_db(conn, &registry)
+    }).await;
+    match synced {
+        Ok(n) if n > 0 => tracing::info!("Registry sync: refreshed {} existing MCP server row(s) from builtin registry", n),
+        Ok(_) => tracing::info!("Registry sync: nothing to refresh (no registered plugins yet)"),
+        Err(e) => tracing::warn!("Registry sync failed: {}", e),
+    }
+
     // Partial-response recovery — agents whose `full_response` was being
     // checkpointed into discussions.partial_response when the previous
     // process died. Convert each into an Agent message with an "interrupted"

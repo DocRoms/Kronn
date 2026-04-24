@@ -120,6 +120,48 @@ pub fn delete_server(conn: &Connection, id: &str) -> Result<bool> {
     Ok(affected > 0)
 }
 
+/// Re-sync registry-derived fields (`api_spec`, `description`, `transport`)
+/// onto every existing DB row whose id matches a builtin definition.
+///
+/// **Why this exists**: when the registry gains a new field on a definition
+/// (e.g. we added `api_spec` to `mcp-github` so it could power ApiCall
+/// steps), users who configured GitHub *before* the registry change still
+/// had the old DB row with `api_spec: None` — so the workflow wizard
+/// silently filtered GitHub out of the API plugin picker. This function,
+/// called on backend startup, makes the registry the source of truth for
+/// system-managed fields without touching anything user-managed (env
+/// secrets, labels, project links).
+///
+/// Only updates EXISTING rows. New registry entries the user hasn't yet
+/// added stay registry-only — they appear in `mcps/registry` but not in
+/// `mcps` until the user explicitly creates a config.
+pub fn sync_registry_servers_to_db(
+    conn: &Connection,
+    registry: &[crate::models::McpDefinition],
+) -> Result<usize> {
+    let mut updated = 0;
+    let existing = list_servers(conn)?;
+    let existing_ids: std::collections::HashSet<String> =
+        existing.iter().map(|s| s.id.clone()).collect();
+
+    for def in registry {
+        if !existing_ids.contains(&def.id) {
+            continue;
+        }
+        let server = crate::models::McpServer {
+            id: def.id.clone(),
+            name: def.name.clone(),
+            description: def.description.clone(),
+            transport: def.transport.clone(),
+            source: crate::models::McpSource::Registry,
+            api_spec: def.api_spec.clone(),
+        };
+        upsert_server(conn, &server)?;
+        updated += 1;
+    }
+    Ok(updated)
+}
+
 // ─── MCP Configs ─────────────────────────────────────────────────────────────
 
 pub fn list_configs(conn: &Connection) -> Result<Vec<McpConfig>> {

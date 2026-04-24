@@ -425,6 +425,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/agents/toggle", post(api::agents::toggle))
         // ── RTK (Rust Token Killer) — host-side compression proxy ──
         .route("/api/rtk/activate", post(api::rtk::activate))
+        .route("/api/rtk/deactivate", post(api::rtk::deactivate))
         .route("/api/rtk/savings", get(api::rtk::savings))
         // ── Ollama (local LLM) ──
         .route("/api/ollama/health", get(api::ollama::health))
@@ -456,6 +457,9 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/workflows/:id", get(api::workflows::get).put(api::workflows::update).delete(api::workflows::delete))
         .route("/api/workflows/test-step", post(api::workflows::test_step))
         .route("/api/workflows/test-batch-step", post(api::workflows::test_batch_step))
+        // ── ApiCall step wizard endpoints (P0.5 — désagentification) ──
+        .route("/api/workflow-steps/test-extract", post(api::workflows::test_extract))
+        .route("/api/workflow-steps/test-api-call", post(api::workflows::test_api_call))
         .route("/api/workflows/:id/trigger", post(api::workflows::trigger))
         .route("/api/workflows/:id/runs", get(api::workflows::list_runs).delete(api::workflows::delete_all_runs))
         .route("/api/workflows/:id/runs/:run_id", get(api::workflows::get_run).delete(api::workflows::delete_run))

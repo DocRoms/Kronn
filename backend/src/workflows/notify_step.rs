@@ -123,6 +123,10 @@ pub async fn execute_notify_step(
             duration_ms: start.elapsed().as_millis() as u64,
             condition_result: None,
             envelope_detected: None,
+            step_kind: None,
+            step_agent: None,
+            step_api_plugin_slug: None,
+            step_api_endpoint_path: None,
         },
         condition_action: None,
     }
@@ -138,6 +142,10 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
             duration_ms: start.elapsed().as_millis() as u64,
             condition_result: None,
             envelope_detected: None,
+            step_kind: None,
+            step_agent: None,
+            step_api_plugin_slug: None,
+            step_api_endpoint_path: None,
         },
         condition_action: None,
     }
@@ -174,6 +182,19 @@ mod tests {
             batch_workspace_mode: None,
             batch_chain_prompt_ids: vec![],
             notify_config: Some(config),
+            api_plugin_slug: None,
+            api_config_id: None,
+            api_endpoint_path: None,
+            api_method: None,
+            api_path_params: None,
+            api_query: None,
+            api_headers: None,
+            api_body: None,
+            api_extract: None,
+            api_pagination: None,
+            api_timeout_ms: None,
+            api_max_retries: None,
+            api_output_var: None,
         }
     }
 

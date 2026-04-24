@@ -111,7 +111,6 @@ export function CompressionSection({ agents, onActivated, toast, t }: Compressio
       } else {
         toast?.(t('config.rtk.activateSuccess'), 'success');
       }
-      onActivated?.();
     } catch (e) {
       toast?.(t('config.rtk.activateError'), 'error', {
         copyable: String(e),
@@ -119,6 +118,45 @@ export function CompressionSection({ agents, onActivated, toast, t }: Compressio
       console.warn('RTK activate failed:', e);
     } finally {
       setActivating(false);
+      // Defer the parent refetch slightly to let RTK's filesystem
+      // writes flush — without this, the `agentsApi.detect()` re-run
+      // would race the AGENTS.md / settings.json writes and the badge
+      // would stick on its old state until the next manual refetch.
+      // Always fires (even on error) so the user sees the post-attempt
+      // state, never a stale snapshot.
+      setTimeout(() => onActivated?.(), 200);
+    }
+  };
+
+  const handleDeactivate = async () => {
+    setActivating(true);
+    try {
+      // Only target agents that are currently configured — sending
+      // `--uninstall` to a never-wired agent is a no-op + extra noise
+      // in the toast. We're conservative on purpose.
+      const configuredAgents = agents
+        .filter(a => RTK_APPLICABLE.has(a.agent_type) && a.rtk_hook_configured)
+        .map(a => a.agent_type);
+      if (configuredAgents.length === 0) return;
+      const res = await rtkApi.deactivate(configuredAgents);
+      if (!res.success) {
+        const stderr = (res.stderr || res.stdout || '').trim();
+        toast?.(t('config.rtk.deactivateError'), 'error', {
+          copyable: stderr || undefined,
+        });
+        console.warn('RTK deactivate non-zero exit:', res);
+      } else {
+        toast?.(t('config.rtk.deactivateSuccess'), 'success');
+      }
+    } catch (e) {
+      toast?.(t('config.rtk.deactivateError'), 'error', {
+        copyable: String(e),
+      });
+      console.warn('RTK deactivate failed:', e);
+    } finally {
+      setActivating(false);
+      // Same FS-flush deferral as `handleActivate`.
+      setTimeout(() => onActivated?.(), 200);
     }
   };
 
@@ -241,6 +279,20 @@ export function CompressionSection({ agents, onActivated, toast, t }: Compressio
                 {t('config.rtk.installCta')}
               </button>
             )
+          )}
+          {/* Deactivate button — visible whenever at least one agent has
+              an RTK hook wired. Lets the user back out without manually
+              editing settings.json / AGENTS.md / shell rc. */}
+          {rtkBinaryAvailable && configured > 0 && (
+            <button
+              type="button"
+              className="set-compression-uninstall"
+              onClick={handleDeactivate}
+              disabled={activating}
+              title={t('config.rtk.deactivateHint')}
+            >
+              {t('config.rtk.deactivate', configured)}
+            </button>
           )}
 
           <span className="set-compression-attrib">

@@ -127,6 +127,38 @@ steps:
 
 **Level 3 — Tracker-driven (Issue → PR)** and **Level 4 — Manual trigger**: see [Workflow documentation](docs/workflows.md).
 
+**Level 5 — Désagentification (0.5.1)** — the new `ApiCall` step hits a Kronn-configured API plugin (Chartbeat, Jira, Cloudflare, Adobe Analytics, Google Search…) directly from the Rust engine, extracts the JSON field of your choice via JSONPath (RFC 9535), and pipes it to the next step. Zero tokens consumed. The agent stops doing `Bash curl` on APIs we already know how to call — a triage workflow that burned 40k tokens on "fetch + parse" drops that phase to 0.
+```yaml
+---
+trigger: { cron: "0 * * * *" }
+steps:
+  - name: fetch_top_pages
+    type: ApiCall
+    plugin: chartbeat
+    endpoint: /live/toppages/v4
+    query: { limit: "5" }
+    extract: { path: "$.pages[*].title" }
+  - name: summarize
+    agent: claude-code
+    prompt: "Voici les titres : {{steps.fetch_top_pages.data}}. Résume."
+  - name: notify_slack
+    type: Notify
+    url: "https://hooks.slack.com/services/XXX"
+    body: '{"text": "{{steps.summarize.output}}"}'
+---
+```
+Security: SSRF host allowlist (no cross-host, no subdomain slip, no scheme downgrade), DNS rebind check blocking RFC1918 + link-local (`169.254.*`) + loopback + IPv6 ULA, secret-redacting logs (bearer tokens, query API keys). Auto-pagination detection for Jira (`startAt`/`nextPageToken`), Cloudflare GraphQL (`pageInfo.endCursor`), Stripe-style (`has_more`). One-click **"Chartbeat top 5 → Résumé IA → Slack"** starter template in the wizard.
+
+**AI helper for the ApiCall step** — clicking *Aide config IA* in the step card opens an ephemeral chat bubble. Pick any locally-installed agent, describe what you want to fetch in plain language, and the agent emits structured suggestions (endpoint, query params, JSONPath extract) that the UI surfaces as one-click *Appliquer* buttons. The conversation is created on demand and deleted on close — nothing persists, nothing leaks across sessions, and a client-side allowlist prevents the agent from rewriting anything outside the documented API surface. Per-plugin debugging tips (Chartbeat host pitfall, Jira pagination, Cloudflare datetime trap…) are baked into the system prompt; the agent gets the API spec + the current step state + the last test's HTTP error verbatim so it can debug a 4xx without guessing. Auth-managed query params and headers (apikey, Bearer, OAuth2) are auto-stripped from suggestions and rendered read-only above the query editor (`••••••••` · 👁) so users don't paste their key twice.
+
+**Click-to-pick JSONPath extraction** — after testing the call, click any key inside a returned object to extract `$.path[*].field` (all items), or any value to extract `$.path[0].field` (that specific one), or the `[N]` count to iterate, or `[i]` to grab a single object. Smart suggestion chips above the path input list the most useful extracts derived from your real response (`Tous les "title" (5 valeurs)`, `Itérer sur les 5 éléments`, `Compteur "total" = 173`) with the resolved sample previewed inline — no JSONPath knowledge needed.
+
+**API plugins shipped**: Chartbeat (live + historical analytics), GitHub (issues, PRs, Actions, releases, commits, search — hybrid MCP + REST sharing one PAT), **Jira / Atlassian Cloud** (JQL search, single issue + comments + transitions, projects + components + versions, custom-field schema, saved filters — hybrid MCP + REST, same email + API token for both), Google Programmable Search, Adobe Analytics. Each plugin's auth is auto-injected (`apikey` query, `Authorization: Bearer …` header, `Authorization: Basic <base64>` for Jira, OAuth2 client credentials) and surfaces as a read-only "Auth — gérée par Kronn" panel above the query editor — your secrets stay in Settings → APIs and never leak into the step config. The plugin's `base_url` can be templated against the encrypted env (`{JIRA_URL}` resolved per-workspace), so one Atlassian plugin definition serves every Kronn user without forking per-tenant.
+
+**Path placeholders** like `/repos/{owner}/{repo}/issues` (GitHub) or `/rest/api/3/issue/{issueIdOrKey}` (Jira) are auto-detected from the endpoint and rendered as dedicated input fields below the picker, with a live "URL résolue" preview. The values stay separate from the template path so re-editing a saved workflow shows BOTH the template AND your concrete `{owner}/{repo}/{issue_number}` values — no retyping.
+
+**Run history is honest** — when you edit a workflow between runs (swap agent, retarget plugin, change endpoint), each `StepResult` snapshots what was actually used at execution time (`step_kind`, `step_agent`, `step_api_plugin_slug`, `step_api_endpoint_path`). The run-detail page surfaces a per-step badge (`🔌 API mcp-github · /user`, `📤 NOTIFY hooks.slack.com`, `Codex`) so you can audit what *really* ran, not what's currently configured.
+
 **One-click stop** — when a workflow is running, clicking the nav icon opens an **Active Runs popover** listing every in-flight run (name, project, live elapsed timer, `⏹ Arrêter` button) from any page. A matching inline Stop button appears on each running workflow card in the list. No modal, no navigation — kill in one click.
 
 <details>

@@ -7,23 +7,61 @@ use crate::models::{
 pub fn builtin_registry() -> Vec<McpDefinition> {
     vec![
         // ── Git & Code ──────────────────────────────────────────────────────
+        // ── GitHub: hybrid MCP (Stdio agent calls) + REST API (ApiCall steps) ──
+        // Both layers share the same `GITHUB_PERSONAL_ACCESS_TOKEN`, encrypted
+        // once in the plugin config. The MCP transport keeps powering Quick
+        // Prompts via `@modelcontextprotocol/server-github`; `api_spec`
+        // declares the curated REST endpoints surfaced to the workflow
+        // wizard's ApiCall step. Path placeholders (`{owner}`, `{repo}`,
+        // `{issue_number}`, …) are filled by the user in the wizard's
+        // editable endpoint combobox at step build time.
         McpDefinition {
             id: "mcp-github".into(),
             name: "GitHub".into(),
-            description: "Issues, PRs, Actions, repos — official Anthropic server".into(),
+            description: "Issues, PRs, Actions, repos — MCP for agents (Quick Prompts) + REST API for désagentified ApiCall steps".into(),
             transport: McpTransport::Stdio {
                 command: "npx".into(),
                 args: vec!["-y".into(), "@modelcontextprotocol/server-github".into()],
             },
             env_keys: vec!["GITHUB_PERSONAL_ACCESS_TOKEN".into()],
-            tags: vec!["git".into(), "ci".into(), "code".into()],
+            tags: vec!["git".into(), "ci".into(), "code".into(), "api".into()],
             token_url: Some("https://github.com/settings/tokens?type=beta".into()),
-            token_help: Some("Fine-grained PAT with repo access".into()),
+            token_help: Some("Fine-grained PAT with `repo` (Issues + PRs + Contents) scopes for the repos you want to query. Classic PAT with `repo` scope also works. The same token powers both the MCP transport (used by agents in Quick Prompts) and the REST API (used by ApiCall workflow steps).".into()),
             publisher: "Anthropic".into(),
             official: false,
             alt_packages: vec![],
             default_context: None,
-            api_spec: None,
+            api_spec: Some(ApiSpec {
+                base_url: "https://api.github.com".into(),
+                auth: ApiAuthKind::Bearer {
+                    env_key: "GITHUB_PERSONAL_ACCESS_TOKEN".into(),
+                },
+                docs_url: Some("https://docs.github.com/en/rest".into()),
+                config_keys: vec![],
+                endpoints: vec![
+                    // ── Sanity check ──
+                    ApiEndpoint { path: "/user".into(),                                          method: "GET".into(),  description: "[USER · sanity] Authenticated user — quick way to verify the token works (200 = OK, 401 = revoked / wrong scope).".into() },
+                    // ── Repos ──
+                    ApiEndpoint { path: "/user/repos".into(),                                    method: "GET".into(),  description: "[REPOS] List repos the user has access to. Useful query params: `visibility=all|public|private`, `affiliation=owner,collaborator`, `sort=updated`.".into() },
+                    ApiEndpoint { path: "/repos/{owner}/{repo}".into(),                          method: "GET".into(),  description: "[REPOS] Single repo metadata (default branch, stars, language, …). Replace `{owner}/{repo}` in the path field.".into() },
+                    // ── Issues ──
+                    ApiEndpoint { path: "/repos/{owner}/{repo}/issues".into(),                   method: "GET".into(),  description: "[ISSUES · list] Issues for a repo. Query: `state=open|closed|all`, `labels=bug,security`, `assignee=login|*|none`, `since=ISO8601`, `per_page=100`. NB: also returns PRs (PRs are issues) — filter by absence of `pull_request` field if needed.".into() },
+                    ApiEndpoint { path: "/repos/{owner}/{repo}/issues/{issue_number}".into(),    method: "GET".into(),  description: "[ISSUES · single] One issue by number. Replace `{owner}/{repo}/{issue_number}`.".into() },
+                    ApiEndpoint { path: "/search/issues".into(),                                  method: "GET".into(),  description: "[SEARCH · issues+PRs] Cross-repo search. Query: `q=is:issue+is:open+repo:owner/name+label:bug` (URL-encoded). Powerful + capped at 1000 results, paginated.".into() },
+                    // ── Pull requests ──
+                    ApiEndpoint { path: "/repos/{owner}/{repo}/pulls".into(),                    method: "GET".into(),  description: "[PRs · list] Open / closed / all PRs. Query: `state`, `head=user:branch`, `base=main`, `sort=updated`, `direction=desc`.".into() },
+                    ApiEndpoint { path: "/repos/{owner}/{repo}/pulls/{pull_number}".into(),      method: "GET".into(),  description: "[PRs · single] One PR by number, with `mergeable`, `mergeable_state`, `additions`, `deletions`, `changed_files`.".into() },
+                    ApiEndpoint { path: "/repos/{owner}/{repo}/pulls/{pull_number}/files".into(),method: "GET".into(),  description: "[PRs · diff] Files changed in a PR — paths + patches (truncated > 3000 lines).".into() },
+                    // ── Commits ──
+                    ApiEndpoint { path: "/repos/{owner}/{repo}/commits".into(),                  method: "GET".into(),  description: "[COMMITS] Commit list. Query: `sha=branch|sha`, `path=file`, `author=login`, `since=ISO8601`, `until=ISO8601`.".into() },
+                    // ── Actions ──
+                    ApiEndpoint { path: "/repos/{owner}/{repo}/actions/runs".into(),             method: "GET".into(),  description: "[ACTIONS] Workflow runs. Query: `status=queued|in_progress|completed`, `conclusion=success|failure|cancelled`, `branch=main`, `event=push|pull_request`.".into() },
+                    // ── Releases ──
+                    ApiEndpoint { path: "/repos/{owner}/{repo}/releases".into(),                 method: "GET".into(),  description: "[RELEASES] Releases for a repo (paginated, latest first).".into() },
+                    // ── Notifications ──
+                    ApiEndpoint { path: "/notifications".into(),                                  method: "GET".into(),  description: "[NOTIFS] Authenticated user's notifications. Query: `all=true|false`, `participating=true|false`, `since=ISO8601`.".into() },
+                ],
+            }),
         },
         McpDefinition {
             id: "mcp-gitlab".into(),
@@ -339,10 +377,17 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             default_context: None,
             api_spec: None,
         },
+        // Atlassian — hybrid MCP (Stdio for agents) + REST API for ApiCall
+        // steps. Auth Cloud = Basic `email:api_token`; the same token also
+        // works against `mcp-atlassian` via JIRA_API_TOKEN, so the user
+        // configures one set of credentials and both surfaces light up.
+        // base_url is templated (`{JIRA_URL}`) so each user/workspace can
+        // point Kronn at their own `https://acme.atlassian.net` without a
+        // separate plugin per workspace.
         McpDefinition {
             id: "mcp-atlassian".into(),
-            name: "Atlassian".into(),
-            description: "Jira + Confluence — official MCP server".into(),
+            name: "Atlassian (Jira + Confluence)".into(),
+            description: "Jira issues / search / projects / Confluence — MCP for agents (Quick Prompts) + REST API for désagentified ApiCall steps".into(),
             transport: McpTransport::Stdio {
                 command: "uvx".into(),
                 args: vec!["mcp-atlassian".into()],
@@ -351,14 +396,55 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
                 "JIRA_URL".into(), "JIRA_USERNAME".into(), "JIRA_API_TOKEN".into(),
                 "CONFLUENCE_URL".into(), "CONFLUENCE_USERNAME".into(), "CONFLUENCE_API_TOKEN".into(),
             ],
-            tags: vec!["project-management".into(), "jira".into(), "confluence".into()],
+            tags: vec!["project-management".into(), "jira".into(), "confluence".into(), "api".into()],
             token_url: Some("https://id.atlassian.com/manage-profile/security/api-tokens".into()),
-            token_help: Some("API token for Jira & Confluence (same token for both)".into()),
+            token_help: Some("Cloud only (REST API): create an API token at id.atlassian.com → Security → API tokens. JIRA_USERNAME = your Atlassian email; JIRA_API_TOKEN = the token. JIRA_URL = your workspace, e.g. https://acme.atlassian.net (no trailing slash). The same credentials power the MCP server (used by agents in Quick Prompts) and REST API (used by ApiCall workflow steps).".into()),
             publisher: "Atlassian".into(),
             official: true,
             alt_packages: vec![],
             default_context: None,
-            api_spec: None,
+            api_spec: Some(ApiSpec {
+                // Templated — interpolated against the encrypted env at
+                // request time. Without `JIRA_URL` set, the executor
+                // surfaces an explicit "unresolved env placeholder" error.
+                base_url: "{JIRA_URL}".into(),
+                auth: ApiAuthKind::Basic {
+                    user_env: "JIRA_USERNAME".into(),
+                    password_env: "JIRA_API_TOKEN".into(),
+                },
+                docs_url: Some("https://developer.atlassian.com/cloud/jira/platform/rest/v3/intro/".into()),
+                config_keys: vec![
+                    ApiConfigKey {
+                        env_key: "JIRA_URL".into(),
+                        label: "Workspace URL".into(),
+                        placeholder: "https://acme.atlassian.net".into(),
+                        description: "Your Atlassian Cloud workspace URL — no trailing slash. Each Kronn project can wire one workspace; duplicate the plugin to track several.".into(),
+                    },
+                ],
+                endpoints: vec![
+                    // ── Sanity check ────────────────────────────────────
+                    ApiEndpoint { path: "/rest/api/3/myself".into(),                       method: "GET".into(),  description: "[USER · sanity] Authenticated user — confirms credentials work. 401 = wrong email or expired token; 403 = no API access on the account.".into() },
+                    // ── Search (the killer endpoint for backlog ops) ────
+                    // Atlassian removed `/rest/api/3/search` in April 2025 (CHANGE-2046)
+                    // — it now returns 410 Gone. The replacement is `/rest/api/3/search/jql`
+                    // with cursor pagination (`nextPageToken`) instead of offset.
+                    ApiEndpoint { path: "/rest/api/3/search/jql".into(),                   method: "GET".into(),  description: "[SEARCH · JQL] The headline endpoint (replaces the deprecated /rest/api/3/search, 410 since 2025-04). Query: `jql=project = KR AND status = Open ORDER BY priority DESC` (URL-encoded). `fields=summary,status,priority,assignee` to limit response size. Pagination via `nextPageToken` (cursor — pass it back as `nextPageToken=…` for the next page). Returns `{issues: [...], nextPageToken, isLast}`.".into() },
+                    ApiEndpoint { path: "/rest/api/3/search/approximate-count".into(),    method: "POST".into(), description: "[SEARCH · count] Approximate total result count for a JQL — Atlassian split the count out of /search/jql to keep that endpoint cheap. Body: `{\"jql\": \"project = KR\"}`. Returns `{count: 173}`. Use sparingly, the count can be off-by-a-few on heavy projects.".into() },
+                    // ── Issues ──────────────────────────────────────────
+                    ApiEndpoint { path: "/rest/api/3/issue/{issueIdOrKey}".into(),         method: "GET".into(),  description: "[ISSUES · single] Full payload of one issue. Path placeholder `{issueIdOrKey}` = key (`KR-123`) or numeric id. `fields=...` query param to slice fields. `expand=changelog,renderedFields` for transitions + ADF rendered HTML.".into() },
+                    ApiEndpoint { path: "/rest/api/3/issue/{issueIdOrKey}/comment".into(), method: "GET".into(),  description: "[ISSUES · comments] Comments on an issue (paginated, `startAt`+`maxResults`).".into() },
+                    ApiEndpoint { path: "/rest/api/3/issue/{issueIdOrKey}/transitions".into(), method: "GET".into(), description: "[ISSUES · transitions] Available workflow transitions for an issue (id + name + target status). Use this before POSTing a transition by id.".into() },
+                    // ── Projects ────────────────────────────────────────
+                    ApiEndpoint { path: "/rest/api/3/project/search".into(),               method: "GET".into(),  description: "[PROJECTS · list] Paginated project list. Query: `query=ACME` for name/key match, `expand=lead,description`. Replaces the deprecated `GET /project`.".into() },
+                    ApiEndpoint { path: "/rest/api/3/project/{projectIdOrKey}".into(),     method: "GET".into(),  description: "[PROJECTS · single] One project — components, lead, issue types. `expand=description,lead,issueTypes`.".into() },
+                    ApiEndpoint { path: "/rest/api/3/project/{projectIdOrKey}/components".into(), method: "GET".into(), description: "[PROJECTS · components] Components defined for a project — useful for assignee resolution.".into() },
+                    ApiEndpoint { path: "/rest/api/3/project/{projectIdOrKey}/versions".into(),   method: "GET".into(), description: "[PROJECTS · versions] Released / unreleased versions for a project.".into() },
+                    // ── Schema introspection ────────────────────────────
+                    ApiEndpoint { path: "/rest/api/3/field".into(),                        method: "GET".into(),  description: "[SCHEMA · fields] All fields visible to the user, including custom fields with their `customfield_NNNNN` ids. Use this to map `Story Points` → `customfield_10016` before searching.".into() },
+                    // ── Filters ─────────────────────────────────────────
+                    ApiEndpoint { path: "/rest/api/3/filter/search".into(),                method: "GET".into(),  description: "[FILTERS] User-saved JQL filters. Query: `accountId=...&filterName=Backlog`. Surfaces the JQL of each filter in `jql`.".into() },
+                ],
+            }),
         },
         // ── Design ──────────────────────────────────────────────────────────
         McpDefinition {

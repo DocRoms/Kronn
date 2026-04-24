@@ -57,6 +57,10 @@ pub async fn execute_step(
                     duration_ms: start.elapsed().as_millis() as u64,
                     condition_result: None,
                     envelope_detected: None,
+                    step_kind: None,
+                    step_agent: None,
+                    step_api_plugin_slug: None,
+                    step_api_endpoint_path: None,
                 },
                 condition_action: None,
             };
@@ -171,6 +175,10 @@ pub async fn execute_step(
                         duration_ms,
                         condition_result,
                         envelope_detected,
+                        step_kind: None,
+                        step_agent: None,
+                        step_api_plugin_slug: None,
+                        step_api_endpoint_path: None,
                     },
                     condition_action,
                 };
@@ -192,6 +200,10 @@ pub async fn execute_step(
             duration_ms: start.elapsed().as_millis() as u64,
             condition_result: None,
             envelope_detected: None,
+            step_kind: None,
+            step_agent: None,
+            step_api_plugin_slug: None,
+            step_api_endpoint_path: None,
         },
         condition_action: None,
     }
@@ -366,6 +378,10 @@ fn fail_fast_on_unresolved(step_name: &str, prompt: &str, elapsed_ms: u64) -> Op
             duration_ms: elapsed_ms,
             condition_result: None,
             envelope_detected: None,
+            step_kind: None,
+            step_agent: None,
+            step_api_plugin_slug: None,
+            step_api_endpoint_path: None,
         },
         condition_action: None,
     })

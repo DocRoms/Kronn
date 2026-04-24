@@ -7,7 +7,7 @@ import type { Workflow, WorkflowRun, StepResult, AgentsConfig, WorkflowStep, Qui
 import {
   Trash2, Play, Loader2, Check, X, ChevronRight,
   Settings, RefreshCw, AlertTriangle, FlaskConical,
-  Layers, GitBranch, MessageSquare,
+  Layers, GitBranch, MessageSquare, Plug, Send,
 } from 'lucide-react';
 import { RunDetail } from './RunDetail';
 import '../../pages/WorkflowsPage.css';
@@ -270,9 +270,19 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
   allSteps: WorkflowStep[];
 }) {
   const isBatch = step.step_type?.type === 'BatchQuickPrompt';
+  const isApi = step.step_type?.type === 'ApiCall';
+  const isNotify = step.step_type?.type === 'Notify';
+  const isAgentLike = !isBatch && !isApi && !isNotify;
   const batchQp = isBatch && step.batch_quick_prompt_id
     ? quickPromptsById?.get(step.batch_quick_prompt_id)
     : undefined;
+  // For Notify steps the only useful summary is "where does the ping
+  // land" — we extract just the host of the URL (full URL might leak
+  // a webhook secret in a screenshot, host alone tells the user it's
+  // their Slack/Teams/etc.).
+  const notifyHost = isNotify && step.notify_config?.url
+    ? (() => { try { return new URL(step.notify_config.url).host; } catch { return step.notify_config.url; } })()
+    : null;
 
   // Observe the module-level tracker for this (workflow, step) pair.
   // The tracker owns the SSE stream and survives component unmount — when
@@ -463,38 +473,70 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
     }
   };
 
+  const cardKind = isBatch ? 'batch-qp' : isApi ? 'api' : isNotify ? 'notify' : 'agent';
   return (
-    <div className="wf-step-card" data-step-type={isBatch ? 'batch-qp' : 'agent'}>
+    <div className="wf-step-card" data-step-type={cardKind}>
       <div className="flex-row gap-4">
         <span className="wf-step-number">{index + 1}</span>
         <span className="font-semibold text-md">{step.name}</span>
-        {isBatch ? (
+        {/* Per step_type tag — the previous version always rendered the
+            agent label, which made an ApiCall step look like an Agent
+            step ("main · Claude Code"). Now: distinct badge for Batch,
+            API, Notify; agent label only for genuine Agent steps. */}
+        {isBatch && (
           <span className="wf-step-kind-badge" title={t('wiz.stepTypeBatchQPHint')}>
             <Layers size={10} /> {t('wiz.stepTypeBatchQP')}
           </span>
-        ) : (
+        )}
+        {isApi && (
+          <span className="wf-step-kind-badge" data-kind="api" title={t('wiz.stepTypeApiCallHint')}>
+            <Plug size={10} /> API
+            {step.api_endpoint_path && (
+              <span className="text-xs text-ghost" style={{ fontWeight: 400, marginLeft: 6 }}>
+                {step.api_plugin_slug ?? '?'} · {step.api_endpoint_path}
+              </span>
+            )}
+          </span>
+        )}
+        {isNotify && (
+          <span className="wf-step-kind-badge" data-kind="notify" title={t('wiz.notifyHint')}>
+            <Send size={10} /> {t('wiz.stepTypeNotify')}
+            {notifyHost && (
+              <span className="text-xs text-ghost" style={{ fontWeight: 400, marginLeft: 6 }}>
+                {notifyHost}
+              </span>
+            )}
+          </span>
+        )}
+        {isAgentLike && (
           <span className="text-xs font-semibold" style={{ color: AGENT_COLORS[step.agent] ?? 'var(--kr-text-faint)' }}>
             {AGENT_LABELS[step.agent] ?? step.agent}
           </span>
         )}
-        {!isBatch && checkAgentRestricted(agentAccess ?? undefined, step.agent) && (
+        {isAgentLike && checkAgentRestricted(agentAccess ?? undefined, step.agent) && (
           <span className="flex-row gap-1 text-xs text-warning">
             <AlertTriangle size={10} />
             {t('config.restrictedStep')}
           </span>
         )}
-        <button
-          className="wf-test-btn"
-          onClick={() => { if (!testRunning) setTestOpen(!testOpen); }}
-          title={isBatch ? t('wiz.testBatchStep') : t('wiz.testStep')}
-          data-active={testOpen || testRunning}
-        >
-          {testRunning ? <Loader2 size={11} className="spin" /> : <FlaskConical size={11} />}
-          {testRunning
-            ? `${t('wiz.testRunning')} ${testElapsed}s`
-            : (isBatch ? t('wiz.testBatchStep') : t('wiz.testStep'))
-          }
-        </button>
+        {/* The Test button is a dry-run mock for Agent / Batch steps —
+            it doesn't apply to ApiCall (real-call test lives in the
+            wizard's `Test the call` button) or Notify (no agent run).
+            Hiding it on those types keeps the row clean. */}
+        {!isApi && !isNotify && (
+          <button
+            className="wf-test-btn"
+            onClick={() => { if (!testRunning) setTestOpen(!testOpen); }}
+            title={isBatch ? t('wiz.testBatchStep') : t('wiz.testStep')}
+            data-active={testOpen || testRunning}
+          >
+            {testRunning ? <Loader2 size={11} className="spin" /> : <FlaskConical size={11} />}
+            {testRunning
+              ? `${t('wiz.testRunning')} ${testElapsed}s`
+              : (isBatch ? t('wiz.testBatchStep') : t('wiz.testStep'))
+            }
+          </button>
+        )}
       </div>
 
       {isBatch ? (

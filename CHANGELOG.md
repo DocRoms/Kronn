@@ -7,20 +7,466 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [0.5.1] - 2026-04-23
+## [0.5.1] - 2026-04-25
 
 Polish + playful additions on top of 0.5.0: the light theme got a proper
 expert-led rework, a hidden-unlock system was added for early-access
 testing, three secret themes ship with a small interactive layer, agents
 can now generate PDF / DOCX / XLSX / CSV / PPTX files directly from the
-conversation without the user installing anything, and the release
-closes with three user-facing hygiene wins: an in-nav "active runs"
-popover that one-clicks a running workflow to Stop, a first-class RTK
-(Rust Token Killer) integration that cuts agent shell outputs by ~90%
-before they hit the model, and a toast refactor that turns errors into
-copyable, sticky notifications the user can actually read.
+conversation without the user installing anything, three user-facing
+hygiene wins land (in-nav "active runs" popover, first-class RTK
+integration cutting agent shell outputs by ~90%, toast refactor for
+copyable sticky errors), and the release **kicks off the désagentification
+push** with a first-class `StepType::ApiCall` that runs a whole API-backed
+workflow step — request, extract, pipe — from the Rust engine, zero
+agent tokens consumed.
 
 ### Added
+- **`StepType::ApiCall` — désagentification's first vertical** — a
+  workflow step that hits a Kronn-configured API plugin directly from
+  the Rust engine and pipes the extracted JSON to the next step
+  (Agent / BatchQuickPrompt / Notify / another ApiCall). The agent
+  stops doing `Bash curl` on APIs we already know how to call; a 5-step
+  workflow that used to burn 40k tokens on parsing can now drop that
+  phase to 0. Backend layout in `backend/src/workflows/`:
+  - `api_call_step.rs` — pure JSONPath extraction via `serde_json_path`
+    (RFC 9535) with size-1 unwrap so `$.total` yields `42` rather than
+    `[42]`; pagination shape detection (Jira `startAt`+`total`
+    offset, Cloudflare GraphQL `pageInfo.endCursor`, Stripe/HubSpot
+    `has_more` page, Jira v3 `nextPageToken` cursor — the migration
+    trap); hard-cap `DEFAULT_MAX_PAGES = 50` against runaway walks
+  - `api_call_security.rs` — three guards: (a) `assert_host_matches_base`
+    rejects subdomains, scheme downgrades, cross-host redirects; (b)
+    `assert_public_ip` blocks RFC 1918, loopback, `169.254.*` (the
+    AWS metadata SSRF trampoline), link-local v6, ULA fc00::/7 — with
+    an IP-literal fast path so `[::1]` blocks even on IPv4-only hosts;
+    (c) `ResolvedAuth` with manual `Debug` impl that redacts bearers /
+    api-keys via `looks_like_secret_key`, plus `redact_url_query` for
+    log-safe URL echoes
+  - `api_call_executor.rs` — `execute_api_call_step_core` orchestrates
+    template rendering (walking `serde_json::Value` so string leaves
+    get substituted without enabling JSON injection), auth resolution
+    (ApiKeyQuery / ApiKeyHeader / Bearer / OAuth2ClientCredentials
+    reusing the `core::oauth2_cache` contract), URL composition with
+    percent-encoded query pairs, `send_with_retry` with exponential
+    backoff on 5xx + 429 only (never 4xx — retrying a client error is
+    a foot-gun); `SecurityPolicy` explicit type so tests can hit
+    wiremock on loopback while production stays locked; wrapper
+    `execute_api_call_step_with_db` loads the decrypted env via the
+    existing `collect_active_api_plugins`
+  - Two endpoints (`backend/src/api/workflows.rs`):
+    `POST /api/workflow-steps/test-extract` (pure, no net, no DB) and
+    `POST /api/workflow-steps/test-api-call` (real HTTP with
+    production security policy — localhost targets fail here too so a
+    user can't design a workflow that'll refuse to run in production)
+  - Dispatch wired in `workflows::runner::execute_run` — `StepType::ApiCall`
+    takes its own arm, no more fallthrough to the Agent executor
+- **ApiCall step wizard card** (`frontend/src/components/workflows/ApiCallStepCard.tsx`)
+  — plugin + endpoint pickers cascading from the project's installed
+  `api_spec` plugins, query-param editor (key/value rows, template-
+  aware placeholder `{{steps.X.data}}`), **Test** button firing a real
+  request through `/test-api-call` with live response panel, a
+  clickable `JsonTreeViewer` (each leaf + each array marker `[N]`
+  generates the matching `$.path` — size-1 paths don't wrap in
+  brackets, wildcard arrays land as `$.items[*]`), extract panel with
+  3 radios (data/status/summary), live preview debounced 150 ms via
+  `/test-extract`, 3 example-path quick buttons
+  ("Tous les IDs" / "Premier élément" / "Nombre total"),
+  collapsible advanced options (timeout, retries, output_var,
+  fail_on_empty toggle). Empty-state "aucun plugin API configuré
+  sur ce projet" when there's nothing to pick from
+- **Next-step validation banner** — when the step immediately after
+  an ApiCall is a `BatchQuickPrompt`, the wizard checks the resolved
+  `preview.value_type` and flags a mismatch inline: green `✓ Compatible`
+  if it's an array, amber warning echoing the actual type ("Data est
+  `number`") otherwise. Silent on Agent / Notify / ApiCall next steps
+  — those accept any shape, the banner would be noise
+- **"Chartbeat top 5 → Résumé IA → Slack" starter template** — the
+  désagentification aha-moment, cloneable in one click from the
+  wizard creation screen when the Chartbeat plugin is configured.
+  Three pre-wired steps (ApiCall → Agent → Notify), extract path
+  `$.pages[*].title` so the array flows cleanly through the chain,
+  `cloneTemplateSteps()` helper deep-copies and stamps the user's
+  `api_config_id` into the matching ApiCall step
+- **Path parameters editor for `{owner}/{repo}`-style endpoints** —
+  ApiCall plugins like GitHub expose endpoints with placeholders
+  (`/repos/{owner}/{repo}/issues`). The wizard now auto-detects
+  `{name}` tokens in the endpoint, renders one input per unique
+  placeholder below the endpoint picker, and stores the values on a
+  new `WorkflowStep.api_path_params: HashMap<String, String>` field.
+  At request time the executor's `resolve_path_params` substitutes
+  each token (with percent-encoding for path-segment safety + `{{var}}`
+  template expansion on the value, so `{owner}` = `{{steps.X.data}}`
+  works for chaining). Tokens with no value stay literal — the
+  request 404s, which is more diagnostic than silently dropping the
+  segment. Round-trip safe: re-loading a saved workflow shows BOTH
+  the template (`/repos/{owner}/{repo}`) AND the concrete values, so
+  the user can change one parameter without retyping the whole path.
+  A live "URL résolue" preview below the inputs flags unresolved
+  tokens in amber. Backend tests in `api_call_executor::path_params*`,
+  frontend tests cover detection, write-through, and absence-of-tokens
+  hide path. Mask-and-restore approach disambiguates `{{var}}` from
+  `{key}` without an external regex dep.
+- **ApiCall / Notify steps no longer demand `prompt_template` at save** —
+  the wizard's last-step validator was checking `!s.prompt_template`
+  unconditionally, so saving a workflow whose only step was an
+  ApiCall fired `Prompt missing for "main"` even though the step
+  hits an API directly with zero LLM involvement. Validator now
+  branches per `step_type`: `ApiCall` requires `api_plugin_slug` +
+  `api_config_id` + `api_endpoint_path`; `Notify` requires
+  `notify_config.url`; the prompt check applies only to Agent /
+  Custom steps. Three new error keys (`wiz.errorApiNoPlugin`,
+  `wiz.errorApiNoEndpoint`, `wiz.errorNotifyNoUrl`) × FR/EN/ES.
+- **`Test the call` always shows the FULL JSON response** — when an
+  extract path was set on the step (e.g. `$.toppages[*].path`), the
+  backend `/test-api-call` would apply it and return the extracted
+  array, breaking the click-to-pick UX once the user came back to
+  the step (they'd see only the previously-extracted value, not the
+  full body). Fix is one line: the wizard sends a copy of the step
+  with `api_extract: null` to the test endpoint. The live preview
+  on the right panel still uses `/test-extract` against the cached
+  raw response, so the user keeps seeing the resolved value as they
+  type the path.
+- **Headers editor promoted out of "Advanced options"** in the ApiCall
+  wizard — the top-bug from real-world GitHub usage was "I applied a
+  User-Agent header suggestion, chip says ✓ Appliqué, but the wizard
+  shows nothing changed". The fix: the Headers editor is now rendered
+  inline below the Query Params editor, always visible regardless of
+  the Advanced toggle state. Real APIs need headers more often than
+  not (User-Agent for GitHub, X-API-Version for Adobe, Accept for
+  custom mime types) — hiding them was friction. Body / Method /
+  Output var / Timeout / Retries stay in Advanced (genuinely
+  power-user fields). The Advanced auto-expand still applies for
+  these remaining fields: open by default when any of them carries
+  a value, sticky on manual collapse, the false → true transition
+  is the only auto-fire. Toggle renamed to "Options avancées
+  (body, méthode, timeout, retries, output var)". A small accent dot
+  on the collapsed toggle still signals "something is set in here".
+- **Multi-config plugin support in the ApiCall step picker** — when a
+  user has multiple credentials configured for the same plugin (e.g.
+  a personal GitHub PAT *and* an org-bound Euronews PAT both pointing
+  at `mcp-github`), the wizard's plugin picker now keys options on
+  `config.id` rather than `server.id` so each entry is selectable
+  individually. The picker writes both `api_plugin_slug` and
+  `api_config_id` on change; legacy workflows pre-dating this fix
+  fall back gracefully to the first matching server. Stops the
+  silent "always pick the first config" trap that was invisible
+  whenever two GitHub or two Jira instances coexisted.
+- **Auto-sync registry → DB on backend startup**
+  (`db::mcps::sync_registry_servers_to_db`, called from `main.rs`
+  after the orphan scan) — re-mirrors `api_spec`, `description`, and
+  `transport` from `builtin_registry()` onto every existing
+  `mcp_servers` row whose id matches a definition. Fixes the
+  "I configured GitHub last week, now Kronn enriched the registry
+  with `api_spec`, but my workflow wizard's plugin picker doesn't
+  see GitHub" gap — without forcing the user to click "Refresh
+  registry" in Settings → APIs by hand. Only updates EXISTING rows
+  (new registry entries the user hasn't added stay registry-only).
+  Backend test (`sync_registry_refreshes_api_spec_on_existing_rows_only`)
+  locks the contract: stale rows pick up the new spec, never-
+  configured plugins don't sneak into the DB.
+- **Test coverage pass over the désagentification track** — 5 new
+  test modules / blocks land alongside the features they protect:
+  `rtk_args_for` + `rtk_uninstall_args_for` matrix tests
+  (Claude/Codex/Gemini argv shape + unsupported set, prevents the
+  `--codex --auto-patch` regression from coming back),
+  `apply_step_snapshot` per-step-kind tests in `runner.rs` (Agent
+  records agent / ApiCall records plugin+endpoint / Notify+Batch
+  record kind only — locks the run-history shape), `apiCallAuth`
+  test file covering all five `ApiAuthKind` variants including
+  Basic (Jira's email+token wire shape) and the case-insensitive
+  header-strip, `RunDetail` tests for the snapshot badges + the
+  `LiveStepStatus` elapsed estimator (Date.now mocked, started_at
+  + completed durations math). Backend now at 1297 lib tests,
+  frontend at 856.
+- **Jira `/search` migrated to `/search/jql`** — Atlassian removed
+  `/rest/api/3/search` in April 2025 (CHANGE-2046, returns 410 Gone)
+  in favour of `/rest/api/3/search/jql` with cursor-based pagination
+  (`nextPageToken`) instead of offset (`startAt`/`total`). The
+  Kronn registry now exposes the new endpoint by default and adds
+  `POST /rest/api/3/search/approximate-count` (split out by Atlassian
+  to keep the JQL query fast). The plugin tips registry was also
+  re-keyed under `mcp-atlassian` (matching the actual `server.id`)
+  so the AI helper now actually surfaces the Jira lore — including
+  an explicit warning about the deprecated endpoint, so the agent
+  flips an existing workflow to the new path on its own when it
+  sees a 410. The previous `jira` slug stays as an alias for
+  back-compat. Backend regression test updated to assert
+  `/search/jql` IN + `/search` OUT.
+- **Jira (Atlassian Cloud) as an ApiCall plugin (hybrid: MCP + REST)** —
+  the existing `mcp-atlassian` definition gained an `api_spec` and the
+  same `JIRA_USERNAME` + `JIRA_API_TOKEN` (already configured for the
+  MCP server) now also drives REST API workflow steps. Two backend
+  prerequisites had to land first: (1) **`ApiAuthKind::Basic` variant**
+  — composes `Authorization: Basic <base64(user:password)>` from two
+  env keys, the right shape for Jira Cloud auth where Bearer wouldn't
+  work; (2) **templated `base_url`** — the executor interpolates
+  `{ENV_KEY}` placeholders against the encrypted plugin env, so a
+  workspace-scoped URL (`https://acme.atlassian.net`) lives in the
+  config rather than in the plugin spec, and one Atlassian plugin
+  serves every Kronn user (no fork-per-workspace). Unresolved
+  placeholders surface a "go fill JIRA_URL in Settings → APIs" error
+  rather than firing a half-composed request. 11 curated endpoints:
+  `/myself` (sanity), `/search` (JQL — the killer endpoint),
+  single-issue + comments + transitions, project search + single +
+  components + versions, `/field` (custom-field id mapping for
+  `customfield_10016` style stuff), saved-filter search.
+  Same-token reuse means the user pastes the API token once, both
+  Quick Prompt (MCP) and ApiCall workflows light up. Plugin tips
+  registry already has the Jira lore (401/403/404/400 semantics,
+  pagination v2 vs v3, customfields, JQL URL-encoding). Backend
+  regression tests:
+  `atlassian_builtin_has_basic_auth_templated_base_url_and_jira_search`,
+  `resolve_auth_basic_encodes_user_and_password_to_authorization_header`,
+  `execute_basic_auth_attaches_base64_authorization_header`,
+  `execute_templated_base_url_resolves_from_env`,
+  `execute_templated_base_url_unresolved_placeholder_fails_clearly`.
+- **GitHub as an ApiCall plugin (hybrid: MCP + REST)** — the existing
+  `mcp-github` definition gained an `api_spec` so the same
+  `GITHUB_PERSONAL_ACCESS_TOKEN` powers both Quick Prompts (via the
+  Stdio MCP transport) and désagentified ApiCall workflow steps (via
+  Bearer auth on `https://api.github.com`). 13 curated endpoints
+  shipped: `/user` (sanity), repos (`/user/repos`,
+  `/repos/{owner}/{repo}`), issues + single issue + cross-repo
+  `/search/issues`, pull requests + single PR + diff files, commits,
+  Actions runs, releases, notifications. Path placeholders
+  (`{owner}/{repo}/…`) are filled by the user in the wizard's
+  endpoint combobox: the static `<select>` was swapped for
+  `<input + datalist>` so picking a template seeds the input and the
+  user can type over the placeholders inline — Chartbeat's stable
+  paths still work as before because the datalist surfaces as a
+  dropdown on focus. Plugin tips registry gained a `mcp-github`
+  entry warning the AI helper about the placeholder pitfall, the
+  issue/PR list overlap (PRs are issues), `q=` URL-encoding for
+  search, and the SAML-SSO 403 trap. Backend regression test
+  (`github_builtin_has_bearer_api_spec_alongside_mcp_transport`)
+  locks the contract: Stdio transport stays for MCP, Bearer auth on
+  REST reuses the same env key, key endpoints survive future trims.
+- **AI helper bubble inside the ApiCall card** — discovering the
+  right endpoint and JSONPath on a 4-page Jira/Cloudflare API doc
+  used to be the friction wall for new users. Click "Aide config IA"
+  in the card header, pick any locally-installed agent, and a
+  bottom-right floating chat opens. The agent receives the API spec
+  + a **fresh "current context" snapshot rebuilt on every user
+  message** (endpoint / method / query / headers / body / extract +
+  last test result, success body or 4xx/5xx error verbatim) — so
+  asking "pourquoi j'ai un 400 ?" or "j'ai changé l'extract, regarde"
+  Just Works without the user having to re-explain state. Display
+  and payload are decoupled: the chat history shows what the user
+  typed, the agent sees the prepended context block. A "📎 context
+  chip" above the textarea makes the attached info transparent
+  (API name · endpoint · last test ✓/❌). The agent answers in ≤3
+  lines and emits structured `KRONN:APPLY` blocks (`endpoint` /
+  `method` / `query` / `headers` / `body` / `extract`) — the UI
+  parses them, hides the raw fenced JSON, and renders an inline
+  "Appliquer" button per suggestion. The conversation is **ephemeral**:
+  a fresh discussion is created on agent select and deleted on close /
+  unmount, no localStorage, no carry-over between step edits.
+  `project_id: null` is accepted (helper doesn't require a project).
+  Field allowlist is enforced client-side (`applyToStep`) so a
+  hallucinating agent cannot rewrite `prompt_template`, `agent`, or
+  any non-API field. **Auth slots are auto-stripped**: when the
+  plugin declares `ApiKeyQuery` / `ApiKeyHeader` / `Bearer` /
+  `OAuth2ClientCredentials`, the matching key is removed from
+  every suggestion (no more `apikey: 'VOTRE_API_KEY'` placeholders
+  shadowing the user's real configured key) — and the system
+  prompt tells the agent up-front not to suggest them. Single-
+  installed-agent shortcut skips the picker; multi-agent popover
+  uses `agentColor` dots.
+  (`frontend/src/components/workflows/ApiCallAiHelper.tsx`,
+  `apiCallAuth.ts`, 24 i18n keys × FR/EN/ES, 17 unit tests)
+- **Auth-managed slots panel in the ApiCall wizard card** —
+  green-tinted read-only fieldset above the query editor surfaces
+  every credential the backend already injects at runtime
+  (Chartbeat `apikey` query, Jira/Bearer `Authorization` header,
+  OAuth2 token). Each row shows `<param-name>` · `••••••••` · 👁
+  reveal-toggle that swaps the dots for `(env: <ENV_KEY>)` so the
+  user can see exactly which env var is wired without exposing the
+  secret. Stops the "I configured my key in Settings → APIs but
+  the wizard asks for it again" confusion in its tracks.
+- **Workflow runner derives `project_id` from the config when the
+  workflow has none** — same fallback the wizard's "Test the call"
+  uses: if the workflow isn't bound to a project, the runner reads
+  the picked config's `project_ids[0]` (or marks the call as global
+  when `is_global = true`) and decrypts the env from there. Stops
+  the previous "ApiCall step requires a project-scoped workflow"
+  hard-fail on global plugins or workflows the user wanted scoped
+  per-trigger rather than per-project. The error is reserved for
+  the genuinely-broken case (config linked to no project at all)
+  and points the user to Settings → APIs to fix.
+- **Wizard step 0 explains why "Next" is disabled** when the
+  workflow name is empty — was previously silent (button just
+  greyed). Now: required-marker `*` on the label, amber border on
+  the input, helper text `wiz.nameRequired` below ("Donne un nom à
+  ton workflow pour passer à l'étape suivante"), and a `title`
+  tooltip on the disabled Next button repeating the same message.
+  Triple-channel signaling so the user can't miss it.
+- **Wizard summary resolves plugin slug → human name** —
+  ApiCall step recap used to show `(mcp-github · /user)` (internal
+  slug). Now resolves through the loaded `availableApiPlugins`
+  catalog → `(GitHub — Perso · /user)` (server name + config
+  label). Falls back to the slug only when the catalog lookup
+  misses. Two-config-of-same-plugin case (perso vs Euronews) is
+  now distinguishable in the recap.
+- **Wizard summary surfaces the right metadata per step type** —
+  the recap row used to show `1. API main (Claude Code)` for an
+  ApiCall step, displaying a meaningless agent label even though
+  the call hits an API directly with no LLM in the loop. The
+  recap now branches per `step_type`: ApiCall shows
+  `(plugin-slug · /endpoint/path)`, Notify shows
+  `(webhook-host)`, BatchQuickPrompt keeps `(QP name)`, only
+  Agent / Custom show the agent label. The step name color also
+  drops the agent-color tint when the step doesn't run an agent
+  (uses `--kr-text-faint` for ApiCall / Notify / Batch).
+  `wiz.notifyMissingUrl` i18n key × FR/EN/ES.
+- **Run history is now editing-proof — `StepResult` snapshots
+  agent / plugin / endpoint at execution time**. Editing a workflow
+  between runs (swap the agent, retarget the API plugin, change the
+  endpoint) used to silently re-write the run history with the
+  *current* config when the page rendered. Now the runner snapshots
+  `step_kind` (`Agent | ApiCall | Notify | BatchQuickPrompt`),
+  `step_agent` (for Agent steps), `step_api_plugin_slug` and
+  `step_api_endpoint_path` (for ApiCall) onto each `StepResult` row
+  before pushing it. RunDetail displays per-step badges built from
+  the snapshot, not from the current workflow definition: `🔌 API
+  mcp-github · /user`, `📤 NOTIFY hooks.slack.com`, `Codex`. Legacy
+  rows (pre-snapshot) fall back gracefully — the field is optional
+  on serde + ts-rs, no schema migration needed.
+- **Live step status with elapsed counter + activity hint** — the
+  static `running...` placeholder for the in-flight step felt frozen
+  ("is it stuck or thinking?"). New `LiveStepStatus` component in
+  `RunDetail.tsx` ticks every second, estimates `step_start =
+  run.started_at + sum(durations of completed steps)`, and surfaces a
+  step-type-aware activity label ("L'agent réfléchit", "Appel HTTP en
+  cours", "Envoi du webhook", "Fan-out en cours") next to a
+  tabular-num elapsed counter. Solves 90% of the "is it frozen?"
+  anxiety without re-plumbing SSE end-to-end. 4 i18n keys ×
+  FR/EN/ES.
+- **Workflow detail page surfaces the right metadata per step**
+  (`WorkflowDetail.tsx` + `RunDetail.tsx`) — `step_type === ApiCall`
+  → `🔌 API` badge with plugin slug + endpoint subtitle, no
+  agent label, no Test button (the wizard's "Test the call" is the
+  real-call test; the detail-page Test was a dry-run mock that
+  doesn't apply). `step_type === Notify` → `📤 NOTIFY` with the
+  webhook host (full URL would risk leaking a secret in a
+  screenshot). `step_type === BatchQuickPrompt` → existing batch
+  card. Only Agent / Custom show the agent label. Card border-left
+  colour-coded per type so the list is scannable at a glance.
+- **Step output viewer fixed for the light theme** — the
+  `.wf-step-output-code` block uses `--kr-bg-code` (intentionally
+  dark in both themes — IDE convention) but the text was bound to
+  `--kr-text-secondary` (dark-on-light in light theme), producing
+  illegible noir-sur-noir on every step error. Pinned to
+  `--kr-text-on-dark` so the contrast is always > 14:1 regardless of
+  theme.
+- **Wizard "Create" button kept disabled silently for ApiCall-only
+  workflows** — fixed alongside the validator. The button's `disabled`
+  predicate had its own copy of the validation logic which only knew
+  about `BatchQuickPrompt` and `prompt_template`, so an ApiCall-only
+  step (no prompt by design) left the button greyed out forever even
+  after the visible validator turned green. Predicate now branches per
+  `step_type` to match: ApiCall → plugin/config/endpoint, Notify →
+  webhook URL, Agent / Custom → prompt_template. Stops the dead-button
+  limbo where the user gets no feedback.
+- **RTK badges refresh after activate / deactivate** — the
+  `onActivated` parent refetch is now deferred 200ms via setTimeout
+  AND moved to the `finally` block, so it fires regardless of
+  success/error and gives RTK's filesystem writes (`AGENTS.md`,
+  `settings.json`, shell rc) time to flush before
+  `agentsApi.detect()` re-reads them. Without the delay,
+  re-detection raced the writes and the badge stuck on the old
+  state until a manual refresh.
+- **RTK activation matrix fixed for Codex / Gemini** + **uninstall
+  endpoint** — the previous `rtk init -g --codex --auto-patch` was
+  rejected by RTK with `--codex cannot be combined with --auto-patch`
+  (the `--auto-patch` flag answers a Claude-only TTY prompt; the
+  Codex / Gemini flows write a dedicated config file with no prompt
+  to auto-answer). Matrix now: Claude → `--auto-patch --hook-only`,
+  Codex → `--codex` alone, Gemini → `--gemini` alone. New
+  `POST /api/rtk/deactivate` endpoint mirrors `activate` with
+  `--uninstall` appended (per-agent: `rtk init -g --codex --uninstall`,
+  etc.) so the user can back out without manually editing
+  `settings.json` / `AGENTS.md` / shell rc. Frontend `CompressionSection`
+  gains a discreet "Désactiver RTK (N)" outline button visible
+  whenever ≥1 agent is RTK-configured; 4 new i18n keys × FR/EN/ES.
+- **Plugin tips registry for the AI helper** (`apiCallPluginTips.ts`)
+  — per-slug debugging lore injected as a `### TIPS PLUGIN` block in
+  the system prompt. Chartbeat (host must match Settings → Sites
+  exactly, 404 on `/live/*` = host or no traffic, recommend
+  `/historical/*` to isolate auth), Jira (401/403/404/400 semantics,
+  pagination v2 vs v3, customfields), Cloudflare (Bearer only,
+  GraphQL datetime trap, 7d max), Adobe Analytics (rsid casse-
+  sensitive), Google Search/GSC (quota, siteUrl format strict). Each
+  plugin's `docs_url` (or fallback) is exposed so the agent can
+  redirect when stumped. The system prompt also gained an explicit
+  `# Rôle` / `# Ce que tu peux et ne peux PAS faire` (no MCP, no
+  fetch) / `# Méthode de debug` (6-step ordered procedure) /
+  `# Style` (the `***` masking is display-only — real key IS sent)
+  structure to stop the agent from doubting the auth in a loop.
+- **AI helper trigger disabled when no API selected** — without
+  `selectedServer` the agent has no spec, no endpoints list, no auth
+  context: the button is hard-disabled with an explanatory tooltip
+  rather than letting the user open an empty helper that just asks
+  "go pick an API".
+- **Smart JSONPath suggestions chips** in the extract panel
+  (`apiCallSuggestions.ts`) — auto-derived from each test response.
+  Rebuilt fresh whenever the response changes; up to 6 chips ranked
+  by usefulness: `Tous les "<scalar>"` (priority field id/key/name/
+  title/path/url/slug/email/pseudo, fall back to first scalar),
+  `Itérer sur les N éléments` (wildcard for fan-out), `Le 1er
+  élément` (handy "test before fan-out"), counter detection by name
+  (`total`, `count`, `totalCount`, `total_count`, `length`). Each
+  chip shows the resolved sample inline (`"fr.euronews.com/"`) so
+  the user spots the right one without trial-and-error. Replaces
+  the static "All IDs / First / Total count" examples that only
+  worked for users who already knew JSONPath.
+- **Click-to-pick everywhere in the JSON tree, with DWIM wildcard
+  on keys** — every renderable atom is now clickable: object keys,
+  array index buttons (`[0]`, `[1]`, …), array count markers
+  (`[N]`), and leaf values. The killer feature: clicking a KEY
+  inside an array item promotes the closest enclosing array's
+  index to `[*]` automatically — `path` clicked under `toppages[0]`
+  generates `$.toppages[*].path` (all items) instead of
+  `$.toppages[0].path` (just the first). Clicking a leaf VALUE
+  keeps the specific `[N]` index because the user is pointing at
+  *that* item. Mental model: *clé → tous les éléments ; valeur → cet
+  élément précis ; [N] → itérer ; [i] → cet objet précis*. Wired in
+  `JsonNode` via dual `pathSegments` / `wildcardSegments` props.
+  Regression tests lock both directions.
+- **Deep one-line preview** for the resolved JSONPath value
+  (`previewString` in `ApiCallStepCard.tsx`) — the chip used to show
+  `Array(5)` / `Object`; now walks one level deep:
+  `["fr.euronews.com/", "fr.euronews.com/voyages/2026…", … (+3)]`
+  for arrays of strings, `{id: 42, title: "Hello", meta: {…}}` for
+  objects. Depth capped at 1 to keep it on one line — the JSON tree
+  on the left handles deeper inspection.
+- **Visual pulse on the path input** when populated — 600ms accent-
+  coloured `@keyframes wf-apicall-pulse` fires on every path change,
+  giving immediate "your click landed" feedback without forcing the
+  user to scan the form.
+- **Test button derives `project_id` from the plugin config** —
+  when the wizard's project field is empty, `handleTest` falls back
+  to `config.project_ids[0]` (the first project the plugin is
+  already linked to in Settings → APIs). The opaque "projectId
+  missing" was replaced by `wf.apicall.testNeedsProjectLink` ("Cette
+  config plugin n'est liée à aucun projet — va dans Settings → APIs
+  et coche au moins un projet pour pouvoir tester") which surfaces
+  only when there's truly no link.
+- **Fresh context block re-injected on every helper message**
+  (`buildContextBlock`) — display vs payload decoupled. The user
+  types "pourquoi 400 ?", the chat shows that, the agent receives
+  `### CONTEXTE COURANT` (snapshot of endpoint/method/query/headers/
+  body/extract + last test result with the verbatim error or a
+  1.5 kB JSON excerpt) followed by `### QUESTION DU USER` + the
+  typed text. A `📎 context chip` above the textarea echoes what's
+  attached (API · endpoint · last test ✓/❌). Stops the "I changed
+  the extract path five messages ago, why doesn't the agent see it"
+  staleness problem.
+- **Integration runner dispatch** — `StepType::ApiCall` branches to
+  `execute_api_call_step_with_db` in `workflows::runner`, using the
+  parent workflow's `project_id` (not the run row's — `WorkflowRun`
+  doesn't carry it). Production `SecurityPolicy` enforced: localhost
+  / RFC1918 targets block even in live runs
 - **Active-runs popover in the nav** — When one or more workflow runs
   are in flight, clicking the Automatisation tab (which now spins a
   Loader2 icon + counter badge) no longer navigates to the list but
@@ -280,6 +726,24 @@ copyable, sticky notifications the user can actually read.
   lime `#c8ff00` + black-on-lime contract stays 14:1 AAA)
 
 ### Fixed
+- **ApiCall step — `jmespath-rs` crate unmaintained** — picked
+  `serde_json_path` (RFC 9535) instead. Tech lead's JMESPath preference
+  lost to the factual 2022-unmaintained bus factor; end-user syntax
+  `$.issues[*].key` also happens to match the docs of every target API
+  (Jira, Cloudflare, Chartbeat) — a nice side-effect
+- **Codex RTK hook path was `config.toml`, RTK writes to `AGENTS.md`**
+  — first-pass detector reported "hook not configured" forever for
+  Codex. Fixed in `rtk_detect.rs` with a regression test
+  (`codex_reads_agents_md_not_config_toml`) asserting AGENTS.md is the
+  source of truth even when `config.toml` happens to contain the word
+  "rtk"
+- **ApiCall Docker loopback trap during tests** — `assert_public_ip`
+  rightly blocks `127.0.0.1`, but wiremock serves from loopback, so
+  the happy-path integration tests deadlocked on Security errors.
+  Added `SecurityPolicy::allow_loopback_for_tests()` (explicit, no
+  global cfg(test) bypass) alongside `SecurityPolicy::production()`;
+  the SSRF regression test keeps using `production()` so the guard
+  is actually exercised
 - **RTK activation in Docker** — three successive bugs caught
   while iterating with a real user:
   1. First spawn passed no `--auto-patch` → `rtk init` waited on a
@@ -381,8 +845,17 @@ copyable, sticky notifications the user can actually read.
   defense + workflow: ActiveRunsPopover 9 tests, inline Stop button on
   wf-card + stopPropagation + CompressionSection 16 tests covering
   the 3 states, install modal, sobriety tooltip, toast error stderr
-  forwarding). Totals: **1178 backend lib / 756 frontend** — all
-  green
+  forwarding) + **+84 more** for désagentification: 16 extract /
+  pagination-detect, 22 security guards (SSRF ranges v4+v6, redact
+  unicode-safe, subdomain & scheme-downgrade rejection), 20 executor
+  (Chartbeat happy path, Bearer header, 4xx no-retry, 5xx retry, SSRF
+  block in production policy, templating, NO_RESULTS, no-extract
+  pass-through, OAuth2 cache hit + error), 5 `test-extract` handler,
+  18 `ApiCallStepCard` (empty state, cascade picker, Test, click-to-
+  pick leaf + array wildcard, query-param editor add/remove, live
+  preview, next-step banner 4 scenarios, advanced options toggle),
+  11 Chartbeat starter template shape contract. Totals: **1262 backend
+  lib / 785 frontend** — all green
 
 ---
 

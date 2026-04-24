@@ -162,7 +162,11 @@ describe('CompressionSection', () => {
     );
     fireEvent.click(screen.getByRole('button', { name: /config\.rtk\.activateAll/ }));
     await waitFor(() => expect(activateMock).toHaveBeenCalledTimes(1));
-    expect(onActivated).toHaveBeenCalledTimes(1);
+    // The activate handler defers `onActivated` via setTimeout(200) so
+    // RTK's filesystem writes have time to flush before the parent
+    // re-runs `agentsApi.detect()`. waitFor polls until the deferred
+    // call fires.
+    await waitFor(() => expect(onActivated).toHaveBeenCalledTimes(1));
   });
 
   it('disables the activate button and shows the spinner label while the request is in flight', async () => {

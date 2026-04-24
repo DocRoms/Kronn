@@ -147,6 +147,10 @@ pub async fn execute_run(
                 duration_ms: 0,
                 condition_result: None,
                 envelope_detected: None,
+                step_kind: None,
+                step_agent: None,
+                step_api_plugin_slug: None,
+                step_api_endpoint_path: None,
             });
             all_success = false;
             break;
@@ -163,6 +167,10 @@ pub async fn execute_run(
                 duration_ms: 0,
                 condition_result: None,
                 envelope_detected: None,
+                step_kind: None,
+                step_agent: None,
+                step_api_plugin_slug: None,
+                step_api_endpoint_path: None,
             });
             break;
         }
@@ -175,7 +183,7 @@ pub async fn execute_run(
             total_steps,
         }).await;
 
-        let outcome: StepOutcome = match step.step_type {
+        let mut outcome: StepOutcome = match step.step_type {
             StepType::BatchQuickPrompt => {
                 // Phase 2 batch workflows — fan out a Quick Prompt over items
                 // from a previous step's output, then optionally wait for all
@@ -193,7 +201,21 @@ pub async fn execute_run(
                 // ticket, etc.). Shipped 0.3.5.
                 super::notify_step::execute_notify_step(step, &ctx).await
             }
-            StepType::Agent | StepType::ApiCall => {
+            StepType::ApiCall => {
+                // Désagentification: direct HTTP call from the engine.
+                // Uses `SecurityPolicy::production()` — localhost URLs fail
+                // here, as intended. Rate-limiting lands in P0.5b. Project
+                // id comes from the parent workflow, not the run row, since
+                // `WorkflowRun` doesn't carry it (only `workflow_id`).
+                super::api_call_executor::execute_api_call_step_with_db(
+                    step,
+                    workflow.project_id.as_deref(),
+                    &state,
+                    &ctx,
+                    super::api_call_executor::SecurityPolicy::production(),
+                ).await
+            }
+            StepType::Agent => {
                 let full_access = agents_config.full_access_for(&step.agent);
                 execute_step(
                     step,
@@ -214,6 +236,15 @@ pub async fn execute_run(
         run.tokens_used += outcome.result.tokens_used;
 
         let step_failed = outcome.result.status == RunStatus::Failed;
+
+        // Snapshot the step's "what was actually used here" metadata
+        // onto the result row. The user can edit the workflow between
+        // runs (swap agent, retarget API plugin, change endpoint),
+        // and without this snapshot the run history would silently
+        // start describing the *current* config instead of what ran
+        // in this run. Done here so every executor path benefits, not
+        // per-executor.
+        apply_step_snapshot(step, &mut outcome.result);
 
         // Emit step done event
         emit(RunEvent::StepDone { step_result: outcome.result.clone() }).await;
@@ -303,6 +334,34 @@ pub async fn execute_run(
 /// Formula: total_steps * 10 + 50.
 pub(crate) fn max_iterations_for(total_steps: usize) -> usize {
     total_steps * 10 + 50
+}
+
+/// Stamp the step's "what was actually used here" metadata onto a
+/// freshly-produced [`StepResult`] so editing the workflow afterwards
+/// (swapping the agent, retargeting the plugin, changing the endpoint)
+/// can't corrupt the run's history.
+///
+/// The frontend reads these fields back to render per-step badges in
+/// [`RunDetail`] — `step_kind` drives the badge type, `step_agent` /
+/// `step_api_plugin_slug` / `step_api_endpoint_path` populate the
+/// subtitle.
+///
+/// Pulled out of `execute_run`'s loop so the snapshot logic is testable
+/// in isolation (the loop itself needs a full workspace + agents to
+/// drive end-to-end).
+pub(crate) fn apply_step_snapshot(step: &WorkflowStep, result: &mut StepResult) {
+    let kind: &'static str = match step.step_type {
+        StepType::ApiCall => "ApiCall",
+        StepType::Notify => "Notify",
+        StepType::BatchQuickPrompt => "BatchQuickPrompt",
+        StepType::Agent => "Agent",
+    };
+    result.step_kind = Some(kind.into());
+    result.step_agent = matches!(step.step_type, StepType::Agent).then(|| step.agent.clone());
+    if matches!(step.step_type, StepType::ApiCall) {
+        result.step_api_plugin_slug = step.api_plugin_slug.clone();
+        result.step_api_endpoint_path = step.api_endpoint_path.clone();
+    }
 }
 
 /// Inject trigger context JSON into template variables.
@@ -444,6 +503,116 @@ mod tests {
         inject_trigger_context(&mut ctx, &json);
         // Non-string items in labels array are filtered out
         assert_eq!(ctx.render("{{issue.labels}}").unwrap(), "bug, feature");
+    }
+
+    // ─── apply_step_snapshot ────────────────────────────────────────────
+    //
+    // The whole point of these snapshots is run-history honesty: editing
+    // the workflow definition after a run completes must NOT corrupt the
+    // run record. These tests lock the per-step-kind shape so a future
+    // refactor can't silently start setting step_agent on an ApiCall row
+    // (or skip step_api_endpoint_path on the ApiCall path).
+
+    fn mk_step_for_snapshot(kind: StepType) -> WorkflowStep {
+        WorkflowStep {
+            name: "s".into(),
+            step_type: kind,
+            description: None,
+            agent: AgentType::Codex,
+            prompt_template: String::new(),
+            mode: StepMode::Normal,
+            output_format: StepOutputFormat::FreeText,
+            mcp_config_ids: vec![],
+            agent_settings: None,
+            on_result: vec![],
+            stall_timeout_secs: None,
+            retry: None,
+            delay_after_secs: None,
+            skill_ids: vec![],
+            profile_ids: vec![],
+            directive_ids: vec![],
+            batch_quick_prompt_id: None,
+            batch_items_from: None,
+            batch_wait_for_completion: None,
+            batch_max_items: None,
+            batch_workspace_mode: None,
+            batch_chain_prompt_ids: vec![],
+            notify_config: None,
+            api_plugin_slug: Some("mcp-github".into()),
+            api_config_id: Some("cfg-1".into()),
+            api_endpoint_path: Some("/repos/anthropics/cookbook/issues".into()),
+            api_method: None,
+            api_path_params: None,
+            api_query: None,
+            api_headers: None,
+            api_body: None,
+            api_extract: None,
+            api_pagination: None,
+            api_timeout_ms: None,
+            api_max_retries: None,
+            api_output_var: None,
+        }
+    }
+
+    fn empty_result() -> StepResult {
+        StepResult {
+            step_name: "s".into(),
+            status: RunStatus::Success,
+            output: String::new(),
+            tokens_used: 0,
+            duration_ms: 0,
+            condition_result: None,
+            envelope_detected: None,
+            step_kind: None,
+            step_agent: None,
+            step_api_plugin_slug: None,
+            step_api_endpoint_path: None,
+        }
+    }
+
+    #[test]
+    fn snapshot_agent_step_records_agent_only() {
+        let step = mk_step_for_snapshot(StepType::Agent);
+        let mut r = empty_result();
+        apply_step_snapshot(&step, &mut r);
+        assert_eq!(r.step_kind.as_deref(), Some("Agent"));
+        assert_eq!(r.step_agent, Some(AgentType::Codex));
+        // ApiCall fields stay None for Agent steps even when the step
+        // happens to carry stale api_* values (legacy edits).
+        assert!(r.step_api_plugin_slug.is_none());
+        assert!(r.step_api_endpoint_path.is_none());
+    }
+
+    #[test]
+    fn snapshot_apicall_step_records_plugin_and_endpoint_no_agent() {
+        let step = mk_step_for_snapshot(StepType::ApiCall);
+        let mut r = empty_result();
+        apply_step_snapshot(&step, &mut r);
+        assert_eq!(r.step_kind.as_deref(), Some("ApiCall"));
+        assert!(r.step_agent.is_none(),
+            "ApiCall has no agent — leaving step_agent null is what powers the per-step badge");
+        assert_eq!(r.step_api_plugin_slug.as_deref(), Some("mcp-github"));
+        assert_eq!(r.step_api_endpoint_path.as_deref(), Some("/repos/anthropics/cookbook/issues"));
+    }
+
+    #[test]
+    fn snapshot_notify_step_records_notify_kind_no_agent_no_plugin() {
+        let step = mk_step_for_snapshot(StepType::Notify);
+        let mut r = empty_result();
+        apply_step_snapshot(&step, &mut r);
+        assert_eq!(r.step_kind.as_deref(), Some("Notify"));
+        assert!(r.step_agent.is_none());
+        assert!(r.step_api_plugin_slug.is_none());
+    }
+
+    #[test]
+    fn snapshot_batch_step_records_batch_kind_no_agent_no_plugin() {
+        let step = mk_step_for_snapshot(StepType::BatchQuickPrompt);
+        let mut r = empty_result();
+        apply_step_snapshot(&step, &mut r);
+        assert_eq!(r.step_kind.as_deref(), Some("BatchQuickPrompt"));
+        assert!(r.step_agent.is_none());
+        assert!(r.step_api_plugin_slug.is_none());
     }
 
     // ─── max_iterations_for ──────────────────────────────────────────────

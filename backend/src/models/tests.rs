@@ -346,3 +346,172 @@ fn ws_message_presence_offline() {
         _ => panic!("Expected Presence variant"),
     }
 }
+
+// ─── ApiCall step models (désagentification) ─────────────────────────────
+//
+// Guards the serde contract — a drift here cascades into every workflow
+// stored in the DB and into the TypeScript bindings consumed by the React
+// wizard. Every new field on `ExtractSpec` / `PaginationSpec` should add
+// a matching case here.
+
+#[test]
+fn extract_spec_roundtrip_full() {
+    let spec = ExtractSpec {
+        path: "$.issues[*].key".into(),
+        fallback: Some(serde_json::json!([])),
+        fail_on_empty: true,
+    };
+    let json = serde_json::to_string(&spec).unwrap();
+    let parsed: ExtractSpec = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, spec);
+}
+
+#[test]
+fn extract_spec_roundtrip_minimal_omits_fallback() {
+    // `fallback: None` should serialize as absent (skip_serializing_if),
+    // not as explicit `null`. Keeps the wire format clean for users.
+    let spec = ExtractSpec { path: "$.total".into(), fallback: None, fail_on_empty: false };
+    let json = serde_json::to_string(&spec).unwrap();
+    assert!(!json.contains("fallback"), "expected fallback absent from output, got {json}");
+    let parsed: ExtractSpec = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, spec);
+}
+
+#[test]
+fn extract_spec_deserializes_when_fail_on_empty_absent() {
+    // Old rows written before `fail_on_empty` existed must still load with
+    // the documented default (`false`). `#[serde(default)]` guarantees it.
+    let parsed: ExtractSpec = serde_json::from_str(r#"{"path":"$.items"}"#).unwrap();
+    assert_eq!(parsed.path, "$.items");
+    assert!(!parsed.fail_on_empty);
+    assert!(parsed.fallback.is_none());
+}
+
+#[test]
+fn pagination_spec_none_and_auto_roundtrip() {
+    for (spec, expected_substring) in [
+        (PaginationSpec::None, r#""type":"None""#),
+        (PaginationSpec::Auto { max_pages: Some(25) }, r#""type":"Auto""#),
+        (PaginationSpec::Auto { max_pages: None }, r#""type":"Auto""#),
+    ] {
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(json.contains(expected_substring), "serialized {spec:?} as {json}");
+        let parsed: PaginationSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, spec);
+    }
+}
+
+#[test]
+fn pagination_spec_offset_cursor_page_roundtrip() {
+    let variants = vec![
+        PaginationSpec::Offset {
+            start_param: "startAt".into(),
+            limit_param: "maxResults".into(),
+            limit: 50,
+            total_path: "$.total".into(),
+            max_pages: Some(20),
+        },
+        PaginationSpec::Cursor {
+            cursor_param: "after".into(),
+            next_path: "$.pageInfo.endCursor".into(),
+            max_pages: None,
+        },
+        PaginationSpec::Page {
+            page_param: "page".into(),
+            page_size_param: "per_page".into(),
+            page_size: 100,
+            has_more_path: "$.has_more".into(),
+            max_pages: Some(10),
+        },
+    ];
+    for spec in variants {
+        let json = serde_json::to_string(&spec).unwrap();
+        let parsed: PaginationSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, spec, "roundtrip mismatch for json={json}");
+    }
+}
+
+#[test]
+fn workflow_step_deserializes_without_api_fields_backcompat() {
+    // Regression guard: a workflow JSON row written before the ApiCall
+    // fields existed must deserialize cleanly, with every `api_*` field
+    // defaulting to `None`. Losing this means every stored workflow in
+    // every user's DB becomes unreadable at upgrade. `#[serde(default)]`
+    // on each Option enforces it.
+    let legacy = r#"{
+      "name": "Old agent step",
+      "step_type": {"type": "Agent"},
+      "agent": "ClaudeCode",
+      "prompt_template": "hello",
+      "mode": {"type": "Normal"}
+    }"#;
+    let step: WorkflowStep = serde_json::from_str(legacy).unwrap();
+    assert_eq!(step.name, "Old agent step");
+    assert!(step.api_plugin_slug.is_none());
+    assert!(step.api_config_id.is_none());
+    assert!(step.api_extract.is_none());
+    assert!(step.api_pagination.is_none());
+    assert!(step.api_timeout_ms.is_none());
+    assert!(step.api_max_retries.is_none());
+    assert!(step.api_output_var.is_none());
+}
+
+#[test]
+fn workflow_step_api_call_roundtrip() {
+    let mut query = std::collections::HashMap::new();
+    query.insert("jql".into(), "project = KRONN".into());
+
+    let step = WorkflowStep {
+        name: "fetch_issues".into(),
+        step_type: StepType::ApiCall,
+        description: Some("Pull open bugs".into()),
+        agent: AgentType::ClaudeCode,
+        prompt_template: String::new(),
+        mode: StepMode::Normal,
+        output_format: StepOutputFormat::Structured,
+        mcp_config_ids: vec![],
+        agent_settings: None,
+        on_result: vec![],
+        stall_timeout_secs: None,
+        retry: None,
+        delay_after_secs: None,
+        skill_ids: vec![],
+        profile_ids: vec![],
+        directive_ids: vec![],
+        batch_quick_prompt_id: None,
+        batch_items_from: None,
+        batch_wait_for_completion: None,
+        batch_max_items: None,
+        batch_workspace_mode: None,
+        batch_chain_prompt_ids: vec![],
+        notify_config: None,
+        api_plugin_slug: Some("jira".into()),
+        api_config_id: Some("cfg-123".into()),
+        api_endpoint_path: Some("/rest/api/3/search".into()),
+        api_method: Some("GET".into()),
+        api_path_params: None,
+        api_query: Some(query),
+        api_headers: None,
+        api_body: None,
+        api_extract: Some(ExtractSpec {
+            path: "$.issues[*].key".into(),
+            fallback: Some(serde_json::json!([])),
+            fail_on_empty: false,
+        }),
+        api_pagination: Some(PaginationSpec::Auto { max_pages: Some(5) }),
+        api_timeout_ms: Some(15_000),
+        api_max_retries: Some(3),
+        api_output_var: Some("issues".into()),
+    };
+    let json = serde_json::to_string(&step).unwrap();
+    let parsed: WorkflowStep = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed.api_plugin_slug.as_deref(), Some("jira"));
+    assert_eq!(parsed.api_endpoint_path.as_deref(), Some("/rest/api/3/search"));
+    assert_eq!(parsed.api_output_var.as_deref(), Some("issues"));
+    let extract = parsed.api_extract.unwrap();
+    assert_eq!(extract.path, "$.issues[*].key");
+    match parsed.api_pagination.unwrap() {
+        PaginationSpec::Auto { max_pages } => assert_eq!(max_pages, Some(5)),
+        other => panic!("expected Auto, got {other:?}"),
+    }
+}

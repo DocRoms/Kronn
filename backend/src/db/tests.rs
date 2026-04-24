@@ -513,6 +513,89 @@ fn mcp_server_upsert_and_list() {
 }
 
 #[test]
+fn sync_registry_refreshes_api_spec_on_existing_rows_only() {
+    // Regression for the GitHub case: a user configures a plugin BEFORE
+    // the registry gains `api_spec` for it. The DB row sticks with the
+    // old shape (api_spec: None) and the workflow wizard's plugin picker
+    // silently filters it out. The startup sync must re-mirror the
+    // registry's current api_spec onto every existing row, without
+    // creating rows for plugins the user never configured.
+    use crate::models::{ApiAuthKind, ApiEndpoint, ApiSpec, McpDefinition, McpServer, McpSource, McpTransport};
+    let conn = test_db();
+
+    // Pre-existing row, no api_spec — mirrors the "configured before
+    // registry enrichment" state.
+    let stale = McpServer {
+        id: "mcp-foo".into(),
+        name: "Foo".into(),
+        description: "old".into(),
+        transport: McpTransport::Stdio { command: "npx".into(), args: vec!["-y".into(), "foo".into()] },
+        source: McpSource::Registry,
+        api_spec: None,
+    };
+    crate::db::mcps::upsert_server(&conn, &stale).unwrap();
+
+    // Registry gained api_spec for this plugin + lists a brand-new
+    // plugin the user has never configured.
+    let registry = vec![
+        McpDefinition {
+            id: "mcp-foo".into(),
+            name: "Foo".into(),
+            description: "fresh".into(),
+            transport: McpTransport::Stdio { command: "npx".into(), args: vec!["-y".into(), "foo".into()] },
+            env_keys: vec!["FOO_TOKEN".into()],
+            tags: vec![],
+            token_url: None,
+            token_help: None,
+            publisher: "Test".into(),
+            official: false,
+            alt_packages: vec![],
+            default_context: None,
+            api_spec: Some(ApiSpec {
+                base_url: "https://api.foo".into(),
+                auth: ApiAuthKind::Bearer { env_key: "FOO_TOKEN".into() },
+                docs_url: None,
+                config_keys: vec![],
+                endpoints: vec![ApiEndpoint { path: "/me".into(), method: "GET".into(), description: "x".into() }],
+            }),
+        },
+        // User never created a config for this one — sync must NOT
+        // insert it (the user picks plugins explicitly in Settings).
+        McpDefinition {
+            id: "mcp-never-added".into(),
+            name: "Never Added".into(),
+            description: "x".into(),
+            transport: McpTransport::Stdio { command: "x".into(), args: vec![] },
+            env_keys: vec![],
+            tags: vec![],
+            token_url: None,
+            token_help: None,
+            publisher: "Test".into(),
+            official: false,
+            alt_packages: vec![],
+            default_context: None,
+            api_spec: Some(ApiSpec {
+                base_url: "https://api.never".into(),
+                auth: ApiAuthKind::None,
+                docs_url: None,
+                config_keys: vec![],
+                endpoints: vec![],
+            }),
+        },
+    ];
+
+    let updated = crate::db::mcps::sync_registry_servers_to_db(&conn, &registry).unwrap();
+    assert_eq!(updated, 1, "only the existing row gets refreshed");
+
+    let after = crate::db::mcps::list_servers(&conn).unwrap();
+    assert_eq!(after.len(), 1, "sync must NOT create rows for unconfigured plugins");
+    let foo = &after[0];
+    assert!(foo.api_spec.is_some(), "stale row gets the new api_spec");
+    assert_eq!(foo.api_spec.as_ref().unwrap().base_url, "https://api.foo");
+    assert_eq!(foo.description, "fresh", "description also re-mirrored");
+}
+
+#[test]
 fn mcp_config_insert_with_projects() {
     let conn = test_db();
     // Create server and projects first
@@ -930,6 +1013,19 @@ fn sample_workflow(id: &str) -> Workflow {
             batch_workspace_mode: None,
             batch_chain_prompt_ids: vec![],
             notify_config: None,
+            api_plugin_slug: None,
+            api_config_id: None,
+            api_endpoint_path: None,
+            api_method: None,
+            api_path_params: None,
+            api_query: None,
+            api_headers: None,
+            api_body: None,
+            api_extract: None,
+            api_pagination: None,
+            api_timeout_ms: None,
+            api_max_retries: None,
+            api_output_var: None,
         }],
         actions: vec![],
         safety: WorkflowSafety {
@@ -1044,6 +1140,10 @@ fn workflow_runs_update() {
         duration_ms: 1234,
         condition_result: None,
         envelope_detected: None,
+        step_kind: None,
+        step_agent: None,
+        step_api_plugin_slug: None,
+        step_api_endpoint_path: None,
     }];
     crate::db::workflows::update_run(&conn, &run).unwrap();
 
@@ -1860,6 +1960,19 @@ fn workflow_multi_step_roundtrip() {
                 batch_workspace_mode: None,
                 batch_chain_prompt_ids: vec![],
                 notify_config: None,
+            api_plugin_slug: None,
+            api_config_id: None,
+            api_endpoint_path: None,
+            api_method: None,
+            api_path_params: None,
+            api_query: None,
+            api_headers: None,
+            api_body: None,
+            api_extract: None,
+            api_pagination: None,
+            api_timeout_ms: None,
+            api_max_retries: None,
+            api_output_var: None,
             },
             WorkflowStep {
                 step_type: StepType::default(),
@@ -1888,6 +2001,19 @@ fn workflow_multi_step_roundtrip() {
                 batch_workspace_mode: None,
                 batch_chain_prompt_ids: vec![],
                 notify_config: None,
+            api_plugin_slug: None,
+            api_config_id: None,
+            api_endpoint_path: None,
+            api_method: None,
+            api_path_params: None,
+            api_query: None,
+            api_headers: None,
+            api_body: None,
+            api_extract: None,
+            api_pagination: None,
+            api_timeout_ms: None,
+            api_max_retries: None,
+            api_output_var: None,
             },
             WorkflowStep {
                 step_type: StepType::default(),
@@ -1913,6 +2039,19 @@ fn workflow_multi_step_roundtrip() {
                 batch_workspace_mode: None,
                 batch_chain_prompt_ids: vec![],
                 notify_config: None,
+            api_plugin_slug: None,
+            api_config_id: None,
+            api_endpoint_path: None,
+            api_method: None,
+            api_path_params: None,
+            api_query: None,
+            api_headers: None,
+            api_body: None,
+            api_extract: None,
+            api_pagination: None,
+            api_timeout_ms: None,
+            api_max_retries: None,
+            api_output_var: None,
             },
         ],
         actions: vec![],
@@ -1975,6 +2114,19 @@ fn workflow_update_steps_count() {
         batch_workspace_mode: None,
         batch_chain_prompt_ids: vec![],
         notify_config: None,
+            api_plugin_slug: None,
+            api_config_id: None,
+            api_endpoint_path: None,
+            api_method: None,
+            api_path_params: None,
+            api_query: None,
+            api_headers: None,
+            api_body: None,
+            api_extract: None,
+            api_pagination: None,
+            api_timeout_ms: None,
+            api_max_retries: None,
+            api_output_var: None,
     });
     crate::db::workflows::update_workflow(&conn, &wf).unwrap();
 
