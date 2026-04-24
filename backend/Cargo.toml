@@ -51,6 +51,12 @@ base64 = "0.22"
 # HTTP client (for tracker APIs)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
+# ApiCall step (désagentification) — JSONPath extraction, rate limiting, retry, secret redaction
+serde_json_path = "0.7"   # RFC 9535 JSONPath, runs on serde_json::Value directly
+governor = "0.8"          # Token-bucket rate limiter, per-(plugin,config) keys
+backoff = { version = "0.4", features = ["tokio"] }  # Exponential retry on 5xx/429
+secrecy = "0.10"          # Wrap decrypted env so it's never Debug-logged
+
 # WebSocket client (for peer-to-peer connections between Kronn instances)
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 async-trait = "0.1"
@@ -79,6 +85,7 @@ serial_test = "3"
 tempfile = "3"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 futures = "0.3"
+wiremock = "0.6"          # HTTP mock server for ApiCall step tests
 
 # ── Build profiles ───────────────────────────────────────────────────────────
 

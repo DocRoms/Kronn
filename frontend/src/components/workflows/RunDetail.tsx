@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useT } from '../../lib/I18nContext';
 import type { WorkflowRun, WorkflowStep } from '../../types/generated';
-import { Trash2, ChevronRight, Square } from 'lucide-react';
+import { Trash2, ChevronRight, Square, Loader2, Plug, Send, Layers } from 'lucide-react';
+import { AGENT_LABELS, AGENT_COLORS } from '../../lib/constants';
 import '../../pages/WorkflowsPage.css';
 
 const STATUS_COLORS: Record<string, string> = {
@@ -19,6 +20,55 @@ export interface RunDetailProps {
   onDelete: () => void;
   /** Cancel a Running workflow run. Button is only rendered for Running status. */
   onCancel?: () => void;
+}
+
+/** Live counter for the step that's currently running. The exact start
+ *  timestamp isn't tracked in `step_results` (which only carries
+ *  `duration_ms` post-completion), so we estimate: start = run.started_at
+ *  + sum of completed steps' durations. Good enough to show the user
+ *  "this step has been running for 23s" — way better than a static
+ *  "running..." that screams "the page is frozen". Ticks every second
+ *  via setInterval; effect cleaned up on unmount or status change. */
+function LiveStepStatus({
+  run,
+  step,
+  stepIndex,
+  t,
+}: {
+  run: WorkflowRun;
+  step: WorkflowStep;
+  stepIndex: number;
+  t: (key: string, ...args: (string | number)[]) => string;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const runStart = new Date(run.started_at).getTime();
+  const completedDurationMs = run.step_results
+    .slice(0, stepIndex)
+    .reduce((acc, sr) => acc + (sr.duration_ms || 0), 0);
+  const stepStart = runStart + completedDurationMs;
+  const elapsedSec = Math.max(0, Math.floor((now - stepStart) / 1000));
+
+  // Step-type-aware activity hint. Generic "running..." was a black
+  // box — telling the user *what kind* of activity is in flight (HTTP
+  // call, agent reasoning, webhook, fan-out) keeps them oriented.
+  const kind = step.step_type?.type ?? 'Agent';
+  const activity = kind === 'ApiCall' ? t('wf.liveStep.api')
+    : kind === 'Notify' ? t('wf.liveStep.notify')
+    : kind === 'BatchQuickPrompt' ? t('wf.liveStep.batch')
+    : t('wf.liveStep.agent');
+
+  return (
+    <span className="wf-live-step-status">
+      <Loader2 size={10} className="spin" style={{ color: 'var(--kr-warning)' }} />
+      <span className="wf-live-step-activity">{activity}</span>
+      <span className="wf-live-step-elapsed">{elapsedSec}s</span>
+    </span>
+  );
 }
 
 export function RunDetail({ run, workflowSteps, onDelete, onCancel }: RunDetailProps) {
@@ -114,7 +164,9 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel }: RunDetailP
                 {completed && completed.duration_ms > 0 && (
                   <span className="text-ghost text-xs">{(completed.duration_ms / 1000).toFixed(1)}s</span>
                 )}
-                {isNext && <span className="text-2xs" style={{ color: 'rgba(var(--kr-warning-rgb), 0.5)' }}>running...</span>}
+                {isNext && (
+                  <LiveStepStatus run={run} step={ws_step} stepIndex={i} t={t} />
+                )}
               </div>
             );
           })}
@@ -139,6 +191,37 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel }: RunDetailP
                     style={{ background: STATUS_COLORS[sr.status] ?? 'var(--kr-text-faint)' }}
                   />
                   <span className="font-semibold">{sr.step_name}</span>
+                  {/* Snapshot of what was actually used for this step at
+                      run time — frozen on the row so editing the workflow
+                      afterwards (swapping agent, retargeting plugin) keeps
+                      the run history honest. Null = legacy row written
+                      before the field shipped — fall back to nothing. */}
+                  {sr.step_kind === 'ApiCall' && (
+                    <span className="wf-step-kind-badge" data-kind="api">
+                      <Plug size={9} /> API
+                      {(sr.step_api_plugin_slug || sr.step_api_endpoint_path) && (
+                        <span className="text-xs text-ghost" style={{ fontWeight: 400, marginLeft: 4 }}>
+                          {sr.step_api_plugin_slug ?? '?'}
+                          {sr.step_api_endpoint_path ? ` · ${sr.step_api_endpoint_path}` : ''}
+                        </span>
+                      )}
+                    </span>
+                  )}
+                  {sr.step_kind === 'Notify' && (
+                    <span className="wf-step-kind-badge" data-kind="notify">
+                      <Send size={9} /> NOTIFY
+                    </span>
+                  )}
+                  {sr.step_kind === 'BatchQuickPrompt' && (
+                    <span className="wf-step-kind-badge">
+                      <Layers size={9} /> BATCH
+                    </span>
+                  )}
+                  {sr.step_kind === 'Agent' && sr.step_agent && (
+                    <span className="text-xs font-semibold" style={{ color: AGENT_COLORS[sr.step_agent] ?? 'var(--kr-text-faint)' }}>
+                      {AGENT_LABELS[sr.step_agent] ?? sr.step_agent}
+                    </span>
+                  )}
                   <span className="text-ghost">
                     {sr.duration_ms > 0 ? `${(sr.duration_ms / 1000).toFixed(1)}s` : ''}
                   </span>

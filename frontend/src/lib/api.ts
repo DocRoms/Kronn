@@ -786,6 +786,20 @@ export const workflows = {
    *  rendered prompt, QP info, errors. NO discussion is created. */
   testBatchStep: (req: { step: WorkflowStep; mock_previous_output?: string | null; previous_step_name?: string | null }) =>
     api<BatchPreview>('POST', '/workflows/test-batch-step', req),
+  /** Pure JSONPath extraction on a client-provided JSON sample — no network,
+   *  no DB. Drives the wizard's live preview box so users can refine their
+   *  path without re-hitting the API. Returns a 200 even on invalid path
+   *  (error goes into the `error` field for inline display). */
+  testExtract: (req: { sample: unknown; path: string; fallback?: unknown; fail_on_empty?: boolean }) =>
+    api<{ value: unknown; value_type: string; is_empty: boolean; error: string | null }>(
+      'POST', '/workflow-steps/test-extract', req,
+    ),
+  /** Run an ApiCall step end-to-end (real HTTP, real auth) and return the
+   *  structured envelope. Drives the wizard's "Tester" button. */
+  testApiCall: (req: { step: WorkflowStep; project_id: string }) =>
+    api<{ success: boolean; duration_ms: number; envelope: { data: unknown; status: string; summary: string } | null; error: string | null }>(
+      'POST', '/workflow-steps/test-api-call', req,
+    ),
   suggestions: (projectId: string) => api<WorkflowSuggestion[]>('GET', `/projects/${projectId}/workflow-suggestions`),
   /** Batch runs with parent workflow meta (name + run sequence) — feeds the
    *  sidebar pastille that jumps from a batch group back to its spawning workflow. */
@@ -961,6 +975,9 @@ export const rtk = {
    *  time of writing) and spawns one `rtk init -g ...` per agent. */
   activate: (agents: AgentType[]) =>
     api<RtkActivateResponse>('POST', '/rtk/activate', { agents }),
+  /** Remove RTK hooks from the given agents. Mirrors `activate` shape. */
+  deactivate: (agents: AgentType[]) =>
+    api<RtkActivateResponse>('POST', '/rtk/deactivate', { agents }),
   /** Read the global savings counter RTK keeps in its own SQLite. */
   savings: () => api<RtkSavings>('GET', '/rtk/savings'),
 };

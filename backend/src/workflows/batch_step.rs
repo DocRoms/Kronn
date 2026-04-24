@@ -224,6 +224,10 @@ pub async fn execute_batch_quick_prompt_step(
                 // payload that `set_step_output` can extract via Strategy 2
                 // — the contract is met even without `---STEP_OUTPUT---`.
                 envelope_detected: Some(true),
+                step_kind: None,
+                step_agent: None,
+                step_api_plugin_slug: None,
+                step_api_endpoint_path: None,
             },
             condition_action: None,
         };
@@ -302,6 +306,10 @@ pub async fn execute_batch_quick_prompt_step(
             duration_ms: start.elapsed().as_millis() as u64,
             condition_result: None,
             envelope_detected: Some(true),
+            step_kind: None,
+            step_agent: None,
+            step_api_plugin_slug: None,
+            step_api_endpoint_path: None,
         },
         condition_action: None,
     }
@@ -318,6 +326,10 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
             duration_ms: start.elapsed().as_millis() as u64,
             condition_result: None,
             envelope_detected: None,
+            step_kind: None,
+            step_agent: None,
+            step_api_plugin_slug: None,
+            step_api_endpoint_path: None,
         },
         condition_action: None,
     }

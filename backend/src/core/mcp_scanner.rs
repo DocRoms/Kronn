@@ -1343,6 +1343,17 @@ pub fn build_api_context_block(
                 let val = env.get(env_key).map(|s| s.as_str()).unwrap_or("<MISSING>");
                 out.push_str(&format!("Auth: send header `Authorization: Bearer {}` on every request.\n", val));
             }
+            ApiAuthKind::Basic { user_env, password_env } => {
+                // Compose the encoded value here — the agent needs the
+                // exact wire-format header to craft `curl -H` calls.
+                // Both halves come from the encrypted env; an unset key
+                // surfaces as `<MISSING>` so the agent knows what to fix.
+                let user = env.get(user_env).map(|s| s.as_str()).unwrap_or("<MISSING>");
+                let password = env.get(password_env).map(|s| s.as_str()).unwrap_or("<MISSING>");
+                use base64::{engine::general_purpose::STANDARD, Engine as _};
+                let encoded = STANDARD.encode(format!("{user}:{password}"));
+                out.push_str(&format!("Auth: send header `Authorization: Basic {}` on every request (HTTP Basic, base64 of `{}:<token>`).\n", encoded, user));
+            }
             ApiAuthKind::OAuth2ClientCredentials { extra_headers, .. } => {
                 // By this point the async resolver (see make_agent_stream)
                 // has already called `core::oauth2_cache::resolve_token`

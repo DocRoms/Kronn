@@ -1211,6 +1211,19 @@ pub async fn suggestions(
                 batch_workspace_mode: None,
                 batch_chain_prompt_ids: vec![],
                 notify_config: None,
+                api_plugin_slug: None,
+                api_config_id: None,
+                api_endpoint_path: None,
+                api_method: None,
+                api_query: None,
+                api_path_params: None,
+                api_headers: None,
+                api_body: None,
+                api_extract: None,
+                api_pagination: None,
+                api_timeout_ms: None,
+                api_max_retries: None,
+                api_output_var: None,
             }).collect(),
         });
     }
@@ -1243,6 +1256,158 @@ pub(crate) fn build_dry_run_preamble(output_format: &StepOutputFormat) -> &'stat
 - Tu dois DÉCRIRE précisément ce que tu FERAIS en mode réel : quelles actions, sur quels éléments, avec quel contenu.\n\
 - Formate ta réponse comme un plan d'exécution détaillé.\n\n---\n\n",
     }
+}
+
+// ─── ApiCall step test endpoints (P0.5 — désagentification) ──────────────
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Deserialize, ts_rs::TS)]
+#[ts(export)]
+pub struct TestExtractRequest {
+    /// Sample JSON the user is refining the path against — either pasted
+    /// from docs or the response of a previous `test-api-call`.
+    pub sample: serde_json::Value,
+    /// JSONPath expression, e.g. `$.issues[*].key`.
+    pub path: String,
+    /// Optional fallback when the path matches nothing.
+    #[serde(default)]
+    pub fallback: Option<serde_json::Value>,
+    /// When true, empty extractions count as NO_RESULTS in the response.
+    #[serde(default)]
+    pub fail_on_empty: bool,
+}
+
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct TestExtractResponse {
+    /// Resolved value. `null` when the path matched nothing (unless
+    /// `fallback` was set, in which case fallback is returned).
+    pub value: serde_json::Value,
+    /// Human-readable type tag for the wizard preview: `"number"`,
+    /// `"string"`, `"boolean"`, `"array(N)"`, `"object"`, `"null"`.
+    pub value_type: String,
+    /// True when no match was found (even if a fallback rescued the
+    /// value). Drives the "0 results — will skip next step" hint.
+    pub is_empty: bool,
+    /// Only set when the JSONPath is syntactically invalid — the wizard
+    /// shows this inline under the input.
+    pub error: Option<String>,
+}
+
+/// POST /api/workflow-steps/test-extract
+/// Pure function — runs the JSONPath on the supplied sample without any
+/// network or DB access. Drives the wizard's live-preview box so users
+/// can refine their path without re-hitting the API.
+pub async fn test_extract(
+    Json(req): Json<TestExtractRequest>,
+) -> Json<ApiResponse<TestExtractResponse>> {
+    use crate::workflows::api_call_step::{apply_extract, ExtractError};
+    let spec = ExtractSpec {
+        path: req.path,
+        fallback: req.fallback,
+        fail_on_empty: req.fail_on_empty,
+    };
+    match apply_extract(&spec, &req.sample) {
+        Ok(outcome) => Json(ApiResponse::ok(TestExtractResponse {
+            value_type: value_type_tag(&outcome.value),
+            value: outcome.value,
+            is_empty: outcome.is_empty,
+            error: None,
+        })),
+        Err(ExtractError::InvalidPath { path, reason }) => {
+            // We keep the handler returning 200 — the wizard shows the
+            // error inline under the input, not via an HTTP status that
+            // triggers the global error toast.
+            Json(ApiResponse::ok(TestExtractResponse {
+                value: serde_json::Value::Null,
+                value_type: "error".into(),
+                is_empty: true,
+                error: Some(format!("Invalid JSONPath `{path}`: {reason}")),
+            }))
+        }
+    }
+}
+
+fn value_type_tag(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Null => "null".into(),
+        serde_json::Value::Bool(_) => "boolean".into(),
+        serde_json::Value::Number(_) => "number".into(),
+        serde_json::Value::String(_) => "string".into(),
+        serde_json::Value::Array(a) => format!("array({})", a.len()),
+        serde_json::Value::Object(_) => "object".into(),
+    }
+}
+
+#[derive(Debug, Deserialize, ts_rs::TS)]
+#[ts(export)]
+pub struct TestApiCallRequest {
+    /// The (partial) step configuration the user is building in the wizard.
+    /// Must at least declare `api_plugin_slug`, `api_config_id`, and
+    /// `api_endpoint_path`.
+    pub step: WorkflowStep,
+    /// Project context — plugin instances are scoped per project. Required.
+    pub project_id: String,
+}
+
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct TestApiCallResponse {
+    /// Matches the `StepOutcome.result.status` after normalization —
+    /// `true` when the HTTP call succeeded and extract (if any) ran
+    /// without error. NO_RESULTS still counts as success here; the
+    /// wizard surfaces it via `envelope.status`.
+    pub success: bool,
+    /// Milliseconds elapsed end-to-end.
+    pub duration_ms: u64,
+    /// `{data, status, summary}` envelope (parsed from the step output).
+    /// On failure this is `null` and `error` holds the message.
+    pub envelope: Option<serde_json::Value>,
+    /// Error message when `success == false`. Same string that would
+    /// land in the step's output column if this were a real run.
+    pub error: Option<String>,
+}
+
+/// POST /api/workflow-steps/test-api-call
+/// Runs a single ApiCall step end-to-end (real HTTP, real auth, real
+/// extract) and echoes the structured envelope. Drives the wizard's
+/// "Tester" button. Production security policy — a localhost target
+/// fails here too so users can't design a workflow that'll refuse to
+/// run in production.
+pub async fn test_api_call(
+    State(state): State<AppState>,
+    Json(req): Json<TestApiCallRequest>,
+) -> Json<ApiResponse<TestApiCallResponse>> {
+    use crate::workflows::api_call_executor::{
+        execute_api_call_step_with_db, SecurityPolicy,
+    };
+    use crate::workflows::template::TemplateContext;
+
+    let ctx = TemplateContext::new();
+    let outcome = execute_api_call_step_with_db(
+        &req.step,
+        Some(&req.project_id),
+        &state,
+        &ctx,
+        SecurityPolicy::production(),
+    )
+    .await;
+
+    let success = outcome.result.status == RunStatus::Success;
+    let envelope: Option<serde_json::Value> = if success {
+        serde_json::from_str(&outcome.result.output).ok()
+    } else {
+        None
+    };
+    let error = if success { None } else { Some(outcome.result.output) };
+
+    Json(ApiResponse::ok(TestApiCallResponse {
+        success,
+        duration_ms: outcome.result.duration_ms,
+        envelope,
+        error,
+    }))
 }
 
 #[cfg(test)]
@@ -1356,5 +1521,80 @@ mod tests {
             .collect();
         assert!(matches.contains(&"orphan-prs"), "GitHub+Jira should suggest orphan PRs");
         assert!(matches.contains(&"changelog-release"), "GitHub+Jira should still suggest changelog");
+    }
+
+    // ─── test_extract handler (P0.5) ────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_extract_returns_scalar_with_type_tag() {
+        let req = TestExtractRequest {
+            sample: serde_json::json!({ "total": 42, "issues": [] }),
+            path: "$.total".into(),
+            fallback: None,
+            fail_on_empty: false,
+        };
+        let resp = test_extract(Json(req)).await.0;
+        let body = resp.data.expect("test_extract should succeed");
+        assert_eq!(body.value, serde_json::json!(42));
+        assert_eq!(body.value_type, "number");
+        assert!(!body.is_empty);
+        assert!(body.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_extract_reports_array_type_with_length() {
+        let req = TestExtractRequest {
+            sample: serde_json::json!({ "items": [{ "k": "a" }, { "k": "b" }, { "k": "c" }] }),
+            path: "$.items[*].k".into(),
+            fallback: None,
+            fail_on_empty: false,
+        };
+        let resp = test_extract(Json(req)).await.0;
+        let body = resp.data.unwrap();
+        assert_eq!(body.value, serde_json::json!(["a", "b", "c"]));
+        assert_eq!(body.value_type, "array(3)");
+    }
+
+    #[tokio::test]
+    async fn test_extract_surfaces_invalid_jsonpath_inline() {
+        // The wizard shows this message under the input — NOT a global
+        // toast. Returning 200 + error field (vs 4xx) is deliberate.
+        let req = TestExtractRequest {
+            sample: serde_json::json!({}),
+            path: "$[**$bad".into(),
+            fallback: None,
+            fail_on_empty: false,
+        };
+        let resp = test_extract(Json(req)).await.0;
+        let body = resp.data.unwrap();
+        assert!(body.error.is_some(), "expected inline error");
+        assert!(body.error.unwrap().contains("Invalid JSONPath"));
+        assert_eq!(body.value, serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn test_extract_empty_match_with_fallback_returns_fallback_marked_empty() {
+        let req = TestExtractRequest {
+            sample: serde_json::json!({ "issues": [] }),
+            path: "$.issues[*].key".into(),
+            fallback: Some(serde_json::json!([])),
+            fail_on_empty: false,
+        };
+        let resp = test_extract(Json(req)).await.0;
+        let body = resp.data.unwrap();
+        assert_eq!(body.value, serde_json::json!([]));
+        assert!(body.is_empty, "is_empty flag must be set so wizard can warn");
+    }
+
+    #[tokio::test]
+    async fn test_extract_value_type_tag_covers_all_variants() {
+        // Regression guard — the wizard uses these tags to render a
+        // pill. A change to the set breaks the UI silently.
+        assert_eq!(value_type_tag(&serde_json::Value::Null), "null");
+        assert_eq!(value_type_tag(&serde_json::json!(true)), "boolean");
+        assert_eq!(value_type_tag(&serde_json::json!(1)), "number");
+        assert_eq!(value_type_tag(&serde_json::json!("s")), "string");
+        assert_eq!(value_type_tag(&serde_json::json!([1, 2])), "array(2)");
+        assert_eq!(value_type_tag(&serde_json::json!({ "k": 1 })), "object");
     }
 }

@@ -1143,6 +1143,98 @@ args = ["@example/old-mcp"]
     }
 
     #[test]
+    fn github_builtin_has_bearer_api_spec_alongside_mcp_transport() {
+        // Regression guard: GitHub is the first hybrid plugin (Stdio MCP
+        // for agents in Quick Prompts + REST API for ApiCall workflow
+        // steps). Both layers must coexist on the same `mcp-github`
+        // entry and share the `GITHUB_PERSONAL_ACCESS_TOKEN`. If a future
+        // refactor accidentally drops the api_spec, ApiCall steps for
+        // GitHub silently disappear from the wizard's plugin picker.
+        use crate::models::{ApiAuthKind, McpTransport};
+        let reg = crate::core::registry::builtin_registry();
+        let gh = reg.iter().find(|d| d.id == "mcp-github")
+            .expect("GitHub must be in the builtin registry");
+        // Hybrid: Stdio transport stays for the MCP server.
+        assert!(matches!(gh.transport, McpTransport::Stdio { .. }),
+            "GitHub keeps the Stdio MCP transport for agent-side usage");
+        // REST API spec is what makes ApiCall steps possible.
+        let spec = gh.api_spec.as_ref()
+            .expect("GitHub must have api_spec populated for ApiCall steps");
+        assert_eq!(spec.base_url, "https://api.github.com");
+        // Same token powers MCP + REST — never split into two env keys.
+        match &spec.auth {
+            ApiAuthKind::Bearer { env_key } => {
+                assert_eq!(env_key, "GITHUB_PERSONAL_ACCESS_TOKEN",
+                    "GitHub Bearer auth must reuse the MCP env key");
+            }
+            other => panic!("GitHub must use Bearer auth, got {:?}", other),
+        }
+        // Verify the curated workflow-relevant endpoints survive any
+        // future trim. Path placeholders (`{owner}`, `{repo}`, …) are
+        // resolved by the user in the wizard's editable endpoint
+        // combobox at step build time.
+        let paths: Vec<&str> = spec.endpoints.iter().map(|e| e.path.as_str()).collect();
+        assert!(paths.contains(&"/user"), "/user is the sanity check");
+        assert!(paths.contains(&"/repos/{owner}/{repo}/issues"));
+        assert!(paths.contains(&"/repos/{owner}/{repo}/pulls"));
+        assert!(paths.contains(&"/search/issues"));
+        assert!(paths.contains(&"/repos/{owner}/{repo}/actions/runs"));
+        // docs_url is mandatory so the AI helper can redirect users
+        // (the GitHub REST docs are huge — better to bounce there than
+        // hallucinate endpoints that don't exist).
+        assert!(spec.docs_url.is_some());
+        // No config_keys: GitHub doesn't need per-instance non-secret
+        // config (unlike Chartbeat HOST or Google Search CX) — the
+        // owner/repo lives in the path itself.
+        assert!(spec.config_keys.is_empty(),
+            "GitHub has no per-instance config keys (owner/repo in path)");
+    }
+
+    #[test]
+    fn atlassian_builtin_has_basic_auth_templated_base_url_and_jira_search() {
+        // Regression guard: Jira drove the Basic-auth + templated-
+        // base_url plumbing. If a future refactor strips the Basic
+        // variant, drops `{JIRA_URL}` interpolation, or rips the
+        // search/myself endpoints from the curated list, ApiCall
+        // workflows on Jira silently break.
+        use crate::models::{ApiAuthKind, McpTransport};
+        let reg = crate::core::registry::builtin_registry();
+        let atl = reg.iter().find(|d| d.id == "mcp-atlassian")
+            .expect("Atlassian must be in the builtin registry");
+        // Hybrid: keeps the Stdio MCP transport for agent-side usage.
+        assert!(matches!(atl.transport, McpTransport::Stdio { .. }),
+            "Atlassian keeps the Stdio MCP transport for agent-side usage");
+        let spec = atl.api_spec.as_ref()
+            .expect("Atlassian must have api_spec populated");
+        // base_url is a templated placeholder — the executor resolves it
+        // against the encrypted env (JIRA_URL config_key) at request time.
+        assert_eq!(spec.base_url, "{JIRA_URL}");
+        // Auth — Basic email:token, both halves come from encrypted env.
+        match &spec.auth {
+            ApiAuthKind::Basic { user_env, password_env } => {
+                assert_eq!(user_env, "JIRA_USERNAME");
+                assert_eq!(password_env, "JIRA_API_TOKEN");
+            }
+            other => panic!("Atlassian must use Basic auth on Cloud, got {:?}", other),
+        }
+        // JIRA_URL exposed as a non-secret config key so the wizard
+        // renders a plain text input; the user enters their workspace
+        // there once, every request reuses it.
+        assert!(spec.config_keys.iter().any(|k| k.env_key == "JIRA_URL"));
+        // The two killer endpoints for backlog ops + sanity check.
+        let paths: Vec<&str> = spec.endpoints.iter().map(|e| e.path.as_str()).collect();
+        assert!(paths.contains(&"/rest/api/3/myself"), "/myself is the auth sanity check");
+        // Use /search/jql (cursor pagination) — Atlassian removed
+        // /rest/api/3/search in April 2025 (CHANGE-2046, 410 Gone).
+        assert!(paths.contains(&"/rest/api/3/search/jql"), "/search/jql replaces the removed /search");
+        assert!(!paths.contains(&"/rest/api/3/search"), "deprecated /search must NOT be exposed (410 Gone)");
+        assert!(paths.contains(&"/rest/api/3/issue/{issueIdOrKey}"));
+        assert!(paths.contains(&"/rest/api/3/project/search"));
+        // docs_url — agents bounce here when stumped.
+        assert!(spec.docs_url.is_some());
+    }
+
+    #[test]
     fn google_search_builtin_has_apikey_auth_and_cx_config_key() {
         // Regression guard: Google Programmable Search is the lightweight
         // example in the API-plugin catalog — apikey= query param + a

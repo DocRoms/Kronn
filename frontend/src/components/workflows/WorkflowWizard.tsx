@@ -1,6 +1,8 @@
 import { useState, useRef, useEffect } from 'react';
 import { useT } from '../../lib/I18nContext';
-import { workflows as workflowsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, quickPrompts as quickPromptsApi } from '../../lib/api';
+import { workflows as workflowsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, quickPrompts as quickPromptsApi, mcps as mcpsApi } from '../../lib/api';
+import { ApiCallStepCard, type ApiPluginOption } from './ApiCallStepCard';
+import { STARTER_TEMPLATES, cloneTemplateSteps } from '../../lib/workflow-templates/chartbeat-top5';
 import { AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES, isAgentRestricted } from '../../lib/constants';
 import type {
   Project, Workflow, WorkflowTrigger,
@@ -188,6 +190,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   const [availableProfiles, setAvailableProfiles] = useState<AgentProfile[]>([]);
   const [availableDirectives, setAvailableDirectives] = useState<Directive[]>([]);
   const [availableQuickPrompts, setAvailableQuickPrompts] = useState<QuickPrompt[]>([]);
+  // API plugins available on the project — filtered to those with `api_spec != null`
+  // and a matching config. Consumed by ApiCallStepCard's plugin picker.
+  const [availableApiPlugins, setAvailableApiPlugins] = useState<ApiPluginOption[]>([]);
   const promptTextareaRefs = useRef<Record<number, HTMLTextAreaElement | null>>({});
 
   /** Insert text at cursor position in the prompt textarea of step `stepIndex` */
@@ -221,6 +226,22 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     refetchProfiles();
     directivesApi.list().then(setAvailableDirectives).catch(e => console.warn('Failed to load directives:', e));
     quickPromptsApi.list().then(setAvailableQuickPrompts).catch(e => console.warn('Failed to load quick prompts:', e));
+    // Load API plugins once at mount — the list is refreshed if the user
+    // comes back to the wizard, cheap call + rare delta.
+    mcpsApi.overview()
+      .then(overview => {
+        const options: ApiPluginOption[] = [];
+        for (const config of overview.configs) {
+          const server = overview.servers.find(s => s.id === config.server_id);
+          if (!server || !server.api_spec) continue;
+          // Project scope: the wizard's `projectId` may change, so we
+          // keep all configs and filter per-step-render if needed. For
+          // MVP, include global configs + configs bound to any project.
+          options.push({ server, config });
+        }
+        setAvailableApiPlugins(options);
+      })
+      .catch(e => console.warn('Failed to load API plugins:', e));
     window.addEventListener('kronn:profiles-changed', refetchProfiles);
     return () => window.removeEventListener('kronn:profiles-changed', refetchProfiles);
   }, []);
@@ -255,6 +276,22 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     } else {
       setWizardStep(isSimple ? 1 : 2); // Jump to Task (simple) or Steps (advanced)
     }
+  };
+
+  /** Load a starter template (désagentification aha moment). Picks the
+   *  first matching config_id from `availableApiPlugins` for the template's
+   *  primary plugin — user can still re-select in the wizard after. */
+  const applyStarterTemplate = (templateId: string) => {
+    const template = STARTER_TEMPLATES.find(t => t.id === templateId);
+    if (!template) return;
+    const match = availableApiPlugins.find(p => p.server.id === template.primary_plugin_slug);
+    const steps = cloneTemplateSteps(template, match?.config.id ?? null);
+    setName(template.title_fr);
+    setSteps(steps);
+    setTriggerType('Manual');
+    setShowSuggestions(false);
+    setWizardMode('advanced');
+    setWizardStep(2); // Jump straight to Steps so the user sees the chain.
   };
 
   const addStep = () => {
@@ -416,6 +453,26 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
         </div>
       )}
 
+      {/* Starter templates — désagentification aha moment. Only shown on
+          fresh creation (not edit) and only if at least one template's
+          primary plugin is configured on the project (otherwise the clone
+          would leave `api_config_id: null` and the step can't run). */}
+      {!isEdit && STARTER_TEMPLATES.some(t => availableApiPlugins.some(p => p.server.id === t.primary_plugin_slug)) && (
+        <div className="wf-starter-templates">
+          {STARTER_TEMPLATES.filter(t => availableApiPlugins.some(p => p.server.id === t.primary_plugin_slug)).map(tpl => (
+            <button
+              key={tpl.id}
+              type="button"
+              className="wf-starter-template-btn"
+              onClick={() => applyStarterTemplate(tpl.id)}
+              title={tpl.description_fr}
+            >
+              <Sparkles size={12} /> {tpl.title_fr}
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* Suggestions toggle */}
       {suggestions.length > 0 && !showSuggestions && (
         <button
@@ -485,13 +542,22 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
       {/* Step: Name + Project (both modes) */}
       {wizardStep === 0 && (
         <div>
-          <label className="wf-label">{t('wiz.name')}</label>
+          <label className="wf-label">
+            {t('wiz.name')} <span className="wf-required-marker" aria-hidden="true">*</span>
+          </label>
           <input
-            className="wf-input"
+            className={`wf-input${!name ? ' wf-input-required-empty' : ''}`}
             value={name}
             onChange={e => setName(e.target.value)}
             placeholder={t('wiz.namePlaceholder')}
+            aria-required="true"
+            aria-invalid={!name}
           />
+          {!name && (
+            <p className="wf-field-hint wf-field-hint-required">
+              {t('wiz.nameRequired')}
+            </p>
+          )}
 
           <label className="wf-label mt-6">{isEdit ? t('wiz.project') : t('wiz.projectOptional')}</label>
           <select className="wf-select" value={projectId} onChange={e => {
@@ -1009,6 +1075,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       data-type="api"
                       data-selected={step.step_type?.type === 'ApiCall'}
                       onClick={() => updateStep(i, { step_type: { type: 'ApiCall' } })}
+                      title={t('wiz.stepTypeApiCallHint')}
                     >{t('wiz.stepTypeApiCall')}</button>
                     <button
                       className="wf-step-type-btn"
@@ -1278,7 +1345,17 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                     )}
                   </div>
                   );
-                })() : step.step_type?.type === 'Notify' ? (
+                })() : step.step_type?.type === 'ApiCall' ? (
+                  <ApiCallStepCard
+                    step={step}
+                    onChange={updates => updateStep(i, updates)}
+                    availableApiPlugins={availableApiPlugins}
+                    projectId={projectId || null}
+                    nextStepType={steps[i + 1]?.step_type}
+                    installedAgents={installedAgentTypes}
+                    t={t}
+                  />
+                ) : step.step_type?.type === 'Notify' ? (
                   <div className="wf-notify-form">
                     <div className="wf-batch-intro">
                       <Send size={14} />
@@ -1806,19 +1883,62 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           <div className="wf-summary-row"><span className="wf-summary-label">Steps</span> {steps.length}</div>
           {steps.map((s, i) => {
             const typeKind = s.step_type?.type ?? 'Agent';
-            const typeLabel = typeKind === 'ApiCall' ? 'API' : typeKind === 'BatchQuickPrompt' ? 'BATCH' : 'AGENT';
-            const typeData = typeKind === 'ApiCall' ? 'api' : typeKind === 'BatchQuickPrompt' ? 'batch-qp' : 'agent';
+            const typeLabel = typeKind === 'ApiCall' ? 'API'
+              : typeKind === 'BatchQuickPrompt' ? 'BATCH'
+              : typeKind === 'Notify' ? 'NOTIFY'
+              : 'AGENT';
+            const typeData = typeKind === 'ApiCall' ? 'api'
+              : typeKind === 'BatchQuickPrompt' ? 'batch-qp'
+              : typeKind === 'Notify' ? 'notify'
+              : 'agent';
             const isBatch = typeKind === 'BatchQuickPrompt';
+            const isApi = typeKind === 'ApiCall';
+            const isNotify = typeKind === 'Notify';
             const qpName = isBatch && s.batch_quick_prompt_id
               ? availableQuickPrompts.find(qp => qp.id === s.batch_quick_prompt_id)?.name
               : null;
+            // For ApiCall, show `<plugin name> — <config label> · <endpoint>`
+            // — resolve the user-visible names from the catalog rather
+            // than echoing internal ids (`mcp-github` slug, `cfg-abc123`
+            // uuid) which don't speak to anyone. Falls back to the slug
+            // only when the catalog lookup misses (offline, deleted
+            // config, etc.) so the recap still tells *something*.
+            // Never an agent label (the call hits an API directly, no
+            // LLM in the loop). For Notify, show the webhook host so
+            // the user can confirm where the ping lands. Only Agent /
+            // Custom steps surface an agent label.
+            const apiPlugin = isApi
+              ? availableApiPlugins.find(p => p.config.id === s.api_config_id)
+                ?? availableApiPlugins.find(p => p.server.id === s.api_plugin_slug)
+              : null;
+            const apiSubtitle = isApi
+              ? [
+                  apiPlugin
+                    ? `${apiPlugin.server.name} — ${apiPlugin.config.label}`
+                    : (s.api_plugin_slug ?? '?'),
+                  s.api_endpoint_path,
+                ].filter(Boolean).join(' · ')
+              : null;
+            const notifyHost = isNotify && s.notify_config?.url
+              ? (() => {
+                  try { return new URL(s.notify_config.url).host; }
+                  catch { return s.notify_config.url; }
+                })()
+              : null;
+            const nameColor = isBatch || isApi || isNotify
+              ? 'var(--kr-text-faint)'
+              : (AGENT_COLORS[s.agent] ?? 'var(--kr-text-faint)');
             return (
             <div key={i} className="wf-summary-row" style={{ paddingLeft: 20 }}>
               {i + 1}. <span className="wf-summary-step-type" data-type={typeData}>{typeLabel}</span>
-              <span className="font-semibold" style={{ color: isBatch ? 'var(--kr-text-faint)' : (AGENT_COLORS[s.agent] ?? 'var(--kr-text-faint)') }}>{s.name}</span>
+              <span className="font-semibold" style={{ color: nameColor }}>{s.name}</span>
               {isBatch
                 ? <span className="text-dim text-xs"> ({qpName ?? t('wiz.batchQPPickerEmpty')})</span>
-                : <> ({AGENT_LABELS[s.agent] ?? s.agent})</>
+                : isApi
+                  ? <span className="text-dim text-xs"> ({apiSubtitle})</span>
+                  : isNotify
+                    ? <span className="text-dim text-xs"> ({notifyHost ?? t('wiz.notifyMissingUrl')})</span>
+                    : <> ({AGENT_LABELS[s.agent] ?? s.agent})</>
               }
               {s.description && <span className="text-faint text-xs" style={{ fontStyle: 'italic' }}> &mdash; {s.description}</span>}
               {s.on_result && s.on_result.length > 0 && <span className="text-dim text-xs"> [{s.on_result.length} condition{s.on_result.length > 1 ? 's' : ''}]</span>}
@@ -1869,6 +1989,22 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             if (!s.batch_items_from || !s.batch_items_from.trim()) {
               errors.push(t('wiz.errorBatchNoItemsFrom').replace('{0}', label));
             }
+          } else if (s.step_type?.type === 'ApiCall') {
+            // ApiCall steps have no prompt — they hit an API directly via
+            // the configured plugin. Validate the API-specific fields:
+            // plugin/config wired + endpoint chosen. Without these the
+            // backend executor would refuse anyway.
+            if (!s.api_plugin_slug || !s.api_config_id) {
+              errors.push(t('wiz.errorApiNoPlugin').replace('{0}', label));
+            }
+            if (!s.api_endpoint_path || !s.api_endpoint_path.trim()) {
+              errors.push(t('wiz.errorApiNoEndpoint').replace('{0}', label));
+            }
+          } else if (s.step_type?.type === 'Notify') {
+            // Notify steps drive a webhook URL — no prompt either.
+            if (!s.notify_config?.url) {
+              errors.push(t('wiz.errorNotifyNoUrl').replace('{0}', label));
+            }
           } else if (!s.prompt_template) {
             errors.push(t('wiz.errorNoPrompt').replace('{0}', label));
           }
@@ -1895,6 +2031,11 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             className="wf-next-btn"
             onClick={() => setWizardStep(wizardStep + 1)}
             disabled={wizardStep === 0 && !name}
+            // Tooltip on hover when disabled — without it, the user
+            // clicks Next, nothing happens, and there's zero hint that
+            // the workflow name is the missing piece. Native HTML title
+            // is the cheapest "why is this disabled?" affordance.
+            title={wizardStep === 0 && !name ? t('wiz.nameRequired') : undefined}
           >
             {t('wiz.next')} <ChevronRight size={12} />
           </button>
@@ -1902,11 +2043,25 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           <button
             className="wf-next-btn"
             onClick={handleSave}
+            // The disabled predicate must match the visible-error
+            // validator above. If they drift, the user lands in a
+            // dead-button limbo: validator says "all good", button
+            // stays grey, no feedback. Per step_type:
+            //   - BatchQuickPrompt: needs `batch_quick_prompt_id` +
+            //     `batch_items_from`.
+            //   - ApiCall: needs `api_plugin_slug` + `api_config_id`
+            //     + `api_endpoint_path`.
+            //   - Notify: needs `notify_config.url`.
+            //   - Agent / Custom (default): needs `prompt_template`.
             disabled={saving || !name || steps.some(s => {
-              // BatchQuickPrompt steps validate their own fields instead of prompt_template
               if (s.step_type?.type === 'BatchQuickPrompt') {
                 if (!s.batch_quick_prompt_id) return true;
                 if (!s.batch_items_from || !s.batch_items_from.trim()) return true;
+              } else if (s.step_type?.type === 'ApiCall') {
+                if (!s.api_plugin_slug || !s.api_config_id) return true;
+                if (!s.api_endpoint_path || !s.api_endpoint_path.trim()) return true;
+              } else if (s.step_type?.type === 'Notify') {
+                if (!s.notify_config?.url) return true;
               } else if (!s.prompt_template) {
                 return true;
               }

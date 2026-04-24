@@ -52,6 +52,11 @@ vi.mock('../../lib/api', () => ({
     getUiLanguage: vi.fn().mockResolvedValue('fr'),
     saveUiLanguage: vi.fn().mockResolvedValue(undefined),
   },
+  // WorkflowWizard loads the MCP overview at mount (ApiCall plugin picker).
+  mcps: {
+    overview: vi.fn().mockResolvedValue({ servers: [], configs: [], customized_contexts: [], incompatibilities: [] }),
+    registry: vi.fn().mockResolvedValue([]),
+  },
 }));
 
 const defaultModelTiers = {

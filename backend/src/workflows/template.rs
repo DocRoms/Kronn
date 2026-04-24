@@ -694,6 +694,19 @@ mod tests {
             batch_workspace_mode: None,
             batch_chain_prompt_ids: vec![],
             notify_config: None,
+            api_plugin_slug: None,
+            api_config_id: None,
+            api_endpoint_path: None,
+            api_method: None,
+            api_path_params: None,
+            api_query: None,
+            api_headers: None,
+            api_body: None,
+            api_extract: None,
+            api_pagination: None,
+            api_timeout_ms: None,
+            api_max_retries: None,
+            api_output_var: None,
         }
     }
 

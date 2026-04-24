@@ -709,6 +709,12 @@ pub enum ApiAuthKind {
     ApiKeyHeader { header_name: String, env_key: String },
     /// Bearer token in `Authorization: Bearer ...`.
     Bearer { env_key: String },
+    /// HTTP Basic — `Authorization: Basic <base64(user:password)>`. Used by
+    /// Jira Cloud (`email:api_token`), Bitbucket Cloud, and any other
+    /// vendor that ships a "user + secret" token pair. Both halves come
+    /// from the encrypted config env so Kronn never stores them in
+    /// plaintext.
+    Basic { user_env: String, password_env: String },
     /// OAuth2 client-credentials grant — Kronn exchanges `client_id` +
     /// `client_secret` against `token_url` to get a short-lived
     /// `access_token`, caches it until expiry, and injects a fresh
@@ -1072,6 +1078,171 @@ pub struct WorkflowStep {
     /// agent prompts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notify_config: Option<NotifyConfig>,
+
+    // ─── ApiCall fields (désagentification — 0.5.2) ──────────────────────
+    // Only meaningful when `step_type == ApiCall`. Calls a Kronn-configured
+    // API plugin directly from the Rust engine — zero agent tokens. Params
+    // support the same `{{steps.X.data}}` templates as agent prompts.
+    // See `ai/operations/deagent-apicall.md` for the full contract.
+
+    /// Registry slug of the plugin to invoke (e.g. `"chartbeat"`, `"jira"`).
+    /// The slug resolves to an `ApiSpec` in the plugin registry; the request
+    /// base URL comes from that spec and is NEVER templated from the step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_plugin_slug: Option<String>,
+
+    /// `McpConfig.id` of the specific credential set to use. The plugin can
+    /// be configured multiple times per project (e.g. two Jira instances);
+    /// this picks one. Decrypted env lives in the DB row and is loaded at
+    /// step execution via `collect_active_api_plugins`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_config_id: Option<String>,
+
+    /// Endpoint path as declared in `ApiSpec.endpoints[].path` — prefix-
+    /// matched against the allowlist in the executor so a step can't reach
+    /// arbitrary paths under the plugin's `base_url`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_endpoint_path: Option<String>,
+
+    /// HTTP method override. Defaults to the method of the endpoint in the
+    /// plugin registry. Uppercase: `GET | POST | PUT | PATCH | DELETE`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_method: Option<String>,
+
+    /// Path-segment parameters (e.g. `/repos/{owner}/{repo}` → `{owner}` and
+    /// `{repo}`). The executor scans `api_endpoint_path` for `{key}` tokens
+    /// and substitutes each match with the value from this map at request
+    /// time. Values support `{{steps.X.data}}` templates so a previous
+    /// fetch can drive the segment dynamically. Tokens with no entry stay
+    /// literal — the request will fail because `/repos/{owner}/...` is not
+    /// a real GitHub path. This way the spec-declared template stays in
+    /// `api_endpoint_path` (round-trip safe across re-edits) while the
+    /// concrete values live separately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_path_params: Option<std::collections::HashMap<String, String>>,
+
+    /// Query-string parameters. Values support `{{steps.X.data}}` templates.
+    /// Rendered values are percent-encoded AFTER template expansion to
+    /// prevent injection (`&` / `=` in a templated value would corrupt the
+    /// query otherwise).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_query: Option<std::collections::HashMap<String, String>>,
+
+    /// Extra headers (auth headers come from the plugin spec, not here).
+    /// String values templatable; keys are literal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_headers: Option<std::collections::HashMap<String, String>>,
+
+    /// JSON body for POST/PUT/PATCH. Rendered by walking the `Value` tree
+    /// and interpolating string leaves only — no string-level interpolation,
+    /// which would allow JSON injection via templated content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_body: Option<serde_json::Value>,
+
+    /// How to extract a value from the JSON response. The extracted `data`
+    /// is what downstream steps read via `{{steps.X.data}}`; batch QP steps
+    /// expect an array and fail-fast if it's a scalar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_extract: Option<ExtractSpec>,
+
+    /// Pagination strategy. `Auto` (default-ish) inspects the response for
+    /// `nextPageToken` / `startAt`+`total` / `page` and walks accordingly,
+    /// concatenating arrays. Hard-capped at 50 pages to prevent runaway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_pagination: Option<PaginationSpec>,
+
+    /// Per-request timeout in milliseconds. Defaults to 30 000 ms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_timeout_ms: Option<u64>,
+
+    /// Max retries on 5xx / 429 with exponential backoff. Defaults to 2.
+    /// Idempotent GETs retry freely; endpoints flagged `side_effect: true`
+    /// in the plugin spec skip retry entirely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_max_retries: Option<u8>,
+
+    /// Context variable name under which the extracted data is stored.
+    /// Downstream steps reference it as `{{steps.<output_var>.data}}`.
+    /// Defaults to the step's `name` field when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_output_var: Option<String>,
+}
+
+/// Extraction specification for an `ApiCall` step's JSON response.
+/// Implements RFC 9535 JSONPath via the `serde_json_path` crate.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[ts(export)]
+pub struct ExtractSpec {
+    /// JSONPath expression, e.g. `$.issues[*].key` or `$.data.viewer.zones[0].zoneTag`.
+    /// Evaluated against the full response (after pagination concat if enabled).
+    pub path: String,
+
+    /// Default value when the path resolves to nothing. Keeps workflows
+    /// alive on empty results. Omit = `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<serde_json::Value>,
+
+    /// If true and the extraction returns `null` / empty array, the step
+    /// reports `status: NO_RESULTS` so `on_result` conditions (Skip, Stop,
+    /// Goto) can fire. Default false → status OK even on empty data.
+    #[serde(default)]
+    pub fail_on_empty: bool,
+}
+
+/// Pagination strategy for an `ApiCall` step. `Auto` covers the three most
+/// common REST patterns; explicit variants let advanced users hardcode the
+/// cursor/offset paths for non-standard APIs (Cloudflare GraphQL for ex.).
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[ts(export)]
+#[serde(tag = "type")]
+pub enum PaginationSpec {
+    /// No pagination — issue the request once and return the response.
+    None,
+
+    /// Auto-detect: inspects the response for `nextPageToken` (cursor),
+    /// `startAt`+`total`+`maxResults` (offset), or `page`+`has_more` (page).
+    /// Walks until exhausted or `max_pages` reached.
+    Auto {
+        /// Safety cap. Defaults to 50 when unset.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_pages: Option<u32>,
+    },
+
+    /// Classic offset pagination: `GET …?start_param=0&limit_param=100`,
+    /// increments `start` by `limit` until `len(items) < limit` or
+    /// `total_path` reports all consumed.
+    Offset {
+        start_param: String,
+        limit_param: String,
+        limit: u32,
+        /// JSONPath to the total count in the response, e.g. `$.total`.
+        total_path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_pages: Option<u32>,
+    },
+
+    /// Cursor-based: response exposes a next-cursor path that feeds back
+    /// into `cursor_param` on the next call. Terminates when the path
+    /// resolves to null/absent.
+    Cursor {
+        cursor_param: String,
+        /// JSONPath to the next cursor value, e.g. `$.pageInfo.endCursor`.
+        next_path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_pages: Option<u32>,
+    },
+
+    /// Page number: increment `page_param` from 1, stop when `has_more_path`
+    /// is false or there are no more results.
+    Page {
+        page_param: String,
+        page_size_param: String,
+        page_size: u32,
+        /// JSONPath to a boolean / truthy "has more" indicator.
+        has_more_path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_pages: Option<u32>,
+    },
 }
 
 /// Configuration for a `StepType::Notify` webhook step. Rendered at run-time
@@ -1290,6 +1461,32 @@ pub struct StepResult {
     /// `None`        = FreeText step, the concept does not apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub envelope_detected: Option<bool>,
+    /// Snapshot of the step's `step_type.type` at execution time
+    /// (`"Agent" | "ApiCall" | "Notify" | "BatchQuickPrompt" | "Custom"`).
+    /// Frozen on the run row so editing the workflow afterwards (changing
+    /// the step type, swapping the agent, retargeting the API plugin)
+    /// doesn't corrupt the historical record. `None` is tolerated for
+    /// rows written before this field existed — the frontend falls back
+    /// to "(legacy)" rather than crashing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_kind: Option<String>,
+    /// Snapshot of `step.agent` for Agent / Custom steps. `None` for
+    /// non-agent steps (ApiCall, Notify, Batch). Lets the run-detail UI
+    /// say "Codex was used here" even after the workflow was edited to
+    /// run with a different agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_agent: Option<AgentType>,
+    /// Snapshot of the API plugin slug for ApiCall steps (`mcp-github`,
+    /// `api-chartbeat`, …). `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_api_plugin_slug: Option<String>,
+    /// Snapshot of the resolved endpoint path for ApiCall steps. Stored
+    /// AFTER path-param substitution so reviewers see the actual URL
+    /// path that was hit (`/repos/anthropics/anthropic-cookbook/issues`
+    /// rather than the template `/repos/{owner}/{repo}/issues`). `None`
+    /// for non-API steps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_api_endpoint_path: Option<String>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

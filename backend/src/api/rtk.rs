@@ -53,22 +53,47 @@ pub struct RtkActivateRequest {
 /// Returns the argv tail for `rtk init` that hooks the given agent, or
 /// `None` if RTK doesn't support it.
 ///
-/// Notes on the flag matrix (from RTK's own docs + error messages):
-///   - `--hook-only` exists only for the Claude-default flow ("hook +
-///     RTK.md"). Passing it with `--codex` triggers `--codex cannot be
-///     combined with --hook-only` — the Codex flow *is* the hook (an
-///     AGENTS.md injection), there's no RTK.md to skip.
-///   - Same likely story for `--gemini` (shell-rc hook): play safe,
-///     drop `--hook-only` there too.
-///   - `--auto-patch` is the only way to avoid a TTY prompt; we always
-///     pass it.
+/// Notes on the flag matrix (verified empirically against RTK + its
+/// own error messages):
+///   - `--auto-patch` is the **Claude-only** "yes to the settings.json
+///     patch prompt" shortcut. Combining it with `--codex` or `--gemini`
+///     triggers `rtk: --codex cannot be combined with --auto-patch`
+///     (and the symmetric Gemini error). Those flows write to a
+///     dedicated config file (AGENTS.md / shell rc) — no prompt to
+///     auto-answer, no `--auto-patch` needed.
+///   - `--hook-only` is also Claude-only (skip the RTK.md companion).
+///     Passing it with `--codex` or `--gemini` errors out with the same
+///     "cannot be combined" message.
+///   - Net: per-agent matrix is one well-known shape per agent.
 fn rtk_args_for(agent_type: &AgentType) -> Option<Vec<&'static str>> {
     match agent_type {
         AgentType::ClaudeCode => Some(vec!["init", "-g", "--auto-patch", "--hook-only"]),
-        AgentType::Codex      => Some(vec!["init", "-g", "--codex", "--auto-patch"]),
-        AgentType::GeminiCli  => Some(vec!["init", "-g", "--gemini", "--auto-patch"]),
-        AgentType::Kiro
-        | AgentType::CopilotCli
+        AgentType::Codex      => Some(vec!["init", "-g", "--codex"]),
+        AgentType::GeminiCli  => Some(vec!["init", "-g", "--gemini"]),
+        // RTK's `--copilot` targets VS Code Copilot Chat (writes to the
+        // editor's settings.json), not the @github/copilot standalone
+        // CLI that Kronn detects as `CopilotCli`. Treating it as
+        // unsupported avoids miswiring the wrong host.
+        // Kiro (AWS), Vibe, Ollama, Custom: not in RTK's upstream list.
+        AgentType::CopilotCli
+        | AgentType::Kiro
+        | AgentType::Vibe
+        | AgentType::Ollama
+        | AgentType::Custom => None,
+    }
+}
+
+/// Sibling of `rtk_args_for` for the **uninstall** path. Same agent
+/// flag, plus `--uninstall` which RTK accepts to remove the hook /
+/// settings entry / RTK.md companion. Same combinability rules — keep
+/// `--hook-only` Claude-only.
+fn rtk_uninstall_args_for(agent_type: &AgentType) -> Option<Vec<&'static str>> {
+    match agent_type {
+        AgentType::ClaudeCode => Some(vec!["init", "-g", "--auto-patch", "--uninstall"]),
+        AgentType::Codex      => Some(vec!["init", "-g", "--codex", "--uninstall"]),
+        AgentType::GeminiCli  => Some(vec!["init", "-g", "--gemini", "--uninstall"]),
+        AgentType::CopilotCli
+        | AgentType::Kiro
         | AgentType::Vibe
         | AgentType::Ollama
         | AgentType::Custom => None,
@@ -183,6 +208,84 @@ pub async fn activate(
     }))
 }
 
+/// POST /api/rtk/deactivate
+/// Mirror of [`activate`] for `rtk init -g --<agent> --uninstall`. The
+/// per-agent matrix is the same; we just append `--uninstall`. Output
+/// shape is identical to ease frontend wiring.
+pub async fn deactivate(
+    Json(req): Json<RtkActivateRequest>,
+) -> Json<ApiResponse<RtkActivateResponse>> {
+    if !crate::core::rtk_detect::rtk_binary_available() {
+        return Json(ApiResponse::err(
+            "rtk binary not found on PATH.".to_string(),
+        ));
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "<unset>".into());
+
+    let mut per_agent: Vec<RtkAgentActivation> = Vec::new();
+    let mut combined_stdout = String::new();
+    let mut combined_stderr = String::new();
+    let mut any_failure = false;
+    let mut any_ran = false;
+
+    for agent in &req.agents {
+        let Some(args) = rtk_uninstall_args_for(agent) else { continue; };
+        any_ran = true;
+
+        tracing::info!("Spawning: rtk {:?} (agent={:?}, HOME={home}, mode=uninstall)", args, agent);
+
+        match async_cmd("rtk").args(&args).output().await {
+            Ok(out) => {
+                let success = out.status.success();
+                let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                if success {
+                    tracing::info!("rtk hook uninstalled for {:?}", agent);
+                } else {
+                    tracing::warn!("rtk uninstall failed for {:?} (status={:?}): {}",
+                        agent, out.status.code(), stderr.trim());
+                    any_failure = true;
+                }
+                if !stdout.trim().is_empty() {
+                    combined_stdout.push_str(&format!("[{:?}] {}\n", agent, stdout.trim()));
+                }
+                if !stderr.trim().is_empty() {
+                    combined_stderr.push_str(&format!("[{:?}] {}\n", agent, stderr.trim()));
+                }
+                per_agent.push(RtkAgentActivation {
+                    agent_type: agent.clone(), success, stdout, stderr,
+                });
+            }
+            Err(e) => {
+                let msg = format!("Failed to spawn rtk for {:?}: {e}", agent);
+                tracing::error!("{msg}");
+                any_failure = true;
+                combined_stderr.push_str(&format!("{msg}\n"));
+                per_agent.push(RtkAgentActivation {
+                    agent_type: agent.clone(), success: false,
+                    stdout: String::new(), stderr: msg,
+                });
+            }
+        }
+    }
+
+    if !any_ran {
+        return Json(ApiResponse::ok(RtkActivateResponse {
+            success: false,
+            stdout: String::new(),
+            stderr: "No RTK-supported agent in the request.".into(),
+            per_agent,
+        }));
+    }
+
+    Json(ApiResponse::ok(RtkActivateResponse {
+        success: !any_failure,
+        stdout: combined_stdout,
+        stderr: combined_stderr,
+        per_agent,
+    }))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct RtkSavings {
@@ -282,6 +385,74 @@ fn pick_f32(json: &serde_json::Value, keys: &[&str]) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── RTK matrix (rtk_args_for / rtk_uninstall_args_for) ─────────
+    //
+    // These tests are the contract that prevents the user-reported
+    // `--codex cannot be combined with --auto-patch` regression. RTK's
+    // own error messages are the ground truth: any combination it
+    // rejects, the matrix MUST avoid. If a future contributor adds
+    // `--auto-patch` back to the Codex/Gemini flow, these tests fail.
+
+    #[test]
+    fn rtk_args_claude_uses_auto_patch_and_hook_only() {
+        let args = rtk_args_for(&AgentType::ClaudeCode).expect("Claude is supported");
+        assert_eq!(args, vec!["init", "-g", "--auto-patch", "--hook-only"]);
+    }
+
+    #[test]
+    fn rtk_args_codex_no_auto_patch_no_hook_only() {
+        // Both flags trigger `--codex cannot be combined with …` from RTK.
+        let args = rtk_args_for(&AgentType::Codex).expect("Codex is supported");
+        assert_eq!(args, vec!["init", "-g", "--codex"]);
+        assert!(!args.contains(&"--auto-patch"), "Codex flow must not pass --auto-patch");
+        assert!(!args.contains(&"--hook-only"), "Codex flow must not pass --hook-only");
+    }
+
+    #[test]
+    fn rtk_args_gemini_no_auto_patch_no_hook_only() {
+        let args = rtk_args_for(&AgentType::GeminiCli).expect("Gemini is supported");
+        assert_eq!(args, vec!["init", "-g", "--gemini"]);
+        assert!(!args.contains(&"--auto-patch"));
+    }
+
+    #[test]
+    fn rtk_args_unsupported_agents_return_none() {
+        // RTK's `--copilot` targets VS Code Copilot Chat, not the
+        // standalone `@github/copilot` CLI — treating it as
+        // unsupported avoids miswiring. Kiro / Vibe / Ollama / Custom
+        // aren't in RTK's upstream list either.
+        for agent in [
+            AgentType::CopilotCli, AgentType::Kiro,
+            AgentType::Vibe, AgentType::Ollama, AgentType::Custom,
+        ] {
+            assert!(rtk_args_for(&agent).is_none(),
+                "{:?} must be unsupported by RTK", agent);
+        }
+    }
+
+    #[test]
+    fn rtk_uninstall_args_mirror_install_with_uninstall_flag() {
+        // Uninstall path: same agent flag, append `--uninstall`. Same
+        // combinability rules — `--hook-only` Claude-only, no
+        // `--auto-patch` on Codex/Gemini. The `rtk init -g … --uninstall`
+        // form is documented at github.com/rtk-ai/rtk; if RTK changes
+        // the syntax this test will catch the drift on next refresh.
+        assert_eq!(
+            rtk_uninstall_args_for(&AgentType::ClaudeCode).unwrap(),
+            vec!["init", "-g", "--auto-patch", "--uninstall"],
+        );
+        assert_eq!(
+            rtk_uninstall_args_for(&AgentType::Codex).unwrap(),
+            vec!["init", "-g", "--codex", "--uninstall"],
+        );
+        assert_eq!(
+            rtk_uninstall_args_for(&AgentType::GeminiCli).unwrap(),
+            vec!["init", "-g", "--gemini", "--uninstall"],
+        );
+        // Must mirror the install matrix's "unsupported" set.
+        assert!(rtk_uninstall_args_for(&AgentType::Kiro).is_none());
+    }
 
     #[test]
     fn pick_u64_finds_first_matching_key() {

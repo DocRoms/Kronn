@@ -169,6 +169,8 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     },
 
     mcps: {
+      overview: resolve({ servers: [], configs: [], customized_contexts: [], incompatibilities: [] }),
+      registry: resolve([]),
       listCatalog: resolve([]),
       listConfigs: resolve([]),
       createConfig: resolve({}),
@@ -229,6 +231,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
 
     rtk: {
       activate: resolve({ success: true, stdout: '', stderr: '' }),
+      deactivate: resolve({ success: true, stdout: '', stderr: '' }),
       savings: resolve({ available: false, total_tokens_saved: 0, ratio_percent: 0, sample_count: 0 }),
     },
 
