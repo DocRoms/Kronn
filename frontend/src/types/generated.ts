@@ -567,6 +567,14 @@ export interface StepResult {
   tokens_used: number;
   duration_ms: number;
   condition_result?: string | null;
+  /**
+   * For output_format=Structured only: did the agent produce the
+   * ---STEP_OUTPUT--- envelope (possibly after repair).
+   * true = envelope found, .data/.summary/.status populated downstream.
+   * false = Structured requested but extraction failed even after repair.
+   * null/undefined = FreeText step, the concept does not apply.
+   */
+  envelope_detected?: boolean | null;
 }
 
 export interface WorkflowSummary {

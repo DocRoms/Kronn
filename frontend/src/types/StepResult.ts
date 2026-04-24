@@ -5,4 +5,13 @@ export type StepResult = { step_name: string, status: RunStatus, output: string,
 /**
  * What happened after this step: null = continued normally, or the condition action triggered.
  */
-condition_result: string | null, };
+condition_result: string | null, 
+/**
+ * For `output_format: Structured` steps only — did the agent actually
+ * produce the `---STEP_OUTPUT---` envelope (possibly after repair)?
+ * `Some(true)`  = envelope found, `.data/.summary/.status` populated.
+ * `Some(false)` = Structured requested but extraction failed even after
+ *                 repair, downstream `{{steps.X.data}}` won't resolve.
+ * `None`        = FreeText step, the concept does not apply.
+ */
+envelope_detected: boolean | null, };

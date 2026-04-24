@@ -122,6 +122,7 @@ pub async fn execute_notify_step(
             tokens_used: 0,
             duration_ms: start.elapsed().as_millis() as u64,
             condition_result: None,
+            envelope_detected: None,
         },
         condition_action: None,
     }
@@ -136,6 +137,7 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
             tokens_used: 0,
             duration_ms: start.elapsed().as_millis() as u64,
             condition_result: None,
+            envelope_detected: None,
         },
         condition_action: None,
     }

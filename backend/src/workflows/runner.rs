@@ -146,6 +146,7 @@ pub async fn execute_run(
                 tokens_used: 0,
                 duration_ms: 0,
                 condition_result: None,
+                envelope_detected: None,
             });
             all_success = false;
             break;
@@ -161,6 +162,7 @@ pub async fn execute_run(
                 tokens_used: 0,
                 duration_ms: 0,
                 condition_result: None,
+                envelope_detected: None,
             });
             break;
         }

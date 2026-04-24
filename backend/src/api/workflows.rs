@@ -89,6 +89,9 @@ pub async fn create(
     if req.name.len() > 200 {
         return Json(ApiResponse::err("Workflow name too long (max 200 chars)"));
     }
+    if let Err(errors) = crate::workflows::template::validate_step_references(&req.steps) {
+        return Json(ApiResponse::err(format!("Références d'étapes invalides :\n- {}", errors.join("\n- "))));
+    }
 
     let now = Utc::now();
     let wf = Workflow {
@@ -134,6 +137,9 @@ pub async fn update(
     if let Some(ref steps) = req.steps {
         if steps.len() > 20 {
             return Json(ApiResponse::err(format!("Too many steps ({}, max 20)", steps.len())));
+        }
+        if let Err(errors) = crate::workflows::template::validate_step_references(steps) {
+            return Json(ApiResponse::err(format!("Références d'étapes invalides :\n- {}", errors.join("\n- "))));
         }
     }
     if let Some(ref name) = req.name {
@@ -619,19 +625,18 @@ pub async fn test_step(
         AgentType::Custom => false,
     };
 
-    // In dry_run mode, prepend a simulation preamble to the prompt
+    // In dry_run mode, prepend a simulation preamble. The preamble is
+    // adaptive so it does not fight the output contract downstream steps rely on:
+    //   - Structured → short preamble that enforces read-only but requires the
+    //     agent to keep the exact `---STEP_OUTPUT---` envelope. Without this,
+    //     the legacy "detailed execution plan" instruction used to push the
+    //     agent toward prose, and chained steps failed with unresolved
+    //     `{{steps.X.data}}` at runtime even when dry-run looked fine.
+    //   - FreeText → legacy preamble (narrative plan of execution) — no
+    //     contract to preserve, so describing the plan is fine.
     let mut step = req.step.clone();
     if req.dry_run {
-        step.prompt_template = format!(
-            "⚠️ MODE SIMULATION (dry-run) — RÈGLES STRICTES :\n\
-            - Tu ne dois RIEN exécuter, RIEN modifier, RIEN écrire, RIEN créer.\n\
-            - Tu ne dois PAS appeler de tool qui modifie des données (pas de create, update, delete, write, post, comment).\n\
-            - Tu peux LIRE des données (get, list, search, read) pour analyser la situation.\n\
-            - Tu dois DÉCRIRE précisément ce que tu FERAIS en mode réel : quelles actions, sur quels éléments, avec quel contenu.\n\
-            - Formate ta réponse comme un plan d'exécution détaillé.\n\n\
-            ---\n\n{}",
-            step.prompt_template
-        );
+        step.prompt_template = format!("{}{}", build_dry_run_preamble(&step.output_format), step.prompt_template);
     }
     let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::workflows::runner::RunEvent>(64);
 
@@ -1213,6 +1218,33 @@ pub async fn suggestions(
     Json(ApiResponse::ok(suggestions))
 }
 
+/// Build the preamble prepended to a step's prompt when running in dry-run mode.
+///
+/// The preamble is adaptive so it never fights the output contract that
+/// downstream steps rely on:
+///   - `Structured`: short read-only preamble that explicitly requires the
+///     agent to keep the `---STEP_OUTPUT---` envelope and fill `data`.
+///     The legacy narrative preamble pushed the agent toward prose, which
+///     silently produced workflows whose `{{steps.X.data}}` never resolved.
+///   - `FreeText`: legacy preamble (plan of execution). Nothing downstream
+///     relies on the format, so a descriptive response is fine.
+pub(crate) fn build_dry_run_preamble(output_format: &StepOutputFormat) -> &'static str {
+    match output_format {
+        StepOutputFormat::Structured => "\
+⚠️ MODE TEST (dry-run) — RÈGLES STRICTES :\n\
+- N'utilise QUE des tools en lecture seule (get, list, search, read). N'écris, ne modifie, ne crée, ne supprime RIEN.\n\
+- Respecte STRICTEMENT le format de sortie structuré demandé plus bas. Ne remplace PAS le bloc ---STEP_OUTPUT--- par une narration, même en mode test.\n\
+- Les données que tu lis doivent être placées dans le champ `data` de l'enveloppe JSON finale, pour que les étapes suivantes puissent les consommer.\n\n---\n\n",
+        StepOutputFormat::FreeText => "\
+⚠️ MODE SIMULATION (dry-run) — RÈGLES STRICTES :\n\
+- Tu ne dois RIEN exécuter, RIEN modifier, RIEN écrire, RIEN créer.\n\
+- Tu ne dois PAS appeler de tool qui modifie des données (pas de create, update, delete, write, post, comment).\n\
+- Tu peux LIRE des données (get, list, search, read) pour analyser la situation.\n\
+- Tu dois DÉCRIRE précisément ce que tu FERAIS en mode réel : quelles actions, sur quels éléments, avec quel contenu.\n\
+- Formate ta réponse comme un plan d'exécution détaillé.\n\n---\n\n",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1273,6 +1305,46 @@ mod tests {
         assert!(matches.contains(&"changelog-release"), "GitHub alone should suggest changelog");
         assert!(matches.contains(&"pr-quality"), "GitHub alone should suggest PR quality");
         assert!(!matches.contains(&"orphan-prs"), "GitHub alone should NOT suggest orphan PRs (needs jira)");
+    }
+
+    // ─── Dry-run preamble ────────────────────────────────────────────────
+    //
+    // Regression tests for Workflow B ("Auto pré-analyse de ticket"): the
+    // original preamble asked the agent for a "plan d'exécution détaillé",
+    // which pushed Structured steps toward Markdown prose and dropped the
+    // `---STEP_OUTPUT---` envelope. The chained step then rendered
+    // `{{steps.main.data}}` literally and failed with "tickets pas injectés".
+
+    #[test]
+    fn dry_run_preamble_freetext_keeps_narrative() {
+        let p = build_dry_run_preamble(&StepOutputFormat::FreeText);
+        assert!(p.contains("plan d'exécution détaillé"), "FreeText preamble must keep the narrative instruction");
+        assert!(p.contains("RIEN écrire"), "FreeText preamble must keep the read-only rule");
+    }
+
+    #[test]
+    fn dry_run_preamble_structured_does_not_force_narrative() {
+        let p = build_dry_run_preamble(&StepOutputFormat::Structured);
+        assert!(!p.contains("plan d'exécution détaillé"),
+            "Structured preamble must NOT push the agent toward narrative output");
+        assert!(!p.contains("Formate ta réponse comme un plan"),
+            "Structured preamble must NOT replace the structured contract with a format instruction");
+    }
+
+    #[test]
+    fn dry_run_preamble_structured_protects_envelope() {
+        let p = build_dry_run_preamble(&StepOutputFormat::Structured);
+        assert!(p.contains("---STEP_OUTPUT---"),
+            "Structured preamble must explicitly name the envelope so the agent keeps it");
+        assert!(p.contains("data"),
+            "Structured preamble must reference the `data` field — downstream steps consume it");
+    }
+
+    #[test]
+    fn dry_run_preamble_structured_enforces_read_only() {
+        let p = build_dry_run_preamble(&StepOutputFormat::Structured);
+        assert!(p.contains("lecture seule") || p.to_lowercase().contains("read-only"),
+            "Structured preamble must still enforce read-only tool usage");
     }
 
     #[test]

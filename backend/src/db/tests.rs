@@ -1043,6 +1043,7 @@ fn workflow_runs_update() {
         tokens_used: 500,
         duration_ms: 1234,
         condition_result: None,
+        envelope_detected: None,
     }];
     crate::db::workflows::update_run(&conn, &run).unwrap();
 

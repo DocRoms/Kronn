@@ -14,6 +14,7 @@ import {
   Plus, Loader2, Check, X, ChevronRight, ChevronDown,
   Clock, GitBranch, Zap, HelpCircle, Settings, Shield,
   AlertTriangle, UserCircle, FileText, Sparkles, Layers, Send,
+  Info,
 } from 'lucide-react';
 import '../../pages/WorkflowsPage.css';
 
@@ -179,6 +180,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     agent: 'ClaudeCode',
     prompt_template: '',
     mode: { type: 'Normal' },
+    // Structured by default — see addStep() for the rationale.
+    output_format: { type: 'Structured' },
   }]);
   const [saving, setSaving] = useState(false);
   const [availableSkills, setAvailableSkills] = useState<Skill[]>([]);
@@ -260,11 +263,43 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
       agent: 'ClaudeCode',
       prompt_template: '',
       mode: { type: 'Normal' },
+      // Default to Structured so chained steps can read `.data` / `.summary`
+      // from the very first save. Users can switch to Free text on terminal
+      // steps that don't feed anything downstream.
+      output_format: { type: 'Structured' },
     }]);
   };
 
   const updateStep = (idx: number, patch: Partial<WorkflowStep>) => {
     setSteps(steps.map((s, i) => i === idx ? { ...s, ...patch } : s));
+  };
+
+  // Switch a step to BatchQuickPrompt and pre-configure the upstream step
+  // to actually feed it: Structured output (so `batch_items_from` can read
+  // `{{steps.X.data}}`) + reasoning_effort=low (so the producer doesn't
+  // burn tokens on narration the batch never reads).
+  // Existing user overrides on `reasoning_effort` are preserved.
+  const selectBatchQpStepType = (idx: number) => {
+    setSteps(prev => prev.map((s, i) => {
+      if (i === idx) {
+        return { ...s, step_type: { type: 'BatchQuickPrompt' } };
+      }
+      if (i === idx - 1 && s.step_type?.type !== 'BatchQuickPrompt' && s.step_type?.type !== 'Notify') {
+        // Only patch the immediate predecessor when it's actually a producer
+        // step (Agent / ApiCall). Notify and nested Batch don't feed a list.
+        const needsStructured = !s.output_format || s.output_format.type !== 'Structured';
+        const needsLowEffort = !s.agent_settings?.reasoning_effort;
+        if (!needsStructured && !needsLowEffort) return s;
+        return {
+          ...s,
+          output_format: needsStructured ? { type: 'Structured' } : s.output_format,
+          agent_settings: needsLowEffort
+            ? { ...s.agent_settings, reasoning_effort: 'low' }
+            : s.agent_settings,
+        };
+      }
+      return s;
+    }));
   };
 
   const removeStep = (idx: number) => {
@@ -979,7 +1014,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       className="wf-step-type-btn"
                       data-type="batch-qp"
                       data-selected={step.step_type?.type === 'BatchQuickPrompt'}
-                      onClick={() => updateStep(i, { step_type: { type: 'BatchQuickPrompt' } })}
+                      onClick={() => selectBatchQpStepType(i)}
                       title={t('wiz.stepTypeBatchQPHint')}
                     >{t('wiz.stepTypeBatchQP')}</button>
                     <button
@@ -1028,6 +1063,28 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                         <span>{t('wiz.batchFirstStepWarning')}</span>
                       </div>
                     )}
+
+                    {!isFirstStep && (() => {
+                      // Surface the auto-config applied to the upstream step
+                      // so the user understands why its output_format /
+                      // reasoning_effort changed when they selected BatchQP.
+                      const prev = steps[i - 1];
+                      const prevIsProducer = prev.step_type?.type !== 'BatchQuickPrompt' && prev.step_type?.type !== 'Notify';
+                      const prevStructured = prev.output_format?.type === 'Structured';
+                      const prevLowEffort = prev.agent_settings?.reasoning_effort === 'low';
+                      if (!prevIsProducer || (!prevStructured && !prevLowEffort)) return null;
+                      return (
+                        <div className="wf-batch-info mt-2">
+                          <Info size={12} />
+                          <span>
+                            {t('wiz.batchAutoPrevNotice').replace('{name}', prev.name)}
+                            {prevStructured && prevLowEffort ? ' (Structured + reasoning_effort=low)'
+                              : prevStructured ? ' (Structured)'
+                              : ' (reasoning_effort=low)'}
+                          </span>
+                        </div>
+                      );
+                    })()}
 
                     {availableQuickPrompts.length === 0 ? (
                       <div className="wf-restricted-warning">
@@ -1412,6 +1469,31 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                   </div>
                 )}
 
+                {/* Output format — visible at the root of the step card.
+                    Moved out of the Advanced panel because a FreeText
+                    producer feeding a `{{previous_step.data}}` consumer
+                    used to silently break workflows at runtime. */}
+                <div className="mb-4 mt-4">
+                  <label className="wf-label">{t('wiz.outputFormat')}</label>
+                  <div className="flex-row gap-3">
+                    <button
+                      className="wf-step-type-btn"
+                      data-selected={step.output_format?.type === 'Structured'}
+                      onClick={() => updateStep(i, { output_format: { type: 'Structured' } })}
+                    >{t('wiz.outputStructured')}</button>
+                    <button
+                      className="wf-step-type-btn"
+                      data-selected={!step.output_format || step.output_format.type === 'FreeText'}
+                      onClick={() => updateStep(i, { output_format: { type: 'FreeText' } })}
+                    >{t('wiz.outputFree')}</button>
+                  </div>
+                  <p className="text-2xs text-ghost mt-2">
+                    {step.output_format?.type === 'Structured'
+                      ? t('wiz.outputStructuredHint')
+                      : t('wiz.outputFreeHint')}
+                  </p>
+                </div>
+
                 {/* Advanced toggle */}
                 <button
                   className="wf-advanced-toggle"
@@ -1425,26 +1507,6 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
 
                 {isAdvOpen && (
                   <div className="wf-advanced-panel">
-                    {/* Output format */}
-                    <div className="mb-5">
-                      <label className="wf-label">{t('wiz.outputFormat')}</label>
-                      <div className="flex-row gap-3">
-                        <button
-                          className="wf-step-type-btn"
-                          data-selected={!step.output_format || step.output_format.type === 'FreeText'}
-                          onClick={() => updateStep(i, { output_format: { type: 'FreeText' } })}
-                        >{t('wiz.outputFree')}</button>
-                        <button
-                          className="wf-step-type-btn"
-                          data-selected={step.output_format?.type === 'Structured'}
-                          onClick={() => updateStep(i, { output_format: { type: 'Structured' } })}
-                        >{t('wiz.outputStructured')}</button>
-                      </div>
-                      {step.output_format?.type === 'Structured' && (
-                        <p className="text-2xs text-ghost mt-2">{t('wiz.outputStructuredHint')}</p>
-                      )}
-                    </div>
-
                     {/* Agent settings */}
                     <div className="mb-5">
                       <label className="wf-label">{t('wiz.agentSettings')}</label>

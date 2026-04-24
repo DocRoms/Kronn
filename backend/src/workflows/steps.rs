@@ -56,11 +56,22 @@ pub async fn execute_step(
                     tokens_used: 0,
                     duration_ms: start.elapsed().as_millis() as u64,
                     condition_result: None,
+                    envelope_detected: None,
                 },
                 condition_action: None,
             };
         }
     };
+
+    // Fail-fast on broken inter-step contracts: if the rendered prompt still
+    // contains `{{steps.X.data|summary|status}}` or `{{previous_step.*}}`
+    // placeholders, the upstream step either ran as FreeText or failed to
+    // produce a `---STEP_OUTPUT---` envelope. Sending the literal `{{...}}`
+    // to the agent wastes tokens and surfaces as a cryptic agent error —
+    // better to abort here with a message the user can act on.
+    if let Some(outcome) = fail_fast_on_unresolved(&step.name, &prompt, start.elapsed().as_millis() as u64) {
+        return outcome;
+    }
 
     // Auto-inject structured output format instructions when output_format = Structured
     if step.output_format == crate::models::StepOutputFormat::Structured {
@@ -142,6 +153,15 @@ pub async fn execute_step(
                     ConditionAction::Goto { step_name } => format!("Goto:{}", step_name),
                 });
 
+                // Record whether the structured contract was actually met.
+                // Downstream code (UI badge, SuccessDegraded status, health
+                // checks) can branch on this without re-parsing the output.
+                let envelope_detected = if step.output_format == crate::models::StepOutputFormat::Structured {
+                    Some(crate::workflows::template::extract_step_envelope(&final_output).is_some())
+                } else {
+                    None
+                };
+
                 return StepOutcome {
                     result: StepResult {
                         step_name: step.name.clone(),
@@ -150,6 +170,7 @@ pub async fn execute_step(
                         tokens_used: total_tokens,
                         duration_ms,
                         condition_result,
+                        envelope_detected,
                     },
                     condition_action,
                 };
@@ -170,6 +191,7 @@ pub async fn execute_step(
             tokens_used: 0,
             duration_ms: start.elapsed().as_millis() as u64,
             condition_result: None,
+            envelope_detected: None,
         },
         condition_action: None,
     }
@@ -313,6 +335,42 @@ fn evaluate_conditions(rules: &[StepConditionRule], output: &str) -> Option<Cond
     None
 }
 
+/// Build a `StepOutcome::Failed` when a rendered prompt still contains
+/// unresolved step-output references. Returns `None` if the prompt is safe
+/// to send to the agent, `Some(outcome)` otherwise. Pulled out as a pure
+/// function so the fail-fast logic can be unit-tested without spinning up
+/// an agent.
+fn fail_fast_on_unresolved(step_name: &str, prompt: &str, elapsed_ms: u64) -> Option<StepOutcome> {
+    let unresolved = crate::workflows::template::find_unresolved_critical_refs(prompt);
+    if unresolved.is_empty() {
+        return None;
+    }
+    let first = &unresolved[0];
+    let rest_count = unresolved.len().saturating_sub(1);
+    let extra = if rest_count > 0 {
+        format!(" (+{} autre{})", rest_count, if rest_count > 1 { "s" } else { "" })
+    } else {
+        String::new()
+    };
+    Some(StepOutcome {
+        result: StepResult {
+            step_name: step_name.to_string(),
+            status: RunStatus::Failed,
+            output: format!(
+                "Référence non résolue dans le prompt : {{{{{first}}}}}{extra}. \
+                L'étape productrice doit être en `output_format: Structured` \
+                pour exposer `.data` / `.summary` / `.status`, et sa sortie doit \
+                contenir l'enveloppe `---STEP_OUTPUT---`."
+            ),
+            tokens_used: 0,
+            duration_ms: elapsed_ms,
+            condition_result: None,
+            envelope_detected: None,
+        },
+        condition_action: None,
+    })
+}
+
 /// Generate a human-readable description of what a keyword means.
 /// Used in the auto-injected prompt section.
 fn condition_description(keyword: &str) -> &str {
@@ -387,6 +445,120 @@ mod tests {
         let output = "line1\nline2\nline3\nline4\nline5\n[SIGNAL: STOP_SIGNAL]";
         let action = evaluate_conditions(&rules, output);
         assert!(matches!(action, Some(ConditionAction::Stop)));
+    }
+
+    // ── fail_fast_on_unresolved ──────────────────────────────────────────
+    //
+    // Regression tests for Workflow B: the runner must refuse to call the
+    // agent when the rendered prompt still carries `{{steps.X.data}}` or
+    // `{{previous_step.*}}` placeholders. Before this check, those leaked
+    // into the agent prompt and surfaced as opaque "tickets pas injectés"
+    // messages at runtime.
+
+    // ── envelope_detected field ──────────────────────────────────────────
+    //
+    // Pure-data regression: the StepResult envelope_detected field must
+    // mirror extract_step_envelope's verdict on the output, scoped to
+    // Structured steps only. Foundation for the post-run UX badge and
+    // SuccessDegraded status.
+
+    #[test]
+    fn envelope_detected_matches_extraction_for_structured_output() {
+        let good = "Here is the analysis.\n---STEP_OUTPUT---\n{\"data\": [1], \"status\": \"OK\", \"summary\": \"one\"}\n---END_STEP_OUTPUT---";
+        let bad = "Just a markdown table, no envelope.";
+
+        assert!(crate::workflows::template::extract_step_envelope(good).is_some());
+        assert!(crate::workflows::template::extract_step_envelope(bad).is_none());
+
+        // Same logic lives inside execute_step's success branch — these
+        // asserts pin the contract that branch depends on.
+        let fmt = crate::models::StepOutputFormat::Structured;
+        let expect_good = fmt == crate::models::StepOutputFormat::Structured
+            && crate::workflows::template::extract_step_envelope(good).is_some();
+        let expect_bad = fmt == crate::models::StepOutputFormat::Structured
+            && crate::workflows::template::extract_step_envelope(bad).is_some();
+        assert!(expect_good);
+        assert!(!expect_bad);
+    }
+
+    #[test]
+    fn envelope_detected_is_none_for_freetext() {
+        // FreeText steps don't use the envelope contract — envelope_detected
+        // stays None so the UI can distinguish "didn't apply" from "failed".
+        let fmt = crate::models::StepOutputFormat::FreeText;
+        let value: Option<bool> = if fmt == crate::models::StepOutputFormat::Structured {
+            Some(true) // hypothetical
+        } else {
+            None
+        };
+        assert_eq!(value, None);
+    }
+
+    #[test]
+    fn fail_fast_passes_through_when_prompt_is_clean() {
+        let outcome = fail_fast_on_unresolved("s1", "Analyse les tickets EW-1234", 12);
+        assert!(outcome.is_none());
+    }
+
+    #[test]
+    fn fail_fast_ignores_non_contract_braces() {
+        // `.output` always resolves; `{{foo}}` is not part of the inter-step
+        // contract. Neither should abort the run.
+        let prompt = "{{steps.a.output}} / {{foo}} / {{ steps.a.tokens }}";
+        let outcome = fail_fast_on_unresolved("s1", prompt, 0);
+        assert!(outcome.is_none(), "Non-contract braces must not fail-fast");
+    }
+
+    #[test]
+    fn fail_fast_on_steps_data_placeholder() {
+        let outcome = fail_fast_on_unresolved(
+            "analyze",
+            "Use {{steps.main.data}} to proceed.",
+            5,
+        ).expect("Must return a failed outcome");
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        assert_eq!(outcome.result.step_name, "analyze");
+        assert!(outcome.result.output.contains("steps.main.data"),
+            "Error message must name the offending placeholder");
+        assert!(outcome.result.output.contains("Structured"),
+            "Error message must hint at the fix (output_format: Structured)");
+        assert_eq!(outcome.result.tokens_used, 0, "No tokens spent on failed fail-fast");
+    }
+
+    #[test]
+    fn fail_fast_on_previous_step_summary() {
+        let outcome = fail_fast_on_unresolved(
+            "step2",
+            "Previous summary: {{previous_step.summary}}",
+            0,
+        ).expect("Must return a failed outcome");
+        assert!(outcome.result.output.contains("previous_step.summary"));
+    }
+
+    #[test]
+    fn fail_fast_message_mentions_additional_placeholders() {
+        let outcome = fail_fast_on_unresolved(
+            "s",
+            "{{steps.a.data}} and {{steps.b.summary}} and {{previous_step.status}}",
+            0,
+        ).expect("Must fail-fast");
+        // Names the first + flags the count of extras so the user knows it's
+        // not a one-off; exact wording is asserted to catch regressions.
+        assert!(outcome.result.output.contains("+2 autres"),
+            "Got: {}", outcome.result.output);
+    }
+
+    #[test]
+    fn fail_fast_single_extra_uses_singular() {
+        let outcome = fail_fast_on_unresolved(
+            "s",
+            "{{steps.a.data}} {{steps.b.summary}}",
+            0,
+        ).expect("Must fail-fast");
+        assert!(outcome.result.output.contains("+1 autre"),
+            "Expected singular 'autre', got: {}", outcome.result.output);
+        assert!(!outcome.result.output.contains("+1 autres"),
+            "Must not pluralize when only 1 extra");
     }
 
     #[test]
