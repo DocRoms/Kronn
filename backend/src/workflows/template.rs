@@ -32,7 +32,14 @@ impl TemplateContext {
     }
 
     /// Record a step result for use by subsequent steps.
-    /// For structured outputs, also sets `.data` and `.summary` variables.
+    /// For structured outputs, also sets `.data`, `.summary`, `.status` and
+    /// the always-serialized `.data_json` variables.
+    ///
+    /// `data` vs `data_json`: `.data` unwraps string values (convenient for
+    /// prompt interpolation — `"tickets": "EW-1, EW-2"` renders cleanly),
+    /// while `.data_json` preserves JSON representation (convenient for
+    /// piping into an HTTP body or a downstream JSON parser). Needed for
+    /// the désagentification ApiCall→ApiCall path where nothing re-parses.
     pub fn set_step_output(&mut self, step_name: &str, output: &str) {
         self.values.insert(format!("steps.{}.output", step_name), output.into());
         self.values.insert("previous_step.output".into(), output.into());
@@ -42,9 +49,11 @@ impl TemplateContext {
             self.values.insert(format!("steps.{}.data", step_name), envelope.data.clone());
             self.values.insert(format!("steps.{}.summary", step_name), envelope.summary.clone());
             self.values.insert(format!("steps.{}.status", step_name), envelope.status.clone());
+            self.values.insert(format!("steps.{}.data_json", step_name), envelope.data_json.clone());
             self.values.insert("previous_step.data".into(), envelope.data);
             self.values.insert("previous_step.summary".into(), envelope.summary);
             self.values.insert("previous_step.status".into(), envelope.status);
+            self.values.insert("previous_step.data_json".into(), envelope.data_json);
         }
     }
 
@@ -92,14 +101,168 @@ impl TemplateContext {
     }
 }
 
+/// Validate that every `{{steps.X.Y}}` / `{{previous_step.Y}}` reference in
+/// the workflow's step prompts points to a valid upstream step whose
+/// `output_format` is `Structured`. Returns `Ok(())` if the workflow is
+/// internally consistent, or a list of human-readable errors otherwise.
+///
+/// Design-time companion to the runtime `find_unresolved_critical_refs`:
+/// together they block the Workflow B bug class at two layers — save-time
+/// validation catches the mistake the moment the user clicks Save, and the
+/// runtime check catches any remaining edge cases (e.g. envelope extraction
+/// failing even though `output_format` is Structured).
+pub fn validate_step_references(steps: &[crate::models::WorkflowStep]) -> Result<(), Vec<String>> {
+    use crate::models::StepOutputFormat;
+    static RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
+        regex_lite::Regex::new(
+            r"\{\{\s*(?:steps\.([A-Za-z0-9_\-]+)\.(data|summary|status|data_json)|previous_step\.(data|summary|status|data_json))\s*\}\}"
+        ).unwrap()
+    });
+
+    let mut errors = Vec::new();
+    for (idx, step) in steps.iter().enumerate() {
+        for caps in RE.captures_iter(&step.prompt_template) {
+            if let (Some(name), Some(field)) = (caps.get(1), caps.get(2)) {
+                let target_name = name.as_str();
+                let target_field = field.as_str();
+                // Look only in strictly-upstream steps (can't read self or future)
+                let upstream = steps.iter().take(idx).find(|s| s.name == target_name);
+                match upstream {
+                    Some(target) if target.output_format == StepOutputFormat::Structured => {}
+                    Some(target) => errors.push(format!(
+                        "Étape '{}' référence {{{{steps.{}.{}}}}}, mais l'étape '{}' est en output_format: FreeText. Passe-la en Structured pour qu'elle expose .data / .summary / .status.",
+                        step.name, target_name, target_field, target.name
+                    )),
+                    None => {
+                        if steps.iter().any(|s| s.name == target_name) {
+                            // Either self-reference or forward-reference
+                            errors.push(format!(
+                                "Étape '{}' référence {{{{steps.{}.{}}}}}, mais cette étape n'est pas exécutée avant. Les références en avant ou sur soi-même ne sont pas supportées.",
+                                step.name, target_name, target_field
+                            ));
+                        } else {
+                            errors.push(format!(
+                                "Étape '{}' référence {{{{steps.{}.{}}}}}, mais aucune étape ne porte le nom '{}'.",
+                                step.name, target_name, target_field, target_name
+                            ));
+                        }
+                    }
+                }
+            } else if let Some(field) = caps.get(3) {
+                let target_field = field.as_str();
+                if idx == 0 {
+                    errors.push(format!(
+                        "Étape '{}' utilise {{{{previous_step.{}}}}} mais c'est la première étape du workflow — il n'y a pas de précédente.",
+                        step.name, target_field
+                    ));
+                } else {
+                    let prev = &steps[idx - 1];
+                    if prev.output_format != StepOutputFormat::Structured {
+                        errors.push(format!(
+                            "Étape '{}' utilise {{{{previous_step.{}}}}}, mais l'étape précédente '{}' est en output_format: FreeText. Passe-la en Structured.",
+                            step.name, target_field, prev.name
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    if errors.is_empty() { Ok(()) } else { Err(errors) }
+}
+
+/// Return the names of producer steps that need their `output_format`
+/// flipped to `Structured` to satisfy the inter-step contract.
+///
+/// A producer is "healable" when:
+///   - It exists strictly upstream of the consumer
+///   - A downstream step references `{{steps.X.data|summary|status|data_json}}`
+///     or (for the immediate predecessor) `{{previous_step.*}}`
+///   - Its current `output_format` is `FreeText`
+///
+/// Forward references, self-references, and references to missing steps are
+/// NOT healable — they're structural bugs that need manual intervention.
+/// Those are reported by `validate_step_references`; the healer ignores them.
+pub fn healable_producer_names(steps: &[crate::models::WorkflowStep]) -> Vec<String> {
+    use crate::models::StepOutputFormat;
+    static RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
+        regex_lite::Regex::new(
+            r"\{\{\s*(?:steps\.([A-Za-z0-9_\-]+)\.(?:data|summary|status|data_json)|previous_step\.(?:data|summary|status|data_json))\s*\}\}"
+        ).unwrap()
+    });
+
+    let mut names = std::collections::BTreeSet::new();
+    for (idx, step) in steps.iter().enumerate() {
+        for caps in RE.captures_iter(&step.prompt_template) {
+            if let Some(name_match) = caps.get(1) {
+                let target_name = name_match.as_str();
+                // Strictly upstream only
+                if let Some(target) = steps.iter().take(idx).find(|s| s.name == target_name) {
+                    if target.output_format == StepOutputFormat::FreeText {
+                        names.insert(target.name.clone());
+                    }
+                }
+            } else if idx > 0 {
+                // previous_step.* — the immediate predecessor
+                let prev = &steps[idx - 1];
+                if prev.output_format == StepOutputFormat::FreeText {
+                    names.insert(prev.name.clone());
+                }
+            }
+        }
+    }
+    names.into_iter().collect()
+}
+
+/// Scan a rendered prompt for unresolved references that would poison an
+/// agent call. We only flag the ones that signal a broken inter-step
+/// contract: `{{steps.X.data|summary|status}}` and
+/// `{{previous_step.data|summary|status}}`. The `.output` form always
+/// resolves once a step has produced *any* text, so we ignore it.
+///
+/// Why fail-fast on these: when the upstream step runs as `FreeText` or the
+/// envelope extraction fails, `set_step_output` never inserts the `.data`
+/// keys. The template engine then renders `{{steps.X.data}}` literally,
+/// the agent receives that placeholder in its prompt, and panics with a
+/// cryptic "tickets pas injectés" — which is really "Workflow B shipped
+/// broken and nobody told you."
+pub fn find_unresolved_critical_refs(rendered: &str) -> Vec<String> {
+    static RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
+        // Matches `{{steps.NAME.data|data_json|summary|status}}` or the
+        // `{{previous_step.*}}` equivalent, tolerating whitespace inside
+        // the braces the way TemplateContext::render does.
+        regex_lite::Regex::new(
+            r"\{\{\s*(steps\.[A-Za-z0-9_\-]+\.(?:data|summary|status|data_json)|previous_step\.(?:data|summary|status|data_json))\s*\}\}"
+        ).unwrap()
+    });
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for caps in RE.captures_iter(rendered) {
+        if let Some(m) = caps.get(1) {
+            let s = m.as_str().to_string();
+            if seen.insert(s.clone()) {
+                out.push(s);
+            }
+        }
+    }
+    out
+}
+
 // ── Structured output extraction ────────────────────────────────────────────
 
 /// Extracted envelope from a step's output.
 #[derive(Debug, Clone)]
 pub struct StepEnvelope {
+    /// String-rendered data. Unwrapped when the JSON field was a string
+    /// (so `"data": "hello"` → `data = "hello"` without the quotes).
     pub data: String,
     pub status: String,
     pub summary: String,
+    /// Always-serialized JSON form of `data`. Preserves the JSON
+    /// representation (so `"data": "hello"` → `data_json = "\"hello\""`).
+    /// Lets downstream ApiCall steps inject the value as a valid JSON
+    /// body without re-parsing.
+    pub data_json: String,
 }
 
 /// Instructions injected into prompts when `output_format = Structured`.
@@ -184,17 +347,20 @@ fn envelope_from_json(val: &serde_json::Value) -> Option<StepEnvelope> {
     let status = val.get("status")?.as_str().unwrap_or("OK");
     let summary = val.get("summary").and_then(|s| s.as_str()).unwrap_or("");
 
-    // Serialize data back to string — if it's a string, use it directly
+    // `data`: unwrap strings for clean prompt interpolation.
     let data_str = if let Some(s) = data.as_str() {
         s.to_string()
     } else {
         serde_json::to_string(data).unwrap_or_default()
     };
+    // `data_json`: always-serialized JSON, usable directly as an HTTP body.
+    let data_json = serde_json::to_string(data).unwrap_or_default();
 
     Some(StepEnvelope {
         data: data_str,
         status: status.to_string(),
         summary: summary.to_string(),
+        data_json,
     })
 }
 
@@ -312,6 +478,401 @@ mod tests {
         let text = "---STEP_OUTPUT---\n{\"data\": \"The root cause is a null pointer.\", \"status\": \"OK\", \"summary\": \"Found root cause\"}\n---END_STEP_OUTPUT---";
         let env = extract_step_envelope(text).unwrap();
         assert_eq!(env.data, "The root cause is a null pointer.");
+    }
+
+    // ── Unresolved critical references ──
+    //
+    // Prior behavior: `render()` silently left `{{steps.X.data}}` in place
+    // when the upstream step wasn't Structured, and the agent received the
+    // literal placeholder. These tests pin the detection that feeds the
+    // runner's fail-fast path.
+
+    #[test]
+    fn find_unresolved_critical_refs_detects_steps_data() {
+        let rendered = "Use this list: {{steps.main.data}} to analyze.";
+        let refs = find_unresolved_critical_refs(rendered);
+        assert_eq!(refs, vec!["steps.main.data"]);
+    }
+
+    #[test]
+    fn find_unresolved_critical_refs_detects_previous_step_fields() {
+        let rendered = "summary={{previous_step.summary}} status={{previous_step.status}}";
+        let refs = find_unresolved_critical_refs(rendered);
+        assert_eq!(refs, vec!["previous_step.summary", "previous_step.status"]);
+    }
+
+    #[test]
+    fn find_unresolved_critical_refs_dedups_repeats() {
+        let rendered = "{{steps.a.data}} / {{steps.a.data}} / {{steps.a.data}}";
+        let refs = find_unresolved_critical_refs(rendered);
+        assert_eq!(refs, vec!["steps.a.data"], "Repeats must be deduplicated");
+    }
+
+    // ── healable_producer_names ──
+    //
+    // The healing pass uses this to auto-upgrade FreeText producers that
+    // are referenced via .data/.summary/etc. Not healable: forward refs,
+    // self refs, missing-name refs. Those need human triage.
+
+    #[test]
+    fn healable_detects_freetext_producer() {
+        use crate::models::StepOutputFormat::*;
+        let steps = vec![
+            step("main", "Fetch", FreeText),
+            step("use", "Use {{steps.main.data}}", FreeText),
+        ];
+        assert_eq!(healable_producer_names(&steps), vec!["main".to_string()]);
+    }
+
+    #[test]
+    fn healable_dedups_multiple_references() {
+        use crate::models::StepOutputFormat::*;
+        let steps = vec![
+            step("main", "Fetch", FreeText),
+            step("a", "{{steps.main.data}}", FreeText),
+            step("b", "{{steps.main.summary}} {{steps.main.data_json}}", FreeText),
+        ];
+        // Still just `main` — healing idempotent on a single producer
+        assert_eq!(healable_producer_names(&steps), vec!["main".to_string()]);
+    }
+
+    #[test]
+    fn healable_skips_already_structured() {
+        use crate::models::StepOutputFormat::*;
+        let steps = vec![
+            step("main", "Fetch", Structured),
+            step("use", "{{steps.main.data}}", FreeText),
+        ];
+        assert!(healable_producer_names(&steps).is_empty(),
+            "Already-Structured producers must not reappear");
+    }
+
+    #[test]
+    fn healable_ignores_forward_references() {
+        use crate::models::StepOutputFormat::*;
+        // Forward ref is a structural bug, not something the healer fixes.
+        let steps = vec![
+            step("a", "Use {{steps.b.data}}", FreeText),
+            step("b", "Produce", FreeText),
+        ];
+        assert!(healable_producer_names(&steps).is_empty(),
+            "Forward refs must stay for validate_step_references to flag");
+    }
+
+    #[test]
+    fn healable_ignores_unknown_step_name() {
+        use crate::models::StepOutputFormat::*;
+        let steps = vec![
+            step("only", "Use {{steps.ghost.data}}", FreeText),
+        ];
+        assert!(healable_producer_names(&steps).is_empty());
+    }
+
+    #[test]
+    fn healable_previous_step_upgrades_predecessor() {
+        use crate::models::StepOutputFormat::*;
+        let steps = vec![
+            step("a", "Fetch", FreeText),
+            step("b", "{{previous_step.summary}}", FreeText),
+        ];
+        assert_eq!(healable_producer_names(&steps), vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn healable_previous_step_on_first_step_noop() {
+        use crate::models::StepOutputFormat::*;
+        // First step's `previous_step.*` is a structural bug — not healable.
+        let steps = vec![
+            step("first", "{{previous_step.data}}", FreeText),
+        ];
+        assert!(healable_producer_names(&steps).is_empty());
+    }
+
+    #[test]
+    fn healable_regression_workflow_b() {
+        use crate::models::StepOutputFormat::*;
+        // Exact shape of Workflow B. A single boot healing pass upgrades
+        // `main` from FreeText to Structured, after which the next run
+        // will produce the `---STEP_OUTPUT---` envelope.
+        let steps = vec![
+            step("main", "Récupère les tickets EW", FreeText),
+            step("analyze", "Analyse ces tickets : {{steps.main.data}}", FreeText),
+        ];
+        assert_eq!(healable_producer_names(&steps), vec!["main".to_string()]);
+    }
+
+    #[test]
+    fn find_unresolved_critical_refs_detects_data_json() {
+        // Regression for the data_json addition: the new variable is part
+        // of the structured contract and must fail-fast / validate the
+        // same way as `.data`.
+        let rendered = "{{steps.main.data_json}} is the body";
+        let refs = find_unresolved_critical_refs(rendered);
+        assert_eq!(refs, vec!["steps.main.data_json"]);
+    }
+
+    #[test]
+    fn validate_flags_data_json_on_freetext_producer() {
+        use crate::models::StepOutputFormat::*;
+        let steps = vec![
+            step("main", "Fetch", FreeText),
+            step("use", "POST body {{steps.main.data_json}}", FreeText),
+        ];
+        let err = validate_step_references(&steps).unwrap_err();
+        assert!(err[0].contains("data_json"), "data_json must participate in validation, got {:?}", err);
+    }
+
+    #[test]
+    fn find_unresolved_critical_refs_ignores_output_and_non_ref() {
+        // `.output` always resolves once a step has run, so never flag it.
+        // And `{{foo}}` / `{{steps.x.other}}` are not part of the contract.
+        let rendered = "{{steps.x.output}} {{foo}} {{steps.x.tokens}}";
+        let refs = find_unresolved_critical_refs(rendered);
+        assert!(refs.is_empty(), "Non-contract refs must be ignored, got {:?}", refs);
+    }
+
+    #[test]
+    fn find_unresolved_critical_refs_tolerates_whitespace() {
+        let rendered = "{{  steps.collect.data  }}";
+        let refs = find_unresolved_critical_refs(rendered);
+        assert_eq!(refs, vec!["steps.collect.data"]);
+    }
+
+    #[test]
+    fn find_unresolved_critical_refs_ignores_resolved_refs() {
+        // If the upstream step was Structured, set_step_output populated the
+        // variable and render() substituted it. Nothing should be flagged.
+        let mut ctx = TemplateContext::new();
+        let output = "---STEP_OUTPUT---\n{\"data\": \"EW-1\", \"status\": \"OK\", \"summary\": \"one\"}\n---END_STEP_OUTPUT---";
+        ctx.set_step_output("collect", output);
+        let rendered = ctx.render("List: {{steps.collect.data}}").unwrap();
+        let refs = find_unresolved_critical_refs(&rendered);
+        assert!(refs.is_empty(), "Resolved refs must disappear, got {:?}", refs);
+    }
+
+    #[test]
+    fn find_unresolved_critical_refs_regression_workflow_b() {
+        // The exact shape of the Workflow B bug: step 1 ran as FreeText (or
+        // its envelope extraction failed) so `steps.main.data` never got
+        // populated. The runner must detect this before calling the agent.
+        let mut ctx = TemplateContext::new();
+        ctx.set_step_output("main", "| Ticket | Résumé |\n|--|--|\n| EW-7181 | ... |"); // no envelope
+        let rendered = ctx.render("Analyse les tickets: {{steps.main.data}}").unwrap();
+        let refs = find_unresolved_critical_refs(&rendered);
+        assert_eq!(refs, vec!["steps.main.data"],
+            "Workflow B regression: FreeText upstream must be caught before agent call");
+    }
+
+    // ── validate_step_references ──
+    //
+    // Design-time validation: refuse to save a workflow where a step
+    // references .data/.summary/.status from an upstream step that isn't
+    // Structured. This is the UX-level companion to the runtime fail-fast.
+
+    fn step(name: &str, prompt: &str, fmt: crate::models::StepOutputFormat) -> crate::models::WorkflowStep {
+        crate::models::WorkflowStep {
+            name: name.into(),
+            step_type: crate::models::StepType::default(),
+            description: None,
+            agent: crate::models::AgentType::ClaudeCode,
+            prompt_template: prompt.into(),
+            mode: crate::models::StepMode::Normal,
+            output_format: fmt,
+            mcp_config_ids: vec![],
+            agent_settings: None,
+            on_result: vec![],
+            stall_timeout_secs: None,
+            retry: None,
+            skill_ids: vec![],
+            directive_ids: vec![],
+            profile_ids: vec![],
+            delay_after_secs: None,
+            batch_quick_prompt_id: None,
+            batch_items_from: None,
+            batch_wait_for_completion: None,
+            batch_max_items: None,
+            batch_workspace_mode: None,
+            batch_chain_prompt_ids: vec![],
+            notify_config: None,
+        }
+    }
+
+    #[test]
+    fn validate_ok_when_upstream_is_structured() {
+        use crate::models::StepOutputFormat::*;
+        let steps = vec![
+            step("main", "Fetch tickets", Structured),
+            step("analyze", "Analyze {{steps.main.data}}", FreeText),
+        ];
+        assert!(validate_step_references(&steps).is_ok());
+    }
+
+    #[test]
+    fn validate_ok_when_no_refs_at_all() {
+        use crate::models::StepOutputFormat::*;
+        let steps = vec![
+            step("a", "Just do A", FreeText),
+            step("b", "Just do B", FreeText),
+        ];
+        assert!(validate_step_references(&steps).is_ok(),
+            "No contract refs = no validation required");
+    }
+
+    #[test]
+    fn validate_regression_workflow_b() {
+        use crate::models::StepOutputFormat::*;
+        // Exact shape of Workflow B: step 1 in FreeText, step 2 references .data.
+        let steps = vec![
+            step("main", "Récupère les tickets EW", FreeText),
+            step("analyze", "Analyse ces tickets : {{steps.main.data}}", FreeText),
+        ];
+        let err = validate_step_references(&steps).unwrap_err();
+        assert_eq!(err.len(), 1);
+        assert!(err[0].contains("main"), "Error must name the offending producer");
+        assert!(err[0].contains("Structured"), "Error must suggest the fix");
+    }
+
+    #[test]
+    fn validate_blocks_forward_reference() {
+        use crate::models::StepOutputFormat::*;
+        // Step 1 references step 2 — the runner executes linearly so this
+        // can never work, even if step 2 is Structured.
+        let steps = vec![
+            step("a", "Use {{steps.b.data}}", FreeText),
+            step("b", "Produce data", Structured),
+        ];
+        let err = validate_step_references(&steps).unwrap_err();
+        assert!(err[0].contains("en avant"), "Error must explain forward-ref is unsupported, got {:?}", err);
+    }
+
+    #[test]
+    fn validate_blocks_self_reference() {
+        use crate::models::StepOutputFormat::*;
+        let steps = vec![
+            step("loop", "Refer to {{steps.loop.data}}", Structured),
+        ];
+        let err = validate_step_references(&steps).unwrap_err();
+        assert!(err[0].contains("en avant") || err[0].contains("soi"),
+            "Self-ref must be flagged, got {:?}", err);
+    }
+
+    #[test]
+    fn validate_blocks_unknown_step_name() {
+        use crate::models::StepOutputFormat::*;
+        let steps = vec![
+            step("only", "Look at {{steps.ghost.data}}", FreeText),
+        ];
+        let err = validate_step_references(&steps).unwrap_err();
+        assert!(err[0].contains("ghost"), "Error must name the missing step");
+    }
+
+    #[test]
+    fn validate_previous_step_on_first_step_fails() {
+        use crate::models::StepOutputFormat::*;
+        let steps = vec![
+            step("first", "{{previous_step.data}}", FreeText),
+        ];
+        let err = validate_step_references(&steps).unwrap_err();
+        assert!(err[0].contains("première étape") || err[0].contains("précédente"),
+            "Must flag that the first step has no predecessor, got {:?}", err);
+    }
+
+    #[test]
+    fn validate_previous_step_requires_structured_predecessor() {
+        use crate::models::StepOutputFormat::*;
+        let steps = vec![
+            step("a", "Produce", FreeText),
+            step("b", "{{previous_step.summary}}", FreeText),
+        ];
+        let err = validate_step_references(&steps).unwrap_err();
+        assert!(err[0].contains("'a'") || err[0].contains("a "),
+            "Must point at the predecessor by name, got {:?}", err);
+    }
+
+    #[test]
+    fn validate_output_ref_does_not_require_structured() {
+        use crate::models::StepOutputFormat::*;
+        // `.output` is always populated — FreeText upstream is fine for it.
+        let steps = vec![
+            step("a", "Produce", FreeText),
+            step("b", "Raw text: {{steps.a.output}} and {{previous_step.output}}", FreeText),
+        ];
+        assert!(validate_step_references(&steps).is_ok());
+    }
+
+    #[test]
+    fn validate_collects_all_errors() {
+        use crate::models::StepOutputFormat::*;
+        // Multiple issues in one pass — the user should see all of them,
+        // not fix-and-retry one at a time.
+        let steps = vec![
+            step("a", "Just produce", FreeText),
+            step("b", "{{steps.a.data}} {{steps.ghost.summary}}", FreeText),
+            step("c", "{{previous_step.status}}", FreeText),
+        ];
+        let err = validate_step_references(&steps).unwrap_err();
+        assert!(err.len() >= 3, "Must return all errors at once, got {:?}", err);
+    }
+
+    // ── data_json template variable ──
+    //
+    // `data_json` is the always-serialized sibling of `data`. Existing
+    // workflows relying on `.data` keep working; ApiCall chainers get a
+    // JSON-ready payload without a re-parse in between.
+
+    #[test]
+    fn data_json_preserves_string_quoting() {
+        let mut ctx = TemplateContext::new();
+        let output = "---STEP_OUTPUT---\n{\"data\": \"hello\", \"status\": \"OK\", \"summary\": \"s\"}\n---END_STEP_OUTPUT---";
+        ctx.set_step_output("s", output);
+        // `.data` unwraps the string
+        assert_eq!(ctx.render("{{steps.s.data}}").unwrap(), "hello");
+        // `.data_json` keeps it JSON-quoted
+        assert_eq!(ctx.render("{{steps.s.data_json}}").unwrap(), "\"hello\"");
+    }
+
+    #[test]
+    fn data_json_matches_data_for_arrays_and_objects() {
+        let mut ctx = TemplateContext::new();
+        let output = "---STEP_OUTPUT---\n{\"data\": [1,2,3], \"status\": \"OK\", \"summary\": \"s\"}\n---END_STEP_OUTPUT---";
+        ctx.set_step_output("s", output);
+        // Both render to the same JSON when `data` is not a string.
+        assert_eq!(ctx.render("{{steps.s.data}}").unwrap(), "[1,2,3]");
+        assert_eq!(ctx.render("{{steps.s.data_json}}").unwrap(), "[1,2,3]");
+    }
+
+    #[test]
+    fn data_json_valid_for_api_body_piping() {
+        // Regression for the ApiCall→ApiCall pipeline: the string produced
+        // by `.data_json` must roundtrip through serde_json::from_str.
+        let mut ctx = TemplateContext::new();
+        let output = "---STEP_OUTPUT---\n{\"data\": {\"id\": 42, \"tags\": [\"a\", \"b\"]}, \"status\": \"OK\", \"summary\": \"s\"}\n---END_STEP_OUTPUT---";
+        ctx.set_step_output("s", output);
+        let rendered = ctx.render("{{steps.s.data_json}}").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&rendered)
+            .expect("data_json must be valid JSON");
+        assert_eq!(parsed["id"], 42);
+        assert_eq!(parsed["tags"][0], "a");
+    }
+
+    #[test]
+    fn previous_step_data_json_exposed() {
+        let mut ctx = TemplateContext::new();
+        let output = "---STEP_OUTPUT---\n{\"data\": [\"x\"], \"status\": \"OK\", \"summary\": \"s\"}\n---END_STEP_OUTPUT---";
+        ctx.set_step_output("main", output);
+        assert_eq!(ctx.render("{{previous_step.data_json}}").unwrap(), "[\"x\"]");
+    }
+
+    #[test]
+    fn data_json_absent_when_no_envelope() {
+        // Mirror of existing .data behavior — a FreeText upstream leaves
+        // the variable unresolved, which our fail-fast / validator catch.
+        let mut ctx = TemplateContext::new();
+        ctx.set_step_output("s", "just raw text, no envelope");
+        assert_eq!(
+            ctx.render("{{steps.s.data_json}}").unwrap(),
+            "{{steps.s.data_json}}"
+        );
     }
 
     #[test]

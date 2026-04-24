@@ -1282,6 +1282,14 @@ pub struct StepResult {
     /// What happened after this step: null = continued normally, or the condition action triggered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condition_result: Option<String>,
+    /// For `output_format: Structured` steps only — did the agent actually
+    /// produce the `---STEP_OUTPUT---` envelope (possibly after repair)?
+    /// `Some(true)`  = envelope found, `.data/.summary/.status` populated.
+    /// `Some(false)` = Structured requested but extraction failed even after
+    ///                 repair, downstream `{{steps.X.data}}` won't resolve.
+    /// `None`        = FreeText step, the concept does not apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub envelope_detected: Option<bool>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

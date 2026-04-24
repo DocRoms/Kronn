@@ -220,6 +220,10 @@ pub async fn execute_batch_quick_prompt_step(
                 tokens_used: 0,
                 duration_ms: start.elapsed().as_millis() as u64,
                 condition_result: None,
+                // build_structured_output always emits a data/status/summary
+                // payload that `set_step_output` can extract via Strategy 2
+                // — the contract is met even without `---STEP_OUTPUT---`.
+                envelope_detected: Some(true),
             },
             condition_action: None,
         };
@@ -297,6 +301,7 @@ pub async fn execute_batch_quick_prompt_step(
             tokens_used: 0,
             duration_ms: start.elapsed().as_millis() as u64,
             condition_result: None,
+            envelope_detected: Some(true),
         },
         condition_action: None,
     }
@@ -312,6 +317,7 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
             tokens_used: 0,
             duration_ms: start.elapsed().as_millis() as u64,
             condition_result: None,
+            envelope_detected: None,
         },
         condition_action: None,
     }
