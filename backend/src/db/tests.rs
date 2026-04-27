@@ -612,7 +612,7 @@ fn mcp_config_insert_with_projects() {
         id: "cfg1".into(), server_id: "srv1".into(), label: "My Config".into(),
         env_keys: vec!["KEY1".into()], env_encrypted: "enc".into(),
         args_override: None, is_global: false, include_general: true, config_hash: "hash1".into(),
-        project_ids: vec!["p1".into()],
+        project_ids: vec!["p1".into()], host_sync: HostSyncMode::None,
     };
     crate::db::mcps::insert_config(&conn, &config).unwrap();
 
@@ -638,7 +638,7 @@ fn mcp_configs_for_project_includes_global() {
         id: "cfg-global".into(), server_id: "srv1".into(), label: "Global".into(),
         env_keys: vec![], env_encrypted: "".into(),
         args_override: None, is_global: true, include_general: true, config_hash: "h1".into(),
-        project_ids: vec![],
+        project_ids: vec![], host_sync: HostSyncMode::None,
     };
     crate::db::mcps::insert_config(&conn, &global).unwrap();
 
@@ -647,7 +647,7 @@ fn mcp_configs_for_project_includes_global() {
         id: "cfg-proj".into(), server_id: "srv1".into(), label: "Proj".into(),
         env_keys: vec![], env_encrypted: "".into(),
         args_override: None, is_global: false, include_general: true, config_hash: "h2".into(),
-        project_ids: vec!["p1".into()],
+        project_ids: vec!["p1".into()], host_sync: HostSyncMode::None,
     };
     crate::db::mcps::insert_config(&conn, &specific).unwrap();
 
@@ -740,7 +740,7 @@ fn mcp_config_update_env_persists() {
         id: "cfg1".into(), server_id: "srv1".into(), label: "My GitHub".into(),
         env_keys: vec!["TOKEN".into()], env_encrypted: encrypted,
         args_override: None, is_global: false, include_general: true,
-        config_hash: "h1".into(), project_ids: vec![],
+        config_hash: "h1".into(), project_ids: vec![], host_sync: HostSyncMode::None,
     };
     crate::db::mcps::insert_config(&conn, &config).unwrap();
 
@@ -752,7 +752,7 @@ fn mcp_config_update_env_persists() {
 
     let updated = crate::db::mcps::update_config(
         &conn, "cfg1", None, Some(&new_encrypted), Some(&new_keys),
-        None, None, None, None,
+        None, None, None, None, None,
     ).unwrap();
     assert!(updated, "update_config should return true");
 
@@ -767,7 +767,7 @@ fn mcp_config_update_env_persists() {
 fn mcp_config_update_nonexistent_returns_false() {
     let conn = test_db();
     let result = crate::db::mcps::update_config(
-        &conn, "nonexistent", Some("label"), None, None, None, None, None, None,
+        &conn, "nonexistent", Some("label"), None, None, None, None, None, None, None,
     ).unwrap();
     assert!(!result, "Updating a nonexistent config should return false");
 }
@@ -809,7 +809,7 @@ fn mcp_config_global_visible_to_all_projects() {
         id: "cfg-global".into(), server_id: "srv1".into(), label: "Sentry Global".into(),
         env_keys: vec!["SENTRY_TOKEN".into()], env_encrypted: encrypted.clone(),
         args_override: None, is_global: true, include_general: true,
-        config_hash: "h".into(), project_ids: vec![],
+        config_hash: "h".into(), project_ids: vec![], host_sync: HostSyncMode::None,
     };
     crate::db::mcps::insert_config(&conn, &config).unwrap();
 
@@ -824,7 +824,7 @@ fn mcp_config_global_visible_to_all_projects() {
     new_env.insert("SENTRY_TOKEN".into(), "tok-456-updated".into());
     let new_encrypted = crate::db::mcps::encrypt_env(&new_env, &secret).unwrap();
     crate::db::mcps::update_config(
-        &conn, "cfg-global", None, Some(&new_encrypted), None, None, None, None, None,
+        &conn, "cfg-global", None, Some(&new_encrypted), None, None, None, None, None, None,
     ).unwrap();
 
     // Both projects should see the UPDATED value
@@ -852,7 +852,7 @@ fn mcp_set_config_projects_relinks() {
         id: "cfg1".into(), server_id: "srv1".into(), label: "Test".into(),
         env_keys: vec![], env_encrypted: "".into(),
         args_override: None, is_global: false, include_general: true,
-        config_hash: "h".into(), project_ids: vec!["p1".into(), "p2".into()],
+        config_hash: "h".into(), project_ids: vec!["p1".into(), "p2".into()], host_sync: HostSyncMode::None,
     };
     crate::db::mcps::insert_config(&conn, &config).unwrap();
 
@@ -889,7 +889,7 @@ fn mcp_delete_config_removes_project_links() {
         id: "cfg1".into(), server_id: "srv1".into(), label: "Test".into(),
         env_keys: vec![], env_encrypted: "".into(),
         args_override: None, is_global: false, include_general: true,
-        config_hash: "h".into(), project_ids: vec!["p1".into()],
+        config_hash: "h".into(), project_ids: vec!["p1".into()], host_sync: HostSyncMode::None,
     };
     crate::db::mcps::insert_config(&conn, &config).unwrap();
 
@@ -920,7 +920,7 @@ fn mcp_config_update_global_flag_changes_visibility() {
         id: "cfg1".into(), server_id: "srv1".into(), label: "Test".into(),
         env_keys: vec![], env_encrypted: "".into(),
         args_override: None, is_global: false, include_general: true,
-        config_hash: "h".into(), project_ids: vec!["p1".into()],
+        config_hash: "h".into(), project_ids: vec!["p1".into()], host_sync: HostSyncMode::None,
     };
     crate::db::mcps::insert_config(&conn, &config).unwrap();
 
@@ -930,7 +930,7 @@ fn mcp_config_update_global_flag_changes_visibility() {
 
     // Promote to global
     crate::db::mcps::update_config(
-        &conn, "cfg1", None, None, None, None, Some(true), None, None,
+        &conn, "cfg1", None, None, None, None, Some(true), None, None, None,
     ).unwrap();
 
     // Now p2 should see it
@@ -2237,7 +2237,7 @@ fn mcp_config_display_secrets_broken_when_decrypt_fails() {
         is_global: false,
         include_general: true,
         config_hash: "hash-broken-test".into(),
-        project_ids: vec![],
+        project_ids: vec![], host_sync: HostSyncMode::None,
     };
     crate::db::mcps::insert_config(&conn, &config).unwrap();
 
@@ -2279,7 +2279,7 @@ fn mcp_config_display_secrets_ok_when_decrypt_succeeds() {
         is_global: false,
         include_general: true,
         config_hash: "hash-ok-test".into(),
-        project_ids: vec![],
+        project_ids: vec![], host_sync: HostSyncMode::None,
     };
     crate::db::mcps::insert_config(&conn, &config).unwrap();
 
@@ -2317,7 +2317,7 @@ fn mcp_config_display_secrets_broken_false_when_no_env() {
         is_global: false,
         include_general: true,
         config_hash: "hash-noenv-test".into(),
-        project_ids: vec![],
+        project_ids: vec![], host_sync: HostSyncMode::None,
     };
     crate::db::mcps::insert_config(&conn, &config).unwrap();
 

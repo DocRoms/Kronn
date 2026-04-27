@@ -26,6 +26,8 @@ import type {
   SetAgentAccessRequest,
   AgentsConfig,
   McpContextEntry,
+  DiscoveredHostMcp,
+  AdoptHostMcpRequest,
   AiAuditStatus,
   AuditProgress,
   LaunchAuditRequest,
@@ -503,6 +505,10 @@ export const mcps = {
   deleteConfig: (id: string) => api<void>('DELETE', `/mcps/configs/${id}`),
   setConfigProjects: (id: string, req: LinkMcpConfigRequest) => api<void>('PATCH', `/mcps/configs/${id}/projects`, req),
   revealSecrets: (id: string) => api<McpEnvEntry[]>('POST', `/mcps/configs/${id}/reveal`),
+  /** Scan host CLI config files for MCPs declared outside Kronn (Phase 1: read-only). */
+  hostDiscovery: () => api<DiscoveredHostMcp[]>('GET', '/mcps/host-discovery'),
+  /** Phase 2: adopt a host-declared MCP into the Kronn registry (no host-file mutation). */
+  adoptHost: (req: AdoptHostMcpRequest) => api<McpConfigDisplay>('POST', '/mcps/host-discovery/adopt', req),
   // MCP context files
   listContexts: (projectId: string) => api<McpContextEntry[]>('GET', `/mcps/context/${projectId}`),
   getContext: (projectId: string, slug: string) => api<McpContextEntry>('GET', `/mcps/context/${projectId}/${slug}`),

@@ -297,6 +297,45 @@ Kronn plugins expose capabilities to agents in two ways:
 - New workflow step type `ApiCall { plugin_id, endpoint, params }` that hits the API directly from the workflow engine — zero agent tokens. This is the "désagentification" vision (`ai/decisions.md` / `project_deagentify_workflows.md` memory). Plugin-kind abstraction is the enabler.
 - Next OAuth2 plugins candidates: Google Analytics 4 Data API, Salesforce REST — same `OAuth2ClientCredentials` variant, different `token_url` + scopes + extra headers.
 
+### Host MCP sync — bidirectional CLI integration (0.6.0 in development)
+
+Kronn-managed MCPs are now also written into the user's local CLI config files (`~/.claude.json`, `~/.gemini/settings.json`, `~/.codex/config.toml`, `~/.copilot/mcp-config.json`) so that running `claude`, `gemini`, `codex`, or `copilot` **outside** Kronn surfaces the same MCPs. Three-phase architecture; both inbound (read-only audit) and outbound (write) flows.
+
+**Phase 1 — Inbound discovery** (`backend/src/core/host_mcp_discovery.rs`): scans the 4 host config files and surfaces every MCP entry found, with ownership classification (`NotManaged` / `ManagedByMarker(config_id)` / `ManagedByHash(config_id)`). Read-only — never mutates disk. Endpoint `GET /api/mcps/host-discovery`. Frontend section in Settings → "MCPs externes détectés".
+
+**Phase 2 — Adopt** (`POST /api/mcps/host-discovery/adopt`): converts a non-Kronn-managed entry into a Kronn `McpConfig`. Defaults to `host_sync = GlobalOnly` + `is_global = false` + `project_ids = []`. Source classified as `McpSource::HostImported` (separate from `Detected` which is project-`.mcp.json`-scoped). Idempotent (hash dedup). Source file is **never modified** during adopt — that's the user's existing config; Kronn just registers a parallel record.
+
+**Phase 3 — Outbound sync** (4 functions in `backend/src/core/mcp_scanner.rs`):
+| Function | Target | Routing |
+|----------|--------|---------|
+| `sync_codex_global_config` | `~/.codex/config.toml` `[mcp_servers.*]` | top-level only (Codex has no native per-project scope) |
+| `sync_copilot_global_config` | `~/.copilot/mcp-config.json` | top-level only |
+| `sync_gemini_global_config` | `~/.gemini/settings.json` `mcpServers` | top-level only — Gemini's `httpUrl` used for Streamable HTTP |
+| `sync_claude_global_config` | `~/.claude.json` | **scope-aware**: `is_global=true` → top-level `mcpServers`; `is_global=false + project_ids` → `projects[<host-path>].mcpServers` for each project; `project_ids=[]` → top-level fallback |
+
+All four filter `host_sync ∈ {GlobalOnly, MirrorAll}` (= "synced to host"), skip `ApiOnly` transport, and use the same defensive merge pattern: `_kronn` marker on each managed entry (`{managed: true, config_id: <uuid>}`), tree-wide cleanup of orphaned Kronn entries, atomic write (`tmp+rename`), `chmod 0600` on Unix, abort+`.kronn-backup` on parse failure (data preservation).
+
+**Data model (`backend/src/models/mod.rs`)**:
+- `HostSyncMode` enum: `None | GlobalOnly | MirrorAll` — column on `mcp_configs` (migration 036). `MirrorAll` is a legacy value the codebase still reads but never writes (collapsed to `GlobalOnly` by migration 038).
+- `McpSource::HostImported` — new variant for entries adopted from host files (vs `Registry` / `Detected` / `Manual`).
+
+**Migrations**:
+- `036_mcp_host_sync.sql` — adds `host_sync TEXT NOT NULL DEFAULT 'None'` to `mcp_configs`.
+- `037_mcp_host_sync_backfill.sql` — sets `host_sync = 'MirrorAll'` on every existing config so the upgrade preserves the pre-0.6.0 behavior (Codex/Copilot were already global-by-default).
+- `038_mcp_host_sync_collapse.sql` — converts `MirrorAll` rows into the orthogonal pair `is_global = 1 + host_sync = 'GlobalOnly'`. The 3-mode UI was found to be confusing (override of project_ids), so the column is now binary in practice and `is_global` carries the "applied to all Kronn projects" semantics alone.
+
+**UX (Plugins page is the canonical editor — see `feedback_mcp_single_edit.md` memory)**:
+- `HostSyncChip` (`frontend/src/components/HostSyncChip.tsx`) — `🌐 CLI local` badge on every MCP card whose `host_sync !== 'None'`. At-a-glance scan of the fleet.
+- Drawer `Scope` section: project toggles + `is_global` toggle (existing) + checkbox "Aussi disponible dans mes CLIs locaux" (new).
+- `HostSyncPreview` (`frontend/src/components/HostSyncPreview.tsx`) — dynamic preview under the checkbox listing the exact destination per CLI based on current scope (e.g. `Claude Code → ~/.claude.json › projects[/home/me/Repos/APP_ANDROID]`, `Gemini → ~/.gemini/settings.json (top-level — scope projet non supporté)`). Renders the asymmetry (Claude scope-aware vs others top-level only) before the user clicks Save.
+- Empty-state banner on Plugins page when no config has `host_sync !== 'None'` (one-click jump to first config). Coach mark "✨ Nouveau" on the checkbox section, one-shot localStorage flag.
+
+**Tech-debts** documented in `inconsistencies-tech-debt.md`:
+- `TD-20260427-host-sync-trait` — 4 sync functions duplicate scaffolding; trait abstraction deferred until Ollama/OpenCode integration.
+- `TD-20260427-host-sync-flock` — no advisory `flock` on host writes; race window with Claude Code itself rewriting `~/.claude.json`.
+- `TD-20260427-host-sync-workflow-race` — `sync_affected_projects` doesn't gate on `workflow_runs.status='Running'`; rare interleave with mid-spawn agent.
+- `TD-20260427-host-sync-backup-rotation` — `.kronn-backup` is single-slot, no rotation, no restore CLI.
+
 ### Document generation — Kronn Docs (0.5.1)
 
 Agents produce 5 file formats (PDF / DOCX / XLSX / CSV / PPTX) without the user installing anything.
@@ -385,4 +424,4 @@ Redirectors to this file: `CLAUDE.md`, `GEMINI.md`, `AGENTS.md`, `.kiro/steering
 
 ## 12. Last updated
 
-AI context last reviewed: **2026-04-27** (v0.5.1 in preparation — on top of Kronn Docs / secret themes: workflow ActiveRunsPopover + inline Stop on cards, RTK (Rust Token Killer) integration **with `--codex`/`--gemini` matrix fix and `/api/rtk/deactivate` endpoint**, toast refactor with persistent-copyable errors, and **désagentification's first vertical — `StepType::ApiCall` shipped** with full wizard UI, **AI helper bubble** for endpoint/extract suggestions with per-plugin tips registry + auth-managed slot stripping, **click-to-pick everywhere with DWIM wildcard** + smart auto-derived suggestion chips + deep one-line preview, **path placeholders** for `/repos/{owner}/{repo}` style endpoints, **Headers editor promoted out of Advanced**, **runner derives `project_id` from config when missing**, **wizard recap + Create button branched per step type** (no more dead-button limbo on ApiCall-only workflows), **`StepResult` snapshots agent/plugin at run time** so editing a workflow doesn't corrupt run history, **live step status with elapsed counter + activity hint**, Chartbeat + **GitHub** + **Jira/Atlassian Cloud (hybrid MCP+REST, Basic auth + templated base_url)** plugins, multi-config picker fix + registry→DB startup sync, security triple-guard, auto-pagination detection, Cloudflare integration planned for Phase 2).
+AI context last reviewed: **2026-04-27** (v0.6.0 in preparation — on top of v0.5.1 Kronn Docs / secret themes / RTK / `StepType::ApiCall`: **bidirectional host MCP sync** (Phase 1 inbound discovery + Phase 2 adopt + Phase 3 outbound write to `~/.claude.json` & friends), **scope-aware Claude routing** (per-project `projects[<host-path>].mcpServers` when `is_global=false`), `_kronn` marker on managed entries with tree-wide orphan cleanup, `HostSyncMode` model + 3 migrations (036/037/038) with non-breaking backfill, `McpSource::HostImported` for adopted entries, `HostSyncChip` on Plugin cards + `HostSyncPreview` dynamic destination preview rendering Claude/Gemini/Codex/Copilot asymmetry, single-source-of-edit pattern (Plugins drawer = canonical, no duplicate radio in Settings), Marie+Antoine UX dialogue documented in `feedback_mcp_single_edit.md`. Tech-debts logged: `host-sync-trait` (4 sync funcs to factorize), `host-sync-flock` (concurrent-write race), `host-sync-workflow-race`, `host-sync-backup-rotation`. **Previous v0.5.1 highlights** (kept for context): workflow ActiveRunsPopover + inline Stop, RTK integration **with `--codex`/`--gemini` matrix fix and `/api/rtk/deactivate`**, toast refactor with persistent-copyable errors, **désagentification's first vertical — `StepType::ApiCall` shipped** with full wizard UI, AI helper bubble, click-to-pick + DWIM wildcard, path placeholders, Headers editor promoted out of Advanced, `StepResult` snapshots agent/plugin at run time, live step status with elapsed counter, Chartbeat + GitHub + Jira/Atlassian Cloud (hybrid) plugins, multi-config picker fix + registry→DB startup sync, security triple-guard, auto-pagination detection, Cloudflare integration planned for Phase 2.

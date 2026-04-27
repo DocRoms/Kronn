@@ -345,7 +345,34 @@ export interface ApiConfigKey {
   description: string;
 }
 
-export type McpSource = "Registry" | "Detected" | "Manual";
+export type McpSource = "Registry" | "Detected" | "Manual" | "HostImported";
+
+/** How a config is surfaced to local CLIs running outside a Kronn project. */
+export type HostSyncMode = "None" | "GlobalOnly" | "MirrorAll";
+
+// ─── Host MCP discovery (Phase 1 inbound) ───────────────────────────────────
+
+export type HostScope =
+  | { kind: "ClaudeUser" }
+  | { kind: "ClaudeLocal"; value: { project_path: string } }
+  | { kind: "Gemini" }
+  | { kind: "Codex" }
+  | { kind: "Copilot" };
+
+export type KronnOwnership =
+  | { type: "NotManaged" }
+  | { type: "ManagedByMarker"; config_id: string }
+  | { type: "ManagedByHash"; config_id: string };
+
+export interface DiscoveredHostMcp {
+  source_file: string;
+  scope: HostScope;
+  name: string;
+  transport: McpTransport;
+  /** Env variable names declared by the entry. Values are never surfaced. */
+  env_keys: string[];
+  managed_by_kronn: KronnOwnership;
+}
 
 export interface McpConfig {
   id: string;
@@ -358,6 +385,7 @@ export interface McpConfig {
   include_general: boolean;
   config_hash: string;
   project_ids: string[];
+  host_sync: HostSyncMode;
 }
 
 export interface McpConfigDisplay {
@@ -375,6 +403,7 @@ export interface McpConfigDisplay {
   project_names: string[];
   /** True when env_keys exist but decryption fails (secrets need re-entry). */
   secrets_broken: boolean;
+  host_sync: HostSyncMode;
 }
 
 export interface McpEnvEntry {
@@ -976,6 +1005,13 @@ export interface UpdateMcpConfigRequest {
   args_override?: string[];
   is_global?: boolean;
   include_general?: boolean;
+  host_sync?: HostSyncMode;
+}
+
+export interface AdoptHostMcpRequest {
+  source_file: string;
+  scope: HostScope;
+  name: string;
 }
 
 export interface LinkMcpConfigRequest {

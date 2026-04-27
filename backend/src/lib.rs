@@ -450,6 +450,8 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/mcps/configs/:id", patch(api::mcps::update_config).delete(api::mcps::delete_config))
         .route("/api/mcps/configs/:id/projects", patch(api::mcps::set_config_projects))
         .route("/api/mcps/configs/:id/reveal", post(api::mcps::reveal_secrets))
+        .route("/api/mcps/host-discovery", get(api::mcps::host_discovery))
+        .route("/api/mcps/host-discovery/adopt", post(api::mcps::adopt_host_mcp))
         .route("/api/mcps/context/:project_id", get(api::mcps::list_contexts))
         .route("/api/mcps/context/:project_id/:slug", get(api::mcps::get_context).put(api::mcps::update_context))
         // ── Workflows ──

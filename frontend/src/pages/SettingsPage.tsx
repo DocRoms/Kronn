@@ -20,6 +20,7 @@ import { TTS_VOICES, getTtsVoiceId, setTtsVoiceId } from '../lib/tts-models';
 import { setAuthToken } from '../lib/api';
 import { useTheme, type ThemeMode } from '../lib/ThemeContext';
 import { AgentsSection } from '../components/settings/AgentsSection';
+import { HostDiscoverySection } from '../components/settings/HostDiscoverySection';
 import { IdentitySection } from '../components/settings/IdentitySection';
 import { ProfilesSection } from '../components/settings/ProfilesSection';
 import { UsageSection } from '../components/settings/UsageSection';
@@ -654,6 +655,23 @@ export function SettingsPage({
                 toast={toast}
                 t={t}
               />
+            </div>
+          )}
+        </div>
+
+        {/* Host MCP discovery accordion (Phase 1: read-only scan of CLI home configs) */}
+        {/* Note: per-config `host_sync` edition lives ONLY in the McpPage drawer
+            ("Portée CLI locale" section). Single-source-of-edit principle —
+            no duplicate radio in Config to avoid "which one wins?" confusion. */}
+        <div className="set-accordion-section" id="settings-host-mcps">
+          <button className="set-accordion-header" onClick={() => toggleAccordion('host-mcps')} aria-expanded={configAccordion.has('host-mcps')}>
+            <ChevronRight size={12} className="set-accordion-chevron" data-expanded={configAccordion.has('host-mcps')} />
+            <Server size={14} className="text-accent" />
+            <span className="font-semibold text-base">MCPs externes détectés</span>
+          </button>
+          {configAccordion.has('host-mcps') && (
+            <div className="set-accordion-body">
+              <HostDiscoverySection t={t} />
             </div>
           )}
         </div>

@@ -662,8 +662,9 @@ args = ["@example/old-mcp"]
             other => panic!("expected Aborted, got {:?}", other),
         }
 
-        let backup = tmp.join("config.toml.kronn-backup");
-        assert!(backup.exists(), "corrupt config must be backed up to .kronn-backup");
+        // Backup rotation N=5 (0.6.0): the most recent backup lives at slot .1.
+        let backup = tmp.join("config.toml.kronn-backup.1");
+        assert!(backup.exists(), "corrupt config must be backed up to .kronn-backup.1");
         let backup_content = std::fs::read_to_string(&backup).unwrap();
         assert!(backup_content.contains("not = valid"),
             "backup must contain the original (corrupt) bytes");

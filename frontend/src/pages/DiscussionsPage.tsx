@@ -371,7 +371,7 @@ export function DiscussionsPage({
       } else {
         // No 'warning' variant in useToast — use 'info' so the toast still
         // shows distinctively without crashing the type check.
-        toast(t('qp.batch.toast.partial', name, msg.batch_completed, msg.batch_failed), 'info');
+        toast(t('qp.batch.toast.partial', name, msg.batch_completed, msg.batch_failed), 'warning');
       }
     }
     // Batch progress tick — clear the spinner for the disc that just finished
@@ -1030,7 +1030,7 @@ export function DiscussionsPage({
     if (result.warning) {
       const warningKey = `contacts.warn.${result.warning}`;
       const msg = t(warningKey);
-      toast(msg !== warningKey ? msg : t('contacts.warnGeneric'), 'info');
+      toast(msg !== warningKey ? msg : t('contacts.warnGeneric'), 'warning');
     } else {
       toast(t('contacts.added'), 'success');
     }

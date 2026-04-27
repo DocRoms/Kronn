@@ -64,6 +64,7 @@ const makeConfig = (id: string, serverId: string, serverName: string, opts?: Par
   project_ids: opts?.project_ids ?? [],
   project_names: opts?.project_names ?? [],
   secrets_broken: opts?.secrets_broken ?? false,
+  host_sync: opts?.host_sync ?? 'None',
 });
 
 const makeProject = (id: string, name: string): Project => ({

@@ -42,6 +42,7 @@ pub fn list_servers(conn: &Connection) -> Result<Vec<McpServer>> {
         let source = match source_str.as_str() {
             "registry" => McpSource::Registry,
             "manual" => McpSource::Manual,
+            "host_imported" => McpSource::HostImported,
             _ => McpSource::Detected,
         };
 
@@ -81,6 +82,7 @@ pub fn upsert_server(conn: &Connection, server: &McpServer) -> Result<()> {
         McpSource::Registry => "registry",
         McpSource::Detected => "detected",
         McpSource::Manual => "manual",
+        McpSource::HostImported => "host_imported",
     };
 
     let api_spec_json = server.api_spec.as_ref()
@@ -166,7 +168,7 @@ pub fn sync_registry_servers_to_db(
 
 pub fn list_configs(conn: &Connection) -> Result<Vec<McpConfig>> {
     let mut stmt = conn.prepare(
-        "SELECT id, server_id, label, env_encrypted, env_keys_json, args_override, is_global, config_hash, include_general
+        "SELECT id, server_id, label, env_encrypted, env_keys_json, args_override, is_global, config_hash, include_general, host_sync
          FROM mcp_configs ORDER BY label"
     )?;
 
@@ -174,6 +176,8 @@ pub fn list_configs(conn: &Connection) -> Result<Vec<McpConfig>> {
         let id: String = row.get(0)?;
         let env_keys_json: String = row.get(4)?;
         let args_str: Option<String> = row.get(5)?;
+        let host_sync_str: String = row.get::<_, Option<String>>(9)?
+            .unwrap_or_else(|| "None".to_string());
 
         Ok((id.clone(), McpConfig {
             id,
@@ -186,6 +190,7 @@ pub fn list_configs(conn: &Connection) -> Result<Vec<McpConfig>> {
             config_hash: row.get(7)?,
             include_general: row.get::<_, i32>(8).unwrap_or(1) != 0,
             project_ids: vec![], // loaded below
+            host_sync: parse_host_sync(&host_sync_str),
         }))
     })?.filter_map(|r| r.ok())
     .map(|(id, mut config)| {
@@ -214,8 +219,8 @@ pub fn insert_config(conn: &Connection, config: &McpConfig) -> Result<()> {
         .transpose()?;
 
     conn.execute(
-        "INSERT INTO mcp_configs (id, server_id, label, env_encrypted, env_keys_json, args_override, is_global, config_hash, include_general)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT INTO mcp_configs (id, server_id, label, env_encrypted, env_keys_json, args_override, is_global, config_hash, include_general, host_sync)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             config.id,
             config.server_id,
@@ -226,6 +231,7 @@ pub fn insert_config(conn: &Connection, config: &McpConfig) -> Result<()> {
             config.is_global as i32,
             config.config_hash,
             config.include_general as i32,
+            host_sync_to_str(&config.host_sync),
         ],
     )?;
 
@@ -238,7 +244,7 @@ pub fn insert_config(conn: &Connection, config: &McpConfig) -> Result<()> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn update_config(conn: &Connection, id: &str, label: Option<&str>, env_encrypted: Option<&str>, env_keys: Option<&[String]>, args_override: Option<&Vec<String>>, is_global: Option<bool>, config_hash: Option<&str>, include_general: Option<bool>) -> Result<bool> {
+pub fn update_config(conn: &Connection, id: &str, label: Option<&str>, env_encrypted: Option<&str>, env_keys: Option<&[String]>, args_override: Option<&Vec<String>>, is_global: Option<bool>, config_hash: Option<&str>, include_general: Option<bool>, host_sync: Option<HostSyncMode>) -> Result<bool> {
     // Load existing, apply changes, write back
     let existing = match get_config(conn, id)? {
         Some(c) => c,
@@ -252,6 +258,7 @@ pub fn update_config(conn: &Connection, id: &str, label: Option<&str>, env_encry
     let new_global = is_global.unwrap_or(existing.is_global);
     let new_include_general = include_general.unwrap_or(existing.include_general);
     let new_hash = config_hash.unwrap_or(&existing.config_hash);
+    let new_host_sync = host_sync.unwrap_or(existing.host_sync.clone());
 
     let env_keys_json = serde_json::to_string(&new_keys)?;
     let args_json = new_args.as_ref()
@@ -259,10 +266,32 @@ pub fn update_config(conn: &Connection, id: &str, label: Option<&str>, env_encry
         .transpose()?;
 
     let affected = conn.execute(
-        "UPDATE mcp_configs SET label = ?1, env_encrypted = ?2, env_keys_json = ?3, args_override = ?4, is_global = ?5, config_hash = ?6, include_general = ?7 WHERE id = ?8",
-        params![new_label, new_enc, env_keys_json, args_json, new_global as i32, new_hash, new_include_general as i32, id],
+        "UPDATE mcp_configs SET label = ?1, env_encrypted = ?2, env_keys_json = ?3, args_override = ?4, is_global = ?5, config_hash = ?6, include_general = ?7, host_sync = ?8 WHERE id = ?9",
+        params![new_label, new_enc, env_keys_json, args_json, new_global as i32, new_hash, new_include_general as i32, host_sync_to_str(&new_host_sync), id],
     )?;
     Ok(affected > 0)
+}
+
+// ─── HostSyncMode <-> string helpers ─────────────────────────────────────────
+
+/// Serialize HostSyncMode → SQL TEXT. Stable wire format independent of
+/// serde so a future enum rename doesn't break the migration.
+pub(crate) fn host_sync_to_str(mode: &HostSyncMode) -> &'static str {
+    match mode {
+        HostSyncMode::None => "None",
+        HostSyncMode::GlobalOnly => "GlobalOnly",
+        HostSyncMode::MirrorAll => "MirrorAll",
+    }
+}
+
+/// Parse SQL TEXT → HostSyncMode. Unknown values fall back to `None`
+/// (safer than failing — preserves data, never auto-syncs).
+pub(crate) fn parse_host_sync(s: &str) -> HostSyncMode {
+    match s {
+        "GlobalOnly" => HostSyncMode::GlobalOnly,
+        "MirrorAll" => HostSyncMode::MirrorAll,
+        _ => HostSyncMode::None,
+    }
 }
 
 pub fn delete_config(conn: &Connection, id: &str) -> Result<bool> {
@@ -372,6 +401,7 @@ pub fn list_configs_display(conn: &Connection, secret: Option<&str>) -> Result<V
             project_ids: c.project_ids,
             project_names,
             secrets_broken,
+            host_sync: c.host_sync,
         }
     }).collect())
 }

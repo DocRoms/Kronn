@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef } from 'react';
 import { X, Copy, Check } from 'lucide-react';
 
-type ToastType = 'success' | 'error' | 'info';
+type ToastType = 'success' | 'error' | 'warning' | 'info';
 
 interface ToastOptions {
   /** Stay visible until manually dismissed. Defaults to `true` for `error`,
@@ -27,6 +27,9 @@ export type ToastFn = (message: string, type?: ToastType, options?: ToastOptions
 const AUTO_DISMISS_MS: Record<ToastType, number> = {
   success: 3000,
   info: 5000,
+  // Warnings stay a bit longer than info — they signal "something is off
+  // but not fatal" and the user typically wants to read the full text.
+  warning: 7000,
   // Not used when persistent — see useToast below.
   error: 0,
 };
@@ -55,12 +58,13 @@ function ToastItem({ toast, onDismiss }: ToastItemProps) {
 
   const colorVar = toast.type === 'error' ? 'error'
     : toast.type === 'success' ? 'success'
+    : toast.type === 'warning' ? 'warning'
     : 'cyan';
 
   return (
     <div
       role="alert"
-      aria-live={toast.type === 'error' ? 'assertive' : 'polite'}
+      aria-live={toast.type === 'error' || toast.type === 'warning' ? 'assertive' : 'polite'}
       className="kr-toast"
       data-type={toast.type}
       style={{

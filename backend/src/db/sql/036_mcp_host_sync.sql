@@ -1,0 +1,16 @@
+-- Outbound MCP host sync — explicit scope per config, separate from `is_global`.
+--
+-- `is_global` keeps its existing meaning: "applied to all Kronn projects".
+-- `host_sync` is brand new: "written to host CLI config files" (the
+-- `~/.claude.json`, `~/.gemini/settings.json`, `~/.codex/config.toml`,
+-- `~/.copilot/mcp-config.json` files used by local CLIs outside Kronn).
+--
+-- Values:
+--   'None'        → Kronn-only, never appears in any host file
+--   'GlobalOnly'  → synced to host files, NOT auto-applied to Kronn projects
+--   'MirrorAll'   → synced to host files AND auto-applied to all projects
+--
+-- Default 'None' is safe — it preserves Phase-1 behavior (no host writes).
+-- Phase 3 will add a one-shot migration that backfills `MirrorAll` for
+-- configs that Codex/Copilot already globalize today, preserving UX.
+ALTER TABLE mcp_configs ADD COLUMN host_sync TEXT NOT NULL DEFAULT 'None';
