@@ -776,8 +776,31 @@ pub struct ApiConfigKey {
 #[ts(export)]
 pub enum McpSource {
     Registry,
+    /// Surfaced from a project's `.mcp.json` (existing path).
     Detected,
     Manual,
+    /// Adopted from a host CLI config file (`~/.claude.json`,
+    /// `~/.gemini/settings.json`, etc.) via Phase-2 host-discovery import.
+    HostImported,
+}
+
+/// How a config should be surfaced to the local CLIs (Claude Code, Gemini,
+/// Codex, Copilot) when they run *outside* a Kronn-managed project.
+///
+/// Separated from `is_global` (which is Kronn-internal: "applied across all
+/// Kronn projects") because the two concepts answer different questions:
+/// `is_global` decides Kronn project visibility; `host_sync` decides
+/// whether Kronn writes the entry into `~/.claude.json` & friends.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub enum HostSyncMode {
+    /// Kronn-only. Never written to a host CLI config file.
+    None,
+    /// Written to host config files. Not auto-applied to Kronn projects.
+    GlobalOnly,
+    /// Written to host config files AND auto-applied to all projects
+    /// (preserves the pre-0.5.2 Codex/Copilot "everything global" UX).
+    MirrorAll,
 }
 
 /// A configured instance of an MCP server — with label, env secrets, etc.
@@ -795,7 +818,14 @@ pub struct McpConfig {
     pub include_general: bool,
     pub config_hash: String,
     pub project_ids: Vec<String>,
+    /// Migration 036 — opt-in outbound sync to host CLI files.
+    /// Defaults to `None` for safety; existing rows get `None` from the
+    /// SQL migration's `DEFAULT 'None'` clause.
+    #[serde(default = "default_host_sync")]
+    pub host_sync: HostSyncMode,
 }
+
+fn default_host_sync() -> HostSyncMode { HostSyncMode::None }
 
 /// Display-safe version of McpConfig (secrets masked)
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -816,6 +846,9 @@ pub struct McpConfigDisplay {
     /// True when env_keys exist but decryption fails (secrets need re-entry).
     #[serde(default)]
     pub secrets_broken: bool,
+    /// See `McpConfig::host_sync`.
+    #[serde(default = "default_host_sync")]
+    pub host_sync: HostSyncMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -2157,6 +2190,7 @@ pub struct UpdateMcpConfigRequest {
     pub args_override: Option<Vec<String>>,
     pub is_global: Option<bool>,
     pub include_general: Option<bool>,
+    pub host_sync: Option<HostSyncMode>,
 }
 
 #[derive(Debug, Deserialize, TS)]

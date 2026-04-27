@@ -674,4 +674,39 @@ body"#;
         assert_eq!(skill.name, "After");
         assert_eq!(skill.auto_triggers.as_ref().unwrap().common, vec!["pdf".to_string()]);
     }
+
+    /// Guard test: the workflow-architect skill MUST teach the new
+    /// step types (ApiCall, Notify, BatchQuickPrompt) and the
+    /// désagentification rule. Locked in 0.6.0 after the skill was found
+    /// to be ~1 year stale (only Agent steps known). If a future edit
+    /// strips these signals, this test fails immediately — better than
+    /// noticing months later that AI-generated workflows are still
+    /// emitting curl-in-bash steps for APIs we have plugins for.
+    #[test]
+    fn workflow_architect_skill_teaches_new_step_types() {
+        let skills = list_all_skills();
+        let arch = skills.iter().find(|s| s.id == "workflow-architect")
+            .expect("workflow-architect skill must exist");
+        let c = &arch.content;
+
+        // Step types must all be referenced.
+        assert!(c.contains("ApiCall"),
+            "skill must mention ApiCall step type — désagentification");
+        assert!(c.contains("Notify"),
+            "skill must mention Notify webhook step type");
+        assert!(c.contains("BatchQuickPrompt"),
+            "skill must mention BatchQuickPrompt step type");
+        // The cost-decision narrative must be explicit.
+        assert!(c.contains("désagentification") || c.contains("Désagentification"),
+            "skill must spell out 'désagentification' so the agent treats it as a first-class concept");
+        assert!(c.contains("0 tokens") || c.contains("zero token") || c.contains("Zero tokens"),
+            "skill must claim zero-token cost on Notify/ApiCall paths to motivate the routing");
+        // Concrete API plugin references — without these the agent doesn't
+        // know what's typically available and can't propose ApiCall steps.
+        assert!(c.contains("chartbeat") || c.contains("Chartbeat"),
+            "skill must reference at least one named API plugin (Chartbeat is the canonical example)");
+        // Decision tree must be visible.
+        assert!(c.contains("decision tree") || c.contains("Decision tree"),
+            "skill must teach an explicit decision tree for picking step types");
+    }
 }

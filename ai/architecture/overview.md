@@ -231,15 +231,21 @@ mcp_servers (type)  →  mcp_configs (configured instance)  →  mcp_config_proj
 
 **Registry** — 34 built-in official MCP servers in `core/registry.rs`, grouped by category: Git & Code (GitHub, GitLab, Git), Databases (PostgreSQL, SQLite, Redis), BaaS (Supabase), Cloud & Infra (Cloudflare, AWS CloudWatch, Docker, Azure), Search & Web (Brave Search, Fetch, Exa), Browser (Puppeteer, Chrome DevTools, Playwright, Browserbase), Scraping (Firecrawl), Monitoring (Sentry, Grafana), Communication (Slack), Email (Resend), Project Management (Linear, Atlassian), Design (Figma), Knowledge & Docs (Notion, Context7), Payments (Stripe), AI & Reasoning (Memory, Sequential Thinking), SEO (Ahrefs), Files (Filesystem), Sandbox (E2B). Each has `env_keys` listing required environment variables, plus optional `token_url` (link to provider's token generation page) and `token_help` (short guidance text).
 
-**Disk sync (3 formats)** — When linkages or config values change, Kronn writes agent-specific config files:
+**Disk sync** — When linkages or config values change, Kronn writes agent-specific config files. The full mapping (Claude / Vibe / Kiro / Gemini / Codex / Copilot, per-project and global) plus the 0.6.0 outbound host sync (scope-aware Claude routing, `_kronn` marker, host_sync field, Phase 1+2+3 architecture) is documented in `ai/index.md § Host MCP sync` — single source of truth, do not duplicate here.
 
-| Agent | Config file | Scope | Format |
-|-------|------------|-------|--------|
-| Claude Code | `.mcp.json` (in project dir) | Per-project | JSON (`mcpServers` object) |
-| Vibe | `.vibe/config.toml` (in project dir) | Per-project | TOML (`[[mcp_servers]]` array) |
-| Codex | `~/.codex/config.toml` (global) | Global (all MCPs) | TOML (`[mcp_servers.<name>]` tables) |
+Quick recap (per-project files):
+- Claude Code → `<project>/.mcp.json`
+- Vibe → `<project>/.vibe/config.toml`
+- Kiro → `<project>/.kiro/settings/mcp.json` + `<project>/.ai/mcp/mcp.json`
+- Gemini → `<project>/.gemini/settings.json`
 
-Sync triggers: toggle project, toggle global, create/update/delete config. Key naming: single config for a server → `server.name.to_lowercase()`, multiple configs of same server → `config.label`. Files are added to `.gitignore`. Codex only supports stdio transport (SSE/streamable MCPs are skipped). Codex global config preserves non-MCP settings (model, approval_policy, etc.).
+Quick recap (host-level / global files, written when `host_sync ≠ None`):
+- Claude Code → `~/.claude.json` (top-level OR `projects[<host-path>].mcpServers` based on Kronn scope)
+- Gemini → `~/.gemini/settings.json` (top-level)
+- Codex → `~/.codex/config.toml` (top-level, stdio only)
+- Copilot → `~/.copilot/mcp-config.json` (top-level, stdio only)
+
+Sync triggers: toggle project, toggle global, toggle host_sync, create/update/delete config. Key naming: single config for a server → `server.name.to_lowercase()`, multiple configs of same server → `config.label`. Files are added to `.gitignore`. Codex/Copilot only support stdio (SSE/streamable skipped). All host-level files preserve non-Kronn entries (`_kronn` marker distinguishes ownership).
 
 **MCP context files** — Per-MCP per-project instruction files at `ai/operations/mcp-servers/<slug>.md`. Auto-created with a default template on first disk sync. Customized files are injected into agent system prompts via `--append-system-prompt`. The `McpOverview` response includes `customized_contexts` (list of `"slug:projectId"` pairs) so the frontend can show colored icons for customized vs default context files.
 

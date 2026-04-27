@@ -1,0 +1,18 @@
+-- Backfill `host_sync = MirrorAll` on configs that pre-date migration 036.
+--
+-- Before 036, Codex (`~/.codex/config.toml`) and Copilot
+-- (`~/.copilot/mcp-config.json`) syncs would write **every** active config.
+-- Phase 3 introduces a per-config opt-in (`host_sync`), and the column's
+-- default is `None` (= no host sync). Without this backfill, upgrading users
+-- would see their Codex/Copilot configs silently lose every Kronn-managed
+-- MCP on first restart — a regression we explicitly want to avoid.
+--
+-- Idempotent: runs once (tracked in `_migrations`). The condition
+-- `host_sync = 'None'` means "untouched by user since the column was added";
+-- once the user explicitly sets a value via the UI, this migration won't
+-- re-flip it (it has already been applied).
+--
+-- New configs inserted after this migration land with `host_sync = 'None'`
+-- (column DEFAULT) — the Phase-3 UX expects opt-in by default for any
+-- config the user creates from now on.
+UPDATE mcp_configs SET host_sync = 'MirrorAll' WHERE host_sync = 'None';

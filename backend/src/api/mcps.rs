@@ -117,6 +117,7 @@ pub async fn create_config(
             include_general: true,
             config_hash: hash,
             project_ids: req.project_ids,
+            host_sync: HostSyncMode::None,
         };
 
         db::mcps::insert_config(conn, &config)?;
@@ -208,6 +209,7 @@ pub async fn update_config(
             req.is_global,
             new_hash.as_deref(),
             req.include_general,
+            req.host_sync.clone(),
         )?;
 
         // Sync .mcp.json to disk — always sync all when secrets change
@@ -486,6 +488,7 @@ pub async fn refresh(
                         include_general: true,
                         config_hash: hash,
                         project_ids: vec![project.id.clone()],
+                        host_sync: HostSyncMode::None,
                     };
                     db::mcps::insert_config(conn, &config)?;
                 }
@@ -565,6 +568,221 @@ pub async fn get_context(
         Ok(entry) => Json(ApiResponse::ok(entry)),
         Err(e) => Json(ApiResponse::err(format!("{}", e))),
     }
+}
+
+/// GET /api/mcps/host-discovery — scan host config files for MCPs declared
+/// outside Kronn. Read-only: no DB writes, no file mutations.
+///
+/// Returns entries from `~/.claude.json`, `~/.gemini/settings.json`,
+/// `~/.codex/config.toml`, `~/.copilot/mcp-config.json` with ownership
+/// classification (`NotManaged` / `ManagedByMarker` / `ManagedByHash`).
+pub async fn host_discovery(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<Vec<crate::core::host_mcp_discovery::DiscoveredHostMcp>>> {
+    let result = state.db.with_conn(move |conn| {
+        Ok(crate::core::host_mcp_discovery::scan_all_host_mcps(conn))
+    }).await;
+
+    match result {
+        Ok(entries) => Json(ApiResponse::ok(entries)),
+        Err(e) => Json(ApiResponse::err(format!("Host discovery failed: {}", e))),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct AdoptHostMcpRequest {
+    /// Source file as reported by host_discovery (e.g. "/home/user/.claude.json").
+    pub source_file: String,
+    /// Scope from host_discovery so we can disambiguate the same MCP name
+    /// living in multiple Claude scopes (user vs local-per-project).
+    pub scope: crate::core::host_mcp_discovery::HostScope,
+    /// Entry name as it appears in the host file.
+    pub name: String,
+}
+
+/// POST /api/mcps/host-discovery/adopt — register a host-declared MCP into
+/// the Kronn registry. Read+write on DB, **never touches the host file**.
+///
+/// Behaviour:
+/// - Re-scans the host file to find the entry (avoids stale-cache issues
+///   if the user edited their file between `GET host-discovery` and clicking
+///   "Adopt").
+/// - Matches against the builtin registry by command+args; falls back to
+///   `McpSource::HostImported` with a synthetic `host_imported:<name>` id.
+/// - Creates an `McpConfig` with `host_sync = GlobalOnly` (since the entry
+///   came from a global host file, the user clearly wants it to remain so)
+///   and `is_global = false` + `project_ids = []` (user opts in per-project
+///   later via the existing UI).
+/// - Idempotent: if a config with the same hash already exists, returns it
+///   instead of duplicating.
+pub async fn adopt_host_mcp(
+    State(state): State<AppState>,
+    Json(req): Json<AdoptHostMcpRequest>,
+) -> Json<ApiResponse<McpConfigDisplay>> {
+    let config_read = state.config.read().await;
+    let secret = match &config_read.encryption_secret {
+        Some(s) => s.clone(),
+        None => return Json(ApiResponse::err("No encryption secret configured")),
+    };
+    drop(config_read);
+
+    let result = state.db.with_conn(move |conn| {
+        // Re-scan host to find the entry — never trust the request's
+        // payload to declare the env, hash, etc. (defence in depth: a
+        // malicious request could otherwise inject arbitrary env values).
+        let discovered = crate::core::host_mcp_discovery::scan_all_host_mcps(conn);
+        let entry = discovered.iter().find(|d| {
+            d.source_file == req.source_file
+                && d.scope == req.scope
+                && d.name == req.name
+        }).ok_or_else(|| anyhow::anyhow!(
+            "Entry '{}' not found in {} — re-scan and retry",
+            req.name, req.source_file
+        ))?;
+
+        // Re-read the env values from the host file. The discovery struct
+        // intentionally does not expose env values, so we re-parse here.
+        let env_values = read_host_entry_env(&req.source_file, &req.scope, &req.name)?;
+
+        // Match against builtin registry. The matching rule is the same as
+        // the existing `.mcp.json` detection path (`refresh` endpoint):
+        // command+args identity for stdio, url for SSE/Streamable.
+        let reg = registry::builtin_registry();
+        let registry_match = match_registry_by_transport(&entry.transport, &reg);
+
+        // Build the McpServer (registry hit reuses existing id; miss creates
+        // a new "host_imported:<name>" id).
+        let server = match registry_match {
+            Some(def) => McpServer {
+                id: def.id.clone(),
+                name: def.name.clone(),
+                description: def.description.clone(),
+                transport: def.transport.clone(),
+                source: McpSource::Registry,
+                api_spec: def.api_spec.clone(),
+            },
+            None => McpServer {
+                id: format!("host_imported:{}", req.name),
+                name: req.name.clone(),
+                description: format!("Adopted from {}", req.source_file),
+                transport: entry.transport.clone(),
+                source: McpSource::HostImported,
+                api_spec: None,
+            },
+        };
+        db::mcps::upsert_server(conn, &server)?;
+
+        // Compute hash + dedup
+        let hash = db::mcps::compute_config_hash(&server, &env_values, None);
+        if let Some(existing) = db::mcps::find_config_by_hash(conn, &hash)? {
+            // Already adopted — return the existing display row idempotently.
+            let configs = db::mcps::list_configs_display(conn, None)?;
+            return configs.into_iter().find(|c| c.id == existing.id)
+                .ok_or_else(|| anyhow::anyhow!("Existing config disappeared"));
+        }
+
+        // Encrypt env + insert
+        let env_encrypted = db::mcps::encrypt_env(&env_values, &secret)
+            .map_err(|e| anyhow::anyhow!("Encrypt: {}", e))?;
+        let env_keys: Vec<String> = env_values.keys().cloned().collect();
+
+        let new_config = McpConfig {
+            id: Uuid::new_v4().to_string(),
+            server_id: server.id.clone(),
+            label: req.name.clone(),
+            env_keys,
+            env_encrypted,
+            args_override: None,
+            is_global: false,
+            include_general: true,
+            config_hash: hash,
+            project_ids: vec![],
+            host_sync: HostSyncMode::GlobalOnly,
+        };
+        db::mcps::insert_config(conn, &new_config)?;
+
+        let configs = db::mcps::list_configs_display(conn, None)?;
+        configs.into_iter().find(|c| c.id == new_config.id)
+            .ok_or_else(|| anyhow::anyhow!("Inserted config not found in display list"))
+    }).await;
+
+    match result {
+        Ok(display) => Json(ApiResponse::ok(display)),
+        Err(e) => Json(ApiResponse::err(format!("Adopt failed: {}", e))),
+    }
+}
+
+/// Read env values for a single entry from the host file. Phase 2 only —
+/// once Phase 3's outbound sync ships, we'll factor this through the trait.
+fn read_host_entry_env(
+    source_file: &str,
+    scope: &crate::core::host_mcp_discovery::HostScope,
+    name: &str,
+) -> anyhow::Result<std::collections::HashMap<String, String>> {
+    use crate::core::host_mcp_discovery::HostScope;
+    let raw = std::fs::read_to_string(source_file)
+        .map_err(|e| anyhow::anyhow!("Read {}: {}", source_file, e))?;
+
+    match scope {
+        HostScope::ClaudeUser | HostScope::Gemini | HostScope::Copilot => {
+            let v: serde_json::Value = serde_json::from_str(&raw)?;
+            let entry = v.get("mcpServers").and_then(|o| o.get(name))
+                .ok_or_else(|| anyhow::anyhow!("Entry '{}' not found", name))?;
+            extract_env_from_json(entry)
+        }
+        HostScope::ClaudeLocal { project_path } => {
+            let v: serde_json::Value = serde_json::from_str(&raw)?;
+            let entry = v.get("projects")
+                .and_then(|p| p.get(project_path))
+                .and_then(|o| o.get("mcpServers"))
+                .and_then(|o| o.get(name))
+                .ok_or_else(|| anyhow::anyhow!("Entry '{}' not found in projects[{}]", name, project_path))?;
+            extract_env_from_json(entry)
+        }
+        HostScope::Codex => {
+            let v: toml::Value = raw.parse()?;
+            let entry = v.get("mcp_servers").and_then(|o| o.get(name)).and_then(|v| v.as_table())
+                .ok_or_else(|| anyhow::anyhow!("Entry '{}' not found", name))?;
+            let mut env = std::collections::HashMap::new();
+            if let Some(t) = entry.get("env").and_then(|v| v.as_table()) {
+                for (k, v) in t {
+                    if let Some(s) = v.as_str() {
+                        env.insert(k.clone(), s.to_string());
+                    }
+                }
+            }
+            Ok(env)
+        }
+    }
+}
+
+fn extract_env_from_json(entry: &serde_json::Value) -> anyhow::Result<std::collections::HashMap<String, String>> {
+    let mut env = std::collections::HashMap::new();
+    if let Some(obj) = entry.get("env").and_then(|v| v.as_object()) {
+        for (k, v) in obj {
+            if let Some(s) = v.as_str() {
+                env.insert(k.clone(), s.to_string());
+            }
+        }
+    }
+    Ok(env)
+}
+
+/// Match a discovered transport against the builtin registry by structural
+/// equality (command+args for stdio, url for remote). Pulled out so both
+/// the existing `refresh` flow and the new `adopt` flow share a single
+/// matching policy.
+fn match_registry_by_transport<'a>(
+    transport: &McpTransport,
+    reg: &'a [McpDefinition],
+) -> Option<&'a McpDefinition> {
+    reg.iter().find(|def| match (&def.transport, transport) {
+        (McpTransport::Stdio { command: c1, args: a1 }, McpTransport::Stdio { command: c2, args: a2 }) =>
+            c1 == c2 && a1 == a2,
+        (McpTransport::Sse { url: u1 }, McpTransport::Sse { url: u2 }) => u1 == u2,
+        (McpTransport::Streamable { url: u1 }, McpTransport::Streamable { url: u2 }) => u1 == u2,
+        _ => false,
+    })
 }
 
 /// PUT /api/mcps/context/:project_id/:slug — update a MCP context file
@@ -834,6 +1052,123 @@ fn is_well_known_mcp_command(cmd: &str) -> bool {
             | "docker"
             | "podman"
     )
+}
+
+#[cfg(test)]
+mod adopt_tests {
+    use super::*;
+    use crate::core::host_mcp_discovery::HostScope;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn read_env_from_claude_user_scope() {
+        let tmp = TempDir::new().unwrap();
+        let claude = tmp.path().join(".claude.json");
+        fs::write(&claude, r#"{
+            "mcpServers": {
+                "linear": {
+                    "command": "npx",
+                    "env": { "LINEAR_API_KEY": "secret-value", "LINEAR_TEAM": "kronn" }
+                }
+            }
+        }"#).unwrap();
+
+        let env = read_host_entry_env(
+            claude.to_str().unwrap(),
+            &HostScope::ClaudeUser,
+            "linear",
+        ).unwrap();
+        assert_eq!(env.get("LINEAR_API_KEY"), Some(&"secret-value".to_string()));
+        assert_eq!(env.get("LINEAR_TEAM"), Some(&"kronn".to_string()));
+    }
+
+    #[test]
+    fn read_env_from_claude_local_scope() {
+        let tmp = TempDir::new().unwrap();
+        let claude = tmp.path().join(".claude.json");
+        fs::write(&claude, r#"{
+            "projects": {
+                "/my/repo": {
+                    "mcpServers": {
+                        "github": {
+                            "command": "uvx",
+                            "env": { "GITHUB_TOKEN": "ghp_xxx" }
+                        }
+                    }
+                }
+            }
+        }"#).unwrap();
+
+        let env = read_host_entry_env(
+            claude.to_str().unwrap(),
+            &HostScope::ClaudeLocal { project_path: "/my/repo".into() },
+            "github",
+        ).unwrap();
+        assert_eq!(env.get("GITHUB_TOKEN"), Some(&"ghp_xxx".to_string()));
+    }
+
+    #[test]
+    fn read_env_from_codex_toml() {
+        let tmp = TempDir::new().unwrap();
+        let codex = tmp.path().join("config.toml");
+        fs::write(&codex, r#"
+[mcp_servers.atlassian]
+command = "uvx"
+[mcp_servers.atlassian.env]
+ATL_TOKEN = "tok-1"
+ATL_USER = "alice"
+"#).unwrap();
+
+        let env = read_host_entry_env(
+            codex.to_str().unwrap(),
+            &HostScope::Codex,
+            "atlassian",
+        ).unwrap();
+        assert_eq!(env.get("ATL_TOKEN"), Some(&"tok-1".to_string()));
+        assert_eq!(env.get("ATL_USER"), Some(&"alice".to_string()));
+    }
+
+    #[test]
+    fn read_env_missing_entry_returns_error() {
+        let tmp = TempDir::new().unwrap();
+        let claude = tmp.path().join(".claude.json");
+        fs::write(&claude, r#"{"mcpServers":{}}"#).unwrap();
+
+        let result = read_host_entry_env(
+            claude.to_str().unwrap(),
+            &HostScope::ClaudeUser,
+            "ghost",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn registry_match_by_transport() {
+        let reg = vec![
+            McpDefinition {
+                id: "linear".into(),
+                name: "Linear".into(),
+                description: String::new(),
+                transport: McpTransport::Stdio { command: "npx".into(), args: vec!["-y".into(), "@linear/mcp".into()] },
+                env_keys: vec![],
+                tags: vec![],
+                token_url: None,
+                token_help: None,
+                publisher: "Test".into(),
+                official: false,
+                alt_packages: vec![],
+                default_context: None,
+                api_spec: None,
+            },
+        ];
+
+        let probe = McpTransport::Stdio { command: "npx".into(), args: vec!["-y".into(), "@linear/mcp".into()] };
+        assert!(match_registry_by_transport(&probe, &reg).is_some());
+
+        let no_match = McpTransport::Stdio { command: "node".into(), args: vec!["other.js".into()] };
+        assert!(match_registry_by_transport(&no_match, &reg).is_none());
+    }
 }
 
 #[cfg(test)]

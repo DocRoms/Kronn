@@ -82,13 +82,18 @@ Kronn/
 │       │       ├── 028_batch_workflow_runs.sql # run_type/batch_total/batch_completed/batch_failed/batch_name
 │       │       ├── 030_workflow_run_parent.sql # parent_run_id for batch fan-out linkage
 │       │       ├── 031_partial_response.sql    # discussions.partial_response (crash recovery)
-│       │       └── 032_partial_response_started_at.sql # preserves checkpoint start time
+│       │       ├── 032_partial_response_started_at.sql # preserves checkpoint start time
+│       │       ├── 035_mcp_server_api_spec.sql # api_spec_json column on mcp_servers (API plugins)
+│       │       ├── 036_mcp_host_sync.sql       # 0.6.0: host_sync TEXT NOT NULL DEFAULT 'None' on mcp_configs
+│       │       ├── 037_mcp_host_sync_backfill.sql # 0.6.0: backfill MirrorAll on existing configs (preserves Codex/Copilot pre-0.6 UX)
+│       │       └── 038_mcp_host_sync_collapse.sql # 0.6.0: MirrorAll → is_global=1 + host_sync='GlobalOnly' (drop the 3-mode model)
 │       ├── core/               # Business logic
 │       │   ├── mod.rs          # Re-exports
 │       │   ├── config.rs       # Config load/save (~/.config/kronn/)
 │       │   ├── scanner.rs      # Git repo scanner + AI audit detection (detect_audit_status, count_ai_todos). WSL UNC paths (\\wsl.localhost\...) run git via wsl.exe
 │       │   ├── registry.rs     # Plugin registry — 53 MCPs + 3 API plugins (api-chartbeat, api-adobe-analytics, api-google-search). Each McpDefinition carries optional api_spec with base_url (supports {ENV_KEY} templating), auth (inc. OAuth2ClientCredentials with extra_headers), endpoints, docs_url, config_keys.
-│       │   ├── mcp_scanner.rs  # Multi-agent MCP sync + MCP/API prompt injection. read_all_mcp_contexts() reads .mcp.json + context files. build_api_context_block() renders `## REST APIs available` from API plugins. collect_active_api_plugins() decrypts + returns active configs. interpolate_env_template() substitutes {ENV_KEY} in base_url + header templates. Disk sync: .mcp.json (Claude), .vibe/config.toml (Vibe), ~/.codex/config.toml (Codex). ApiOnly transport is a silent skip.
+│       │   ├── mcp_scanner.rs  # Multi-agent MCP sync + MCP/API prompt injection. read_all_mcp_contexts() reads .mcp.json + context files. build_api_context_block() renders `## REST APIs available` from API plugins. collect_active_api_plugins() decrypts + returns active configs. interpolate_env_template() substitutes {ENV_KEY} in base_url + header templates. Disk sync: .mcp.json (Claude), .vibe/config.toml (Vibe), ~/.codex/config.toml (Codex). ApiOnly transport is a silent skip. **0.6.0: outbound host sync** — sync_claude_global_config (scope-aware: top-level vs projects[<host-path>].mcpServers based on is_global+project_ids), sync_gemini_global_config, sync_codex_global_config, sync_copilot_global_config. All filter `host_sync ≠ None`. `_kronn` marker on managed entries + tree-wide orphan cleanup. Atomic write + chmod 0600 on Unix. Defensive backup `.kronn-backup` on parse failure.
+│       │   ├── host_mcp_discovery.rs # 0.6.0: read-only scan of ~/.claude.json, ~/.gemini/settings.json, ~/.codex/config.toml, ~/.copilot/mcp-config.json. Returns DiscoveredHostMcp with HostScope (ClaudeUser, ClaudeLocal{path}, Gemini, Codex, Copilot) + KronnOwnership (NotManaged | ManagedByMarker(uuid) | ManagedByHash(uuid)). Phase 1 of inbound/outbound feature. Never writes disk.
 │       │   ├── oauth2_cache.rs # OAuth2 client-credentials token cache + exchanger (0.5.0). In-memory HashMap<config_id, CachedToken> behind a tokio::sync::Mutex. resolve_token() checks cache → exchanges on miss/expiry → returns bearer. 30s safety margin before provider expiry. Error-transparent: token-exchange failures are bubbled up as human-readable strings for prompt injection.
 │       │   ├── native_files.rs # Native SKILL.md + agent file sync. Writes skills to .claude/skills/, .agents/skills/, .gemini/skills/. Profiles to .claude/agents/, .gemini/agents/, .codex/agents/. Additive sync for discussions, full cleanup at startup.
 │       │   ├── docs_sidecar.rs # Kronn Docs sidecar manager (0.5.1) — spawns backend/sidecars/docs/ Python process on a random loopback port, reads stdout until "KRONN_DOCS_READY <port>" marker, exposes handle() → base_url for proxy. Gracefully degrades when the venv is missing (returns None; API handlers surface a "Document sidecar unavailable" error).
@@ -98,7 +103,7 @@ Kronn/
 │       │   ├── skills.rs      # Skills loader: builtin (embedded .md) + custom (~/.config/kronn/skills/). Frontmatter parsing, build_skills_prompt()
 │       │   ├── profiles.rs   # Profiles loader: builtin (embedded .md) + custom (~/.config/kronn/profiles/). Persona override system, build_profiles_prompt()
 │       │   ├── directives.rs # Directives loader: builtin (embedded .md) + custom (~/.config/kronn/directives/). build_directives_prompt()
-│       │   ├── cmd.rs        # Cross-platform command helpers: async_cmd()/sync_cmd() apply CREATE_NO_WINDOW on Windows. ALL Command::new() calls MUST use these helpers
+│       │   ├── cmd.rs        # Cross-platform command helpers: async_cmd()/sync_cmd() apply CREATE_NO_WINDOW on Windows + (0.6.0) resolve bare program names (npx, npm, git…) via which::which on Windows so .cmd/.bat wrappers are spawnable. ALL Command::new() calls MUST use these helpers
 │       │   ├── sse_limits.rs # Global + per-client SSE concurrency caps (0.3.5)
 │       │   └── pricing.rs    # Static token pricing table (per-provider $/1M tokens). estimate_cost() fallback when real cost unavailable
 │       ├── profiles/          # Builtin profile Markdown files (16 profiles: architect, tech-lead, qa-engineer, product-owner, scrum-master, technical-writer, devils-advocate, mentor, entrepreneur, ux-designer, game-developer, data-analyst, data-engineer, seo-growth, sre, staff-engineer)

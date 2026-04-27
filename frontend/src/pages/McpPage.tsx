@@ -2,12 +2,14 @@ import { useState, useRef, useEffect } from 'react';
 import { mcps as mcpsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { isHiddenPath } from '../lib/constants';
-import type { Project, McpConfigDisplay, McpDefinition, McpOverview } from '../types/generated';
+import type { Project, McpConfigDisplay, McpDefinition, McpOverview, HostSyncMode } from '../types/generated';
 import {
   Puzzle, Plus, Trash2, Eye, Check, RefreshCw, Square, CheckSquare,
   X, Key, Pencil, FileText, ExternalLink, Save, Search, ArrowDownAZ, ArrowDownZA,
   Plug, Globe,
 } from 'lucide-react';
+import { HostSyncChip } from '../components/HostSyncChip';
+import { HostSyncPreview } from '../components/HostSyncPreview';
 
 /** Derive plugin kind from transport + api_spec presence. */
 type PluginKind = 'mcp' | 'api' | 'hybrid';
@@ -224,6 +226,17 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
       refetchMcps();
     } catch (e) {
       console.warn('Failed to toggle global:', e);
+    }
+  };
+
+  /** Update host_sync (CLI scope: None/GlobalOnly/MirrorAll). UX#2 — single
+   *  source of edit; the SettingsPage section delegates here via deeplink. */
+  const handleSetHostSync = async (configId: string, mode: HostSyncMode) => {
+    try {
+      await mcpsApi.updateConfig(configId, { host_sync: mode });
+      refetchMcps();
+    } catch (e) {
+      console.warn('Failed to set host_sync:', e);
     }
   };
 
@@ -680,6 +693,9 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
         </div>
       )}
 
+      {/* ── Empty-state banner: no MCP exposed in CLI hors Kronn (UX#7) ── */}
+      <CliExposureHint configs={configs} onJumpToConfig={(id) => setSelectedConfigId(id)} />
+
       {/* ── Installed plugins grid (detail expands inline) ── */}
       {totalConfigs > 0 ? (
         <div className="mcp-installed-grid">
@@ -716,6 +732,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                         }
                         {cfg.env_keys.length > 0 && <span className="mcp-installed-keys"><Key size={9} /> {cfg.env_keys.length}</span>}
                         {cfg.secrets_broken && <span className="mcp-scope-badge" style={{ color: 'var(--kr-warning)', borderColor: 'rgba(var(--kr-warning-rgb), 0.3)' }} title={t('mcp.secretsBroken')}>⚠ {t('mcp.secretsBrokenShort')}</span>}
+                        <HostSyncChip mode={cfg.host_sync} />
                       </div>
                     </div>
                   </div>
@@ -823,6 +840,31 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                         })()}
                       </div>
                     </div>
+                    {/* ── Sync CLIs locaux (Phase-3 refactor — checkbox dans Scope) ── */}
+                    <div
+                      className="mcp-host-sync-block"
+                      style={{ marginTop: 12, paddingTop: 12, borderTop: '1px dashed var(--kr-border, #e5e7eb)', position: 'relative' }}
+                    >
+                      <label
+                        style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: '0.95em', fontWeight: 500 }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={cfg.host_sync !== 'None'}
+                          onChange={(e) => handleSetHostSync(cfg.id, e.target.checked ? 'GlobalOnly' : 'None')}
+                        />
+                        <Globe size={13} />
+                        Aussi disponible dans mes CLIs locaux
+                      </label>
+                      {cfg.host_sync !== 'None' && (
+                        <HostSyncPreview
+                          isGlobal={cfg.is_global}
+                          projectIds={cfg.project_ids}
+                          projects={projects}
+                        />
+                      )}
+                      <PorteeCliCoachMark />
+                    </div>
                   </div>
                 </div>
               );
@@ -882,6 +924,134 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Coach mark for the first-ever open of a Plugin drawer after the host
+ * sync feature was added. Appears once, dismissible, persisted in
+ * localStorage. Sits above the Portée CLI radio group with a subtle
+ * arrow / badge so existing users discover the feature without it
+ * being intrusive on subsequent edits.
+ */
+const PORTEE_CLI_COACH_KEY = 'kronn:portee-cli-coach-seen';
+
+function PorteeCliCoachMark() {
+  const [dismissed, setDismissed] = useState(() => {
+    try { return localStorage.getItem(PORTEE_CLI_COACH_KEY) === '1'; } catch { return true; }
+  });
+
+  if (dismissed) return null;
+
+  const dismiss = () => {
+    try { localStorage.setItem(PORTEE_CLI_COACH_KEY, '1'); } catch {}
+    setDismissed(true);
+  };
+
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        top: -2,
+        right: 0,
+        background: 'var(--kr-accent, #3b82f6)',
+        color: '#fff',
+        padding: '6px 10px',
+        borderRadius: 4,
+        fontSize: '0.78em',
+        fontWeight: 500,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        boxShadow: '0 2px 8px rgba(59, 130, 246, 0.3)',
+        maxWidth: 280,
+        zIndex: 5,
+      }}
+    >
+      <span>✨ Nouveau : expose ce MCP à tes CLIs locaux ici</span>
+      <button
+        onClick={dismiss}
+        style={{
+          all: 'unset',
+          cursor: 'pointer',
+          padding: 2,
+          opacity: 0.85,
+          flexShrink: 0,
+        }}
+        title="OK, j'ai compris"
+      >
+        <X size={11} />
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Empty-state hint shown when the user has MCPs configured but none of
+ * them is exposed to local CLIs (host_sync === 'None'). Surfaces the
+ * "Portée CLI locale" feature without nagging users who deliberately
+ * keep everything Kronn-only — dismissible via localStorage.
+ */
+const CLI_EXPOSURE_HINT_DISMISS_KEY = 'kronn:cli-exposure-hint-dismissed';
+
+function CliExposureHint({ configs, onJumpToConfig }: { configs: McpConfigDisplay[]; onJumpToConfig: (id: string) => void }) {
+  const [dismissed, setDismissed] = useState(() => {
+    try { return localStorage.getItem(CLI_EXPOSURE_HINT_DISMISS_KEY) === '1'; } catch { return false; }
+  });
+
+  // Show only when : at least 1 MCP exists AND none is exposed in CLI
+  const noneExposed = configs.length > 0 && configs.every(c => c.host_sync === 'None');
+  if (dismissed || !noneExposed) return null;
+
+  const dismiss = () => {
+    try { localStorage.setItem(CLI_EXPOSURE_HINT_DISMISS_KEY, '1'); } catch {}
+    setDismissed(true);
+  };
+
+  // Pick the first config alphabetically as the "jump-to" target
+  const firstConfig = [...configs].sort((a, b) => a.label.localeCompare(b.label))[0];
+
+  return (
+    <div
+      style={{
+        margin: '12px 0',
+        padding: '12px 16px',
+        border: '1px solid var(--kr-border, #e5e7eb)',
+        borderLeft: '3px solid var(--kr-accent, #3b82f6)',
+        borderRadius: 6,
+        background: 'var(--kr-info-bg, rgba(96, 165, 250, 0.04))',
+        fontSize: '0.9em',
+        display: 'flex',
+        alignItems: 'flex-start',
+        gap: 10,
+      }}
+    >
+      <Globe size={16} style={{ color: 'var(--kr-accent, #3b82f6)', flexShrink: 0, marginTop: 2 }} />
+      <div style={{ flex: 1 }}>
+        <strong>Aucun MCP n'est exposé en CLI hors Kronn.</strong>
+        <div className="text-muted" style={{ marginTop: 4, fontSize: '0.9em' }}>
+          Si tu utilises Claude Code / Gemini / Codex en dehors de Kronn et veux y avoir accès aux mêmes MCPs,
+          ouvre une config et choisis "Dans Kronn + CLIs locaux" dans la section Portée CLI.
+        </div>
+        {firstConfig && (
+          <button
+            className="btn btn-xs"
+            onClick={() => onJumpToConfig(firstConfig.id)}
+            style={{ marginTop: 8 }}
+          >
+            Configurer "{firstConfig.label}" →
+          </button>
+        )}
+      </div>
+      <button
+        className="btn btn-xs btn-ghost"
+        onClick={dismiss}
+        title="Ne plus afficher"
+        style={{ flexShrink: 0 }}
+      >
+        <X size={12} />
+      </button>
     </div>
   );
 }

@@ -766,20 +766,12 @@ pub(crate) fn load_codex_config_for_merge(codex_config: &Path) -> CodexLoadOutco
             }
         },
         Err(e) => {
-            let backup = codex_config.with_extension("toml.kronn-backup");
-            if let Err(copy_err) = std::fs::copy(codex_config, &backup) {
-                tracing::error!(
-                    "Failed to back up corrupt Codex config {} to {}: {}",
-                    codex_config.display(),
-                    backup.display(),
-                    copy_err
-                );
-            }
+            let backup = rotate_backup(codex_config, BACKUP_ROTATION_SLOTS);
             tracing::error!(
                 "Failed to parse Codex config {} ({}). Backed up to {} and aborting sync to preserve user data.",
                 codex_config.display(),
                 e,
-                backup.display()
+                backup.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "<no-backup>".to_string())
             );
             CodexLoadOutcome::Aborted
         }
@@ -811,6 +803,8 @@ fn sync_codex_global_config(
     // Build MCP entries (Codex only supports stdio transport)
     let mut mcp_entries: HashMap<String, CodexMcpEntry> = HashMap::new();
     for config in &all_configs {
+        // Phase-3 host_sync filter: skip configs the user opted out of.
+        if !should_host_sync(config) { continue; }
         let server = match server_map.get(&config.server_id) {
             Some(s) => s,
             None => continue,
@@ -955,6 +949,8 @@ fn sync_copilot_global_config(
     // Build mcpServers entries (stdio only — Copilot CLI doesn't support SSE)
     let mut mcp_servers: HashMap<String, McpServerEntry> = HashMap::new();
     for config in &all_configs {
+        // Phase-3 host_sync filter (same as Codex above).
+        if !should_host_sync(config) { continue; }
         let server = match server_map.get(&config.server_id) {
             Some(s) => s,
             None => continue,
@@ -1039,9 +1035,670 @@ pub fn sync_affected_projects(
             tracing::warn!("Failed to sync MCP configs for project {}: {}", pid, e);
         }
     }
-    // Sync global configs (once, not per-project)
+    // Sync global host-CLI configs (once, not per-project). Each function
+    // filters by `host_sync ∈ {GlobalOnly, MirrorAll}` and merges with
+    // existing entries to preserve user-managed (non-Kronn) MCPs.
     sync_codex_global_config(conn, secret);
     sync_copilot_global_config(conn, secret);
+    sync_claude_global_config(conn, secret);
+    sync_gemini_global_config(conn, secret);
+}
+
+// ─── Phase-3 host-sync helpers ───────────────────────────────────────────────
+
+/// Whether a config opts in to outbound host sync. Anything other than
+/// `None` means Kronn should write it to the relevant CLI config file.
+pub(crate) fn should_host_sync(config: &crate::models::McpConfig) -> bool {
+    use crate::models::HostSyncMode;
+    matches!(config.host_sync, HostSyncMode::GlobalOnly | HostSyncMode::MirrorAll)
+}
+
+/// Best-effort `chmod 0600` on Unix. Silent no-op on Windows.
+/// Claude/Gemini home files contain user secrets — match their default
+/// permissions so a successful sync doesn't downgrade security.
+fn ensure_user_only_perms(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+            tracing::debug!("chmod 0600 failed on {}: {} (ignored)", path.display(), e);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path; // silence unused-var warning
+    }
+}
+
+/// Resolve a path under the user's HOME, mirroring `sync_codex_global_config`.
+fn resolve_home_subpath(subpath: &str) -> PathBuf {
+    if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {
+        return PathBuf::from(format!("{}/{}", host_home, subpath));
+    }
+    std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map(|h| PathBuf::from(format!("{}/{}", h, subpath)))
+        .unwrap_or_else(|_| directories::BaseDirs::new()
+            .map(|d| d.home_dir().join(subpath))
+            .unwrap_or_else(|| {
+                tracing::warn!("Cannot determine home directory — using /tmp/{}", subpath);
+                PathBuf::from(format!("/tmp/{}", subpath))
+            }))
+}
+
+/// Build a JSON entry for a config + decrypted env, with the `_kronn`
+/// marker. Returns `None` when the transport is `ApiOnly` (skipped).
+fn build_kronn_managed_json_entry(
+    config: &crate::models::McpConfig,
+    server: &crate::models::McpServer,
+    secret: &str,
+    use_http_url_for_streamable: bool,
+) -> Option<serde_json::Value> {
+    use crate::models::McpTransport;
+    let env = crate::db::mcps::decrypt_env(&config.env_encrypted, secret)
+        .unwrap_or_default();
+
+    let mut obj = serde_json::Map::new();
+    match &server.transport {
+        McpTransport::Stdio { command, args } => {
+            let final_args = config.args_override.clone().unwrap_or_else(|| args.clone());
+            obj.insert("command".into(), serde_json::Value::String(command.clone()));
+            obj.insert("args".into(), serde_json::Value::Array(
+                final_args.into_iter().map(serde_json::Value::String).collect()
+            ));
+            if !env.is_empty() {
+                let env_obj: serde_json::Map<String, serde_json::Value> = env.into_iter()
+                    .map(|(k, v)| (k, serde_json::Value::String(v)))
+                    .collect();
+                obj.insert("env".into(), serde_json::Value::Object(env_obj));
+            }
+        }
+        McpTransport::Sse { url } => {
+            obj.insert("type".into(), serde_json::Value::String("sse".into()));
+            obj.insert("url".into(), serde_json::Value::String(url.clone()));
+        }
+        McpTransport::Streamable { url } => {
+            // Gemini prefers `httpUrl`; Claude uses `type: "http" + url`.
+            // Caller picks the convention via use_http_url_for_streamable.
+            if use_http_url_for_streamable {
+                obj.insert("httpUrl".into(), serde_json::Value::String(url.clone()));
+            } else {
+                obj.insert("type".into(), serde_json::Value::String("http".into()));
+                obj.insert("url".into(), serde_json::Value::String(url.clone()));
+            }
+        }
+        McpTransport::ApiOnly => return None,
+    }
+
+    let mut marker = serde_json::Map::new();
+    marker.insert("managed".into(), serde_json::Value::Bool(true));
+    marker.insert("config_id".into(), serde_json::Value::String(config.id.clone()));
+    obj.insert("_kronn".into(), serde_json::Value::Object(marker));
+
+    Some(serde_json::Value::Object(obj))
+}
+
+/// Outcome of attempting to load+merge a JSON host config (Claude/Gemini/Copilot).
+/// Mirrors `CodexLoadOutcome` for the TOML-based Codex flow.
+#[derive(Debug)]
+enum JsonLoadOutcome {
+    Loaded(serde_json::Value),
+    Empty,
+    Aborted,
+}
+
+/// Read a JSON host config file. Backs up corrupt files (rotation N=5)
+/// before returning `Aborted` so we never overwrite user data we couldn't parse.
+fn load_json_config_for_merge(path: &Path) -> JsonLoadOutcome {
+    if !path.exists() {
+        return JsonLoadOutcome::Empty;
+    }
+    let raw = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("Cannot read {}: {} — starting fresh", path.display(), e);
+            return JsonLoadOutcome::Empty;
+        }
+    };
+    if raw.trim().is_empty() {
+        return JsonLoadOutcome::Empty;
+    }
+    match serde_json::from_str::<serde_json::Value>(&raw) {
+        Ok(v) => JsonLoadOutcome::Loaded(v),
+        Err(e) => {
+            let backup = rotate_backup(path, BACKUP_ROTATION_SLOTS);
+            tracing::error!(
+                "Failed to parse {} ({}). Backed up to {} and aborting sync to preserve user data.",
+                path.display(), e,
+                backup.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "<no-backup>".to_string())
+            );
+            JsonLoadOutcome::Aborted
+        }
+    }
+}
+
+/// Number of `.kronn-backup.N` slots kept for each host config file.
+/// Rotation: `.1` is the most recent, `.5` the oldest. On a fresh corruption,
+/// `.5` is dropped, `.1..=.4` shift up by one, and the corrupt file lands at
+/// `.1`. Five slots match common log-rotation defaults; bumping it requires
+/// no migration (extra files are simply not written until the limit is hit).
+const BACKUP_ROTATION_SLOTS: usize = 5;
+
+/// Rotate the `.kronn-backup.N` files for `path` and copy the current file
+/// to slot `.1` (the most recent). Returns the path of the new backup, or
+/// `None` if the copy failed (we still return `None` rather than panic — the
+/// caller has already decided to abort the sync, the backup is best-effort).
+///
+/// **Why rotation matters** — before 0.6.0 we kept a single `.kronn-backup`
+/// slot which got overwritten on every parse failure. Two consecutive
+/// corruptions = first backup lost. Rotation gives the user a recovery
+/// window of N corruption events instead of one. See
+/// `TD-20260427-host-sync-backup-rotation` (now resolved).
+pub(crate) fn rotate_backup(path: &Path, max_n: usize) -> Option<PathBuf> {
+    if max_n == 0 {
+        return None;
+    }
+    // Build the suffix carrying the original extension so the backups are
+    // self-documenting (e.g. `.claude.json.kronn-backup.1`, not
+    // `.claude.kronn-backup.1`).
+    let ext_with_suffix = path.extension()
+        .and_then(|s| s.to_str())
+        .map(|s| format!("{}.kronn-backup", s))
+        .unwrap_or_else(|| "kronn-backup".to_string());
+    let backup_n = |n: usize| path.with_extension(format!("{}.{}", ext_with_suffix, n));
+
+    // 1. Drop the oldest slot (silent if absent).
+    let _ = std::fs::remove_file(backup_n(max_n));
+
+    // 2. Shift .max_n-1 → .max_n, ..., .1 → .2 (work from oldest to newest
+    //    so we never overwrite a slot we haven't moved yet).
+    for n in (1..max_n).rev() {
+        let from = backup_n(n);
+        if from.exists() {
+            let _ = std::fs::rename(&from, backup_n(n + 1));
+        }
+    }
+
+    // 3. Copy the current (corrupt) file to slot `.1`.
+    let dest = backup_n(1);
+    match std::fs::copy(path, &dest) {
+        Ok(_) => Some(dest),
+        Err(e) => {
+            tracing::error!(
+                "Failed to back up corrupt config {} → {}: {}",
+                path.display(), dest.display(), e
+            );
+            None
+        }
+    }
+}
+
+/// Merge logic shared by Claude and Gemini: replace the `mcpServers` map
+/// in `existing` with a 3-way merge:
+///   - `_kronn`-managed entries with config_id matching a current Kronn
+///     config → REPLACED (Kronn data wins)
+///   - `_kronn`-managed entries with no matching current config → REMOVED
+///     (orphan cleanup — config was deleted from Kronn)
+///   - entries WITHOUT `_kronn` marker → PRESERVED as-is (user-managed)
+///   - new Kronn configs → ADDED
+fn merge_kronn_entries(
+    existing: &mut serde_json::Value,
+    kronn_entries: HashMap<String, serde_json::Value>,
+    kronn_config_ids: &std::collections::HashSet<String>,
+) {
+    let root = match existing.as_object_mut() {
+        Some(o) => o,
+        None => return, // not a JSON object — caller should have guarded
+    };
+
+    // Get or create the mcpServers section
+    let servers = root.entry("mcpServers")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let servers_obj = match servers.as_object_mut() {
+        Some(o) => o,
+        None => {
+            tracing::warn!("Existing mcpServers is not an object — replacing");
+            *servers = serde_json::Value::Object(serde_json::Map::new());
+            servers.as_object_mut().unwrap()
+        }
+    };
+
+    // Walk existing entries, keep user ones, drop orphan Kronn ones
+    let to_remove: Vec<String> = servers_obj.iter()
+        .filter_map(|(name, value)| {
+            value.as_object()
+                .and_then(|o| o.get("_kronn"))
+                .and_then(|m| m.as_object())
+                .and_then(|m| m.get("config_id"))
+                .and_then(|v| v.as_str())
+                .filter(|cid| !kronn_config_ids.contains(*cid))
+                .map(|_| name.clone())
+        })
+        .collect();
+    for name in to_remove {
+        servers_obj.remove(&name);
+        tracing::info!("host_sync: removed orphan Kronn entry '{}'", name);
+    }
+
+    // Replace/insert Kronn entries
+    for (name, entry) in kronn_entries {
+        servers_obj.insert(name, entry);
+    }
+}
+
+/// Sync `~/.claude.json` for configs with `host_sync ≠ None`.
+///
+/// Scope-aware (Phase-3 refactor) — respects the Kronn `is_global`
+/// + `project_ids` selection:
+///
+/// - `is_global = true` → top-level `mcpServers` (Claude scope `user`).
+/// - `is_global = false` + `project_ids = [..]` →
+///   `projects[<host-path>].mcpServers` for each project (Claude scope `local`).
+/// - `is_global = false` + `project_ids = []` → top-level fallback (nothing
+///   to scope to).
+///
+/// Always preserves user-managed entries (no `_kronn` marker) and the rest
+/// of the JSON tree (`numStartups`, `theme`, cache, etc.). Orphan cleanup
+/// is global-tree-wide: a config that moved scope (e.g. from top-level to
+/// per-project) gets cleaned at the old location and re-written at the new.
+fn sync_claude_global_config(
+    conn: &rusqlite::Connection,
+    secret: &str,
+) {
+    use crate::db;
+
+    let all_configs = match db::mcps::list_configs(conn) {
+        Ok(c) => c,
+        Err(e) => { tracing::warn!("Claude sync: list_configs failed: {}", e); return; }
+    };
+    let servers = match db::mcps::list_servers(conn) {
+        Ok(s) => s,
+        Err(e) => { tracing::warn!("Claude sync: list_servers failed: {}", e); return; }
+    };
+    let server_map: HashMap<String, &crate::models::McpServer> = servers.iter()
+        .map(|s| (s.id.clone(), s)).collect();
+
+    let projects = match db::projects::list_projects(conn) {
+        Ok(p) => p,
+        Err(e) => { tracing::warn!("Claude sync: list_projects failed: {}", e); return; }
+    };
+    let project_path_by_id: HashMap<String, String> = projects.iter()
+        .map(|p| (p.id.clone(), p.path.clone())).collect();
+
+    // Bucket Kronn-managed entries by their target scope.
+    let mut top_level: HashMap<String, serde_json::Value> = HashMap::new();
+    let mut by_project: HashMap<String /* abs project path */, HashMap<String, serde_json::Value>> = HashMap::new();
+    let mut all_managed_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for config in &all_configs {
+        if !should_host_sync(config) { continue; }
+        let server = match server_map.get(&config.server_id) { Some(s) => s, None => continue };
+        let entry = match build_kronn_managed_json_entry(config, server, secret, false) {
+            Some(e) => e,
+            None => continue, // ApiOnly skipped
+        };
+        all_managed_ids.insert(config.id.clone());
+
+        let goes_top_level = config.is_global || config.project_ids.is_empty();
+        if goes_top_level {
+            top_level.insert(config.label.clone(), entry);
+        } else {
+            for pid in &config.project_ids {
+                if let Some(path) = project_path_by_id.get(pid) {
+                    by_project.entry(path.clone())
+                        .or_default()
+                        .insert(config.label.clone(), entry.clone());
+                }
+            }
+        }
+    }
+
+    let path = resolve_home_subpath(".claude.json");
+
+    if top_level.is_empty() && by_project.is_empty() && !path.exists() {
+        return;
+    }
+
+    let mut existing = match load_json_config_for_merge(&path) {
+        JsonLoadOutcome::Loaded(v) => v,
+        JsonLoadOutcome::Empty => serde_json::Value::Object(serde_json::Map::new()),
+        JsonLoadOutcome::Aborted => return,
+    };
+
+    if !existing.is_object() {
+        tracing::error!("Claude config at {} is not a JSON object — aborting sync", path.display());
+        return;
+    }
+
+    let prev_count = count_kronn_entries_recursive(&existing);
+
+    // Tree-wide cleanup of Kronn entries: top-level + every projects[*]
+    // map. Anything Kronn-managed (marker `_kronn.managed=true`) is removed
+    // before we re-insert at the correct current scope. This handles
+    // scope migration (top-level ↔ per-project) for free.
+    drop_all_kronn_entries(&mut existing);
+
+    // Re-insert at the correct scope.
+    if !top_level.is_empty() {
+        merge_into_mcp_servers(&mut existing, top_level, &all_managed_ids, /*track_scope=*/None);
+    }
+    for (project_path, entries) in by_project {
+        merge_into_project_mcp_servers(&mut existing, &project_path, entries, &all_managed_ids);
+    }
+
+    // Cleanup empty mcpServers maps left over from removed Kronn entries.
+    prune_empty_mcp_servers(&mut existing);
+
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::error!("Claude sync: cannot create dir {}: {}", parent.display(), e);
+            return;
+        }
+    }
+
+    let content = match serde_json::to_string_pretty(&existing) {
+        Ok(s) => s,
+        Err(e) => { tracing::error!("Claude sync: serialize: {}", e); return; }
+    };
+
+    if let Err(e) = atomic_write(&path, &content) {
+        tracing::error!("Claude sync: atomic_write {}: {}", path.display(), e);
+        return;
+    }
+    ensure_user_only_perms(&path);
+
+    let new_count = count_kronn_entries_recursive(&existing);
+    tracing::info!(
+        "Synced Claude global config: {} Kronn entries (was {}) — top-level={}, per-project={} maps",
+        new_count, prev_count, count_at_top_level(&existing), count_project_scopes(&existing)
+    );
+}
+
+/// Walk the entire JSON tree (top-level mcpServers + each projects[*]
+/// mcpServers) and remove any entry that carries the `_kronn` marker.
+fn drop_all_kronn_entries(existing: &mut serde_json::Value) {
+    let root = match existing.as_object_mut() {
+        Some(o) => o,
+        None => return,
+    };
+
+    // Top-level mcpServers
+    if let Some(map) = root.get_mut("mcpServers").and_then(|v| v.as_object_mut()) {
+        let drop_keys: Vec<String> = map.iter()
+            .filter(|(_, v)| is_kronn_managed(v))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in drop_keys { map.remove(&k); }
+    }
+
+    // projects[*].mcpServers
+    if let Some(projects) = root.get_mut("projects").and_then(|v| v.as_object_mut()) {
+        for (_path, project_obj) in projects.iter_mut() {
+            if let Some(map) = project_obj.get_mut("mcpServers").and_then(|v| v.as_object_mut()) {
+                let drop_keys: Vec<String> = map.iter()
+                    .filter(|(_, v)| is_kronn_managed(v))
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                for k in drop_keys { map.remove(&k); }
+            }
+        }
+    }
+}
+
+/// True iff the value is a JSON object with `_kronn.managed = true`.
+fn is_kronn_managed(value: &serde_json::Value) -> bool {
+    value.as_object()
+        .and_then(|o| o.get("_kronn"))
+        .and_then(|m| m.as_object())
+        .and_then(|m| m.get("managed"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Insert/replace Kronn-managed entries into top-level `mcpServers`.
+/// `_managed_ids` is unused here because cleanup already happened
+/// upstream; the parameter is kept for symmetry with the project variant.
+fn merge_into_mcp_servers(
+    existing: &mut serde_json::Value,
+    kronn_entries: HashMap<String, serde_json::Value>,
+    _managed_ids: &std::collections::HashSet<String>,
+    _track_scope: Option<&str>,
+) {
+    let root = match existing.as_object_mut() {
+        Some(o) => o,
+        None => return,
+    };
+    let servers = root.entry("mcpServers")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let map = match servers.as_object_mut() {
+        Some(m) => m,
+        None => {
+            *servers = serde_json::Value::Object(serde_json::Map::new());
+            servers.as_object_mut().unwrap()
+        }
+    };
+    for (k, v) in kronn_entries { map.insert(k, v); }
+}
+
+/// Insert/replace Kronn-managed entries into `projects[<project_path>].mcpServers`.
+/// Creates the `projects` key + the project entry if absent.
+fn merge_into_project_mcp_servers(
+    existing: &mut serde_json::Value,
+    project_path: &str,
+    kronn_entries: HashMap<String, serde_json::Value>,
+    _managed_ids: &std::collections::HashSet<String>,
+) {
+    let root = match existing.as_object_mut() {
+        Some(o) => o,
+        None => return,
+    };
+    let projects = root.entry("projects")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let projects_map = match projects.as_object_mut() {
+        Some(m) => m,
+        None => {
+            *projects = serde_json::Value::Object(serde_json::Map::new());
+            projects.as_object_mut().unwrap()
+        }
+    };
+    let project = projects_map.entry(project_path.to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let project_obj = match project.as_object_mut() {
+        Some(o) => o,
+        None => {
+            *project = serde_json::Value::Object(serde_json::Map::new());
+            project.as_object_mut().unwrap()
+        }
+    };
+    let servers = project_obj.entry("mcpServers".to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let map = match servers.as_object_mut() {
+        Some(m) => m,
+        None => {
+            *servers = serde_json::Value::Object(serde_json::Map::new());
+            servers.as_object_mut().unwrap()
+        }
+    };
+    for (k, v) in kronn_entries { map.insert(k, v); }
+}
+
+/// Remove `mcpServers` keys that became empty after Kronn cleanup, so the
+/// file doesn't accumulate `"mcpServers": {}` clutter for projects whose
+/// only entries were Kronn-managed.
+fn prune_empty_mcp_servers(existing: &mut serde_json::Value) {
+    let root = match existing.as_object_mut() {
+        Some(o) => o,
+        None => return,
+    };
+
+    // Top-level
+    let top_level_empty = root.get("mcpServers")
+        .and_then(|v| v.as_object())
+        .map(|m| m.is_empty())
+        .unwrap_or(false);
+    if top_level_empty {
+        root.remove("mcpServers");
+    }
+
+    // projects[*]
+    if let Some(projects) = root.get_mut("projects").and_then(|v| v.as_object_mut()) {
+        for (_path, proj) in projects.iter_mut() {
+            if let Some(proj_obj) = proj.as_object_mut() {
+                let empty = proj_obj.get("mcpServers")
+                    .and_then(|v| v.as_object())
+                    .map(|m| m.is_empty())
+                    .unwrap_or(false);
+                if empty {
+                    proj_obj.remove("mcpServers");
+                }
+            }
+        }
+    }
+}
+
+fn count_kronn_entries_recursive(existing: &serde_json::Value) -> usize {
+    let mut total = 0;
+    if let Some(map) = existing.get("mcpServers").and_then(|v| v.as_object()) {
+        total += map.values().filter(|v| is_kronn_managed(v)).count();
+    }
+    if let Some(projects) = existing.get("projects").and_then(|v| v.as_object()) {
+        for (_, proj) in projects {
+            if let Some(map) = proj.get("mcpServers").and_then(|v| v.as_object()) {
+                total += map.values().filter(|v| is_kronn_managed(v)).count();
+            }
+        }
+    }
+    total
+}
+
+fn count_at_top_level(existing: &serde_json::Value) -> usize {
+    existing.get("mcpServers").and_then(|v| v.as_object())
+        .map(|m| m.values().filter(|v| is_kronn_managed(v)).count())
+        .unwrap_or(0)
+}
+
+fn count_project_scopes(existing: &serde_json::Value) -> usize {
+    existing.get("projects").and_then(|v| v.as_object())
+        .map(|projects| projects.values()
+            .filter(|p| p.get("mcpServers").and_then(|v| v.as_object())
+                .map(|m| m.values().any(is_kronn_managed))
+                .unwrap_or(false))
+            .count())
+        .unwrap_or(0)
+}
+
+/// Sync `~/.gemini/settings.json` global `mcpServers`. Same pattern as
+/// Claude, but uses `httpUrl` for Streamable HTTP (Gemini convention).
+fn sync_gemini_global_config(
+    conn: &rusqlite::Connection,
+    secret: &str,
+) {
+    sync_json_global_config(
+        conn, secret,
+        ".gemini/settings.json",
+        true,  // Gemini: httpUrl for Streamable
+        "Gemini",
+    );
+}
+
+/// Shared implementation for the Claude + Gemini JSON sync. Refactor target
+/// for the future `HostAgentSync` trait (deferred — Tech Lead P2).
+fn sync_json_global_config(
+    conn: &rusqlite::Connection,
+    secret: &str,
+    relative_subpath: &str,
+    use_http_url_for_streamable: bool,
+    label: &'static str,
+) {
+    use crate::db;
+
+    let all_configs = match db::mcps::list_configs(conn) {
+        Ok(c) => c,
+        Err(e) => { tracing::warn!("{} sync: list_configs failed: {}", label, e); return; }
+    };
+    let servers = match db::mcps::list_servers(conn) {
+        Ok(s) => s,
+        Err(e) => { tracing::warn!("{} sync: list_servers failed: {}", label, e); return; }
+    };
+    let server_map: HashMap<String, &crate::models::McpServer> = servers.iter()
+        .map(|s| (s.id.clone(), s)).collect();
+
+    // Build Kronn-managed entries (filtered by host_sync ≠ None, ApiOnly skipped)
+    let mut kronn_entries: HashMap<String, serde_json::Value> = HashMap::new();
+    let mut kronn_config_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for config in &all_configs {
+        if !should_host_sync(config) { continue; }
+        let server = match server_map.get(&config.server_id) { Some(s) => s, None => continue };
+        if let Some(entry) = build_kronn_managed_json_entry(config, server, secret, use_http_url_for_streamable) {
+            kronn_entries.insert(config.label.clone(), entry);
+            kronn_config_ids.insert(config.id.clone());
+        }
+    }
+
+    let path = resolve_home_subpath(relative_subpath);
+
+    // Empty case: if Kronn has nothing to sync AND the file doesn't exist, skip.
+    // If the file exists, we still want to walk it to remove orphan Kronn entries.
+    if kronn_entries.is_empty() && !path.exists() {
+        return;
+    }
+
+    // Load existing (with backup-on-parse-fail safety)
+    let mut existing = match load_json_config_for_merge(&path) {
+        JsonLoadOutcome::Loaded(v) => v,
+        JsonLoadOutcome::Empty => serde_json::Value::Object(serde_json::Map::new()),
+        JsonLoadOutcome::Aborted => return,
+    };
+
+    // Make sure existing is an object — if it's an array or scalar, abort
+    // (we don't want to clobber the user's file).
+    if !existing.is_object() {
+        tracing::error!("{} config at {} is not a JSON object — aborting sync", label, path.display());
+        return;
+    }
+
+    let prev_kronn_count = count_kronn_entries(&existing);
+    merge_kronn_entries(&mut existing, kronn_entries, &kronn_config_ids);
+    let new_kronn_count = count_kronn_entries(&existing);
+
+    // Ensure parent dir exists (Gemini lives at .gemini/settings.json).
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::error!("{} sync: cannot create dir {}: {}", label, parent.display(), e);
+            return;
+        }
+    }
+
+    let content = match serde_json::to_string_pretty(&existing) {
+        Ok(s) => s,
+        Err(e) => { tracing::error!("{} sync: serialize: {}", label, e); return; }
+    };
+
+    if let Err(e) = atomic_write(&path, &content) {
+        tracing::error!("{} sync: atomic_write {}: {}", label, path.display(), e);
+        return;
+    }
+    ensure_user_only_perms(&path);
+
+    tracing::info!(
+        "Synced {} global config: {} Kronn entries (was {})",
+        label, new_kronn_count, prev_kronn_count
+    );
+}
+
+/// Count entries that carry a `_kronn.managed = true` marker.
+fn count_kronn_entries(value: &serde_json::Value) -> usize {
+    value.get("mcpServers")
+        .and_then(|v| v.as_object())
+        .map(|o| o.values()
+            .filter(|v| v.as_object()
+                .and_then(|e| e.get("_kronn"))
+                .and_then(|m| m.as_object())
+                .and_then(|m| m.get("managed"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false))
+            .count())
+        .unwrap_or(0)
 }
 
 /// Sync ALL projects (used when global flag changes)
@@ -1643,4 +2300,398 @@ pub(crate) fn is_command_available(command: &str) -> bool {
 /// Re-export from scanner — single source of truth for host path resolution.
 fn resolve_host_path(path: &str) -> String {
     crate::core::scanner::resolve_host_path(path).to_string_lossy().to_string()
+}
+
+// ─── Tests for Phase-3 host_sync (merge logic) ───────────────────────────────
+
+#[cfg(test)]
+mod host_sync_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn kronn_entry(config_id: &str, command: &str) -> serde_json::Value {
+        serde_json::json!({
+            "command": command,
+            "args": [],
+            "_kronn": { "managed": true, "config_id": config_id }
+        })
+    }
+
+    #[test]
+    fn merge_preserves_user_managed_entries() {
+        let mut existing = serde_json::json!({
+            "mcpServers": {
+                "user-fav": { "command": "user-cmd", "args": ["x"] }
+            },
+            "otherKey": "preserved"
+        });
+
+        let mut kronn = HashMap::new();
+        kronn.insert("kronn-one".to_string(), kronn_entry("uuid-1", "npx"));
+        let mut ids = HashSet::new();
+        ids.insert("uuid-1".to_string());
+
+        merge_kronn_entries(&mut existing, kronn, &ids);
+
+        let servers = existing.get("mcpServers").unwrap().as_object().unwrap();
+        assert!(servers.contains_key("user-fav"), "user entry preserved");
+        assert!(servers.contains_key("kronn-one"), "kronn entry added");
+        assert_eq!(existing.get("otherKey").unwrap().as_str(), Some("preserved"));
+    }
+
+    #[test]
+    fn merge_replaces_kronn_managed_entries() {
+        let mut existing = serde_json::json!({
+            "mcpServers": {
+                "linear": {
+                    "command": "old-cmd",
+                    "_kronn": { "managed": true, "config_id": "uuid-1" }
+                }
+            }
+        });
+
+        let mut kronn = HashMap::new();
+        kronn.insert("linear".to_string(), kronn_entry("uuid-1", "new-cmd"));
+        let mut ids = HashSet::new();
+        ids.insert("uuid-1".to_string());
+
+        merge_kronn_entries(&mut existing, kronn, &ids);
+
+        let entry = existing.get("mcpServers").unwrap().get("linear").unwrap();
+        assert_eq!(entry.get("command").unwrap().as_str(), Some("new-cmd"),
+            "Kronn entry replaced with current data");
+    }
+
+    #[test]
+    fn merge_orphan_cleanup_removes_stale_kronn_entries() {
+        let mut existing = serde_json::json!({
+            "mcpServers": {
+                "deleted-from-kronn": {
+                    "command": "x",
+                    "_kronn": { "managed": true, "config_id": "uuid-gone" }
+                },
+                "still-managed": {
+                    "command": "y",
+                    "_kronn": { "managed": true, "config_id": "uuid-alive" }
+                }
+            }
+        });
+
+        let mut kronn = HashMap::new();
+        kronn.insert("still-managed".to_string(), kronn_entry("uuid-alive", "y"));
+        let mut ids = HashSet::new();
+        ids.insert("uuid-alive".to_string());
+        // "uuid-gone" intentionally NOT in ids → should be removed
+
+        merge_kronn_entries(&mut existing, kronn, &ids);
+
+        let servers = existing.get("mcpServers").unwrap().as_object().unwrap();
+        assert!(!servers.contains_key("deleted-from-kronn"), "orphan removed");
+        assert!(servers.contains_key("still-managed"), "current Kronn entry kept");
+    }
+
+    #[test]
+    fn merge_creates_mcpservers_when_absent() {
+        let mut existing = serde_json::json!({ "theme": "dark" });
+
+        let mut kronn = HashMap::new();
+        kronn.insert("new".to_string(), kronn_entry("uuid-1", "npx"));
+        let mut ids = HashSet::new();
+        ids.insert("uuid-1".to_string());
+
+        merge_kronn_entries(&mut existing, kronn, &ids);
+
+        let servers = existing.get("mcpServers").unwrap().as_object().unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(existing.get("theme").unwrap().as_str(), Some("dark"));
+    }
+
+    #[test]
+    fn merge_handles_corrupted_mcpservers_gracefully() {
+        // mcpServers is a string by mistake — we replace it rather than crash
+        let mut existing = serde_json::json!({
+            "mcpServers": "this is wrong"
+        });
+
+        let mut kronn = HashMap::new();
+        kronn.insert("x".to_string(), kronn_entry("uuid-1", "npx"));
+        let mut ids = HashSet::new();
+        ids.insert("uuid-1".to_string());
+
+        merge_kronn_entries(&mut existing, kronn, &ids);
+        let servers = existing.get("mcpServers").unwrap().as_object().unwrap();
+        assert_eq!(servers.len(), 1);
+    }
+
+    #[test]
+    fn count_kronn_entries_skips_user_entries() {
+        let v = serde_json::json!({
+            "mcpServers": {
+                "kronn-1": { "_kronn": { "managed": true, "config_id": "u1" } },
+                "user-1": { "command": "x" },
+                "kronn-2": { "_kronn": { "managed": true, "config_id": "u2" } }
+            }
+        });
+        assert_eq!(count_kronn_entries(&v), 2);
+    }
+
+    #[test]
+    fn load_json_aborted_on_parse_failure() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "{ this is not valid").unwrap();
+        match load_json_config_for_merge(tmp.path()) {
+            JsonLoadOutcome::Aborted => {}
+            other => panic!("Expected Aborted, got {:?}", other),
+        }
+        // Backup file should now exist at slot .1 (rotation N=5).
+        let backup = tmp.path().with_extension(
+            tmp.path().extension().and_then(|s| s.to_str()).map(|s| format!("{}.kronn-backup.1", s))
+                .unwrap_or_else(|| "kronn-backup.1".to_string())
+        );
+        assert!(backup.exists(), "backup created at {}", backup.display());
+        let _ = std::fs::remove_file(&backup); // cleanup
+    }
+
+    #[test]
+    fn rotate_backup_keeps_at_most_n_slots() {
+        // Use a TempDir + a config file inside (NamedTempFile would unlink
+        // the source between iterations; we want a stable path).
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.json");
+
+        // Simulate 7 corruptions in a row. With N=5, we should end up with
+        // exactly slots .1..=.5 populated (no .6, no .7).
+        for i in 0..7 {
+            std::fs::write(&path, format!("{{ corrupt #{}", i)).unwrap();
+            let result = rotate_backup(&path, 5);
+            assert!(result.is_some(), "rotation #{} should succeed", i);
+        }
+
+        for n in 1..=5 {
+            let p = path.with_extension(format!("json.kronn-backup.{}", n));
+            assert!(p.exists(), "slot .{} must exist after 7 corruptions", n);
+        }
+        let p6 = path.with_extension("json.kronn-backup.6");
+        assert!(!p6.exists(), "slot .6 must NOT exist (rotation cap)");
+        let p7 = path.with_extension("json.kronn-backup.7");
+        assert!(!p7.exists(), "slot .7 must NOT exist (rotation cap)");
+    }
+
+    #[test]
+    fn rotate_backup_slot1_holds_most_recent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.json");
+
+        // First corruption — content "v1"
+        std::fs::write(&path, "v1").unwrap();
+        rotate_backup(&path, 3);
+        // Second — content "v2" → v1 should shift to .2, v2 land at .1
+        std::fs::write(&path, "v2").unwrap();
+        rotate_backup(&path, 3);
+
+        let slot1 = path.with_extension("json.kronn-backup.1");
+        let slot2 = path.with_extension("json.kronn-backup.2");
+        assert_eq!(std::fs::read_to_string(&slot1).unwrap(), "v2");
+        assert_eq!(std::fs::read_to_string(&slot2).unwrap(), "v1");
+    }
+
+    #[test]
+    fn rotate_backup_handles_no_extension() {
+        // Path without an extension (rare but possible — defensive).
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("rcfile");
+        std::fs::write(&path, "junk").unwrap();
+        let backup = rotate_backup(&path, 5);
+        assert!(backup.is_some(), "must handle ext-less paths");
+        assert!(backup.unwrap().exists());
+    }
+
+    #[test]
+    fn load_json_empty_for_missing_file() {
+        let path = std::env::temp_dir().join("kronn-host-sync-nonexistent-12345");
+        let _ = std::fs::remove_file(&path);
+        match load_json_config_for_merge(&path) {
+            JsonLoadOutcome::Empty => {}
+            other => panic!("Expected Empty, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn build_entry_skips_api_only() {
+        use crate::models::{HostSyncMode, McpConfig, McpServer, McpSource, McpTransport};
+        let config = McpConfig {
+            id: "u1".into(), server_id: "s1".into(), label: "test".into(),
+            env_keys: vec![], env_encrypted: String::new(),
+            args_override: None, is_global: false, include_general: true,
+            config_hash: String::new(), project_ids: vec![],
+            host_sync: HostSyncMode::GlobalOnly,
+        };
+        let server = McpServer {
+            id: "s1".into(), name: "S".into(), description: String::new(),
+            transport: McpTransport::ApiOnly,
+            source: McpSource::Registry,
+            api_spec: None,
+        };
+        assert!(build_kronn_managed_json_entry(&config, &server, "secret-not-used", false).is_none());
+    }
+
+    #[test]
+    fn build_entry_marks_kronn_with_config_id() {
+        use crate::models::{HostSyncMode, McpConfig, McpServer, McpSource, McpTransport};
+        let config = McpConfig {
+            id: "uuid-marker".into(), server_id: "s1".into(), label: "linear".into(),
+            env_keys: vec![], env_encrypted: String::new(),
+            args_override: None, is_global: false, include_general: true,
+            config_hash: String::new(), project_ids: vec![],
+            host_sync: HostSyncMode::GlobalOnly,
+        };
+        let server = McpServer {
+            id: "s1".into(), name: "Linear".into(), description: String::new(),
+            transport: McpTransport::Stdio { command: "npx".into(), args: vec![] },
+            source: McpSource::Registry,
+            api_spec: None,
+        };
+        let entry = build_kronn_managed_json_entry(&config, &server, "secret", false).unwrap();
+        let marker = entry.get("_kronn").unwrap();
+        assert_eq!(marker.get("managed").unwrap().as_bool(), Some(true));
+        assert_eq!(marker.get("config_id").unwrap().as_str(), Some("uuid-marker"));
+    }
+
+    // ─── Phase-3 refactor: Claude scope-aware writes ────────────────────────
+
+    #[test]
+    fn drop_all_kronn_entries_clears_top_level_and_per_project() {
+        let mut v = serde_json::json!({
+            "mcpServers": {
+                "k1": { "_kronn": { "managed": true, "config_id": "u1" } },
+                "user-a": { "command": "x" }
+            },
+            "projects": {
+                "/p1": {
+                    "mcpServers": {
+                        "k2": { "_kronn": { "managed": true, "config_id": "u2" } },
+                        "user-b": { "command": "y" }
+                    }
+                }
+            }
+        });
+        drop_all_kronn_entries(&mut v);
+        let top = v.get("mcpServers").unwrap().as_object().unwrap();
+        assert!(!top.contains_key("k1"));
+        assert!(top.contains_key("user-a"));
+        let p1 = v.pointer("/projects/~1p1/mcpServers").unwrap().as_object().unwrap();
+        assert!(!p1.contains_key("k2"));
+        assert!(p1.contains_key("user-b"));
+    }
+
+    #[test]
+    fn merge_into_project_creates_path_when_missing() {
+        let mut v = serde_json::json!({});
+        let mut entries = HashMap::new();
+        entries.insert("linear".to_string(), serde_json::json!({"command": "x"}));
+        let ids: HashSet<String> = ["u1".to_string()].into_iter().collect();
+        merge_into_project_mcp_servers(&mut v, "/repo/abc", entries, &ids);
+        let entry = v.pointer("/projects/~1repo~1abc/mcpServers/linear").unwrap();
+        assert_eq!(entry.get("command").unwrap().as_str(), Some("x"));
+    }
+
+    #[test]
+    fn count_kronn_entries_recursive_walks_both_scopes() {
+        let v = serde_json::json!({
+            "mcpServers": {
+                "kronn-1": { "_kronn": { "managed": true, "config_id": "u1" } },
+                "user-1": { "command": "x" }
+            },
+            "projects": {
+                "/p1": {
+                    "mcpServers": {
+                        "kronn-2": { "_kronn": { "managed": true, "config_id": "u2" } }
+                    }
+                },
+                "/p2": {
+                    "mcpServers": {
+                        "kronn-3": { "_kronn": { "managed": true, "config_id": "u3" } },
+                        "kronn-4": { "_kronn": { "managed": true, "config_id": "u4" } }
+                    }
+                }
+            }
+        });
+        assert_eq!(count_kronn_entries_recursive(&v), 4);
+    }
+
+    #[test]
+    fn prune_empty_mcp_servers_removes_top_level_and_projects() {
+        let mut v = serde_json::json!({
+            "mcpServers": {},
+            "theme": "dark",
+            "projects": {
+                "/p1": { "mcpServers": {} },
+                "/p2": { "mcpServers": { "kept": { "command": "x" } } }
+            }
+        });
+        prune_empty_mcp_servers(&mut v);
+        assert!(v.get("mcpServers").is_none(), "top-level pruned");
+        assert!(v.pointer("/projects/~1p1/mcpServers").is_none(), "p1 pruned");
+        assert!(v.pointer("/projects/~1p2/mcpServers/kept").is_some(), "p2 kept");
+        assert_eq!(v.get("theme").unwrap().as_str(), Some("dark"), "non-mcp keys preserved");
+    }
+
+    #[test]
+    fn merge_into_top_level_inserts_and_replaces() {
+        let mut v = serde_json::json!({
+            "mcpServers": { "user-a": { "command": "user" } }
+        });
+        let mut entries = HashMap::new();
+        entries.insert("kronn-1".to_string(), serde_json::json!({"command": "k"}));
+        let ids = HashSet::new();
+        merge_into_mcp_servers(&mut v, entries, &ids, None);
+        let map = v.get("mcpServers").unwrap().as_object().unwrap();
+        assert_eq!(map.len(), 2);
+        assert!(map.contains_key("user-a"));
+        assert!(map.contains_key("kronn-1"));
+    }
+
+    #[test]
+    fn is_kronn_managed_detects_marker() {
+        assert!(is_kronn_managed(&serde_json::json!({
+            "command": "x",
+            "_kronn": { "managed": true, "config_id": "u1" }
+        })));
+        assert!(!is_kronn_managed(&serde_json::json!({
+            "command": "x"
+        })));
+        assert!(!is_kronn_managed(&serde_json::json!({
+            "command": "x",
+            "_kronn": { "managed": false }
+        })));
+        // Non-object values
+        assert!(!is_kronn_managed(&serde_json::json!("string")));
+    }
+
+    #[test]
+    fn build_entry_streamable_uses_httpurl_for_gemini() {
+        use crate::models::{HostSyncMode, McpConfig, McpServer, McpSource, McpTransport};
+        let config = McpConfig {
+            id: "u1".into(), server_id: "s1".into(), label: "remote".into(),
+            env_keys: vec![], env_encrypted: String::new(),
+            args_override: None, is_global: false, include_general: true,
+            config_hash: String::new(), project_ids: vec![],
+            host_sync: HostSyncMode::GlobalOnly,
+        };
+        let server = McpServer {
+            id: "s1".into(), name: "Remote".into(), description: String::new(),
+            transport: McpTransport::Streamable { url: "https://example.com/mcp".into() },
+            source: McpSource::Registry,
+            api_spec: None,
+        };
+        // Gemini convention
+        let gemini_entry = build_kronn_managed_json_entry(&config, &server, "s", true).unwrap();
+        assert_eq!(gemini_entry.get("httpUrl").unwrap().as_str(), Some("https://example.com/mcp"));
+        assert!(gemini_entry.get("type").is_none());
+
+        // Claude convention (type:"http" + url)
+        let claude_entry = build_kronn_managed_json_entry(&config, &server, "s", false).unwrap();
+        assert_eq!(claude_entry.get("type").unwrap().as_str(), Some("http"));
+        assert_eq!(claude_entry.get("url").unwrap().as_str(), Some("https://example.com/mcp"));
+    }
 }

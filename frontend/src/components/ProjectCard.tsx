@@ -38,7 +38,7 @@ export interface ProjectCardProps {
   mcpConfigs: McpConfigDisplay[];
   workflows: WorkflowSummary[];
   configLanguage: string | null;
-  toast: (msg: string, type: 'success' | 'error' | 'info') => void;
+  toast: (msg: string, type: 'success' | 'error' | 'warning' | 'info') => void;
   onNavigate: (page: string) => void;
   onSetDiscPrefill: (prefill: { projectId: string; title: string; prompt: string; locked?: boolean }) => void;
   onAutoRunDiscussion: (discId: string) => void;
