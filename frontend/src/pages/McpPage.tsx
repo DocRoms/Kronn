@@ -22,6 +22,32 @@ function pluginKind(m: { transport: McpDefinition['transport']; api_spec?: impor
   if (hasApi) return 'hybrid';
   return 'mcp';
 }
+
+/**
+ * Compact "what kind of plugin is this" badge — shown on each installed
+ * config card so the user can tell at a glance whether the plugin
+ * surfaces tools via MCP (synced to `.mcp.json`), via REST API (injected
+ * in the agent's system prompt), or both. Avoids the trap where a user
+ * sees a `🌐 CLI local` chip on an API-only plugin and assumes it's
+ * being written to their host config files (it isn't — only MCP
+ * transports are synced; API-only plugins live in prompts).
+ */
+function PluginKindBadge({ kind }: { kind: PluginKind }) {
+  const meta = kind === 'api'
+    ? { label: '🌐 API', tooltip: 'API plugin — endpoints injected in the agent\'s system prompt (curl). Not synced to ~/.claude.json or other CLI config files.' }
+    : kind === 'hybrid'
+    ? { label: '🔌🌐 MCP + API', tooltip: 'Hybrid plugin — both an MCP transport (synced to .mcp.json) and a REST API (injected in prompt). The "Portée CLI locale" toggle only affects the MCP side.' }
+    : { label: '🔌 MCP', tooltip: 'MCP plugin — tools synced to `.mcp.json` and friends. The "Portée CLI locale" toggle controls whether this entry is mirrored into ~/.claude.json, ~/.gemini/settings.json, etc.' };
+  return (
+    <span
+      className="mcp-scope-badge"
+      title={meta.tooltip}
+      style={{ fontSize: '0.75em' }}
+    >
+      {meta.label}
+    </span>
+  );
+}
 import { MatrixText } from '../components/MatrixText';
 import './McpPage.css';
 
@@ -712,6 +738,13 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
             .flatMap(cfg => {
               const linkedProjects = cfg.is_global ? projects.filter(p => !isHiddenPath(p.path)).length : cfg.project_ids.length;
               const isSelected = selectedConfigId === cfg.id;
+              // 0.7.0 — derive plugin kind from the server registry so
+              // we can hide host-sync UI on API-only plugins (they're
+              // injected into prompts, never written to ~/.claude.json
+              // & co — showing a "Sync CLI" toggle on them was a UX bug).
+              const cfgServer = mcpOverview.servers.find(s => s.id === cfg.server_id);
+              const cfgKind: PluginKind = cfgServer ? pluginKind(cfgServer) : 'mcp';
+              const supportsHostSync = cfgKind !== 'api';
 
               const card = (
                 <div
@@ -732,7 +765,8 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                         }
                         {cfg.env_keys.length > 0 && <span className="mcp-installed-keys"><Key size={9} /> {cfg.env_keys.length}</span>}
                         {cfg.secrets_broken && <span className="mcp-scope-badge" style={{ color: 'var(--kr-warning)', borderColor: 'rgba(var(--kr-warning-rgb), 0.3)' }} title={t('mcp.secretsBroken')}>⚠ {t('mcp.secretsBrokenShort')}</span>}
-                        <HostSyncChip mode={cfg.host_sync} />
+                        <PluginKindBadge kind={cfgKind} />
+                        {supportsHostSync && <HostSyncChip mode={cfg.host_sync} />}
                       </div>
                     </div>
                   </div>
@@ -840,7 +874,15 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                         })()}
                       </div>
                     </div>
-                    {/* ── Sync CLIs locaux (Phase-3 refactor — checkbox dans Scope) ── */}
+                    {/* ── Sync CLIs locaux (Phase-3 refactor — checkbox dans Scope) ──
+                        Hidden entirely for API-only plugins: those don't have
+                        an MCP transport to write to `.mcp.json` / Codex / Gemini
+                        / Copilot, they only exist as a `## REST APIs available`
+                        block in the agent's system prompt. Showing a "Sync CLI"
+                        toggle on them was misleading — the user reported the
+                        confusion. Hybrid plugins keep the toggle but get a
+                        note that it only affects the MCP side. */}
+                    {supportsHostSync && (
                     <div
                       className="mcp-host-sync-block"
                       style={{ marginTop: 12, paddingTop: 12, borderTop: '1px dashed var(--kr-border, #e5e7eb)', position: 'relative' }}
@@ -856,6 +898,11 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                         <Globe size={13} />
                         Aussi disponible dans mes CLIs locaux
                       </label>
+                      {cfgKind === 'hybrid' && (
+                        <p className="text-muted" style={{ fontSize: '0.8em', margin: '4px 0 0 22px', fontStyle: 'italic' }}>
+                          Plugin hybride : la sync CLI s'applique uniquement à la partie MCP. La partie API (endpoints REST) est toujours injectée dans le prompt agent — elle n'est jamais écrite dans tes fichiers home.
+                        </p>
+                      )}
                       {cfg.host_sync !== 'None' && (
                         <HostSyncPreview
                           isGlobal={cfg.is_global}
@@ -865,6 +912,19 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                       )}
                       <PorteeCliCoachMark />
                     </div>
+                    )}
+                    {/* For API-only plugins: tell the user explicitly that
+                        the toggle they would expect here doesn't apply. */}
+                    {!supportsHostSync && (
+                      <div
+                        style={{ marginTop: 12, paddingTop: 12, borderTop: '1px dashed var(--kr-border, #e5e7eb)' }}
+                      >
+                        <p className="text-muted" style={{ fontSize: '0.85em', margin: 0 }}>
+                          <Globe size={11} style={{ verticalAlign: 'text-bottom', marginRight: 4 }} />
+                          Plugin API : pas de sync CLI locale. Les endpoints REST de ce plugin sont injectés directement dans le prompt système de l'agent (avec exemples curl + auth). Il n'y a aucun fichier <code>.mcp.json</code> / <code>~/.codex/config.toml</code> / etc. à mettre à jour.
+                        </p>
+                      </div>
+                    )}
                   </div>
                 </div>
               );

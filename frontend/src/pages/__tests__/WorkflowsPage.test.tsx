@@ -48,6 +48,15 @@ vi.mock('../../lib/api', () => ({
     delete: vi.fn(),
     batchRun: vi.fn(),
   },
+  quickApis: {
+    list: vi.fn().mockResolvedValue([]),
+    create: vi.fn(),
+    update: vi.fn(),
+    delete: vi.fn(),
+    runQa: vi.fn(),
+    exportQa: vi.fn(),
+    importQa: vi.fn(),
+  },
   config: {
     getUiLanguage: vi.fn().mockResolvedValue('fr'),
     saveUiLanguage: vi.fn().mockResolvedValue(undefined),

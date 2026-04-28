@@ -1,9 +1,11 @@
 import { useState, useEffect } from 'react';
 import { useT } from '../../lib/I18nContext';
-import type { WorkflowRun, WorkflowStep } from '../../types/generated';
-import { Trash2, ChevronRight, Square, Loader2, Plug, Send, Layers } from 'lucide-react';
+import type { WorkflowRun, WorkflowStep, DecideRunRequest } from '../../types/generated';
+import { Trash2, ChevronRight, Square, Loader2, Plug, Send, Layers, Shield, Hand, Check, X, RotateCcw, Terminal, GitBranch, Copy } from 'lucide-react';
 import { AGENT_LABELS, AGENT_COLORS } from '../../lib/constants';
 import '../../pages/WorkflowsPage.css';
+
+export type GateDecisionKind = 'approve' | 'request_changes' | 'reject';
 
 const STATUS_COLORS: Record<string, string> = {
   Pending: 'var(--kr-warning)',
@@ -12,6 +14,8 @@ const STATUS_COLORS: Record<string, string> = {
   Failed: 'var(--kr-error)',
   Cancelled: 'var(--kr-cancelled)',
   WaitingApproval: 'var(--kr-accent-ink)',
+  // 0.7.0 — guard-stopped runs are amber (self-protection, not failure).
+  StoppedByGuard: 'var(--kr-warning)',
 };
 
 export interface RunDetailProps {
@@ -20,6 +24,8 @@ export interface RunDetailProps {
   onDelete: () => void;
   /** Cancel a Running workflow run. Button is only rendered for Running status. */
   onCancel?: () => void;
+  /** 0.7.0 Phase 4 — submit a gate decision (approve / request_changes / reject). */
+  onDecide?: (payload: DecideRunRequest) => Promise<void> | void;
 }
 
 /** Live counter for the step that's currently running. The exact start
@@ -60,6 +66,8 @@ function LiveStepStatus({
   const activity = kind === 'ApiCall' ? t('wf.liveStep.api')
     : kind === 'Notify' ? t('wf.liveStep.notify')
     : kind === 'BatchQuickPrompt' ? t('wf.liveStep.batch')
+    : kind === 'Gate' ? t('wf.liveStep.gate')
+    : kind === 'Exec' ? t('wf.liveStep.exec')
     : t('wf.liveStep.agent');
 
   return (
@@ -71,7 +79,137 @@ function LiveStepStatus({
   );
 }
 
-export function RunDetail({ run, workflowSteps, onDelete, onCancel }: RunDetailProps) {
+/** B5 (0.7.0 UX pass) — counter showing how long a run has been paused
+ *  on a Gate. The pause start = run.started_at + sum of completed step
+ *  durations (same arithmetic as LiveStepStatus). Ticks every minute
+ *  for &gt;1min, every second below. Returns a human "il y a 2h17". */
+function PausedSince({
+  run,
+  t,
+}: {
+  run: WorkflowRun;
+  t: (key: string, ...args: (string | number)[]) => string;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    // 30s tick is enough — past the first minute, sub-minute precision
+    // doesn't matter to the operator.
+    const id = window.setInterval(() => setNow(Date.now()), 30000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const runStart = new Date(run.started_at).getTime();
+  // Sum of all step durations excluding the trailing WaitingApproval one
+  // (its duration_ms is the time the gate executor took to render the
+  // message, ~0ms — it's NOT the pause duration).
+  const completedDurationMs = run.step_results
+    .slice(0, -1)
+    .reduce((acc, sr) => acc + (sr.duration_ms || 0), 0);
+  const pauseStart = runStart + completedDurationMs;
+  const elapsedMs = Math.max(0, now - pauseStart);
+  const elapsedMin = Math.floor(elapsedMs / 60000);
+
+  let label: string;
+  if (elapsedMin < 1) label = t('wf.pausedJustNow');
+  else if (elapsedMin < 60) label = t('wf.pausedMinutes', elapsedMin);
+  else if (elapsedMin < 60 * 24) {
+    const h = Math.floor(elapsedMin / 60);
+    const m = elapsedMin % 60;
+    label = m > 0 ? t('wf.pausedHoursMinutes', h, m) : t('wf.pausedHours', h);
+  } else {
+    const d = Math.floor(elapsedMin / (60 * 24));
+    label = t('wf.pausedDays', d);
+  }
+  return <span className="wf-paused-since">{label}</span>;
+}
+
+/** 0.7.0 Phase 4 — interactive panel rendered when the run is paused on a
+ *  Gate step. Shows the operator the rendered message + 3 decision buttons.
+ *  The "Request changes" path requires a non-empty comment (the agent
+ *  needs feedback to act on); the other two make the comment optional. */
+function GatePanel({
+  message,
+  onDecide,
+  t,
+}: {
+  message: string;
+  onDecide: (payload: DecideRunRequest) => Promise<void> | void;
+  t: (key: string, ...args: (string | number)[]) => string;
+}) {
+  const [comment, setComment] = useState('');
+  const [submitting, setSubmitting] = useState<GateDecisionKind | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const handle = async (decision: GateDecisionKind) => {
+    if (decision === 'request_changes' && comment.trim() === '') {
+      setError(t('wf.gate.commentRequired'));
+      return;
+    }
+    setError(null);
+    setSubmitting(decision);
+    try {
+      await onDecide({ decision, comment: comment.trim() || null });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setSubmitting(null);
+    }
+  };
+
+  return (
+    <div className="wf-gate-panel">
+      <div className="wf-gate-header">
+        <Hand size={14} style={{ color: 'var(--kr-accent-ink)' }} />
+        <span className="font-semibold">{t('wf.gate.title')}</span>
+      </div>
+      <div className="wf-gate-message">
+        {message || t('wf.gate.defaultMessage')}
+      </div>
+      <textarea
+        className="wf-gate-comment"
+        placeholder={t('wf.gate.commentPlaceholder')}
+        value={comment}
+        onChange={(e) => setComment(e.target.value)}
+        rows={3}
+        disabled={submitting !== null}
+      />
+      {error && <div className="wf-gate-error">{error}</div>}
+      <div className="wf-gate-actions">
+        <button
+          className="wf-gate-btn wf-gate-btn--approve"
+          onClick={() => handle('approve')}
+          disabled={submitting !== null}
+        >
+          {submitting === 'approve'
+            ? <Loader2 size={12} className="spin" />
+            : <Check size={12} />}
+          {t('wf.gate.approve')}
+        </button>
+        <button
+          className="wf-gate-btn wf-gate-btn--changes"
+          onClick={() => handle('request_changes')}
+          disabled={submitting !== null}
+        >
+          {submitting === 'request_changes'
+            ? <Loader2 size={12} className="spin" />
+            : <RotateCcw size={12} />}
+          {t('wf.gate.requestChanges')}
+        </button>
+        <button
+          className="wf-gate-btn wf-gate-btn--reject"
+          onClick={() => handle('reject')}
+          disabled={submitting !== null}
+        >
+          {submitting === 'reject'
+            ? <Loader2 size={12} className="spin" />
+            : <X size={12} />}
+          {t('wf.gate.reject')}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+export function RunDetail({ run, workflowSteps, onDelete, onCancel, onDecide }: RunDetailProps) {
   const { t } = useT();
   const [expandedStep, setExpandedStep] = useState<number | null>(null);
 
@@ -88,16 +226,43 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel }: RunDetailP
   return (
     <div className="wf-run-card">
       <div className="flex-row gap-4">
-        <span
-          className="wf-step-dot"
-          style={{ width: 8, height: 8, background: STATUS_COLORS[run.status] ?? 'var(--kr-text-faint)' }}
-        />
-        <span className="font-semibold text-base" style={{ color: STATUS_COLORS[run.status] ?? 'var(--kr-text-faint)' }}>
-          {run.status}
-        </span>
+        {/* B5 (0.7.0 UX pass) \u2014 WaitingApproval gets a hand icon + a
+            distinct "\u00c0 VALIDER" badge instead of the generic status dot.
+            Marie + Antony + Cyndie : trois personas pour qui les runs
+            en pause se noient dans la liste. Pulse animation discr\u00e8te
+            pour attirer l'\u0153il sans surcharger. */}
+        {run.status === 'WaitingApproval' ? (
+          <Hand size={14} style={{ color: 'var(--kr-warning)' }} />
+        ) : run.status === 'StoppedByGuard' ? (
+          <Shield size={12} style={{ color: 'var(--kr-warning)' }} />
+        ) : (
+          <span
+            className="wf-step-dot"
+            style={{ width: 8, height: 8, background: STATUS_COLORS[run.status] ?? 'var(--kr-text-faint)' }}
+          />
+        )}
+        {run.status === 'WaitingApproval' ? (
+          <span className="wf-run-status-badge wf-run-status-badge--gate">
+            {t('wf.runStatusToReview')}
+          </span>
+        ) : (
+          <span className="font-semibold text-base" style={{ color: STATUS_COLORS[run.status] ?? 'var(--kr-text-faint)' }}>
+            {run.status === 'StoppedByGuard' ? t('wf.guards.stoppedBy.title') : run.status}
+          </span>
+        )}
         <span className="text-xs text-muted flex-1">
           {new Date(run.started_at).toLocaleString()}
           {run.finished_at && ` \u2014 ${new Date(run.finished_at).toLocaleString()}`}
+          {run.status === 'WaitingApproval' && (
+            <>
+              {' \u2014 '}
+              <PausedSince run={run} t={t} />
+              {' \u00b7 '}
+              <span className="wf-paused-zero-tokens" title={t('wf.pausedZeroTokensHint')}>
+                {t('wf.pausedZeroTokens')}
+              </span>
+            </>
+          )}
         </span>
         {run.tokens_used > 0 && (
           <span className="text-xs text-muted">{run.tokens_used} tokens</span>
@@ -123,6 +288,36 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel }: RunDetailP
           <Trash2 size={10} />
         </button>
       </div>
+
+      {/* Worktree path — surfaces the actual filesystem location of the run's
+          isolated git worktree. The wizard chips promise isolation; this row
+          is where the promise becomes tangible: the user can cd into it,
+          inspect artefacts, or clone elsewhere. Hidden when no project bound
+          (workspace_path is null) — ApiCall-only / Notify-only workflows
+          legitimately have no worktree. */}
+      {run.workspace_path && (
+        <div className="wf-run-worktree-row mt-3">
+          <span title={t('wiz.worktreeIconTooltip')} style={{ cursor: 'help', display: 'inline-flex' }}>
+            <GitBranch size={11} />
+          </span>
+          <span className="text-xs text-muted">{t('wf.runWorktreePath')}</span>
+          <code className="wf-run-worktree-path" title={run.workspace_path}>
+            {run.workspace_path}
+          </code>
+          <button
+            type="button"
+            className="wf-run-worktree-copy"
+            onClick={(e) => {
+              e.stopPropagation();
+              navigator.clipboard?.writeText(run.workspace_path ?? '').catch(() => {});
+            }}
+            title={t('wf.runWorktreeCopy')}
+            aria-label={t('wf.runWorktreeCopy')}
+          >
+            <Copy size={10} />
+          </button>
+        </div>
+      )}
 
       {/* Step progress — show workflow steps with completion status when running */}
       {run.status === 'Running' && workflowSteps && workflowSteps.length > 0 && (
@@ -150,11 +345,15 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel }: RunDetailP
                     ws_step.step_type.type === 'ApiCall' ? 'api'
                       : ws_step.step_type.type === 'Notify' ? 'notify'
                       : ws_step.step_type.type === 'BatchQuickPrompt' ? 'batch'
+                      : ws_step.step_type.type === 'Gate' ? 'gate'
+                      : ws_step.step_type.type === 'Exec' ? 'exec'
                       : 'agent'
                   }>
                     {ws_step.step_type.type === 'ApiCall' ? 'API'
                       : ws_step.step_type.type === 'Notify' ? 'NOTIFY'
                       : ws_step.step_type.type === 'BatchQuickPrompt' ? 'BATCH'
+                      : ws_step.step_type.type === 'Gate' ? 'GATE'
+                      : ws_step.step_type.type === 'Exec' ? 'EXEC'
                       : 'AGENT'}
                   </span>
                 )}
@@ -173,7 +372,32 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel }: RunDetailP
         </div>
       )}
 
-      {/* Step results (completed runs) */}
+      {/* 0.7.0 Phase 4 — Gate decision panel when paused awaiting approval.
+          Rendered ABOVE the step list so the operator's eyes land on the
+          decision UI first; the step history is collapsible context behind
+          it. The panel is only shown when:
+            - run is Waiting (server-side state)
+            - the trailing step is a Gate (so we have a message to show)
+            - onDecide handler is wired (caller opted in to gating) */}
+      {run.status === 'WaitingApproval' && onDecide && (() => {
+        const last = run.step_results[run.step_results.length - 1];
+        if (!last || last.step_kind !== 'Gate') return null;
+        return (
+          <GatePanel
+            message={last.output}
+            onDecide={onDecide}
+            t={t}
+          />
+        );
+      })()}
+
+      {/* Step results — clickable, expandable details for every completed
+          step. Only rendered for finished runs; during a Running run the
+          parent (`WorkflowDetail`) shows a unified live view with the
+          same expand-per-step affordance, fed by SSE events instead of
+          this static `run.step_results` snapshot which would only update
+          on page reload. Splitting the responsibility avoids two parallel
+          step lists fighting for the user's attention. */}
       {run.step_results.length > 0 && run.status !== 'Running' && (
         <div className="mt-4">
           {run.step_results.map((sr, i) => {
@@ -215,6 +439,16 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel }: RunDetailP
                   {sr.step_kind === 'BatchQuickPrompt' && (
                     <span className="wf-step-kind-badge">
                       <Layers size={9} /> BATCH
+                    </span>
+                  )}
+                  {sr.step_kind === 'Gate' && (
+                    <span className="wf-step-kind-badge" data-kind="gate">
+                      <Hand size={9} /> GATE
+                    </span>
+                  )}
+                  {sr.step_kind === 'Exec' && (
+                    <span className="wf-step-kind-badge" data-kind="exec">
+                      <Terminal size={9} /> EXEC
                     </span>
                   )}
                   {sr.step_kind === 'Agent' && sr.step_agent && (

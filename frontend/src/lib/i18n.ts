@@ -273,6 +273,8 @@ const fr: TranslationDict = {
   'disc.hideSummary': 'Masquer',
   'disc.thinking': '{0} réfléchit...',
   'disc.running': "Agent en cours d'exécution...",
+  'disc.debateLaunching': 'Débat en cours de démarrage… (les CLI agents peuvent mettre 5-30s à booter, surtout Codex au cold-start)',
+  'disc.debateAgentEmpty': '{0} a terminé sans produire de contenu — CLI possiblement crashé ou rate-limited. Re-lance le débat pour ré-essayer.',
   'disc.newContent': 'Nouveau contenu',
   'disc.badgeInfo.showDetails': "Afficher les détails",
   'disc.badgeInfo.profileKind': 'Profil IA',
@@ -717,6 +719,58 @@ const fr: TranslationDict = {
   'wf.newHint': 'Créer un workflow manuellement, étape par étape. Tu contrôles chaque détail.',
   'wf.tabWorkflows': 'Workflows',
   'wf.tabQuickPrompts': 'Quick Prompts',
+  'wf.tabQuickApis': 'Quick APIs',
+  'qa.new': 'Nouveau Quick API',
+  'qa.empty': 'Aucun Quick API',
+  'qa.emptyHint': 'Crée des appels API réutilisables (POST Jira issue, get GitHub PR…) avec des variables {{title}}, {{key}}…',
+  'qa.name': 'Nom',
+  'qa.namePlaceholder': 'Créer un ticket Jira',
+  'qa.descriptionLabel': 'Description (recommandée)',
+  'qa.descriptionPlaceholder': 'Crée un ticket dans le projet EW avec un titre + description fournis en variables.',
+  'qa.variables': 'Variables détectées',
+  'qa.varLabel': 'Label affiché',
+  'qa.varPlaceholder': 'Placeholder',
+  'qa.varRequired': 'Obligatoire',
+  'qa.varDescriptionPlaceholder': 'Description (optionnelle)',
+  'qa.varsHint': 'Tape `{{nom}}` dans n\'importe quel champ ci-dessus (endpoint, body, headers, query) — les variables apparaîtront ici.',
+  'qa.save': 'Enregistrer',
+  'qa.edit': 'Éditer',
+  'qa.delete': 'Supprimer',
+  'qa.deleteConfirm': 'Supprimer le Quick API « {name} » ?',
+  'qa.export': 'Exporter (JSON)',
+  'qa.exportDone': '« {name} » exporté ✓',
+  'qa.vars': '{0} variable(s)',
+  'qa.noPluginsWarning': 'Aucun plugin API n\'est configuré sur cet hôte. Crée d\'abord un plugin (Atlassian, GitHub, SpeedCurve, …) dans l\'onglet MCPs / Plugins, puis reviens ici.',
+  'qa.noPluginsCta': 'Configurer un plugin →',
+  'qa.saveBlockedHint': 'Champs obligatoires manquants',
+  'qa.fieldName': 'nom',
+  'qa.fieldPlugin': 'plugin API',
+  'qa.fieldConfig': 'config plugin',
+  'qa.fieldEndpoint': 'endpoint',
+  'qa.launch': 'Lancer (en direct)',
+  'qa.runTitle': 'Lancer « {name} »',
+  'qa.runNoVars': 'Ce Quick API n\'a pas de variables à fournir.',
+  'qa.runGo': 'Exécuter',
+  'qa.runFailed': 'Échec de l\'exécution',
+  'qa.batch.launch': 'Batch (lancer N appels en parallèle)',
+  'qa.batch.cancel': 'Annuler',
+  'qa.batch.go': 'Lancer le batch',
+  'qa.batch.inputLabel': 'Une valeur de `{0}` par ligne (ou séparées par , ou ;)',
+  'qa.batch.inputPlaceholder': 'www.euronews.com\nde.euronews.com\nfr.euronews.com',
+  'qa.batch.jsonInputLabel': 'JSON array d\'objets — un objet par appel',
+  'qa.batch.jsonInputHint': 'Variables attendues : {0}. Exemple : `[{"host":"de.example.com","limit":"5"}, ...]`',
+  'qa.batch.jsonInputPlaceholder': '[\n  {"host":"www.example.com","limit":"5"},\n  {"host":"de.example.com","limit":"5"}\n]',
+  'qa.batch.countHint': '{0} appel(s) seront lancés',
+  'qa.batch.jsonCountHint': '{0} appel(s) parsé(s) du JSON',
+  'qa.batch.resultSummary': '{0}/{1} OK · {2} échec(s) ·',
+  'qa.batch.colInput': 'Input',
+  'qa.batch.colStatus': 'Statut',
+  'qa.batch.colResult': 'Résultat',
+  'qa.batch.expandRow': 'voir tout',
+  'qa.batch.collapseRow': 'masquer',
+  'qa.batch.errorEmpty': 'Aucun item à lancer.',
+  'qa.batch.errorJsonArray': 'Le JSON doit être un array (`[...]`).',
+  'qa.batch.errorJsonParse': 'JSON invalide : {0}',
   'qp.new': 'Nouveau prompt',
   'qp.empty': 'Aucun quick prompt',
   'qp.emptyHint': 'Créez des prompts réutilisables avec des variables {{ticket}}, {{url}}...',
@@ -729,6 +783,9 @@ const fr: TranslationDict = {
   'qp.varLabel': 'Label affiché',
   'qp.varPlaceholder': 'Placeholder',
   'qp.save': 'Enregistrer',
+  'qp.saveBlockedHint': 'Champs obligatoires manquants',
+  'qp.fieldName': 'nom',
+  'qp.fieldPrompt': 'prompt',
   'qp.launch': 'Lancer',
   'qp.vars': '{0} variable(s)',
   'qp.delete': 'Supprimer',
@@ -812,6 +869,14 @@ const fr: TranslationDict = {
   'wf.apicall.subtitle': 'Appel direct à une API — zéro token consommé',
   'wf.apicall.pluginPicker': 'Plugin API',
   'wf.apicall.pluginPickerHint': 'Choisis une API configurée sur ce projet',
+  'wf.apicall.qaPicker': 'Depuis un Quick API existant',
+  'wf.apicall.qaPickerInline': '— Aucun (config inline ci-dessous) —',
+  'wf.apicall.qaInheritedFrom': 'Hérité de « {0} »',
+  'wf.apicall.qaInheritedHint': 'L\'appel hérite de la config du Quick API. Clique sur ✏️ ci-dessous pour overrider un ou plusieurs fields uniquement pour ce step.',
+  'wf.apicall.qaDetach': 'Détacher du Quick API (mode inline)',
+  'wf.apicall.qaOverrideToggle': 'Personnaliser cet appel pour ce step (override)',
+  'wf.apicall.qaSummaryEndpoint': 'Appel :',
+  'wf.apicall.qaSummaryExtract': 'Extract :',
   'wf.apicall.endpointPicker': 'Endpoint',
   'wf.apicall.endpointPlaceholder': 'ex : /repos/owner/repo/issues — clique pour piocher',
   'wf.apicall.pathParamsTitle': 'Paramètres du chemin',
@@ -825,6 +890,10 @@ const fr: TranslationDict = {
   'wf.apicall.testBtn': 'Tester l\'appel',
   'wf.apicall.testing': 'Test en cours…',
   'wf.apicall.testHint': 'Fait une vraie requête avec les credentials configurés',
+  'wf.apicall.testVarsTitle': 'Variables à fournir pour le test',
+  'wf.apicall.testVarsHint': 'Ta config contient des variables `{{var}}` non résolues. Donne-leur une valeur de test pour cette requête uniquement (la config sauvegardée n\'est pas modifiée).',
+  'wf.apicall.testVarsPlaceholder': 'valeur de test',
+  'wf.apicall.testVarsGo': 'Tester avec ces valeurs',
   'wf.apicall.responseTitle': 'Réponse JSON',
   'wf.apicall.responseEmpty': 'Lance un test pour voir la réponse ici',
   'wf.apicall.clickToPickHint': '💡 Clique sur une clé dans un tableau → tous les éléments. Sur une valeur → cet élément précis. Sur [N] → itérer.',
@@ -891,6 +960,67 @@ const fr: TranslationDict = {
   'wf.apicall.helper.contextNoApi': 'Aucune API choisie',
   'wf.apicall.helper.contextLastErr': 'dernier test : ❌',
   'wf.apicall.helper.contextLastOk': 'dernier test : ✓',
+  // System prompt strings — drive the agent's reply language. Changing the UI locale
+  // changes which language the agent answers in for the API helper conversation.
+  'wf.apicall.helper.sys.unknown': '(inconnu)',
+  'wf.apicall.helper.sys.noPlugin': '(aucun plugin sélectionné)',
+  'wf.apicall.helper.sys.none': '(aucun)',
+  'wf.apicall.helper.sys.default': '(par défaut)',
+  'wf.apicall.helper.sys.empty': '(vide)',
+  'wf.apicall.helper.sys.ctxHeader': '### CONTEXTE COURANT (snapshot au moment de cet envoi)',
+  'wf.apicall.helper.sys.ctxLastFail': '### DERNIER TEST → ÉCHEC',
+  'wf.apicall.helper.sys.ctxLastOk': '### DERNIER TEST → SUCCÈS (extrait de réponse)',
+  'wf.apicall.helper.sys.userQuestion': '### QUESTION DU USER',
+  'wf.apicall.helper.sys.role': `# Rôle
+Tu es un assistant de configuration pour une étape "Récupérer des données" (\`StepType::ApiCall\`)
+dans un workflow Kronn. Cette étape fait un appel HTTP direct (sans LLM consommé) et extrait
+une valeur via JSONPath, qui pipe vers le step suivant.`,
+  'wf.apicall.helper.sys.boundaries': `# Ce que tu peux et ne peux PAS faire
+- ✅ Lire la spec API ci-dessous, l'état courant du step, le résultat du dernier test.
+- ✅ Proposer des modifications de config (endpoint, method, query, headers, body, extract).
+- ❌ Tu n'as **AUCUN** outil pour appeler l'API toi-même. Pas de Bash, pas de MCP, pas de fetch.
+     C'est Kronn (backend Rust) qui fait l'appel quand l'utilisateur clique "Test the call".
+- ❌ Ne propose JAMAIS d'aller "vérifier en ligne" via un MCP — ce n'est pas dispo dans cette
+     conversation. Si la cause d'un échec t'échappe, oriente vers la doc officielle ou le
+     dashboard du fournisseur.`,
+  'wf.apicall.helper.sys.action': `# Ta seule action utile : proposer un \`KRONN:APPLY\`
+Quand tu suggères une config, écris EXACTEMENT ce format (sinon l'UI ne te lit pas) :
+
+KRONN:APPLY
+\`\`\`json
+{ "endpoint": "/path/v4", "query": { "k": "v" }, "extract": "$.data[*]" }
+\`\`\`
+
+Champs autorisés : \`endpoint\`, \`method\`, \`query\`, \`headers\`, \`body\`, \`extract\`.
+Tu peux ne mettre QU'UN champ — le reste du step est préservé.
+Pas plus d'un bloc \`KRONN:APPLY\` par message (sinon l'utilisateur ne sait plus lequel choisir).`,
+  'wf.apicall.helper.sys.debug': `# Méthode de debug (à appliquer dès qu'un test échoue)
+1. Lis le bloc \`### DERNIER TEST → ÉCHEC\` — il contient \`HTTP <status> on <method> <url> — <body excerpt>\`.
+2. Note le **status** (4xx vs 5xx → 4xx = ta config est en cause, 5xx = côté serveur).
+3. Note les **query params** dans l'URL composée (l'apikey est masquée — c'est normal et ATTENDU).
+4. Croise avec les TIPS du plugin ci-dessous + les endpoints autorisés.
+5. Propose **UNE** modification ciblée (un seul KRONN:APPLY). Pas de salve de 3 hypothèses simultanées.
+6. Si l'échec persiste après 2 tentatives, recommande à l'utilisateur de vérifier dans le dashboard
+   du fournisseur (URL de doc plus bas) — ne tourne pas en rond.`,
+  'wf.apicall.helper.sys.endpointsHeader': '# Endpoints AUTORISÉS (n\'invente jamais hors de cette liste)',
+  'wf.apicall.helper.sys.endpointsEmpty': '(aucun — l\'utilisateur n\'a pas encore choisi d\'API)',
+  'wf.apicall.helper.sys.tipsHeader': '# TIPS PLUGIN — {0}',
+  'wf.apicall.helper.sys.docsHeader': '# Doc officielle',
+  'wf.apicall.helper.sys.style': `# Style
+- Français, ≤ 3 lignes par message.
+- Pas de blabla, pas de "je vais analyser", pas de "voilà ce que je suggère :" — direct au but.
+- L'apikey/token affichés en \`••••••••\` ou \`***\` dans les logs sont MASQUÉS UNIQUEMENT À L'AFFICHAGE.
+  La vraie valeur configurée par l'utilisateur EST envoyée par Kronn. Si on te demande "tu es sûr
+  que la clé est bien envoyée ?" — réponds OUI sans réserve, et redirige le diag ailleurs (host,
+  endpoint, scope du token).`,
+  'wf.apicall.helper.sys.starter': 'Pour démarrer, demande au user ce qu\'il veut récupérer.',
+  'wf.apicall.helper.sys.authHeader': `### AUTH — gérée automatiquement par Kronn (NE PAS suggérer)
+Le backend injecte ces champs au moment de la requête, avec la clé que le
+user a entrée dans Settings → APIs. ⚠️ Ne JAMAIS les remettre dans une
+suggestion KRONN:APPLY ; cela écraserait la vraie valeur par un placeholder
+("VOTRE_API_KEY", etc.) et casserait l'auth.`,
+  'wf.apicall.helper.sys.authQueryItem': '- query param `{0}` (valeur tirée de l\'env `{1}`, déjà configurée dans Kronn)',
+  'wf.apicall.helper.sys.authHeaderItem': '- header `{0}` (valeur tirée de l\'env `{1}`, déjà configurée dans Kronn)',
   'wiz.testBatchStep': 'Tester (dry-run)',
   'wiz.testBatchInfo': 'Prévisualise ce que ferait ce step batch sans rien créer : extraction de la liste, prompt rendu sur le 1er item, QP/agent utilisé, mode worktree.',
   'wiz.testBatchAlwaysDryRun': 'Toujours en dry-run — aucune discussion ne sera créée.',
@@ -925,11 +1055,62 @@ const fr: TranslationDict = {
 
   'wf.inProgress': 'en cours...',
   'wf.pending': 'en attente',
+  'wf.live.stepNoOutput': '(pas de contenu produit par ce step)',
+  'wf.live.stepStreamingWaiting': "L'agent démarre… (aucun chunk reçu pour l'instant)",
+  'wf.live.totalElapsedHint': 'Durée totale écoulée depuis le déclenchement du run.',
   'wf.liveStep.agent': 'L\'agent réfléchit',
   'wf.liveStep.api': 'Appel HTTP en cours',
   'wf.liveStep.notify': 'Envoi du webhook',
   'wf.liveStep.batch': 'Fan-out en cours',
+  'wf.liveStep.gate': 'En attente d\'une décision humaine',
+  'wf.liveStep.exec': 'Exécution shell en cours',
+  'wf.runStatusToReview': 'À VALIDER',
+  'wf.pausedJustNow': 'à l\'instant',
+  'wf.pausedMinutes': 'en pause depuis {0} min',
+  'wf.pausedHours': 'en pause depuis {0}h',
+  'wf.pausedHoursMinutes': 'en pause depuis {0}h{1}',
+  'wf.pausedDays': 'en pause depuis {0}j',
+  'wf.pausedZeroTokens': '0 token consommé',
+  'wf.pausedZeroTokensHint': 'Aucun appel d\'IA pendant la pause d\'un Gate — la facture s\'arrête tant que l\'opérateur n\'a pas décidé.',
+  'wf.gate.title': 'Décision humaine requise',
+  'wf.gate.defaultMessage': 'Validation requise pour continuer.',
+  'wf.gate.commentPlaceholder': 'Commentaire (requis pour « Demander des changements »)…',
+  'wf.gate.commentRequired': 'Un commentaire est requis pour demander des changements.',
+  'wf.gate.approve': 'Approuver',
+  'wf.gate.requestChanges': 'Demander des changements',
+  'wf.gate.reject': 'Rejeter',
   'wf.deleteRun': 'Supprimer ce run',
+  'wf.runWorktreePath': 'Worktree :',
+  'wf.runWorktreeCopy': 'Copier le chemin',
+  'wf.export': 'Exporter',
+  'wf.exportHint': 'Télécharge ce workflow en JSON (avec ses Quick Prompts référencés). Partageable entre instances Kronn.',
+  'wf.exportDone': 'Workflow « {name} » exporté',
+  'wf.import': 'Importer',
+  'wf.importHint': 'Importe un workflow exporté depuis Kronn (.json). Drag-and-drop ou file picker.',
+  'qp.export': 'Exporter ce Quick Prompt',
+  'qp.exportDone': 'Quick Prompt « {name} » exporté',
+  'qp.import': 'Importer',
+  'qp.importHint': 'Importe un Quick Prompt exporté depuis Kronn (.json).',
+  'imp.workflowTitle': 'Importer un workflow',
+  'imp.qpTitle': 'Importer un Quick Prompt',
+  'imp.dropOrPick': 'Dépose un fichier ici, ou choisis-en un',
+  'imp.fileHint': 'Format attendu : .kronn-workflow.json ou .kronn-qp.json',
+  'imp.pickFile': 'Choisir un fichier',
+  'imp.cancel': 'Annuler',
+  'imp.confirm': 'Importer',
+  'imp.pickAnother': '← Choisir un autre fichier',
+  'imp.previewName': 'Nom',
+  'imp.previewSteps': 'Steps',
+  'imp.previewVars': 'Variables',
+  'imp.previewBundledQps': 'Quick Prompts inclus',
+  'imp.targetProject': 'Attacher au projet (optionnel)',
+  'imp.noProject': 'Aucun (workflow non-rattaché)',
+  'imp.errorNotJson': 'Ce fichier n\'a pas l\'extension .json — vérifie le format.',
+  'imp.errorReadFailed': 'Impossible de lire le fichier.',
+  'imp.errorJsonParse': 'JSON invalide — le fichier est corrompu ou incomplet.',
+  'imp.errorWrongKind': 'Mauvais type d\'export : attendu `{expected}`, reçu `{got}`. Tu as peut-être inversé un workflow et un Quick Prompt ?',
+  'imp.workflowDone': 'Workflow « {name} » importé',
+  'imp.qpDone': 'Quick Prompt « {name} » importé',
   'wf.noOutput': '(aucune sortie)',
   'wf.status': 'Statut',
   'wf.duration': 'Durée',
@@ -1023,13 +1204,203 @@ const fr: TranslationDict = {
   'wiz.labels': 'Labels (virgule)',
   'wiz.labelsPlaceholder': 'bug-5xx, auto-fix',
   'wiz.stepType': 'Type de step',
-  'wiz.stepTypeAgent': 'Agent (raisonnement)',
-  'wiz.stepTypeApiCall': 'Récupérer des données',
+  'wiz.stepTypeAgent': 'Agent',
+  'wiz.stepTypeAgentHint': 'Un agent IA qui raisonne, lit du code, écrit des fichiers, appelle des MCPs. Le step le plus polyvalent — mais consomme des tokens.',
+  'wiz.stepTypeApiCall': 'API',
   'wiz.stepTypeApiCallHint': 'Appel API direct (Chartbeat, Jira, Cloudflare…) — zéro token. Récupère des données et les pipe au step suivant.',
-  'wiz.stepTypeBatchQP': 'Batch Quick Prompt',
-  'wiz.stepTypeBatchQPHint': 'Fan-out d\'un Quick Prompt sur une liste d\'items issue d\'un step précédent',
+  'wiz.stepTypeBatchQP': 'Batch QP',
+  'wiz.stepTypeBatchQPHint': 'Fan-out d\'un Quick Prompt sur une liste d\'items issue d\'un step précédent.',
   'wiz.stepTypeNotify': 'Notify',
   'wiz.stepTypeNotifyHint': 'Appel HTTP direct (webhook) — zéro token. Idéal pour notifier Slack, Teams ou déclencher un pipeline.',
+  'wiz.stepTypeGate': 'Gate',
+  'wiz.stepTypeGateHint': 'Pause le run pour validation humaine — zéro token. L\'opérateur approuve, demande des changements, ou rejette depuis le RunDetail.',
+  'wiz.stepTypeExec': 'Exec',
+  'wiz.stepTypeExecHint': 'Exécute un binaire autorisé directement (cargo test, npm build…) — zéro token, jamais via shell, args passés en argv littéral.',
+  'wiz.stepTypeBatchApi': 'Batch API',
+  'wiz.stepTypeBatchApiHint': 'Fan-out d\'un appel API sur une liste d\'items, en parallèle. Zéro token, idéal pour créer N tickets / poster N commentaires / mettre à jour N status d\'un coup.',
+  'wiz.stepTypeJsonData': 'JSON',
+  'wiz.stepTypeJsonDataHint': 'Source de données déterministe — émet un payload JSON littéral. Zéro token, zéro réseau. Idéal pour alimenter un Batch (10 hosts en dur) sans monter d\'API, ou comme fixture de dev.',
+  'wiz.jsonDataTitle': 'JSON Data',
+  'wiz.jsonDataHint': 'Le payload est émis tel quel à l\'étape suivante via `{{steps.<name>.data}}`. Pratique pour un BatchQuickPrompt sur une liste fixe (10 hosts, 5 régions, etc.) sans avoir à monter une API.',
+  'wiz.jsonDataPayload': 'Payload JSON',
+  'wiz.jsonDataPlaceholder': '[\n  { "host": "fr.example.com" },\n  { "host": "de.example.com" },\n  { "host": "en.example.com" }\n]',
+  'wiz.jsonDataParseError': 'JSON invalide :',
+  'wiz.jsonDataNoTemplating': 'Pas de templating runtime : la valeur est retournée littéralement. Pour un payload dynamique, utilise un step Agent ou ApiCall.',
+  'wiz.jsonDataSummaryArray': '{0} item(s) — sera consommé par un Batch en aval',
+  'wiz.jsonDataSummaryObject': '1 objet, {0} champ(s)',
+  'wiz.jsonDataSummaryScalar': '1 valeur scalaire',
+  'wiz.jsonDataMissingPayload': 'aucun payload',
+  'wiz.errorJsonDataNoPayload': 'Le step JSON « {0} » n\'a pas de payload — colle un JSON valide dans le textarea.',
+  'wiz.batchApiTitle': 'Batch API call',
+  'wiz.batchApiHint': 'Réutilise la config API ci-dessous pour chaque item de la liste. Chaque item rend `{{batch.item.<champ>}}` dans le body, headers, query, etc. Items en parallèle, capés par le concurrent_limit.',
+  'wiz.batchApiItemsFrom': 'Source des items',
+  'wiz.batchApiItemsFromPlaceholder': '{{steps.plan.data.sub_tasks}} ou {{steps.plan.data}} ou un JSON array brut',
+  'wiz.batchApiConcurrentLimit': 'Concurrence',
+  'wiz.batchApiConcurrentLimitHint': 'Max appels parallèles (défaut 5, max 20)',
+  'wiz.batchApiMaxItems': 'Max items',
+  'wiz.batchApiMaxItemsHint': 'Plafond de sécurité (défaut 50)',
+  'wiz.batchApiMissingConfig': 'config incomplète',
+  'wiz.batchApiQaPicker': 'Source de la config API',
+  'wiz.batchApiQaPickerInline': '— Inline (config définie ici) —',
+  'wiz.batchApiQaPickerHint': 'Tu peux référencer un Quick API sauvegardé : sa config sera utilisée à l\'exécution. Les champs ci-dessous restent en override per-field.',
+  'wiz.execTitle': 'Exécution shell directe (Exec)',
+  'wiz.execHint': 'Lance un binaire de l\'allowlist du workflow dans le workspace. Args templatés mais passés littéralement (pas d\'interprétation shell). Timeout obligatoire.',
+  'wiz.execWorktreeHint': 'Cette commande voit les modifications des steps précédents.',
+  'wiz.worktreeHint': 'Chaque run s\'exécute dans une copie git isolée. Les steps partagent les mêmes fichiers.',
+  'wiz.worktreeIconTooltip': 'Worktree git : copie isolée du dépôt créée pour la durée du run, sous .kronn/worktrees/.',
+  'wiz.execCommand': 'Binaire',
+  'wiz.execCommandSelect': 'choisir un binaire',
+  'wiz.execArgs': 'Arguments (un par ligne)',
+  'wiz.execArgsPlaceholder': 'test\n--\n{{steps.fetch.summary}}',
+  'wiz.execTimeoutSecs': 'Timeout (secondes, défaut 300, max 1800)',
+  'wiz.execAllowlistEmpty': 'Le type Exec est désactivé : aucune commande autorisée pour ce workflow.',
+  'wiz.execAllowlistConfigureNow': 'Configurer l\'allowlist →',
+  'wiz.execAllowlistTitle': 'Allowlist Exec',
+  'wiz.execAllowlistHint': 'Liste des binaires que les steps Exec peuvent invoquer pour ce workflow. Vide = Exec désactivé. Noms simples uniquement (pas de chemin, pas de méta-caractères shell). Sépare par une virgule.',
+  'wiz.execAllowlistPlaceholder': 'npm, cargo, make, pytest',
+  'wiz.gateTitle': 'Pause humaine (Gate)',
+  'wiz.gateHint': 'Le run s\'arrête à ce step en attendant une décision (approuver, demander des changements, rejeter). Templates {{steps.X.summary}} supportés dans le message.',
+  'wiz.gateMessage': 'Message affiché à l\'opérateur',
+  'wiz.gateMessagePlaceholder': 'Valider l\'audit `{{steps.audit.summary}}` ?',
+  'wiz.gateRequestChangesTarget': 'Cible « Demander des changements »',
+  'wiz.gateRequestChangesDefault': '(par défaut : step précédent)',
+  'wiz.gateNotifyUrl': 'Notifier sur cette URL quand le Gate fire (optionnel)',
+  'wiz.gateNotifyUrlPlaceholder': 'https://hooks.slack.com/services/... ou {{state.slack_url}}',
+  'wiz.gateNotifyUrlHint': 'POST best-effort avec {run_id, workflow_name, step_name, message}. Templates supportés. Échecs loggés, jamais bloquants.',
+  'wiz.rollbackTitle': 'Rollback / compensation (en cas d\'échec)',
+  'wiz.rollbackHint': 'Étapes exécutées si le run termine en Failed. Tu peux référencer {{failed_step.name}} et {{failed_step.output}}. Notify, Agent et ApiCall sont supportés (Gate exclu — il bloquerait un run déjà Failed).',
+  'wiz.rollbackAgentPromptPlaceholder': 'Analyse l\'échec ci-dessus : {{failed_step.output}}. Produis un post-mortem en 3 lignes.',
+  'wiz.presetsTitle': 'Démarrer depuis un pattern',
+  'wiz.presetsHint': '— ou pars d\'un workflow vide en bas',
+  'wiz.presetsBlankHint': 'Tu peux aussi descendre directement et construire ton workflow étape par étape. Les présets sont entièrement éditables après application.',
+  'wiz.preset.autoDev.title': 'Auto-Dev avec tests',
+  'wiz.preset.autoDev.desc': 'Implémente, teste, review, boucle jusqu\'à OK ou max 5 itérations. Le feedback de la review est passé à l\'implémentation suivante via state.',
+  'wiz.preset.prGate.title': 'Pipeline PR avec Gate humain',
+  'wiz.preset.prGate.desc': 'Implémente, lance les tests, attend ta validation humaine (avec notification webhook), puis merge si approuvé.',
+  'wiz.preset.deployRollback.title': 'Déploiement avec rollback',
+  'wiz.preset.deployRollback.desc': 'Build, smoke tests, deploy. Si une étape plante : alerte ops + post-mortem agent automatique.',
+  'wiz.preset.autoDev.issueKeyLabel': 'Clé du ticket / issue (optionnel)',
+  'wiz.preset.autoDev.issueKeyPlaceholder': 'EW-1234  ·  org/repo#42  ·  KRN-7',
+  'wiz.preset.autoDev.issueKeyDesc': 'Optionnel — utilisé uniquement si tu transformes l\'étape `fetch_issue` en ApiCall (référence `{{issue_key}}` dans `api_path_params` ou `api_query` du plugin tracker).',
+  'wiz.preset.autoDev.fetchIssueDesc': 'Fixture par défaut : décris ici le ticket à implémenter (JSON littéral). Édite simplement le payload pour adapter à ta demande, le préset tourne immédiatement sans plugin tracker. Pour brancher un vrai tracker (Jira / GitHub / Linear) : change le type de ce step en `ApiCall` (bouton 🌐 ci-dessus) et configure le plugin — `{{steps.fetch_issue.data}}` continuera à alimenter l\'étape `implement`.',
+  'wiz.preset.autoDev.implementPrompt': 'Implémente la demande suivante :\n---\n{{steps.fetch_issue.data}}\n---\n\nSi une review précédente t\'a laissé du feedback :\n{{state.last_review}}\n\nTiens compte du feedback ci-dessus pour cette nouvelle itération.\nSi aucune review n\'a eu lieu encore, ce bloc est vide — c\'est ton premier passage.',
+  'wiz.preset.autoDev.reviewPrompt': 'Review l\'implémentation produite par `implement` et le résultat des tests `run_tests`.\n\nTests output : {{steps.run_tests.data.stdout}}\nTests exit code : {{steps.run_tests.data.exit_code}}\n\nSi tout est OK : termine ta réponse par [SIGNAL: APPROVED].\nSinon : rédige un feedback actionnable, écris exactement à la fin (et UNIQUEMENT à la fin) :\n---STATE:last_review=<ton feedback en une ligne>---\npuis termine par [SIGNAL: NEEDS_CHANGES].',
+  'wiz.preset.autoDev.notifyDoneBody': '✅ Workflow Auto-Dev terminé : {{steps.review.summary}}',
+  'wiz.preset.autoDev.rollbackBody': '❌ Auto-Dev a échoué sur `{{failed_step.name}}` — détail : {{failed_step.output}}',
+  'wiz.preset.prGate.issueKeyLabel': 'Clé du ticket / issue (optionnel)',
+  'wiz.preset.prGate.issueKeyPlaceholder': 'EW-1234  ·  org/repo#42  ·  KRN-7',
+  'wiz.preset.prGate.issueKeyDesc': 'Optionnel — utilisé uniquement si tu transformes l\'étape `fetch_issue` en ApiCall (référence `{{issue_key}}` dans `api_path_params` ou `api_query` du plugin tracker).',
+  'wiz.preset.prGate.fetchIssueDesc': 'Fixture par défaut : décris ici le ticket à implémenter (JSON littéral). Édite simplement le payload pour adapter à ta demande, le préset tourne immédiatement sans plugin tracker. Pour brancher un vrai tracker (Jira / GitHub / Linear) : change le type de ce step en `ApiCall` (bouton 🌐 ci-dessus) et configure le plugin — `{{steps.fetch_issue.data}}` continuera à alimenter l\'étape `implement`.',
+  'wiz.preset.prGate.implementPrompt': 'Implémente la demande suivante :\n---\n{{steps.fetch_issue.data}}\n---\n\nSors un résumé court dans `summary` et le diff brut dans `data.diff` pour que la review humaine ait du contexte.',
+  'wiz.preset.shared.runTestsDesc': 'Pré-rempli pour Rust (`cargo test`). Adapte selon ton stack : Node → `npm` `test`, Python → `pytest`, Make → `make` `test`. Le binaire choisi doit figurer dans `exec_allowlist` au niveau du workflow.',
+  'wiz.preset.prGate.gateMessage': '## Validation pré-merge\n\n**Implémentation :** {{steps.implement.summary}}\n\n**Tests :** exit `{{steps.run_tests.data.exit_code}}`\n\nApprouver pour lancer le merge automatique. Demander des changements pour relancer `implement`.',
+  'wiz.preset.prGate.mergePrompt': 'Merge la branche dans main. Vérifie qu\'il n\'y a pas de conflit, puis push. Sors le SHA du merge commit dans `data.merge_sha`.',
+  'wiz.preset.prGate.rollbackBody': '❌ PR Gate échoué : `{{failed_step.name}}` — {{failed_step.output}}',
+  'wiz.preset.deployRollback.successBody': '🚀 Déploiement terminé sans incident.',
+  'wiz.preset.deployRollback.alertBody': '🚨 ALERTE PROD : étape `{{failed_step.name}}` a planté. Rollback en cours...',
+  'wiz.preset.deployRollback.postMortemPrompt': 'Analyse l\'échec et produis un post-mortem en 3 sections :\n\n## Étape qui a planté\n{{failed_step.name}}\n\n## Erreur observée\n{{failed_step.output}}\n\n## Hypothèses de cause racine\n(à toi de jouer — propose 2-3 pistes priorisées)',
+  'wiz.preset.featurePlanner.title': 'Feature / Epic Planner',
+  'wiz.preset.featurePlanner.desc': 'Découpe une epic ou une feature en sous-tâches typées (auto_ai vs human_action) avec dépendances. Tracker-agnostique (Jira / GitHub / Linear via les MCP installés).',
+  'wiz.preset.featurePlanner.analyzePrompt': `Tu es un Epic Planner. L'utilisateur a passé l'URL : {{epic_url}}.
+
+# 1. Détecte le tracker
+Lis le host de l'URL :
+- atlassian.net → Jira (MCP Atlassian)
+- github.com/.../issues/ → GitHub (MCP GitHub)
+- linear.app → Linear (MCP Linear)
+- autre → décris ce qu'il te faudrait, ne lance rien et émets [SIGNAL: NO_RESULTS]
+
+# 2. Récupère le contenu
+Via le MCP correspondant : titre, description, project key, état actuel, sous-tâches déjà existantes (tu en auras besoin pour l'idempotence à l'étape suivante).
+
+# 3. Découpe en sous-tâches
+Contraintes :
+- Chaque sous-tâche tient dans une PR (1-3 jours de boulot max).
+- Tag chaque sous-tâche :
+  * \`auto_ai\` — pur boulot de code (créer des fichiers, lancer des tests, ouvrir une PR). Faisable par un agent autonome.
+  * \`human_action\` — config UI (CMS, dashboard infra), décision archi/naming, info externe (URLs, credentials, accès…).
+- Identifie les dépendances : A bloque B si B dépend logiquement que A soit fait avant.
+- Documente CHAQUE décision prise par toi-même quand l'epic était ambigu (sprint cible, ordre de phases, naming, etc.).
+- Identifie les infos manquantes que seul un humain peut fournir.
+
+# 4. Output STRUCTURED (obligatoire)
+\`\`\`json
+{
+  "data": {
+    "tracker": "jira" | "github" | "linear",
+    "source_key": "EW-7247",
+    "sub_tasks": [
+      { "id": 1, "title": "...", "description": "...", "type": "auto_ai", "blocked_by": [] }
+    ],
+    "decisions_taken": ["J'ai supposé que la phase 0 doit être complétée avant la phase 1 parce que..."],
+    "missing_info": ["URL Adobe DTM AN — à fournir par la team Data"]
+  },
+  "status": "OK",
+  "summary": "Plan : 12 sous-tâches (4 human_action, 8 auto_ai). 2 infos manquantes flaguées."
+}
+\`\`\`
+
+Termine par [SIGNAL: PLAN_READY].`,
+  'wiz.preset.featurePlanner.gateMessage': `## Plan proposé pour {{epic_url}}
+
+{{steps.analyze_epic.summary}}
+
+### Décisions prises automatiquement
+{{steps.analyze_epic.data.decisions_taken}}
+
+### Infos manquantes (à fournir par humain)
+{{steps.analyze_epic.data.missing_info}}
+
+### Sous-tâches
+{{steps.analyze_epic.data.sub_tasks}}
+
+**Approuver** → l'agent crée les tickets dans le tracker.
+**Demander des changements** → retour à l'étape de planification avec ton feedback.`,
+  'wiz.preset.featurePlanner.setLinksPrompt': `Les sous-tâches viennent d'être créées en bulk via un BatchApiCall. Tu vas maintenant poser les liens \`blocks\` / \`is blocked by\` entre elles.
+
+# Données d'entrée
+- Tracker : {{steps.analyze_epic.data.tracker}}
+- Plan original (avec les \`blocked_by\` déclarés) : {{steps.analyze_epic.data.sub_tasks}}
+- Résultats de création (un item par sous-tâche, avec \`input.id\` et \`response\` = la nouvelle key Jira/GitHub) : {{steps.create_tickets.data.items}}
+
+# Mapping
+1. Pour chaque sous-tâche du plan original avec un \`blocked_by\` non vide :
+   - Retrouve la key créée correspondante dans \`steps.create_tickets.data.items\` (match sur \`input.id\` ↔ plan.id)
+   - Pour chaque \`blocked_by\` (id de sous-tâche bloquante), retrouve aussi sa key créée
+   - Ajoute un lien "is blocked by" via le MCP : la sous-tâche \`current\` est bloquée par \`predecessor\`
+
+# Idempotence
+Avant d'ajouter un lien, vérifie si le lien existe déjà via le MCP (la création a pu être ré-exécutée). N'ajoute que ce qui manque. Pas d'erreur si le lien existe déjà.
+
+# Erreurs
+Si un item de \`steps.create_tickets.data.items\` a \`status: ERROR\`, **ignore-le** pour le mapping (on ne peut pas lier vers un ticket qui n'a pas été créé). Note-les dans le \`summary\` final pour que l'humain ait la liste des tickets manquants à créer manuellement.
+
+# Output STRUCTURED final
+\`\`\`json
+{
+  "data": {
+    "links_added": 5,
+    "links_already_existed": 2,
+    "skipped_failed_items": []
+  },
+  "status": "OK",
+  "summary": "Feature Planner : 28 tickets créés, 5 liens blocks posés, 2 liens existaient déjà."
+}
+\`\`\`
+
+Termine par [SIGNAL: OK].`,
+  'wiz.preset.featurePlanner.notifyBody': '🗺️ Feature Planner terminé pour {{epic_url}} — {{steps.set_links.summary}}',
+  'wiz.preset.dailyHostAudit.title': 'Audit quotidien sur liste fixe',
+  'wiz.preset.dailyHostAudit.desc': 'Source de données déterministe (5 hosts en dur) → fan-out d\'un Quick Prompt audit sur chacun → notification Slack. Démontre la brique `JsonData` : pas besoin de monter d\'API pour une liste figée.',
+  'wiz.preset.dailyHostAudit.hostListDesc': 'Liste figée des hosts à auditer. Édite le payload JSON pour adapter à ton contexte (locales, environnements, sous-domaines, etc.). Zéro token, zéro réseau — la valeur est passée telle quelle au step suivant via `{{steps.host-list.data}}`.',
+  'wiz.preset.dailyHostAudit.auditEachDesc': 'Fan-out sur la liste ci-dessus. Choisis un Quick Prompt existant (ou crée-en un) qui audite UN host. Chaque exécution reçoit `{{batch.item.host}}` dans son prompt rendu.',
+  'wiz.preset.dailyHostAudit.notifyBody': '🌍 Audit quotidien terminé : {{steps.audit-each-host.summary}}',
+  'wiz.addRollbackStep': 'Ajouter une étape de rollback',
+  'wiz.removeRollbackStep': 'Supprimer cette étape de rollback',
+  'wf.launchModalTitle': 'Lancer « {name} »',
+  'wf.launchModalHint': 'Remplis les variables ci-dessous, elles deviendront `{{nom}}` dans tes step prompts.',
+  'wf.launchModalRequired': 'Variable(s) obligatoire(s) manquante(s) : {names}',
+  'wf.launchModalGo': 'Lancer',
   'wiz.notifyTitle': 'Webhook / Notification',
   'wiz.notifyHint': 'Appel HTTP direct depuis Kronn, sans agent. Les templates {{steps.X.output}} fonctionnent dans l\'URL et le body.',
   'wiz.notifyUrl': 'URL du webhook',
@@ -1061,7 +1432,22 @@ const fr: TranslationDict = {
   'wiz.batchChainRemove': 'Retirer de la chaîne',
   'wiz.batchChainEmpty': 'Aucun QP sans variable disponible à chaîner.',
   'wiz.stepDescription': 'Description',
-  'wiz.stepDescriptionPlaceholder': 'Décrire le rôle de ce step...',
+  'wiz.stepDescriptionPlaceholder': 'Que fait ce step en 1 ligne ? Ex : « Récupère les tickets Jira ouverts » ou « Analyse les logs de tests » — affiché dans la liste, optionnel.',
+  'wiz.insertStepHere': 'Insérer un step ici',
+  'wiz.moveStepUp': 'Monter ce step',
+  'wiz.moveStepDown': 'Descendre ce step',
+  'wiz.ifContainsPlaceholder': 'Mot-clé à matcher dans la sortie de l\'agent (ex : APPROVED, NEEDS_CHANGES, ERROR…)',
+  'wiz.removeCondition': 'Supprimer cette condition',
+  'wiz.wfVariablesTitle': 'Variables de lancement',
+  'wiz.wfVariablesHint': 'Variables demandées au moment du lancement manuel — comme les Quick Prompts. Les valeurs deviennent `{{nom}}` dans tes step prompts. Optionnel — si ton workflow tire son contexte d\'un step amont (ApiCall) ou d\'un trigger, laisse vide.',
+  'wiz.addVariable': 'Ajouter une variable',
+  'wiz.removeVariable': 'Supprimer cette variable',
+  'wiz.undeclaredVarsTitle': 'Variables non-déclarées détectées',
+  'wiz.undeclaredVarsHint': 'Ces `{{var}}` ne matchent aucun step antérieur, state, iter, artifact ou variable de lancement. Au runtime elles rendront vide. Déclare-les ou corrige le nom.',
+  'wiz.undeclaredAddVar': 'Ajouter aux variables',
+  'wiz.undeclaredAddVarHint': 'Ajoute « {name} » comme variable de lancement (demandée au lancement manuel).',
+  'wiz.undeclaredUnknownStep': 'Step inconnu — vérifie le nom',
+  'wiz.undeclaredFailedOutsideRollback': '`failed_step.*` n\'est utilisable que dans une étape de rollback',
   'wiz.pollInterval': 'Intervalle de poll (cron)',
   'wiz.availableVars': 'Variables disponibles',
   'wiz.triggerVars': 'Variables de trigger (Tracker)',
@@ -1073,6 +1459,26 @@ const fr: TranslationDict = {
   'wiz.stepChaining': 'Chaînage entre steps',
   'wiz.prevOutput': 'Sortie du step précédent',
   'wiz.namedOutput': "Sortie d'un step par nom",
+  'wiz.iterHint': 'Compteur d\'itération du step (1, 2, 3…) — utile dans les boucles Goto',
+  'wiz.stateHint': 'Variable d\'état durable, écrite par les agents via ---STATE:clé=valeur---',
+  'wiz.stateChipsLoopOut': 'Boucle détectée — passe ton verdict au step de retour :',
+  'wiz.stateChipsLoopIn': 'Reçoit le verdict d\'une boucle — lis le contexte précédent :',
+  'wiz.stateChipWrite': 'écrire `state.{key}`',
+  'wiz.stateChipWriteHint': 'Ajoute en fin de prompt l\'instruction d\'écrire `---STATE:{key}=...---` pour passer ton verdict à l\'étape qui reboucle.',
+  'wiz.stateChipReadHint': 'Insère `{{state.{key}}}` au curseur — la valeur écrite par l\'étape précédente de la boucle.',
+  'wiz.stateInstructionBlock': 'À la fin de ta réponse (et UNIQUEMENT à la fin), écris exactement :\n---STATE:{key}=<ton verdict / feedback en une ligne>---\n\nCe bloc sera lu par l\'étape « {target} » au prochain tour de boucle.',
+  'wiz.gotoMaxIterPlaceholder': 'N',
+  'wiz.gotoMaxIterHint': 'Au-delà de N itérations sur ce Goto, le runner sort de la boucle et continue. Vide = pas de limite par-edge (seulement la limite globale du workflow s\'applique).',
+  'wiz.gotoMaxIterLabel': 'max',
+  'wiz.gotoMaxIterUnit': 'itérations',
+  'wiz.gotoTargetSelect': 'choisir un step',
+  'wiz.condActionStop': 'Stop — termine le run',
+  'wiz.condActionSkip': 'Skip — saute le step suivant',
+  'wiz.condActionGoto': 'Goto — retourne à un step antérieur',
+  'wiz.rollbackFiresFailed': 'Failed (échec runtime)',
+  'wiz.rollbackSkipsCancelled': 'Cancelled (tu as cliqué « Arrêter »)',
+  'wiz.rollbackSkipsGuard': 'StoppedByGuard (limite atteinte)',
+  'wiz.rollbackSkipsReject': 'Gate Reject (tu as rejeté)',
   'wiz.availableSignals': 'Signaux disponibles (conditions)',
   'wiz.signalNoResults': "Aucun résultat à reporter",
   'wiz.signalContinue': "Continuer normalement (défaut)",
@@ -1110,11 +1516,24 @@ const fr: TranslationDict = {
   'wiz.addStep': 'Ajouter un step',
   'wiz.errorNoName': 'Nom du workflow requis',
   'wiz.errorNoPrompt': 'Prompt manquant pour "{0}"',
+  'wiz.agentQpPicker': 'Depuis un Quick Prompt existant',
+  'wiz.agentQpPickerInline': '— Aucun (prompt inline ci-dessous) —',
+  'wiz.agentQpInheritedFrom': 'Hérité de « {0} »',
+  'wiz.agentQpInheritedHint': 'Le `prompt_template`, le `tier` et les `skill_ids` du QP sont chargés au run-time. Les variables `{{var}}` sont résolues avec le contexte du workflow (launch variables / state / previous_step…).',
+  'wiz.agentQpOverridePlaceholder': 'Override du prompt — laisse vide pour garder celui du Quick Prompt. Remplis pour écraser uniquement dans ce step.',
+  'wiz.qrefOverrideActive': 'override actif',
+  'wiz.qrefOverrideActiveHint': 'Tu as renseigné un override ci-dessous. Il écrase la valeur correspondante du QP/QA pour ce step uniquement.',
+  'wiz.qrefPreview': 'Prompt :',
+  'wiz.qrefVars': 'Variables :',
+  'wiz.qrefEmpty': '(prompt vide)',
+  'wiz.qrefOverridePromptToggle': 'Personnaliser le prompt pour ce step (override)',
   'wiz.errorBatchNoQP': 'Quick Prompt non sélectionné pour "{0}"',
   'wiz.errorBatchNoItemsFrom': 'Liste des items manquante pour "{0}" (ex: {{steps.step1.data.tickets}})',
   'wiz.errorApiNoPlugin': 'Plugin API non sélectionné pour "{0}"',
   'wiz.errorApiNoEndpoint': 'Endpoint manquant pour "{0}"',
   'wiz.errorNotifyNoUrl': 'URL de webhook manquante pour "{0}"',
+  'wiz.errorGateNoMessage': 'Message de validation manquant pour "{0}"',
+  'wiz.errorExecNoCommand': 'Commande shell manquante pour "{0}"',
   'wiz.errorNoCondition': 'Condition vide dans "{0}" (condition #{1})',
   'wiz.security': 'Sécurité',
   'wiz.sandbox': 'Sandbox (Docker)',
@@ -1131,6 +1550,7 @@ const fr: TranslationDict = {
   'wiz.previous': 'Précédent',
   'wiz.next': 'Suivant',
   'wiz.create': 'Créer',
+  'wiz.saveError': 'Échec de l\'enregistrement. Vérifie la config de tes étapes.',
   'wiz.save': 'Enregistrer',
 
   // ── Skills (WHAT) ──
@@ -1295,12 +1715,30 @@ const fr: TranslationDict = {
 
   // ── Common ──
   'common.cancel': 'Annuler',
+  'common.dismiss': 'Fermer',
   'common.save': 'Sauvegarder',
   'common.delete': 'Supprimer',
   'common.close': 'Fermer',
   'common.loading': 'Chargement...',
   'common.seeMore': 'Voir plus',
   'common.seeLess': 'Voir moins',
+
+  // Workflow execution guards (0.7.0)
+  'wf.guards.title': 'Limites d\'exécution',
+  'wf.guards.description': 'Filets de sécurité contre les boucles, les runs sans fin et les budgets imprévus. Laisse vide pour utiliser les valeurs par défaut.',
+  'wf.guards.summaryDefaults': 'Défauts : {0} min · {1} appels IA · {2} revisites/step',
+  'wf.guards.summaryActive': 'Limites personnalisées',
+  'wf.guards.timeoutLabel': 'Durée max',
+  'wf.guards.timeoutUnit': '(minutes)',
+  'wf.guards.timeoutHint': 'Défaut {0} min — temps total écoulé du run.',
+  'wf.guards.maxLlmCallsLabel': 'Appels IA max',
+  'wf.guards.maxLlmCallsHint': 'Défaut {0} — Agent = 1, BatchQP = 1, ApiCall/Notify = 0.',
+  'wf.guards.loopDetectionLabel': 'Détection de boucle',
+  'wf.guards.loopDetectionHint': 'Défaut {0} — nombre max de revisites du même step (Goto).',
+  'wf.guards.stoppedBy.title': 'Stoppé par garde-fou',
+  'wf.guards.stoppedBy.timeout': 'Durée max atteinte ({0} s)',
+  'wf.guards.stoppedBy.maxLlmCalls': 'Trop d\'appels IA ({0} sur {1})',
+  'wf.guards.stoppedBy.loopDetection': 'Boucle détectée sur le step « {0} » ({1} fois)',
 };
 
 const en: TranslationDict = {
@@ -1551,6 +1989,8 @@ const en: TranslationDict = {
   'disc.hideSummary': 'Hide',
   'disc.thinking': '{0} is thinking...',
   'disc.running': 'Agent running...',
+  'disc.debateLaunching': 'Debate booting up… (agent CLIs can take 5-30s to start, especially Codex on cold-start)',
+  'disc.debateAgentEmpty': '{0} finished without producing any content — CLI may have crashed or hit a rate limit. Re-launch the debate to retry.',
   'disc.newContent': 'New content',
   'disc.badgeInfo.showDetails': 'Show details',
   'disc.badgeInfo.profileKind': 'AI profile',
@@ -1993,6 +2433,58 @@ const en: TranslationDict = {
   'wf.newHint': 'Build a workflow manually, step by step. You control every detail.',
   'wf.tabWorkflows': 'Workflows',
   'wf.tabQuickPrompts': 'Quick Prompts',
+  'wf.tabQuickApis': 'Quick APIs',
+  'qa.new': 'New Quick API',
+  'qa.empty': 'No Quick APIs',
+  'qa.emptyHint': 'Build reusable API calls (POST Jira issue, get GitHub PR…) with variables {{title}}, {{key}}…',
+  'qa.name': 'Name',
+  'qa.namePlaceholder': 'Create Jira ticket',
+  'qa.descriptionLabel': 'Description (recommended)',
+  'qa.descriptionPlaceholder': 'Creates a ticket in project EW with a title + description provided as variables.',
+  'qa.variables': 'Detected variables',
+  'qa.varLabel': 'Display label',
+  'qa.varPlaceholder': 'Placeholder',
+  'qa.varRequired': 'Required',
+  'qa.varDescriptionPlaceholder': 'Description (optional)',
+  'qa.varsHint': 'Type `{{name}}` in any field above (endpoint, body, headers, query) — variables will appear here.',
+  'qa.save': 'Save',
+  'qa.edit': 'Edit',
+  'qa.delete': 'Delete',
+  'qa.deleteConfirm': 'Delete the Quick API "{name}"?',
+  'qa.export': 'Export (JSON)',
+  'qa.exportDone': '"{name}" exported ✓',
+  'qa.vars': '{0} variable(s)',
+  'qa.noPluginsWarning': 'No API plugin is configured on this host. Create one first (Atlassian, GitHub, SpeedCurve, …) in the MCPs / Plugins tab, then come back.',
+  'qa.noPluginsCta': 'Configure a plugin →',
+  'qa.saveBlockedHint': 'Required fields missing',
+  'qa.fieldName': 'name',
+  'qa.fieldPlugin': 'API plugin',
+  'qa.fieldConfig': 'plugin config',
+  'qa.fieldEndpoint': 'endpoint',
+  'qa.launch': 'Launch (direct run)',
+  'qa.runTitle': 'Launch "{name}"',
+  'qa.runNoVars': 'This Quick API has no variables to fill.',
+  'qa.runGo': 'Run',
+  'qa.runFailed': 'Run failed',
+  'qa.batch.launch': 'Batch (fan-out N parallel calls)',
+  'qa.batch.cancel': 'Cancel',
+  'qa.batch.go': 'Launch batch',
+  'qa.batch.inputLabel': 'One `{0}` value per line (or comma/semicolon-separated)',
+  'qa.batch.inputPlaceholder': 'www.euronews.com\nde.euronews.com\nfr.euronews.com',
+  'qa.batch.jsonInputLabel': 'JSON array of objects — one per call',
+  'qa.batch.jsonInputHint': 'Expected variables: {0}. Example: `[{"host":"de.example.com","limit":"5"}, ...]`',
+  'qa.batch.jsonInputPlaceholder': '[\n  {"host":"www.example.com","limit":"5"},\n  {"host":"de.example.com","limit":"5"}\n]',
+  'qa.batch.countHint': '{0} call(s) will fire',
+  'qa.batch.jsonCountHint': '{0} call(s) parsed from JSON',
+  'qa.batch.resultSummary': '{0}/{1} OK · {2} failure(s) ·',
+  'qa.batch.colInput': 'Input',
+  'qa.batch.colStatus': 'Status',
+  'qa.batch.colResult': 'Result',
+  'qa.batch.expandRow': 'show all',
+  'qa.batch.collapseRow': 'collapse',
+  'qa.batch.errorEmpty': 'No items to launch.',
+  'qa.batch.errorJsonArray': 'JSON must be an array (`[...]`).',
+  'qa.batch.errorJsonParse': 'Invalid JSON: {0}',
   'qp.new': 'New prompt',
   'qp.empty': 'No quick prompts',
   'qp.emptyHint': 'Create reusable prompts with variables {{ticket}}, {{url}}...',
@@ -2005,6 +2497,9 @@ const en: TranslationDict = {
   'qp.varLabel': 'Display label',
   'qp.varPlaceholder': 'Placeholder',
   'qp.save': 'Save',
+  'qp.saveBlockedHint': 'Required fields missing',
+  'qp.fieldName': 'name',
+  'qp.fieldPrompt': 'prompt',
   'qp.launch': 'Launch',
   'qp.vars': '{0} variable(s)',
   'qp.delete': 'Delete',
@@ -2088,6 +2583,14 @@ const en: TranslationDict = {
   'wf.apicall.subtitle': 'Direct API call — zero tokens consumed',
   'wf.apicall.pluginPicker': 'API plugin',
   'wf.apicall.pluginPickerHint': 'Pick an API configured on this project',
+  'wf.apicall.qaPicker': 'From an existing Quick API',
+  'wf.apicall.qaPickerInline': '— None (inline config below) —',
+  'wf.apicall.qaInheritedFrom': 'Inherited from « {0} »',
+  'wf.apicall.qaInheritedHint': 'The call inherits the Quick API\'s config. Click ✏️ below to override one or more fields for this step only.',
+  'wf.apicall.qaDetach': 'Detach from Quick API (inline mode)',
+  'wf.apicall.qaOverrideToggle': 'Customize this call for this step (override)',
+  'wf.apicall.qaSummaryEndpoint': 'Call:',
+  'wf.apicall.qaSummaryExtract': 'Extract:',
   'wf.apicall.endpointPicker': 'Endpoint',
   'wf.apicall.endpointPlaceholder': 'e.g. /repos/owner/repo/issues — click to pick from list',
   'wf.apicall.pathParamsTitle': 'Path parameters',
@@ -2101,6 +2604,10 @@ const en: TranslationDict = {
   'wf.apicall.testBtn': 'Test the call',
   'wf.apicall.testing': 'Testing…',
   'wf.apicall.testHint': 'Issues a real request with the configured credentials',
+  'wf.apicall.testVarsTitle': 'Variables to provide for the test',
+  'wf.apicall.testVarsHint': 'Your config contains unresolved `{{var}}` placeholders. Give them a test value for this request only (the saved config is not modified).',
+  'wf.apicall.testVarsPlaceholder': 'test value',
+  'wf.apicall.testVarsGo': 'Test with these values',
   'wf.apicall.responseTitle': 'JSON response',
   'wf.apicall.responseEmpty': 'Run a test to see the response here',
   'wf.apicall.clickToPickHint': '💡 Click a key inside an array → all items. A value → that specific one. [N] → iterate.',
@@ -2167,6 +2674,67 @@ const en: TranslationDict = {
   'wf.apicall.helper.contextNoApi': 'No API selected',
   'wf.apicall.helper.contextLastErr': 'last test: ❌',
   'wf.apicall.helper.contextLastOk': 'last test: ✓',
+  // System prompt strings — drive the agent's reply language. Changing the UI locale
+  // changes which language the agent answers in for the API helper conversation.
+  'wf.apicall.helper.sys.unknown': '(unknown)',
+  'wf.apicall.helper.sys.noPlugin': '(no plugin selected)',
+  'wf.apicall.helper.sys.none': '(none)',
+  'wf.apicall.helper.sys.default': '(default)',
+  'wf.apicall.helper.sys.empty': '(empty)',
+  'wf.apicall.helper.sys.ctxHeader': '### CURRENT CONTEXT (snapshot at send time)',
+  'wf.apicall.helper.sys.ctxLastFail': '### LAST TEST → FAILURE',
+  'wf.apicall.helper.sys.ctxLastOk': '### LAST TEST → SUCCESS (response excerpt)',
+  'wf.apicall.helper.sys.userQuestion': '### USER QUESTION',
+  'wf.apicall.helper.sys.role': `# Role
+You are a configuration assistant for a "Fetch data" step (\`StepType::ApiCall\`)
+in a Kronn workflow. This step performs a direct HTTP call (no LLM tokens consumed)
+and extracts a value via JSONPath, which pipes into the next step.`,
+  'wf.apicall.helper.sys.boundaries': `# What you can and CANNOT do
+- ✅ Read the API spec below, the current step state, the last test result.
+- ✅ Suggest config changes (endpoint, method, query, headers, body, extract).
+- ❌ You have **NO** tool to call the API yourself. No Bash, no MCP, no fetch.
+     Kronn (Rust backend) makes the call when the user clicks "Test the call".
+- ❌ NEVER suggest "checking online" via an MCP — it is not available in this
+     conversation. If a failure cause eludes you, point to the official docs or
+     the provider's dashboard.`,
+  'wf.apicall.helper.sys.action': `# Your only useful action: propose a \`KRONN:APPLY\`
+When you suggest a config, write EXACTLY this format (otherwise the UI cannot read it):
+
+KRONN:APPLY
+\`\`\`json
+{ "endpoint": "/path/v4", "query": { "k": "v" }, "extract": "$.data[*]" }
+\`\`\`
+
+Allowed fields: \`endpoint\`, \`method\`, \`query\`, \`headers\`, \`body\`, \`extract\`.
+You may set just ONE field — the rest of the step is preserved.
+No more than one \`KRONN:APPLY\` block per message (otherwise the user cannot pick).`,
+  'wf.apicall.helper.sys.debug': `# Debug method (apply as soon as a test fails)
+1. Read the \`### LAST TEST → FAILURE\` block — it contains \`HTTP <status> on <method> <url> — <body excerpt>\`.
+2. Note the **status** (4xx vs 5xx → 4xx = your config is at fault, 5xx = server-side).
+3. Note the **query params** in the composed URL (the apikey is masked — that is normal and EXPECTED).
+4. Cross-reference the plugin TIPS below + the allowed endpoints.
+5. Propose **ONE** targeted change (a single KRONN:APPLY). No salvo of 3 simultaneous hypotheses.
+6. If the failure persists after 2 attempts, advise the user to check the provider's dashboard
+   (docs URL below) — do not loop.`,
+  'wf.apicall.helper.sys.endpointsHeader': '# ALLOWED endpoints (never invent outside this list)',
+  'wf.apicall.helper.sys.endpointsEmpty': '(none — the user has not picked an API yet)',
+  'wf.apicall.helper.sys.tipsHeader': '# PLUGIN TIPS — {0}',
+  'wf.apicall.helper.sys.docsHeader': '# Official docs',
+  'wf.apicall.helper.sys.style': `# Style
+- English, ≤ 3 lines per message.
+- No filler, no "let me analyze", no "here's what I suggest:" — straight to the point.
+- The apikey/token shown as \`••••••••\` or \`***\` in logs are MASKED ONLY FOR DISPLAY.
+  The real value the user configured IS sent by Kronn. If asked "are you sure the key
+  is being sent?" — answer YES without reservation, and redirect the diagnosis elsewhere
+  (host, endpoint, token scope).`,
+  'wf.apicall.helper.sys.starter': 'To start, ask the user what they want to fetch.',
+  'wf.apicall.helper.sys.authHeader': `### AUTH — handled automatically by Kronn (DO NOT suggest)
+The backend injects these fields at request time, using the key the user
+entered in Settings → APIs. ⚠️ NEVER put them back in a KRONN:APPLY
+suggestion; that would overwrite the real value with a placeholder
+("YOUR_API_KEY", etc.) and break auth.`,
+  'wf.apicall.helper.sys.authQueryItem': '- query param `{0}` (value pulled from env `{1}`, already configured in Kronn)',
+  'wf.apicall.helper.sys.authHeaderItem': '- header `{0}` (value pulled from env `{1}`, already configured in Kronn)',
   'wiz.testBatchStep': 'Test (dry-run)',
   'wiz.testBatchInfo': 'Preview what this batch step would do without creating anything: items list, prompt rendered for the 1st item, QP/agent, workspace mode.',
   'wiz.testBatchAlwaysDryRun': 'Always dry-run — no discussion will be created.',
@@ -2201,11 +2769,62 @@ const en: TranslationDict = {
 
   'wf.inProgress': 'in progress...',
   'wf.pending': 'pending',
+  'wf.live.stepNoOutput': '(this step produced no content)',
+  'wf.live.stepStreamingWaiting': 'Agent starting up… (no chunks received yet)',
+  'wf.live.totalElapsedHint': 'Total time elapsed since the run was triggered.',
   'wf.liveStep.agent': 'Agent thinking',
   'wf.liveStep.api': 'HTTP call in flight',
   'wf.liveStep.notify': 'Sending webhook',
   'wf.liveStep.batch': 'Fanning out',
+  'wf.liveStep.gate': 'Awaiting human decision',
+  'wf.liveStep.exec': 'Shell command running',
+  'wf.runStatusToReview': 'TO REVIEW',
+  'wf.pausedJustNow': 'just now',
+  'wf.pausedMinutes': 'paused for {0} min',
+  'wf.pausedHours': 'paused for {0}h',
+  'wf.pausedHoursMinutes': 'paused for {0}h{1}',
+  'wf.pausedDays': 'paused for {0}d',
+  'wf.pausedZeroTokens': '0 tokens consumed',
+  'wf.pausedZeroTokensHint': 'No LLM calls fire during a Gate pause — the meter stops until the operator decides.',
+  'wf.gate.title': 'Human decision required',
+  'wf.gate.defaultMessage': 'Approval required to continue.',
+  'wf.gate.commentPlaceholder': 'Comment (required for "Request changes")…',
+  'wf.gate.commentRequired': 'A comment is required when requesting changes.',
+  'wf.gate.approve': 'Approve',
+  'wf.gate.requestChanges': 'Request changes',
+  'wf.gate.reject': 'Reject',
   'wf.deleteRun': 'Delete this run',
+  'wf.runWorktreePath': 'Worktree:',
+  'wf.runWorktreeCopy': 'Copy path',
+  'wf.export': 'Export',
+  'wf.exportHint': 'Download this workflow as JSON (with its referenced Quick Prompts). Shareable across Kronn instances.',
+  'wf.exportDone': 'Workflow "{name}" exported',
+  'wf.import': 'Import',
+  'wf.importHint': 'Import a workflow exported from Kronn (.json). Drag-and-drop or file picker.',
+  'qp.export': 'Export this Quick Prompt',
+  'qp.exportDone': 'Quick Prompt "{name}" exported',
+  'qp.import': 'Import',
+  'qp.importHint': 'Import a Quick Prompt exported from Kronn (.json).',
+  'imp.workflowTitle': 'Import a workflow',
+  'imp.qpTitle': 'Import a Quick Prompt',
+  'imp.dropOrPick': 'Drop a file here, or pick one',
+  'imp.fileHint': 'Expected: .kronn-workflow.json or .kronn-qp.json',
+  'imp.pickFile': 'Pick a file',
+  'imp.cancel': 'Cancel',
+  'imp.confirm': 'Import',
+  'imp.pickAnother': '← Pick another file',
+  'imp.previewName': 'Name',
+  'imp.previewSteps': 'Steps',
+  'imp.previewVars': 'Variables',
+  'imp.previewBundledQps': 'Bundled Quick Prompts',
+  'imp.targetProject': 'Attach to project (optional)',
+  'imp.noProject': 'None (unattached workflow)',
+  'imp.errorNotJson': 'This file is not a .json — check the format.',
+  'imp.errorReadFailed': 'Failed to read the file.',
+  'imp.errorJsonParse': 'Invalid JSON — the file is corrupt or incomplete.',
+  'imp.errorWrongKind': 'Wrong export type: expected `{expected}`, got `{got}`. Did you swap a workflow and a Quick Prompt?',
+  'imp.workflowDone': 'Workflow "{name}" imported',
+  'imp.qpDone': 'Quick Prompt "{name}" imported',
   'wf.noOutput': '(no output)',
   'wf.status': 'Status',
   'wf.duration': 'Duration',
@@ -2299,13 +2918,203 @@ const en: TranslationDict = {
   'wiz.labels': 'Labels (comma-separated)',
   'wiz.labelsPlaceholder': 'bug-5xx, auto-fix',
   'wiz.stepType': 'Step type',
-  'wiz.stepTypeAgent': 'Agent (reasoning)',
-  'wiz.stepTypeApiCall': 'Fetch data',
+  'wiz.stepTypeAgent': 'Agent',
+  'wiz.stepTypeAgentHint': 'An AI agent that reasons, reads code, writes files, calls MCPs. The most flexible step — but consumes tokens.',
+  'wiz.stepTypeApiCall': 'API',
   'wiz.stepTypeApiCallHint': 'Direct API call (Chartbeat, Jira, Cloudflare…) — zero tokens. Fetches data and pipes to the next step.',
-  'wiz.stepTypeBatchQP': 'Batch Quick Prompt',
-  'wiz.stepTypeBatchQPHint': 'Fan out a Quick Prompt over a list of items produced by a previous step',
+  'wiz.stepTypeBatchQP': 'Batch QP',
+  'wiz.stepTypeBatchQPHint': 'Fan out a Quick Prompt over a list of items produced by a previous step.',
   'wiz.stepTypeNotify': 'Notify',
   'wiz.stepTypeNotifyHint': 'Direct HTTP call (webhook) — zero tokens. Send to Slack, Teams, or trigger a downstream pipeline.',
+  'wiz.stepTypeGate': 'Gate',
+  'wiz.stepTypeGateHint': 'Pause the run for human approval — zero tokens. Operator approves, requests changes, or rejects from RunDetail.',
+  'wiz.stepTypeExec': 'Exec',
+  'wiz.stepTypeExecHint': 'Run a whitelisted binary directly (cargo test, npm build…) — zero tokens, never via shell, args passed as literal argv.',
+  'wiz.stepTypeBatchApi': 'Batch API',
+  'wiz.stepTypeBatchApiHint': 'Fan out an API call over a list of items, in parallel. Zero tokens — perfect for creating N tickets / posting N comments / updating N statuses at once.',
+  'wiz.stepTypeJsonData': 'JSON',
+  'wiz.stepTypeJsonDataHint': 'Deterministic data source — emits a literal JSON payload. Zero tokens, zero network. Great for feeding a Batch step with a fixed list (10 hosts, 5 regions…) without standing up an API, or as a dev fixture.',
+  'wiz.jsonDataTitle': 'JSON Data',
+  'wiz.jsonDataHint': 'The payload is emitted as-is to the next step via `{{steps.<name>.data}}`. Useful for a BatchQuickPrompt on a fixed list (10 hosts, 5 regions…) without standing up an API.',
+  'wiz.jsonDataPayload': 'JSON payload',
+  'wiz.jsonDataPlaceholder': '[\n  { "host": "fr.example.com" },\n  { "host": "de.example.com" },\n  { "host": "en.example.com" }\n]',
+  'wiz.jsonDataParseError': 'Invalid JSON:',
+  'wiz.jsonDataNoTemplating': 'No runtime templating — the value is returned verbatim. For a dynamic payload, use an Agent or ApiCall step.',
+  'wiz.jsonDataSummaryArray': '{0} item(s) — will be consumed by a downstream Batch step',
+  'wiz.jsonDataSummaryObject': '1 object, {0} field(s)',
+  'wiz.jsonDataSummaryScalar': '1 scalar value',
+  'wiz.jsonDataMissingPayload': 'no payload',
+  'wiz.errorJsonDataNoPayload': 'JSON step « {0} » has no payload — paste valid JSON in the textarea.',
+  'wiz.batchApiTitle': 'Batch API call',
+  'wiz.batchApiHint': 'Reuses the API config below for each item in the list. Each item exposes `{{batch.item.<field>}}` in body, headers, query, etc. Items run in parallel, capped by the concurrent limit.',
+  'wiz.batchApiItemsFrom': 'Items source',
+  'wiz.batchApiItemsFromPlaceholder': '{{steps.plan.data.sub_tasks}} or {{steps.plan.data}} or a raw JSON array',
+  'wiz.batchApiConcurrentLimit': 'Concurrency',
+  'wiz.batchApiConcurrentLimitHint': 'Max parallel calls (default 5, max 20)',
+  'wiz.batchApiMaxItems': 'Max items',
+  'wiz.batchApiMaxItemsHint': 'Safety cap (default 50)',
+  'wiz.batchApiMissingConfig': 'incomplete config',
+  'wiz.batchApiQaPicker': 'API config source',
+  'wiz.batchApiQaPickerInline': '— Inline (config defined here) —',
+  'wiz.batchApiQaPickerHint': 'You can reference a saved Quick API: its config will be used at runtime. The fields below remain per-field overrides.',
+  'wiz.execTitle': 'Direct shell execution (Exec)',
+  'wiz.execHint': 'Run a binary from the workflow allowlist inside the workspace. Args are templated but passed literally (no shell interpretation). Timeout enforced.',
+  'wiz.execWorktreeHint': 'This command sees the changes made by previous steps.',
+  'wiz.worktreeHint': 'Each run executes in an isolated git copy. Steps share the same files.',
+  'wiz.worktreeIconTooltip': 'Git worktree: an isolated copy of the repo, created for the run\'s lifetime, under .kronn/worktrees/.',
+  'wiz.execCommand': 'Binary',
+  'wiz.execCommandSelect': 'pick a binary',
+  'wiz.execArgs': 'Arguments (one per line)',
+  'wiz.execArgsPlaceholder': 'test\n--\n{{steps.fetch.summary}}',
+  'wiz.execTimeoutSecs': 'Timeout (seconds, default 300, max 1800)',
+  'wiz.execAllowlistEmpty': 'Exec is disabled: no command allowed for this workflow.',
+  'wiz.execAllowlistConfigureNow': 'Configure allowlist →',
+  'wiz.execAllowlistTitle': 'Exec allowlist',
+  'wiz.execAllowlistHint': 'Binaries that Exec steps may invoke in this workflow. Empty = Exec disabled. Bare names only (no paths, no shell metas). Comma-separated.',
+  'wiz.execAllowlistPlaceholder': 'npm, cargo, make, pytest',
+  'wiz.gateTitle': 'Human pause (Gate)',
+  'wiz.gateHint': 'Run stops at this step awaiting a decision (approve, request changes, reject). {{steps.X.summary}} templates supported in the message.',
+  'wiz.gateMessage': 'Message shown to the operator',
+  'wiz.gateMessagePlaceholder': 'Approve audit `{{steps.audit.summary}}`?',
+  'wiz.gateRequestChangesTarget': '"Request changes" target',
+  'wiz.gateRequestChangesDefault': '(default: previous step)',
+  'wiz.gateNotifyUrl': 'Notify this URL when the Gate fires (optional)',
+  'wiz.gateNotifyUrlPlaceholder': 'https://hooks.slack.com/services/... or {{state.slack_url}}',
+  'wiz.gateNotifyUrlHint': 'Best-effort POST with {run_id, workflow_name, step_name, message}. Templates supported. Failures logged, never blocking.',
+  'wiz.rollbackTitle': 'Rollback / compensation (on failure)',
+  'wiz.rollbackHint': 'Steps run when the workflow ends Failed. You can reference {{failed_step.name}} and {{failed_step.output}}. Notify, Agent and ApiCall are supported (Gate is excluded — it would deadlock an already-Failed run).',
+  'wiz.rollbackAgentPromptPlaceholder': 'Analyze the failure above: {{failed_step.output}}. Produce a 3-line post-mortem.',
+  'wiz.presetsTitle': 'Start from a pattern',
+  'wiz.presetsHint': '— or start from a blank workflow below',
+  'wiz.presetsBlankHint': 'You can also scroll down and build your workflow step by step. Presets are fully editable after applying.',
+  'wiz.preset.autoDev.title': 'Auto-Dev with tests',
+  'wiz.preset.autoDev.desc': 'Implement, test, review, loop until OK or max 5 iterations. Review feedback is passed back to the next implement via state.',
+  'wiz.preset.prGate.title': 'PR pipeline with human Gate',
+  'wiz.preset.prGate.desc': 'Implement, run tests, wait for human approval (with webhook notification), merge if approved.',
+  'wiz.preset.deployRollback.title': 'Deploy with rollback',
+  'wiz.preset.deployRollback.desc': 'Build, smoke tests, deploy. On failure: alert ops + automatic post-mortem agent.',
+  'wiz.preset.autoDev.issueKeyLabel': 'Ticket / issue key (optional)',
+  'wiz.preset.autoDev.issueKeyPlaceholder': 'EW-1234  ·  org/repo#42  ·  KRN-7',
+  'wiz.preset.autoDev.issueKeyDesc': 'Optional — only used if you switch the `fetch_issue` step to ApiCall (reference `{{issue_key}}` in `api_path_params` or `api_query` of the tracker plugin).',
+  'wiz.preset.autoDev.fetchIssueDesc': 'Default fixture: describe the ticket to implement here (literal JSON). Just edit the payload to fit your request, the preset runs immediately without any tracker plugin. To wire a real tracker (Jira / GitHub / Linear): switch this step to `ApiCall` (🌐 button above) and configure the plugin — `{{steps.fetch_issue.data}}` will keep feeding the `implement` step.',
+  'wiz.preset.autoDev.implementPrompt': 'Implement the following request:\n---\n{{steps.fetch_issue.data}}\n---\n\nIf a previous review left feedback:\n{{state.last_review}}\n\nTake the feedback above into account for this new iteration.\nIf no review happened yet, this block is empty — it\'s your first pass.',
+  'wiz.preset.autoDev.reviewPrompt': 'Review the implementation produced by `implement` and the result of the `run_tests` step.\n\nTests output: {{steps.run_tests.data.stdout}}\nTests exit code: {{steps.run_tests.data.exit_code}}\n\nIf everything is OK: end your reply with [SIGNAL: APPROVED].\nOtherwise: write actionable feedback, then exactly at the end (and ONLY at the end):\n---STATE:last_review=<your feedback in one line>---\nthen end with [SIGNAL: NEEDS_CHANGES].',
+  'wiz.preset.autoDev.notifyDoneBody': '✅ Auto-Dev workflow complete: {{steps.review.summary}}',
+  'wiz.preset.autoDev.rollbackBody': '❌ Auto-Dev failed at `{{failed_step.name}}` — details: {{failed_step.output}}',
+  'wiz.preset.prGate.issueKeyLabel': 'Ticket / issue key (optional)',
+  'wiz.preset.prGate.issueKeyPlaceholder': 'EW-1234  ·  org/repo#42  ·  KRN-7',
+  'wiz.preset.prGate.issueKeyDesc': 'Optional — only used if you switch the `fetch_issue` step to ApiCall (reference `{{issue_key}}` in `api_path_params` or `api_query` of the tracker plugin).',
+  'wiz.preset.prGate.fetchIssueDesc': 'Default fixture: describe the ticket to implement here (literal JSON). Just edit the payload to fit your request, the preset runs immediately without any tracker plugin. To wire a real tracker (Jira / GitHub / Linear): switch this step to `ApiCall` (🌐 button above) and configure the plugin — `{{steps.fetch_issue.data}}` will keep feeding the `implement` step.',
+  'wiz.preset.prGate.implementPrompt': 'Implement the following request:\n---\n{{steps.fetch_issue.data}}\n---\n\nOutput a short summary in `summary` and the raw diff in `data.diff` so the human reviewer has context.',
+  'wiz.preset.shared.runTestsDesc': 'Pre-filled for Rust (`cargo test`). Adapt to your stack: Node → `npm` `test`, Python → `pytest`, Make → `make` `test`. The chosen binary must be listed in the workflow `exec_allowlist`.',
+  'wiz.preset.prGate.gateMessage': '## Pre-merge approval\n\n**Implementation:** {{steps.implement.summary}}\n\n**Tests:** exit `{{steps.run_tests.data.exit_code}}`\n\nApprove to trigger the automatic merge. Request changes to run `implement` again.',
+  'wiz.preset.prGate.mergePrompt': 'Merge the branch into main. Check there is no conflict, then push. Output the merge commit SHA in `data.merge_sha`.',
+  'wiz.preset.prGate.rollbackBody': '❌ PR Gate failed: `{{failed_step.name}}` — {{failed_step.output}}',
+  'wiz.preset.deployRollback.successBody': '🚀 Deployment complete, no incident.',
+  'wiz.preset.deployRollback.alertBody': '🚨 PROD ALERT: step `{{failed_step.name}}` failed. Rolling back...',
+  'wiz.preset.deployRollback.postMortemPrompt': 'Analyze the failure and produce a post-mortem in 3 sections:\n\n## Step that failed\n{{failed_step.name}}\n\n## Observed error\n{{failed_step.output}}\n\n## Root cause hypotheses\n(your turn — propose 2-3 prioritized leads)',
+  'wiz.preset.featurePlanner.title': 'Feature / Epic Planner',
+  'wiz.preset.featurePlanner.desc': 'Break an epic or feature into typed sub-tasks (auto_ai vs human_action) with dependencies. Tracker-agnostic (Jira / GitHub / Linear via the installed MCPs).',
+  'wiz.preset.featurePlanner.analyzePrompt': `You are an Epic Planner. The user passed the URL: {{epic_url}}.
+
+# 1. Detect the tracker
+Read the URL host:
+- atlassian.net → Jira (Atlassian MCP)
+- github.com/.../issues/ → GitHub (GitHub MCP)
+- linear.app → Linear MCP
+- other → describe what you'd need, do nothing, end with [SIGNAL: NO_RESULTS]
+
+# 2. Fetch the content
+Via the matching MCP: title, description, project key, current state, and existing sub-tasks (you'll need them for idempotency next step).
+
+# 3. Break it down
+Constraints:
+- Each sub-task must fit in a single PR (1-3 days of work max).
+- Tag each sub-task:
+  * \`auto_ai\` — pure code work (writing files, running tests, opening a PR). Doable by an autonomous agent.
+  * \`human_action\` — UI config (CMS, infra dashboard), architecture/naming decision, external info (URLs, credentials, accesses…).
+- Identify dependencies: A blocks B if B logically depends on A being done first.
+- Document EACH decision you took yourself when the epic was ambiguous (target sprint, phase ordering, naming, etc.).
+- Identify missing info that only a human can provide.
+
+# 4. STRUCTURED output (mandatory)
+\`\`\`json
+{
+  "data": {
+    "tracker": "jira" | "github" | "linear",
+    "source_key": "EW-7247",
+    "sub_tasks": [
+      { "id": 1, "title": "...", "description": "...", "type": "auto_ai", "blocked_by": [] }
+    ],
+    "decisions_taken": ["I assumed phase 0 must complete before phase 1 because..."],
+    "missing_info": ["Adobe DTM AN URL — needed from the Data team"]
+  },
+  "status": "OK",
+  "summary": "Plan: 12 sub-tasks (4 human_action, 8 auto_ai). 2 missing-info items flagged."
+}
+\`\`\`
+
+End with [SIGNAL: PLAN_READY].`,
+  'wiz.preset.featurePlanner.gateMessage': `## Proposed plan for {{epic_url}}
+
+{{steps.analyze_epic.summary}}
+
+### Decisions auto-taken
+{{steps.analyze_epic.data.decisions_taken}}
+
+### Missing info (human-provided)
+{{steps.analyze_epic.data.missing_info}}
+
+### Sub-tasks
+{{steps.analyze_epic.data.sub_tasks}}
+
+**Approve** → the agent creates the tickets in the tracker.
+**Request changes** → goes back to the planning step with your feedback.`,
+  'wiz.preset.featurePlanner.setLinksPrompt': `Sub-tasks have just been bulk-created via a BatchApiCall. You'll now set the \`blocks\` / \`is blocked by\` links between them.
+
+# Inputs
+- Tracker: {{steps.analyze_epic.data.tracker}}
+- Original plan (with declared \`blocked_by\`): {{steps.analyze_epic.data.sub_tasks}}
+- Creation results (one item per sub-task, with \`input.id\` and \`response\` = the new Jira/GitHub key): {{steps.create_tickets.data.items}}
+
+# Mapping
+1. For each sub-task in the original plan with non-empty \`blocked_by\`:
+   - Find the matching created key in \`steps.create_tickets.data.items\` (match on \`input.id\` ↔ plan.id)
+   - For each \`blocked_by\` (id of the blocking sub-task), find its created key as well
+   - Add a "is blocked by" link via the MCP: the \`current\` sub-task is blocked by \`predecessor\`
+
+# Idempotency
+Before adding a link, check whether it already exists via the MCP (the creation may have been re-run). Only add what's missing. No error if the link already exists.
+
+# Errors
+If an item in \`steps.create_tickets.data.items\` has \`status: ERROR\`, **skip it** for the mapping (you can't link to a ticket that wasn't created). List them in the final \`summary\` so the human has the missing tickets to create manually.
+
+# Final STRUCTURED output
+\`\`\`json
+{
+  "data": {
+    "links_added": 5,
+    "links_already_existed": 2,
+    "skipped_failed_items": []
+  },
+  "status": "OK",
+  "summary": "Feature Planner: 28 tickets created, 5 blocks links set, 2 already existed."
+}
+\`\`\`
+
+End with [SIGNAL: OK].`,
+  'wiz.preset.featurePlanner.notifyBody': '🗺️ Feature Planner finished for {{epic_url}} — {{steps.set_links.summary}}',
+  'wiz.preset.dailyHostAudit.title': 'Daily audit on fixed list',
+  'wiz.preset.dailyHostAudit.desc': 'Deterministic data source (5 hardcoded hosts) → fan out an audit Quick Prompt on each → Slack notification. Showcases the `JsonData` brick: no need to stand up an API for a fixed list.',
+  'wiz.preset.dailyHostAudit.hostListDesc': 'Hardcoded list of hosts to audit. Edit the JSON payload to fit your context (locales, environments, subdomains, etc.). Zero tokens, zero network — the value is passed as-is to the next step via `{{steps.host-list.data}}`.',
+  'wiz.preset.dailyHostAudit.auditEachDesc': 'Fan-out on the list above. Pick an existing Quick Prompt (or create one) that audits ONE host. Each run receives `{{batch.item.host}}` in its rendered prompt.',
+  'wiz.preset.dailyHostAudit.notifyBody': '🌍 Daily audit complete: {{steps.audit-each-host.summary}}',
+  'wiz.addRollbackStep': 'Add rollback step',
+  'wiz.removeRollbackStep': 'Remove this rollback step',
+  'wf.launchModalTitle': 'Launch "{name}"',
+  'wf.launchModalHint': 'Fill the variables below — they become `{{name}}` in your step prompts.',
+  'wf.launchModalRequired': 'Required variable(s) missing: {names}',
+  'wf.launchModalGo': 'Launch',
   'wiz.notifyTitle': 'Webhook / Notification',
   'wiz.notifyHint': 'Direct HTTP call from Kronn, no agent. {{steps.X.output}} templates work in URL and body.',
   'wiz.notifyUrl': 'Webhook URL',
@@ -2337,7 +3146,22 @@ const en: TranslationDict = {
   'wiz.batchChainRemove': 'Remove from chain',
   'wiz.batchChainEmpty': 'No variable-less QP available to chain.',
   'wiz.stepDescription': 'Description',
-  'wiz.stepDescriptionPlaceholder': 'Describe this step\'s purpose...',
+  'wiz.stepDescriptionPlaceholder': 'What does this step do, in 1 line? E.g. "Fetch open Jira tickets" or "Analyze test logs" — shown in the list, optional.',
+  'wiz.insertStepHere': 'Insert a step here',
+  'wiz.moveStepUp': 'Move step up',
+  'wiz.moveStepDown': 'Move step down',
+  'wiz.ifContainsPlaceholder': 'Keyword to match in the agent output (e.g. APPROVED, NEEDS_CHANGES, ERROR…)',
+  'wiz.removeCondition': 'Remove this condition',
+  'wiz.wfVariablesTitle': 'Launch variables',
+  'wiz.wfVariablesHint': 'Variables prompted at manual launch time — like Quick Prompts. Values become `{{name}}` in your step prompts. Optional — leave empty if your workflow gets its context from an upstream step (ApiCall) or a trigger.',
+  'wiz.addVariable': 'Add variable',
+  'wiz.removeVariable': 'Remove this variable',
+  'wiz.undeclaredVarsTitle': 'Undeclared variables detected',
+  'wiz.undeclaredVarsHint': 'These `{{var}}` don\'t match any earlier step, state, iter, artifact or launch variable. They\'ll render empty at runtime. Declare them or fix the name.',
+  'wiz.undeclaredAddVar': 'Add to variables',
+  'wiz.undeclaredAddVarHint': 'Add "{name}" as a launch variable (asked at manual launch).',
+  'wiz.undeclaredUnknownStep': 'Unknown step — check the name',
+  'wiz.undeclaredFailedOutsideRollback': '`failed_step.*` is only usable in a rollback step',
   'wiz.pollInterval': 'Poll interval (cron)',
   'wiz.availableVars': 'Available variables',
   'wiz.triggerVars': 'Trigger variables (Tracker)',
@@ -2349,6 +3173,26 @@ const en: TranslationDict = {
   'wiz.stepChaining': 'Step chaining',
   'wiz.prevOutput': 'Previous step output',
   'wiz.namedOutput': 'Named step output',
+  'wiz.iterHint': 'Step iteration counter (1, 2, 3…) — useful in Goto loops',
+  'wiz.stateHint': 'Durable state variable, agents write via ---STATE:key=value---',
+  'wiz.stateChipsLoopOut': 'Loop detected — pass your verdict to the rewind step:',
+  'wiz.stateChipsLoopIn': 'Receives a loop verdict — read the previous context:',
+  'wiz.stateChipWrite': 'write `state.{key}`',
+  'wiz.stateChipWriteHint': 'Appends an instruction to the prompt to write `---STATE:{key}=...---` so the rewind step can read your verdict.',
+  'wiz.stateChipReadHint': 'Inserts `{{state.{key}}}` at the cursor — the value the previous loop step wrote.',
+  'wiz.stateInstructionBlock': 'At the end of your reply (and ONLY at the end), write exactly:\n---STATE:{key}=<your verdict / feedback in one line>---\n\nThis block will be read by step "{target}" on the next loop iteration.',
+  'wiz.gotoMaxIterPlaceholder': 'N',
+  'wiz.gotoMaxIterHint': 'Past N iterations of this Goto, the runner exits the loop and continues. Empty = no per-edge limit (only the workflow-level guard applies).',
+  'wiz.gotoMaxIterLabel': 'max',
+  'wiz.gotoMaxIterUnit': 'iterations',
+  'wiz.gotoTargetSelect': 'pick a step',
+  'wiz.condActionStop': 'Stop — end the run',
+  'wiz.condActionSkip': 'Skip — skip the next step',
+  'wiz.condActionGoto': 'Goto — jump back to an earlier step',
+  'wiz.rollbackFiresFailed': 'Failed (runtime error)',
+  'wiz.rollbackSkipsCancelled': 'Cancelled (you clicked "Stop")',
+  'wiz.rollbackSkipsGuard': 'StoppedByGuard (limit reached)',
+  'wiz.rollbackSkipsReject': 'Gate Reject (you rejected)',
   'wiz.availableSignals': 'Available signals (conditions)',
   'wiz.signalNoResults': 'Nothing found or nothing to report',
   'wiz.signalContinue': 'Continue normally (default)',
@@ -2386,11 +3230,24 @@ const en: TranslationDict = {
   'wiz.addStep': 'Add a step',
   'wiz.errorNoName': 'Workflow name required',
   'wiz.errorNoPrompt': 'Prompt missing for "{0}"',
+  'wiz.agentQpPicker': 'From an existing Quick Prompt',
+  'wiz.agentQpPickerInline': '— None (inline prompt below) —',
+  'wiz.agentQpInheritedFrom': 'Inherited from « {0} »',
+  'wiz.agentQpInheritedHint': 'The QP\'s `prompt_template`, `tier`, and `skill_ids` are loaded at run-time. `{{var}}` placeholders are resolved against the workflow context (launch variables / state / previous_step…).',
+  'wiz.agentQpOverridePlaceholder': 'Prompt override — leave empty to keep the Quick Prompt\'s prompt. Fill to override for this step only.',
+  'wiz.qrefOverrideActive': 'override active',
+  'wiz.qrefOverrideActiveHint': 'You filled an override below. It overrides the corresponding QP/QA value for this step only.',
+  'wiz.qrefPreview': 'Prompt:',
+  'wiz.qrefVars': 'Variables:',
+  'wiz.qrefEmpty': '(empty prompt)',
+  'wiz.qrefOverridePromptToggle': 'Customize the prompt for this step (override)',
   'wiz.errorBatchNoQP': 'No Quick Prompt selected for "{0}"',
   'wiz.errorBatchNoItemsFrom': 'Items list missing for "{0}" (e.g. {{steps.step1.data.tickets}})',
   'wiz.errorApiNoPlugin': 'API plugin not selected for "{0}"',
   'wiz.errorApiNoEndpoint': 'Endpoint missing for "{0}"',
   'wiz.errorNotifyNoUrl': 'Webhook URL missing for "{0}"',
+  'wiz.errorGateNoMessage': 'Approval message missing for "{0}"',
+  'wiz.errorExecNoCommand': 'Shell command missing for "{0}"',
   'wiz.errorNoCondition': 'Empty condition in "{0}" (condition #{1})',
   'wiz.security': 'Security',
   'wiz.sandbox': 'Sandbox (Docker)',
@@ -2407,6 +3264,7 @@ const en: TranslationDict = {
   'wiz.previous': 'Previous',
   'wiz.next': 'Next',
   'wiz.create': 'Create',
+  'wiz.saveError': 'Save failed. Check your step config.',
   'wiz.save': 'Save',
 
   // ── Skills (WHAT) ──
@@ -2571,12 +3429,30 @@ const en: TranslationDict = {
 
   // ── Common ──
   'common.cancel': 'Cancel',
+  'common.dismiss': 'Dismiss',
   'common.save': 'Save',
   'common.delete': 'Delete',
   'common.close': 'Close',
   'common.loading': 'Loading...',
   'common.seeMore': 'See more',
   'common.seeLess': 'See less',
+
+  // Workflow execution guards (0.7.0)
+  'wf.guards.title': 'Execution limits',
+  'wf.guards.description': 'Safety net against runaway loops, infinite runs and unexpected budgets. Leave blank to use defaults.',
+  'wf.guards.summaryDefaults': 'Defaults: {0} min · {1} AI calls · {2} revisits/step',
+  'wf.guards.summaryActive': 'Custom limits',
+  'wf.guards.timeoutLabel': 'Max duration',
+  'wf.guards.timeoutUnit': '(minutes)',
+  'wf.guards.timeoutHint': 'Default {0} min — total wall-clock elapsed.',
+  'wf.guards.maxLlmCallsLabel': 'Max AI calls',
+  'wf.guards.maxLlmCallsHint': 'Default {0} — Agent = 1, BatchQP = 1, ApiCall/Notify = 0.',
+  'wf.guards.loopDetectionLabel': 'Loop detection',
+  'wf.guards.loopDetectionHint': 'Default {0} — max revisits of the same step via Goto.',
+  'wf.guards.stoppedBy.title': 'Stopped by guard',
+  'wf.guards.stoppedBy.timeout': 'Max duration reached ({0} s)',
+  'wf.guards.stoppedBy.maxLlmCalls': 'Too many AI calls ({0} of {1})',
+  'wf.guards.stoppedBy.loopDetection': 'Loop detected on step "{0}" ({1} times)',
 };
 
 const es: TranslationDict = {
@@ -2827,6 +3703,8 @@ const es: TranslationDict = {
   'disc.hideSummary': 'Ocultar',
   'disc.thinking': '{0} está pensando...',
   'disc.running': 'Agente en ejecución...',
+  'disc.debateLaunching': 'Debate iniciando… (las CLI agents pueden tardar 5-30s en arrancar, especialmente Codex en cold-start)',
+  'disc.debateAgentEmpty': '{0} terminó sin producir contenido — el CLI pudo haberse caído o alcanzado un rate limit. Vuelve a lanzar el debate para reintentar.',
   'disc.newContent': 'Nuevo contenido',
   'disc.badgeInfo.showDetails': 'Mostrar detalles',
   'disc.badgeInfo.profileKind': 'Perfil IA',
@@ -3269,6 +4147,58 @@ const es: TranslationDict = {
   'wf.newHint': 'Crea un workflow manualmente, paso a paso. Controlas cada detalle.',
   'wf.tabWorkflows': 'Workflows',
   'wf.tabQuickPrompts': 'Quick Prompts',
+  'wf.tabQuickApis': 'Quick APIs',
+  'qa.new': 'Nuevo Quick API',
+  'qa.empty': 'Ningún Quick API',
+  'qa.emptyHint': 'Crea llamadas API reutilizables (POST Jira issue, get GitHub PR…) con variables {{title}}, {{key}}…',
+  'qa.name': 'Nombre',
+  'qa.namePlaceholder': 'Crear ticket Jira',
+  'qa.descriptionLabel': 'Descripción (recomendada)',
+  'qa.descriptionPlaceholder': 'Crea un ticket en el proyecto EW con título + descripción aportados como variables.',
+  'qa.variables': 'Variables detectadas',
+  'qa.varLabel': 'Etiqueta mostrada',
+  'qa.varPlaceholder': 'Placeholder',
+  'qa.varRequired': 'Obligatoria',
+  'qa.varDescriptionPlaceholder': 'Descripción (opcional)',
+  'qa.varsHint': 'Escribe `{{nombre}}` en cualquier campo arriba (endpoint, body, headers, query) — las variables aparecerán aquí.',
+  'qa.save': 'Guardar',
+  'qa.edit': 'Editar',
+  'qa.delete': 'Eliminar',
+  'qa.deleteConfirm': '¿Eliminar el Quick API «{name}»?',
+  'qa.export': 'Exportar (JSON)',
+  'qa.exportDone': '«{name}» exportado ✓',
+  'qa.vars': '{0} variable(s)',
+  'qa.noPluginsWarning': 'Ningún plugin API configurado en este host. Crea uno primero (Atlassian, GitHub, SpeedCurve, …) en la pestaña MCPs / Plugins, luego vuelve aquí.',
+  'qa.noPluginsCta': 'Configurar un plugin →',
+  'qa.saveBlockedHint': 'Campos obligatorios faltantes',
+  'qa.fieldName': 'nombre',
+  'qa.fieldPlugin': 'plugin API',
+  'qa.fieldConfig': 'config plugin',
+  'qa.fieldEndpoint': 'endpoint',
+  'qa.launch': 'Ejecutar (directo)',
+  'qa.runTitle': 'Ejecutar «{name}»',
+  'qa.runNoVars': 'Este Quick API no tiene variables que rellenar.',
+  'qa.runGo': 'Ejecutar',
+  'qa.runFailed': 'Ejecución fallida',
+  'qa.batch.launch': 'Batch (lanzar N llamadas en paralelo)',
+  'qa.batch.cancel': 'Cancelar',
+  'qa.batch.go': 'Lanzar el batch',
+  'qa.batch.inputLabel': 'Un valor de `{0}` por línea (o separados por , o ;)',
+  'qa.batch.inputPlaceholder': 'www.euronews.com\nde.euronews.com\nfr.euronews.com',
+  'qa.batch.jsonInputLabel': 'Array JSON de objetos — uno por llamada',
+  'qa.batch.jsonInputHint': 'Variables esperadas: {0}. Ejemplo: `[{"host":"de.example.com","limit":"5"}, ...]`',
+  'qa.batch.jsonInputPlaceholder': '[\n  {"host":"www.example.com","limit":"5"},\n  {"host":"de.example.com","limit":"5"}\n]',
+  'qa.batch.countHint': '{0} llamada(s) se lanzarán',
+  'qa.batch.jsonCountHint': '{0} llamada(s) parseadas del JSON',
+  'qa.batch.resultSummary': '{0}/{1} OK · {2} fallo(s) ·',
+  'qa.batch.colInput': 'Entrada',
+  'qa.batch.colStatus': 'Estado',
+  'qa.batch.colResult': 'Resultado',
+  'qa.batch.expandRow': 'ver todo',
+  'qa.batch.collapseRow': 'ocultar',
+  'qa.batch.errorEmpty': 'Ningún ítem para lanzar.',
+  'qa.batch.errorJsonArray': 'El JSON debe ser un array (`[...]`).',
+  'qa.batch.errorJsonParse': 'JSON inválido: {0}',
   'qp.new': 'Nuevo prompt',
   'qp.empty': 'Sin quick prompts',
   'qp.emptyHint': 'Cree prompts reutilizables con variables {{ticket}}, {{url}}...',
@@ -3281,6 +4211,9 @@ const es: TranslationDict = {
   'qp.varLabel': 'Etiqueta',
   'qp.varPlaceholder': 'Placeholder',
   'qp.save': 'Guardar',
+  'qp.saveBlockedHint': 'Campos obligatorios faltantes',
+  'qp.fieldName': 'nombre',
+  'qp.fieldPrompt': 'prompt',
   'qp.launch': 'Ejecutar',
   'qp.vars': '{0} variable(s)',
   'qp.delete': 'Eliminar',
@@ -3364,6 +4297,14 @@ const es: TranslationDict = {
   'wf.apicall.subtitle': 'Llamada directa a una API — cero tokens consumidos',
   'wf.apicall.pluginPicker': 'Plugin API',
   'wf.apicall.pluginPickerHint': 'Elige una API configurada en este proyecto',
+  'wf.apicall.qaPicker': 'Desde un Quick API existente',
+  'wf.apicall.qaPickerInline': '— Ninguno (config inline más abajo) —',
+  'wf.apicall.qaInheritedFrom': 'Heredado de « {0} »',
+  'wf.apicall.qaInheritedHint': 'La llamada hereda la config del Quick API. Haz clic en ✏️ abajo para sobrescribir uno o más campos solo en este step.',
+  'wf.apicall.qaDetach': 'Desvincular del Quick API (modo inline)',
+  'wf.apicall.qaOverrideToggle': 'Personalizar esta llamada para este step (override)',
+  'wf.apicall.qaSummaryEndpoint': 'Llamada:',
+  'wf.apicall.qaSummaryExtract': 'Extract:',
   'wf.apicall.endpointPicker': 'Endpoint',
   'wf.apicall.endpointPlaceholder': 'ej.: /repos/owner/repo/issues — haz clic para elegir',
   'wf.apicall.pathParamsTitle': 'Parámetros de ruta',
@@ -3377,6 +4318,10 @@ const es: TranslationDict = {
   'wf.apicall.testBtn': 'Probar la llamada',
   'wf.apicall.testing': 'Probando…',
   'wf.apicall.testHint': 'Envía una solicitud real con las credenciales configuradas',
+  'wf.apicall.testVarsTitle': 'Variables a aportar para la prueba',
+  'wf.apicall.testVarsHint': 'Tu config contiene variables `{{var}}` sin resolver. Dales un valor de prueba sólo para esta solicitud (la config guardada no se modifica).',
+  'wf.apicall.testVarsPlaceholder': 'valor de prueba',
+  'wf.apicall.testVarsGo': 'Probar con estos valores',
   'wf.apicall.responseTitle': 'Respuesta JSON',
   'wf.apicall.responseEmpty': 'Ejecuta una prueba para ver la respuesta aquí',
   'wf.apicall.clickToPickHint': '💡 Haz clic en una clave dentro de un array → todos los elementos. En un valor → ese elemento. [N] → iterar.',
@@ -3443,6 +4388,67 @@ const es: TranslationDict = {
   'wf.apicall.helper.contextNoApi': 'Ninguna API seleccionada',
   'wf.apicall.helper.contextLastErr': 'último test: ❌',
   'wf.apicall.helper.contextLastOk': 'último test: ✓',
+  // System prompt strings — drive the agent's reply language. Changing the UI locale
+  // changes which language the agent answers in for the API helper conversation.
+  'wf.apicall.helper.sys.unknown': '(desconocido)',
+  'wf.apicall.helper.sys.noPlugin': '(ningún plugin seleccionado)',
+  'wf.apicall.helper.sys.none': '(ninguno)',
+  'wf.apicall.helper.sys.default': '(por defecto)',
+  'wf.apicall.helper.sys.empty': '(vacío)',
+  'wf.apicall.helper.sys.ctxHeader': '### CONTEXTO ACTUAL (instantánea al momento del envío)',
+  'wf.apicall.helper.sys.ctxLastFail': '### ÚLTIMO TEST → FALLO',
+  'wf.apicall.helper.sys.ctxLastOk': '### ÚLTIMO TEST → ÉXITO (extracto de respuesta)',
+  'wf.apicall.helper.sys.userQuestion': '### PREGUNTA DEL USUARIO',
+  'wf.apicall.helper.sys.role': `# Rol
+Eres un asistente de configuración para un paso "Recuperar datos" (\`StepType::ApiCall\`)
+en un workflow Kronn. Este paso hace una llamada HTTP directa (sin tokens LLM consumidos)
+y extrae un valor mediante JSONPath, que se redirige al paso siguiente.`,
+  'wf.apicall.helper.sys.boundaries': `# Lo que puedes y NO puedes hacer
+- ✅ Leer la spec de la API abajo, el estado actual del paso, el resultado del último test.
+- ✅ Proponer modificaciones de config (endpoint, method, query, headers, body, extract).
+- ❌ NO tienes **NINGUNA** herramienta para llamar a la API tú mismo. Ni Bash, ni MCP, ni fetch.
+     Es Kronn (backend Rust) quien hace la llamada cuando el usuario hace clic en "Test the call".
+- ❌ NUNCA propongas "verificar en línea" mediante un MCP — no está disponible en esta
+     conversación. Si la causa de un fallo se te escapa, redirige a la documentación oficial
+     o al dashboard del proveedor.`,
+  'wf.apicall.helper.sys.action': `# Tu única acción útil: proponer un \`KRONN:APPLY\`
+Cuando sugieres una config, escribe EXACTAMENTE este formato (si no, la UI no te lee):
+
+KRONN:APPLY
+\`\`\`json
+{ "endpoint": "/path/v4", "query": { "k": "v" }, "extract": "$.data[*]" }
+\`\`\`
+
+Campos permitidos: \`endpoint\`, \`method\`, \`query\`, \`headers\`, \`body\`, \`extract\`.
+Puedes poner SÓLO UN campo — el resto del paso se preserva.
+No más de un bloque \`KRONN:APPLY\` por mensaje (si no, el usuario no sabe cuál elegir).`,
+  'wf.apicall.helper.sys.debug': `# Método de debug (aplicar en cuanto un test falle)
+1. Lee el bloque \`### ÚLTIMO TEST → FALLO\` — contiene \`HTTP <status> on <method> <url> — <body excerpt>\`.
+2. Anota el **status** (4xx vs 5xx → 4xx = tu config es la causa, 5xx = lado servidor).
+3. Anota los **query params** en la URL compuesta (la apikey está enmascarada — es normal y ESPERADO).
+4. Cruza con los TIPS del plugin abajo + los endpoints permitidos.
+5. Propón **UNA** modificación dirigida (un solo KRONN:APPLY). Nada de ráfagas de 3 hipótesis simultáneas.
+6. Si el fallo persiste tras 2 intentos, recomienda al usuario verificar en el dashboard
+   del proveedor (URL de doc abajo) — no des vueltas en círculos.`,
+  'wf.apicall.helper.sys.endpointsHeader': '# Endpoints PERMITIDOS (nunca inventes fuera de esta lista)',
+  'wf.apicall.helper.sys.endpointsEmpty': '(ninguno — el usuario aún no ha elegido una API)',
+  'wf.apicall.helper.sys.tipsHeader': '# TIPS PLUGIN — {0}',
+  'wf.apicall.helper.sys.docsHeader': '# Documentación oficial',
+  'wf.apicall.helper.sys.style': `# Estilo
+- Español, ≤ 3 líneas por mensaje.
+- Sin paja, sin "voy a analizar", sin "esto es lo que sugiero:" — directo al grano.
+- La apikey/token mostrados como \`••••••••\` o \`***\` en los logs están ENMASCARADOS SÓLO PARA MOSTRAR.
+  El valor real configurado por el usuario SE envía por Kronn. Si te preguntan "¿estás seguro
+  de que la clave se envía bien?" — responde SÍ sin reservas, y redirige el diagnóstico a otra
+  parte (host, endpoint, scope del token).`,
+  'wf.apicall.helper.sys.starter': 'Para empezar, pregunta al usuario qué quiere recuperar.',
+  'wf.apicall.helper.sys.authHeader': `### AUTH — gestionada automáticamente por Kronn (NO sugerir)
+El backend inyecta estos campos en el momento de la solicitud, con la clave que
+el usuario introdujo en Settings → APIs. ⚠️ NUNCA los pongas en una sugerencia
+KRONN:APPLY; eso sobreescribiría el valor real con un placeholder
+("TU_API_KEY", etc.) y rompería la auth.`,
+  'wf.apicall.helper.sys.authQueryItem': '- query param `{0}` (valor sacado del env `{1}`, ya configurado en Kronn)',
+  'wf.apicall.helper.sys.authHeaderItem': '- header `{0}` (valor sacado del env `{1}`, ya configurado en Kronn)',
   'wiz.testBatchStep': 'Probar (dry-run)',
   'wiz.testBatchInfo': 'Previsualiza lo que haría este paso batch sin crear nada: lista de ítems, prompt renderizado en el 1er ítem, QP/agente, modo workspace.',
   'wiz.testBatchAlwaysDryRun': 'Siempre dry-run — no se creará ninguna discusión.',
@@ -3477,11 +4483,62 @@ const es: TranslationDict = {
 
   'wf.inProgress': 'en curso...',
   'wf.pending': 'pendiente',
+  'wf.live.stepNoOutput': '(este paso no produjo contenido)',
+  'wf.live.stepStreamingWaiting': 'El agente está arrancando… (ningún chunk recibido aún)',
+  'wf.live.totalElapsedHint': 'Tiempo total transcurrido desde que se lanzó el run.',
   'wf.liveStep.agent': 'El agente está pensando',
   'wf.liveStep.api': 'Llamada HTTP en curso',
   'wf.liveStep.notify': 'Enviando webhook',
   'wf.liveStep.batch': 'Fan-out en curso',
+  'wf.liveStep.gate': 'Esperando una decisión humana',
+  'wf.liveStep.exec': 'Comando shell en ejecución',
+  'wf.runStatusToReview': 'A REVISAR',
+  'wf.pausedJustNow': 'ahora mismo',
+  'wf.pausedMinutes': 'en pausa desde hace {0} min',
+  'wf.pausedHours': 'en pausa desde hace {0}h',
+  'wf.pausedHoursMinutes': 'en pausa desde hace {0}h{1}',
+  'wf.pausedDays': 'en pausa desde hace {0}d',
+  'wf.pausedZeroTokens': '0 tokens consumidos',
+  'wf.pausedZeroTokensHint': 'Ninguna llamada IA durante la pausa de un Gate — el contador se para hasta que el operador decida.',
+  'wf.gate.title': 'Se requiere decisión humana',
+  'wf.gate.defaultMessage': 'Se requiere aprobación para continuar.',
+  'wf.gate.commentPlaceholder': 'Comentario (requerido para «Solicitar cambios»)…',
+  'wf.gate.commentRequired': 'Se requiere un comentario al solicitar cambios.',
+  'wf.gate.approve': 'Aprobar',
+  'wf.gate.requestChanges': 'Solicitar cambios',
+  'wf.gate.reject': 'Rechazar',
   'wf.deleteRun': 'Eliminar este run',
+  'wf.runWorktreePath': 'Worktree:',
+  'wf.runWorktreeCopy': 'Copiar la ruta',
+  'wf.export': 'Exportar',
+  'wf.exportHint': 'Descarga este workflow en JSON (con sus Quick Prompts referenciados). Compartible entre instancias Kronn.',
+  'wf.exportDone': 'Workflow «{name}» exportado',
+  'wf.import': 'Importar',
+  'wf.importHint': 'Importa un workflow exportado desde Kronn (.json). Arrastrar y soltar o selector de archivo.',
+  'qp.export': 'Exportar este Quick Prompt',
+  'qp.exportDone': 'Quick Prompt «{name}» exportado',
+  'qp.import': 'Importar',
+  'qp.importHint': 'Importa un Quick Prompt exportado desde Kronn (.json).',
+  'imp.workflowTitle': 'Importar un workflow',
+  'imp.qpTitle': 'Importar un Quick Prompt',
+  'imp.dropOrPick': 'Arrastra un archivo aquí, o elige uno',
+  'imp.fileHint': 'Formato esperado: .kronn-workflow.json o .kronn-qp.json',
+  'imp.pickFile': 'Elegir un archivo',
+  'imp.cancel': 'Cancelar',
+  'imp.confirm': 'Importar',
+  'imp.pickAnother': '← Elegir otro archivo',
+  'imp.previewName': 'Nombre',
+  'imp.previewSteps': 'Steps',
+  'imp.previewVars': 'Variables',
+  'imp.previewBundledQps': 'Quick Prompts incluidos',
+  'imp.targetProject': 'Adjuntar al proyecto (opcional)',
+  'imp.noProject': 'Ninguno (workflow no vinculado)',
+  'imp.errorNotJson': 'Este archivo no es un .json — verifica el formato.',
+  'imp.errorReadFailed': 'No se pudo leer el archivo.',
+  'imp.errorJsonParse': 'JSON inválido — el archivo está corrupto o incompleto.',
+  'imp.errorWrongKind': 'Tipo de export incorrecto: esperado `{expected}`, recibido `{got}`. ¿Has confundido un workflow con un Quick Prompt?',
+  'imp.workflowDone': 'Workflow «{name}» importado',
+  'imp.qpDone': 'Quick Prompt «{name}» importado',
   'wf.noOutput': '(sin salida)',
   'wf.status': 'Estado',
   'wf.duration': 'Duración',
@@ -3575,13 +4632,203 @@ const es: TranslationDict = {
   'wiz.labels': 'Labels (coma)',
   'wiz.labelsPlaceholder': 'bug-5xx, auto-fix',
   'wiz.stepType': 'Tipo de step',
-  'wiz.stepTypeAgent': 'Agente (razonamiento)',
-  'wiz.stepTypeApiCall': 'Obtener datos',
+  'wiz.stepTypeAgent': 'Agente',
+  'wiz.stepTypeAgentHint': 'Un agente IA que razona, lee código, escribe archivos, llama MCPs. El step más flexible — pero consume tokens.',
+  'wiz.stepTypeApiCall': 'API',
   'wiz.stepTypeApiCallHint': 'Llamada API directa (Chartbeat, Jira, Cloudflare…) — cero tokens. Obtiene datos y los pasa al siguiente paso.',
-  'wiz.stepTypeBatchQP': 'Batch Quick Prompt',
-  'wiz.stepTypeBatchQPHint': 'Despliega un Quick Prompt sobre una lista de ítems producida por un paso anterior',
+  'wiz.stepTypeBatchQP': 'Batch QP',
+  'wiz.stepTypeBatchQPHint': 'Despliega un Quick Prompt sobre una lista de ítems producida por un paso anterior.',
   'wiz.stepTypeNotify': 'Notify',
   'wiz.stepTypeNotifyHint': 'Llamada HTTP directa (webhook) — cero tokens. Envía a Slack, Teams o activa un pipeline.',
+  'wiz.stepTypeGate': 'Gate',
+  'wiz.stepTypeGateHint': 'Pausa el run para aprobación humana — cero tokens. El operador aprueba, solicita cambios o rechaza desde RunDetail.',
+  'wiz.stepTypeExec': 'Exec',
+  'wiz.stepTypeExecHint': 'Ejecuta un binario permitido directamente (cargo test, npm build…) — cero tokens, nunca vía shell, args pasados como argv literal.',
+  'wiz.stepTypeBatchApi': 'Batch API',
+  'wiz.stepTypeBatchApiHint': 'Fan-out de una llamada API sobre una lista de ítems, en paralelo. Cero tokens — ideal para crear N tickets / publicar N comentarios / actualizar N estados de golpe.',
+  'wiz.stepTypeJsonData': 'JSON',
+  'wiz.stepTypeJsonDataHint': 'Fuente de datos determinista — emite un payload JSON literal. Cero tokens, cero red. Ideal para alimentar un Batch (10 hosts en duro) sin montar API, o como fixture de dev.',
+  'wiz.jsonDataTitle': 'JSON Data',
+  'wiz.jsonDataHint': 'El payload se emite tal cual al siguiente paso vía `{{steps.<name>.data}}`. Útil para un BatchQuickPrompt sobre una lista fija (10 hosts, 5 regiones…) sin montar una API.',
+  'wiz.jsonDataPayload': 'Payload JSON',
+  'wiz.jsonDataPlaceholder': '[\n  { "host": "fr.example.com" },\n  { "host": "de.example.com" },\n  { "host": "en.example.com" }\n]',
+  'wiz.jsonDataParseError': 'JSON inválido:',
+  'wiz.jsonDataNoTemplating': 'Sin templating runtime — el valor se devuelve literalmente. Para un payload dinámico, usa un paso Agent o ApiCall.',
+  'wiz.jsonDataSummaryArray': '{0} ítem(s) — será consumido por un paso Batch en cascada',
+  'wiz.jsonDataSummaryObject': '1 objeto, {0} campo(s)',
+  'wiz.jsonDataSummaryScalar': '1 valor escalar',
+  'wiz.jsonDataMissingPayload': 'sin payload',
+  'wiz.errorJsonDataNoPayload': 'El paso JSON « {0} » no tiene payload — pega un JSON válido en el textarea.',
+  'wiz.batchApiTitle': 'Batch API call',
+  'wiz.batchApiHint': 'Reutiliza la config API de abajo para cada ítem de la lista. Cada ítem expone `{{batch.item.<campo>}}` en el body, headers, query, etc. Los ítems corren en paralelo, capados por el límite de concurrencia.',
+  'wiz.batchApiItemsFrom': 'Origen de los ítems',
+  'wiz.batchApiItemsFromPlaceholder': '{{steps.plan.data.sub_tasks}} o {{steps.plan.data}} o un JSON array crudo',
+  'wiz.batchApiConcurrentLimit': 'Concurrencia',
+  'wiz.batchApiConcurrentLimitHint': 'Máx llamadas paralelas (defecto 5, máx 20)',
+  'wiz.batchApiMaxItems': 'Máx ítems',
+  'wiz.batchApiMaxItemsHint': 'Tope de seguridad (defecto 50)',
+  'wiz.batchApiMissingConfig': 'config incompleta',
+  'wiz.batchApiQaPicker': 'Origen de la config API',
+  'wiz.batchApiQaPickerInline': '— Inline (config definida aquí) —',
+  'wiz.batchApiQaPickerHint': 'Puedes referenciar un Quick API guardado: su config se usará en la ejecución. Los campos abajo siguen siendo overrides per-field.',
+  'wiz.execTitle': 'Ejecución shell directa (Exec)',
+  'wiz.execHint': 'Ejecuta un binario de la allowlist del workflow en el workspace. Args con plantillas pero pasados literalmente (sin interpretación shell). Timeout obligatorio.',
+  'wiz.execWorktreeHint': 'Este comando ve las modificaciones de los pasos anteriores.',
+  'wiz.worktreeHint': 'Cada run se ejecuta en una copia git aislada. Los pasos comparten los mismos archivos.',
+  'wiz.worktreeIconTooltip': 'Worktree git: copia aislada del repo, creada por la duración del run, en .kronn/worktrees/.',
+  'wiz.execCommand': 'Binario',
+  'wiz.execCommandSelect': 'elegir un binario',
+  'wiz.execArgs': 'Argumentos (uno por línea)',
+  'wiz.execArgsPlaceholder': 'test\n--\n{{steps.fetch.summary}}',
+  'wiz.execTimeoutSecs': 'Timeout (segundos, predet. 300, máx 1800)',
+  'wiz.execAllowlistEmpty': 'Exec está desactivado: ningún comando autorizado para este workflow.',
+  'wiz.execAllowlistConfigureNow': 'Configurar la allowlist →',
+  'wiz.execAllowlistTitle': 'Allowlist Exec',
+  'wiz.execAllowlistHint': 'Binarios que los steps Exec pueden invocar para este workflow. Vacío = Exec desactivado. Solo nombres simples (sin rutas, sin metacaracteres shell). Separa con coma.',
+  'wiz.execAllowlistPlaceholder': 'npm, cargo, make, pytest',
+  'wiz.gateTitle': 'Pausa humana (Gate)',
+  'wiz.gateHint': 'El run se detiene en este paso esperando una decisión (aprobar, solicitar cambios, rechazar). Templates {{steps.X.summary}} soportados en el mensaje.',
+  'wiz.gateMessage': 'Mensaje mostrado al operador',
+  'wiz.gateMessagePlaceholder': '¿Aprobar auditoría `{{steps.audit.summary}}`?',
+  'wiz.gateRequestChangesTarget': 'Destino "Solicitar cambios"',
+  'wiz.gateRequestChangesDefault': '(por defecto: paso anterior)',
+  'wiz.gateNotifyUrl': 'Notificar esta URL cuando el Gate se active (opcional)',
+  'wiz.gateNotifyUrlPlaceholder': 'https://hooks.slack.com/services/... o {{state.slack_url}}',
+  'wiz.gateNotifyUrlHint': 'POST best-effort con {run_id, workflow_name, step_name, message}. Templates soportados. Fallos loggeados, nunca bloqueantes.',
+  'wiz.rollbackTitle': 'Rollback / compensación (en caso de fallo)',
+  'wiz.rollbackHint': 'Pasos que se ejecutan si el run termina en Failed. Puedes usar {{failed_step.name}} y {{failed_step.output}}. Notify, Agent y ApiCall son soportados (Gate excluido — bloquearía un run ya Failed).',
+  'wiz.rollbackAgentPromptPlaceholder': 'Analiza el fallo anterior: {{failed_step.output}}. Produce un post-mortem en 3 líneas.',
+  'wiz.presetsTitle': 'Empezar desde un patrón',
+  'wiz.presetsHint': '— o empieza desde un workflow vacío abajo',
+  'wiz.presetsBlankHint': 'También puedes desplazarte hacia abajo y construir tu workflow paso a paso. Los presets son totalmente editables tras aplicar.',
+  'wiz.preset.autoDev.title': 'Auto-Dev con tests',
+  'wiz.preset.autoDev.desc': 'Implementa, testea, revisa, repite hasta OK o máx 5 iteraciones. El feedback de la review se pasa a la siguiente implementación vía state.',
+  'wiz.preset.prGate.title': 'Pipeline PR con Gate humano',
+  'wiz.preset.prGate.desc': 'Implementa, lanza los tests, espera tu validación humana (con notificación webhook), luego mergea si aprobado.',
+  'wiz.preset.deployRollback.title': 'Despliegue con rollback',
+  'wiz.preset.deployRollback.desc': 'Build, smoke tests, deploy. Si un paso falla: alerta ops + post-mortem agent automático.',
+  'wiz.preset.autoDev.issueKeyLabel': 'Clave del ticket / issue (opcional)',
+  'wiz.preset.autoDev.issueKeyPlaceholder': 'EW-1234  ·  org/repo#42  ·  KRN-7',
+  'wiz.preset.autoDev.issueKeyDesc': 'Opcional — usado solo si conviertes el paso `fetch_issue` en ApiCall (referencia `{{issue_key}}` en `api_path_params` o `api_query` del plugin tracker).',
+  'wiz.preset.autoDev.fetchIssueDesc': 'Fixture por defecto: describe aquí el ticket a implementar (JSON literal). Edita el payload para adaptar a tu petición, el preset corre de inmediato sin plugin tracker. Para conectar un tracker real (Jira / GitHub / Linear): cambia el tipo de este paso a `ApiCall` (botón 🌐 arriba) y configura el plugin — `{{steps.fetch_issue.data}}` seguirá alimentando el paso `implement`.',
+  'wiz.preset.autoDev.implementPrompt': 'Implementa la siguiente petición:\n---\n{{steps.fetch_issue.data}}\n---\n\nSi una review anterior ha dejado feedback:\n{{state.last_review}}\n\nTen en cuenta el feedback de arriba para esta nueva iteración.\nSi todavía no hubo review, este bloque está vacío — es tu primera pasada.',
+  'wiz.preset.autoDev.reviewPrompt': 'Revisa la implementación producida por `implement` y el resultado de los tests `run_tests`.\n\nTests output: {{steps.run_tests.data.stdout}}\nTests exit code: {{steps.run_tests.data.exit_code}}\n\nSi todo está OK: termina tu respuesta con [SIGNAL: APPROVED].\nSi no: escribe feedback accionable y exactamente al final (y SOLO al final):\n---STATE:last_review=<tu feedback en una línea>---\nluego termina con [SIGNAL: NEEDS_CHANGES].',
+  'wiz.preset.autoDev.notifyDoneBody': '✅ Workflow Auto-Dev terminado: {{steps.review.summary}}',
+  'wiz.preset.autoDev.rollbackBody': '❌ Auto-Dev falló en `{{failed_step.name}}` — detalle: {{failed_step.output}}',
+  'wiz.preset.prGate.issueKeyLabel': 'Clave del ticket / issue (opcional)',
+  'wiz.preset.prGate.issueKeyPlaceholder': 'EW-1234  ·  org/repo#42  ·  KRN-7',
+  'wiz.preset.prGate.issueKeyDesc': 'Opcional — usado solo si conviertes el paso `fetch_issue` en ApiCall (referencia `{{issue_key}}` en `api_path_params` o `api_query` del plugin tracker).',
+  'wiz.preset.prGate.fetchIssueDesc': 'Fixture por defecto: describe aquí el ticket a implementar (JSON literal). Edita el payload para adaptar a tu petición, el preset corre de inmediato sin plugin tracker. Para conectar un tracker real (Jira / GitHub / Linear): cambia el tipo de este paso a `ApiCall` (botón 🌐 arriba) y configura el plugin — `{{steps.fetch_issue.data}}` seguirá alimentando el paso `implement`.',
+  'wiz.preset.prGate.implementPrompt': 'Implementa la siguiente petición:\n---\n{{steps.fetch_issue.data}}\n---\n\nSaca un resumen corto en `summary` y el diff bruto en `data.diff` para que la revisión humana tenga contexto.',
+  'wiz.preset.shared.runTestsDesc': 'Pre-rellenado para Rust (`cargo test`). Adapta según tu stack: Node → `npm` `test`, Python → `pytest`, Make → `make` `test`. El binario elegido debe figurar en `exec_allowlist` del workflow.',
+  'wiz.preset.prGate.gateMessage': '## Validación pre-merge\n\n**Implementación:** {{steps.implement.summary}}\n\n**Tests:** exit `{{steps.run_tests.data.exit_code}}`\n\nAprobar para lanzar el merge automático. Solicitar cambios para volver a `implement`.',
+  'wiz.preset.prGate.mergePrompt': 'Merge la rama en main. Verifica que no haya conflicto, luego push. Saca el SHA del merge commit en `data.merge_sha`.',
+  'wiz.preset.prGate.rollbackBody': '❌ PR Gate falló: `{{failed_step.name}}` — {{failed_step.output}}',
+  'wiz.preset.deployRollback.successBody': '🚀 Despliegue terminado sin incidente.',
+  'wiz.preset.deployRollback.alertBody': '🚨 ALERTA PROD: paso `{{failed_step.name}}` falló. Rollback en curso...',
+  'wiz.preset.deployRollback.postMortemPrompt': 'Analiza el fallo y produce un post-mortem en 3 secciones:\n\n## Paso que falló\n{{failed_step.name}}\n\n## Error observado\n{{failed_step.output}}\n\n## Hipótesis de causa raíz\n(a ti te toca — propón 2-3 pistas priorizadas)',
+  'wiz.preset.featurePlanner.title': 'Feature / Epic Planner',
+  'wiz.preset.featurePlanner.desc': 'Divide una epic o feature en sub-tareas tipadas (auto_ai vs human_action) con dependencias. Tracker-agnóstico (Jira / GitHub / Linear via los MCP instalados).',
+  'wiz.preset.featurePlanner.analyzePrompt': `Eres un Epic Planner. El usuario pasó la URL: {{epic_url}}.
+
+# 1. Detecta el tracker
+Lee el host de la URL:
+- atlassian.net → Jira (MCP Atlassian)
+- github.com/.../issues/ → GitHub (MCP GitHub)
+- linear.app → Linear MCP
+- otro → describe lo que necesitarías, no hagas nada y termina con [SIGNAL: NO_RESULTS]
+
+# 2. Recupera el contenido
+Vía el MCP correspondiente: título, descripción, project key, estado actual, sub-tareas existentes (las necesitarás para la idempotencia en el siguiente paso).
+
+# 3. Divide
+Restricciones:
+- Cada sub-tarea cabe en una PR (1-3 días de trabajo máx).
+- Etiqueta cada sub-tarea:
+  * \`auto_ai\` — puro trabajo de código (crear archivos, ejecutar tests, abrir una PR). Hacible por un agente autónomo.
+  * \`human_action\` — config UI (CMS, dashboard infra), decisión arquitectura/naming, info externa (URLs, credenciales, accesos…).
+- Identifica las dependencias: A bloquea B si B depende lógicamente de que A esté hecho primero.
+- Documenta CADA decisión que tomaste tú mismo cuando la epic era ambigua (sprint objetivo, orden de fases, naming, etc.).
+- Identifica las informaciones faltantes que solo un humano puede aportar.
+
+# 4. Output STRUCTURED (obligatorio)
+\`\`\`json
+{
+  "data": {
+    "tracker": "jira" | "github" | "linear",
+    "source_key": "EW-7247",
+    "sub_tasks": [
+      { "id": 1, "title": "...", "description": "...", "type": "auto_ai", "blocked_by": [] }
+    ],
+    "decisions_taken": ["Asumí que la fase 0 debe completarse antes de la fase 1 porque..."],
+    "missing_info": ["URL Adobe DTM AN — necesario del equipo Data"]
+  },
+  "status": "OK",
+  "summary": "Plan: 12 sub-tareas (4 human_action, 8 auto_ai). 2 ítems de info faltante señalados."
+}
+\`\`\`
+
+Termina con [SIGNAL: PLAN_READY].`,
+  'wiz.preset.featurePlanner.gateMessage': `## Plan propuesto para {{epic_url}}
+
+{{steps.analyze_epic.summary}}
+
+### Decisiones tomadas automáticamente
+{{steps.analyze_epic.data.decisions_taken}}
+
+### Info faltante (a aportar por humano)
+{{steps.analyze_epic.data.missing_info}}
+
+### Sub-tareas
+{{steps.analyze_epic.data.sub_tasks}}
+
+**Aprobar** → el agente crea los tickets en el tracker.
+**Pedir cambios** → vuelve al paso de planificación con tu feedback.`,
+  'wiz.preset.featurePlanner.setLinksPrompt': `Las sub-tareas acaban de crearse en bulk vía un BatchApiCall. Ahora vas a colocar los enlaces \`blocks\` / \`is blocked by\` entre ellas.
+
+# Datos de entrada
+- Tracker: {{steps.analyze_epic.data.tracker}}
+- Plan original (con \`blocked_by\` declarados): {{steps.analyze_epic.data.sub_tasks}}
+- Resultados de creación (un ítem por sub-tarea, con \`input.id\` y \`response\` = la nueva key Jira/GitHub): {{steps.create_tickets.data.items}}
+
+# Mapeo
+1. Para cada sub-tarea del plan original con \`blocked_by\` no vacío:
+   - Encuentra la key creada correspondiente en \`steps.create_tickets.data.items\` (match en \`input.id\` ↔ plan.id)
+   - Para cada \`blocked_by\` (id de sub-tarea bloqueante), encuentra también su key creada
+   - Añade un enlace "is blocked by" vía el MCP: la sub-tarea \`current\` está bloqueada por \`predecessor\`
+
+# Idempotencia
+Antes de añadir un enlace, comprueba si existe ya vía el MCP (la creación pudo re-ejecutarse). Solo añade lo que falta. Ningún error si el enlace ya existe.
+
+# Errores
+Si un ítem de \`steps.create_tickets.data.items\` tiene \`status: ERROR\`, **sáltalo** para el mapeo (no se puede enlazar con un ticket no creado). Lístalos en el \`summary\` final para que el humano tenga la lista de tickets que crear manualmente.
+
+# Output STRUCTURED final
+\`\`\`json
+{
+  "data": {
+    "links_added": 5,
+    "links_already_existed": 2,
+    "skipped_failed_items": []
+  },
+  "status": "OK",
+  "summary": "Feature Planner: 28 tickets creados, 5 enlaces blocks puestos, 2 ya existían."
+}
+\`\`\`
+
+Termina con [SIGNAL: OK].`,
+  'wiz.preset.featurePlanner.notifyBody': '🗺️ Feature Planner terminado para {{epic_url}} — {{steps.set_links.summary}}',
+  'wiz.preset.dailyHostAudit.title': 'Auditoría diaria sobre lista fija',
+  'wiz.preset.dailyHostAudit.desc': 'Fuente de datos determinista (5 hosts en duro) → fan-out de un Quick Prompt de auditoría sobre cada uno → notificación Slack. Demuestra la pieza `JsonData`: no hace falta montar una API para una lista fija.',
+  'wiz.preset.dailyHostAudit.hostListDesc': 'Lista fija de hosts a auditar. Edita el payload JSON para adaptar a tu contexto (locales, entornos, subdominios, etc.). Cero tokens, cero red — el valor se pasa tal cual al siguiente paso vía `{{steps.host-list.data}}`.',
+  'wiz.preset.dailyHostAudit.auditEachDesc': 'Fan-out sobre la lista de arriba. Elige un Quick Prompt existente (o crea uno) que audite UN host. Cada ejecución recibe `{{batch.item.host}}` en su prompt renderizado.',
+  'wiz.preset.dailyHostAudit.notifyBody': '🌍 Auditoría diaria completada: {{steps.audit-each-host.summary}}',
+  'wiz.addRollbackStep': 'Añadir paso de rollback',
+  'wiz.removeRollbackStep': 'Eliminar este paso de rollback',
+  'wf.launchModalTitle': 'Lanzar «{name}»',
+  'wf.launchModalHint': 'Rellena las variables a continuación — se convertirán en `{{nombre}}` en tus step prompts.',
+  'wf.launchModalRequired': 'Variable(s) obligatoria(s) faltante(s): {names}',
+  'wf.launchModalGo': 'Lanzar',
   'wiz.notifyTitle': 'Webhook / Notificación',
   'wiz.notifyHint': 'Llamada HTTP directa desde Kronn, sin agente. Las plantillas {{steps.X.output}} funcionan en URL y body.',
   'wiz.notifyUrl': 'URL del webhook',
@@ -3613,7 +4860,22 @@ const es: TranslationDict = {
   'wiz.batchChainRemove': 'Quitar de la cadena',
   'wiz.batchChainEmpty': 'No hay QP sin variables disponible para encadenar.',
   'wiz.stepDescription': 'Descripción',
-  'wiz.stepDescriptionPlaceholder': 'Describir el propósito de este step...',
+  'wiz.stepDescriptionPlaceholder': '¿Qué hace este step en 1 línea? Ej. «Obtiene los tickets Jira abiertos» o «Analiza los logs de tests» — mostrado en la lista, opcional.',
+  'wiz.insertStepHere': 'Insertar un step aquí',
+  'wiz.moveStepUp': 'Subir este step',
+  'wiz.moveStepDown': 'Bajar este step',
+  'wiz.ifContainsPlaceholder': 'Palabra clave a buscar en la salida del agente (ej. APPROVED, NEEDS_CHANGES, ERROR…)',
+  'wiz.removeCondition': 'Eliminar esta condición',
+  'wiz.wfVariablesTitle': 'Variables de lanzamiento',
+  'wiz.wfVariablesHint': 'Variables solicitadas al lanzar manualmente — como los Quick Prompts. Los valores se convierten en `{{nombre}}` en tus step prompts. Opcional — déjalo vacío si tu workflow obtiene su contexto desde un step previo (ApiCall) o un trigger.',
+  'wiz.addVariable': 'Añadir variable',
+  'wiz.removeVariable': 'Eliminar esta variable',
+  'wiz.undeclaredVarsTitle': 'Variables no declaradas detectadas',
+  'wiz.undeclaredVarsHint': 'Estas `{{var}}` no coinciden con ningún step anterior, state, iter, artifact o variable de lanzamiento. Renderizarán vacío en runtime. Decláralas o corrige el nombre.',
+  'wiz.undeclaredAddVar': 'Añadir a variables',
+  'wiz.undeclaredAddVarHint': 'Añade «{name}» como variable de lanzamiento (solicitada al lanzar manualmente).',
+  'wiz.undeclaredUnknownStep': 'Step desconocido — verifica el nombre',
+  'wiz.undeclaredFailedOutsideRollback': '`failed_step.*` solo se puede usar en un step de rollback',
   'wiz.pollInterval': 'Intervalo de poll (cron)',
   'wiz.availableVars': 'Variables disponibles',
   'wiz.triggerVars': 'Variables de trigger (Tracker)',
@@ -3625,6 +4887,26 @@ const es: TranslationDict = {
   'wiz.stepChaining': 'Encadenamiento entre steps',
   'wiz.prevOutput': 'Salida del step anterior',
   'wiz.namedOutput': 'Salida de un step por nombre',
+  'wiz.iterHint': 'Contador de iteración del step (1, 2, 3…) — útil en bucles Goto',
+  'wiz.stateHint': 'Variable de estado durable, los agentes escriben vía ---STATE:clave=valor---',
+  'wiz.stateChipsLoopOut': 'Bucle detectado — pasa tu veredicto al step de retorno:',
+  'wiz.stateChipsLoopIn': 'Recibe el veredicto de un bucle — lee el contexto anterior:',
+  'wiz.stateChipWrite': 'escribir `state.{key}`',
+  'wiz.stateChipWriteHint': 'Añade al final del prompt la instrucción de escribir `---STATE:{key}=...---` para pasar tu veredicto al step que reinicia.',
+  'wiz.stateChipReadHint': 'Inserta `{{state.{key}}}` en el cursor — el valor escrito por el step anterior del bucle.',
+  'wiz.stateInstructionBlock': 'Al final de tu respuesta (y SOLO al final), escribe exactamente:\n---STATE:{key}=<tu veredicto / feedback en una línea>---\n\nEste bloque será leído por el step «{target}» en la próxima iteración del bucle.',
+  'wiz.gotoMaxIterPlaceholder': 'N',
+  'wiz.gotoMaxIterHint': 'Pasadas N iteraciones de este Goto, el runner sale del bucle y continúa. Vacío = sin límite por-edge (solo aplica el límite global del workflow).',
+  'wiz.gotoMaxIterLabel': 'máx',
+  'wiz.gotoMaxIterUnit': 'iteraciones',
+  'wiz.gotoTargetSelect': 'elige un step',
+  'wiz.condActionStop': 'Stop — termina el run',
+  'wiz.condActionSkip': 'Skip — salta el siguiente step',
+  'wiz.condActionGoto': 'Goto — vuelve a un step anterior',
+  'wiz.rollbackFiresFailed': 'Failed (error runtime)',
+  'wiz.rollbackSkipsCancelled': 'Cancelled (has clicado «Detener»)',
+  'wiz.rollbackSkipsGuard': 'StoppedByGuard (límite alcanzado)',
+  'wiz.rollbackSkipsReject': 'Gate Reject (has rechazado)',
   'wiz.availableSignals': 'Señales disponibles (condiciones)',
   'wiz.signalNoResults': 'Nada encontrado o nada que reportar',
   'wiz.signalContinue': 'Continuar normalmente (defecto)',
@@ -3662,10 +4944,23 @@ const es: TranslationDict = {
   'wiz.addStep': 'Agregar un step',
   'wiz.errorNoName': 'Nombre del workflow requerido',
   'wiz.errorNoPrompt': 'Prompt faltante para "{0}"',
+  'wiz.agentQpPicker': 'Desde un Quick Prompt existente',
+  'wiz.agentQpPickerInline': '— Ninguno (prompt inline más abajo) —',
+  'wiz.agentQpInheritedFrom': 'Heredado de « {0} »',
+  'wiz.agentQpInheritedHint': 'Los `prompt_template`, `tier` y `skill_ids` del QP se cargan en runtime. Las `{{var}}` se resuelven contra el contexto del workflow (variables de lanzamiento / state / previous_step…).',
+  'wiz.agentQpOverridePlaceholder': 'Override del prompt — déjalo vacío para mantener el del Quick Prompt. Rellena para sobrescribir solo en este step.',
+  'wiz.qrefOverrideActive': 'override activo',
+  'wiz.qrefOverrideActiveHint': 'Has rellenado un override abajo. Sobrescribe el valor correspondiente del QP/QA solo en este step.',
+  'wiz.qrefPreview': 'Prompt:',
+  'wiz.qrefVars': 'Variables:',
+  'wiz.qrefEmpty': '(prompt vacío)',
+  'wiz.qrefOverridePromptToggle': 'Personalizar el prompt para este step (override)',
   'wiz.errorBatchNoQP': 'Quick Prompt no seleccionado para "{0}"',
   'wiz.errorApiNoPlugin': 'Plugin API no seleccionado para "{0}"',
   'wiz.errorApiNoEndpoint': 'Endpoint faltante para "{0}"',
   'wiz.errorNotifyNoUrl': 'URL del webhook faltante para "{0}"',
+  'wiz.errorGateNoMessage': 'Mensaje de aprobación faltante para "{0}"',
+  'wiz.errorExecNoCommand': 'Comando shell faltante para "{0}"',
   'wiz.errorBatchNoItemsFrom': 'Lista de ítems faltante para "{0}" (ej: {{steps.step1.data.tickets}})',
   'wiz.errorNoCondition': 'Condición vacía en "{0}" (condición #{1})',
   'wiz.security': 'Seguridad',
@@ -3683,6 +4978,7 @@ const es: TranslationDict = {
   'wiz.previous': 'Anterior',
   'wiz.next': 'Siguiente',
   'wiz.create': 'Crear',
+  'wiz.saveError': 'Error al guardar. Revisa la config de tus pasos.',
   'wiz.save': 'Guardar',
 
   // ── Skills (WHAT) ──
@@ -3847,12 +5143,30 @@ const es: TranslationDict = {
 
   // ── Common ──
   'common.cancel': 'Cancelar',
+  'common.dismiss': 'Cerrar',
   'common.save': 'Guardar',
   'common.delete': 'Eliminar',
   'common.close': 'Cerrar',
   'common.loading': 'Cargando...',
   'common.seeMore': 'Ver más',
   'common.seeLess': 'Ver menos',
+
+  // Workflow execution guards (0.7.0)
+  'wf.guards.title': 'Límites de ejecución',
+  'wf.guards.description': 'Red de seguridad contra bucles, runs sin fin y presupuestos imprevistos. Deja vacío para usar los valores por defecto.',
+  'wf.guards.summaryDefaults': 'Defaults: {0} min · {1} llamadas IA · {2} revisitas/step',
+  'wf.guards.summaryActive': 'Límites personalizados',
+  'wf.guards.timeoutLabel': 'Duración máx',
+  'wf.guards.timeoutUnit': '(minutos)',
+  'wf.guards.timeoutHint': 'Por defecto {0} min — tiempo total transcurrido del run.',
+  'wf.guards.maxLlmCallsLabel': 'Llamadas IA máx',
+  'wf.guards.maxLlmCallsHint': 'Por defecto {0} — Agent = 1, BatchQP = 1, ApiCall/Notify = 0.',
+  'wf.guards.loopDetectionLabel': 'Detección de bucle',
+  'wf.guards.loopDetectionHint': 'Por defecto {0} — máximo de revisitas del mismo step (Goto).',
+  'wf.guards.stoppedBy.title': 'Detenido por límite',
+  'wf.guards.stoppedBy.timeout': 'Duración máx alcanzada ({0} s)',
+  'wf.guards.stoppedBy.maxLlmCalls': 'Demasiadas llamadas IA ({0} de {1})',
+  'wf.guards.stoppedBy.loopDetection': 'Bucle detectado en step "{0}" ({1} veces)',
 };
 
 /** Exposed for tests (key-parity check) and dev tooling. Do not mutate. */

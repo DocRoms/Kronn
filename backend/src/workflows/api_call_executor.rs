@@ -220,7 +220,26 @@ pub async fn execute_api_call_step_core(
         "status": status_str,
         "summary": summary,
     });
-    let output = serde_json::to_string(&output_envelope).unwrap_or_default();
+    // Trailing `[SIGNAL: <kw>]` lines so users can branch via `on_result.contains`
+    // without parsing the JSON envelope. NO_RESULTS gets its own signal because
+    // it's the existing convention for "API returned an empty list, skip the
+    // downstream agent" — already special-cased in the Agent path.
+    let signal = if extract_out.is_empty && fail_on_empty {
+        "[SIGNAL: NO_RESULTS]"
+    } else {
+        "[SIGNAL: OK]"
+    };
+    let output = format!(
+        "{}\n{}",
+        serde_json::to_string(&output_envelope).unwrap_or_default(),
+        signal,
+    );
+    let condition_action = super::steps::evaluate_conditions(&step.on_result, &output);
+    let condition_result = condition_action.as_ref().map(|a| match a {
+        ConditionAction::Stop => "Stop".to_string(),
+        ConditionAction::Skip => "Skip".to_string(),
+        ConditionAction::Goto { step_name, .. } => format!("Goto:{}", step_name),
+    });
 
     StepOutcome {
         result: StepResult {
@@ -229,14 +248,14 @@ pub async fn execute_api_call_step_core(
             output,
             tokens_used: 0,
             duration_ms: start.elapsed().as_millis() as u64,
-            condition_result: None,
+            condition_result,
             envelope_detected: None,
             step_kind: None,
             step_agent: None,
             step_api_plugin_slug: None,
             step_api_endpoint_path: None,
         },
-        condition_action: None,
+        condition_action,
     }
 }
 
@@ -258,6 +277,22 @@ pub async fn execute_api_call_step_with_db(
     policy: SecurityPolicy,
 ) -> StepOutcome {
     let start = Instant::now();
+
+    // 0.7+ — référence optionnelle vers un QuickApi. Hydrate les champs
+    // `api_*` manquants depuis le QA (per-field override, le step gagne).
+    // Même règle que pour `BatchApiCall`. Permet à l'utilisateur de définir
+    // un appel canonique côté QuickApi et de le réutiliser dans un step
+    // ApiCall single sans tout re-saisir.
+    let mut step_owned = step.clone();
+    if let Err(e) = crate::workflows::quick_api_hydrate::hydrate_step_from_quick_api(
+        &mut step_owned,
+        &state.db,
+    )
+    .await
+    {
+        return fail(step, start, e);
+    }
+    let step = &step_owned;
 
     let Some(slug) = step.api_plugin_slug.as_ref() else {
         return fail(step, start, "ApiCall step missing `api_plugin_slug`".into());
@@ -437,6 +472,19 @@ pub fn resolve_auth(
             })?;
             use base64::{engine::general_purpose::STANDARD, Engine as _};
             let encoded = STANDARD.encode(format!("{user}:{password}"));
+            out.headers.insert("Authorization".into(), format!("Basic {encoded}"));
+        }
+        ApiAuthKind::BasicApiKey { env_key } => {
+            // HTTP Basic with the API key as user and empty password —
+            // `Authorization: Basic <base64(API_KEY:)>`. SpeedCurve,
+            // Stripe, etc. The trailing colon in `KEY:` is significant
+            // (the user/password separator); without it, Basic decoders
+            // see a single field and reject as malformed.
+            let key = env.get(env_key).ok_or_else(|| {
+                format!("Auth error: env key `{env_key}` missing for BasicApiKey auth")
+            })?;
+            use base64::{engine::general_purpose::STANDARD, Engine as _};
+            let encoded = STANDARD.encode(format!("{key}:"));
             out.headers.insert("Authorization".into(), format!("Basic {encoded}"));
         }
         ApiAuthKind::OAuth2ClientCredentials { extra_headers, .. } => {
@@ -982,21 +1030,44 @@ fn summarize(value: &Value, url: &Url, method: &str) -> String {
 }
 
 fn fail(step: &WorkflowStep, start: Instant, msg: String) -> StepOutcome {
+    // HTTP-level failures format the message as "HTTP <code> on <method> <url> — <body>".
+    // Extract that status into a `[SIGNAL: http_<code>]` line + a generic
+    // `[SIGNAL: ERROR]` so users can branch their workflow ("503 → Goto retry,
+    // 401 → Goto refresh_auth, anything else → fall through to rollback").
+    // Config / template / extract errors don't get signals — they're bugs the
+    // user can't usefully branch on.
+    let mut output = msg.clone();
+    if let Some(rest) = msg.strip_prefix("HTTP ") {
+        if let Some(code_str) = rest.split_whitespace().next() {
+            if let Ok(code) = code_str.parse::<u16>() {
+                output.push('\n');
+                output.push_str("[SIGNAL: ERROR]");
+                output.push('\n');
+                output.push_str(&format!("[SIGNAL: http_{}]", code));
+            }
+        }
+    }
+    let condition_action = super::steps::evaluate_conditions(&step.on_result, &output);
+    let condition_result = condition_action.as_ref().map(|a| match a {
+        ConditionAction::Stop => "Stop".to_string(),
+        ConditionAction::Skip => "Skip".to_string(),
+        ConditionAction::Goto { step_name, .. } => format!("Goto:{}", step_name),
+    });
     StepOutcome {
         result: StepResult {
             step_name: step.name.clone(),
             status: RunStatus::Failed,
-            output: msg,
+            output,
             tokens_used: 0,
             duration_ms: start.elapsed().as_millis() as u64,
-            condition_result: None,
+            condition_result,
             envelope_detected: None,
             step_kind: None,
             step_agent: None,
             step_api_plugin_slug: None,
             step_api_endpoint_path: None,
         },
-        condition_action: None,
+        condition_action,
     }
 }
 
@@ -1058,6 +1129,8 @@ mod tests {
             batch_max_items: None,
             batch_workspace_mode: None,
             batch_chain_prompt_ids: vec![],
+            batch_concurrent_limit: None,
+            quick_api_id: None,
             notify_config: None,
             api_plugin_slug: Some("fake-plugin".into()),
             api_config_id: Some("cfg-1".into()),
@@ -1072,11 +1145,24 @@ mod tests {
             api_timeout_ms: Some(5_000),
             api_max_retries: Some(2),
             api_output_var: None,
+            gate_message: None,
+            gate_request_changes_target: None,
+            gate_notify_url: None,
+            exec_command: None,
+            exec_args: vec![],
+            exec_timeout_secs: None,
+            quick_prompt_id: None,
+            json_data_payload: None,
         }
     }
 
     fn extract_envelope(output: &str) -> Value {
-        serde_json::from_str(output).expect("output is structured JSON")
+        // The runtime output is `{json}\n[SIGNAL: ...]` (the trailing
+        // SIGNAL line lets `evaluate_conditions` branch without parsing
+        // JSON). Parse only the JSON head — split on the SIGNAL marker
+        // if present, otherwise the whole string.
+        let json_part = output.split("\n[SIGNAL:").next().unwrap_or(output);
+        serde_json::from_str(json_part).expect("output is structured JSON")
     }
 
     // ─── resolve_auth ───────────────────────────────────────────────
@@ -1160,6 +1246,36 @@ mod tests {
         let auth = ApiAuthKind::Bearer { env_key: "MISSING".into() };
         let err = resolve_auth(&auth, &env).unwrap_err();
         assert!(err.contains("MISSING"), "error hint should name the key: {err}");
+    }
+
+    #[test]
+    fn resolve_auth_basic_apikey_encodes_key_with_empty_password() {
+        // SpeedCurve / Stripe convention: HTTP Basic where the API key is
+        // the username and the password half is empty. The trailing `:`
+        // after the key is significant — Basic-Auth decoders treat
+        // missing-colon strings as malformed and reject them. Without
+        // this test, removing the `:` (or trimming) would silently break
+        // every BasicApiKey-using plugin in production.
+        let mut env = HashMap::new();
+        env.insert("SPEEDCURVE_API_KEY".into(), "sc-abc-xyz".into());
+        let auth = ApiAuthKind::BasicApiKey { env_key: "SPEEDCURVE_API_KEY".into() };
+        let out = resolve_auth(&auth, &env).unwrap();
+        assert!(out.bearer.is_none(), "BasicApiKey must not populate bearer");
+        let header = out.headers.get("Authorization")
+            .expect("Authorization header must be set");
+        assert!(header.starts_with("Basic "), "header must use the Basic scheme: {header}");
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let b64 = header.trim_start_matches("Basic ");
+        let decoded = String::from_utf8(STANDARD.decode(b64).unwrap()).unwrap();
+        assert_eq!(decoded, "sc-abc-xyz:", "must encode `KEY:` with the trailing colon (empty password half)");
+    }
+
+    #[test]
+    fn resolve_auth_basic_apikey_missing_env_errors_with_actionable_message() {
+        let env = HashMap::new();
+        let auth = ApiAuthKind::BasicApiKey { env_key: "SPEEDCURVE_API_KEY".into() };
+        let err = resolve_auth(&auth, &env).unwrap_err();
+        assert!(err.contains("SPEEDCURVE_API_KEY"), "error must name the missing key: {err}");
     }
 
     #[test]
@@ -1912,5 +2028,84 @@ mod tests {
         let t = truncate(s, 4);
         assert!(s.starts_with(&t));
         assert!(t.chars().count() <= 4);
+    }
+
+    // ─── on_result + SIGNAL emission tests ────────────────────────────
+    //
+    // Mirrors the Exec-step contract: ApiCall surfaces signals so a
+    // workflow can branch on HTTP status without writing a wrapper
+    // Agent step ("503 → Goto retry, 401 → Goto refresh_auth").
+
+    #[tokio::test]
+    async fn success_appends_signal_ok() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/ok"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "x": 1 })))
+            .mount(&server)
+            .await;
+        let plugin = mk_plugin(&server.uri(), ApiAuthKind::None, vec![mk_endpoint("GET", "/ok")]);
+        let step = mk_step("/ok");
+        let outcome = execute_api_call_step_core(
+            &step, &plugin, &HashMap::new(), &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        ).await;
+        assert_eq!(outcome.result.status, RunStatus::Success);
+        assert!(outcome.result.output.contains("[SIGNAL: OK]"));
+    }
+
+    #[tokio::test]
+    async fn http_5xx_appends_signal_error_and_http_status() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/boom"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("upstream down"))
+            .mount(&server)
+            .await;
+        let plugin = mk_plugin(&server.uri(), ApiAuthKind::None, vec![mk_endpoint("GET", "/boom")]);
+        let mut step = mk_step("/boom");
+        step.api_max_retries = Some(0); // skip backoff in tests
+        let outcome = execute_api_call_step_core(
+            &step, &plugin, &HashMap::new(), &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        ).await;
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        assert!(outcome.result.output.contains("[SIGNAL: ERROR]"));
+        assert!(outcome.result.output.contains("[SIGNAL: http_503]"));
+    }
+
+    #[tokio::test]
+    async fn on_result_goto_fires_when_signal_matches_on_4xx() {
+        // The headline use case: an API returns 401, we want to Goto a
+        // refresh_auth step instead of triggering on_failure rollback.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/locked"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        let plugin = mk_plugin(&server.uri(), ApiAuthKind::None, vec![mk_endpoint("GET", "/locked")]);
+        let mut step = mk_step("/locked");
+        step.api_max_retries = Some(0);
+        step.on_result = vec![StepConditionRule {
+            contains: "http_401".to_string(),
+            action: ConditionAction::Goto {
+                step_name: "refresh_auth".to_string(),
+                max_iterations: Some(2),
+            },
+        }];
+        let outcome = execute_api_call_step_core(
+            &step, &plugin, &HashMap::new(), &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        ).await;
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        match outcome.condition_action {
+            Some(ConditionAction::Goto { step_name, max_iterations }) => {
+                assert_eq!(step_name, "refresh_auth");
+                assert_eq!(max_iterations, Some(2));
+            }
+            other => panic!("expected Goto on http_401, got {:?}", other),
+        }
+        assert_eq!(outcome.result.condition_result.as_deref(), Some("Goto:refresh_auth"));
     }
 }

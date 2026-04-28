@@ -67,6 +67,13 @@ import type {
   TestStepRequest,
   QuickPrompt,
   CreateQuickPromptRequest,
+  QuickApi,
+  CreateQuickApiRequest,
+  RunQuickApiRequest,
+  RunQuickApiResponse,
+  ImportQuickApiRequest,
+  BatchRunQuickApiRequest,
+  BatchRunQuickApiResponse,
   OllamaHealthResponse,
   OllamaModelsResponse,
 } from '../types/generated';
@@ -724,7 +731,10 @@ export const workflows = {
   delete: (id: string) => api<void>('DELETE', `/workflows/${id}`),
   trigger: (id: string) => api<WorkflowRun>('POST', `/workflows/${id}/trigger`),
 
-  /** Trigger with SSE streaming for real-time progress. */
+  /** Trigger with SSE streaming for real-time progress.
+   *  0.6.0 UX pass — accepts optional `variables` payload for workflows
+   *  declaring manual launch variables. Required-but-empty values
+   *  surface as a "Variable « X » est obligatoire…" SSE error. */
   triggerStream: async (
     id: string,
     onStepStart: (data: { step_name: string; step_index: number; total_steps: number }) => void,
@@ -732,10 +742,28 @@ export const workflows = {
     onRunDone: (data: { status: string }) => void,
     onError: (error: string) => void,
     signal?: AbortSignal,
+    variables?: Record<string, string>,
+    /** Live agent stdout chunks for the step currently in flight. Optional
+     *  — older callers ignore them; the workflow live view uses them to
+     *  render the in-progress step's output as it streams (no more
+     *  60s of "spinner with no content" UX). */
+    onStepProgress?: (text: string) => void,
+    /** Fires once at the start with the freshly-created run_id. Optional.
+     *  Used by the live view to surface a "⏹ Stop" button that calls
+     *  `cancelRun(workflow_id, run_id)` — without the run_id the live
+     *  view can't address the run it's watching. */
+    onRunStart?: (runId: string) => void,
   ) => {
+    const headers: Record<string, string> = { ...authHeaders() };
+    let body: string | undefined;
+    if (variables && Object.keys(variables).length > 0) {
+      headers['Content-Type'] = 'application/json';
+      body = JSON.stringify({ variables });
+    }
     const res = await fetch(`${_apiBase}/api/workflows/${id}/trigger`, {
       method: 'POST',
-      headers: authHeaders(),
+      headers,
+      body,
       signal,
     }).catch(e => {
       if (e.name !== 'AbortError') onError(String(e));
@@ -764,7 +792,9 @@ export const workflows = {
             const data = line.slice(5).trim();
             try {
               const parsed = JSON.parse(data);
-              if (eventType === 'step_start') onStepStart(parsed);
+              if (eventType === 'run_start' && onRunStart) onRunStart(parsed.run_id ?? '');
+              else if (eventType === 'step_start') onStepStart(parsed);
+              else if (eventType === 'step_progress' && onStepProgress) onStepProgress(parsed.text ?? '');
               else if (eventType === 'step_done') onStepDone(parsed);
               else if (eventType === 'run_done') onRunDone(parsed);
               else if (eventType === 'error') onError(parsed.error ?? 'Unknown error');
@@ -788,6 +818,30 @@ export const workflows = {
     api<{ run_cancelled: boolean; child_discs_cancelled: number }>(
       'POST', `/workflows/${id}/runs/${runId}/cancel`, {}
     ),
+  /** 0.7.0 Phase 4 — submit operator's decision on a paused (Gate) run.
+   *  `decision` ∈ "approve" | "request_changes" | "reject".
+   *  `comment` is required for request_changes (the agent needs feedback).
+   *  Returns the new run status (Running on approve / request_changes,
+   *  Failed on reject). The actual continuation runs in the background. */
+  decideRun: (id: string, runId: string, payload: import('../types/generated').DecideRunRequest) =>
+    api<import('../types/generated').DecideRunResponse>(
+      'POST', `/workflows/${id}/runs/${runId}/decide`, payload
+    ),
+  /** 0.7.0 UX pass — export a single workflow as a self-contained JSON.
+   *  Triggers a browser file download via Content-Disposition. Different
+   *  contract from the regular `api()` helper (binary-style response,
+   *  not the {success, data} envelope), so we bypass it. */
+  exportWorkflow: async (id: string): Promise<{ filename: string; blob: Blob }> => {
+    const r = await fetch(`/api/workflows/${id}/export`, { credentials: 'same-origin' });
+    if (!r.ok) throw new Error(`Export failed (${r.status})`);
+    const cd = r.headers.get('content-disposition') || '';
+    const m = cd.match(/filename="([^"]+)"/);
+    const filename = m?.[1] || `workflow-${id}.kronn-workflow.json`;
+    return { filename, blob: await r.blob() };
+  },
+  /** 0.7.0 UX pass — import a workflow from a previously-exported JSON. */
+  importWorkflow: (payload: import('../types/generated').ImportWorkflowRequest) =>
+    api<Workflow>('POST', '/workflows/import', payload),
   /** Dry-run preview of a BatchQuickPrompt step: returns parsed items, sample
    *  rendered prompt, QP info, errors. NO discussion is created. */
   testBatchStep: (req: { step: WorkflowStep; mock_previous_output?: string | null; previous_step_name?: string | null }) =>
@@ -909,6 +963,43 @@ export const quickPrompts = {
    */
   batchRun: (qpId: string, req: BatchRunRequest) =>
     api<BatchRunResponse>('POST', `/quick-prompts/${qpId}/batch`, req),
+  /** 0.7.0 UX pass — export a single QP as JSON file download. */
+  exportQp: async (id: string): Promise<{ filename: string; blob: Blob }> => {
+    const r = await fetch(`/api/quick-prompts/${id}/export`, { credentials: 'same-origin' });
+    if (!r.ok) throw new Error(`Export failed (${r.status})`);
+    const cd = r.headers.get('content-disposition') || '';
+    const m = cd.match(/filename="([^"]+)"/);
+    const filename = m?.[1] || `quick-prompt-${id}.kronn-qp.json`;
+    return { filename, blob: await r.blob() };
+  },
+  importQp: (payload: import('../types/generated').ImportQuickPromptRequest) =>
+    api<QuickPrompt>('POST', '/quick-prompts/import', payload),
+};
+
+// ─── Quick APIs (0.6.0) ─────────────────────────────────────────────────────
+// Mirror of `quickPrompts` for HTTP call templates. Same CRUD shape; the
+// `runQa` endpoint executes the saved QuickApi standalone with the user-supplied
+// variables and returns the parsed envelope (or the error message on failure).
+
+export const quickApis = {
+  list: () => api<QuickApi[]>('GET', '/quick-apis'),
+  create: (req: CreateQuickApiRequest) => api<QuickApi>('POST', '/quick-apis', req),
+  update: (id: string, req: CreateQuickApiRequest) => api<QuickApi>('PUT', `/quick-apis/${id}`, req),
+  delete: (id: string) => api<void>('DELETE', `/quick-apis/${id}`),
+  runQa: (id: string, req: RunQuickApiRequest) =>
+    api<RunQuickApiResponse>('POST', `/quick-apis/${id}/run`, req),
+  batchRunQa: (id: string, req: BatchRunQuickApiRequest) =>
+    api<BatchRunQuickApiResponse>('POST', `/quick-apis/${id}/batch`, req),
+  exportQa: async (id: string): Promise<{ filename: string; blob: Blob }> => {
+    const r = await fetch(`/api/quick-apis/${id}/export`, { credentials: 'same-origin' });
+    if (!r.ok) throw new Error(`Export failed (${r.status})`);
+    const cd = r.headers.get('content-disposition') || '';
+    const m = cd.match(/filename="([^"]+)"/);
+    const filename = m?.[1] || `quick-api-${id}.kronn-qa.json`;
+    return { filename, blob: await r.blob() };
+  },
+  importQa: (payload: ImportQuickApiRequest) =>
+    api<QuickApi>('POST', '/quick-apis/import', payload),
 };
 
 // ─── Skills ─────────────────────────────────────────────────────────────────

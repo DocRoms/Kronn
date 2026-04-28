@@ -1236,58 +1236,32 @@ concrete sub-domain (`host=de.example.com` for a German edition). The
 plugin config stores a default `host` but agents SHOULD override per
 question when the user mentions another edition.
 
-## 2. Historical / Query API — `X-CB-AK` HEADER, ASYNCHRONOUS
+## 2. Historical API — `X-CB-AK` HEADER, synchronous
 
-**Critical**: historical endpoints do NOT accept `apikey` as a query
-parameter. They require the header `X-CB-AK: <KEY>`. Passing the key
-in the URL on `/historical/...` or `/query/...` returns 401 or 404
-that LOOK like access errors — it's just the wrong auth channel.
-
-Two endpoint shapes observed in the wild, both asynchronous:
-
-- **Modern**: `/query/v2/submit/page/` then `/query/v2/status/?query_id=<id>` then `/query/v2/fetch/?query_id=<id>`
-- **Legacy**: `/historical/traffic/series/` (accepts the header directly, returns data synchronously in most cases — but still OK to retry with the modern flow if it doesn't)
-
-### The 3-step async flow (modern, `/query/v2/...`)
+**Critical**: `/historical/...` endpoints do NOT accept `apikey` as a
+query parameter. They require the header `X-CB-AK: <KEY>`. Passing the
+key in the URL returns 401/404 that LOOK like access errors — it's
+just the wrong auth channel. The Kronn plugin auth setting is
+`apikey=` (Live API), so for Historical calls Kronn surfaces the
+same key as the `X-CB-AK` header in the agent's context — copy it
+verbatim.
 
 ```bash
-# 1. Submit — returns { "query_id": "..." }
-curl -s "https://api.chartbeat.com/query/v2/submit/page/?host=example.com&start=2026-04-13&end=2026-04-20" \
-     -H "X-CB-AK: <KEY>"
-
-# 2. Poll status — { "status": "running" | "completed" | "failed" }
-curl -s "https://api.chartbeat.com/query/v2/status/?query_id=<QID>" -H "X-CB-AK: <KEY>"
-
-# 3. Fetch the actual data once status=completed
-curl -s "https://api.chartbeat.com/query/v2/fetch/?query_id=<QID>" -H "X-CB-AK: <KEY>"
-```
-
-### Polling loop template
-
-```bash
-qid=$(curl -s "https://api.chartbeat.com/query/v2/submit/page/?host=example.com&start=2026-04-13&end=2026-04-20" \
-  -H "X-CB-AK: <KEY>" | jq -r .query_id)
-deadline=$(($(date +%s) + 30))
-while :; do
-  st=$(curl -s "https://api.chartbeat.com/query/v2/status/?query_id=$qid" -H "X-CB-AK: <KEY>" | jq -r .status)
-  [ "$st" = "completed" ] && break
-  [ "$st" = "failed" ] && { echo "query failed"; exit 1; }
-  [ $(date +%s) -ge $deadline ] && { echo "timeout"; exit 1; }
-  sleep 1
-done
-curl -s "https://api.chartbeat.com/query/v2/fetch/?query_id=$qid" -H "X-CB-AK: <KEY>"
-```
-
-### Legacy historical — still works with the header
-
-```bash
-# /historical/traffic/series/ accepts the header, returns series JSON directly.
+# Time series — returns JSON directly (synchronous).
 curl -s "https://api.chartbeat.com/historical/traffic/series/?host=example.com&start=2026-04-19&end=2026-04-20&frequency=hour" \
      -H "X-CB-AK: <KEY>"
 ```
 
-Prefer `/query/v2/...` for new queries; fall back to `/historical/...`
-only if the modern path returns 404 for the specific metric.
+Available historical endpoints (all `GET`, all header auth):
+
+- `/historical/traffic/{series,stats}/`
+- `/historical/engagement/{series,stats}/`
+- `/historical/social/{series,stats}/`
+
+There is **no** `/query/v2/...` async family on this Chartbeat
+account — those paths return 404. If you have an older code sample
+referencing them, ignore it and use the `/historical/...` paths above
+or the `/live/...` family for real-time data.
 
 ## 3. Granularity for analysing dips
 
@@ -1305,10 +1279,9 @@ are almost always **API data gaps**, not real zero-traffic moments.
 - Regional editions use the full host: `host=de.example.com`. Check
   the site's client-side Chartbeat config to learn the exact host
   string (often `${locale}.${base}` built from a `Locale` helper).
-- A 404 on `/historical/...` is almost always a wrong-auth or
-  wrong-endpoint issue, NOT an API-key scope limit. Verify by:
-  (a) switching to the header-based auth, (b) trying `/query/v2/...`
-  variant, (c) checking the user's API key scope page shows `all`.
+- A 404 on `/historical/...` is almost always a wrong-auth issue
+  (you sent `apikey=` instead of `X-CB-AK:`), NOT an API-key scope
+  limit. Verify by switching to header auth.
 
 ## 5. Params that work on both families
 
@@ -1337,26 +1310,28 @@ Official docs: https://docs.chartbeat.com/cbp/api/historical-api/getting-started
                     },
                 ],
                 endpoints: vec![
+                    // List sourced from the official Chartbeat API explorer:
+                    // https://chartbeat.com/docs/api/explore/. Keep in sync —
+                    // /live/dashapi/v4, /live/toppages/v4, /live/top_geo/v3,
+                    // /live/social/v3, /live/top_devices/v3, /live/video/*,
+                    // /query/v2/* and /historical/topreferrers,authors are
+                    // NOT real endpoints (or have been deprecated). They
+                    // returned 404 in production and were removed.
+                    //
                     // ── Live Publishing API (synchronous GET, apikey= query param) ──
-                    ApiEndpoint { path: "/live/dashapi/v4".into(),           method: "GET".into(), description: "[LIVE · apikey= · sync] Full live dashboard snapshot (visits, engagement, top pages)".into() },
-                    ApiEndpoint { path: "/live/toppages/v4".into(),          method: "GET".into(), description: "[LIVE · apikey= · sync] Top pages right now, ranked by concurrents".into() },
-                    ApiEndpoint { path: "/live/quickstats/v4".into(),        method: "GET".into(), description: "[LIVE · apikey= · sync] Aggregate stats (visits, engaged time, referrer types)".into() },
-                    ApiEndpoint { path: "/live/recent/v3".into(),            method: "GET".into(), description: "[LIVE · apikey= · sync] Recent visitor activity (5-min granularity — ideal for short-window dip analysis)".into() },
-                    ApiEndpoint { path: "/live/referrers/v3".into(),         method: "GET".into(), description: "[LIVE · apikey= · sync] Top referrers bringing traffic now".into() },
-                    ApiEndpoint { path: "/live/top_geo/v3".into(),           method: "GET".into(), description: "[LIVE · apikey= · sync] Top countries / regions".into() },
-                    ApiEndpoint { path: "/live/summary/v3".into(),           method: "GET".into(), description: "[LIVE · apikey= · sync] Concise traffic summary for a section".into() },
-                    ApiEndpoint { path: "/live/social/v3".into(),            method: "GET".into(), description: "[LIVE · apikey= · sync] Social-network referrers breakdown".into() },
-                    ApiEndpoint { path: "/live/top_devices/v3".into(),       method: "GET".into(), description: "[LIVE · apikey= · sync] Top device types".into() },
-                    ApiEndpoint { path: "/live/video/sources/v1".into(),     method: "GET".into(), description: "[LIVE · apikey= · sync] Live video sources".into() },
-                    ApiEndpoint { path: "/live/video/top_videos/v1".into(),  method: "GET".into(), description: "[LIVE · apikey= · sync] Live top videos".into() },
-                    // ── Historical / Query — `X-CB-AK` HEADER, async submit/status/fetch ──
-                    ApiEndpoint { path: "/query/v2/submit/page/".into(),     method: "GET".into(), description: "[QUERY · X-CB-AK · async-submit] Modern historical query — returns {query_id}. Use header auth, NOT apikey= param.".into() },
-                    ApiEndpoint { path: "/query/v2/status/".into(),          method: "GET".into(), description: "[QUERY · X-CB-AK · async-status] ?query_id=<id> → {status: running|completed|failed}".into() },
-                    ApiEndpoint { path: "/query/v2/fetch/".into(),           method: "GET".into(), description: "[QUERY · X-CB-AK · async-fetch] ?query_id=<id> → final data (poll /status/ until completed first)".into() },
-                    ApiEndpoint { path: "/historical/traffic/series/".into(),method: "GET".into(), description: "[HIST-legacy · X-CB-AK · often sync] Traffic time series with frequency=hour|minute|day. Accepts the header and usually returns data without the submit/fetch dance.".into() },
-                    ApiEndpoint { path: "/historical/traffic/stats/".into(), method: "GET".into(), description: "[HIST-legacy · X-CB-AK] Aggregate historical traffic stats (legacy; prefer /query/v2/submit/page/ for new code)".into() },
-                    ApiEndpoint { path: "/historical/topreferrers/".into(),  method: "GET".into(), description: "[HIST-legacy · X-CB-AK] Top referrers over a date range".into() },
-                    ApiEndpoint { path: "/historical/authors/".into(),       method: "GET".into(), description: "[HIST-legacy · X-CB-AK] Author performance over a date range".into() },
+                    ApiEndpoint { path: "/live/quickstats/v4/".into(),       method: "GET".into(), description: "[LIVE · apikey= · sync] Aggregate stats (visits, engaged time, referrer types) — the closest thing to a dashboard snapshot.".into() },
+                    ApiEndpoint { path: "/live/toppages/v3/".into(),         method: "GET".into(), description: "[LIVE · apikey= · sync] Top pages right now, ranked by concurrents.".into() },
+                    ApiEndpoint { path: "/live/recent/v3/".into(),           method: "GET".into(), description: "[LIVE · apikey= · sync] Recent visitor activity (5-min granularity — ideal for short-window dip analysis).".into() },
+                    ApiEndpoint { path: "/live/referrers/v3/".into(),        method: "GET".into(), description: "[LIVE · apikey= · sync] Top referrers bringing traffic now.".into() },
+                    ApiEndpoint { path: "/live/summary/v3/".into(),          method: "GET".into(), description: "[LIVE · apikey= · sync] Concise traffic summary for a section. Pass `section=<path>` to scope.".into() },
+                    ApiEndpoint { path: "/live/top_geo/v1/".into(),          method: "GET".into(), description: "[LIVE · apikey= · sync] Top countries / regions.".into() },
+                    // ── Historical API (synchronous GET, X-CB-AK header — NOT apikey= param) ──
+                    ApiEndpoint { path: "/historical/traffic/series/".into(),method: "GET".into(), description: "[HIST · X-CB-AK · sync] Traffic time series. Query: `host=`, `start=YYYY-MM-DD`, `end=YYYY-MM-DD`, `frequency=hour|minute|day`. Header auth required — `apikey=` query param will 401/404.".into() },
+                    ApiEndpoint { path: "/historical/traffic/stats/".into(), method: "GET".into(), description: "[HIST · X-CB-AK · sync] Aggregate traffic stats over a date range.".into() },
+                    ApiEndpoint { path: "/historical/engagement/series/".into(), method: "GET".into(), description: "[HIST · X-CB-AK · sync] Engagement time series (engaged time, scroll depth).".into() },
+                    ApiEndpoint { path: "/historical/engagement/stats/".into(), method: "GET".into(), description: "[HIST · X-CB-AK · sync] Aggregate engagement stats over a date range.".into() },
+                    ApiEndpoint { path: "/historical/social/series/".into(), method: "GET".into(), description: "[HIST · X-CB-AK · sync] Social-referrer time series (Facebook, Twitter/X, etc).".into() },
+                    ApiEndpoint { path: "/historical/social/stats/".into(),  method: "GET".into(), description: "[HIST · X-CB-AK · sync] Aggregate social-referrer stats over a date range.".into() },
                 ],
             }),
         },
@@ -1732,6 +1707,101 @@ Official docs: https://developers.google.com/custom-search/v1/reference/rest
                         method: "GET".into(),
                         description: "[SEARCH · apikey= · sync] The one and only endpoint. Pass q=<query>, num=1-10, start=<offset>, plus any filter (dateRestrict, siteSearch, lr, gl, searchType=image). See default_context for the complete param matrix.".into(),
                     },
+                ],
+            }),
+        },
+
+        // ─────────────────────────────────────────────────────────────────
+        // SpeedCurve — synthetic & real-user web performance monitoring.
+        // API-only plugin, HTTP Basic with the API key as username and an
+        // empty password (the `BasicApiKey` auth variant). Two data planes:
+        //   - Synthetic (WPT-style): /v1/sites, /v1/tests, /v1/deploys
+        //   - LUX (Real User Monitoring): /v1/lux/...
+        // Both share the same API key.
+        // ─────────────────────────────────────────────────────────────────
+        McpDefinition {
+            id: "api-speedcurve".into(),
+            name: "SpeedCurve".into(),
+            description: "Synthetic + RUM web performance — Core Web Vitals, deploys, LUX. Tracks performance regressions across releases.".into(),
+            transport: McpTransport::ApiOnly,
+            env_keys: vec!["SPEEDCURVE_API_KEY".into()],
+            tags: vec!["performance".into(), "api".into(), "rum".into(), "synthetic".into(), "core-web-vitals".into()],
+            token_url: Some("https://app.speedcurve.com/account/api/".into()),
+            token_help: Some("Read-only API key from SpeedCurve account settings (Account → API). The same key works for synthetic + LUX endpoints. Auth is HTTP Basic with the key as username and an empty password — Kronn handles the encoding automatically.".into()),
+            publisher: "SpeedCurve".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: Some(r#"# SpeedCurve — Usage Context
+
+> Instructions for agents calling the **SpeedCurve** API via curl.
+
+## 1. Auth — HTTP Basic with API key as user, empty password
+
+```bash
+curl -u "$SPEEDCURVE_API_KEY:" "https://api.speedcurve.com/v1/sites"
+```
+
+Note the trailing colon in `$KEY:` — the password half is intentionally
+empty. Kronn already injects `Authorization: Basic <base64>` for you,
+this is just for reference if the agent debugs raw auth.
+
+## 2. Two data planes
+
+- **Synthetic** (WebPageTest-style scheduled tests): `/v1/sites`,
+  `/v1/tests`, `/v1/deploys`. Tracks Core Web Vitals + custom metrics
+  on a schedule (every 30min, hourly, daily…) from chosen regions.
+- **LUX** (Real User Monitoring — JS beacon on real user pages):
+  `/v1/lux/...`. Aggregated CWV from real visitors, segmented by
+  device/country/page-label/etc.
+
+A single API key works for both.
+
+## 3. Common workflows
+
+- **Did this deploy break perf?** → POST `/v1/deploys` to mark a
+  release timeline → next test run carries the deploy_id → compare
+  `/v1/tests?since=<deploy_id>` against pre-deploy baseline.
+- **CWV regression on prod?** → GET `/v1/lux/sites/<id>/metrics`
+  with `metric=lcp&granularity=hour&start=<ts>&end=<ts>`.
+- **Top slow URLs?** → GET `/v1/lux/sites/<id>/url_metrics`
+  with `metric=lcp&order=desc&limit=20`.
+
+## 4. Pagination
+
+`limit` + `offset` (most endpoints, default limit 100, max 1000).
+Some endpoints use `since` / `until` ISO-8601 timestamps for windowing.
+
+## 5. Rate limit
+
+300 req/min per key. Kronn's BatchApiCall default `concurrent_limit=5`
+is well within bounds for typical fan-outs.
+"#.into()),
+            api_spec: Some(ApiSpec {
+                base_url: "https://api.speedcurve.com".into(),
+                auth: ApiAuthKind::BasicApiKey {
+                    env_key: "SPEEDCURVE_API_KEY".into(),
+                },
+                docs_url: Some("https://support.speedcurve.com/docs/api".into()),
+                config_keys: vec![],
+                endpoints: vec![
+                    // ── Account / sanity ──
+                    ApiEndpoint { path: "/v1/account".into(),                                method: "GET".into(),  description: "[ACCOUNT · sanity] Account info + plan tier — quickest way to verify the key works (200 = OK, 401 = bad key).".into() },
+                    ApiEndpoint { path: "/v1/teams".into(),                                  method: "GET".into(),  description: "[TEAMS] List teams in the account — useful to scope subsequent calls.".into() },
+                    // ── Synthetic — Sites ──
+                    ApiEndpoint { path: "/v1/sites".into(),                                  method: "GET".into(),  description: "[SYNTHETIC · sites] List monitored sites with their site_id (used as path param everywhere else).".into() },
+                    ApiEndpoint { path: "/v1/sites/{site_id}".into(),                        method: "GET".into(),  description: "[SYNTHETIC · sites] One site's config (URL, regions, browsers, schedule).".into() },
+                    // ── Synthetic — Tests ──
+                    ApiEndpoint { path: "/v1/tests".into(),                                  method: "GET".into(),  description: "[SYNTHETIC · tests] List test runs across all sites. Query: `site=<id>`, `since=<unix_ts>`, `until=<unix_ts>`, `limit=N`, `browser=chrome|firefox`, `region=<id>`. One row per (URL × browser × region × timestamp).".into() },
+                    ApiEndpoint { path: "/v1/tests/{test_id}".into(),                        method: "GET".into(),  description: "[SYNTHETIC · tests] Single test run with full waterfall, every CWV metric, screenshots, traces.".into() },
+                    // ── Synthetic — Deploys (release timeline markers) ──
+                    ApiEndpoint { path: "/v1/deploys".into(),                                method: "GET".into(),  description: "[SYNTHETIC · deploys · list] List release markers. Query: `site=<id>`, `since=<ts>`, `limit=N`. Use to correlate perf changes with releases.".into() },
+                    ApiEndpoint { path: "/v1/deploys".into(),                                method: "POST".into(), description: "[SYNTHETIC · deploys · create] Mark a release on the timeline. Body: `{\"site_id\":<id>,\"note\":\"v0.6.0\",\"details\":\"<changelog excerpt>\"}`. Returns the new deploy_id.".into() },
+                    ApiEndpoint { path: "/v1/deploys/{deploy_id}".into(),                    method: "GET".into(),  description: "[SYNTHETIC · deploys] One deploy + its associated tests (auto-fired post-deploy).".into() },
+                    // ── LUX (RUM) ──
+                    ApiEndpoint { path: "/v1/lux/sites".into(),                              method: "GET".into(),  description: "[LUX · sites] List LUX-enabled sites (subset of synthetic sites that have the JS beacon installed).".into() },
+                    ApiEndpoint { path: "/v1/lux/sites/{site_id}/metrics".into(),            method: "GET".into(),  description: "[LUX · metrics] Aggregated CWV time series. Query: `metric=lcp|cls|inp|fcp|ttfb`, `granularity=hour|day`, `start=<ISO>`, `end=<ISO>`, `dimension=device|country|page_label`.".into() },
+                    ApiEndpoint { path: "/v1/lux/sites/{site_id}/url_metrics".into(),        method: "GET".into(),  description: "[LUX · per-URL] Top URLs ranked by a metric. Query: `metric=lcp|cls|inp`, `order=asc|desc`, `limit=N`, `start=<ISO>`, `end=<ISO>`. Use to find slowest pages.".into() },
+                    ApiEndpoint { path: "/v1/lux/sites/{site_id}/page_groups".into(),        method: "GET".into(),  description: "[LUX · page groups] Performance segmented by page label (homepage, article, search…). Same query params as url_metrics.".into() },
                 ],
             }),
         },

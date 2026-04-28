@@ -1,0 +1,11 @@
+-- 0.7.0 Phase 6 — durable state map on workflow runs.
+--
+-- Stored as JSON: a `HashMap<String, String>`. NULL or empty `{}` = no
+-- state set. Agents write entries by emitting `---STATE:<k>=<v>---`
+-- blocks in their output (parsed alongside `---ARTIFACT:` blocks);
+-- steps read entries via `{{state.<k>}}`.
+--
+-- Survives Gate pauses and daemon restarts (rebuilt into the
+-- TemplateContext on resume). The runner persists it whenever it
+-- writes the run progress snapshot.
+ALTER TABLE workflow_runs ADD COLUMN state TEXT;

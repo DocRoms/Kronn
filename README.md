@@ -1,388 +1,205 @@
-# ⚡ Kronn
+<p align="center">
+  <img src="docs/screenshots/Kronn_logo.png" alt="Kronn — Many agents. Zero chaos." width="240" />
+</p>
 
-Self-hosted control plane for AI coding agents.
-Orchestrate Claude Code, Codex, Vibe, Gemini CLI, Kiro, GitHub Copilot, and Ollama (local models) — with less waste.
+<h1 align="center">Kronn</h1>
 
-> Enter the grid. Command your agents.
+<p align="center"><strong><em>Many agents. Zero chaos.</em></strong></p>
 
-> **Early development** — Kronn is functional but actively evolving. Expect breaking changes.
+<p align="center">
+  <img src="docs/screenshots/workflow-wizard.gif" alt="Workflow creation in 30s: advanced mode → Auto-Dev preset → manual trigger → first two steps streaming" />
+</p>
 
----
+Self-hosted control plane for AI coding agents. One local backend orchestrates Claude Code, Codex, Vibe, Gemini CLI, Kiro, GitHub Copilot, and Ollama across your repos — chat, multi-step workflows, MCP (Model Context Protocol — the plugin standard agents use) configs, secrets, and tokens, in one place. Built for developers who automate their work with AI assistants and want a single dashboard instead of seven CLIs and seven MCP configs.
 
-## Why Kronn?
-
-You use AI coding agents. Maybe Claude Code, maybe Codex, maybe both. Each has its own config, its own MCP setup, its own context files scattered across your repos. You manage all of that... manually.
-
-**Kronn fixes that.** Every feature is designed to reduce unnecessary compute — document once instead of letting agents explore blindly, persist context instead of rebuilding it from scratch, frame agents with profiles and skills so they get it right on the first try.
-
-| | Without Kronn | With Kronn |
-|---|---|---|
-| **Agents** | Switch between 3+ CLIs, each with different flags | One dashboard, all agents, `@mentions` |
-| **MCPs** | Maintain separate configs per agent per repo | Configure once, sync to all projects and all agents |
-| **Architecture decisions** | Ask one model, get one opinion | Multi-agent debate: agents argue, then synthesize |
-| **Recurring tasks** | Run manually, forget, repeat | Cron workflows with multi-step, multi-agent pipelines |
-| **Legacy projects** | "Nobody knows how this works" | 20-min AI audit → fully documented, AI-ready codebase |
-| **Tokens** | No idea what you're spending | Per-message cost tracking, usage dashboard with daily history, provider breakdown, project-level visibility |
-| **API Keys** | One key per provider, no switching | Multiple named keys per provider with one-click activation |
-| **Security** | Tokens in plaintext in dotfiles | AES-256-GCM encrypted, self-hosted, nothing leaves your network |
-| **Waste** | Agents explore blindly, rebuild context daily, retry on bad answers | Document once, persist context, get it right first try |
+> Status: **0.6.0** — functional but pre-1.0. Breaking changes happen.
+> License: AGPL-3.0.
 
 ---
 
-## Get Started
+## What you actually do with it
 
-### Desktop App (recommended)
+Plug your repos. Ask Claude Code to refactor module X while Codex audits security on module Y — same dashboard, same MCP config, secrets stay in your vault. When it works, save the prompt as a Quick Prompt, fan it out over 50 tickets, gate the PRs behind human approval. No copy-paste between terminals, no MCP file per agent.
 
-Download, install, launch. No Docker, no CLI, no config.
+<p align="center">
+  <img src="docs/screenshots/kronn_multi-ai_discussion.png" alt="Multi-agent discussion in Kronn — Claude Code and Codex debating on the same thread, with shared MCPs and project context" />
+</p>
 
-**[Download latest release](https://github.com/DocRoms/Kronn/releases/latest)** — `.msi` (Windows), `.dmg` (macOS), `.deb` / `.AppImage` (Linux).
+---
 
-The setup wizard detects your agents and repositories automatically.
+## Quick start
 
-### Self-hosted (Docker)
+**Prerequisite (both modes):** at least one agent installed locally — Claude Code, Codex, Vibe, Kiro, Gemini CLI, GitHub Copilot CLI, or [Ollama](https://ollama.com) for fully-local models (Llama, Gemma, Qwen…). Kronn drives the runtime you already use; it does not ship its own LLM. The setup wizard auto-detects what's on your `$PATH` (with an `npx` runtime fallback for npm-published agents).
 
-For those who want full control, multi-user P2P sync, or server deployment.
+Pick the install mode that fits:
 
-**Prerequisites:** Docker + Docker Compose. Windows requires WSL2.
+**Desktop app** (one user, one machine — recommended for solo use)
+Download the installer for your OS from [Releases](https://github.com/DocRoms/Kronn/releases/latest). No Docker, no extra runtime. Per-OS steps in [docs/install.md](docs/install.md).
+
+**Self-hosted** (team-shared, always-on, headless server)
+Requires Docker + Docker Compose. On Windows, WSL2 (Docker Engine inside WSL works — Docker Desktop optional).
 
 ```bash
 git clone https://github.com/DocRoms/kronn.git
 cd kronn
 ./kronn start
-# → open http://localhost:3140
+# → http://localhost:3140
 ```
 
-**[Full installation guide (Linux / macOS / Windows)](docs/install.md)**
+In both modes the setup wizard scans your repos and walks you through API keys.
 
-![Kronn Dashboard](docs/screenshots/kronn_dashboard.png)
+### Day 1 — first 5 minutes
+
+1. **Open a project** the wizard found (or add one). Kronn scans existing `.mcp.json` and adopts MCPs automatically.
+2. **Start a discussion**, pick an agent, ask something. The agent runs locally with your MCPs injected — no manual config per CLI.
+3. **Save a useful prompt** as a Quick Prompt with `{{variables}}`. One-shot or fan-out (Batch) over a list of items.
+
+When you want orchestration (multi-step, conditional, scheduled, gated), graduate to a Workflow.
 
 ---
 
-## Core Features
+## Core concepts
 
-### Multi-Agent Discussions
+### Objects you create
+- **Project** — a git repo Kronn knows about. Tracks AI context, MCPs, workflows, audit state.
+- **Discussion** — a chat thread bound (or not) to a project. Single agent or multi-agent debate (N rounds). Streams in real-time via SSE (server-sent events), persisted in SQLite, optionally isolated in a git worktree (Git's "multiple working trees" feature — lets two branches coexist on disk).
+- **Quick Prompt** — reusable prompt template with `{{variables}}` and conditional sections. One-shot or fan-out over a list.
+- **Workflow** — a multi-step pipeline. See below.
 
-Chat with agents in project context. Use `@claude` or `@codex` to target specific agents. **Debate mode**: agents discuss in configurable rounds (1-3) and a primary agent synthesizes.
+### How agents are shaped
+Three layers injected into the agent's system prompt — independent axes:
 
-Persistent conversations backed by SQLite. Full i18n (French, English, Spanish). Claude Code streamed token-by-token with per-message tracking. **Switch agent mid-conversation** — click the agent name to switch; the new agent auto-summarizes and continues. **Favorites** — pin any discussion (star icon in header) to a dedicated "Favorites" section at the top of the sidebar. **Unread badges** on individual discussions AND group headers — never lose track of new messages. Archive, retry, edit, search, swipe gestures, multi-line input, emoji autocomplete (`:tada:` → 🎉).
+| Layer | Answers | Example |
+|---|---|---|
+| **Profile** | WHO is talking | "Senior backend engineer" / "Tech writer" |
+| **Skill** | WHAT it knows | "Rust ownership" / "JSONPath RFC 9535" |
+| **Directive** | HOW it talks | "Concise, no apologies" / "Always reference the file path" |
 
-![Multi-agent discussion with debate mode](docs/screenshots/kronn_multi-ai_discussion.png)
+17 default profiles, 25 default skills, custom ones via Markdown + YAML in `~/.config/kronn/`.
 
-### Multi-User P2P
+### Integrations
+- **Plugin (MCP / API / hybrid)** — configure once with encrypted secrets, link to projects N:N. MCPs sync to the right config file per agent (`.mcp.json` for Claude Code, `~/.codex/config.toml` for Codex, etc.). API plugins inject endpoints + auth into the system prompt so the agent calls them via `Bash curl` — no MCP server needed. OAuth2 client-credentials handled transparently.
 
-Share discussions between Kronn instances via WebSocket. Replicated model: each peer stores a full copy, messages sync in real-time. Auto-detection of Tailscale, VPN, and LAN networks. Network diagnostics on connection failures.
+---
 
-### Plugins — MCP + API (new in 0.5)
+## Workflow engine
 
-A 3-tier architecture with encrypted secrets, now covering two kinds of plugins:
+A multi-step pipeline triggered by cron, by a tracker (Jira issue / GitHub PR), or manually. Built via UI wizard or a `WORKFLOW.md` file (Symphony-compatible — see [docs/install.md](docs/install.md) for the spec format).
+
+### Canonical example — Auto-Dev with tests
 
 ```
-Plugin (MCP / API / hybrid)  →  Config (instance + secrets)  →  Project (N:N)
+fetch_issue (JsonData)
+  payload: { key, title, description }     # fixture, swap to ApiCall when you wire a tracker
+
+implement (Agent: ClaudeCode)
+  prompt: "Implement the following request:
+           ---
+           {{steps.fetch_issue.data}}
+           ---
+           If a previous review left feedback: {{state.last_review}}"
+
+run_tests (Exec: cargo test)
+  on_result:
+    contains "ERROR" → goto implement (max 5 iterations)
+
+review (Agent: ClaudeCode)
+  prompt: "Review the implementation. Tests stdout: {{steps.run_tests.data.stdout}}
+           If OK end with [SIGNAL: APPROVED].
+           Else write ---STATE:last_review=<feedback>--- then [SIGNAL: NEEDS_CHANGES]"
+  on_result:
+    contains "NEEDS_CHANGES" → goto implement (max 5 iterations)
+    contains "APPROVED" → stop
+
+notify_done (Notify): POST {webhook} "Auto-Dev complete: {{steps.review.summary}}"
+
+# on_failure (rollback chain — fires only on runtime Failed)
+rollback_notify (Notify): POST {webhook} "Auto-Dev failed at {{failed_step.name}}"
 ```
 
-**56 built-in plugins** — 53 MCPs + 3 API plugins (**Chartbeat**, **Adobe Analytics**, **Google Search**). MCPs expose tools to the agent via `.mcp.json` sync; API plugins ship their endpoints + auth + curl example directly into the agent's system prompt, so the agent calls them via Bash (no MCP server required). OAuth2 client-credentials is supported out of the box (Adobe IMS today, extensible to Google Analytics / Salesforce / any RFC 6749 provider): Kronn mints + caches the bearer token, the agent never sees the secret. A single plugin can offer both MCP and API (hybrid) — useful for services like Jira that have an MCP server AND a REST API. [Full list →](docs/mcps.md)
+That covers a fixture-first data source you can swap for a real API later, loops with feedback, deterministic shell execution, structured outputs, a final notification, and a rollback chain — all in ~20 lines. The wizard produces this from a one-click preset; you don't have to write the spec by hand.
 
-- **Auto-detection** from existing `.mcp.json` files across projects
-- **Disk sync for MCP plugins** — `.mcp.json` (Claude), `.kiro/settings/mcp.json` (Kiro), `.gemini/settings.json` (Gemini), `.vibe/config.toml` (Vibe), `~/.codex/config.toml` (Codex), `~/.copilot/mcp-config.json` (Copilot)
-- **Prompt injection for API plugins** — no `.mcp.json` write; a `## REST APIs available` section with credentials + endpoints + curl template appears in the agent's `--append-system-prompt`
-- **Smart dedup** — detects when the same MCP uses different runtimes (e.g. npm package vs Go binary) and merges them automatically
-- **Inline secret editing** with per-field visibility toggles; API plugins' non-secret config keys (host, workspace id, etc.) render as plain text with placeholders + descriptions sourced from the plugin definition
-- **Global configs** — mark a config as global to deploy to all projects at once
-- **Kind filter** in the Plugins UI: `All | 🔌 MCP | 🌐 API` pills above the category row
+<p align="center">
+  <img src="docs/screenshots/kronn_autodev_with_test_wf.png" alt="Auto-Dev workflow detail in Kronn — step recap, a failing test step that loops back to implement, and the final Notify webhook" />
+</p>
 
-![MCP management with encrypted secrets](docs/screenshots/mcps.png)
+### 7 step types
+- **Agent** — run a CLI agent with auto-injected MCPs, profiles, skills. Can reference a saved Quick Prompt via `quick_prompt_id` — the runtime loads its `prompt_template`, `tier`, and `skill_ids`, with per-field override at the step level.
+- **ApiCall** — hit an API plugin directly from the Rust engine. **Zero tokens** (no LLM in the loop). JSONPath extraction, auto-pagination (Jira / Cloudflare GraphQL / Stripe-style cursors), SSRF-hardened. Can reference a saved Quick API via `quick_api_id` — same per-field override pattern, define the canonical call once and reuse it across N workflows.
+- **JsonData** — emit a literal JSON payload as the step's structured envelope. **Zero tokens, zero network.** Use it to feed a downstream Batch on a fixed list (10 hosts, 5 regions, dev fixture) without standing up an API. Validated at save (≤ 1 MiB, valid JSON).
+- **Batch** — fan-out a Quick Prompt over a list (tickets, JSON path, static items, `JsonData` payload). Optional per-item worktree.
+- **Notify** — webhook POST/PUT/GET. Zero tokens.
+- **Gate** — human approval. Run pauses with `WaitingApproval` until the operator decides via UI or `POST /decide`. Optional notify-on-pause webhook.
+- **Exec** — run a binary from the workflow's allowlist. No `sh -c`, args are argv literals — no shell interpolation.
 
-### Workflows
+### What the engine guarantees
+- **Guards** stop runaway runs (timeout, max LLM calls, loop detection) with a distinct `StoppedByGuard` status — orange in UI, not red.
+- **Loops** via backward jumps. Agents emit `---STATE:k=v---` lines persisted on the run row, exposed as `{{state.X}}` and `{{iter.X}}` in next iterations.
+- **Structured outputs** validate against a JSON Schema with auto-repair retry on failure.
+- **Rollback** fires `on_failure` steps only on `Failed` (not Cancelled, not StoppedByGuard, not Gate reject).
+- **Honest run history** — every step result snapshots what actually ran. Editing the workflow doesn't rewrite past runs.
+- **Launch variables** mirror Quick Prompts. Manual launch shows a form, values become `{{var_name}}` in step prompts. The wizard live-warns if a prompt references an undeclared `{{var}}`.
+- **Per-item Export/Import** — single-file JSON for Workflows + Quick Prompts, share between machines.
 
-One system for everything: cron jobs, multi-step pipelines, issue-to-PR automation, manual triggers, and **webhook notifications** (Notify step — zero tokens, direct HTTP call). Created from a 5-step UI wizard or imported from a `WORKFLOW.md` file. MCP tools auto-injected into agent prompts.
-
-**Level 1 — Simple cron**: one agent, one prompt, on a schedule.
-```yaml
----
-trigger: { cron: "0 2 * * 1" }
-agent: claude-code
----
-Audit all dependencies for known vulnerabilities.
-```
-
-**Level 2 — Multi-step, multi-agent**: chain steps, different agents per step, debates.
-```yaml
----
-trigger: { cron: "0 9 * * *" }
-steps:
-  - name: scan
-    agent: claude-code
-    mcps: [filesystem]
-    prompt: "List all TODO/FIXME comments in the codebase."
-  - name: prioritize
-    agents: [claude-code, codex]
-    mode: debate
-    rounds: 2
-    prompt: "Rank these TODOs by business impact and effort."
-  - name: report
-    agent: claude-code
-    prompt: "Generate a markdown report and create a GitHub issue."
----
-```
-
-**Level 3 — Tracker-driven (Issue → PR)** and **Level 4 — Manual trigger**: see [Workflow documentation](docs/workflows.md).
-
-**Level 5 — Désagentification (0.5.1)** — the new `ApiCall` step hits a Kronn-configured API plugin (Chartbeat, Jira, Cloudflare, Adobe Analytics, Google Search…) directly from the Rust engine, extracts the JSON field of your choice via JSONPath (RFC 9535), and pipes it to the next step. Zero tokens consumed. The agent stops doing `Bash curl` on APIs we already know how to call — a triage workflow that burned 40k tokens on "fetch + parse" drops that phase to 0.
-```yaml
----
-trigger: { cron: "0 * * * *" }
-steps:
-  - name: fetch_top_pages
-    type: ApiCall
-    plugin: chartbeat
-    endpoint: /live/toppages/v4
-    query: { limit: "5" }
-    extract: { path: "$.pages[*].title" }
-  - name: summarize
-    agent: claude-code
-    prompt: "Voici les titres : {{steps.fetch_top_pages.data}}. Résume."
-  - name: notify_slack
-    type: Notify
-    url: "https://hooks.slack.com/services/XXX"
-    body: '{"text": "{{steps.summarize.output}}"}'
----
-```
-Security: SSRF host allowlist (no cross-host, no subdomain slip, no scheme downgrade), DNS rebind check blocking RFC1918 + link-local (`169.254.*`) + loopback + IPv6 ULA, secret-redacting logs (bearer tokens, query API keys). Auto-pagination detection for Jira (`startAt`/`nextPageToken`), Cloudflare GraphQL (`pageInfo.endCursor`), Stripe-style (`has_more`). One-click **"Chartbeat top 5 → Résumé IA → Slack"** starter template in the wizard.
-
-**AI helper for the ApiCall step** — clicking *Aide config IA* in the step card opens an ephemeral chat bubble. Pick any locally-installed agent, describe what you want to fetch in plain language, and the agent emits structured suggestions (endpoint, query params, JSONPath extract) that the UI surfaces as one-click *Appliquer* buttons. The conversation is created on demand and deleted on close — nothing persists, nothing leaks across sessions, and a client-side allowlist prevents the agent from rewriting anything outside the documented API surface. Per-plugin debugging tips (Chartbeat host pitfall, Jira pagination, Cloudflare datetime trap…) are baked into the system prompt; the agent gets the API spec + the current step state + the last test's HTTP error verbatim so it can debug a 4xx without guessing. Auth-managed query params and headers (apikey, Bearer, OAuth2) are auto-stripped from suggestions and rendered read-only above the query editor (`••••••••` · 👁) so users don't paste their key twice.
-
-**Click-to-pick JSONPath extraction** — after testing the call, click any key inside a returned object to extract `$.path[*].field` (all items), or any value to extract `$.path[0].field` (that specific one), or the `[N]` count to iterate, or `[i]` to grab a single object. Smart suggestion chips above the path input list the most useful extracts derived from your real response (`Tous les "title" (5 valeurs)`, `Itérer sur les 5 éléments`, `Compteur "total" = 173`) with the resolved sample previewed inline — no JSONPath knowledge needed.
-
-**API plugins shipped**: Chartbeat (live + historical analytics), GitHub (issues, PRs, Actions, releases, commits, search — hybrid MCP + REST sharing one PAT), **Jira / Atlassian Cloud** (JQL search, single issue + comments + transitions, projects + components + versions, custom-field schema, saved filters — hybrid MCP + REST, same email + API token for both), Google Programmable Search, Adobe Analytics. Each plugin's auth is auto-injected (`apikey` query, `Authorization: Bearer …` header, `Authorization: Basic <base64>` for Jira, OAuth2 client credentials) and surfaces as a read-only "Auth — gérée par Kronn" panel above the query editor — your secrets stay in Settings → APIs and never leak into the step config. The plugin's `base_url` can be templated against the encrypted env (`{JIRA_URL}` resolved per-workspace), so one Atlassian plugin definition serves every Kronn user without forking per-tenant.
-
-**Path placeholders** like `/repos/{owner}/{repo}/issues` (GitHub) or `/rest/api/3/issue/{issueIdOrKey}` (Jira) are auto-detected from the endpoint and rendered as dedicated input fields below the picker, with a live "URL résolue" preview. The values stay separate from the template path so re-editing a saved workflow shows BOTH the template AND your concrete `{owner}/{repo}/{issue_number}` values — no retyping.
-
-**Run history is honest** — when you edit a workflow between runs (swap agent, retarget plugin, change endpoint), each `StepResult` snapshots what was actually used at execution time (`step_kind`, `step_agent`, `step_api_plugin_slug`, `step_api_endpoint_path`). The run-detail page surfaces a per-step badge (`🔌 API mcp-github · /user`, `📤 NOTIFY hooks.slack.com`, `Codex`) so you can audit what *really* ran, not what's currently configured.
-
-**One-click stop** — when a workflow is running, clicking the nav icon opens an **Active Runs popover** listing every in-flight run (name, project, live elapsed timer, `⏹ Arrêter` button) from any page. A matching inline Stop button appears on each running workflow card in the list. No modal, no navigation — kill in one click.
-
-<details>
-<summary><strong>Symphony compatibility</strong></summary>
-
-Kronn reads [OpenAI Symphony](https://github.com/openai/symphony)'s `WORKFLOW.md` natively. Existing users can migrate without changes. Kronn extends the pattern with: any trigger (cron, GitHub/Linear/GitLab/Jira, manual), any agent per step, debate mode, auto-injected MCPs, dashboard UI, and per-run token tracking.
-
-</details>
-
-### Agent Configuration (3-axis model)
-
-Three independent axes shape how agents behave — all multi-selectable, all available in discussions and workflow steps:
-
-**Profiles (WHO)** — 17 built-in personas with distinct perspectives and avatars.
-
-| Category | Profiles |
-|----------|----------|
-| Technical | Architect, Tech Lead, QA Engineer, Game Developer, Staff Engineer |
-| Business | Product Owner, Scrum Master, Technical Writer, Entrepreneur, UX Designer, Translator/Teacher |
-| Data | Data Analyst, Data Engineer |
-| Operations | SRE/DevOps, SEO/Growth |
-| Meta | Devil's Advocate, Mentor |
-
-**Skills (WHAT)** — 25 built-in domain expertise, injected as knowledge.
-
-| Category | Skills |
-|----------|--------|
-| Language | Rust, TypeScript, Python, Go, PHP, Java, Kotlin, Swift, C# |
-| Domain | Security, DevOps, Data Engineering, Database, Terraform/IaC, Testing, API Design, Mobile |
-| Business | SEO, Web Performance, Green IT, Accessibility, GDPR |
-
-**Directives (HOW)** — control output format and verbosity. Conflict detection prevents contradictory combinations.
-
-Custom profiles, skills, and directives are Markdown files with YAML frontmatter in `~/.config/kronn/`. Create, edit, and delete from the dashboard.
-
-### AI Audit Pipeline
-
-Generate, review, and validate AI context documentation for any project in 4 steps:
-
-```
-NoTemplate → TemplateInstalled → Audited → Validated
-```
-
-1. **Install template** — one-click `ai/` skeleton with redirectors (`CLAUDE.md`, `.cursorrules`, `.windsurfrules`)
-2. **AI audit** — 10-step automated analysis (~20 min, SSE progress) with 3 expert profiles: project analysis, repo map, coding rules, testing, architecture, glossary, operations, MCP servers, tech debt, final review
-3. **Validation** — interactive Q&A where the AI asks about ambiguities and updates docs in real-time
-4. **Mark as validated** — project is AI-ready
-
-Optional **pre-audit briefing**: 5 quick questions about purpose, stack, team, conventions, and watch points.
-
-**Drift detection**: compares source file checksums against stored data, reports stale sections without consuming tokens. Partial re-audit re-runs only stale steps.
-
-![AI audit pipeline in progress](docs/screenshots/audit.png)
-
-### Voice — TTS & STT (100% Local)
-
-Talk to your agents. No cloud, no API, no data leaves your machine.
-
-- **Speech-to-Text** — Whisper WASM via `@huggingface/transformers`. Three model sizes (Tiny/Base/Small).
-- **Text-to-Speech** — Piper WASM via `@diffusionstudio/vits-web`. 9 voices across FR/EN/ES.
-- **Voice Conversation Mode** — hands-free loop: speak → send → agent responds → TTS reads → mic auto-starts.
-
-All models downloaded on first use and cached locally.
-
-![Audio Discussion mode](docs/screenshots/kronn_audio_discussion.png)
-
-### More Features
-
-- **RTK integration — "Mode économique" (0.5.1)** — Kronn detects, wires, and reports on [RTK (Rust Token Killer)](https://github.com/rtk-ai/rtk), a shell-output compressor that cuts ~89% of tokens on commands like `git`, `cargo`, `ls`, test runners. Settings → Agents ships a `<CompressionSection />` with a one-click "Activate on all compatible agents" CTA (spawns the right `rtk init -g ...` per agent), a per-agent badge (🟢 active / 🟡 hook missing / ⚪ not installed / italic "Non pris en charge par RTK" for Kiro / Copilot CLI / Vibe), and a live counter pulling `rtk gain --all --format json` with an expandable 3-card breakdown (tokens saved / avg ratio / commands compressed). A (?) tooltip nuances the "eco mode" claim: the most sustainable AI is no AI — if you do use it, RTK reduces the footprint. Ships bundled in the Docker image (0.37.1 pinned, arm64-ready), host-side `~/.config/rtk` + `~/.local/share/rtk` bind-mounted so stats match what `rtk gain` shows on the host
-- **Document generation — Kronn Docs (0.5.1)** — Agents produce PDF / DOCX / XLSX / CSV / PPTX files directly from the chat with zero install on the user side. A Python sidecar (WeasyPrint + python-docx + XlsxWriter + python-pptx) is spawned by the backend; the agent wraps content in a ```` ```kronn-doc-preview ```` fence (HTML → PDF/DOCX with live sandboxed preview) or a ```` ```kronn-doc-data ```` fence (JSON → XLSX/CSV/PPTX with row/sheet/slide summary). Skill `kronn-docs` auto-activates on FR/EN/ES prompts like "génère un rapport PDF" / "create a spreadsheet" / "exporta una presentación" — per-skill opt-out in Settings
-- **Usage Dashboard** — real-time token consumption and cost estimation across all providers. Summary cards, provider breakdown bar, per-project horizontal bars, daily history chart (30 days, stacked by provider). Toggle between token count and USD cost view. Filter by discussions or workflows. Click a discussion name to navigate directly to it
-- **Project Bootstrap** — create a new project from scratch with an AI architect guiding Vision → Architecture → Stack → MVP → Action Plan
-- **Worktree Isolation + Test Mode** — each discussion/workflow runs in its own git worktree. One-click **🧪 Test mode** (0.5) swaps your main repo to the discussion's branch so you can try the code in your IDE without leaving Kronn; the agent is paused, a global banner shows the active test, and exiting restores your previous branch + pops the auto-stash + re-creates the worktree. Triple preflight (worktree dirty, main dirty, detached HEAD) with a modal that lets you pick _stash and proceed_ / _commit first_ / _cancel_ — rollback on any failure
-- **Agent Incompatibility** — Kronn tracks per-agent limitations and auto-excludes incompatible agents from steps
-- **Guided Tour** — 17-step interactive onboarding for new users. Auto-launched on first visit, replayable from "?" button. 4 learn-by-doing steps where the user clicks the real UI (pulse animation). Spotlight overlay with auto-positioned tooltips. Keyboard navigation (Escape/arrows). Mobile-responsive
-- **Secret unlock area** — a hidden zone in Settings (revealed by a
-  well-known arcade input sequence entered on the Settings page)
-  accepts short codes that ship with each release. A single code can
-  unlock a theme, a profile, or both at once. Lets the maintainer
-  ship early-access palettes and personas for testers without
-  exposing them in the default UI. Codes are never distributed with
-  the source — only their hashes
+Reference for contributors: [`ai/index.md`](ai/index.md) (workflow engine sections + "Plugin kind: MCP | API | hybrid").
 
 ---
 
-## Supported Agents
+## When Kronn fits — and when it doesn't
 
-| Agent | CLI | Status |
-|-------|-----|--------|
-| Claude Code | `claude` | ✅ Supported |
-| OpenAI Codex | `codex` | ✅ Supported |
-| Vibe | `vibe` | ✅ Supported (CLI + direct Mistral API) |
-| Gemini CLI | `gemini` | ✅ Supported |
-| Kiro | `kiro-cli` | ✅ Supported |
-| GitHub Copilot | `copilot` | ✅ Supported |
-| **Ollama (local)** | `ollama` | ✅ Supported (100% local, zero cost) |
-| DeepSeek | `deepseek` | Planned |
-| OpenCode | `opencode` | Planned |
+**Fits** if you run multiple AI CLIs, want one dashboard, want to industrialize repeatable runs (PR review, audit, generate-from-spec, batch over tickets), and prefer self-hosted with secrets in your vault.
 
-Auto-detected at setup with runtime probe fallback (npx). Per-agent permissions toggle. Multiple named API keys per provider. **Ollama**: runs models locally (Llama, Gemma, Codestral, Qwen) — setup wizard in Settings with health check, model suggestions, and contextual install instructions per OS.
+**Doesn't fit** for pure RAG pipelines, agents-over-API-only stacks (LangGraph + LiteLLM is the better path), or workloads needing managed multi-tenancy. Kronn is a **runner of CLI agents on local files**, not a Python LLM framework.
 
-![Multi API key management per agent](docs/screenshots/multiApiKeyByAgent.png)
+**Why not n8n / Temporal / LangGraph?** n8n is generic automation (no agent context, no MCP). Temporal is durable execution at scale (overkill, no AI primitives). LangGraph is in-process Python orchestration (no CLI agents, no MCP plumbing). Kronn fills the niche where you orchestrate *external* AI CLIs across local repos.
 
 ---
 
-## CLI Usage
+## Architecture in one paragraph
+
+Backend Rust + axum + SQLite (WAL mode, local file at `~/.config/kronn/data.json` or container volume) on a Tokio runtime. Frontend React 19 + Vite, types shared with the backend via `ts-rs` (no schema drift). Agents run as external processes — Kronn spawns the right CLI with the right env, parses streaming output, persists per-step results. Secrets live in an AES-256-GCM vault. Nothing leaves your machine unless you opt-in to P2P contact sharing. Full schema: [`ai/architecture/overview.md`](ai/architecture/overview.md).
+
+---
+
+## Other features (sorted by use case)
+
+**Quality & oversight** — AI-driven repo audit (~50–150K tokens, breakdowns by file/topic), structured questions surfaced from agent output, run timeline with edit history, per-step token tracking.
+
+**Productivity** — multi-agent debate (N rounds for adversarial reasoning), voice mode (mic-in / TTS-out), generate docs from spec, secret theme switcher.
+
+**Distribution & infra** — P2P contact sharing (Tailscale-friendly, opt-in), bidirectional host MCP sync (Kronn ↔ `~/.claude.json`, `~/.codex/config.toml`, `.gemini/settings.json`), RTK (token-saving CLI wrapper) integration.
+
+---
+
+## CLI
 
 ```bash
-./kronn start           # Interactive flow: detect agents, choose CLI or web
-./kronn start --debug   # Same + verbose backend logs auto-tailed in terminal
-./kronn stop            # Stop all services
-./kronn restart         # Stop and restart services
-./kronn web             # Launch web interface directly
-./kronn logs            # View service logs (Ctrl+C to detach)
-./kronn status          # Overview (delegates to API when backend is up)
-./kronn agents          # List detected agents (API-first, local fallback)
-./kronn projects        # List projects with audit status (requires backend)
-./kronn init [path]     # Configure AI context for a repo
-./kronn mcp sync        # Sync MCP configs across repos
-./kronn help            # Show help
+./kronn start              # Docker mode (default)
+./kronn stop
+./kronn status             # Cross-checks API + container state
+./kronn logs [service]
+./kronn restart            # Smart restart (no downtime if config didn't drift)
+./kronn dev                # Frontend dev server + backend hot-reload
+./kronn agents             # List installed CLIs + Kronn-detected status
+./kronn projects           # List / add / remove projects
+./kronn mcp sync           # Force resync host MCP files
 ```
-
-<details>
-<summary><strong>Dev commands</strong></summary>
-
-```bash
-make start              # Build & launch (Docker)
-make start DEBUG=1      # Same, with verbose backend logs (debug level)
-make stop               # Stop services
-make logs               # Tail logs (all services)
-make dev-backend        # Rust hot reload
-make dev-frontend       # Vite dev server
-make typegen            # Sync Rust → TS types
-make bump V=x.y.z      # Bump version everywhere
-```
-</details>
 
 ---
 
-## Architecture
+## Security notes
 
-```
-kronn/
-├── backend/            # Rust (Axum) — API, workflows, agents, SQLite
-│   └── src/
-│       ├── api/            # setup, projects, agents, mcps, workflows, discussions, contacts
-│       ├── core/           # config, scanner, registry, crypto, cmd helpers, profiles, directives
-│       ├── agents/         # Agent runner (spawns CLIs, streams stdout)
-│       ├── workflows/      # Workflow engine, triggers, steps
-│       ├── skills/         # 25 built-in (Markdown + YAML frontmatter)
-│       ├── profiles/       # 17 built-in agent profiles
-│       └── directives/     # Output directives
-├── frontend/           # React 19 + TypeScript + Vite
-│   └── src/
-│       ├── pages/          # SetupWizard, Dashboard, Settings, Discussions, MCPs, Workflows
-│       ├── types/          # generated.ts (from Rust via ts-rs)
-│       └── lib/            # Typed API client + SSE + i18n (fr/en/es) + TTS/STT engines
-├── desktop/            # Tauri desktop app (backend embedded, no Docker needed)
-├── ai/                 # AI context (for agents working on Kronn itself)
-├── templates/          # AI context templates (for managed projects)
-├── tests/bats/         # 192 shell tests (bats-core)
-├── docker-compose.yml  # 3 services: backend, frontend, gateway
-└── LICENSE             # AGPL-3.0
-```
-
-**Stack**: Rust (Axum 0.7) + TypeScript (React 19 / Vite) — full type safety end-to-end via `ts-rs`.
-
-<details>
-<summary><strong>Configuration</strong></summary>
-
-Generated at first run in `~/.config/kronn/config.toml`:
-
-```toml
-[server]
-host = "127.0.0.1"
-port = 3140
-
-[[tokens.keys]]
-id = "abc-123"
-name = "Personal API Key"
-provider = "anthropic"
-active = true
-
-[scan]
-paths = ["~/projects", "~/work"]
-ignore = ["node_modules", ".git", "target"]
-scan_depth = 4
-```
-</details>
-
-<details>
-<summary><strong>CI pipeline</strong></summary>
-
-GitHub Actions triggered by `ci-test` label on PRs:
-- **test-backend**: `cargo check` + `cargo clippy` + `cargo test` (~1090 tests)
-- **test-frontend**: `tsc --noEmit` + `pnpm test` (~629 tests, 51 suites)
-- **test-shell**: `make test-shell` (195 bats tests, 8 suites)
-- **desktop-build**: `.github/workflows/desktop-build.yml` — builds Tauri installers for Windows, macOS, and Linux
-</details>
+- **No TLS shipped.** Run behind a reverse proxy (nginx, Caddy, Tailscale Funnel) for non-localhost use.
+- **SSRF-hardened API plugins** — blocks loopback, RFC1918 (private IPv4 ranges like `10.0.0.0/8`), link-local, IPv6 ULA (Unique Local Address `fc00::/7`), with DNS-rebind detection.
+- **Exec step** is allowlist-gated per workflow, no `sh -c`, args are argv literals — no shell interpolation possible from templated values.
+- **Secrets** encrypted at rest with AES-256-GCM. Redacted from agent stdout and logs.
+- Threat model details: [`ai/operations/secret-themes.md`](ai/operations/secret-themes.md) and the workflow engine sections of [`ai/index.md`](ai/index.md).
 
 ---
 
-## Security
+## Links
 
-> **Kronn does not include TLS.** Do not expose port 3140 without a TLS reverse proxy (nginx, Caddy, Traefik...).
-
-> **Authentication is opt-in.** Enable Bearer token auth from Settings — Kronn generates a UUID token shown once. Localhost requests always bypass auth. Remote peers (multi-user P2P) require the token.
-
----
-
-## Philosophy
-
-Kronn is built on a simple principle: **every token that doesn't need to be spent, shouldn't be.**
-
-AI agents run on physical hardware with a finite lifespan. Every unnecessary inference cycle wears down GPUs and TPUs, accelerates replacements, and adds to the environmental cost of our industry. Kronn's features minimize waste: document codebases so agents don't explore blindly, persist context so it's never rebuilt, frame agents so they get it right the first time.
-
-The long-term vision: **de-agentify what doesn't need an agent.** MCPs are APIs — when a workflow step is mechanical (post to Slack, create a ticket), a direct API call costs zero tokens. Agent intelligence should be reserved for tasks that actually need reasoning.
-
----
-
-## Contributing
-
-Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md).
-
-## License
-
-AGPL-3.0 — See [LICENSE](LICENSE).
+- [Install guide](docs/install.md) — Docker, Tauri desktop, WSL2 specifics
+- [`ai/index.md`](ai/index.md) — full architecture reference for contributors
+- [CONTRIBUTING.md](CONTRIBUTING.md)
+- [LICENSE](LICENSE) — AGPL-3.0

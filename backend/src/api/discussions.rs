@@ -2235,6 +2235,36 @@ pub async fn orchestrate(
                         };
                         let result = run_agent_streaming(process, &tx, &meta, agent_type).await;
 
+                        // Empty-response detection — when a CLI exits cleanly but
+                        // produces no output, `run_agent_streaming` substitutes
+                        // either `[No response]` (clean exit) or `[Agent exited
+                        // with error] ...` (non-zero exit). Both end up saved
+                        // verbatim in the DB and the user sees a near-empty
+                        // bubble in the debate UI. Detect both forms so the
+                        // daemon log carries an actionable trace AND the
+                        // client gets a System event flagging the round.
+                        let trimmed = result.response.trim();
+                        let is_empty_response = trimmed.is_empty()
+                            || trimmed == "[No response]"
+                            || trimmed.starts_with("[Agent exited with error]");
+                        if is_empty_response {
+                            tracing::warn!(
+                                target: "kronn::orchestration",
+                                discussion = %disc_id,
+                                round,
+                                agent = %agent_name,
+                                tokens_used = result.tokens_used,
+                                response_excerpt = %trimmed.chars().take(200).collect::<String>(),
+                                "Agent finished orchestration round with no usable output — likely rate-limit, silent CLI crash, or auth failure (other agents in the same debate may still succeed; orchestration continues)."
+                            );
+                            emit!(AgentStreamEvent::System { data: serde_json::json!({
+                                "kind": "agent_empty_output",
+                                "agent": agent_name,
+                                "round": round,
+                                "message": format!("⚠️ {} produced no content this round ({}). Other agents in this debate may still succeed; the orchestration continues. Re-launch the debate to retry this agent.", agent_name, trimmed.chars().take(80).collect::<String>()),
+                            })});
+                        }
+
                         // Save to DB — always runs even if client is gone
                         {
                             let msg = DiscussionMessage {

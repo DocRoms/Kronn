@@ -28,7 +28,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock  # Docker socket for docker compose
       - ${HOME}/.local/share:/host-home/.local/share:ro  # Symlink targets (claude, vibe)
       - npm-cache:/home/kronn/.npm  # Persistent npm cache for npx agent execution
-      - ${HOME}/.cache/uv:/home/kronn/.cache/uv:rw  # Share host uv cache for Python MCP servers
+      - uv-cache:/home/kronn/.cache/uv  # Isolated uv cache (named volume — see TD-20260429-uv-cache-uid-mismatch: bind-mounting ~/.cache/uv left root-owned files on host pre-APP_UID, breaking host `uvx` for MCP servers in CC CLI / Codex / Gemini)
       - uv-tools:/home/kronn/.local/share/uv  # Persistent uv tool installs (CloudWatch, Atlassian MCP servers)
       # SSH auth for git push (forward host SSH keys)
       - ${HOME}/.ssh:/home/kronn/.ssh:ro                    # SSH keys + known_hosts
@@ -133,5 +133,6 @@ services:
 volumes:
   kronn-data:
   npm-cache:
+  uv-cache:        # Isolated from host ~/.cache/uv to avoid uid-mismatch pollution (see TD-20260429)
   uv-tools:
   claude-projects:  # Isolates Docker Claude Code sessions from host ~/.claude/projects

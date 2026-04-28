@@ -58,6 +58,13 @@ pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> 
         ("036_mcp_host_sync", include_str!("sql/036_mcp_host_sync.sql")),
         ("037_mcp_host_sync_backfill", include_str!("sql/037_mcp_host_sync_backfill.sql")),
         ("038_mcp_host_sync_collapse", include_str!("sql/038_mcp_host_sync_collapse.sql")),
+        ("039_workflow_guards", include_str!("sql/039_workflow_guards.sql")),
+        ("040_workflow_artifacts", include_str!("sql/040_workflow_artifacts.sql")),
+        ("041_workflow_on_failure", include_str!("sql/041_workflow_on_failure.sql")),
+        ("042_workflow_run_state", include_str!("sql/042_workflow_run_state.sql")),
+        ("043_workflow_exec_allowlist", include_str!("sql/043_workflow_exec_allowlist.sql")),
+        ("044_workflow_variables", include_str!("sql/044_workflow_variables.sql")),
+        ("045_quick_apis", include_str!("sql/045_quick_apis.sql")),
     ];
 
     // Check if there are pending migrations before backing up

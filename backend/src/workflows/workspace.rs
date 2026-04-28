@@ -104,6 +104,28 @@ impl Workspace {
         Ok(ws)
     }
 
+    /// 0.7.0 Phase 4 — attach to a previously-created worktree. Used on
+    /// resume from a Gate pause: the worktree already exists on disk
+    /// (the agent ran in it before the pause), `before_run` already
+    /// fired, and we just want a `Workspace` handle to drive `after_run`
+    /// and `cleanup` once the run finishes. No git side-effects: no
+    /// `worktree add`, no `safe.directory` config, no hook firing.
+    /// The path is taken at face value.
+    pub fn attach(
+        path: PathBuf,
+        repo_path: PathBuf,
+        workflow_name: &str,
+        run_id: &str,
+        hooks: Option<WorkspaceHooks>,
+    ) -> Self {
+        Self {
+            path,
+            branch: build_branch_name(workflow_name, run_id),
+            repo_path,
+            hooks,
+        }
+    }
+
     /// Run the before_run hook.
     pub async fn before_run(&self) -> Result<()> {
         self.run_hook("before_run").await

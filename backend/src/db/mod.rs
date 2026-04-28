@@ -5,6 +5,7 @@ pub mod discussions;
 pub mod mcps;
 pub mod workflows;
 pub mod quick_prompts;
+pub mod quick_apis;
 
 #[cfg(test)]
 #[path = "tests.rs"]

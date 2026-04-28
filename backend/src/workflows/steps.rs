@@ -77,9 +77,18 @@ pub async fn execute_step(
         return outcome;
     }
 
-    // Auto-inject structured output format instructions when output_format = Structured
-    if step.output_format == crate::models::StepOutputFormat::Structured {
-        prompt.push_str(crate::workflows::template::STRUCTURED_OUTPUT_INSTRUCTIONS);
+    // Auto-inject structured output format instructions when output_format
+    // is `Structured` or `TypedSchema`. The TypedSchema variant adds the
+    // schema constraint to the same envelope shape so downstream
+    // `{{previous_step.data.X}}` resolution stays uniform.
+    match &step.output_format {
+        crate::models::StepOutputFormat::Structured => {
+            prompt.push_str(crate::workflows::template::STRUCTURED_OUTPUT_INSTRUCTIONS);
+        }
+        crate::models::StepOutputFormat::TypedSchema { schema } => {
+            prompt.push_str(&crate::workflows::template::build_typed_schema_instruction(schema));
+        }
+        crate::models::StepOutputFormat::FreeText => {}
     }
 
     // Auto-inject on_result signal instructions into the prompt
@@ -91,7 +100,7 @@ pub async fn execute_step(
             let action_label = match &rule.action {
                 ConditionAction::Stop => "the workflow will stop (no further steps needed)".to_string(),
                 ConditionAction::Skip => "the next step will be skipped".to_string(),
-                ConditionAction::Goto { step_name } => format!("the workflow will jump to step '{}'", step_name),
+                ConditionAction::Goto { step_name, .. } => format!("the workflow will jump to step '{}'", step_name),
             };
             prompt.push_str(&format!(
                 "  [SIGNAL: {}]  — use this if {} — {}\n",
@@ -120,21 +129,57 @@ pub async fn execute_step(
                 let mut final_output = agent_output.text.clone();
                 let mut total_tokens = agent_output.tokens_used;
 
-                // For Structured steps: verify envelope exists, try repair if missing
-                if step.output_format == crate::models::StepOutputFormat::Structured
-                    && crate::workflows::template::extract_step_envelope(&final_output).is_none()
-                {
-                        tracing::info!("Step '{}': structured output missing envelope, attempting repair", step.name);
-                        let truncated = if final_output.len() > 2000 { &final_output[..2000] } else { &final_output };
-                        let repair_prompt = crate::workflows::template::REPAIR_PROMPT_TEMPLATE
-                            .replace("{PREVIOUS_OUTPUT}", truncated);
-                    if let Ok(repair_output) = run_agent_with_timeout(step, project_path, work_dir, &repair_prompt, tokens_config, full_access, None).await {
-                        total_tokens += repair_output.tokens_used;
-                        if crate::workflows::template::extract_step_envelope(&repair_output.text).is_some() {
-                            final_output = repair_output.text;
-                            tracing::info!("Step '{}': repair succeeded", step.name);
+                // For Structured / TypedSchema steps: verify envelope exists,
+                // try repair if missing. TypedSchema additionally validates
+                // the `data` field against the user-supplied JSON Schema
+                // subset and triggers repair on validation failure (not
+                // just envelope absence).
+                let needs_envelope = matches!(
+                    step.output_format,
+                    crate::models::StepOutputFormat::Structured
+                        | crate::models::StepOutputFormat::TypedSchema { .. }
+                );
+                if needs_envelope {
+                    let envelope = crate::workflows::template::extract_step_envelope(&final_output);
+                    let validation_error = match (&step.output_format, &envelope) {
+                        (crate::models::StepOutputFormat::TypedSchema { schema }, Some(env)) => {
+                            crate::workflows::template::validate_envelope_against_schema(
+                                &env.data_json, schema,
+                            ).err()
+                        }
+                        _ => None,
+                    };
+                    if envelope.is_none() || validation_error.is_some() {
+                        let reason = if let Some(ref err) = validation_error {
+                            format!("schema validation failed: {}", err)
                         } else {
-                            tracing::warn!("Step '{}': repair failed, using raw output", step.name);
+                            "missing envelope".into()
+                        };
+                        tracing::info!("Step '{}': output {}, attempting repair", step.name, reason);
+                        let truncated = if final_output.len() > 2000 { &final_output[..2000] } else { &final_output };
+                        let repair_prompt = crate::workflows::template::build_repair_prompt(
+                            truncated,
+                            &step.output_format,
+                            validation_error.as_deref(),
+                        );
+                        if let Ok(repair_output) = run_agent_with_timeout(step, project_path, work_dir, &repair_prompt, tokens_config, full_access, None).await {
+                            total_tokens += repair_output.tokens_used;
+                            let repaired_env = crate::workflows::template::extract_step_envelope(&repair_output.text);
+                            let repair_valid = match (&step.output_format, &repaired_env) {
+                                (crate::models::StepOutputFormat::TypedSchema { schema }, Some(env)) => {
+                                    crate::workflows::template::validate_envelope_against_schema(
+                                        &env.data_json, schema,
+                                    ).is_ok()
+                                }
+                                (_, Some(_)) => true,
+                                (_, None) => false,
+                            };
+                            if repair_valid {
+                                final_output = repair_output.text;
+                                tracing::info!("Step '{}': repair succeeded", step.name);
+                            } else {
+                                tracing::warn!("Step '{}': repair failed, using raw output", step.name);
+                            }
                         }
                     }
                 }
@@ -142,8 +187,13 @@ pub async fn execute_step(
                 // Evaluate on_result conditions (check signals + structured status)
                 let mut condition_action = evaluate_conditions(&step.on_result, &final_output);
 
-                // For Structured: also check status field for NO_RESULTS
-                if condition_action.is_none() && step.output_format == crate::models::StepOutputFormat::Structured {
+                // For Structured / TypedSchema: also check status field for NO_RESULTS
+                let envelope_aware = matches!(
+                    step.output_format,
+                    crate::models::StepOutputFormat::Structured
+                        | crate::models::StepOutputFormat::TypedSchema { .. }
+                );
+                if condition_action.is_none() && envelope_aware {
                     if let Some(env) = crate::workflows::template::extract_step_envelope(&final_output) {
                         if env.status == "NO_RESULTS" && step.on_result.iter().any(|r| r.contains == "NO_RESULTS") {
                             condition_action = Some(ConditionAction::Stop);
@@ -154,13 +204,13 @@ pub async fn execute_step(
                 let condition_result = condition_action.as_ref().map(|a| match a {
                     ConditionAction::Stop => "Stop".to_string(),
                     ConditionAction::Skip => "Skip".to_string(),
-                    ConditionAction::Goto { step_name } => format!("Goto:{}", step_name),
+                    ConditionAction::Goto { step_name, .. } => format!("Goto:{}", step_name),
                 });
 
                 // Record whether the structured contract was actually met.
                 // Downstream code (UI badge, SuccessDegraded status, health
                 // checks) can branch on this without re-parsing the output.
-                let envelope_detected = if step.output_format == crate::models::StepOutputFormat::Structured {
+                let envelope_detected = if matches!(step.output_format, crate::models::StepOutputFormat::Structured | crate::models::StepOutputFormat::TypedSchema { .. }) {
                     Some(crate::workflows::template::extract_step_envelope(&final_output).is_some())
                 } else {
                     None
@@ -331,7 +381,10 @@ async fn run_agent_with_timeout(
 /// Evaluate on_result conditions against the step output.
 /// Only checks the last 5 lines for `[SIGNAL: keyword]` to avoid false positives
 /// from the agent quoting instruction text in its response.
-fn evaluate_conditions(rules: &[StepConditionRule], output: &str) -> Option<ConditionAction> {
+///
+/// `pub(crate)` so non-Agent step types (Exec, ApiCall) can also branch on
+/// signals they emit themselves (e.g. `[SIGNAL: ERROR]` on cargo test exit≠0).
+pub(crate) fn evaluate_conditions(rules: &[StepConditionRule], output: &str) -> Option<ConditionAction> {
     // Look at the last 5 lines for a signal
     let tail: Vec<&str> = output.lines().rev().take(5).collect();
     for rule in rules {
@@ -423,10 +476,10 @@ mod tests {
 
     #[test]
     fn test_contains_goto() {
-        let rules = vec![rule("GO_NEXT", ConditionAction::Goto { step_name: "step_b".to_string() })];
+        let rules = vec![rule("GO_NEXT", ConditionAction::Goto { step_name: "step_b".to_string(), max_iterations: None })];
         let output = "Some output\n[SIGNAL: GO_NEXT]";
         let action = evaluate_conditions(&rules, output);
-        assert!(matches!(action, Some(ConditionAction::Goto { step_name }) if step_name == "step_b"));
+        assert!(matches!(action, Some(ConditionAction::Goto { step_name, .. }) if step_name == "step_b"));
     }
 
     #[test]

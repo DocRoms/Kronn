@@ -41,6 +41,7 @@ export const API_NAMESPACES = [
   'discussions',
   'workflows',
   'quickPrompts',
+  'quickApis',
   'skills',
   'profiles',
   'directives',
@@ -79,6 +80,7 @@ interface DefaultMock {
   discussions: Record<string, AnyFn>;
   workflows: Record<string, AnyFn>;
   quickPrompts: Record<string, AnyFn>;
+  quickApis: Record<string, AnyFn>;
   skills: Record<string, AnyFn>;
   profiles: Record<string, AnyFn>;
   directives: Record<string, AnyFn>;
@@ -227,6 +229,16 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       create: resolve({}),
       update: resolve({}),
       delete: resolve(undefined),
+    },
+
+    quickApis: {
+      list: resolve([]),
+      create: resolve({}),
+      update: resolve({}),
+      delete: resolve(undefined),
+      runQa: resolve({ success: true, duration_ms: 0, envelope: null, error: null }),
+      exportQa: vi.fn(),
+      importQa: resolve({}),
     },
 
     rtk: {

@@ -1,10 +1,11 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
-import { Plug, Play, Loader2, ChevronDown, ChevronRight as ChevRight, KeyRound } from 'lucide-react';
+import { Plug, Play, Loader2, ChevronDown, ChevronRight as ChevRight, KeyRound, Link2, X as XIcon } from 'lucide-react';
 import { workflows as workflowsApi } from '../../lib/api';
-import type { AgentType, McpConfigDisplay, McpServer, WorkflowStep, ExtractSpec, StepType } from '../../types/generated';
+import type { AgentType, McpConfigDisplay, McpServer, WorkflowStep, ExtractSpec, StepType, QuickApi } from '../../types/generated';
 import { ApiCallAiHelper } from './ApiCallAiHelper';
 import { authSlotsForServer, type AuthSlot } from './apiCallAuth';
 import { suggestPaths, type PathSuggestion } from './apiCallSuggestions';
+import { collectPlaceholders, substitutePlaceholders } from './apiCallPlaceholders';
 
 /** Plugin + config pair rendered in the plugin picker. */
 export interface ApiPluginOption {
@@ -27,6 +28,16 @@ interface ApiCallStepCardProps {
   /** Locally-installed agent types — shown in the AI helper picker. Empty array
    *  hides the helper button (no usable agent on this host). */
   installedAgents?: AgentType[];
+  /** Backend "agent output language" — passed through to the AI helper so the
+   *  ephemeral discussion + system prompt match the language the user selected
+   *  in Settings → Output language. UI labels stay on the UI locale. */
+  configLanguage?: string;
+  /** 0.7+ — liste des QuickApis disponibles. Quand non vide, la card affiche
+   *  un select "Depuis un Quick API existant" qui permet de référencer un QA
+   *  via `step.quick_api_id`. Le runner hydrate les fields `api_*` manquants
+   *  depuis le QA au run-time (per-field override : le step gagne quand set).
+   *  Mirror du pattern existant pour BatchApiCall. */
+  availableQuickApis?: QuickApi[];
   t: (key: string, ...args: (string | number)[]) => string;
 }
 
@@ -44,12 +55,24 @@ export function ApiCallStepCard({
   projectId,
   nextStepType,
   installedAgents,
+  configLanguage,
+  availableQuickApis,
   t,
 }: ApiCallStepCardProps) {
   const [testing, setTesting] = useState(false);
   const [response, setResponse] = useState<unknown>(null);
   const [responseError, setResponseError] = useState<string | null>(null);
   const [activeField, setActiveField] = useState<ExtractField>('data');
+  // Test-time variable values modal. Opened when the user clicks Test and
+  // we detect unresolved `{{var}}` placeholders that aren't runtime-only
+  // tokens (`{{steps.X.*}}`, `{{state.*}}`, etc.). Without this the
+  // backend would receive a literal `{{host}}` and forward it to the
+  // upstream API, returning an opaque 4xx that doesn't tell the user
+  // "you forgot to substitute your variable".
+  const [testVarsPrompt, setTestVarsPrompt] = useState<{
+    names: string[];
+    values: Record<string, string>;
+  } | null>(null);
   // Open the "Advanced" section by default whenever the step already
   // has any advanced field populated — covers loading an existing step
   // that uses a non-default method, custom timeout, etc. Auto-expansion
@@ -113,6 +136,17 @@ export function ApiCallStepCard({
       setResponseError(t('wf.apicall.testNeedsProjectLink'));
       return;
     }
+    // Detect unresolved placeholders. If any, open the modal to collect
+    // values and bail — the modal's submit handler will re-call this path
+    // with `vars` provided.
+    const unresolved = collectPlaceholders(step);
+    if (unresolved.length > 0 && testVarsPrompt === null) {
+      setTestVarsPrompt({
+        names: unresolved,
+        values: Object.fromEntries(unresolved.map(n => [n, ''])),
+      });
+      return;
+    }
     setTesting(true);
     setResponseError(null);
     try {
@@ -123,8 +157,11 @@ export function ApiCallStepCard({
       // extract preview (right panel) uses `/test-extract` on the cached
       // raw response, so the user still sees the resolved value as they
       // type the path.
-      const stepWithoutExtract = { ...step, api_extract: null };
-      const res = await workflowsApi.testApiCall({ step: stepWithoutExtract, project_id: effectiveProjectId });
+      let stepToSend: WorkflowStep = { ...step, api_extract: null };
+      if (testVarsPrompt) {
+        stepToSend = substitutePlaceholders(stepToSend, testVarsPrompt.values);
+      }
+      const res = await workflowsApi.testApiCall({ step: stepToSend, project_id: effectiveProjectId });
       if (res.success && res.envelope) {
         setResponse(res.envelope.data);
       } else {
@@ -134,6 +171,7 @@ export function ApiCallStepCard({
       setResponseError(String(e));
     } finally {
       setTesting(false);
+      setTestVarsPrompt(null);
     }
   };
 
@@ -152,6 +190,27 @@ export function ApiCallStepCard({
   const endpoints = selectedServer?.api_spec?.endpoints ?? [];
   const query = step.api_query ?? {};
 
+  // 0.7+ — QuickApi reference state. Surfacé en variables au niveau du
+  // composant pour que le JSX puisse adapter le rendu : si un QA est
+  // sélectionné, les fields override sont enroulés derrière un disclosure
+  // (ne pas suggérer qu'il faut tout remplir). `hasApiOverride` détecte si
+  // au moins un field api_* a été overridé au niveau du step — auquel cas
+  // le disclosure s'ouvre auto pour ne pas masquer le travail en cours.
+  const selectedQa = availableQuickApis?.find(qa => qa.id === step.quick_api_id) ?? null;
+  const hasApiOverride = !!selectedQa && (
+    !!step.api_endpoint_path
+    || !!step.api_method
+    || !!step.api_extract
+    || (!!step.api_query && Object.keys(step.api_query).length > 0)
+    || (!!step.api_path_params && Object.keys(step.api_path_params).length > 0)
+    || (!!step.api_headers && Object.keys(step.api_headers).length > 0)
+    || step.api_body !== null && step.api_body !== undefined
+    || !!step.api_pagination
+    || !!step.api_timeout_ms
+    || !!step.api_max_retries
+    || !!step.api_output_var
+  );
+
   return (
     <div className="wf-apicall-card" role="region" aria-label={t('wf.apicall.title')}>
       <div className="wf-apicall-header">
@@ -166,11 +225,114 @@ export function ApiCallStepCard({
             installedAgents={installedAgents}
             lastTestResponse={response}
             lastTestError={responseError}
+            configLanguage={configLanguage}
             t={t}
           />
         )}
       </div>
 
+      {/* ── QuickApi reference (0.7+) ──
+          Picker + bandeau d'héritage avec récap riche. Les fields override
+          ci-dessous sont cachés derrière un disclosure quand un QA est set —
+          on ne suggère pas que tout doit être rempli. */}
+      {availableQuickApis && availableQuickApis.length > 0 && (
+        <div className="wf-apicall-qa-ref" style={{ marginBottom: 10 }}>
+          <label className="wf-apicall-field">
+            <span>
+              <Link2 size={11} style={{ verticalAlign: 'middle', marginRight: 4 }} />
+              {t('wf.apicall.qaPicker')}
+            </span>
+            <select
+              value={step.quick_api_id ?? ''}
+              onChange={e => onChange({ quick_api_id: e.target.value || null })}
+            >
+              <option value="">{t('wf.apicall.qaPickerInline')}</option>
+              {availableQuickApis.map(qa => (
+                <option key={qa.id} value={qa.id}>
+                  {qa.icon} {qa.name} — {qa.api_method ?? 'GET'} {qa.api_endpoint_path}
+                </option>
+              ))}
+            </select>
+          </label>
+          {selectedQa && (
+            <div className="wf-qref-banner">
+              <div className="wf-qref-banner-header">
+                <strong>🔗 {t('wf.apicall.qaInheritedFrom').replace('{0}', selectedQa.name)}</strong>
+                {hasApiOverride && (
+                  <span className="wf-qref-override-badge" title={t('wiz.qrefOverrideActiveHint')}>
+                    🔓 {t('wiz.qrefOverrideActive')}
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => onChange({ quick_api_id: null })}
+                  style={{
+                    background: 'transparent', border: 'none',
+                    color: 'var(--kr-text-muted)', cursor: 'pointer', padding: 2,
+                  }}
+                  title={t('wf.apicall.qaDetach')}
+                >
+                  <XIcon size={11} />
+                </button>
+              </div>
+              <div className="wf-qref-banner-body">
+                <div className="wf-qref-field">
+                  <span className="wf-qref-field-label">{t('wf.apicall.qaSummaryEndpoint')}</span>
+                  <code className="wf-qref-field-value">
+                    {(selectedQa.api_method ?? 'GET')} {selectedQa.api_endpoint_path}
+                  </code>
+                </div>
+                {selectedQa.api_extract && (
+                  <div className="wf-qref-field">
+                    <span className="wf-qref-field-label">{t('wf.apicall.qaSummaryExtract')}</span>
+                    <code className="wf-qref-field-value">
+                      {selectedQa.api_extract.path}
+                    </code>
+                  </div>
+                )}
+                {selectedQa.variables.length > 0 && (
+                  <div className="wf-qref-field">
+                    <span className="wf-qref-field-label">{t('wiz.qrefVars')}</span>
+                    <span className="wf-qref-field-value">
+                      {selectedQa.variables.map(v => (
+                        <code key={v.name} className="wf-qref-var-chip">{`{{${v.name}}}`}</code>
+                      ))}
+                    </span>
+                  </div>
+                )}
+              </div>
+              <p className="wf-qref-hint">{t('wf.apicall.qaInheritedHint')}</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Quand un QA est référencé, les fields override sont cachés derrière
+          un disclosure pour ne pas surcharger l'UI. Auto-open si override
+          actif. Quand pas de QA, le rendu reste tel quel (mode inline). */}
+      {selectedQa ? (
+        <details className="wf-qref-override" open={hasApiOverride}>
+          <summary className="wf-qref-override-summary">
+            ✏️ {t('wf.apicall.qaOverrideToggle')}
+          </summary>
+          <div className="wf-qref-override-body">
+            {renderApiFields()}
+          </div>
+        </details>
+      ) : (
+        renderApiFields()
+      )}
+
+      {/* Le rendu original n'est pas dupliqué : on l'extrait dans une
+          fonction locale pour pouvoir le réutiliser dans les deux branches
+          du conditionnel ci-dessus. JS hoisting garantit que la déclaration
+          plus bas reste accessible ici. */}
+    </div>
+  );
+
+  function renderApiFields() {
+    return (
+    <>
       {/* ── Plugin + endpoint pickers ── */}
       <div className="wf-apicall-pickers">
         <label className="wf-apicall-field">
@@ -285,6 +447,53 @@ export function ApiCallStepCard({
         </button>
         <span className="wf-apicall-tokens-saved">{t('wf.apicall.tokensSaved')}</span>
       </div>
+
+      {/* Variable-substitution modal — opens when the user clicks Test on
+          a step containing user-defined `{{var}}` placeholders. Forces the
+          user to provide concrete values for the test only (the underlying
+          step config is unchanged). Without this, the backend forwards
+          literal `{{host}}` to the upstream API and gets a confusing 4xx. */}
+      {testVarsPrompt && (
+        <div
+          className="wf-import-modal-backdrop"
+          onClick={() => !testing && setTestVarsPrompt(null)}
+        >
+          <div className="wf-import-modal" onClick={e => e.stopPropagation()}>
+            <h3>{t('wf.apicall.testVarsTitle')}</h3>
+            <p className="text-xs text-muted mb-3">{t('wf.apicall.testVarsHint')}</p>
+            {testVarsPrompt.names.map(name => (
+              <div key={name} className="flex-row gap-3 mb-2" style={{ alignItems: 'center' }}>
+                <code className="qp-var-name" style={{ minWidth: 140 }}>{`{{${name}}}`}</code>
+                <input
+                  className="wf-input flex-1"
+                  value={testVarsPrompt.values[name] ?? ''}
+                  onChange={e => setTestVarsPrompt(prev => prev ? {
+                    ...prev,
+                    values: { ...prev.values, [name]: e.target.value },
+                  } : prev)}
+                  placeholder={t('wf.apicall.testVarsPlaceholder')}
+                  autoFocus={testVarsPrompt.names[0] === name}
+                />
+              </div>
+            ))}
+            <div className="flex-row gap-3 mt-4">
+              <button
+                className="wf-cancel-btn"
+                onClick={() => setTestVarsPrompt(null)}
+                disabled={testing}
+              >{t('common.cancel')}</button>
+              <button
+                className="wf-create-btn"
+                onClick={handleTest}
+                disabled={testing || testVarsPrompt.names.some(n => !testVarsPrompt.values[n]?.trim())}
+              >
+                {testing ? <Loader2 size={12} className="spin" /> : <Play size={12} />}
+                {t('wf.apicall.testVarsGo')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {responseError && (
         <div className="wf-apicall-error" role="alert">
@@ -408,8 +617,9 @@ export function ApiCallStepCard({
           />
         </>
       )}
-    </div>
-  );
+    </>
+    );
+  }
 }
 
 // ─── PathParamsEditor ─────────────────────────────────────────────────────

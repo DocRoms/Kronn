@@ -466,12 +466,27 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/workflows/:id/runs", get(api::workflows::list_runs).delete(api::workflows::delete_all_runs))
         .route("/api/workflows/:id/runs/:run_id", get(api::workflows::get_run).delete(api::workflows::delete_run))
         .route("/api/workflows/:id/runs/:run_id/cancel", post(api::workflows::cancel_run))
+        .route("/api/workflows/:id/runs/:run_id/decide", post(api::workflows::decide_run))
+        // 0.7.0 UX pass — per-item export / import (single workflow or QP).
+        // Distinct from /api/config/export which exports the whole DB.
+        .route("/api/workflows/:id/export", get(api::workflows::export_workflow))
+        .route("/api/workflows/import", post(api::workflows::import_workflow))
         .route("/api/workflow-runs/batch-summaries", get(api::workflows::list_batch_run_summaries))
         .route("/api/workflow-runs/:run_id", delete(api::workflows::delete_batch_run))
         // ── Quick Prompts ──
         .route("/api/quick-prompts", get(api::quick_prompts::list).post(api::quick_prompts::create))
         .route("/api/quick-prompts/:id", put(api::quick_prompts::update).delete(api::quick_prompts::delete))
         .route("/api/quick-prompts/:id/batch", post(api::quick_prompts::batch_run))
+        // 0.7.0 UX pass — per-item export / import.
+        .route("/api/quick-prompts/:id/export", get(api::quick_prompts::export_qp))
+        .route("/api/quick-prompts/import", post(api::quick_prompts::import_qp))
+        // ── Quick APIs (0.6.0 — reusable HTTP call templates) ──
+        .route("/api/quick-apis", get(api::quick_apis::list).post(api::quick_apis::create))
+        .route("/api/quick-apis/:id", put(api::quick_apis::update).delete(api::quick_apis::delete))
+        .route("/api/quick-apis/:id/run", post(api::quick_apis::run_qa))
+        .route("/api/quick-apis/:id/batch", post(api::quick_apis::batch_run_qa))
+        .route("/api/quick-apis/:id/export", get(api::quick_apis::export_qa))
+        .route("/api/quick-apis/import", post(api::quick_apis::import_qa))
         // ── Discussions ──
         .route("/api/discussions", get(api::discussions::list))
         .route("/api/discussions", post(api::discussions::create))

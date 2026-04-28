@@ -1,23 +1,28 @@
 import { useState, useRef, useEffect } from 'react';
 import { useT } from '../../lib/I18nContext';
-import { workflows as workflowsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, quickPrompts as quickPromptsApi, mcps as mcpsApi } from '../../lib/api';
+import { workflows as workflowsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, mcps as mcpsApi } from '../../lib/api';
 import { ApiCallStepCard, type ApiPluginOption } from './ApiCallStepCard';
 import { STARTER_TEMPLATES, cloneTemplateSteps } from '../../lib/workflow-templates/chartbeat-top5';
+import { buildV07Presets } from '../../lib/workflow-templates/v07-presets';
 import { AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES, isAgentRestricted } from '../../lib/constants';
 import type {
   Project, Workflow, WorkflowTrigger,
   WorkflowStep, AgentType, WorkflowSafety,
   WorkspaceConfig, StepConditionRule,
   CreateWorkflowRequest, Skill, AgentProfile, Directive,
-  WorkflowSuggestion, QuickPrompt,
+  WorkflowSuggestion, QuickPrompt, QuickApi, WorkflowGuards,
+  PromptVariable,
 } from '../../types/generated';
+import { ExecutionLimitsCard } from './ExecutionLimitsCard';
 import type { AgentsConfig } from '../../types/generated';
 import {
-  Plus, Loader2, Check, X, ChevronRight, ChevronDown,
+  Plus, Loader2, Check, X, ChevronRight, ChevronDown, ChevronUp,
   Clock, GitBranch, Zap, HelpCircle, Settings, Shield,
   AlertTriangle, UserCircle, FileText, Sparkles, Layers, Send,
-  Info,
+  Info, Hand, RotateCcw, Terminal, Bot, Plug, Braces,
 } from 'lucide-react';
+import { scanUndeclaredVars } from '../../lib/scanUndeclaredVars';
+import { userError } from '../../lib/userError';
 import '../../pages/WorkflowsPage.css';
 
 const checkAgentRestricted = isAgentRestricted;
@@ -71,9 +76,14 @@ export interface WorkflowWizardProps {
   onCancel: () => void;
   installedAgentTypes?: AgentType[];
   agentAccess?: AgentsConfig;
+  /** Backend "agent output language" (Settings → Output language). Distinct from
+   *  the UI locale (`useT()`): UI labels follow the user's interface language,
+   *  but agents reply in this language. Used by the ApiCall AI helper to pick
+   *  both the system-prompt translation and the discussion's `language` param. */
+  configLanguage?: string;
 }
 
-export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAgentTypes, agentAccess }: WorkflowWizardProps) {
+export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAgentTypes, agentAccess, configLanguage }: WorkflowWizardProps) {
   const { t } = useT();
   const availableAgents = (installedAgentTypes && installedAgentTypes.length > 0
     ? installedAgentTypes
@@ -135,6 +145,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   // Concurrency
   const [concurrencyLimit, setConcurrencyLimit] = useState<string>(editWorkflow?.concurrency_limit?.toString() ?? '');
 
+  // 0.7.0 — Execution limits (timeout / max LLM calls / loop detection)
+  const [guards, setGuards] = useState<WorkflowGuards | null>(editWorkflow?.guards ?? null);
+
   // Build cron expression from visual inputs (or raw if complex)
   const buildCronExpr = (): string => {
     if (cronRaw) return cronRaw;
@@ -185,11 +198,44 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     // Structured by default — see addStep() for the rationale.
     output_format: { type: 'Structured' },
   }]);
+  // 0.7.0 Phase 7 — rollback / compensation chain. Empty by default.
+  // Wizard supports adding Notify-only rollback steps (the most common
+  // case: "tell ops on failure"). Agent / ApiCall rollback steps can
+  // be added via the API directly — keeping the wizard focused.
+  const [onFailureSteps, setOnFailureSteps] = useState<WorkflowStep[]>(editWorkflow?.on_failure ?? []);
+  // 0.7.0 Phase 5 — list of binaries `StepType::Exec` may invoke. Empty
+  // by default = Exec disabled. Editable in the Config tab; the step
+  // form's command dropdown is filled from this list.
+  const [execAllowlist, setExecAllowlist] = useState<string[]>(editWorkflow?.exec_allowlist ?? []);
+  // 0.6.0 UX pass — workflow-level launch variables (mirrors QP variables).
+  // When the user clicks "Lancer" with trigger=Manual + non-empty list,
+  // a form asks for one value per variable before the run starts.
+  const [wfVariables, setWfVariables] = useState<PromptVariable[]>(editWorkflow?.variables ?? []);
+  // 0.7.0 Phase 5b — ref so the Exec form's "Configure now" button can
+  // jump to the Config tab AND focus the allowlist input. Without focus
+  // the user lands on a tab full of forms and has to hunt for "Allowlist
+  // Exec" — defeats the purpose of the actionable warning.
+  const execAllowlistInputRef = useRef<HTMLInputElement>(null);
+  const goToAllowlistConfig = () => {
+    setWizardStep(3); // Config tab in advanced mode
+    // Wait one paint for the Config tab to mount before focusing.
+    requestAnimationFrame(() => {
+      execAllowlistInputRef.current?.focus();
+      execAllowlistInputRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    });
+  };
   const [saving, setSaving] = useState(false);
+  // 0.7+ — Save error surfacé en bandeau rouge sous le bouton Create.
+  // Avant : seul `console.warn` capturait les rejets backend, l'utilisateur
+  // cliquait sans rien voir = bug "dead button". Le validator backend rend
+  // souvent des messages déjà actionnables (ex: "L'étape X est en
+  // FreeText, passe-la en Structured"), inutile de les masquer.
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [availableSkills, setAvailableSkills] = useState<Skill[]>([]);
   const [availableProfiles, setAvailableProfiles] = useState<AgentProfile[]>([]);
   const [availableDirectives, setAvailableDirectives] = useState<Directive[]>([]);
   const [availableQuickPrompts, setAvailableQuickPrompts] = useState<QuickPrompt[]>([]);
+  const [availableQuickApis, setAvailableQuickApis] = useState<QuickApi[]>([]);
   // API plugins available on the project — filtered to those with `api_spec != null`
   // and a matching config. Consumed by ApiCallStepCard's plugin picker.
   const [availableApiPlugins, setAvailableApiPlugins] = useState<ApiPluginOption[]>([]);
@@ -213,6 +259,26 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     });
   };
 
+  /** B3 (0.7.0 UX pass) — append a multi-line instruction block at the
+   *  end of a prompt (rather than at cursor). Used by the "écrire STATE"
+   *  chip: the instruction belongs at the *end* of the agent's prompt
+   *  ("À la fin, écris ---STATE:...---"), not wherever the user happens
+   *  to be typing. Adds a leading blank line so the instruction stands
+   *  out from whatever the user already wrote. */
+  const appendPromptBlock = (stepIndex: number, block: string) => {
+    const cur = steps[stepIndex]?.prompt_template ?? '';
+    const sep = cur.endsWith('\n\n') ? '' : (cur.endsWith('\n') || cur === '') ? '\n' : '\n\n';
+    updateStep(stepIndex, { prompt_template: cur + sep + block });
+    // Focus the textarea at the end so the user sees what was inserted.
+    requestAnimationFrame(() => {
+      const el = promptTextareaRefs.current[stepIndex];
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(el.value.length, el.value.length);
+      el.scrollTop = el.scrollHeight;
+    });
+  };
+
   // Workflow suggestions from MCP introspection
   const [suggestions, setSuggestions] = useState<WorkflowSuggestion[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
@@ -226,6 +292,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     refetchProfiles();
     directivesApi.list().then(setAvailableDirectives).catch(e => console.warn('Failed to load directives:', e));
     quickPromptsApi.list().then(setAvailableQuickPrompts).catch(e => console.warn('Failed to load quick prompts:', e));
+    quickApisApi.list().then(setAvailableQuickApis).catch(e => console.warn('Failed to load quick apis:', e));
     // Load API plugins once at mount — the list is refreshed if the user
     // comes back to the wizard, cheap call + rare delta.
     mcpsApi.overview()
@@ -294,17 +361,41 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     setWizardStep(2); // Jump straight to Steps so the user sees the chain.
   };
 
-  const addStep = () => {
-    setSteps([...steps, {
-      name: `step-${steps.length + 1}`,
-      agent: 'ClaudeCode',
-      prompt_template: '',
-      mode: { type: 'Normal' },
-      // Default to Structured so chained steps can read `.data` / `.summary`
-      // from the very first save. Users can switch to Free text on terminal
-      // steps that don't feed anything downstream.
-      output_format: { type: 'Structured' },
-    }]);
+  /** Build a fresh blank step. Centralised so `addStep` (append) and
+   *  `insertStep` (insert-at-position) share the same defaults. */
+  const blankStep = (existingCount: number): WorkflowStep => ({
+    name: `step-${existingCount + 1}`,
+    agent: 'ClaudeCode',
+    prompt_template: '',
+    mode: { type: 'Normal' },
+    // Default to Structured so chained steps can read `.data` / `.summary`
+    // from the very first save. Users can switch to Free text on terminal
+    // steps that don't feed anything downstream.
+    output_format: { type: 'Structured' },
+  });
+
+  const addStep = () => setSteps([...steps, blankStep(steps.length)]);
+
+  /** 0.6.0 UX pass — insert a blank step at `at`. The user can then drop
+   *  a step before the first one (`at = 0`), between two existing steps,
+   *  or after the last (`at = steps.length`, equivalent to addStep).
+   *  Subsequent step `Goto` references stay valid because they're keyed
+   *  by step name, not index. */
+  const insertStep = (at: number) => {
+    const fresh = blankStep(steps.length);
+    setSteps([...steps.slice(0, at), fresh, ...steps.slice(at)]);
+  };
+
+  /** 0.6.0 UX pass — move a step up or down by 1 position. No-op at the
+   *  edges. Same `Goto`-by-name immunity as insertStep. */
+  const moveStep = (idx: number, direction: -1 | 1) => {
+    const target = idx + direction;
+    if (target < 0 || target >= steps.length) return;
+    setSteps(prev => {
+      const copy = [...prev];
+      [copy[idx], copy[target]] = [copy[target], copy[idx]];
+      return copy;
+    });
   };
 
   const updateStep = (idx: number, patch: Partial<WorkflowStep>) => {
@@ -390,6 +481,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
 
   const handleSave = async () => {
     setSaving(true);
+    setSaveError(null);
     try {
       const trigger = buildTrigger();
       const wsConfig = buildWorkspaceConfig();
@@ -406,6 +498,10 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           safety: safetyVal ?? editWorkflow.safety,
           workspace_config: wsConfig ?? undefined,
           concurrency_limit: concurrency ?? null,
+          guards,
+          on_failure: onFailureSteps,
+          exec_allowlist: execAllowlist,
+          variables: wfVariables,
         });
       } else {
         const req: CreateWorkflowRequest = {
@@ -417,12 +513,17 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           safety: safetyVal,
           workspace_config: wsConfig ?? undefined,
           concurrency_limit: concurrency,
+          guards: guards ?? undefined,
+          on_failure: onFailureSteps,
+          exec_allowlist: execAllowlist,
+          variables: wfVariables,
         };
         await workflowsApi.create(req);
       }
       onDone();
     } catch (e) {
       console.warn('Workflow action failed:', e);
+      setSaveError(userError(e, t('wiz.saveError')));
     } finally {
       setSaving(false);
     }
@@ -935,6 +1036,63 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
       {/* Step 2 (advanced): Steps (with advanced per-step config) */}
       {!isSimple && wizardStep === 2 && (
         <div>
+          {/* B4 (0.7.0 UX pass) — Bandeau "Démarrer depuis un pattern".
+              Visible uniquement à la création (pas en édition) ET tant
+              que la config est restée vierge (1 step nommé "main" avec
+              prompt vide). Dès que l'user customise, le bandeau s'efface
+              tout seul — pas besoin d'un bouton dismiss explicite.
+              Click sur une carte = applique steps + on_failure +
+              exec_allowlist du préset. Pédagogique : le user voit
+              comment c'est construit (pas de magie cachée). */}
+          {!isEdit && steps.length === 1 && steps[0].name === 'main' && steps[0].prompt_template === '' && (
+            <div className="wf-presets-bandeau mb-6">
+              <div className="flex-row gap-3 mb-3 items-center">
+                <Sparkles size={14} className="text-accent" />
+                <span className="text-sm font-semibold text-secondary">{t('wiz.presetsTitle')}</span>
+                <span className="text-xs text-ghost">{t('wiz.presetsHint')}</span>
+              </div>
+              <div className="wf-presets-grid">
+                {buildV07Presets(t).map(preset => (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    className="wf-preset-card"
+                    onClick={() => {
+                      setSteps(preset.steps);
+                      if (preset.onFailure) setOnFailureSteps(preset.onFailure);
+                      if (preset.execAllowlist) setExecAllowlist(preset.execAllowlist);
+                      if (preset.variables) setWfVariables(preset.variables);
+                    }}
+                  >
+                    <div className="wf-preset-icon">{preset.icon}</div>
+                    <div className="wf-preset-title">{t(preset.titleKey)}</div>
+                    <div className="wf-preset-desc">{t(preset.descKey)}</div>
+                    <div className="wf-preset-primitives">
+                      {preset.primitives.map(p => (
+                        <span key={p} className="wf-preset-chip">{p}</span>
+                      ))}
+                    </div>
+                  </button>
+                ))}
+              </div>
+              <p className="text-2xs text-ghost mt-3">{t('wiz.presetsBlankHint')}</p>
+            </div>
+          )}
+
+          {/* Worktree isolation hint — visible whenever a project is bound.
+              Each WorkflowRun creates its own git worktree at
+              `.kronn/worktrees/<name>-<run_id>` and ALL steps share that
+              `work_dir`. Without this note the user wonders whether
+              consecutive Agent → Exec → Agent steps see the same files. */}
+          {projectId && (
+            <div className="wf-worktree-hint mb-5">
+              <span title={t('wiz.worktreeIconTooltip')} className="flex-row" style={{ cursor: 'help' }}>
+                <GitBranch size={11} />
+              </span>
+              <span>{t('wiz.worktreeHint')}</span>
+            </div>
+          )}
+
           {/* Variable help toggle */}
           <button
             className="wf-small-help-btn mb-6"
@@ -976,6 +1134,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                   {[
                     ['{{previous_step.output}}', t('wiz.prevOutput')],
                     ['{{steps.<nom>.output}}', t('wiz.namedOutput')],
+                    // 0.7.0 Phase 6 — iteration counter & durable state.
+                    ['{{iter.<step>}}', t('wiz.iterHint')],
+                    ['{{state.<key>}}', t('wiz.stateHint')],
                   ].map(([v, d]) => (
                     <div key={v} className="wf-help-row">
                       <code
@@ -1034,7 +1195,27 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               step.stall_timeout_secs || step.retry || step.delay_after_secs;
 
             return (
-              <div key={i} className="wf-step-edit-card mb-6">
+              <div key={i}>
+                {/* 0.6.0 UX pass — Insert-here divider.
+                    Une fine ligne avec un bouton "+" qui apparaît au hover
+                    permettant d'insérer un step à cette position. Couvre :
+                      - Avant le 1er step (i === 0)
+                      - Entre 2 steps existants (i > 0)
+                    Le bouton final ("Add at end") reste sous la liste,
+                    inchangé. Pattern similaire au "+ Add cell" de Notion. */}
+                <div className="wf-step-insert-divider">
+                  <button
+                    type="button"
+                    className="wf-step-insert-btn"
+                    onClick={() => insertStep(i)}
+                    title={t('wiz.insertStepHere')}
+                    aria-label={t('wiz.insertStepHere')}
+                  >
+                    <Plus size={11} />
+                    <span>{t('wiz.insertStepHere')}</span>
+                  </button>
+                </div>
+              <div className="wf-step-edit-card mb-6">
                 <div className="flex-row gap-4 mb-4">
                   <span className="wf-step-number">
                     {i + 1}
@@ -1045,53 +1226,129 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                     onChange={e => updateStep(i, { name: e.target.value })}
                     placeholder={t('wiz.stepName')}
                   />
-                  <select
-                    className="wf-select"
-                    style={{ width: 120 }}
-                    value={step.agent}
-                    onChange={e => updateStep(i, { agent: e.target.value as AgentType })}
-                  >
-                    {availableAgents.map(a => (
-                      <option key={a.type} value={a.type}>{a.label}</option>
-                    ))}
-                  </select>
+                  {(!step.step_type || step.step_type.type === 'Agent') && (
+                    <select
+                      className="wf-select"
+                      style={{ width: 120 }}
+                      value={step.agent}
+                      onChange={e => updateStep(i, { agent: e.target.value as AgentType })}
+                    >
+                      {availableAgents.map(a => (
+                        <option key={a.type} value={a.type}>{a.label}</option>
+                      ))}
+                    </select>
+                  )}
+                  {/* 0.6.0 UX pass — reorder buttons. Marie + Antony :
+                      "je peux pas déplacer mes steps". On expose 2 chevrons
+                      à côté du remove. Désactivés aux bornes. Le Goto par
+                      nom rend la réordonnance safe (les conditions ne
+                      pètent pas en swappant 2 steps). */}
                   {steps.length > 1 && (
-                    <button className="wf-icon-btn" onClick={() => removeStep(i)} aria-label="Remove step">
-                      <X size={12} />
-                    </button>
+                    <>
+                      <button
+                        className="wf-icon-btn"
+                        onClick={() => moveStep(i, -1)}
+                        disabled={i === 0}
+                        aria-label={t('wiz.moveStepUp')}
+                        title={t('wiz.moveStepUp')}
+                      ><ChevronUp size={12} /></button>
+                      <button
+                        className="wf-icon-btn"
+                        onClick={() => moveStep(i, 1)}
+                        disabled={i === steps.length - 1}
+                        aria-label={t('wiz.moveStepDown')}
+                        title={t('wiz.moveStepDown')}
+                      ><ChevronDown size={12} /></button>
+                      <button className="wf-icon-btn" onClick={() => removeStep(i)} aria-label="Remove step">
+                        <X size={12} />
+                      </button>
+                    </>
                   )}
                 </div>
-                {/* Step type + description */}
+                {/* Step type — equal-width buttons with icon + short label.
+                    0.6.0 UX pass : Marie flaggait des largeurs incohérentes
+                    et des labels longs ("Agent (raisonnement)", "Récupérer
+                    des données"). On garde un mot court par bouton, l'icône
+                    porte la sémantique visuelle, le `title` (tooltip) garde
+                    l'explication détaillée. La caption sous la rangée affiche
+                    en clair le rôle du type sélectionné — plus besoin de
+                    hover pour comprendre. */}
+                <div className="wf-step-type-row mb-3">
+                  <button
+                    className="wf-step-type-btn"
+                    data-type="agent"
+                    data-selected={!step.step_type || step.step_type.type === 'Agent'}
+                    onClick={() => updateStep(i, { step_type: { type: 'Agent' } })}
+                    title={t('wiz.stepTypeAgentHint')}
+                  ><Bot size={11} /> {t('wiz.stepTypeAgent')}</button>
+                  <button
+                    className="wf-step-type-btn"
+                    data-type="api"
+                    data-selected={step.step_type?.type === 'ApiCall'}
+                    onClick={() => updateStep(i, { step_type: { type: 'ApiCall' } })}
+                    title={t('wiz.stepTypeApiCallHint')}
+                  ><Plug size={11} /> {t('wiz.stepTypeApiCall')}</button>
+                  <button
+                    className="wf-step-type-btn"
+                    data-type="batch-qp"
+                    data-selected={step.step_type?.type === 'BatchQuickPrompt'}
+                    onClick={() => selectBatchQpStepType(i)}
+                    title={t('wiz.stepTypeBatchQPHint')}
+                  ><Layers size={11} /> {t('wiz.stepTypeBatchQP')}</button>
+                  <button
+                    className="wf-step-type-btn"
+                    data-type="notify"
+                    data-selected={step.step_type?.type === 'Notify'}
+                    onClick={() => updateStep(i, { step_type: { type: 'Notify' } })}
+                    title={t('wiz.stepTypeNotifyHint')}
+                  ><Send size={11} /> {t('wiz.stepTypeNotify')}</button>
+                  <button
+                    className="wf-step-type-btn"
+                    data-type="gate"
+                    data-selected={step.step_type?.type === 'Gate'}
+                    onClick={() => updateStep(i, { step_type: { type: 'Gate' } })}
+                    title={t('wiz.stepTypeGateHint')}
+                  ><Hand size={11} /> {t('wiz.stepTypeGate')}</button>
+                  <button
+                    className="wf-step-type-btn"
+                    data-type="exec"
+                    data-selected={step.step_type?.type === 'Exec'}
+                    onClick={() => updateStep(i, { step_type: { type: 'Exec' } })}
+                    title={t('wiz.stepTypeExecHint')}
+                  ><Terminal size={11} /> {t('wiz.stepTypeExec')}</button>
+                  <button
+                    className="wf-step-type-btn"
+                    data-type="batch-api"
+                    data-selected={step.step_type?.type === 'BatchApiCall'}
+                    onClick={() => updateStep(i, { step_type: { type: 'BatchApiCall' } })}
+                    title={t('wiz.stepTypeBatchApiHint')}
+                  ><Layers size={11} /> {t('wiz.stepTypeBatchApi')}</button>
+                  <button
+                    className="wf-step-type-btn"
+                    data-type="json-data"
+                    data-selected={step.step_type?.type === 'JsonData'}
+                    onClick={() => updateStep(i, { step_type: { type: 'JsonData' } })}
+                    title={t('wiz.stepTypeJsonDataHint')}
+                  ><Braces size={11} /> {t('wiz.stepTypeJsonData')}</button>
+                </div>
+                {/* Caption sous la rangée — résume en 1 phrase ce que fait
+                    le type sélectionné. Évite au user de devoir hover pour
+                    comprendre la diff Agent / API / Batch / Notify / Gate / Exec. */}
+                <div className="wf-step-type-caption mb-3">
+                  {(() => {
+                    const k = step.step_type?.type ?? 'Agent';
+                    const captionKey =
+                      k === 'ApiCall' ? 'wiz.stepTypeApiCallHint' :
+                      k === 'BatchQuickPrompt' ? 'wiz.stepTypeBatchQPHint' :
+                      k === 'Notify' ? 'wiz.stepTypeNotifyHint' :
+                      k === 'Gate' ? 'wiz.stepTypeGateHint' :
+                      k === 'Exec' ? 'wiz.stepTypeExecHint' :
+                      k === 'BatchApiCall' ? 'wiz.stepTypeBatchApiHint' :
+                      'wiz.stepTypeAgentHint';
+                    return t(captionKey);
+                  })()}
+                </div>
                 <div className="flex-row gap-4 mb-3">
-                  <div className="flex-row gap-2">
-                    <button
-                      className="wf-step-type-btn"
-                      data-type="agent"
-                      data-selected={!step.step_type || step.step_type.type === 'Agent'}
-                      onClick={() => updateStep(i, { step_type: { type: 'Agent' } })}
-                    >{t('wiz.stepTypeAgent')}</button>
-                    <button
-                      className="wf-step-type-btn"
-                      data-type="api"
-                      data-selected={step.step_type?.type === 'ApiCall'}
-                      onClick={() => updateStep(i, { step_type: { type: 'ApiCall' } })}
-                      title={t('wiz.stepTypeApiCallHint')}
-                    >{t('wiz.stepTypeApiCall')}</button>
-                    <button
-                      className="wf-step-type-btn"
-                      data-type="batch-qp"
-                      data-selected={step.step_type?.type === 'BatchQuickPrompt'}
-                      onClick={() => selectBatchQpStepType(i)}
-                      title={t('wiz.stepTypeBatchQPHint')}
-                    >{t('wiz.stepTypeBatchQP')}</button>
-                    <button
-                      className="wf-step-type-btn"
-                      data-type="notify"
-                      data-selected={step.step_type?.type === 'Notify'}
-                      onClick={() => updateStep(i, { step_type: { type: 'Notify' } })}
-                      title={t('wiz.stepTypeNotifyHint')}
-                    >{t('wiz.stepTypeNotify')}</button>
-                  </div>
                   <input
                     className="wf-input flex-1 text-sm"
                     value={step.description ?? ''}
@@ -1353,6 +1610,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                     projectId={projectId || null}
                     nextStepType={steps[i + 1]?.step_type}
                     installedAgents={installedAgentTypes}
+                    configLanguage={configLanguage}
+                    availableQuickApis={availableQuickApis}
                     t={t}
                   />
                 ) : step.step_type?.type === 'Notify' ? (
@@ -1406,8 +1665,392 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       </div>
                     )}
                   </div>
-                ) : (
+                ) : step.step_type?.type === 'Gate' ? (
+                  <div className="wf-gate-form">
+                    <div className="wf-batch-intro">
+                      <Hand size={14} />
+                      <div>
+                        <strong>{t('wiz.gateTitle')}</strong>
+                        <p className="text-xs text-muted">{t('wiz.gateHint')}</p>
+                      </div>
+                    </div>
+                    <label className="text-xs text-muted mb-1">{t('wiz.gateMessage')}</label>
+                    <textarea
+                      className="wf-textarea text-sm mb-2"
+                      rows={4}
+                      value={step.gate_message ?? ''}
+                      onChange={e => updateStep(i, { gate_message: e.target.value || null })}
+                      placeholder={t('wiz.gateMessagePlaceholder')}
+                    />
+                    {i > 0 && (
+                      <div className="mt-1 mb-2 text-xs text-ghost flex-wrap flex-row gap-1">
+                        <span>{t('wiz.clickToInsert')} :</span>
+                        <code className="wf-var-hint-code" style={{ cursor: 'default' }}>{'{{previous_step.output}}'}</code>
+                        <code className="wf-var-hint-code" style={{ cursor: 'default' }}>{'{{previous_step.summary}}'}</code>
+                        {steps.slice(0, i).map(prev => (
+                          <code key={prev.name} className="wf-var-hint-code" style={{ cursor: 'default' }}>
+                            {`{{steps.${prev.name}.summary}}`}
+                          </code>
+                        ))}
+                      </div>
+                    )}
+                    <label className="text-xs text-muted mb-1">{t('wiz.gateRequestChangesTarget')}</label>
+                    <select
+                      className="wf-select text-sm mb-2"
+                      value={step.gate_request_changes_target ?? ''}
+                      onChange={e => updateStep(i, { gate_request_changes_target: e.target.value || null })}
+                    >
+                      <option value="">{t('wiz.gateRequestChangesDefault')}</option>
+                      {steps.map((s, j) => j !== i && (
+                        <option key={s.name} value={s.name}>{s.name}</option>
+                      ))}
+                    </select>
+                    {/* P1-1 (0.7.0 UX pass) — optional webhook to ping
+                        ops on Gate fire. Cyndie's blocker for team
+                        deployment. Templated so {{state.slack_url}}
+                        type vars work. Empty = no notification. */}
+                    <label className="text-xs text-muted mb-1">{t('wiz.gateNotifyUrl')}</label>
+                    <input
+                      className="wf-input text-sm"
+                      value={step.gate_notify_url ?? ''}
+                      onChange={e => updateStep(i, { gate_notify_url: e.target.value || null })}
+                      placeholder={t('wiz.gateNotifyUrlPlaceholder')}
+                    />
+                    <p className="text-2xs text-ghost mt-1">{t('wiz.gateNotifyUrlHint')}</p>
+                  </div>
+                ) : step.step_type?.type === 'Exec' ? (
+                  <div className="wf-exec-form">
+                    <div className="wf-batch-intro">
+                      <Terminal size={14} />
+                      <div>
+                        <strong>{t('wiz.execTitle')}</strong>
+                        <p className="text-xs text-muted">{t('wiz.execHint')}</p>
+                      </div>
+                    </div>
+                    {/* Worktree affordance — surface here because "is this exec
+                        seeing what the previous Agent step wrote?" is the most
+                        common UX worry on the Exec step. Only show when there's
+                        actually a previous step to be impacted by. */}
+                    {i > 0 && projectId && (
+                      <div className="wf-worktree-hint mb-3">
+                        <span title={t('wiz.worktreeIconTooltip')} className="flex-row" style={{ cursor: 'help' }}>
+                          <GitBranch size={11} />
+                        </span>
+                        <span>{t('wiz.execWorktreeHint')}</span>
+                      </div>
+                    )}
+                    {execAllowlist.length === 0 ? (
+                      <div className="wf-restricted-warning">
+                        <AlertTriangle size={12} />
+                        <span className="flex-1">{t('wiz.execAllowlistEmpty')}</span>
+                        <button
+                          type="button"
+                          className="wf-allowlist-cta"
+                          onClick={goToAllowlistConfig}
+                        >
+                          {t('wiz.execAllowlistConfigureNow')}
+                        </button>
+                      </div>
+                    ) : (
+                      <>
+                        <label className="text-xs text-muted mb-1">{t('wiz.execCommand')} <span className="wf-required">*</span></label>
+                        <select
+                          className="wf-select text-sm mb-2"
+                          value={step.exec_command ?? ''}
+                          onChange={e => updateStep(i, { exec_command: e.target.value || null })}
+                        >
+                          <option value="">— {t('wiz.execCommandSelect')} —</option>
+                          {execAllowlist.map(bin => (
+                            <option key={bin} value={bin}>{bin}</option>
+                          ))}
+                        </select>
+                        <label className="text-xs text-muted mb-1">{t('wiz.execArgs')}</label>
+                        <textarea
+                          className="wf-textarea text-sm mb-2"
+                          rows={3}
+                          value={(step.exec_args ?? []).join('\n')}
+                          onChange={e => updateStep(i, { exec_args: e.target.value.split('\n').filter(s => s.length > 0) })}
+                          placeholder={t('wiz.execArgsPlaceholder')}
+                        />
+                        <div className="mt-1 mb-2 text-xs text-ghost flex-wrap flex-row gap-1">
+                          <span>{t('wiz.clickToInsert')} :</span>
+                          {steps.slice(0, i).map(prev => (
+                            <code key={prev.name} className="wf-var-hint-code" style={{ cursor: 'default' }}>
+                              {`{{steps.${prev.name}.summary}}`}
+                            </code>
+                          ))}
+                        </div>
+                        <label className="text-xs text-muted mb-1">{t('wiz.execTimeoutSecs')}</label>
+                        <input
+                          type="number"
+                          min={1}
+                          max={1800}
+                          className="wf-input text-sm"
+                          style={{ width: 100 }}
+                          value={step.exec_timeout_secs ?? ''}
+                          onChange={e => updateStep(i, { exec_timeout_secs: e.target.value ? parseInt(e.target.value) : null })}
+                          placeholder="300"
+                        />
+                      </>
+                    )}
+                  </div>
+                ) : step.step_type?.type === 'BatchApiCall' ? (
+                  <div className="wf-batch-api-form">
+                    <div className="wf-batch-intro">
+                      <Layers size={14} />
+                      <div>
+                        <strong>{t('wiz.batchApiTitle')}</strong>
+                        <p className="text-xs text-muted">{t('wiz.batchApiHint')}</p>
+                      </div>
+                    </div>
+                    {/* QuickApi reference — when set, the runtime loads the
+                        saved Quick API and uses its config (per-field overrides
+                        from the inline fields below still apply). Lets the
+                        user define the call once, reuse across N workflows. */}
+                    {availableQuickApis.length > 0 && (
+                      <div className="mb-3">
+                        <label className="text-xs text-muted mb-1">{t('wiz.batchApiQaPicker')}</label>
+                        <select
+                          className="wf-select text-sm"
+                          value={step.quick_api_id ?? ''}
+                          onChange={e => updateStep(i, { quick_api_id: e.target.value || null })}
+                        >
+                          <option value="">{t('wiz.batchApiQaPickerInline')}</option>
+                          {availableQuickApis.map(qa => (
+                            <option key={qa.id} value={qa.id}>
+                              {qa.icon} {qa.name} — {qa.api_method ?? 'GET'} {qa.api_endpoint_path}
+                            </option>
+                          ))}
+                        </select>
+                        <p className="text-2xs text-ghost mt-1">{t('wiz.batchApiQaPickerHint')}</p>
+                      </div>
+                    )}
+                    {/* Items source — same shape as BatchQP. Accepts JSON array
+                        (preferred) or `{{steps.X.data}}` envelope. Per-item
+                        templating exposes `{{batch.item.<field>}}`. */}
+                    <label className="text-xs text-muted mb-1">{t('wiz.batchApiItemsFrom')} <span className="wf-required">*</span></label>
+                    <input
+                      className="wf-input text-sm mb-1"
+                      value={step.batch_items_from ?? ''}
+                      onChange={e => updateStep(i, { batch_items_from: e.target.value || null })}
+                      placeholder={t('wiz.batchApiItemsFromPlaceholder')}
+                    />
+                    {i > 0 && (
+                      <div className="mt-1 mb-3 text-xs text-ghost flex-wrap flex-row gap-1">
+                        <span>{t('wiz.clickToInsert')} :</span>
+                        {steps.slice(0, i).map(prev => (
+                          <code key={prev.name} className="wf-var-hint-code" style={{ cursor: 'default' }}>
+                            {`{{steps.${prev.name}.data}}`}
+                          </code>
+                        ))}
+                      </div>
+                    )}
+                    <div className="flex-row gap-4 mb-3">
+                      <div>
+                        <label className="text-xs text-muted">{t('wiz.batchApiConcurrentLimit')}</label>
+                        <input
+                          type="number" min={1} max={20}
+                          className="wf-input text-sm"
+                          style={{ width: 80 }}
+                          value={step.batch_concurrent_limit ?? ''}
+                          onChange={e => updateStep(i, { batch_concurrent_limit: e.target.value ? parseInt(e.target.value) : null })}
+                          placeholder="5"
+                        />
+                        <p className="text-2xs text-ghost mt-1">{t('wiz.batchApiConcurrentLimitHint')}</p>
+                      </div>
+                      <div>
+                        <label className="text-xs text-muted">{t('wiz.batchApiMaxItems')}</label>
+                        <input
+                          type="number" min={1} max={500}
+                          className="wf-input text-sm"
+                          style={{ width: 80 }}
+                          value={step.batch_max_items ?? ''}
+                          onChange={e => updateStep(i, { batch_max_items: e.target.value ? parseInt(e.target.value) : null })}
+                          placeholder="50"
+                        />
+                        <p className="text-2xs text-ghost mt-1">{t('wiz.batchApiMaxItemsHint')}</p>
+                      </div>
+                    </div>
+                    {/* Reuse ApiCallStepCard for the request config. The
+                        same plugin/endpoint/method/body/extract fields apply
+                        — every child fan-out fires a clone of this request
+                        with `{{batch.item.X}}` resolved per-item. */}
+                    <ApiCallStepCard
+                      step={step}
+                      onChange={updates => updateStep(i, updates)}
+                      availableApiPlugins={availableApiPlugins}
+                      projectId={projectId || null}
+                      installedAgents={installedAgentTypes}
+                      configLanguage={configLanguage}
+                      t={t}
+                    />
+                  </div>
+                ) : step.step_type?.type === 'JsonData' ? (() => {
+                  // Source de données déterministe — payload littéral, 0 token,
+                  // 0 réseau. Valide le JSON live pour signaler les erreurs avant
+                  // le save. Pas de templating runtime : la valeur est retournée
+                  // telle quelle, ce qui permet à un BatchQuickPrompt aval de
+                  // consommer `{{steps.<name>.data}}` exactement comme s'il
+                  // venait d'une vraie API.
+                  const raw = step.json_data_payload === null || step.json_data_payload === undefined
+                    ? ''
+                    : JSON.stringify(step.json_data_payload, null, 2);
+                  let parseError: string | null = null;
+                  let summary: string | null = null;
+                  if (raw.trim()) {
+                    try {
+                      const parsed = JSON.parse(raw);
+                      if (Array.isArray(parsed)) {
+                        summary = t('wiz.jsonDataSummaryArray', parsed.length);
+                      } else if (parsed && typeof parsed === 'object') {
+                        summary = t('wiz.jsonDataSummaryObject', Object.keys(parsed).length);
+                      } else {
+                        summary = t('wiz.jsonDataSummaryScalar');
+                      }
+                    } catch (e) {
+                      parseError = (e as Error).message;
+                    }
+                  }
+                  return (
+                    <div className="wf-json-data-form">
+                      <div className="wf-batch-intro">
+                        <Braces size={14} />
+                        <div>
+                          <strong>{t('wiz.jsonDataTitle')}</strong>
+                          <p className="text-xs text-muted">{t('wiz.jsonDataHint')}</p>
+                        </div>
+                      </div>
+                      <label className="text-xs text-muted mb-1">
+                        {t('wiz.jsonDataPayload')} <span className="wf-required">*</span>
+                      </label>
+                      <textarea
+                        className="wf-textarea text-sm"
+                        rows={10}
+                        style={{ fontFamily: 'var(--kr-font-mono)' }}
+                        value={raw}
+                        data-invalid={parseError !== null || !raw.trim()}
+                        onChange={e => {
+                          const next = e.target.value;
+                          if (!next.trim()) {
+                            updateStep(i, { json_data_payload: null });
+                            return;
+                          }
+                          // On garde la string exacte si elle ne parse pas — on
+                          // la stocke quand même via le state pour que le user
+                          // ne perde pas son édition. Mais comme le model est
+                          // `unknown | null`, on ne peut PAS y mettre une string
+                          // brute (sinon downstream batch lit du non-JSON). Solution :
+                          // on tente le parse, et on stocke null si échec — le
+                          // textarea garde le texte brut côté DOM tant qu'il n'a
+                          // pas perdu le focus.
+                          try {
+                            const parsed = JSON.parse(next);
+                            updateStep(i, { json_data_payload: parsed });
+                          } catch {
+                            // Parse échoue → on tag invalide via data-invalid,
+                            // mais on n'écrase pas json_data_payload. Le user
+                            // doit corriger pour que la valeur soit consommée
+                            // par le runner.
+                          }
+                        }}
+                        placeholder={t('wiz.jsonDataPlaceholder')}
+                      />
+                      {parseError && (
+                        <div className="wf-restricted-warning" style={{ marginTop: 6 }}>
+                          <AlertTriangle size={12} />
+                          <span>{t('wiz.jsonDataParseError')} {parseError}</span>
+                        </div>
+                      )}
+                      {!parseError && summary && (
+                        <p className="text-2xs text-ghost mt-1">{summary}</p>
+                      )}
+                      <p className="text-2xs text-ghost mt-2">{t('wiz.jsonDataNoTemplating')}</p>
+                    </div>
+                  );
+                })() : (() => {
+                  // 0.7+ — Quick Prompt reference UX. Quand un QP est sélectionné,
+                  // le textarea + les hints sont cachés derrière un <details>
+                  // "Personnaliser pour ce step" pour ne pas suggérer qu'il
+                  // faut TOUT remplir. Le récap du QP montre ce qui sera utilisé.
+                  // Le disclosure s'ouvre auto si l'utilisateur a déjà overridé.
+                  const selectedQp = step.quick_prompt_id
+                    ? availableQuickPrompts.find(qp => qp.id === step.quick_prompt_id) ?? null
+                    : null;
+                  const hasInlineOverride = !!step.prompt_template.trim();
+                  return (
                   <>
+                    {availableQuickPrompts.length > 0 && (
+                      <div className="mb-3">
+                        <label className="text-xs text-muted mb-1">
+                          {t('wiz.agentQpPicker')}
+                        </label>
+                        <select
+                          className="wf-select text-sm"
+                          value={step.quick_prompt_id ?? ''}
+                          onChange={e => updateStep(i, { quick_prompt_id: e.target.value || null })}
+                        >
+                          <option value="">{t('wiz.agentQpPickerInline')}</option>
+                          {availableQuickPrompts.map(qp => (
+                            <option key={qp.id} value={qp.id}>
+                              {qp.icon} {qp.name}
+                            </option>
+                          ))}
+                        </select>
+                        {selectedQp && (
+                          <div className="wf-qref-banner">
+                            <div className="wf-qref-banner-header">
+                              <strong>🔗 {t('wiz.agentQpInheritedFrom').replace('{0}', selectedQp.name)}</strong>
+                              {hasInlineOverride && (
+                                <span className="wf-qref-override-badge" title={t('wiz.qrefOverrideActiveHint')}>
+                                  🔓 {t('wiz.qrefOverrideActive')}
+                                </span>
+                              )}
+                            </div>
+                            <div className="wf-qref-banner-body">
+                              <div className="wf-qref-field">
+                                <span className="wf-qref-field-label">{t('wiz.qrefPreview')}</span>
+                                <code className="wf-qref-field-value">
+                                  {selectedQp.prompt_template.length > 200
+                                    ? selectedQp.prompt_template.slice(0, 200) + '…'
+                                    : selectedQp.prompt_template || <em>{t('wiz.qrefEmpty')}</em>}
+                                </code>
+                              </div>
+                              {selectedQp.variables.length > 0 && (
+                                <div className="wf-qref-field">
+                                  <span className="wf-qref-field-label">{t('wiz.qrefVars')}</span>
+                                  <span className="wf-qref-field-value">
+                                    {selectedQp.variables.map(v => (
+                                      <code key={v.name} className="wf-qref-var-chip">{`{{${v.name}}}`}</code>
+                                    ))}
+                                  </span>
+                                </div>
+                              )}
+                            </div>
+                            <p className="wf-qref-hint">{t('wiz.agentQpInheritedHint')}</p>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {/* Quand un QP est référencé, on enroule le textarea +
+                        ses hints dans un <details> pour cacher le bruit
+                        visuel par défaut. Open auto si override actif. */}
+                    {selectedQp ? (
+                      <details className="wf-qref-override" open={hasInlineOverride}>
+                        <summary className="wf-qref-override-summary">
+                          ✏️ {t('wiz.qrefOverridePromptToggle')}
+                        </summary>
+                        <div className="wf-qref-override-body">
+                          <textarea
+                            ref={el => { promptTextareaRefs.current[i] = el; }}
+                            className="wf-textarea"
+                            rows={3}
+                            value={step.prompt_template}
+                            onChange={e => updateStep(i, { prompt_template: e.target.value })}
+                            placeholder={t('wiz.agentQpOverridePlaceholder')}
+                          />
+                        </div>
+                      </details>
+                    ) : (
                     <textarea
                       ref={el => { promptTextareaRefs.current[i] = el; }}
                       className="wf-textarea"
@@ -1419,6 +2062,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                         : `Prompt template... ex: Voici l'analyse : {{previous_step.output}}. Ecris le correctif.`
                       }
                     />
+                    )}
                     {/* Hint: available variables for this step (clickable) */}
                     {i > 0 && (
                       <div className="mt-2 text-xs text-ghost flex-wrap flex-row gap-1">
@@ -1438,9 +2082,156 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                         ))}
                       </div>
                     )}
+                    {/* B3 (0.7.0 UX pass) — STATE pédagogie chips.
+                        Trois personas (Marie, Antony, Cyndie) ont flaggé
+                        que la convention `---STATE:k=v---` est invisible.
+                        On la matérialise via 2 chips conditionnelles :
+                          (a) cette étape Goto vers un Agent → chip pour
+                              insérer l'instruction "écris ---STATE:---"
+                              dans le prompt (auto-clé `last_<this_name>`)
+                          (b) cette étape est cible d'un Goto Agent → chip
+                              pour insérer `{{state.last_<source_name>}}`
+                              au curseur dans le prompt
+                        Le user voit la convention, l'apprend, garde le
+                        contrôle (transparence vs auto-magie). */}
+                    {(() => {
+                      const myName = step.name;
+                      // Cibles Agent atteignables via Goto depuis CE step.
+                      const gotoTargets = (step.on_result ?? [])
+                        .filter(r => r.action.type === 'Goto')
+                        .map(r => r.action.type === 'Goto' ? r.action.step_name : '')
+                        .filter(name => name && name !== myName)
+                        .map(name => steps.find(s => s.name === name))
+                        .filter((s): s is WorkflowStep => !!s && (!s.step_type || s.step_type.type === 'Agent'));
+                      // Sources Agent qui Goto vers CE step.
+                      const gotoSources = steps
+                        .filter(s => s.name !== myName)
+                        .filter(s => !s.step_type || s.step_type.type === 'Agent')
+                        .filter(s => (s.on_result ?? []).some(r =>
+                          r.action.type === 'Goto' && r.action.step_name === myName));
+                      if (gotoTargets.length === 0 && gotoSources.length === 0) return null;
+                      return (
+                        <div className="wf-state-chips mt-2">
+                          {gotoTargets.length > 0 && (
+                            <div className="flex-wrap flex-row gap-2 items-center">
+                              <span className="text-xs text-ghost">{t('wiz.stateChipsLoopOut')}</span>
+                              {gotoTargets.map(target => {
+                                const stateKey = `last_${myName}`;
+                                const block = t('wiz.stateInstructionBlock')
+                                  .replace('{key}', stateKey)
+                                  .replace('{target}', target.name);
+                                return (
+                                  <button
+                                    key={target.name}
+                                    type="button"
+                                    className="wf-state-chip"
+                                    onClick={() => appendPromptBlock(i, block)}
+                                    title={t('wiz.stateChipWriteHint').replace('{key}', stateKey)}
+                                  >
+                                    + {t('wiz.stateChipWrite').replace('{key}', stateKey)}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          )}
+                          {gotoSources.length > 0 && (
+                            <div className="flex-wrap flex-row gap-2 items-center mt-1">
+                              <span className="text-xs text-ghost">{t('wiz.stateChipsLoopIn')}</span>
+                              {gotoSources.map(source => {
+                                const stateKey = `last_${source.name}`;
+                                const varText = `{{state.${stateKey}}}`;
+                                return (
+                                  <button
+                                    key={source.name}
+                                    type="button"
+                                    className="wf-state-chip"
+                                    onClick={() => insertVarAtCursor(i, varText)}
+                                    title={t('wiz.stateChipReadHint').replace('{key}', stateKey)}
+                                  >
+                                    + {varText}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+                    {/* P2 (0.6.0 UX pass) — Undeclared `{{var}}` warning.
+                        Scans this step's prompt en live et flagge toute
+                        var qui ne matche aucune source connue (steps
+                        antérieurs, state, iter, artifacts, vars de
+                        lancement déclarées, trigger fields). Bouton
+                        "Ajouter à variables" qui pré-remplit la card
+                        Variables de lancement → workflow complet en 1 clic. */}
+                    {(() => {
+                      const undeclared = scanUndeclaredVars(step.prompt_template, {
+                        allSteps: steps,
+                        currentStepIdx: i,
+                        inRollback: false,
+                        triggerType,
+                        workflowVariables: wfVariables,
+                        artifacts: {},
+                      });
+                      if (undeclared.length === 0) return null;
+                      return (
+                        <div className="wf-undeclared-warning mt-2">
+                          <div className="flex-row gap-2 items-center mb-1">
+                            <AlertTriangle size={11} className="text-warning" />
+                            <span className="text-xs font-semibold">{t('wiz.undeclaredVarsTitle')}</span>
+                          </div>
+                          <p className="text-2xs text-ghost mb-2">{t('wiz.undeclaredVarsHint')}</p>
+                          <div className="flex-wrap flex-row gap-2">
+                            {undeclared.map(uv => {
+                              // Only "unknown_bare" → actionable button to declare it.
+                              // Other reasons (unknown_step, failed_step_outside_rollback)
+                              // are typos / wrong context — user has to fix manually.
+                              const canDeclare = uv.reason === 'unknown_bare' && !uv.name.includes('.');
+                              return (
+                                <span key={uv.name} className="wf-undeclared-chip">
+                                  <code>{`{{${uv.name}}}`}</code>
+                                  {canDeclare ? (
+                                    <button
+                                      type="button"
+                                      className="wf-undeclared-add-btn"
+                                      onClick={() => {
+                                        if (wfVariables.some(v => v.name === uv.name)) return;
+                                        setWfVariables(prev => [...prev, {
+                                          name: uv.name,
+                                          label: uv.name,
+                                          placeholder: '',
+                                          description: null,
+                                          required: true,
+                                        }]);
+                                      }}
+                                      title={t('wiz.undeclaredAddVarHint').replace('{name}', uv.name)}
+                                    >
+                                      + {t('wiz.undeclaredAddVar')}
+                                    </button>
+                                  ) : (
+                                    <span className="text-2xs text-ghost">
+                                      {uv.reason === 'unknown_step' ? t('wiz.undeclaredUnknownStep')
+                                        : t('wiz.undeclaredFailedOutsideRollback')}
+                                    </span>
+                                  )}
+                                </span>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })()}
                   </>
-                )}
+                  );
+                })()}
 
+                {/* Skills / Profile / Directives selectors only apply to Agent
+                    steps — the runner injects them into the LLM prompt. They
+                    are no-ops on ApiCall (HTTP), Notify (webhook), Gate (pause),
+                    Exec (shell), and BatchQuickPrompt (each item carries its
+                    own QP-level config). Hiding them removes ~30vh of dead
+                    real-estate on those step types. */}
+                {(!step.step_type || step.step_type.type === 'Agent') && (<>
                 {/* Skills selector per step */}
                 {availableSkills.length > 0 && (
                   <div className="mt-4">
@@ -1545,31 +2336,38 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                     </div>
                   </div>
                 )}
+                </>)}
 
                 {/* Output format — visible at the root of the step card.
                     Moved out of the Advanced panel because a FreeText
                     producer feeding a `{{previous_step.data}}` consumer
-                    used to silently break workflows at runtime. */}
-                <div className="mb-4 mt-4">
-                  <label className="wf-label">{t('wiz.outputFormat')}</label>
-                  <div className="flex-row gap-3">
-                    <button
-                      className="wf-step-type-btn"
-                      data-selected={step.output_format?.type === 'Structured'}
-                      onClick={() => updateStep(i, { output_format: { type: 'Structured' } })}
-                    >{t('wiz.outputStructured')}</button>
-                    <button
-                      className="wf-step-type-btn"
-                      data-selected={!step.output_format || step.output_format.type === 'FreeText'}
-                      onClick={() => updateStep(i, { output_format: { type: 'FreeText' } })}
-                    >{t('wiz.outputFree')}</button>
+                    used to silently break workflows at runtime. Only
+                    relevant for Agent steps: ApiCall returns the JSONPath-
+                    extracted value, Exec returns stdout, Notify/Gate emit
+                    nothing parseable, BatchQuickPrompt's shape is set by
+                    the QP itself. */}
+                {(!step.step_type || step.step_type.type === 'Agent') && (
+                  <div className="mb-4 mt-4">
+                    <label className="wf-label">{t('wiz.outputFormat')}</label>
+                    <div className="flex-row gap-3">
+                      <button
+                        className="wf-step-type-btn"
+                        data-selected={step.output_format?.type === 'Structured'}
+                        onClick={() => updateStep(i, { output_format: { type: 'Structured' } })}
+                      >{t('wiz.outputStructured')}</button>
+                      <button
+                        className="wf-step-type-btn"
+                        data-selected={!step.output_format || step.output_format.type === 'FreeText'}
+                        onClick={() => updateStep(i, { output_format: { type: 'FreeText' } })}
+                      >{t('wiz.outputFree')}</button>
+                    </div>
+                    <p className="text-2xs text-ghost mt-2">
+                      {step.output_format?.type === 'Structured'
+                        ? t('wiz.outputStructuredHint')
+                        : t('wiz.outputFreeHint')}
+                    </p>
                   </div>
-                  <p className="text-2xs text-ghost mt-2">
-                    {step.output_format?.type === 'Structured'
-                      ? t('wiz.outputStructuredHint')
-                      : t('wiz.outputFreeHint')}
-                  </p>
-                </div>
+                )}
 
                 {/* Advanced toggle */}
                 <button
@@ -1584,50 +2382,54 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
 
                 {isAdvOpen && (
                   <div className="wf-advanced-panel">
-                    {/* Agent settings */}
-                    <div className="mb-5">
-                      <label className="wf-label">{t('wiz.agentSettings')}</label>
-                      <div className="flex-row gap-3">
-                        <div className="flex-1">
-                          <label className="wf-label text-2xs">{t('wiz.model')}</label>
-                          <input
-                            className="wf-input"
-                            value={step.agent_settings?.model ?? ''}
-                            onChange={e => updateStep(i, {
-                              agent_settings: { ...step.agent_settings, model: e.target.value || null }
-                            })}
-                            placeholder="ex: o3"
-                          />
-                        </div>
-                        <div className="flex-1">
-                          <label className="wf-label text-2xs">Reasoning effort</label>
-                          <select
-                            className="wf-select"
-                            value={step.agent_settings?.reasoning_effort ?? ''}
-                            onChange={e => updateStep(i, {
-                              agent_settings: { ...step.agent_settings, reasoning_effort: e.target.value || null }
-                            })}
-                          >
-                            <option value="">default</option>
-                            <option value="low">low</option>
-                            <option value="medium">medium</option>
-                            <option value="high">high</option>
-                          </select>
-                        </div>
-                        <div className="flex-1">
-                          <label className="wf-label text-2xs">Max tokens</label>
-                          <input
-                            type="number"
-                            className="wf-input"
-                            value={step.agent_settings?.max_tokens ?? ''}
-                            onChange={e => updateStep(i, {
-                              agent_settings: { ...step.agent_settings, max_tokens: e.target.value ? parseInt(e.target.value) : null }
-                            })}
-                            placeholder="ex: 16000"
-                          />
+                    {/* Agent settings — only meaningful for Agent steps; the
+                        runner ignores `agent_settings` on ApiCall/Notify/
+                        Gate/Exec/BatchQuickPrompt. */}
+                    {(!step.step_type || step.step_type.type === 'Agent') && (
+                      <div className="mb-5">
+                        <label className="wf-label">{t('wiz.agentSettings')}</label>
+                        <div className="flex-row gap-3">
+                          <div className="flex-1">
+                            <label className="wf-label text-2xs">{t('wiz.model')}</label>
+                            <input
+                              className="wf-input"
+                              value={step.agent_settings?.model ?? ''}
+                              onChange={e => updateStep(i, {
+                                agent_settings: { ...step.agent_settings, model: e.target.value || null }
+                              })}
+                              placeholder="ex: o3"
+                            />
+                          </div>
+                          <div className="flex-1">
+                            <label className="wf-label text-2xs">Reasoning effort</label>
+                            <select
+                              className="wf-select"
+                              value={step.agent_settings?.reasoning_effort ?? ''}
+                              onChange={e => updateStep(i, {
+                                agent_settings: { ...step.agent_settings, reasoning_effort: e.target.value || null }
+                              })}
+                            >
+                              <option value="">default</option>
+                              <option value="low">low</option>
+                              <option value="medium">medium</option>
+                              <option value="high">high</option>
+                            </select>
+                          </div>
+                          <div className="flex-1">
+                            <label className="wf-label text-2xs">Max tokens</label>
+                            <input
+                              type="number"
+                              className="wf-input"
+                              value={step.agent_settings?.max_tokens ?? ''}
+                              onChange={e => updateStep(i, {
+                                agent_settings: { ...step.agent_settings, max_tokens: e.target.value ? parseInt(e.target.value) : null }
+                              })}
+                              placeholder="ex: 16000"
+                            />
+                          </div>
                         </div>
                       </div>
-                    </div>
+                    )}
 
                     {/* Stall timeout */}
                     <div className="flex-row gap-6 mb-5">
@@ -1694,46 +2496,86 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       </div>
                     </div>
 
-                    {/* on_result conditions */}
+                    {/* on_result conditions — 0.6.0 UX pass : layout 2 lignes
+                        pour ne plus déborder. Avant : tout sur 1 ligne flex
+                        avec un `flex-1` qui se faisait écraser par les selects
+                        Goto (220+140+56+labels+X = ~500px de fixe). Maintenant :
+                          ligne 1 = "Si contient [______________________]"
+                          ligne 2 = "→ [Action] (si Goto: step + max N itérations)"
+                        Le bouton remove vit en haut à droite, plus accessible. */}
                     <div>
                       <label className="wf-label">{t('wiz.conditions')}</label>
                       {(step.on_result ?? []).map((cond, j) => (
-                        <div key={j} className="flex-row gap-3 mb-2">
-                          <span className="text-xs text-dim" style={{ whiteSpace: 'nowrap' }}>{t('wiz.ifContains')}</span>
-                          <input
-                            className="wf-input flex-1 text-sm"
-                            style={{ borderColor: !cond.contains ? 'rgba(var(--kr-error-rgb), 0.4)' : undefined }}
-                            value={cond.contains}
-                            onChange={e => updateCondition(i, j, { contains: e.target.value })}
-                            placeholder="NO_RESULTS (obligatoire)"
-                          />
-                          <span className="text-xs text-dim">&rarr;</span>
-                          <select
-                            className="wf-select text-sm"
-                            style={{ width: 100 }}
-                            value={cond.action.type}
-                            onChange={e => {
-                              const type = e.target.value as 'Stop' | 'Skip' | 'Goto';
-                              const action = type === 'Goto' ? { type: 'Goto' as const, step_name: '' } : { type };
-                              updateCondition(i, j, { action: action as StepConditionRule['action'] });
-                            }}
-                          >
-                            <option value="Stop">Stop</option>
-                            <option value="Skip">Skip</option>
-                            <option value="Goto">Goto</option>
-                          </select>
-                          {cond.action.type === 'Goto' && (
+                        <div key={j} className="wf-condition-row mb-3">
+                          <div className="wf-condition-row-line1">
+                            <span className="text-xs text-dim" style={{ whiteSpace: 'nowrap' }}>{t('wiz.ifContains')}</span>
                             <input
-                              className="wf-input text-sm"
-                              style={{ width: 80 }}
-                              value={cond.action.type === 'Goto' ? cond.action.step_name : ''}
-                              onChange={e => updateCondition(i, j, { action: { type: 'Goto', step_name: e.target.value } })}
-                              placeholder="step name"
+                              className="wf-input flex-1 text-sm"
+                              style={{ borderColor: !cond.contains ? 'rgba(var(--kr-error-rgb), 0.4)' : undefined }}
+                              value={cond.contains}
+                              onChange={e => updateCondition(i, j, { contains: e.target.value })}
+                              placeholder={t('wiz.ifContainsPlaceholder')}
                             />
-                          )}
-                          <button className="wf-icon-btn" onClick={() => removeCondition(i, j)} aria-label="Remove condition">
-                            <X size={10} />
-                          </button>
+                            <button
+                              className="wf-icon-btn"
+                              onClick={() => removeCondition(i, j)}
+                              aria-label="Remove condition"
+                              title={t('wiz.removeCondition')}
+                            >
+                              <X size={10} />
+                            </button>
+                          </div>
+                          <div className="wf-condition-row-line2">
+                            <span className="text-xs text-dim">&rarr;</span>
+                            {/* B7 (0.7.0 UX pass) — dropdown enrichi avec
+                                sous-libellés explicites pour la diff
+                                Stop/Skip/Goto. */}
+                            <select
+                              className="wf-select text-sm wf-condition-action-select"
+                              value={cond.action.type}
+                              onChange={e => {
+                                const type = e.target.value as 'Stop' | 'Skip' | 'Goto';
+                                const action = type === 'Goto' ? { type: 'Goto' as const, step_name: '', max_iterations: null } : { type };
+                                updateCondition(i, j, { action: action as StepConditionRule['action'] });
+                              }}
+                            >
+                              <option value="Stop">{t('wiz.condActionStop')}</option>
+                              <option value="Skip">{t('wiz.condActionSkip')}</option>
+                              <option value="Goto">{t('wiz.condActionGoto')}</option>
+                            </select>
+                            {cond.action.type === 'Goto' && (
+                              <>
+                                {/* B1 — step cible = dropdown (anti free-text). */}
+                                <select
+                                  className="wf-select text-sm wf-condition-goto-select"
+                                  value={cond.action.type === 'Goto' ? cond.action.step_name : ''}
+                                  onChange={e => updateCondition(i, j, { action: { type: 'Goto', step_name: e.target.value, max_iterations: cond.action.type === 'Goto' ? cond.action.max_iterations ?? null : null } })}
+                                >
+                                  <option value="">— {t('wiz.gotoTargetSelect')} —</option>
+                                  {steps.map((s, k) => k !== i && (
+                                    <option key={s.name} value={s.name}>{s.name}</option>
+                                  ))}
+                                </select>
+                                <span className="text-2xs text-ghost">{t('wiz.gotoMaxIterLabel')}</span>
+                                <input
+                                  type="number"
+                                  min={1}
+                                  className="wf-input text-sm"
+                                  style={{ width: 56 }}
+                                  value={cond.action.type === 'Goto' && cond.action.max_iterations != null ? cond.action.max_iterations : ''}
+                                  onChange={e => {
+                                    const n = e.target.value ? parseInt(e.target.value) : null;
+                                    if (cond.action.type === 'Goto') {
+                                      updateCondition(i, j, { action: { type: 'Goto', step_name: cond.action.step_name, max_iterations: n } });
+                                    }
+                                  }}
+                                  placeholder={t('wiz.gotoMaxIterPlaceholder')}
+                                  title={t('wiz.gotoMaxIterHint')}
+                                />
+                                <span className="text-2xs text-ghost">{t('wiz.gotoMaxIterUnit')}</span>
+                              </>
+                            )}
+                          </div>
                         </div>
                       ))}
                       {(step.on_result ?? []).length === 0 && (
@@ -1755,11 +2597,186 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                   </div>
                 )}
               </div>
+              </div>
             );
           })}
           <button className="wf-add-step-btn" onClick={addStep}>
             <Plus size={12} /> {t('wiz.addStep')}
           </button>
+
+          {/* 0.7.0 Phase 7 — Rollback / compensation chain (workflow-level).
+              Wizard supports adding Notify-only rollback steps (most common
+              "tell ops on failure" case). Agent / ApiCall rollback steps
+              can be added via the API for advanced setups. */}
+          <div className="wf-rollback-section mt-8">
+            <div className="flex-row gap-3 mb-2">
+              <RotateCcw size={14} className="text-warning" />
+              <span className="text-md font-semibold text-secondary">{t('wiz.rollbackTitle')}</span>
+            </div>
+            <p className="text-xs text-muted mb-3">{t('wiz.rollbackHint')}</p>
+            {/* B6 (0.7.0 UX pass) — matrice explicite des conditions de
+                fire. Marie + Antony + Cyndie : "rollback se déclenche
+                quand au juste ?" → on liste ✓/✗ inline plutôt que de
+                renvoyer à la doc. Le mot "rollback" est polysémique,
+                on désamorce le malentendu de loin. */}
+            <div className="wf-rollback-matrix mb-4">
+              <div className="wf-rollback-matrix-row" data-fires="true">
+                <span>✓</span><span>{t('wiz.rollbackFiresFailed')}</span>
+              </div>
+              <div className="wf-rollback-matrix-row">
+                <span>✗</span><span>{t('wiz.rollbackSkipsCancelled')}</span>
+              </div>
+              <div className="wf-rollback-matrix-row">
+                <span>✗</span><span>{t('wiz.rollbackSkipsGuard')}</span>
+              </div>
+              <div className="wf-rollback-matrix-row">
+                <span>✗</span><span>{t('wiz.rollbackSkipsReject')}</span>
+              </div>
+            </div>
+
+            {/* 0.7.0 UX pass — rollback steps support Agent, ApiCall, AND
+                Notify in the wizard (was Notify-only). The backend already
+                accepted the 3 types ; the wizard caught up so users
+                don't write hand-rolled JSON for rollback agents.
+                Gate is explicitly excluded (deadlock — validated server-side). */}
+            {onFailureSteps.map((rb, idx) => {
+              const rbKind = rb.step_type?.type ?? 'Notify';
+              const updateRb = (patch: Partial<WorkflowStep>) =>
+                setOnFailureSteps(prev => prev.map((s, i) => i === idx ? { ...s, ...patch } : s));
+              return (
+                <div key={idx} className="wf-rollback-step mb-3">
+                  <div className="flex-row gap-2 mb-2 flex-wrap">
+                    <input
+                      className="wf-input text-sm"
+                      style={{ width: 200 }}
+                      value={rb.name}
+                      onChange={e => updateRb({ name: e.target.value })}
+                      placeholder="notify_ops"
+                    />
+                    {/* Step-type pills: Notify / Agent / ApiCall.
+                        Switching resets type-specific config to a sane
+                        default (no spurious leftovers between types). */}
+                    <div className="flex-row gap-1">
+                      <button
+                        className="wf-step-type-btn"
+                        data-type="notify"
+                        data-selected={rbKind === 'Notify'}
+                        onClick={() => updateRb({
+                          step_type: { type: 'Notify' },
+                          output_format: { type: 'FreeText' },
+                          notify_config: rb.notify_config ?? { url: '', method: 'POST', headers: {}, body_template: '' },
+                        })}
+                      >{t('wiz.stepTypeNotify')}</button>
+                      <button
+                        className="wf-step-type-btn"
+                        data-type="agent"
+                        data-selected={rbKind === 'Agent'}
+                        onClick={() => updateRb({
+                          step_type: { type: 'Agent' },
+                          output_format: { type: 'FreeText' },
+                        })}
+                      >{t('wiz.stepTypeAgent')}</button>
+                      <button
+                        className="wf-step-type-btn"
+                        data-type="api"
+                        data-selected={rbKind === 'ApiCall'}
+                        onClick={() => updateRb({
+                          step_type: { type: 'ApiCall' },
+                          output_format: { type: 'Structured' },
+                        })}
+                      >{t('wiz.stepTypeApiCall')}</button>
+                    </div>
+                    <span className="flex-1" />
+                    <button
+                      className="wf-icon-btn"
+                      onClick={() => setOnFailureSteps(prev => prev.filter((_, i) => i !== idx))}
+                      aria-label={t('wiz.removeRollbackStep')}
+                      title={t('wiz.removeRollbackStep')}
+                    >
+                      <X size={10} />
+                    </button>
+                  </div>
+
+                  {rbKind === 'Notify' && (
+                    <>
+                      <input
+                        className="wf-input text-sm mb-2"
+                        value={rb.notify_config?.url ?? ''}
+                        onChange={e => updateRb({ notify_config: { ...rb.notify_config ?? { url: '', method: 'POST', headers: {}, body_template: '' }, url: e.target.value } })}
+                        placeholder="https://hooks.slack.com/services/..."
+                      />
+                      <textarea
+                        className="wf-textarea text-sm"
+                        rows={3}
+                        value={rb.notify_config?.body_template ?? ''}
+                        onChange={e => updateRb({ notify_config: { ...rb.notify_config ?? { url: '', method: 'POST', headers: {}, body_template: '' }, body_template: e.target.value } })}
+                        placeholder={`{"text": "🚨 Workflow ${name || 'X'} échoué : {{failed_step.name}} — {{failed_step.output}}"}`}
+                      />
+                    </>
+                  )}
+
+                  {rbKind === 'Agent' && (
+                    <>
+                      <div className="flex-row gap-2 mb-2">
+                        <select
+                          className="wf-select text-sm"
+                          style={{ width: 180 }}
+                          value={rb.agent}
+                          onChange={e => updateRb({ agent: e.target.value as AgentType })}
+                        >
+                          {ALL_AGENT_TYPES.map(a => (
+                            <option key={a} value={a}>{AGENT_LABELS[a] ?? a}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <textarea
+                        className="wf-textarea text-sm"
+                        rows={3}
+                        value={rb.prompt_template}
+                        onChange={e => updateRb({ prompt_template: e.target.value })}
+                        placeholder={t('wiz.rollbackAgentPromptPlaceholder')}
+                      />
+                    </>
+                  )}
+
+                  {rbKind === 'ApiCall' && (
+                    <ApiCallStepCard
+                      step={rb}
+                      onChange={updateRb}
+                      availableApiPlugins={availableApiPlugins}
+                      projectId={projectId || null}
+                      installedAgents={installedAgentTypes}
+                      configLanguage={configLanguage}
+                      availableQuickApis={availableQuickApis}
+                      t={t}
+                    />
+                  )}
+
+                  <div className="mt-1 text-xs text-ghost flex-wrap flex-row gap-1">
+                    <span>{t('wiz.clickToInsert')} :</span>
+                    <code className="wf-var-hint-code" style={{ cursor: 'default' }}>{'{{failed_step.name}}'}</code>
+                    <code className="wf-var-hint-code" style={{ cursor: 'default' }}>{'{{failed_step.output}}'}</code>
+                  </div>
+                </div>
+              );
+            })}
+
+            <button
+              className="wf-add-step-btn wf-add-step-btn-inline"
+              onClick={() => setOnFailureSteps(prev => [...prev, {
+                name: `rollback-${prev.length + 1}`,
+                step_type: { type: 'Notify' },
+                description: null,
+                agent: 'ClaudeCode',
+                prompt_template: '',
+                mode: { type: 'Normal' },
+                output_format: { type: 'FreeText' },
+                notify_config: { url: '', method: 'POST', headers: {}, body_template: '' },
+              }])}
+            >
+              <Plus size={10} /> {t('wiz.addRollbackStep')}
+            </button>
+          </div>
         </div>
       )}
 
@@ -1808,6 +2825,107 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                 />
               </div>
             </div>
+          </div>
+
+          {/* 0.7.0 — Execution limits (Guards). Visible by default,
+              placed BEFORE the Advanced toggle (Antoine UX rationale:
+              not hidden, not advanced — first-class safety control). */}
+          <ExecutionLimitsCard value={guards} onChange={setGuards} t={t} />
+
+          {/* 0.7.0 Phase 5 — Exec allowlist. Visible by default; the
+              prominent placement is intentional because Exec is a
+              security-sensitive feature and the empty-default-disabled
+              status is the user's safety net. Editable as a comma-separated
+              list of binary names — same backend validation rules apply. */}
+          <div className="wf-section mt-6">
+            <div className="flex-row gap-3 mb-2">
+              <Terminal size={14} className="text-warning" />
+              <span className="text-md font-semibold text-secondary">{t('wiz.execAllowlistTitle')}</span>
+            </div>
+            <p className="text-xs text-muted mb-3">{t('wiz.execAllowlistHint')}</p>
+            <input
+              ref={execAllowlistInputRef}
+              className="wf-input text-sm"
+              value={execAllowlist.join(', ')}
+              onChange={e => setExecAllowlist(
+                e.target.value.split(',').map(s => s.trim()).filter(s => s.length > 0)
+              )}
+              placeholder={t('wiz.execAllowlistPlaceholder')}
+            />
+          </div>
+
+          {/* 0.6.0 UX pass — Workflow launch variables (mirrors QP variables).
+              When the user clicks "Lancer" with trigger=Manual + non-empty
+              list, a form asks for one value per variable. Each variable
+              renders as `{{name}}` inside any step prompt. Required check
+              is enforced server-side; the UI just collects + validates that
+              required ones are non-empty before sending. */}
+          <div className="wf-section mt-6">
+            <div className="flex-row gap-3 mb-2">
+              <FileText size={14} className="text-accent" />
+              <span className="text-md font-semibold text-secondary">{t('wiz.wfVariablesTitle')}</span>
+            </div>
+            <p className="text-xs text-muted mb-3">{t('wiz.wfVariablesHint')}</p>
+            {wfVariables.map((v, idx) => (
+              <div key={idx} className="qp-var-row mb-2" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 6 }}>
+                <div className="flex-row gap-3" style={{ alignItems: 'center' }}>
+                  <input
+                    className="wf-input text-sm"
+                    style={{ width: 160, fontFamily: 'var(--kr-font-mono, monospace)' }}
+                    value={v.name}
+                    onChange={e => setWfVariables(prev => prev.map((pv, j) =>
+                      j === idx ? { ...pv, name: e.target.value.replace(/[^a-zA-Z0-9_]/g, '') } : pv
+                    ))}
+                    placeholder="ticket_id"
+                  />
+                  <input
+                    className="wf-input flex-1 text-sm"
+                    value={v.label}
+                    onChange={e => setWfVariables(prev => prev.map((pv, j) => j === idx ? { ...pv, label: e.target.value } : pv))}
+                    placeholder={t('qp.varLabel')}
+                  />
+                  <input
+                    className="wf-input flex-1 text-sm"
+                    value={v.placeholder}
+                    onChange={e => setWfVariables(prev => prev.map((pv, j) => j === idx ? { ...pv, placeholder: e.target.value } : pv))}
+                    placeholder={t('qp.varPlaceholder')}
+                  />
+                  <label className="flex-row gap-2 text-xs" style={{ whiteSpace: 'nowrap', cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={v.required ?? true}
+                      onChange={e => setWfVariables(prev => prev.map((pv, j) => j === idx ? { ...pv, required: e.target.checked } : pv))}
+                    />
+                    {t('qp.varRequired')}
+                  </label>
+                  <button
+                    className="wf-icon-btn"
+                    onClick={() => setWfVariables(prev => prev.filter((_, j) => j !== idx))}
+                    aria-label={t('wiz.removeVariable')}
+                    title={t('wiz.removeVariable')}
+                  ><X size={10} /></button>
+                </div>
+                <input
+                  className="wf-input text-xs"
+                  value={v.description ?? ''}
+                  onChange={e => setWfVariables(prev => prev.map((pv, j) => j === idx ? { ...pv, description: e.target.value || null } : pv))}
+                  placeholder={t('qp.varDescriptionPlaceholder')}
+                  style={{ opacity: 0.85 }}
+                />
+              </div>
+            ))}
+            <button
+              className="wf-add-step-btn wf-add-step-btn-inline"
+              onClick={() => setWfVariables(prev => [...prev, {
+                name: `var_${prev.length + 1}`,
+                label: '',
+                placeholder: '',
+                description: null,
+                required: true,
+              }])}
+            >
+              <Plus size={10} /> {t('wiz.addVariable')}
+            </button>
           </div>
 
           {/* Expert options toggle */}
@@ -1886,14 +3004,26 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             const typeLabel = typeKind === 'ApiCall' ? 'API'
               : typeKind === 'BatchQuickPrompt' ? 'BATCH'
               : typeKind === 'Notify' ? 'NOTIFY'
+              : typeKind === 'Gate' ? 'GATE'
+              : typeKind === 'Exec' ? 'EXEC'
+              : typeKind === 'BatchApiCall' ? 'BATCH API'
+              : typeKind === 'JsonData' ? 'JSON'
               : 'AGENT';
             const typeData = typeKind === 'ApiCall' ? 'api'
               : typeKind === 'BatchQuickPrompt' ? 'batch-qp'
               : typeKind === 'Notify' ? 'notify'
+              : typeKind === 'Gate' ? 'gate'
+              : typeKind === 'Exec' ? 'exec'
+              : typeKind === 'BatchApiCall' ? 'batch-api'
+              : typeKind === 'JsonData' ? 'json-data'
               : 'agent';
             const isBatch = typeKind === 'BatchQuickPrompt';
             const isApi = typeKind === 'ApiCall';
             const isNotify = typeKind === 'Notify';
+            const isGate = typeKind === 'Gate';
+            const isExec = typeKind === 'Exec';
+            const isBatchApi = typeKind === 'BatchApiCall';
+            const isJsonData = typeKind === 'JsonData';
             const qpName = isBatch && s.batch_quick_prompt_id
               ? availableQuickPrompts.find(qp => qp.id === s.batch_quick_prompt_id)?.name
               : null;
@@ -1925,9 +3055,23 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                   catch { return s.notify_config.url; }
                 })()
               : null;
-            const nameColor = isBatch || isApi || isNotify
+            const nameColor = isBatch || isApi || isNotify || isGate || isExec || isBatchApi || isJsonData
               ? 'var(--kr-text-faint)'
               : (AGENT_COLORS[s.agent] ?? 'var(--kr-text-faint)');
+            const execSubtitle = isExec && s.exec_command
+              ? [s.exec_command, ...(s.exec_args ?? [])].join(' ')
+              : null;
+            // Pour BatchApiCall on montre le plugin + endpoint + la source des items.
+            // Format compact pour rester sur une ligne dans le résumé.
+            const batchApiSubtitle = isBatchApi
+              ? [
+                  availableApiPlugins.find(p => p.config.id === s.api_config_id)
+                    ? `${availableApiPlugins.find(p => p.config.id === s.api_config_id)!.server.name}`
+                    : (s.api_plugin_slug ?? '?'),
+                  s.api_endpoint_path,
+                  s.batch_items_from ? `× ${s.batch_items_from}` : null,
+                ].filter(Boolean).join(' · ')
+              : null;
             return (
             <div key={i} className="wf-summary-row" style={{ paddingLeft: 20 }}>
               {i + 1}. <span className="wf-summary-step-type" data-type={typeData}>{typeLabel}</span>
@@ -1938,7 +3082,21 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                   ? <span className="text-dim text-xs"> ({apiSubtitle})</span>
                   : isNotify
                     ? <span className="text-dim text-xs"> ({notifyHost ?? t('wiz.notifyMissingUrl')})</span>
-                    : <> ({AGENT_LABELS[s.agent] ?? s.agent})</>
+                    : isGate
+                      ? null /* Gate has no per-step subtitle worth surfacing — the message is the body, not a header */
+                      : isExec
+                        ? <span className="text-dim text-xs"> ({execSubtitle ?? t('wiz.execCommandSelect')})</span>
+                        : isBatchApi
+                          ? <span className="text-dim text-xs"> ({batchApiSubtitle || t('wiz.batchApiMissingConfig')})</span>
+                          : isJsonData
+                            ? <span className="text-dim text-xs"> ({(() => {
+                                const p = s.json_data_payload;
+                                if (p === null || p === undefined) return t('wiz.jsonDataMissingPayload');
+                                if (Array.isArray(p)) return t('wiz.jsonDataSummaryArray', p.length);
+                                if (typeof p === 'object') return t('wiz.jsonDataSummaryObject', Object.keys(p as object).length);
+                                return t('wiz.jsonDataSummaryScalar');
+                              })()})</span>
+                            : <> ({AGENT_LABELS[s.agent] ?? s.agent})</>
               }
               {s.description && <span className="text-faint text-xs" style={{ fontStyle: 'italic' }}> &mdash; {s.description}</span>}
               {s.on_result && s.on_result.length > 0 && <span className="text-dim text-xs"> [{s.on_result.length} condition{s.on_result.length > 1 ? 's' : ''}]</span>}
@@ -1991,21 +3149,65 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             }
           } else if (s.step_type?.type === 'ApiCall') {
             // ApiCall steps have no prompt — they hit an API directly via
-            // the configured plugin. Validate the API-specific fields:
-            // plugin/config wired + endpoint chosen. Without these the
-            // backend executor would refuse anyway.
-            if (!s.api_plugin_slug || !s.api_config_id) {
-              errors.push(t('wiz.errorApiNoPlugin').replace('{0}', label));
-            }
-            if (!s.api_endpoint_path || !s.api_endpoint_path.trim()) {
-              errors.push(t('wiz.errorApiNoEndpoint').replace('{0}', label));
+            // the configured plugin. Validate the API-specific fields :
+            //   - Soit `quick_api_id` est set (référence vers un QuickApi
+            //     existant), auquel cas les fields api_* peuvent être
+            //     vides ; le runner les hydrate au run-time depuis le QA.
+            //   - Soit on tombe sur le mode inline et plugin/config/endpoint
+            //     sont obligatoires.
+            const hasQaRef = !!s.quick_api_id;
+            if (!hasQaRef) {
+              if (!s.api_plugin_slug || !s.api_config_id) {
+                errors.push(t('wiz.errorApiNoPlugin').replace('{0}', label));
+              }
+              if (!s.api_endpoint_path || !s.api_endpoint_path.trim()) {
+                errors.push(t('wiz.errorApiNoEndpoint').replace('{0}', label));
+              }
             }
           } else if (s.step_type?.type === 'Notify') {
             // Notify steps drive a webhook URL — no prompt either.
             if (!s.notify_config?.url) {
               errors.push(t('wiz.errorNotifyNoUrl').replace('{0}', label));
             }
-          } else if (!s.prompt_template) {
+          } else if (s.step_type?.type === 'Gate') {
+            // Gate steps pause for a human review — they need a message
+            // to show the approver, but no LLM prompt.
+            if (!s.gate_message || !s.gate_message.trim()) {
+              errors.push(t('wiz.errorGateNoMessage').replace('{0}', label));
+            }
+          } else if (s.step_type?.type === 'Exec') {
+            // Exec steps run a shell command from the allowlist — they
+            // need a `exec_command`, no LLM prompt.
+            if (!s.exec_command || !s.exec_command.trim()) {
+              errors.push(t('wiz.errorExecNoCommand').replace('{0}', label));
+            }
+          } else if (s.step_type?.type === 'BatchApiCall') {
+            // BatchApiCall fans out an API call over a list — same API
+            // requirements as ApiCall plus an items source. Aussi : si
+            // `quick_api_id` est set, l'API config arrive du QA au run-time.
+            const hasQaRef = !!s.quick_api_id;
+            if (!hasQaRef) {
+              if (!s.api_plugin_slug || !s.api_config_id) {
+                errors.push(t('wiz.errorApiNoPlugin').replace('{0}', label));
+              }
+              if (!s.api_endpoint_path || !s.api_endpoint_path.trim()) {
+                errors.push(t('wiz.errorApiNoEndpoint').replace('{0}', label));
+              }
+            }
+            if (!s.batch_items_from || !s.batch_items_from.trim()) {
+              errors.push(t('wiz.errorBatchNoItemsFrom').replace('{0}', label));
+            }
+          } else if (s.step_type?.type === 'JsonData') {
+            // JsonData steps émettent un payload littéral. Valider qu'il
+            // est non-null et un JSON valide. Le textarea front a déjà un
+            // try/catch, mais double-check au save (un user pourrait
+            // bypasser via copy-paste rapide).
+            if (s.json_data_payload === null || s.json_data_payload === undefined) {
+              errors.push(t('wiz.errorJsonDataNoPayload').replace('{0}', label));
+            }
+          } else if (!s.prompt_template && !s.quick_prompt_id) {
+            // Agent step needs SOIT un prompt_template, SOIT une référence
+            // vers un QuickPrompt. Le runner hydrate le second au run-time.
             errors.push(t('wiz.errorNoPrompt').replace('{0}', label));
           }
           (s.on_result ?? []).forEach((r, j) => {
@@ -2040,6 +3242,20 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             {t('wiz.next')} <ChevronRight size={12} />
           </button>
         ) : (
+          <>
+          {saveError && (
+            <div className="wf-restricted-warning" style={{ marginRight: 'auto', flex: '1 1 auto' }}>
+              <AlertTriangle size={12} />
+              <span className="flex-1">{saveError}</span>
+              <button
+                type="button"
+                className="wf-icon-btn"
+                onClick={() => setSaveError(null)}
+                title={t('common.dismiss')}
+                aria-label={t('common.dismiss')}
+              ><X size={10} /></button>
+            </div>
+          )}
           <button
             className="wf-next-btn"
             onClick={handleSave}
@@ -2052,17 +3268,37 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             //   - ApiCall: needs `api_plugin_slug` + `api_config_id`
             //     + `api_endpoint_path`.
             //   - Notify: needs `notify_config.url`.
+            //   - Gate: needs `gate_message`.
+            //   - Exec: needs `exec_command`.
             //   - Agent / Custom (default): needs `prompt_template`.
             disabled={saving || !name || steps.some(s => {
               if (s.step_type?.type === 'BatchQuickPrompt') {
                 if (!s.batch_quick_prompt_id) return true;
                 if (!s.batch_items_from || !s.batch_items_from.trim()) return true;
               } else if (s.step_type?.type === 'ApiCall') {
-                if (!s.api_plugin_slug || !s.api_config_id) return true;
-                if (!s.api_endpoint_path || !s.api_endpoint_path.trim()) return true;
+                // 0.7+ — quick_api_id set = config arrive du QA au run-time,
+                // les fields api_* peuvent être vides.
+                if (!s.quick_api_id) {
+                  if (!s.api_plugin_slug || !s.api_config_id) return true;
+                  if (!s.api_endpoint_path || !s.api_endpoint_path.trim()) return true;
+                }
               } else if (s.step_type?.type === 'Notify') {
                 if (!s.notify_config?.url) return true;
-              } else if (!s.prompt_template) {
+              } else if (s.step_type?.type === 'Gate') {
+                if (!s.gate_message || !s.gate_message.trim()) return true;
+              } else if (s.step_type?.type === 'Exec') {
+                if (!s.exec_command || !s.exec_command.trim()) return true;
+              } else if (s.step_type?.type === 'BatchApiCall') {
+                if (!s.quick_api_id) {
+                  if (!s.api_plugin_slug || !s.api_config_id) return true;
+                  if (!s.api_endpoint_path || !s.api_endpoint_path.trim()) return true;
+                }
+                if (!s.batch_items_from || !s.batch_items_from.trim()) return true;
+              } else if (s.step_type?.type === 'JsonData') {
+                // 0.7+ — payload obligatoire, sinon le runner failera au lancement.
+                if (s.json_data_payload === null || s.json_data_payload === undefined) return true;
+              } else if (!s.prompt_template && !s.quick_prompt_id) {
+                // Agent step (default) : prompt_template OU quick_prompt_id requis.
                 return true;
               }
               return (s.on_result ?? []).some(r => !r.contains);
@@ -2071,6 +3307,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             {saving ? <Loader2 size={12} /> : <Check size={12} />}
             {isEdit ? t('wiz.save') : t('wiz.create')}
           </button>
+          </>
         )}
       </div>
     </div>

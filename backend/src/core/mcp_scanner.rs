@@ -2011,6 +2011,14 @@ pub fn build_api_context_block(
                 let encoded = STANDARD.encode(format!("{user}:{password}"));
                 out.push_str(&format!("Auth: send header `Authorization: Basic {}` on every request (HTTP Basic, base64 of `{}:<token>`).\n", encoded, user));
             }
+            ApiAuthKind::BasicApiKey { env_key } => {
+                // Same wire format as Basic, but the password half is empty
+                // (`base64(KEY:)`). Used by SpeedCurve, Stripe, etc.
+                let key = env.get(env_key).map(|s| s.as_str()).unwrap_or("<MISSING>");
+                use base64::{engine::general_purpose::STANDARD, Engine as _};
+                let encoded = STANDARD.encode(format!("{key}:"));
+                out.push_str(&format!("Auth: send header `Authorization: Basic {}` on every request (HTTP Basic, base64 of `{}:` — note the trailing colon, the password is empty).\n", encoded, key));
+            }
             ApiAuthKind::OAuth2ClientCredentials { extra_headers, .. } => {
                 // By this point the async resolver (see make_agent_stream)
                 // has already called `core::oauth2_cache::resolve_token`

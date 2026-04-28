@@ -3,7 +3,7 @@
 ## Rules
 
 - **Quality gate is non-negotiable**: code must compile and build after any change.
-- **All tests must pass**: `npm run test` (frontend, **520 tests**), `cargo test` (backend, **1187 tests**: 1040 lib + 147 integration), `make test-shell` (192 bats tests).
+- **All tests must pass**: `npm run test` (frontend, **908 tests** as of 0.6.0), `cargo test` (backend, **1490 tests** as of 0.6.0), `make test-shell` (192 bats tests).
 - **0 ESLint errors**: `npm run lint` must report 0 errors (warnings are tolerated for existing patterns).
 - **0 clippy warnings**: `cargo clippy --all-targets -- -D warnings` must pass.
 

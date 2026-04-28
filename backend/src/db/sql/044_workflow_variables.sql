@@ -1,0 +1,12 @@
+-- 0.6.0 UX pass — workflow-level launch variables.
+--
+-- Stored as JSON: a `Vec<PromptVariable>` (mirrors `quick_prompts.variables`).
+-- NULL or empty `[]` = workflow takes no manual variables (trigger-driven
+-- workflows, or workflows whose first step is a step that fetches
+-- the context itself like an ApiCall).
+--
+-- When the user launches a Manual-trigger workflow with non-empty
+-- variables, the wizard / runs page shows a form asking for one value
+-- per variable; values are merged into the run's `trigger_context`
+-- so they resolve as `{{var_name}}` in step prompts.
+ALTER TABLE workflows ADD COLUMN variables TEXT;
