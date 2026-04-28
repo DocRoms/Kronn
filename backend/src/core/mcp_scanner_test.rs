@@ -1128,16 +1128,15 @@ args = ["@example/old-mcp"]
         let paths: Vec<&str> = spec.endpoints.iter().map(|e| e.path.as_str()).collect();
         // A sample of the most-used endpoints — if any disappear, the
         // prompt injection block will be weaker. Keep them.
-        assert!(paths.contains(&"/live/toppages/v4"));
-        assert!(paths.contains(&"/live/quickstats/v4"));
-        // Modern Query API (async, header-auth) — these were corrected
-        // after observing the live behaviour during the "Chartbeat"
-        // discussion. Agents must be able to see both the 3-step flow
-        // and a legacy fallback.
-        assert!(paths.contains(&"/query/v2/submit/page/"));
-        assert!(paths.contains(&"/query/v2/status/"));
-        assert!(paths.contains(&"/query/v2/fetch/"));
+        // Versions corrected against the official API explorer
+        // (https://chartbeat.com/docs/api/explore/) on 2026-04-29 —
+        // /live/toppages was v3 not v4, /live/dashapi/v4 didn't exist,
+        // /query/v2/* don't exist. The previous test was asserting
+        // bogus paths that returned 404 in production.
+        assert!(paths.contains(&"/live/toppages/v3/"));
+        assert!(paths.contains(&"/live/quickstats/v4/"));
         assert!(paths.contains(&"/historical/traffic/series/"));
+        assert!(paths.contains(&"/historical/engagement/series/"));
         assert!(spec.docs_url.is_some(), "docs_url mandatory so agent can self-extend");
         // Host is exposed as a config key so the user enters it per-instance.
         assert!(spec.config_keys.iter().any(|k| k.env_key == "CHARTBEAT_HOST"));

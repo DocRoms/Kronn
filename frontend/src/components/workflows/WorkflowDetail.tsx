@@ -8,6 +8,7 @@ import {
   Trash2, Play, Loader2, Check, X, ChevronRight,
   Settings, RefreshCw, AlertTriangle, FlaskConical,
   Layers, GitBranch, MessageSquare, Plug, Send,
+  Download, Square, Hand, Terminal, Braces,
 } from 'lucide-react';
 import { RunDetail } from './RunDetail';
 import '../../pages/WorkflowsPage.css';
@@ -97,10 +98,25 @@ function getStepTest(key: string): ActiveStepTest | undefined {
 
 export interface LiveRunState {
   workflowId: string;
+  /** Run id, set after the backend's `run_start` SSE event. Required to
+   *  call `cancelRun(workflow_id, run_id)` from the Stop button. Null
+   *  for the brief window between trigger() POST and the first SSE event. */
+  runId: string | null;
   currentStep: string | null;
   stepIndex: number;
   totalSteps: number;
   completedSteps: StepResult[];
+  /** Live agent stdout for the step currently in flight. Reset on every
+   *  StepStart, accumulated on every StepProgress chunk. Empty string
+   *  when no Agent step is running. */
+  currentStepText: string;
+  /** Wall-clock millis at trigger time. Drives the "total elapsed" badge
+   *  on the live view header. Set once when the live run starts. */
+  startedAt: number;
+  /** Wall-clock millis at the current step's StepStart. Set on every
+   *  step transition, null between steps. Drives the per-step elapsed
+   *  badge on the in-flight row. */
+  currentStepStartedAt: number | null;
   finished: boolean;
   status: string | null;
 }
@@ -119,6 +135,9 @@ export interface WorkflowDetailProps {
   /** Click on a "📋 N conversations" chip → jump to the discussions tab and
    *  expand+scroll to the matching batch group. */
   onNavigateToBatch?: (batchRunId: string) => void;
+  /** 0.7.0 UX pass — export the workflow as a JSON file. The handler
+   *  is wired in the parent page (it has the api binding + toast). */
+  onExport?: () => void;
 }
 
 /** Renders the per-item preview of a BatchQuickPrompt dry-run.
@@ -272,7 +291,18 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
   const isBatch = step.step_type?.type === 'BatchQuickPrompt';
   const isApi = step.step_type?.type === 'ApiCall';
   const isNotify = step.step_type?.type === 'Notify';
-  const isAgentLike = !isBatch && !isApi && !isNotify;
+  const isGate = step.step_type?.type === 'Gate';
+  const isExec = step.step_type?.type === 'Exec';
+  const isBatchApi = step.step_type?.type === 'BatchApiCall';
+  const isJsonData = step.step_type?.type === 'JsonData';
+  // Only the Agent step type actually consumes the `agent` field; every
+  // other type delegates: Batch → QP, ApiCall / BatchApiCall → HTTP, Notify
+  // → webhook, Gate → human pause, Exec → shell binary, JsonData → static
+  // payload. Showing the agent badge on those types confused users into
+  // thinking "Claude Code" was running inside their `cargo test` step (or
+  // on a JsonData fixture). Whitelist Agent explicitly to avoid the
+  // recurring "miss a step type in the negation" bug.
+  const isAgentLike = !step.step_type || step.step_type.type === 'Agent';
   const batchQp = isBatch && step.batch_quick_prompt_id
     ? quickPromptsById?.get(step.batch_quick_prompt_id)
     : undefined;
@@ -473,7 +503,7 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
     }
   };
 
-  const cardKind = isBatch ? 'batch-qp' : isApi ? 'api' : isNotify ? 'notify' : 'agent';
+  const cardKind = isBatch ? 'batch-qp' : isApi ? 'api' : isNotify ? 'notify' : isGate ? 'gate' : isExec ? 'exec' : 'agent';
   return (
     <div className="wf-step-card" data-step-type={cardKind}>
       <div className="flex-row gap-4">
@@ -508,6 +538,48 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
             )}
           </span>
         )}
+        {isBatchApi && (
+          <span className="wf-step-kind-badge" data-kind="batch-api" title={t('wiz.stepTypeBatchApiHint')}>
+            <Layers size={10} /> {t('wiz.stepTypeBatchApi')}
+            {step.api_endpoint_path && (
+              <span className="text-xs text-ghost" style={{ fontWeight: 400, marginLeft: 6 }}>
+                {step.api_plugin_slug ?? '?'} · {step.api_endpoint_path}
+              </span>
+            )}
+          </span>
+        )}
+        {isGate && (
+          <span className="wf-step-kind-badge" data-kind="gate" title={t('wiz.stepTypeGateHint')}>
+            <Hand size={10} /> {t('wiz.stepTypeGate')}
+          </span>
+        )}
+        {isExec && (
+          <span className="wf-step-kind-badge" data-kind="exec" title={t('wiz.stepTypeExecHint')}>
+            <Terminal size={10} /> {t('wiz.stepTypeExec')}
+            {step.exec_command && (
+              <span className="text-xs text-ghost" style={{ fontWeight: 400, marginLeft: 6 }}>
+                {step.exec_command}{(step.exec_args ?? []).length > 0 ? ' ' + (step.exec_args ?? []).join(' ') : ''}
+              </span>
+            )}
+          </span>
+        )}
+        {isJsonData && (
+          <span className="wf-step-kind-badge" data-kind="json-data" title={t('wiz.stepTypeJsonDataHint')}>
+            <Braces size={10} /> {t('wiz.stepTypeJsonData')}
+            {(() => {
+              const p = step.json_data_payload;
+              if (p === null || p === undefined) return null;
+              const summary = Array.isArray(p)
+                ? t('wiz.jsonDataSummaryArray', p.length)
+                : (typeof p === 'object' ? t('wiz.jsonDataSummaryObject', Object.keys(p as object).length) : t('wiz.jsonDataSummaryScalar'));
+              return (
+                <span className="text-xs text-ghost" style={{ fontWeight: 400, marginLeft: 6 }}>
+                  {summary}
+                </span>
+              );
+            })()}
+          </span>
+        )}
         {isAgentLike && (
           <span className="text-xs font-semibold" style={{ color: AGENT_COLORS[step.agent] ?? 'var(--kr-text-faint)' }}>
             {AGENT_LABELS[step.agent] ?? step.agent}
@@ -520,10 +592,17 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
           </span>
         )}
         {/* The Test button is a dry-run mock for Agent / Batch steps —
-            it doesn't apply to ApiCall (real-call test lives in the
-            wizard's `Test the call` button) or Notify (no agent run).
+            it doesn't apply to:
+              - ApiCall (real-call test lives in the wizard's `Test the
+                call` button),
+              - Notify (no agent run),
+              - Exec (mechanical binary execution; the test endpoint
+                routes through the Agent runner today, so the panel
+                would show useless mock/dry-run controls AND not
+                actually exec the binary — UX feedback 2026-04-29),
+              - Gate (a human-pause step has nothing to test).
             Hiding it on those types keeps the row clean. */}
-        {!isApi && !isNotify && (
+        {!isApi && !isNotify && !isExec && !isGate && !isBatchApi && !isJsonData && (
           <button
             className="wf-test-btn"
             onClick={() => { if (!testRunning) setTestOpen(!testOpen); }}
@@ -638,10 +717,39 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
         </>
       )}
       {step.on_result && step.on_result.length > 0 && (
-        <div className="mt-2 text-xs text-warning">
-          {step.on_result.map((r, j) => (
-            <span key={j}>{t('wiz.ifContains')} "{r.contains}" &rarr; {r.action.type} </span>
-          ))}
+        <div className="mt-2 text-xs text-warning flex-row" style={{ gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+          {step.on_result.map((r, j) => {
+            // For Goto: resolve target name → 1-based index so we can
+            // render a step-number chip (same circular badge as the
+            // step row) instead of a bare "Goto". Without this, the
+            // recap showed "→ Goto" twice in a row with no hint at
+            // which step the run jumps to (UX feedback 2026-04-29).
+            const targetName = r.action.type === 'Goto' ? r.action.step_name : null;
+            const targetIdx = targetName !== null
+              ? allSteps.findIndex(s => s.name === targetName)
+              : -1;
+            return (
+              <span key={j} className="flex-row" style={{ gap: 4, alignItems: 'center' }}>
+                {t('wiz.ifContains')} "{r.contains}" &rarr; {r.action.type}
+                {targetName !== null && targetIdx >= 0 && (
+                  <span
+                    className="wf-step-number wf-step-number-chip"
+                    title={targetName}
+                  >
+                    {targetIdx + 1}
+                  </span>
+                )}
+                {targetName !== null && targetIdx < 0 && (
+                  /* Dangling reference — the target step was renamed or
+                     deleted. Surface the broken edge instead of pretending
+                     it's fine; user can fix in the wizard. */
+                  <span className="text-error" title={`Step '${targetName}' introuvable`}>
+                    ?{targetName}
+                  </span>
+                )}
+              </span>
+            );
+          })}
         </div>
       )}
 
@@ -846,9 +954,40 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
   );
 }
 
-export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch }: WorkflowDetailProps) {
+export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onExport }: WorkflowDetailProps) {
   const { t } = useT();
   const [showRuns, setShowRuns] = useState(true);
+  // Per-step expand state for the live run view. Keyed by step name (not
+  // index — order can shift if Goto loops re-fire a step). The user
+  // clicks a completed step to inspect its output without leaving the
+  // run-in-progress page; the SSE-fed `liveRun.completedSteps` keeps
+  // the expanded body fresh as new chunks arrive on subsequent steps.
+  const [expandedLiveSteps, setExpandedLiveSteps] = useState<Set<string>>(new Set());
+  const toggleLiveStep = (stepName: string) => {
+    setExpandedLiveSteps(prev => {
+      const next = new Set(prev);
+      if (next.has(stepName)) next.delete(stepName); else next.add(stepName);
+      return next;
+    });
+  };
+
+  // 1Hz tick to refresh the live elapsed-time badges (workflow total +
+  // current step) without storing a recomputed string in state. Cheap
+  // re-render — only the two duration spans depend on it. Stops as soon
+  // as the live run finishes (cleared by the !active branch in the
+  // effect's deps).
+  const [, tickElapsed] = useState(0);
+  useEffect(() => {
+    if (!liveRun || liveRun.finished) return;
+    const id = setInterval(() => tickElapsed(t => t + 1), 1000);
+    return () => clearInterval(id);
+  }, [liveRun?.finished, liveRun?.workflowId]);
+
+  /** Format a millisecond duration as `Xs` for short, `MmSSs` past 60s. */
+  const fmtDuration = (ms: number): string => {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    return s >= 60 ? `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s` : `${s}s`;
+  };
 
   // Resolve Quick Prompts referenced by BatchQuickPrompt steps so the step card
   // can show the QP name/icon/description instead of just an opaque id. One
@@ -899,6 +1038,14 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
         <button className="wf-small-btn" onClick={onEdit}>
           <Settings size={10} /> {t('wf.edit')}
         </button>
+        {/* 0.7.0 UX pass — export button bundles the workflow + any
+            referenced QPs into a single JSON file for sharing across
+            instances. The download is triggered by the parent page. */}
+        {onExport && (
+          <button className="wf-small-btn" onClick={onExport} title={t('wf.exportHint')}>
+            <Download size={10} /> {t('wf.export')}
+          </button>
+        )}
         <button className="wf-small-btn" onClick={onRefresh}>
           <RefreshCw size={10} /> {t('wf.refresh')}
         </button>
@@ -934,7 +1081,7 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
       {/* Live run progress */}
       {liveRun && liveRun.workflowId === workflow.id && !liveRun.finished && (
         <div className="wf-live-run">
-          <div className="flex-row gap-4 mb-5">
+          <div className="flex-row gap-4 mb-5" style={{ alignItems: 'center' }}>
             <Loader2 size={12} className="wf-spin" style={{ color: 'var(--kr-cyan)' }} />
             <span className="text-base font-bold" style={{ color: 'var(--kr-cyan)' }}>
               {t('wf.running')}
@@ -943,6 +1090,40 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
               <span className="text-xs text-muted">
                 ({liveRun.completedSteps.length}/{liveRun.totalSteps} steps)
               </span>
+            )}
+            {/* Total = sum of completed step durations + elapsed on the
+                current step. By construction the badge equals the sum of
+                the per-step badges, so users don't see "total 1m20" while
+                the steps below add up to 50s. Wall-clock from click would
+                include scheduler/SSE latency that's noise to the user. */}
+            <span className="text-xs text-ghost" title={t('wf.live.totalElapsedHint')}>
+              ⏱ {fmtDuration(
+                liveRun.completedSteps.reduce((acc, s) => acc + (s.duration_ms || 0), 0)
+                + (liveRun.currentStepStartedAt ? Date.now() - liveRun.currentStepStartedAt : 0)
+              )}
+            </span>
+            {/* Stop the in-flight run. Disabled until run_start lands
+                (we need the run_id to call cancelRun). Cancelling
+                cascades to in-flight agents + child batches; the runner
+                short-circuits at the next checkpoint. */}
+            {liveRun.runId && (
+              <button
+                className="wf-run-cancel-btn"
+                style={{ marginLeft: 'auto' }}
+                onClick={async () => {
+                  if (!liveRun.runId) return;
+                  if (!confirm(t('wf.cancelRunConfirm'))) return;
+                  try {
+                    await workflowsApi.cancelRun(workflow.id, liveRun.runId);
+                  } catch (e) {
+                    console.warn('cancelRun failed:', e);
+                  }
+                }}
+                title={t('wf.cancelRun')}
+              >
+                <Square size={10} style={{ fill: 'currentColor' }} />
+                {t('wf.cancelRun')}
+              </button>
             )}
           </div>
 
@@ -956,55 +1137,132 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
             </div>
           )}
 
-          {/* Step indicators */}
+          {/* Step indicators — completed rows are clickable to inspect
+              the output without reloading. The expanded body uses the
+              same `liveRun.completedSteps` that the SSE stream feeds, so
+              it stays fresh as the run progresses. */}
           {workflow.steps.map((step, i) => {
             const completed = liveRun.completedSteps.find(s => s.step_name === step.name);
             const isCurrent = liveRun.currentStep === step.name;
             const isPending = !completed && !isCurrent;
+            const isExpanded = expandedLiveSteps.has(step.name);
+            // Both completed AND in-flight rows are expandable. The
+            // in-flight one streams the agent's stdout chunks as they
+            // arrive (`liveRun.currentStepText`), the completed ones
+            // show their full saved output. Pending rows stay inert.
+            const isClickable = !!completed || isCurrent;
 
             const stepState = completed ? 'completed' : isCurrent ? 'current' : 'pending';
             const iconState = completed
               ? (completed.status === 'Success' ? 'success' : 'failed')
               : isCurrent ? 'current' : 'pending';
 
+            const RowTag = isClickable ? 'button' : 'div';
             return (
-              <div key={i} className="wf-live-step" data-state={isCurrent ? 'current' : 'other'}>
-                {/* Status icon */}
-                <span className="wf-live-step-icon" data-state={iconState}>
-                  {completed ? (
-                    completed.status === 'Success'
-                      ? <Check size={9} className="text-success" />
-                      : <X size={9} className="text-error" />
-                  ) : isCurrent ? (
-                    <span className="wf-live-step-pulse" />
-                  ) : (
-                    <span className="wf-live-step-dot-pending" />
+              <div key={i}>
+                <RowTag
+                  className="wf-live-step"
+                  data-state={isCurrent ? 'current' : 'other'}
+                  data-expanded={isExpanded}
+                  // The whole row is the click target on completed/current
+                  // steps — bigger hit area, no extra chevron column.
+                  // Pending rows stay as <div> so they don't suggest
+                  // interactivity that doesn't exist yet.
+                  {...(isClickable ? {
+                    onClick: () => toggleLiveStep(step.name),
+                    type: 'button' as const,
+                    'aria-expanded': isExpanded,
+                  } : {})}
+                  style={isClickable ? { cursor: 'pointer', width: '100%', textAlign: 'left', background: 'transparent', border: 'none', padding: 0 } : undefined}
+                >
+                  {/* Status icon */}
+                  <span className="wf-live-step-icon" data-state={iconState}>
+                    {completed ? (
+                      completed.status === 'Success'
+                        ? <Check size={9} className="text-success" />
+                        : <X size={9} className="text-error" />
+                    ) : isCurrent ? (
+                      <span className="wf-live-step-pulse" />
+                    ) : (
+                      <span className="wf-live-step-dot-pending" />
+                    )}
+                  </span>
+
+                  {/* Step name */}
+                  <span className="wf-live-step-name" data-state={stepState}>
+                    {step.name}
+                  </span>
+
+                  {/* Duration for completed */}
+                  {completed && completed.duration_ms > 0 && (
+                    <span className="text-2xs text-ghost">
+                      {(completed.duration_ms / 1000).toFixed(1)}s
+                    </span>
                   )}
-                </span>
 
-                {/* Step name */}
-                <span className="wf-live-step-name" data-state={stepState}>
-                  {step.name}
-                </span>
+                  {/* Current step indicator + live elapsed */}
+                  {isCurrent && (
+                    <>
+                      <span className="wf-live-step-in-progress">
+                        {t('wf.inProgress')}
+                      </span>
+                      {liveRun.currentStepStartedAt && (
+                        <span className="text-2xs text-ghost">
+                          {fmtDuration(Date.now() - liveRun.currentStepStartedAt)}
+                        </span>
+                      )}
+                    </>
+                  )}
 
-                {/* Duration for completed */}
-                {completed && completed.duration_ms > 0 && (
-                  <span className="text-2xs text-ghost">
-                    {(completed.duration_ms / 1000).toFixed(1)}s
-                  </span>
-                )}
+                  {isPending && (
+                    <span className="text-2xs" style={{ color: 'var(--kr-border-medium)' }}>
+                      {t('wf.pending')}
+                    </span>
+                  )}
 
-                {/* Current step indicator */}
-                {isCurrent && (
-                  <span className="wf-live-step-in-progress">
-                    {t('wf.inProgress')}
-                  </span>
-                )}
+                  {/* Chevron — collapsed/expanded affordance for any
+                      clickable row (completed OR current-streaming).
+                      Hidden on pending so the row doesn't look
+                      interactive when it isn't. */}
+                  {isClickable && (
+                    <ChevronRight
+                      size={10}
+                      className="wf-chevron"
+                      data-expanded={isExpanded}
+                      style={{ marginLeft: 'auto' }}
+                    />
+                  )}
+                </RowTag>
 
-                {isPending && (
-                  <span className="text-2xs" style={{ color: 'var(--kr-border-medium)' }}>
-                    {t('wf.pending')}
-                  </span>
+                {/* Inline expanded body — content depends on the row state:
+                      - completed: the step's saved `output` (markdown / JSON
+                        envelope / exec stdout, depending on step type)
+                      - current: the streaming `currentStepText` accumulated
+                        from SSE `step_progress` chunks (live!), with a
+                        "still streaming" cursor while it grows */}
+                {isExpanded && (completed || isCurrent) && (
+                  <div
+                    className="wf-live-step-body"
+                    style={{
+                      margin: '4px 0 8px 28px',
+                      padding: '8px 12px',
+                      background: 'rgba(var(--kr-text-faint-rgb, 128, 128, 128), 0.04)',
+                      borderLeft: `2px solid ${isCurrent ? 'var(--kr-cyan)' : 'var(--kr-border-faint)'}`,
+                      borderRadius: 4,
+                      fontSize: 11,
+                      maxHeight: 360,
+                      overflow: 'auto',
+                    }}
+                    aria-live={isCurrent ? 'polite' : undefined}
+                  >
+                    <pre style={{ margin: 0, whiteSpace: 'pre-wrap', fontFamily: 'var(--kr-font-mono)', fontSize: 11 }}>
+                      {completed
+                        ? (completed.output || t('wf.live.stepNoOutput'))
+                        : (liveRun.currentStepText
+                            ? <>{liveRun.currentStepText}<span className="wf-streaming-cursor" style={{ opacity: 0.6 }}>▊</span></>
+                            : t('wf.live.stepStreamingWaiting'))}
+                    </pre>
+                  </div>
                 )}
               </div>
             );
@@ -1072,6 +1330,10 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
                   // poisoned) — the UI refreshes automatically via onRefresh
                   // so we just swallow silently.
                 }
+              }}
+              onDecide={async (payload) => {
+                await workflowsApi.decideRun(workflow.id, run.id, payload);
+                onRefresh();
               }}
             />
             {childBatch && onNavigateToBatch && (

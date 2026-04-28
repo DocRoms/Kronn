@@ -186,8 +186,19 @@ export function QuickPromptForm({ editPrompt, projects, onSave, onCancel }: Prop
       />
       <p className="qp-syntax-hint">{t('qp.syntaxHint')}</p>
 
+      {(!name || !template) && (
+        <p className="text-xs text-ghost mb-2">
+          {t('qp.saveBlockedHint')} :{' '}
+          {[!name && t('qp.fieldName'), !template && t('qp.fieldPrompt')].filter(Boolean).join(', ')}
+        </p>
+      )}
       <div className="flex-row gap-4">
-        <button className="wf-create-btn" onClick={handleSave} disabled={saving || !name || !template}>
+        <button
+          className="wf-create-btn"
+          onClick={handleSave}
+          disabled={saving || !name || !template}
+          title={(!name || !template) ? t('qp.saveBlockedHint') : undefined}
+        >
           <Save size={14} /> {saving ? '...' : t('qp.save')}
         </button>
       </div>

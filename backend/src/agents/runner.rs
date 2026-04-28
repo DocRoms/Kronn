@@ -359,6 +359,25 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     if !directives_prompt.is_empty() { parts.push(format!("=== OUTPUT REQUIREMENTS ===\n\n{}", directives_prompt)); }
     let extra_context = parts.join("\n\n");
 
+    // 0.6.0 — observability log : trace ce qui est INJECTÉ à chaque
+    // spawn d'agent. Utile quand un user signale "ma directive ne fait
+    // rien" — on peut lui dire de filtrer `kronn logs | grep injection`
+    // pour vérifier que le payload est bien passé. INFO-level pour qu'il
+    // reste visible sans flag de debug, mais sur un target dédié pour
+    // pouvoir le couper si trop verbeux. Empty arrays sont volontairement
+    // loggés (un user qui voit `directive_ids: []` comprend tout de suite
+    // que sa sélection n'a pas été persistée).
+    tracing::info!(
+        target: "kronn::agent::injection",
+        agent = ?config.agent_type,
+        profile_ids = ?config.profile_ids,
+        skill_ids = ?config.skill_ids,
+        directive_ids = ?config.directive_ids,
+        directives_prompt_len = directives_prompt.len(),
+        extra_context_len = extra_context.len(),
+        "agent prompt injection summary"
+    );
+
     // ── Ollama HTTP path ────────────────────────────────────────────────
     // Ollama uses the HTTP API (/api/chat) instead of a CLI process.
     // This gives us: (1) separate system/user message roles — the model
@@ -1061,7 +1080,15 @@ fn try_spawn(
         .current_dir(&effective_work_dir)
         .stdin(if stdin_payload.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        // SIGKILL the agent process if its `Child` is dropped before
+        // `wait()` returns. This is what makes workflow-run cancellation
+        // actually stop in-flight Agent steps: when the runner drops the
+        // step-dispatch future on `cancel_token.cancelled()`, the
+        // `AgentProcess` (and the child it owns) is dropped, and
+        // kill_on_drop turns that drop into a SIGKILL. Without this, the
+        // child would be reparented to PID 1 and keep burning tokens.
+        .kill_on_drop(true);
 
     // Set TMPDIR to a directory on the same filesystem as work_dir.
     // Prevents EXDEV (cross-device link) errors when agents like Codex do

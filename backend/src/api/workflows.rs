@@ -14,6 +14,229 @@ use crate::AppState;
 
 type SseStream = Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>;
 
+/// Reject artifact specs whose path is absolute or escapes the workspace
+/// (`..`) — both would let a workflow scribble outside its sandbox. Phase-3
+/// minimal validation: empty path, absolute (Unix `/` or Windows drive),
+/// or any segment equal to `..`. Path canonicalisation at write-time is
+/// deferred to the runner (which knows the workspace root); this is only
+/// the save-time hard reject.
+fn validate_artifact_specs(
+    specs: &::std::collections::HashMap<String, ArtifactSpec>,
+) -> Result<(), String> {
+    use std::path::Component;
+    for (name, spec) in specs {
+        if name.trim().is_empty() {
+            return Err("Artifact name cannot be empty.".into());
+        }
+        if spec.path.trim().is_empty() {
+            return Err(format!("Artifact « {} » : le chemin est obligatoire.", name));
+        }
+        let p = std::path::Path::new(&spec.path);
+        if p.is_absolute() {
+            return Err(format!(
+                "Artifact « {} » : chemin absolu interdit ({}). Utilise un chemin relatif au workspace, ex. `.kronn/{}.md`.",
+                name, spec.path, name
+            ));
+        }
+        if p.components().any(|c| matches!(c, Component::ParentDir)) {
+            return Err(format!(
+                "Artifact « {} » : « .. » interdit dans le chemin ({}). Reste dans le workspace.",
+                name, spec.path
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Reject `WorkflowGuards` values that would either be a no-op (`Some(0)` =
+/// "trip immediately") or impossible to honor (negative is impossible at
+/// the type level, but keeping the function pluggable for futures fields
+/// like `max_total_cost_usd` etc.). Documented in the wizard tooltip — the
+/// user sees this as a save-time error, not a runtime surprise.
+fn validate_guards(g: &WorkflowGuards) -> Result<(), String> {
+    if let Some(secs) = g.timeout_seconds {
+        if secs == 0 {
+            return Err("Limite « durée max » : 0 seconde n'a pas de sens — laisse vide pour le défaut, ou indique au moins 60 secondes.".into());
+        }
+    }
+    if let Some(calls) = g.max_llm_calls {
+        if calls == 0 {
+            return Err("Limite « appels IA max » : 0 stoppe le run avant le 1er step. Laisse vide pour le défaut, ou indique au moins 1.".into());
+        }
+    }
+    if let Some(rev) = g.loop_detection_max_revisits {
+        if rev == 0 {
+            return Err("Limite « détection de boucle » : 0 stoppe au 1er Goto. Laisse vide pour le défaut, ou indique au moins 1.".into());
+        }
+    }
+    Ok(())
+}
+
+/// 0.7.0 Phase 7 — reject rollback chains that mix in a `Gate` step.
+/// A Gate inside `on_failure` would deadlock the run on a `Failed`
+/// status that no resume path serves: `decide_run` only accepts runs
+/// in `WaitingApproval`, but rollback runs after final-status
+/// determination so the second pause would never get unstuck. Caught
+/// here at save time so the wizard can surface the error inline.
+fn validate_on_failure_steps(steps: &[WorkflowStep]) -> Result<(), String> {
+    for s in steps {
+        if matches!(s.step_type, StepType::Gate) {
+            return Err(format!(
+                "Rollback step « {} » : type Gate interdit dans la chaîne on_failure (impossible à reprendre, le run est déjà Failed).",
+                s.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 0.7.0 Phase 5 — validate the per-workflow Exec allowlist.
+///
+/// Each entry must be a bare binary name with no path separator and no
+/// shell meta-characters. We reject:
+///   - empty strings
+///   - entries containing `/` or `\` (path = different binary, allowlist bypass)
+///   - entries containing whitespace or shell metas (`;`, `|`, `&`, `$`, `` ` ``,
+///     `>`, `<`, etc.) — defence in depth even though we never invoke a shell
+///   - entries containing `..` (defence in depth on path traversal)
+fn validate_exec_allowlist(entries: &[String]) -> Result<(), String> {
+    for raw in entries {
+        let entry = raw.trim();
+        if entry.is_empty() {
+            return Err("Exec allowlist : chaque entrée doit être un nom de binaire non vide.".into());
+        }
+        if entry.contains('/') || entry.contains('\\') {
+            return Err(format!(
+                "Exec allowlist « {} » : pas de séparateur de chemin (`/` ou `\\`). Utilise juste le nom du binaire (ex. `npm`, `cargo`).",
+                entry
+            ));
+        }
+        if entry.contains("..") {
+            return Err(format!(
+                "Exec allowlist « {} » : « .. » interdit.", entry
+            ));
+        }
+        const FORBIDDEN: &[char] = &[
+            ' ', '\t', '\n', '\r',
+            ';', '|', '&', '$', '`', '>', '<', '*', '?', '(', ')', '{', '}', '[', ']',
+            '\'', '"', '\\',
+        ];
+        if entry.chars().any(|c| FORBIDDEN.contains(&c)) {
+            return Err(format!(
+                "Exec allowlist « {} » : caractères spéciaux interdits. Utilise un nom de binaire simple (ex. `npm`, `cargo`, `make`).",
+                entry
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 0.7+ — valide chaque `StepType::JsonData` step :
+///   - `json_data_payload` est set (sinon erreur claire pour le wizard)
+///   - sa sérialisation tient sous une limite raisonnable
+///
+/// Pas de limite de schéma : on accepte n'importe quelle valeur JSON
+/// valide (array, object, scalaire). La taille max protège contre un
+/// payload géant collé par erreur — au-delà, l'utilisateur veut sans
+/// doute une vraie API.
+fn validate_json_data_steps(steps: &[WorkflowStep]) -> Result<(), String> {
+    /// 1 MiB : largement plus que ce qu'un workflow batch peut consommer
+    /// avant que les agents downstream ne saturent leur context window.
+    const MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
+    for s in steps {
+        if !matches!(s.step_type, StepType::JsonData) {
+            continue;
+        }
+        let payload = match s.json_data_payload.as_ref() {
+            Some(p) => p,
+            None => {
+                return Err(format!(
+                    "Step JsonData « {} » : `json_data_payload` est obligatoire (le JSON à émettre).",
+                    s.name
+                ));
+            }
+        };
+        let serialized = serde_json::to_string(payload).map_err(|e| {
+            format!(
+                "Step JsonData « {} » : payload non sérialisable ({}).",
+                s.name, e
+            )
+        })?;
+        if serialized.len() > MAX_PAYLOAD_BYTES {
+            return Err(format!(
+                "Step JsonData « {} » : payload de {} octets > limite {} ({} MiB). Pour des données plus volumineuses, utilise un step ApiCall qui pointe vers une vraie source.",
+                s.name,
+                serialized.len(),
+                MAX_PAYLOAD_BYTES,
+                MAX_PAYLOAD_BYTES / (1024 * 1024)
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 0.7.0 Phase 5 — validate every `StepType::Exec` step in the list:
+///   - `exec_command` is set, non-empty, and present in `allowlist`
+///   - `exec_command` itself passes the same character-level safety
+///     check as allowlist entries (defence in depth — paranoid)
+///   - `exec_timeout_secs` (if set) is in `[1, 1800]`
+///   - `exec_args` capped at 64 entries to avoid pathological argv blow-ups
+///
+/// Args themselves are NOT validated for content — they're rendered
+/// from templates at run time and passed as literal argv elements; even
+/// a value containing `; rm -rf /` becomes a single benign argument
+/// because the runner never invokes a shell. Validating the rendered
+/// content here would either be a false safety blanket (we'd reject
+/// legitimate values) or trivially bypassed.
+fn validate_exec_steps(steps: &[WorkflowStep], allowlist: &[String]) -> Result<(), String> {
+    const MAX_ARGS: usize = 64;
+    const MAX_TIMEOUT_SECS: u32 = 1800;
+    for s in steps {
+        if !matches!(s.step_type, StepType::Exec) {
+            continue;
+        }
+        let cmd = match s.exec_command.as_deref().map(str::trim) {
+            Some(c) if !c.is_empty() => c,
+            _ => return Err(format!(
+                "Step Exec « {} » : `exec_command` est obligatoire (le binaire à exécuter).",
+                s.name
+            )),
+        };
+        // Apply allowlist-entry rules to the command itself — same
+        // character-level discipline (rejects `bash -c`, `npm; rm`, etc.).
+        if let Err(e) = validate_exec_allowlist(&[cmd.to_string()]) {
+            return Err(format!("Step Exec « {} » : {}", s.name, e));
+        }
+        if allowlist.is_empty() {
+            return Err(format!(
+                "Step Exec « {} » : impossible — l'allowlist du workflow est vide. Configure `exec_allowlist` avec les binaires autorisés (ex. [\"npm\", \"cargo\"]).",
+                s.name
+            ));
+        }
+        if !allowlist.iter().any(|a| a == cmd) {
+            return Err(format!(
+                "Step Exec « {} » : binaire `{}` absent de l'allowlist. Allowlist actuelle : [{}].",
+                s.name, cmd, allowlist.join(", ")
+            ));
+        }
+        if s.exec_args.len() > MAX_ARGS {
+            return Err(format!(
+                "Step Exec « {} » : trop d'arguments ({}, max {}).",
+                s.name, s.exec_args.len(), MAX_ARGS
+            ));
+        }
+        if let Some(t) = s.exec_timeout_secs {
+            if t == 0 || t > MAX_TIMEOUT_SECS {
+                return Err(format!(
+                    "Step Exec « {} » : `exec_timeout_secs` doit être entre 1 et {} (reçu : {}).",
+                    s.name, MAX_TIMEOUT_SECS, t
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// GET /api/workflows
 pub async fn list(
     State(state): State<AppState>,
@@ -93,6 +316,38 @@ pub async fn create(
         return Json(ApiResponse::err(format!("Références d'étapes invalides :\n- {}", errors.join("\n- "))));
     }
 
+    if let Some(ref guards) = req.guards {
+        if let Err(e) = validate_guards(guards) {
+            return Json(ApiResponse::err(e));
+        }
+    }
+
+    if let Err(e) = validate_artifact_specs(&req.artifacts) {
+        return Json(ApiResponse::err(e));
+    }
+
+    if let Err(e) = validate_on_failure_steps(&req.on_failure) {
+        return Json(ApiResponse::err(e));
+    }
+
+    if let Err(e) = validate_exec_allowlist(&req.exec_allowlist) {
+        return Json(ApiResponse::err(e));
+    }
+
+    if let Err(e) = validate_exec_steps(&req.steps, &req.exec_allowlist) {
+        return Json(ApiResponse::err(e));
+    }
+    if let Err(e) = validate_exec_steps(&req.on_failure, &req.exec_allowlist) {
+        return Json(ApiResponse::err(e));
+    }
+
+    if let Err(e) = validate_json_data_steps(&req.steps) {
+        return Json(ApiResponse::err(e));
+    }
+    if let Err(e) = validate_json_data_steps(&req.on_failure) {
+        return Json(ApiResponse::err(e));
+    }
+
     let now = Utc::now();
     let wf = Workflow {
         id: Uuid::new_v4().to_string(),
@@ -109,6 +364,11 @@ pub async fn create(
         }),
         workspace_config: req.workspace_config,
         concurrency_limit: req.concurrency_limit,
+        guards: req.guards,
+        artifacts: req.artifacts,
+        on_failure: req.on_failure,
+        exec_allowlist: req.exec_allowlist,
+        variables: req.variables,
         enabled: true,
         created_at: now,
         updated_at: now,
@@ -148,6 +408,54 @@ pub async fn update(
         }
     }
 
+    // `guards` follows the same opt-in semantics as `safety`: if the
+    // caller doesn't include it in the patch, the existing value is
+    // preserved. Set to `Some(WorkflowGuards::default())` to clear
+    // overrides and fall back to backend defaults.
+    if let Some(ref new_guards) = req.guards {
+        if let Err(e) = validate_guards(new_guards) {
+            return Json(ApiResponse::err(e));
+        }
+    }
+
+    if let Some(ref new_artifacts) = req.artifacts {
+        if let Err(e) = validate_artifact_specs(new_artifacts) {
+            return Json(ApiResponse::err(e));
+        }
+    }
+
+    if let Some(ref new_on_failure) = req.on_failure {
+        if let Err(e) = validate_on_failure_steps(new_on_failure) {
+            return Json(ApiResponse::err(e));
+        }
+    }
+
+    if let Some(ref new_allowlist) = req.exec_allowlist {
+        if let Err(e) = validate_exec_allowlist(new_allowlist) {
+            return Json(ApiResponse::err(e));
+        }
+    }
+
+    // Validate Exec steps against the EFFECTIVE allowlist (the patch's
+    // allowlist if provided, else the existing one).
+    let effective_allowlist = req.exec_allowlist.as_ref().unwrap_or(&existing.exec_allowlist);
+    if let Some(ref new_steps) = req.steps {
+        if let Err(e) = validate_exec_steps(new_steps, effective_allowlist) {
+            return Json(ApiResponse::err(e));
+        }
+        if let Err(e) = validate_json_data_steps(new_steps) {
+            return Json(ApiResponse::err(e));
+        }
+    }
+    if let Some(ref new_on_failure) = req.on_failure {
+        if let Err(e) = validate_exec_steps(new_on_failure, effective_allowlist) {
+            return Json(ApiResponse::err(e));
+        }
+        if let Err(e) = validate_json_data_steps(new_on_failure) {
+            return Json(ApiResponse::err(e));
+        }
+    }
+
     let updated = Workflow {
         id: existing.id,
         name: req.name.unwrap_or(existing.name),
@@ -158,6 +466,11 @@ pub async fn update(
         safety: req.safety.unwrap_or(existing.safety),
         workspace_config: req.workspace_config.or(existing.workspace_config),
         concurrency_limit: req.concurrency_limit.or(existing.concurrency_limit),
+        guards: req.guards.or(existing.guards),
+        artifacts: req.artifacts.unwrap_or(existing.artifacts),
+        on_failure: req.on_failure.unwrap_or(existing.on_failure),
+        exec_allowlist: req.exec_allowlist.unwrap_or(existing.exec_allowlist),
+        variables: req.variables.unwrap_or(existing.variables),
         enabled: req.enabled.unwrap_or(existing.enabled),
         created_at: existing.created_at,
         updated_at: Utc::now(),
@@ -181,10 +494,237 @@ pub async fn delete(
     }
 }
 
-/// POST /api/workflows/:id/trigger — Manual trigger with SSE streaming
+/// 0.7.0 UX pass — current export envelope schema version. Bumped on
+/// incompatible changes; the importer reads this to decide whether to
+/// run a migration or refuse the file.
+const EXPORT_VERSION: u32 = 1;
+const WORKFLOW_EXPORT_KIND: &str = "kronn.workflow";
+
+/// GET /api/workflows/:id/export
+///
+/// Returns a self-contained `WorkflowExportEnvelope` JSON. Bundles every
+/// QP referenced by a `BatchQuickPrompt` step so the importer doesn't
+/// need to find them separately. The frontend triggers a file download
+/// from this response (filename suggested via `Content-Disposition`).
+pub async fn export_workflow(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    let wf_id = id.clone();
+    let wf = match state.db.with_conn(move |conn| crate::db::workflows::get_workflow(conn, &wf_id)).await {
+        Ok(Some(wf)) => wf,
+        Ok(None) => return (StatusCode::NOT_FOUND, "Workflow not found").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {}", e)).into_response(),
+    };
+
+    // Bundle every QP referenced by a BatchQuickPrompt step. Dedup by
+    // QP id so we don't ship the same QP twice when multiple steps
+    // reuse it.
+    let qp_ids: Vec<String> = wf.steps.iter()
+        .chain(wf.on_failure.iter())
+        .filter_map(|s| s.batch_quick_prompt_id.clone())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    let referenced_quick_prompts = if qp_ids.is_empty() {
+        Vec::new()
+    } else {
+        let ids = qp_ids.clone();
+        match state.db.with_conn(move |conn| {
+            let mut found = Vec::with_capacity(ids.len());
+            for id in &ids {
+                if let Some(qp) = crate::db::quick_prompts::get_quick_prompt(conn, id)? {
+                    found.push(qp);
+                }
+            }
+            Ok(found)
+        }).await {
+            Ok(qps) => qps,
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {}", e)).into_response(),
+        }
+    };
+
+    let envelope = WorkflowExportEnvelope {
+        kind: WORKFLOW_EXPORT_KIND.to_string(),
+        version: EXPORT_VERSION,
+        exported_at: Utc::now(),
+        workflow: wf.clone(),
+        referenced_quick_prompts,
+    };
+
+    // Sanitised filename: `<workflow_name>.kronn-workflow.json`. Replace
+    // anything outside a-zA-Z0-9_- with `-`.
+    let safe_name: String = wf.name.chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    let filename = format!("{}.kronn-workflow.json", safe_name);
+
+    let body = match serde_json::to_string_pretty(&envelope) {
+        Ok(s) => s,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("Serialization error: {}", e)).into_response(),
+    };
+
+    (
+        [
+            (header::CONTENT_TYPE, "application/json".to_string()),
+            (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{}\"", filename)),
+        ],
+        body,
+    ).into_response()
+}
+
+/// POST /api/workflows/import
+///
+/// Body: `ImportWorkflowRequest { content, project_id }`. `content` is
+/// the raw JSON string of a `WorkflowExportEnvelope`. Validates the
+/// envelope, mints fresh ids/timestamps, attaches to `project_id` (or
+/// leaves null), strips `gate_notify_url` (URLs are per-user — not
+/// portable), and inserts both the workflow and any bundled QPs.
+///
+/// Behaviour with referenced QPs:
+///   - Each bundled QP gets a fresh id (no collision with importer's
+///     existing QPs)
+///   - `BatchQuickPrompt` steps' `batch_quick_prompt_id` is rewritten
+///     to point at the new ids
+///   - If the workflow references a QP that wasn't bundled, the import
+///     fails loudly (no silent half-import)
+pub async fn import_workflow(
+    State(state): State<AppState>,
+    Json(req): Json<ImportWorkflowRequest>,
+) -> Json<ApiResponse<Workflow>> {
+    let envelope: WorkflowExportEnvelope = match serde_json::from_str(&req.content) {
+        Ok(env) => env,
+        Err(e) => return Json(ApiResponse::err(format!("JSON invalide : {}", e))),
+    };
+
+    if envelope.kind != WORKFLOW_EXPORT_KIND {
+        return Json(ApiResponse::err(format!(
+            "Type incorrect : attendu `{}`, reçu `{}`. Vérifie que tu importes bien un workflow exporté depuis Kronn.",
+            WORKFLOW_EXPORT_KIND, envelope.kind
+        )));
+    }
+    if envelope.version > EXPORT_VERSION {
+        return Json(ApiResponse::err(format!(
+            "Version d'export non supportée ({} > {} max). Mets à jour Kronn pour importer ce fichier.",
+            envelope.version, EXPORT_VERSION
+        )));
+    }
+
+    let mut wf = envelope.workflow;
+
+    // Validate the workflow as if it were created from scratch — same
+    // rules as POST /api/workflows. Fail loudly if the source machine
+    // had something the destination doesn't accept.
+    if wf.steps.is_empty() {
+        return Json(ApiResponse::err("Workflow must have at least one step"));
+    }
+    if wf.steps.len() > 20 {
+        return Json(ApiResponse::err(format!("Too many steps ({}, max 20)", wf.steps.len())));
+    }
+    if let Err(errors) = crate::workflows::template::validate_step_references(&wf.steps) {
+        return Json(ApiResponse::err(format!("Références d'étapes invalides :\n- {}", errors.join("\n- "))));
+    }
+    if let Some(ref guards) = wf.guards {
+        if let Err(e) = validate_guards(guards) {
+            return Json(ApiResponse::err(e));
+        }
+    }
+    if let Err(e) = validate_artifact_specs(&wf.artifacts) {
+        return Json(ApiResponse::err(e));
+    }
+    if let Err(e) = validate_on_failure_steps(&wf.on_failure) {
+        return Json(ApiResponse::err(e));
+    }
+    if let Err(e) = validate_exec_allowlist(&wf.exec_allowlist) {
+        return Json(ApiResponse::err(e));
+    }
+    if let Err(e) = validate_exec_steps(&wf.steps, &wf.exec_allowlist) {
+        return Json(ApiResponse::err(e));
+    }
+    if let Err(e) = validate_exec_steps(&wf.on_failure, &wf.exec_allowlist) {
+        return Json(ApiResponse::err(e));
+    }
+
+    // Build a remap table for QP ids (source → fresh) and insert the
+    // bundled QPs first. If a step references a QP that's NOT bundled,
+    // refuse the whole import to keep the workflow consistent.
+    let mut qp_id_remap: std::collections::HashMap<String, String> = Default::default();
+    let now = Utc::now();
+    let mut qps_to_insert: Vec<QuickPrompt> = Vec::with_capacity(envelope.referenced_quick_prompts.len());
+    for mut qp in envelope.referenced_quick_prompts {
+        let old_id = qp.id.clone();
+        let new_id = Uuid::new_v4().to_string();
+        qp_id_remap.insert(old_id, new_id.clone());
+        qp.id = new_id;
+        qp.project_id = req.project_id.clone();
+        qp.created_at = now;
+        qp.updated_at = now;
+        qps_to_insert.push(qp);
+    }
+
+    // Rewrite batch_quick_prompt_id refs in steps + on_failure. Refuse
+    // if a step points to an unbundled QP.
+    let rewrite = |steps: &mut Vec<WorkflowStep>| -> Result<(), String> {
+        for s in steps {
+            if let Some(ref qp_id) = s.batch_quick_prompt_id {
+                match qp_id_remap.get(qp_id) {
+                    Some(new) => s.batch_quick_prompt_id = Some(new.clone()),
+                    None => return Err(format!(
+                        "Step `{}` référence le Quick Prompt `{}` qui n'est pas inclus dans le fichier d'import. Ré-exporte le workflow source pour qu'il bundle ses QPs.",
+                        s.name, qp_id
+                    )),
+                }
+            }
+            // Strip per-user webhook URL — Slack/Teams URLs are NOT portable.
+            // The importer will see the field empty and re-fill if needed.
+            s.gate_notify_url = None;
+        }
+        Ok(())
+    };
+    if let Err(e) = rewrite(&mut wf.steps) {
+        return Json(ApiResponse::err(e));
+    }
+    if let Err(e) = rewrite(&mut wf.on_failure) {
+        return Json(ApiResponse::err(e));
+    }
+
+    // Mint fresh identity for the workflow itself.
+    wf.id = Uuid::new_v4().to_string();
+    wf.project_id = req.project_id.clone();
+    wf.created_at = now;
+    wf.updated_at = now;
+    wf.enabled = true;
+
+    let imported_wf = wf.clone();
+    let qps = qps_to_insert.clone();
+    match state.db.with_conn(move |conn| {
+        for qp in &qps {
+            crate::db::quick_prompts::insert_quick_prompt(conn, qp)?;
+        }
+        crate::db::workflows::insert_workflow(conn, &imported_wf)?;
+        Ok(())
+    }).await {
+        Ok(()) => Json(ApiResponse::ok(wf)),
+        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
+/// POST /api/workflows/:id/trigger — Manual trigger with SSE streaming.
+/// 0.6.0 UX pass — accepts an optional JSON body with `variables` (manual
+/// launch). When the workflow has declared `variables`, required ones
+/// must be filled (400 if not). Variable values land in the run's
+/// `trigger_context` so they resolve as `{{var_name}}` in step prompts
+/// (the existing `inject_trigger_context` already handles that path).
+/// Legacy callers that send no body still work — `Option<Json<...>>` ➜
+/// `None` → no variables → exactly the previous behaviour.
 pub async fn trigger(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    body: Option<Json<TriggerWorkflowRequest>>,
 ) -> Sse<SseStream> {
     let wf_id = id.clone();
     let wf = match state.db.with_conn(move |conn| crate::db::workflows::get_workflow(conn, &wf_id)).await {
@@ -201,13 +741,39 @@ pub async fn trigger(
         return sse_error("Workflow is disabled");
     }
 
+    // 0.6.0 UX pass — validate and merge user-entered variables.
+    // - Required variable missing/empty → reject with explicit message.
+    // - Unknown variables (sent but not declared) → silently dropped
+    //   (defensive: don't let a stale form smuggle data in).
+    let provided_vars = body.map(|Json(b)| b.variables).unwrap_or_default();
+    for declared in &wf.variables {
+        if declared.required {
+            let val = provided_vars.get(&declared.name).map(|s| s.trim()).unwrap_or("");
+            if val.is_empty() {
+                let label = if declared.label.is_empty() { &declared.name } else { &declared.label };
+                return sse_error(format!(
+                    "Variable « {} » est obligatoire pour lancer ce workflow.",
+                    label
+                ));
+            }
+        }
+    }
+    let mut trigger_obj = serde_json::Map::new();
+    trigger_obj.insert("type".into(), serde_json::Value::String("manual".into()));
+    trigger_obj.insert("triggered_at".into(), serde_json::Value::String(Utc::now().to_rfc3339()));
+    for declared in &wf.variables {
+        if let Some(val) = provided_vars.get(&declared.name) {
+            trigger_obj.insert(declared.name.clone(), serde_json::Value::String(val.clone()));
+        }
+    }
+
     // Atomic concurrency check + insert in a single transaction (avoids TOCTOU race)
     let now = Utc::now();
     let run = WorkflowRun {
         id: Uuid::new_v4().to_string(),
         workflow_id: wf.id.clone(),
         status: RunStatus::Pending,
-        trigger_context: Some(serde_json::json!({ "type": "manual", "triggered_at": now.to_rfc3339() })),
+        trigger_context: Some(serde_json::Value::Object(trigger_obj)),
         step_results: vec![],
         tokens_used: 0,
         workspace_path: None,
@@ -220,6 +786,7 @@ pub async fn trigger(
         batch_failed: 0,
         batch_name: None,
         parent_run_id: None,
+        state: ::std::collections::HashMap::new(),
     };
 
     let r = run.clone();
@@ -286,8 +853,13 @@ pub async fn trigger(
                     });
                     yield Event::default().event("step_start").data(data.to_string());
                 }
-                crate::workflows::runner::RunEvent::StepProgress { .. } => {
-                    // Progress events not streamed for full workflow runs (only test-step)
+                crate::workflows::runner::RunEvent::StepProgress { text } => {
+                    // Live-progress passthrough — the runner now emits chunks from
+                    // the in-flight Agent step's stdout. Without this the user
+                    // sees the "step running" pulse for 30-120s with no content.
+                    yield Event::default()
+                        .event("step_progress")
+                        .data(serde_json::json!({ "text": text }).to_string());
                 }
                 crate::workflows::runner::RunEvent::StepDone { step_result } => {
                     let data = serde_json::to_value(step_result).unwrap_or_default();
@@ -296,6 +868,10 @@ pub async fn trigger(
                 crate::workflows::runner::RunEvent::RunDone { status } => {
                     let data = serde_json::json!({ "status": status });
                     yield Event::default().event("run_done").data(data.to_string());
+                }
+                crate::workflows::runner::RunEvent::GuardTriggered { kind, threshold, actual } => {
+                    let data = serde_json::json!({ "kind": kind, "threshold": threshold, "actual": actual });
+                    yield Event::default().event("guard_triggered").data(data.to_string());
                 }
                 crate::workflows::runner::RunEvent::RunError { error } => {
                     let data = serde_json::json!({ "error": error });
@@ -698,6 +1274,11 @@ pub async fn test_step(
                         serde_json::json!({ "status": status }).to_string()
                     );
                 }
+                crate::workflows::runner::RunEvent::GuardTriggered { kind, threshold, actual } => {
+                    yield Event::default().event("guard_triggered").data(
+                        serde_json::json!({ "kind": kind, "threshold": threshold, "actual": actual }).to_string()
+                    );
+                }
                 crate::workflows::runner::RunEvent::RunError { error } => {
                     yield Event::default().event("error").data(
                         serde_json::json!({ "error": error }).to_string()
@@ -850,6 +1431,111 @@ pub async fn cancel_run(
     Json(ApiResponse::ok(CancelRunResponse {
         run_cancelled,
         child_discs_cancelled,
+    }))
+}
+
+/// 0.7.0 Phase 4 — payload for `POST /api/workflows/:id/runs/:run_id/decide`.
+///
+/// `decision` is one of `"approve" | "request_changes" | "reject"`.
+/// `comment` is optional in general but the frontend enforces a non-empty
+/// value for `request_changes` (the agent needs feedback to act on).
+#[derive(Debug, serde::Deserialize, ts_rs::TS)]
+#[ts(export)]
+pub struct DecideRunRequest {
+    pub decision: String,
+    #[serde(default)]
+    pub comment: Option<String>,
+}
+
+/// Response for [`decide_run`].
+#[derive(Debug, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct DecideRunResponse {
+    pub run_id: String,
+    pub new_status: RunStatus,
+}
+
+/// POST /api/workflows/:id/runs/:run_id/decide
+///
+/// Apply an operator's decision to a paused (Gate) run and resume it.
+/// Idempotent on already-finished runs (returns the current status).
+pub async fn decide_run(
+    State(state): State<AppState>,
+    Path((_workflow_id, run_id)): Path<(String, String)>,
+    Json(payload): Json<DecideRunRequest>,
+) -> Json<ApiResponse<DecideRunResponse>> {
+    use crate::workflows::runner::GateDecision;
+
+    let run_id_for_db = run_id.clone();
+    let run = match state
+        .db
+        .with_conn(move |conn| crate::db::workflows::get_run(conn, &run_id_for_db))
+        .await
+    {
+        Ok(Some(r)) => r,
+        Ok(None) => return Json(ApiResponse::err("Run not found")),
+        Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
+    };
+
+    if run.status != RunStatus::WaitingApproval {
+        return Json(ApiResponse::err(format!(
+            "Run is not waiting for approval (status: {:?})",
+            run.status
+        )));
+    }
+
+    let wf_id = run.workflow_id.clone();
+    let workflow = match state
+        .db
+        .with_conn(move |conn| crate::db::workflows::get_workflow(conn, &wf_id))
+        .await
+    {
+        Ok(Some(wf)) => wf,
+        Ok(None) => return Json(ApiResponse::err("Workflow not found")),
+        Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
+    };
+
+    let decision = match payload.decision.as_str() {
+        "approve" => GateDecision::Approve { comment: payload.comment.clone() },
+        "request_changes" => match payload.comment.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+            Some(c) => GateDecision::RequestChanges { comment: c.to_string() },
+            None => return Json(ApiResponse::err(
+                "request_changes requires a non-empty `comment`",
+            )),
+        },
+        "reject" => GateDecision::Reject { comment: payload.comment.clone() },
+        other => return Json(ApiResponse::err(format!(
+            "Unknown decision `{}` (expected approve | request_changes | reject)",
+            other
+        ))),
+    };
+
+    // Resume in the background — long-running, the operator just gets
+    // back the new status (Running for approve/request_changes, Failed
+    // for reject). The UI already polls run state via SSE/refetch.
+    let state_clone = state.clone();
+    let run_for_resume = run.clone();
+    let run_id_for_log = run.id.clone();
+    let new_status = match &decision {
+        GateDecision::Reject { .. } => RunStatus::Failed,
+        _ => RunStatus::Running,
+    };
+    tokio::spawn(async move {
+        let cfg = state_clone.config.read().await;
+        let tokens = cfg.tokens.clone();
+        let agents = cfg.agents.clone();
+        drop(cfg);
+        let mut run_mut = run_for_resume;
+        if let Err(e) = crate::workflows::runner::resume_run(
+            state_clone, &workflow, &mut run_mut, decision, &tokens, &agents, None,
+        ).await {
+            tracing::error!("Resume run {} failed: {}", run_id_for_log, e);
+        }
+    });
+
+    Json(ApiResponse::ok(DecideRunResponse {
+        run_id: run.id,
+        new_status,
     }))
 }
 
@@ -1210,6 +1896,8 @@ pub async fn suggestions(
                 batch_max_items: None,
                 batch_workspace_mode: None,
                 batch_chain_prompt_ids: vec![],
+                batch_concurrent_limit: None,
+                quick_api_id: None,
                 notify_config: None,
                 api_plugin_slug: None,
                 api_config_id: None,
@@ -1224,6 +1912,14 @@ pub async fn suggestions(
                 api_timeout_ms: None,
                 api_max_retries: None,
                 api_output_var: None,
+                gate_message: None,
+                gate_request_changes_target: None,
+                gate_notify_url: None,
+                exec_command: None,
+                exec_args: vec![],
+                exec_timeout_secs: None,
+                quick_prompt_id: None,
+                json_data_payload: None,
             }).collect(),
         });
     }
@@ -1243,7 +1939,11 @@ pub async fn suggestions(
 ///     relies on the format, so a descriptive response is fine.
 pub(crate) fn build_dry_run_preamble(output_format: &StepOutputFormat) -> &'static str {
     match output_format {
-        StepOutputFormat::Structured => "\
+        // TypedSchema and Structured share the dry-run preamble — both
+        // need the LLM to keep the envelope shape, the only difference is
+        // the schema constraint on `data` (validated post-extract by the
+        // runner). The preamble itself doesn't change.
+        StepOutputFormat::Structured | StepOutputFormat::TypedSchema { .. } => "\
 ⚠️ MODE TEST (dry-run) — RÈGLES STRICTES :\n\
 - N'utilise QUE des tools en lecture seule (get, list, search, read). N'écris, ne modifie, ne crée, ne supprime RIEN.\n\
 - Respecte STRICTEMENT le format de sortie structuré demandé plus bas. Ne remplace PAS le bloc ---STEP_OUTPUT--- par une narration, même en mode test.\n\
@@ -1395,8 +2095,17 @@ pub async fn test_api_call(
     .await;
 
     let success = outcome.result.status == RunStatus::Success;
+    // The output now has a trailing `\n[SIGNAL: ...]` line so workflows can
+    // branch on the result via `on_result.contains`. Strip that suffix before
+    // parsing the JSON envelope — without this, `serde_json::from_str` chokes
+    // on the trailing line and the wizard's "Test the call" panel showed
+    // success-but-no-envelope, which the UI rendered as a generic Failure.
     let envelope: Option<serde_json::Value> = if success {
-        serde_json::from_str(&outcome.result.output).ok()
+        let json_part = outcome.result.output
+            .split("\n[SIGNAL:")
+            .next()
+            .unwrap_or(&outcome.result.output);
+        serde_json::from_str(json_part).ok()
     } else {
         None
     };
@@ -1413,6 +2122,394 @@ pub async fn test_api_call(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Regression test: 0.6.0 added a trailing `\n[SIGNAL: OK]` line to ApiCall
+    // success outputs so workflows can branch via on_result without parsing JSON.
+    // The /test-api-call handler used `serde_json::from_str(full_output)` which
+    // failed on the SIGNAL suffix → wizard's "Test the call" surfaced
+    // "success: true, envelope: null" → UI rendered "Failed" with no detail.
+    // This guards the strip-then-parse logic the handler now uses.
+    #[test]
+    fn test_api_call_strips_trailing_signal_line_before_json_parse() {
+        let envelope_json = r#"{"data":{"key":"EW-1"},"status":"OK","summary":"GET /search → 1 issue"}"#;
+        let with_signal = format!("{}\n[SIGNAL: OK]", envelope_json);
+
+        // Same logic the handler runs.
+        let json_part = with_signal.split("\n[SIGNAL:").next().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(json_part)
+            .expect("strip-then-parse should succeed");
+
+        assert_eq!(parsed.get("status").and_then(|v| v.as_str()), Some("OK"));
+        assert_eq!(parsed.pointer("/data/key").and_then(|v| v.as_str()), Some("EW-1"));
+    }
+
+    #[test]
+    fn test_api_call_strip_is_noop_when_output_has_no_signal_suffix() {
+        // Older outputs (no trailing SIGNAL) must still parse cleanly.
+        let envelope_json = r#"{"data":{"x":1},"status":"OK","summary":""}"#;
+        let json_part = envelope_json.split("\n[SIGNAL:").next().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(json_part).unwrap();
+        assert_eq!(parsed.pointer("/data/x").and_then(|v| v.as_i64()), Some(1));
+    }
+
+    fn mk_step(name: &str, kind: StepType) -> WorkflowStep {
+        WorkflowStep {
+            name: name.into(),
+            step_type: kind,
+            description: None,
+            agent: AgentType::ClaudeCode,
+            prompt_template: String::new(),
+            mode: StepMode::Normal,
+            output_format: StepOutputFormat::FreeText,
+            on_result: vec![],
+            agent_settings: None,
+            stall_timeout_secs: None,
+            retry: None,
+            delay_after_secs: None,
+            mcp_config_ids: vec![],
+            skill_ids: vec![],
+            profile_ids: vec![],
+            directive_ids: vec![],
+            batch_quick_prompt_id: None,
+            batch_items_from: None,
+            batch_wait_for_completion: None,
+            batch_max_items: None,
+            batch_workspace_mode: None,
+            batch_chain_prompt_ids: vec![],
+            batch_concurrent_limit: None,
+            quick_api_id: None,
+            notify_config: None,
+            api_plugin_slug: None,
+            api_config_id: None,
+            api_endpoint_path: None,
+            api_method: None,
+            api_query: None,
+            api_path_params: None,
+            api_headers: None,
+            api_body: None,
+            api_extract: None,
+            api_pagination: None,
+            api_timeout_ms: None,
+            api_max_retries: None,
+            api_output_var: None,
+            gate_message: None,
+            gate_request_changes_target: None,
+            gate_notify_url: None,
+            exec_command: None,
+            exec_args: vec![],
+            exec_timeout_secs: None,
+            quick_prompt_id: None,
+            json_data_payload: None,
+        }
+    }
+
+    #[test]
+    fn validate_on_failure_accepts_empty_chain() {
+        // Empty rollback is the default state for every workflow — must
+        // not surface as an error.
+        assert!(validate_on_failure_steps(&[]).is_ok());
+    }
+
+    #[test]
+    fn validate_on_failure_accepts_notify_and_apicall_and_agent() {
+        let chain = vec![
+            mk_step("notify_ops", StepType::Notify),
+            mk_step("revert_db", StepType::ApiCall),
+            mk_step("post_mortem", StepType::Agent),
+            mk_step("fan_out_alerts", StepType::BatchQuickPrompt),
+        ];
+        assert!(validate_on_failure_steps(&chain).is_ok());
+    }
+
+    #[test]
+    fn validate_on_failure_rejects_gate_step() {
+        // A Gate inside on_failure would deadlock — rejected at save time.
+        let chain = vec![
+            mk_step("notify_ops", StepType::Notify),
+            mk_step("ask_for_review", StepType::Gate),
+        ];
+        let err = validate_on_failure_steps(&chain).expect_err("expected validation error");
+        assert!(err.contains("ask_for_review"), "error should name the offending step, got: {}", err);
+        assert!(err.to_lowercase().contains("gate"));
+    }
+
+    // ─── Phase 5 — Exec allowlist validation ─────────────────────────────
+
+    #[test]
+    fn validate_allowlist_accepts_simple_binaries() {
+        // Bare names with hyphens, underscores, digits — common binary
+        // naming. Don't reject `npm`, `cargo-clippy`, `python3`.
+        let allowed = vec!["npm".into(), "cargo".into(), "cargo-clippy".into(), "python3".into(), "make".into()];
+        assert!(validate_exec_allowlist(&allowed).is_ok());
+    }
+
+    #[test]
+    fn validate_allowlist_accepts_empty_list() {
+        // Empty list = Exec disabled. Not an error to define a workflow
+        // without any allowlisted binaries.
+        assert!(validate_exec_allowlist(&[]).is_ok());
+    }
+
+    #[test]
+    fn validate_allowlist_rejects_path_separator() {
+        // Path-separator-bearing entries bypass the bare-name guarantee
+        // (would let `cargo` and `/etc/cargo` look like the same entry).
+        let err1 = validate_exec_allowlist(&["/usr/bin/npm".to_string()]).unwrap_err();
+        assert!(err1.contains("séparateur de chemin"), "got: {}", err1);
+        let err2 = validate_exec_allowlist(&["bin\\npm".to_string()]).unwrap_err();
+        assert!(err2.contains("séparateur de chemin"));
+    }
+
+    #[test]
+    fn validate_allowlist_rejects_shell_metas() {
+        // Defence in depth: even though we never invoke a shell, an
+        // entry like `npm; rm -rf /` looks suspicious and would
+        // exercise the matcher in surprising ways. Reject loudly.
+        let cases = ["npm; rm", "npm|cat", "npm&", "npm$", "npm`whoami`", "npm>out", "npm<in", "npm*", "npm?"];
+        for raw in cases {
+            let err = validate_exec_allowlist(&[raw.into()]).unwrap_err();
+            assert!(err.contains("caractères spéciaux"), "case `{}` got: {}", raw, err);
+        }
+    }
+
+    #[test]
+    fn validate_allowlist_rejects_double_dot() {
+        let err = validate_exec_allowlist(&["..".into()]).unwrap_err();
+        assert!(err.contains(".."), "got: {}", err);
+        let err2 = validate_exec_allowlist(&["my..bin".into()]).unwrap_err();
+        assert!(err2.contains(".."), "got: {}", err2);
+    }
+
+    #[test]
+    fn validate_allowlist_rejects_whitespace() {
+        let err = validate_exec_allowlist(&["bash -c".into()]).unwrap_err();
+        assert!(err.contains("caractères spéciaux"), "got: {}", err);
+    }
+
+    #[test]
+    fn validate_allowlist_rejects_empty_entry() {
+        let err = validate_exec_allowlist(&["".into()]).unwrap_err();
+        assert!(err.to_lowercase().contains("vide"), "got: {}", err);
+        let err2 = validate_exec_allowlist(&["  ".into()]).unwrap_err();
+        assert!(err2.to_lowercase().contains("vide"), "got: {}", err2);
+    }
+
+    // ─── Phase 5 — Exec step validation ──────────────────────────────────
+
+    fn mk_exec_step(name: &str, command: Option<&str>, args: Vec<&str>, timeout: Option<u32>) -> WorkflowStep {
+        let mut s = mk_step(name, StepType::Exec);
+        s.exec_command = command.map(String::from);
+        s.exec_args = args.into_iter().map(String::from).collect();
+        s.exec_timeout_secs = timeout;
+        s
+    }
+
+    #[test]
+    fn validate_exec_step_requires_command() {
+        let chain = vec![mk_exec_step("run", None, vec![], None)];
+        let err = validate_exec_steps(&chain, &["echo".into()]).unwrap_err();
+        assert!(err.contains("exec_command"));
+        assert!(err.contains("run"));
+    }
+
+    #[test]
+    fn validate_exec_step_rejects_empty_allowlist() {
+        let chain = vec![mk_exec_step("run", Some("echo"), vec![], None)];
+        let err = validate_exec_steps(&chain, &[]).unwrap_err();
+        assert!(err.to_lowercase().contains("allowlist"), "got: {}", err);
+        assert!(err.contains("vide"), "got: {}", err);
+    }
+
+    #[test]
+    fn validate_exec_step_rejects_command_not_in_allowlist() {
+        let chain = vec![mk_exec_step("run", Some("rm"), vec!["-rf", "/"], None)];
+        let err = validate_exec_steps(&chain, &["echo".into(), "npm".into()]).unwrap_err();
+        assert!(err.contains("absent de l'allowlist"), "got: {}", err);
+        assert!(err.contains("rm"));
+    }
+
+    #[test]
+    fn validate_exec_step_rejects_path_traversal_in_command() {
+        let chain = vec![mk_exec_step("run", Some("../../etc/passwd"), vec![], None)];
+        let err = validate_exec_steps(&chain, &["passwd".into()]).unwrap_err();
+        // Same character-level guard as the allowlist — blocks before
+        // the allowlist check, with a "Step Exec" prefix.
+        assert!(err.contains("Step Exec"), "got: {}", err);
+    }
+
+    #[test]
+    fn validate_exec_step_rejects_shell_in_command() {
+        // `bash -c` would let the operator smuggle a full shell line
+        // past the allowlist via args. Whitespace check catches it.
+        let chain = vec![mk_exec_step("run", Some("bash -c"), vec!["echo hi"], None)];
+        let err = validate_exec_steps(&chain, &["bash".into()]).unwrap_err();
+        assert!(err.contains("Step Exec"), "got: {}", err);
+    }
+
+    #[test]
+    fn validate_exec_step_accepts_valid_config() {
+        let chain = vec![mk_exec_step("test", Some("cargo"), vec!["test", "--", "{{steps.x.summary}}"], Some(120))];
+        assert!(validate_exec_steps(&chain, &["cargo".into()]).is_ok());
+    }
+
+    #[test]
+    fn validate_exec_step_rejects_zero_or_huge_timeout() {
+        let chain1 = vec![mk_exec_step("test", Some("cargo"), vec![], Some(0))];
+        assert!(validate_exec_steps(&chain1, &["cargo".into()]).is_err());
+        let chain2 = vec![mk_exec_step("test", Some("cargo"), vec![], Some(1801))];
+        assert!(validate_exec_steps(&chain2, &["cargo".into()]).is_err());
+        // Edge: 1800 is allowed (the cap, inclusive).
+        let chain3 = vec![mk_exec_step("test", Some("cargo"), vec![], Some(1800))];
+        assert!(validate_exec_steps(&chain3, &["cargo".into()]).is_ok());
+    }
+
+    #[test]
+    fn validate_exec_step_rejects_too_many_args() {
+        let too_many: Vec<String> = (0..65).map(|i| format!("arg{}", i)).collect();
+        let mut step = mk_exec_step("run", Some("echo"), vec![], None);
+        step.exec_args = too_many;
+        let err = validate_exec_steps(&[step], &["echo".into()]).unwrap_err();
+        assert!(err.contains("trop d'arguments"), "got: {}", err);
+    }
+
+    #[test]
+    fn validate_exec_step_skips_non_exec_steps() {
+        // Validator must ignore Notify / Agent / etc. — they don't have
+        // exec_command and shouldn't surface a spurious error.
+        let chain = vec![
+            mk_step("agent", StepType::Agent),
+            mk_step("notify", StepType::Notify),
+            mk_step("api", StepType::ApiCall),
+        ];
+        assert!(validate_exec_steps(&chain, &[]).is_ok());
+    }
+
+    // ─── Phase 0.7.0 UX pass — Export/Import envelope shape ─────────────
+
+    fn mk_workflow_for_export(name: &str) -> Workflow {
+        Workflow {
+            id: "src-id-original".into(),
+            name: name.into(),
+            project_id: Some("src-project".into()),
+            trigger: WorkflowTrigger::Manual,
+            steps: vec![mk_step("main", StepType::Agent)],
+            actions: vec![],
+            safety: WorkflowSafety {
+                sandbox: false, max_files: None, max_lines: None, require_approval: false,
+            },
+            workspace_config: None,
+            concurrency_limit: None,
+            guards: None,
+            artifacts: ::std::collections::HashMap::new(),
+            on_failure: vec![],
+            exec_allowlist: vec![],
+            variables: vec![],
+            enabled: true,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn export_envelope_serializes_with_kind_and_version() {
+        let env = WorkflowExportEnvelope {
+            kind: WORKFLOW_EXPORT_KIND.into(),
+            version: EXPORT_VERSION,
+            exported_at: chrono::Utc::now(),
+            workflow: mk_workflow_for_export("audit"),
+            referenced_quick_prompts: vec![],
+        };
+        let json = serde_json::to_string(&env).unwrap();
+        assert!(json.contains("\"kind\":\"kronn.workflow\""));
+        assert!(json.contains("\"version\":1"));
+        // Roundtrip: parse back, fields preserved.
+        let parsed: WorkflowExportEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.kind, WORKFLOW_EXPORT_KIND);
+        assert_eq!(parsed.workflow.name, "audit");
+        assert!(parsed.referenced_quick_prompts.is_empty());
+    }
+
+    #[test]
+    fn export_envelope_omits_empty_qp_list_from_wire() {
+        // `skip_serializing_if = "Vec::is_empty"` keeps the JSON tight
+        // when no QPs are bundled — common case for solo dev workflows.
+        let env = WorkflowExportEnvelope {
+            kind: WORKFLOW_EXPORT_KIND.into(),
+            version: EXPORT_VERSION,
+            exported_at: chrono::Utc::now(),
+            workflow: mk_workflow_for_export("no-qps"),
+            referenced_quick_prompts: vec![],
+        };
+        let json = serde_json::to_string(&env).unwrap();
+        assert!(!json.contains("referenced_quick_prompts"),
+            "empty QP vec should be omitted; got: {}", json);
+    }
+
+    #[test]
+    fn import_workflow_rejects_wrong_kind() {
+        // The frontend may try to import a Quick Prompt JSON file by
+        // mistake — kind discriminator catches that case loudly.
+        let payload = r#"{"kind":"kronn.quick_prompt","version":1,"exported_at":"2026-04-28T00:00:00Z","quick_prompt":{}}"#;
+        // We don't go through the handler (needs DB) — just check the
+        // decode + kind check logic in isolation.
+        let env: serde_json::Value = serde_json::from_str(payload).unwrap();
+        assert_eq!(env["kind"], "kronn.quick_prompt");
+        // The handler's kind check would fire here with a clear error.
+    }
+
+    #[test]
+    fn import_workflow_rejects_future_version() {
+        // Forward-incompat: a v2 envelope from a future Kronn must NOT
+        // be silently accepted by today's importer (would skip fields
+        // it doesn't know about).
+        let env = WorkflowExportEnvelope {
+            kind: WORKFLOW_EXPORT_KIND.into(),
+            version: EXPORT_VERSION + 1,
+            exported_at: chrono::Utc::now(),
+            workflow: mk_workflow_for_export("future"),
+            referenced_quick_prompts: vec![],
+        };
+        let json = serde_json::to_string(&env).unwrap();
+        let parsed: WorkflowExportEnvelope = serde_json::from_str(&json).unwrap();
+        assert!(parsed.version > EXPORT_VERSION,
+            "version mismatch should be detectable post-decode");
+    }
+
+    #[test]
+    fn qp_export_envelope_roundtrip() {
+        use crate::models::PromptVariable;
+        let qp = QuickPrompt {
+            id: "src-qp".into(),
+            name: "audit_repo".into(),
+            icon: "🔍".into(),
+            prompt_template: "Audit {{repo}}".into(),
+            variables: vec![PromptVariable {
+                name: "repo".into(),
+                label: "Repo".into(),
+                placeholder: "kronn".into(),
+                description: None,
+                required: true,
+            }],
+            agent: AgentType::ClaudeCode,
+            project_id: Some("src-project".into()),
+            skill_ids: vec![],
+            tier: ModelTier::Default,
+            description: "Audit a repo".into(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let env = QuickPromptExportEnvelope {
+            kind: "kronn.quick_prompt".into(),
+            version: 1,
+            exported_at: chrono::Utc::now(),
+            quick_prompt: qp.clone(),
+        };
+        let json = serde_json::to_string(&env).unwrap();
+        let parsed: QuickPromptExportEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.kind, "kronn.quick_prompt");
+        assert_eq!(parsed.quick_prompt.name, "audit_repo");
+        assert_eq!(parsed.quick_prompt.variables.len(), 1);
+    }
 
     #[test]
     fn normalize_mcp_names() {

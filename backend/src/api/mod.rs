@@ -18,6 +18,7 @@ pub mod directives;
 pub mod git_ops;
 pub mod ws;
 pub mod quick_prompts;
+pub mod quick_apis;
 pub mod ollama;
 pub mod debug;
 pub mod themes;

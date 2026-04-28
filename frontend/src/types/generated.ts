@@ -318,6 +318,9 @@ export type ApiAuthKind =
   | { ApiKeyHeader: { header_name: string; env_key: string } }
   | { Bearer: { env_key: string } }
   | { Basic: { user_env: string; password_env: string } }
+  /** HTTP Basic with the API key as username and an empty password —
+   *  `Authorization: Basic <base64(API_KEY:)>`. SpeedCurve, Stripe, etc. */
+  | { BasicApiKey: { env_key: string } }
   | { OAuth2ClientCredentials: {
       token_url: string;
       client_id_env: string;
@@ -453,10 +456,53 @@ export interface Workflow {
   safety: WorkflowSafety;
   workspace_config: WorkspaceConfig | null;
   concurrency_limit: number | null;
+  /** 0.7.0 — execution limits (timeout, max LLM calls, loop detection).
+   *  `null` = use backend defaults (120 min, 100 calls, 10 revisits/step). */
+  guards?: WorkflowGuards | null;
+  /** 0.7.0 Phase 3 — declared artifacts (file outputs the steps may
+   *  emit). Map key = artifact name; referenced in steps as
+   *  `{{artifacts.<name>}}`. Absent / empty map = no artifact persistence. */
+  artifacts?: Record<string, ArtifactSpec>;
+  /** 0.7.0 Phase 7 — compensating steps run when the main pipeline ends in
+   *  RunStatus::Failed. Empty by default. NOT fired on Cancelled / StoppedByGuard
+   *  / Gate-Reject. Each rollback step sees `{{failed_step.name}}` and
+   *  `{{failed_step.output}}` in addition to the regular template context.
+   *  Gate steps are rejected here (would deadlock the run). */
+  on_failure?: WorkflowStep[];
+  /** 0.7.0 Phase 5 — allowlist of binaries that StepType::Exec is permitted
+   *  to invoke. Empty list = Exec disabled (the safe default). Match is exact
+   *  on the bare binary name (no path, no glob). */
+  exec_allowlist?: string[];
+  /** 0.6.0 UX pass — variables prompted at manual launch time (mirrors
+   *  QuickPrompt.variables). Empty = no launch form, lance direct. */
+  variables?: PromptVariable[];
   enabled: boolean;
   created_at: string;
   updated_at: string;
 }
+
+/** Declared artifact in a workflow. Path is workspace-relative. */
+export interface ArtifactSpec {
+  path: string;
+  /** Hint for the UI: "markdown", "yaml", "json", "text". Informational only. */
+  format?: string | null;
+}
+
+/** Per-workflow execution limits enforced by the runner. */
+export interface WorkflowGuards {
+  /** Wall-clock max duration in seconds. */
+  timeout_seconds?: number | null;
+  /** Cap on LLM-spending steps (Agent=1, BatchQuickPrompt=1, ApiCall/Notify=0). */
+  max_llm_calls?: number | null;
+  /** Max revisits of the same step via Goto. Default 10. */
+  loop_detection_max_revisits?: number | null;
+}
+
+/** Which guard tripped (sent in the `guard_triggered` SSE event). */
+export type GuardKind =
+  | { type: "Timeout" }
+  | { type: "MaxLlmCalls" }
+  | { type: "LoopDetection"; step_name: string };
 
 export type WorkflowTrigger =
   | { type: "Cron"; schedule: string }
@@ -468,7 +514,11 @@ export type TrackerSourceConfig =
 
 export type StepOutputFormat =
   | { type: "FreeText" }
-  | { type: "Structured" };
+  | { type: "Structured" }
+  /** 0.7.0 — like Structured, but `data` is constrained by a JSON-Schema
+   *  subset. The schema is sent to the LLM in the prompt and validated
+   *  post-extract by the runner. */
+  | { type: "TypedSchema"; schema: unknown };
 
 export interface WorkflowStep {
   name: string;
@@ -498,6 +548,19 @@ export interface WorkflowStep {
   /** Quick Prompt IDs to fire sequentially after the initial one inside each
    * child discussion. Progress only increments when the full chain finishes. */
   batch_chain_prompt_ids?: string[];
+  /** 0.6.0 — concurrent fan-out cap for `BatchApiCall` (HTTP path only).
+   * Default 5; capped at 20. Distinct from agent_semaphore which gates
+   * `BatchQuickPrompt`. */
+  batch_concurrent_limit?: number | null;
+  /** 0.6.0 — when set on a `BatchApiCall` step, the executor loads the
+   * referenced QuickApi from DB at run-time and uses its API config.
+   * The step's own api_* fields take precedence per-field. 0.7+ — étendu
+   * à `StepType::ApiCall` (single, non-batch). */
+  quick_api_id?: string | null;
+  /** 0.7+ — when set on an `Agent` step, the runner loads the referenced
+   *  QuickPrompt and pulls `prompt_template`, `tier`, and `skill_ids` from
+   *  it. The step's values override per-field (non-empty wins). */
+  quick_prompt_id?: string | null;
   // ─── Notify fields (0.3.5) ─────────────────────────────────────────
   // Only meaningful when step_type.type === 'Notify'.
   notify_config?: NotifyConfig | null;
@@ -517,6 +580,29 @@ export interface WorkflowStep {
   api_timeout_ms?: number | null;
   api_max_retries?: number | null;
   api_output_var?: string | null;
+
+  // ─── Gate fields (0.7.0 Phase 4 — human-in-the-loop) ─────────────
+  /** Markdown message shown to the operator. Templates supported. */
+  gate_message?: string | null;
+  /** Step name to jump to on "Request Changes". Default: previous step. */
+  gate_request_changes_target?: string | null;
+  /** 0.7.0 P1-1 — optional webhook URL fired when the run enters
+   *  WaitingApproval. Best-effort, fire-and-forget. Templated. */
+  gate_notify_url?: string | null;
+
+  // ─── Exec fields (0.7.0 Phase 5 — direct shell, allowlist-gated) ─────
+  /** Binary to execute. Must match an entry in Workflow.exec_allowlist. NOT templated. */
+  exec_command?: string | null;
+  /** Argv elements. Templates {{steps.X}} are rendered, but the result becomes a literal arg. */
+  exec_args?: string[];
+  /** Per-step timeout in seconds. Default 300, capped at 1800. */
+  exec_timeout_secs?: number | null;
+
+  // ─── JsonData fields (0.7+ — déterministe data source) ───────────────
+  /** Payload JSON émis par le step. Validé au save (parse JSON valide,
+   *  taille raisonnable). Aucun templating au runtime — la valeur est
+   *  retournée telle quelle. Voir `StepType.JsonData`. */
+  json_data_payload?: unknown | null;
 }
 
 /** Configuration for a Notify webhook step (zero agent tokens). */
@@ -549,7 +635,11 @@ export type StepType =
   | { type: "Agent" }
   | { type: "ApiCall" }
   | { type: "BatchQuickPrompt" }
-  | { type: "Notify" };
+  | { type: "Notify" }
+  | { type: "Gate" }
+  | { type: "Exec" }
+  | { type: "BatchApiCall" }
+  | { type: "JsonData" };
 
 export type StepMode =
   | { type: "Normal" };
@@ -569,7 +659,10 @@ export interface StepConditionRule {
 export type ConditionAction =
   | { type: "Stop" }
   | { type: "Skip" }
-  | { type: "Goto"; step_name: string };
+  /** 0.7.0 Phase 6 — `max_iterations` caps how many times THIS Goto fires
+   *  before the runner falls through. `null` = no per-edge limit (only the
+   *  workflow-level loop_detection guard applies). */
+  | { type: "Goto"; step_name: string; max_iterations?: number | null };
 
 export interface RetryConfig {
   max_retries: number;
@@ -622,7 +715,20 @@ export interface WorkflowRun {
   batch_name?: string | null;
 }
 
-export type RunStatus = "Pending" | "Running" | "Success" | "Failed" | "Cancelled" | "WaitingApproval";
+export type RunStatus = "Pending" | "Running" | "Success" | "Failed" | "Cancelled" | "WaitingApproval" | "StoppedByGuard";
+
+/** 0.7.0 Phase 4 — payload for POST /api/workflows/:id/runs/:run_id/decide. */
+export interface DecideRunRequest {
+  /** "approve" | "request_changes" | "reject" */
+  decision: string;
+  /** Operator's free-text comment. Required for request_changes. */
+  comment?: string | null;
+}
+
+export interface DecideRunResponse {
+  run_id: string;
+  new_status: RunStatus;
+}
 
 export interface StepResult {
   step_name: string;
@@ -708,6 +814,14 @@ export interface CreateWorkflowRequest {
   safety?: WorkflowSafety | null;
   workspace_config?: WorkspaceConfig | null;
   concurrency_limit?: number | null;
+  guards?: WorkflowGuards | null;
+  artifacts?: Record<string, ArtifactSpec>;
+  /** 0.7.0 Phase 7 — rollback chain. Empty = no compensation. Gate steps rejected. */
+  on_failure?: WorkflowStep[];
+  /** 0.7.0 Phase 5 — Exec binary allowlist. Empty = Exec disabled. */
+  exec_allowlist?: string[];
+  /** 0.6.0 UX pass — manual launch variables. */
+  variables?: PromptVariable[];
 }
 
 export interface UpdateWorkflowRequest {
@@ -719,12 +833,50 @@ export interface UpdateWorkflowRequest {
   safety?: WorkflowSafety;
   workspace_config?: WorkspaceConfig;
   concurrency_limit?: number | null;
+  guards?: WorkflowGuards | null;
+  artifacts?: Record<string, ArtifactSpec> | null;
+  /** Replace the rollback chain entirely when present. Send `[]` to clear. */
+  on_failure?: WorkflowStep[] | null;
+  /** Replace the Exec allowlist entirely when present. Send `[]` to disable. */
+  exec_allowlist?: string[] | null;
+  /** Replace launch-time variables entirely. */
+  variables?: PromptVariable[] | null;
   enabled?: boolean;
 }
 
+/** 0.7.0 UX pass — payload for POST /api/workflows/import. */
 export interface ImportWorkflowRequest {
   content: string;
   project_id?: string | null;
+}
+
+/** 0.6.0 UX pass — optional payload for POST /api/workflows/:id/trigger.
+ *  Carries values matching the workflow's declared `variables`. */
+export interface TriggerWorkflowRequest {
+  variables: Record<string, string>;
+}
+
+/** 0.7.0 UX pass — payload for POST /api/quick-prompts/import. */
+export interface ImportQuickPromptRequest {
+  content: string;
+  project_id?: string | null;
+}
+
+/** Self-contained envelope returned by GET /api/workflows/:id/export. */
+export interface WorkflowExportEnvelope {
+  kind: string;
+  version: number;
+  exported_at: string;
+  workflow: Workflow;
+  referenced_quick_prompts?: QuickPrompt[];
+}
+
+/** Self-contained envelope returned by GET /api/quick-prompts/:id/export. */
+export interface QuickPromptExportEnvelope {
+  kind: string;
+  version: number;
+  exported_at: string;
+  quick_prompt: QuickPrompt;
 }
 
 // ─── AI Documentation Files ─────────────────────────────────────────────────
@@ -1178,4 +1330,90 @@ export interface CreateQuickPromptRequest {
   skill_ids?: string[];
   tier?: ModelTier;
   description?: string;
+}
+
+// ─── Quick APIs (0.6.0) ────────────────────────────────────────────────
+// Reusable API call templates with variables. Mirror of QuickPrompt but
+// the engine is HTTP, not LLM. Field names follow WorkflowStep ApiCall
+// fields verbatim so ApiCallStepCard can edit either shape unchanged.
+
+export interface QuickApi {
+  id: string;
+  name: string;
+  icon: string;
+  description?: string;
+  project_id?: string | null;
+  api_plugin_slug: string;
+  api_config_id: string;
+  api_endpoint_path: string;
+  api_method?: string | null;
+  api_query?: Record<string, string> | null;
+  api_path_params?: Record<string, string> | null;
+  api_headers?: Record<string, string> | null;
+  /** JSON body — shape walked at runtime, string leaves are templated. */
+  api_body?: unknown | null;
+  api_extract?: ExtractSpec | null;
+  api_pagination?: PaginationSpec | null;
+  api_timeout_ms?: number | null;
+  api_max_retries?: number | null;
+  variables: PromptVariable[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateQuickApiRequest {
+  name: string;
+  icon?: string | null;
+  description?: string;
+  project_id?: string | null;
+  api_plugin_slug: string;
+  api_config_id: string;
+  api_endpoint_path: string;
+  api_method?: string | null;
+  api_query?: Record<string, string> | null;
+  api_path_params?: Record<string, string> | null;
+  api_headers?: Record<string, string> | null;
+  api_body?: unknown | null;
+  api_extract?: ExtractSpec | null;
+  api_pagination?: PaginationSpec | null;
+  api_timeout_ms?: number | null;
+  api_max_retries?: number | null;
+  variables?: PromptVariable[];
+}
+
+export interface QuickApiExportEnvelope {
+  kind: string;
+  version: number;
+  exported_at: string;
+  quick_api: QuickApi;
+}
+
+export interface ImportQuickApiRequest {
+  content: string;
+  project_id?: string | null;
+}
+
+export interface RunQuickApiRequest {
+  variables?: Record<string, string>;
+}
+
+export interface RunQuickApiResponse {
+  success: boolean;
+  duration_ms: number;
+  envelope?: unknown | null;
+  error?: string | null;
+}
+
+export interface BatchRunQuickApiRequest {
+  /** JSON array of strings (one per QA first variable) OR objects (keys map to variables). */
+  items: unknown;
+  concurrent_limit?: number | null;
+}
+
+export interface BatchRunQuickApiResponse {
+  /** OK | PARTIAL | ERROR */
+  status: string;
+  duration_ms: number;
+  envelope?: unknown | null;
+  error?: string | null;
 }

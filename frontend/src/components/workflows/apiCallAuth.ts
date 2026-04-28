@@ -48,6 +48,15 @@ export function authSlots(spec: ApiSpec | null | undefined): AuthSlot[] {
       envKey: `${auth.Basic.user_env}+${auth.Basic.password_env}`,
     }];
   }
+  if ('BasicApiKey' in auth) {
+    // Same wire as Basic but with the password half empty — the agent
+    // only owns one secret. SpeedCurve, Stripe, etc.
+    return [{
+      kind: 'header',
+      name: 'Authorization',
+      envKey: auth.BasicApiKey.env_key,
+    }];
+  }
   if ('OAuth2ClientCredentials' in auth) {
     return [{ kind: 'header', name: 'Authorization', envKey: `${auth.OAuth2ClientCredentials.client_id_env}+secret` }];
   }

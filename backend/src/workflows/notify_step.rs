@@ -181,6 +181,8 @@ mod tests {
             batch_max_items: None,
             batch_workspace_mode: None,
             batch_chain_prompt_ids: vec![],
+            batch_concurrent_limit: None,
+            quick_api_id: None,
             notify_config: Some(config),
             api_plugin_slug: None,
             api_config_id: None,
@@ -195,6 +197,14 @@ mod tests {
             api_timeout_ms: None,
             api_max_retries: None,
             api_output_var: None,
+            gate_message: None,
+            gate_request_changes_target: None,
+            gate_notify_url: None,
+            exec_command: None,
+            exec_args: vec![],
+            exec_timeout_secs: None,
+            quick_prompt_id: None,
+            json_data_payload: None,
         }
     }
 

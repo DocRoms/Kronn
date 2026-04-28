@@ -142,6 +142,11 @@ export function DiscussionsPage({
   const [testModePendingDiscId, setTestModePendingDiscId] = useState<string | null>(null);
   const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState('');
+  // Per-discussion override of the agent shown in the streaming placeholder.
+  // Set when the user pings `@codex` (or any other agent) instead of the
+  // discussion's default — the bubble must say "Codex" while it spins,
+  // not the default agent. Cleared when the stream ends.
+  const [streamingTargetMap, setStreamingTargetMap] = useState<Record<string, AgentType>>({});
   const [collapsedDiscGroups, setCollapsedDiscGroups] = useState<Set<string>>(() => {
     try {
       const saved = localStorage.getItem('kronn:discCollapsedGroups');
@@ -530,6 +535,12 @@ export function DiscussionsPage({
     refetchDiscussions();
     refetchProjects(); // Refresh project audit_status for CTA updates
     reloadDiscussion(discId);
+    // Clear the @-mention target — next message goes back to the
+    // discussion's default agent unless re-pinged.
+    setStreamingTargetMap(prev => {
+      const { [discId]: _drop, ...rest } = prev;
+      return rest;
+    });
   }, [cleanupStreamBase, refetchDiscussions, refetchProjects, reloadDiscussion]);
 
   // Called by ChatHeader after any inline API update (title, skills, profiles, etc.)
@@ -769,6 +780,19 @@ export function DiscussionsPage({
     const controller = new AbortController();
     abortControllers.current[discId] = controller;
     setStreamingMap(prev => ({ ...prev, [discId]: '' }));
+    // Track the pinged agent so the streaming placeholder ("Codex · Agent
+    // running…") shows the right name and color while we wait for the first
+    // chunk. Without this the placeholder always shows the discussion's
+    // default agent — the user pings @codex but sees Claude Code spinning,
+    // which makes the @-mention feel broken.
+    if (targetAgent) {
+      setStreamingTargetMap(prev => ({ ...prev, [discId]: targetAgent }));
+    } else {
+      setStreamingTargetMap(prev => {
+        const { [discId]: _drop, ...rest } = prev;
+        return rest;
+      });
+    }
 
     resetAgentLogs();
     await discussionsApi.sendMessageStream(
@@ -1401,12 +1425,17 @@ export function DiscussionsPage({
               })()}
 
               {/* Streaming: single agent mode */}
-              {sending && !orchState[activeDiscussion.id]?.active && (
+              {sending && !orchState[activeDiscussion.id]?.active && (() => {
+                // The pinged agent (e.g. @codex) takes precedence over the
+                // discussion's default — without this, the streaming
+                // placeholder lies about who's actually responding.
+                const streamingAgent = streamingTargetMap[activeDiscussion.id] ?? activeDiscussion.agent;
+                return (
                 <div className="disc-msg-row" data-role="agent" aria-live="polite">
                   <div className="disc-msg-bubble" data-role="agent">
-                    <div className="disc-msg-agent-label" style={{ color: agentColor(activeDiscussion.agent), justifyContent: 'space-between' }}>
+                    <div className="disc-msg-agent-label" style={{ color: agentColor(streamingAgent), justifyContent: 'space-between' }}>
                       <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                        <Cpu size={10} /> {activeDiscussion.agent}
+                        <Cpu size={10} /> {AGENT_LABELS[streamingAgent] ?? streamingAgent}
                         <Loader2 size={10} style={{ animation: 'spin 1s linear infinite', marginLeft: 4 }} />
                       </span>
                       <span className="disc-streaming-elapsed">
@@ -1458,13 +1487,49 @@ export function DiscussionsPage({
                     )}
                   </div>
                 </div>
-              )}
+                );
+              })()}
 
               {/* Streaming: orchestration mode */}
               {orchState[activeDiscussion.id] && (() => {
                 const orch = orchState[activeDiscussion.id];
                 return (
                   <>
+                    {/* Pre-roll placeholder. Between "Lancer le débat" and
+                        the first agent's first chunk, agentStreams is
+                        empty and the rest of the loop renders nothing —
+                        the user sees a frozen UI for several seconds
+                        (agent CLI cold-start, especially Codex). Show a
+                        clear "debate launching" pulse + any system
+                        messages we've already received so the user knows
+                        it's actually running. The placeholder hides as
+                        soon as the first agent stream lands. */}
+                    {orch.active && orch.agentStreams.length === 0 && (
+                      <div className="disc-msg-row" data-role="agent" aria-live="polite">
+                        <div className="disc-msg-bubble" data-role="agent">
+                          <div className="disc-streaming-waiting">
+                            <span className="disc-pulse-dot" />
+                            {t('disc.debateLaunching')}
+                          </div>
+                          {orch.systemMessages.length > 0 && (
+                            <ul className="disc-orch-systems" style={{ marginTop: 6, paddingLeft: 18, fontSize: 11, color: 'var(--kr-text-muted)' }}>
+                              {orch.systemMessages.slice(-5).map((m, i) => (
+                                <li key={i}>{m}</li>
+                              ))}
+                            </ul>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                    {/* When agent streams have started but new system
+                        messages keep arriving (round transitions, status
+                        notes), show them as a compact strip above the
+                        latest stream so the user has continuous feedback. */}
+                    {orch.systemMessages.length > 0 && orch.agentStreams.length > 0 && (
+                      <div className="disc-orch-systems-strip" style={{ fontSize: 11, color: 'var(--kr-text-muted)', padding: '4px 0', borderLeft: '2px solid var(--kr-border-faint)', paddingLeft: 8, marginBottom: 4 }}>
+                        {orch.systemMessages[orch.systemMessages.length - 1]}
+                      </div>
+                    )}
                     {orch.agentStreams.map((as_, i) => (
                       <div key={i} className="disc-msg-row" data-role="agent">
                         <div
@@ -1484,7 +1549,15 @@ export function DiscussionsPage({
                             <div className="disc-orch-thinking">
                               {t('disc.thinking', as_.agent)}
                             </div>
-                          ) : null}
+                          ) : (
+                            // Agent finished with NO chunks — typically a CLI
+                            // that crashed before printing or returned empty.
+                            // Without an explicit message the user sees a
+                            // ghost bubble and can't tell whether to retry.
+                            <div className="disc-orch-empty" style={{ fontSize: 12, color: 'var(--kr-warning)', fontStyle: 'italic' }}>
+                              ⚠️ {t('disc.debateAgentEmpty', as_.agent)}
+                            </div>
+                          )}
                         </div>
                       </div>
                     ))}

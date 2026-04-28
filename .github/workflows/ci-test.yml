@@ -116,6 +116,10 @@ jobs:
           # line is production code → violation. Lines AFTER it are test
           # helpers and are exempt.
           #
+          # Comment lines (//, //!, ///) are skipped: a doc comment that
+          # mentions `Command::new` for context isn't a real call site
+          # and shouldn't break the build.
+          #
           # Note: we use LINE_NUM instead of LINENO because LINENO is a
           # bash builtin (current script line number).
           FAIL=0
@@ -130,7 +134,7 @@ jobs:
                 echo "  $file:$LINE_NUM:$rest"
                 FAIL=1
               fi
-            done < <(grep -n 'Command::new' "$file")
+            done < <(grep -n 'Command::new' "$file" | grep -vE '^[0-9]+:[[:space:]]*//')
           done
           if [ "$FAIL" -eq 1 ]; then exit 1; fi
           echo "✓ No raw Command::new in production code"

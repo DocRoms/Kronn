@@ -55,6 +55,49 @@ impl TemplateContext {
             self.values.insert("previous_step.status".into(), envelope.status);
             self.values.insert("previous_step.data_json".into(), envelope.data_json);
         }
+
+        // 0.7.0 Phase 3 — also extract any `---ARTIFACT:<name>---` blocks
+        // and expose them as `{{artifacts.<name>}}`. Persistence to disk
+        // is handled by the runner (which knows the workspace path);
+        // this just makes the content available to subsequent steps via
+        // the same render path. Re-emitting the same artifact on a
+        // later step overwrites the previous render — Auto-Dev's
+        // implement→review→implement loop relies on this.
+        for (name, content) in extract_artifacts(output) {
+            self.values.insert(format!("artifacts.{}", name), content);
+        }
+
+        // 0.7.0 Phase 6 — same pattern for `---STATE:<k>=<v>---` lines.
+        // Persistence to the run row is handled by the runner; this
+        // just exposes the freshly-written state to subsequent steps in
+        // the same iteration via `{{state.<k>}}`. Re-writing a key
+        // overwrites — the run.state map ends up with the last value.
+        for (k, v) in extract_state(output) {
+            self.values.insert(format!("state.{}", k), v);
+        }
+    }
+
+    /// Seed the context with previously-persisted artifacts at run start.
+    /// Used by the runner to make `{{artifacts.<name>}}` resolve before
+    /// the first step that produces them — Auto-Dev's first
+    /// `implement` iteration reads `{{artifacts.review | if_exists}}`
+    /// which is empty on round 1 (no review yet) and populated on
+    /// rounds 2+ once the previous iteration wrote it.
+    pub fn seed_artifacts(&mut self, artifacts: &::std::collections::HashMap<String, String>) {
+        for (name, content) in artifacts {
+            self.values.insert(format!("artifacts.{}", name), content.clone());
+        }
+    }
+
+    /// 0.7.0 Phase 6 — seed the context with previously-persisted run
+    /// state at run start (and on resume after a Gate pause). Without
+    /// this the first step of a fresh iteration would see empty
+    /// `{{state.X}}` even though the durable state on the run row is
+    /// non-empty.
+    pub fn seed_state(&mut self, state: &::std::collections::HashMap<String, String>) {
+        for (k, v) in state {
+            self.values.insert(format!("state.{}", k), v.clone());
+        }
     }
 
     /// Render a template string, replacing all `{{variable}}` occurrences.
@@ -112,12 +155,38 @@ impl TemplateContext {
 /// runtime check catches any remaining edge cases (e.g. envelope extraction
 /// failing even though `output_format` is Structured).
 pub fn validate_step_references(steps: &[crate::models::WorkflowStep]) -> Result<(), Vec<String>> {
-    use crate::models::StepOutputFormat;
+    use crate::models::{StepOutputFormat, StepType};
     static RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
         regex_lite::Regex::new(
             r"\{\{\s*(?:steps\.([A-Za-z0-9_\-]+)\.(data|summary|status|data_json)|previous_step\.(data|summary|status|data_json))\s*\}\}"
         ).unwrap()
     });
+
+    /// Le step émet-il une envelope Structured exploitable par
+    /// `{{steps.X.data|summary|status|data_json}}` ? Pour l'Agent, ça
+    /// dépend de son `output_format` (l'utilisateur peut choisir FreeText).
+    /// Pour tous les autres step types, le runner émet TOUJOURS une
+    /// envelope Structured peu importe le champ `output_format` du step
+    /// (cf. notify_step.rs / api_call_executor.rs / json_data_step.rs / etc.) —
+    /// donc on les considère comme producteurs Structured even si le
+    /// wizard n'a pas explicitement set le field.
+    fn produces_structured(step: &crate::models::WorkflowStep) -> bool {
+        match step.step_type {
+            StepType::Agent => matches!(
+                step.output_format,
+                StepOutputFormat::Structured | StepOutputFormat::TypedSchema { .. }
+            ),
+            // Les step types mécaniques émettent toujours une envelope
+            // Structured. C'est leur contrat invariant.
+            StepType::ApiCall
+            | StepType::Notify
+            | StepType::Gate
+            | StepType::Exec
+            | StepType::BatchApiCall
+            | StepType::BatchQuickPrompt
+            | StepType::JsonData => true,
+        }
+    }
 
     let mut errors = Vec::new();
     for (idx, step) in steps.iter().enumerate() {
@@ -128,7 +197,7 @@ pub fn validate_step_references(steps: &[crate::models::WorkflowStep]) -> Result
                 // Look only in strictly-upstream steps (can't read self or future)
                 let upstream = steps.iter().take(idx).find(|s| s.name == target_name);
                 match upstream {
-                    Some(target) if target.output_format == StepOutputFormat::Structured => {}
+                    Some(target) if produces_structured(target) => {}
                     Some(target) => errors.push(format!(
                         "Étape '{}' référence {{{{steps.{}.{}}}}}, mais l'étape '{}' est en output_format: FreeText. Passe-la en Structured pour qu'elle expose .data / .summary / .status.",
                         step.name, target_name, target_field, target.name
@@ -157,7 +226,7 @@ pub fn validate_step_references(steps: &[crate::models::WorkflowStep]) -> Result
                     ));
                 } else {
                     let prev = &steps[idx - 1];
-                    if prev.output_format != StepOutputFormat::Structured {
+                    if !produces_structured(prev) {
                         errors.push(format!(
                             "Étape '{}' utilise {{{{previous_step.{}}}}}, mais l'étape précédente '{}' est en output_format: FreeText. Passe-la en Structured.",
                             step.name, target_field, prev.name
@@ -290,6 +359,305 @@ Now rewrite ONLY the structured output block. Do not repeat your analysis.\n\n\
 ---STEP_OUTPUT---\n\
 {{\"data\": <extract the key result from above>, \"status\": \"OK\", \"summary\": \"<one sentence>\"}}\n\
 ---END_STEP_OUTPUT---";
+
+// ─── Artifacts (0.7.0 Phase 3) ───────────────────────────────────────────────
+
+/// Extract every `---ARTIFACT:<name>---\n<content>\n---END_ARTIFACT---`
+/// block from an agent's response. Returns a name → raw content map.
+///
+/// **Why blocks instead of a tool** : the same plain-text capture pattern
+/// already powers `extract_step_envelope`, so the agent doesn't need a
+/// new tool to interact with the runner — it just emits the right marker.
+/// Works on every agent type without per-CLI plumbing.
+///
+/// **Trailing newline trimming** : we trim trailing `\n` so a re-rendered
+/// artifact in `{{artifacts.X}}` doesn't add a blank line every time it's
+/// referenced. Leading whitespace is preserved (Markdown indentation
+/// matters).
+pub fn extract_artifacts(text: &str) -> ::std::collections::HashMap<String, String> {
+    use ::std::collections::HashMap;
+    let mut out = HashMap::new();
+    let mut cursor = 0usize;
+    while let Some(start_rel) = text[cursor..].find("---ARTIFACT:") {
+        let header_start = cursor + start_rel;
+        // Header line: `---ARTIFACT:<name>---\n`. Find the closing `---`
+        // on the same line.
+        let after_prefix = &text[header_start + "---ARTIFACT:".len()..];
+        let header_end_rel = match after_prefix.find("---") {
+            Some(i) => i,
+            None => break,
+        };
+        let name = after_prefix[..header_end_rel].trim().to_string();
+        if name.is_empty() {
+            cursor = header_start + 1;
+            continue;
+        }
+        // Content starts after the header's closing `---` (skip optional `\n`).
+        let content_start = header_start + "---ARTIFACT:".len() + header_end_rel + "---".len();
+        let content_after = &text[content_start..];
+        let content_after = content_after.strip_prefix('\n').unwrap_or(content_after);
+        // Find the matching `---END_ARTIFACT---`.
+        let end_rel = match content_after.find("---END_ARTIFACT---") {
+            Some(i) => i,
+            None => break,
+        };
+        let raw = &content_after[..end_rel];
+        // Trim a single trailing newline (common LLM emission style) but
+        // preserve everything else.
+        let trimmed = raw.strip_suffix('\n').unwrap_or(raw).to_string();
+        out.insert(name, trimmed);
+        cursor = content_start + end_rel + "---END_ARTIFACT---".len();
+    }
+    out
+}
+
+// ─── State map (0.7.0 Phase 6) ───────────────────────────────────────────────
+
+/// Extract every `---STATE:<key>=<value>---` line from an agent's
+/// response. Returns a key → value map.
+///
+/// Sister of [`extract_artifacts`]: same plain-text capture pattern, but
+/// single-line (a state entry is just a small string, no body block).
+/// Multiple writes to the same key in one response → last write wins
+/// (mirrors normal hash-map semantics, no surprise).
+///
+/// Format constraints:
+/// - Header on its own line, no leading whitespace before `---STATE:`
+/// - `<key>` is everything up to the first `=` (trimmed)
+/// - `<value>` is everything after `=` up to `---` on the same line (trimmed)
+/// - Empty key → entry skipped (defensive — no anonymous state)
+/// - Empty value → kept (clearing a counter back to "" is legitimate)
+///
+/// Examples that match:
+///   `---STATE:retry_count=3---`
+///   `---STATE:last_verdict=approved---`
+///   `---STATE:notes=---`              (empty value, key "notes" set to "")
+pub fn extract_state(text: &str) -> ::std::collections::HashMap<String, String> {
+    use ::std::collections::HashMap;
+    let mut out = HashMap::new();
+    let prefix = "---STATE:";
+    let suffix = "---";
+    let mut cursor = 0usize;
+    while let Some(start_rel) = text[cursor..].find(prefix) {
+        let header_start = cursor + start_rel;
+        let after_prefix = &text[header_start + prefix.len()..];
+        // Each entry is a single line — anything past `\n` ends the search.
+        // Find the closing `---` BEFORE any newline.
+        let line_end = after_prefix.find('\n').unwrap_or(after_prefix.len());
+        let line_slice = &after_prefix[..line_end];
+        let close_rel = match line_slice.find(suffix) {
+            Some(i) => i,
+            None => {
+                cursor = header_start + prefix.len();
+                continue;
+            }
+        };
+        let body = &line_slice[..close_rel];
+        // Split on the first `=`. Missing `=` → skip the entry (malformed).
+        if let Some(eq_idx) = body.find('=') {
+            let key = body[..eq_idx].trim().to_string();
+            let value = body[eq_idx + 1..].trim().to_string();
+            if !key.is_empty() {
+                out.insert(key, value);
+            }
+        }
+        cursor = header_start + prefix.len() + close_rel + suffix.len();
+    }
+    out
+}
+
+// ─── TypedSchema (0.7.0 Phase 2) ─────────────────────────────────────────────
+
+/// Build the prompt instruction for an Agent step whose output_format is
+/// `TypedSchema { schema }`. Reuses the `---STEP_OUTPUT---` envelope
+/// contract (so downstream `{{previous_step.data}}` / `{{previous_step.status}}`
+/// resolution stays uniform with vanilla `Structured`) but adds the
+/// schema spec so the LLM produces conforming `data`.
+pub fn build_typed_schema_instruction(schema: &serde_json::Value) -> String {
+    let pretty = serde_json::to_string_pretty(schema).unwrap_or_else(|_| schema.to_string());
+    format!(
+        "\n\n\
+---\n\
+You must structure your response as follows:\n\n\
+1. First, do your analysis/reasoning in plain text.\n\n\
+2. Then, end your response with EXACTLY this format:\n\n\
+---STEP_OUTPUT---\n\
+{{\"data\": <object conforming to the JSON schema below>, \"status\": \"OK\", \"summary\": \"<one sentence>\"}}\n\
+---END_STEP_OUTPUT---\n\n\
+The `data` field MUST validate against this JSON Schema:\n\n\
+```json\n{}\n```\n\n\
+Rules:\n\
+- status must be one of: OK, NO_RESULTS, ERROR\n\
+- summary must be a single sentence describing what you found/did\n\
+- data MUST satisfy every field, type, and constraint in the schema above\n\
+- The ---STEP_OUTPUT--- block must be the LAST thing in your response\n\
+- Do NOT wrap the JSON in markdown code fences inside the delimiters",
+        pretty
+    )
+}
+
+/// Build a repair prompt that tells the LLM exactly what went wrong:
+/// either "missing envelope" or "schema validation failed: <error>".
+/// Phase-1 we only had `REPAIR_PROMPT_TEMPLATE`; that one stays valid
+/// for vanilla `Structured` — the new builder routes per-format.
+pub fn build_repair_prompt(
+    previous_output: &str,
+    output_format: &crate::models::StepOutputFormat,
+    schema_error: Option<&str>,
+) -> String {
+    use crate::models::StepOutputFormat;
+    match output_format {
+        StepOutputFormat::TypedSchema { schema } => {
+            let pretty = serde_json::to_string_pretty(schema).unwrap_or_else(|_| schema.to_string());
+            let problem = schema_error
+                .map(|e| format!("Your previous response failed: schema validation failed: {}\n\n", e))
+                .unwrap_or_else(|| "Your previous response did not include the required output format.\n\n".into());
+            format!(
+                "{}\
+Here is what you wrote:\n---\n{}\n---\n\n\
+Now rewrite ONLY the structured output block. Do not repeat your analysis.\n\n\
+The `data` field MUST validate against:\n\n```json\n{}\n```\n\n\
+---STEP_OUTPUT---\n\
+{{\"data\": <object conforming to the schema above>, \"status\": \"OK\", \"summary\": \"<one sentence>\"}}\n\
+---END_STEP_OUTPUT---",
+                problem, previous_output, pretty
+            )
+        }
+        _ => REPAIR_PROMPT_TEMPLATE.replace("{PREVIOUS_OUTPUT}", previous_output),
+    }
+}
+
+/// Validate the envelope's `data_json` (raw JSON string from the
+/// `---STEP_OUTPUT---` block's `data` field) against a JSON-Schema subset.
+///
+/// **Subset supported** (deliberately tight — wide enough for Auto-Dev's
+/// `validate_ticket` schema, narrow enough to keep the validator
+/// understandable without pulling in the full `jsonschema` crate):
+///
+/// - `type`: `"string"` | `"integer"` | `"number"` | `"boolean"` |
+///   `"array"` | `"object"` | `"null"`. Type mismatches reject.
+/// - `enum`: array of allowed values. Anything not in the list rejects.
+/// - `minimum` / `maximum`: numeric bounds (inclusive). Out-of-range rejects.
+/// - `minLength` / `maxLength`: string length bounds. Out-of-range rejects.
+/// - `properties`: per-field sub-schemas (recursive). Unknown fields are
+///   tolerated by default (matches JSON Schema's `additionalProperties: true`).
+/// - `required`: array of property names that must be present.
+/// - `items`: sub-schema applied to every element of an array. The
+///   first failing item is reported.
+///
+/// **Not supported** (deferred — no Auto-Dev step needs them yet):
+///   `pattern`, `format`, `oneOf`, `anyOf`, `$ref`, `$defs`, `additionalProperties: false`.
+pub fn validate_envelope_against_schema(
+    data_json: &str,
+    schema: &serde_json::Value,
+) -> Result<(), String> {
+    let data: serde_json::Value = serde_json::from_str(data_json)
+        .map_err(|e| format!("data field is not valid JSON: {}", e))?;
+    validate_value(&data, schema, "$")
+}
+
+fn validate_value(
+    value: &serde_json::Value,
+    schema: &serde_json::Value,
+    path: &str,
+) -> Result<(), String> {
+    let schema_obj = match schema.as_object() {
+        Some(o) => o,
+        None => return Ok(()), // Empty/non-object schema accepts anything.
+    };
+
+    // type
+    if let Some(ty) = schema_obj.get("type").and_then(|v| v.as_str()) {
+        let actual = value_type_name(value);
+        let ok = match ty {
+            "number" => matches!(value, serde_json::Value::Number(_)),
+            "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+            other => actual == other,
+        };
+        if !ok {
+            return Err(format!("{}: expected type {}, got {}", path, ty, actual));
+        }
+    }
+
+    // enum
+    if let Some(allowed) = schema_obj.get("enum").and_then(|v| v.as_array()) {
+        if !allowed.iter().any(|a| a == value) {
+            return Err(format!(
+                "{}: value {} is not in allowed enum {:?}",
+                path, value, allowed
+            ));
+        }
+    }
+
+    // min/max numeric
+    if let Some(n) = value.as_f64() {
+        if let Some(min) = schema_obj.get("minimum").and_then(|v| v.as_f64()) {
+            if n < min { return Err(format!("{}: {} < minimum {}", path, n, min)); }
+        }
+        if let Some(max) = schema_obj.get("maximum").and_then(|v| v.as_f64()) {
+            if n > max { return Err(format!("{}: {} > maximum {}", path, n, max)); }
+        }
+    }
+
+    // string length
+    if let Some(s) = value.as_str() {
+        if let Some(min) = schema_obj.get("minLength").and_then(|v| v.as_u64()) {
+            if (s.chars().count() as u64) < min {
+                return Err(format!("{}: length {} < minLength {}", path, s.chars().count(), min));
+            }
+        }
+        if let Some(max) = schema_obj.get("maxLength").and_then(|v| v.as_u64()) {
+            if (s.chars().count() as u64) > max {
+                return Err(format!("{}: length {} > maxLength {}", path, s.chars().count(), max));
+            }
+        }
+    }
+
+    // properties + required (object case)
+    if let Some(obj) = value.as_object() {
+        if let Some(required) = schema_obj.get("required").and_then(|v| v.as_array()) {
+            for req in required {
+                if let Some(name) = req.as_str() {
+                    if !obj.contains_key(name) {
+                        return Err(format!("{}: missing required property '{}'", path, name));
+                    }
+                }
+            }
+        }
+        if let Some(props) = schema_obj.get("properties").and_then(|v| v.as_object()) {
+            for (name, sub_schema) in props {
+                if let Some(child) = obj.get(name) {
+                    let child_path = format!("{}.{}", path, name);
+                    validate_value(child, sub_schema, &child_path)?;
+                }
+                // Missing optional property — covered by `required` above.
+            }
+        }
+    }
+
+    // items (array case)
+    if let Some(arr) = value.as_array() {
+        if let Some(item_schema) = schema_obj.get("items") {
+            for (i, item) in arr.iter().enumerate() {
+                let child_path = format!("{}[{}]", path, i);
+                validate_value(item, item_schema, &child_path)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn value_type_name(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
 
 /// Try to extract a `---STEP_OUTPUT--- ... ---END_STEP_OUTPUT---` envelope from raw text.
 pub fn extract_step_envelope(text: &str) -> Option<StepEnvelope> {
@@ -693,6 +1061,8 @@ mod tests {
             batch_max_items: None,
             batch_workspace_mode: None,
             batch_chain_prompt_ids: vec![],
+            batch_concurrent_limit: None,
+            quick_api_id: None,
             notify_config: None,
             api_plugin_slug: None,
             api_config_id: None,
@@ -707,6 +1077,14 @@ mod tests {
             api_timeout_ms: None,
             api_max_retries: None,
             api_output_var: None,
+            gate_message: None,
+            gate_request_changes_target: None,
+            gate_notify_url: None,
+            exec_command: None,
+            exec_args: vec![],
+            exec_timeout_secs: None,
+            quick_prompt_id: None,
+            json_data_payload: None,
         }
     }
 
@@ -901,5 +1279,362 @@ mod tests {
         assert_eq!(ctx.render("{{previous_step.summary}}").unwrap(), "2 orphan PRs");
         // .output still contains the full raw text
         assert!(ctx.render("{{previous_step.output}}").unwrap().contains("Reasoning"));
+    }
+
+    // ─── TypedSchema (0.7.0 Phase 2) ──────────────────────────────────────────
+
+    #[test]
+    fn typed_schema_instruction_includes_schema_text() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "score": { "type": "integer", "minimum": 0, "maximum": 10 }
+            },
+            "required": ["score"]
+        });
+        let instr = build_typed_schema_instruction(&schema);
+        // The schema must appear verbatim (or pretty-printed) so the LLM
+        // sees the contract — not just a hand-wavy description.
+        assert!(instr.contains("score"));
+        assert!(instr.contains("minimum"));
+        assert!(instr.contains("---STEP_OUTPUT---"));
+    }
+
+    #[test]
+    fn validator_accepts_conforming_object() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "score": { "type": "integer", "minimum": 0, "maximum": 10 },
+                "status": { "type": "string", "enum": ["READY", "INCOMPLETE", "AMBIGUOUS"] }
+            },
+            "required": ["score", "status"]
+        });
+        let data = r#"{"score": 7, "status": "READY"}"#;
+        assert!(validate_envelope_against_schema(data, &schema).is_ok());
+    }
+
+    #[test]
+    fn validator_rejects_missing_required_property() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "score": { "type": "integer" } },
+            "required": ["score"]
+        });
+        let data = r#"{"other": 7}"#;
+        let err = validate_envelope_against_schema(data, &schema).unwrap_err();
+        assert!(err.contains("missing required property 'score'"), "got: {}", err);
+    }
+
+    #[test]
+    fn validator_rejects_out_of_range_number() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "score": { "type": "integer", "minimum": 0, "maximum": 10 } },
+            "required": ["score"]
+        });
+        let data = r#"{"score": 42}"#;
+        let err = validate_envelope_against_schema(data, &schema).unwrap_err();
+        assert!(err.contains("> maximum"), "got: {}", err);
+    }
+
+    #[test]
+    fn validator_rejects_value_not_in_enum() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "status": { "type": "string", "enum": ["READY", "DONE"] } },
+            "required": ["status"]
+        });
+        let data = r#"{"status": "MAYBE"}"#;
+        let err = validate_envelope_against_schema(data, &schema).unwrap_err();
+        assert!(err.contains("not in allowed enum"), "got: {}", err);
+    }
+
+    #[test]
+    fn validator_rejects_wrong_type() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "score": { "type": "integer" } },
+            "required": ["score"]
+        });
+        let data = r#"{"score": "not a number"}"#;
+        let err = validate_envelope_against_schema(data, &schema).unwrap_err();
+        assert!(err.contains("expected type integer"), "got: {}", err);
+    }
+
+    #[test]
+    fn validator_validates_array_items_recursively() {
+        let schema = serde_json::json!({
+            "type": "array",
+            "items": { "type": "string", "minLength": 3 }
+        });
+        // Valid: all items >= 3 chars
+        let ok = r#"["hello", "world"]"#;
+        assert!(validate_envelope_against_schema(ok, &schema).is_ok());
+        // Invalid: second item too short
+        let bad = r#"["hello", "x"]"#;
+        let err = validate_envelope_against_schema(bad, &schema).unwrap_err();
+        assert!(err.contains("[1]"), "error path should point at item 1: {}", err);
+        assert!(err.contains("minLength"), "got: {}", err);
+    }
+
+    #[test]
+    fn validator_tolerates_unknown_properties() {
+        // additionalProperties defaults to "true" in our subset — extra
+        // fields are allowed, mirroring JSON Schema's default behavior.
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "score": { "type": "integer" } },
+            "required": ["score"]
+        });
+        let data = r#"{"score": 7, "extra": "ignored"}"#;
+        assert!(validate_envelope_against_schema(data, &schema).is_ok());
+    }
+
+    #[test]
+    fn validator_handles_invalid_json_in_data() {
+        let schema = serde_json::json!({});
+        let bad = r#"{not json"#;
+        let err = validate_envelope_against_schema(bad, &schema).unwrap_err();
+        assert!(err.contains("not valid JSON"), "got: {}", err);
+    }
+
+    #[test]
+    fn repair_prompt_for_typed_schema_includes_validation_error() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "score": { "type": "integer" } }
+        });
+        let fmt = crate::models::StepOutputFormat::TypedSchema { schema };
+        let prompt = build_repair_prompt(
+            "previous output here",
+            &fmt,
+            Some("$.score: expected type integer, got string"),
+        );
+        assert!(prompt.contains("schema validation failed"));
+        assert!(prompt.contains("$.score"));
+        assert!(prompt.contains("previous output here"));
+    }
+
+    #[test]
+    fn repair_prompt_for_vanilla_structured_keeps_legacy_template() {
+        let prompt = build_repair_prompt(
+            "previous",
+            &crate::models::StepOutputFormat::Structured,
+            None,
+        );
+        // Legacy `REPAIR_PROMPT_TEMPLATE` content
+        assert!(prompt.contains("Now rewrite ONLY the structured output block"));
+        assert!(prompt.contains("previous"));
+    }
+
+    // ─── Artifacts (0.7.0 Phase 3) ────────────────────────────────────────────
+
+    #[test]
+    fn extract_artifacts_handles_single_block() {
+        let output = "Reasoning prose.\n\
+            ---ARTIFACT:plan---\n\
+            # Plan\n\
+            1. Step A\n\
+            2. Step B\n\
+            ---END_ARTIFACT---\n\
+            More prose.";
+        let arts = extract_artifacts(output);
+        assert_eq!(arts.len(), 1);
+        assert_eq!(arts.get("plan").unwrap(), "# Plan\n1. Step A\n2. Step B");
+    }
+
+    #[test]
+    fn extract_artifacts_handles_multiple_blocks() {
+        let output = "\
+            ---ARTIFACT:plan---\nplan body\n---END_ARTIFACT---\n\
+            ---ARTIFACT:review---\nreview body\n---END_ARTIFACT---\n";
+        let arts = extract_artifacts(output);
+        assert_eq!(arts.len(), 2);
+        assert_eq!(arts.get("plan").unwrap(), "plan body");
+        assert_eq!(arts.get("review").unwrap(), "review body");
+    }
+
+    #[test]
+    fn extract_artifacts_returns_empty_when_no_blocks() {
+        let output = "Just prose, no markers.\n---STEP_OUTPUT---\n{}\n---END_STEP_OUTPUT---";
+        let arts = extract_artifacts(output);
+        assert!(arts.is_empty());
+    }
+
+    #[test]
+    fn extract_artifacts_skips_unclosed_block() {
+        let output = "---ARTIFACT:lonely---\nno end marker ever";
+        let arts = extract_artifacts(output);
+        assert!(arts.is_empty(), "unclosed block should be skipped, not panic");
+    }
+
+    #[test]
+    fn extract_artifacts_skips_empty_name() {
+        let output = "---ARTIFACT:---\nbody\n---END_ARTIFACT---";
+        let arts = extract_artifacts(output);
+        assert!(arts.is_empty(), "empty artifact name must be rejected");
+    }
+
+    #[test]
+    fn extract_artifacts_preserves_leading_whitespace_strips_one_trailing_newline() {
+        let output = "---ARTIFACT:md---\n  indented line\n  another\n---END_ARTIFACT---";
+        let arts = extract_artifacts(output);
+        // Leading whitespace preserved (Markdown matters); a single
+        // trailing `\n` was stripped (LLM emission convention).
+        assert_eq!(arts.get("md").unwrap(), "  indented line\n  another");
+    }
+
+    #[test]
+    fn template_context_renders_artifact_after_step_output() {
+        let mut ctx = TemplateContext::new();
+        let step_output = "Did the work.\n\
+            ---ARTIFACT:plan---\nstep 1\nstep 2\n---END_ARTIFACT---";
+        ctx.set_step_output("plan_work", step_output);
+        let rendered = ctx.render("Plan was: {{artifacts.plan}}").unwrap();
+        assert_eq!(rendered, "Plan was: step 1\nstep 2");
+    }
+
+    #[test]
+    fn template_context_seed_artifacts_pre_first_step() {
+        // Use case: round 2+ of an Auto-Dev loop. The previous run
+        // produced `review` already; the new run should see it before
+        // the first step executes.
+        let mut ctx = TemplateContext::new();
+        let mut seed = ::std::collections::HashMap::new();
+        seed.insert("review".to_string(), "feedback from round 1".to_string());
+        ctx.seed_artifacts(&seed);
+        let rendered = ctx.render("Review: {{artifacts.review}}").unwrap();
+        assert_eq!(rendered, "Review: feedback from round 1");
+    }
+
+    #[test]
+    fn missing_artifact_renders_when_seeded_via_workflow_declaration() {
+        // The runner pre-seeds every declared artifact with "" before
+        // step 1 executes, so referencing an artifact that hasn't been
+        // produced yet renders empty. Test simulates that seeding here:
+        // a TemplateContext with a manually-seeded empty entry.
+        let mut ctx = TemplateContext::new();
+        ctx.set("artifacts.review", "");
+        let rendered = ctx.render("Review: '{{artifacts.review}}'").unwrap();
+        assert_eq!(rendered, "Review: ''");
+    }
+
+    #[test]
+    fn artifact_overwritten_on_later_step() {
+        // implement → review → implement loop : the second `review`
+        // emission should replace the first.
+        let mut ctx = TemplateContext::new();
+        ctx.set_step_output("review_v1", "---ARTIFACT:review---\nv1\n---END_ARTIFACT---");
+        ctx.set_step_output("review_v2", "---ARTIFACT:review---\nv2 with more\n---END_ARTIFACT---");
+        let rendered = ctx.render("{{artifacts.review}}").unwrap();
+        assert_eq!(rendered, "v2 with more");
+    }
+
+    // ─── State (0.7.0 Phase 6) ────────────────────────────────────────────────
+
+    #[test]
+    fn extract_state_handles_single_entry() {
+        let output = "Reasoning prose.\n---STATE:retry_count=3---\nMore prose.";
+        let st = extract_state(output);
+        assert_eq!(st.len(), 1);
+        assert_eq!(st.get("retry_count").unwrap(), "3");
+    }
+
+    #[test]
+    fn extract_state_handles_multiple_entries() {
+        let output = "---STATE:counter=5---\n\
+            ---STATE:last_verdict=approved---\n\
+            ---STATE:notes=long form value with spaces---";
+        let st = extract_state(output);
+        assert_eq!(st.len(), 3);
+        assert_eq!(st.get("counter").unwrap(), "5");
+        assert_eq!(st.get("last_verdict").unwrap(), "approved");
+        assert_eq!(st.get("notes").unwrap(), "long form value with spaces");
+    }
+
+    #[test]
+    fn extract_state_returns_empty_when_no_entries() {
+        let output = "Just prose, no markers.\n---STEP_OUTPUT---\n{}\n---END_STEP_OUTPUT---";
+        let st = extract_state(output);
+        assert!(st.is_empty());
+    }
+
+    #[test]
+    fn extract_state_skips_malformed_no_equals() {
+        let output = "---STATE:lonely---";
+        let st = extract_state(output);
+        assert!(st.is_empty(), "entry without '=' must be skipped");
+    }
+
+    #[test]
+    fn extract_state_skips_empty_key() {
+        let output = "---STATE:=value---";
+        let st = extract_state(output);
+        assert!(st.is_empty(), "empty key must be rejected");
+    }
+
+    #[test]
+    fn extract_state_keeps_empty_value() {
+        // Clearing a counter to "" is legitimate — distinguish from
+        // "key never set". The map gets an entry with an empty string.
+        let output = "---STATE:notes=---";
+        let st = extract_state(output);
+        assert_eq!(st.len(), 1);
+        assert_eq!(st.get("notes").unwrap(), "");
+    }
+
+    #[test]
+    fn extract_state_last_write_wins_within_one_response() {
+        // Two writes to the same key in one agent response: standard
+        // hash-map semantics — second overwrites first. Documented
+        // behaviour, not undefined.
+        let output = "---STATE:counter=1---\n---STATE:counter=2---";
+        let st = extract_state(output);
+        assert_eq!(st.get("counter").unwrap(), "2");
+    }
+
+    #[test]
+    fn extract_state_does_not_span_multiple_lines() {
+        // Defensive: a `---STATE:` without closing `---` on the same
+        // line is malformed and skipped. Without this rule, a long
+        // narrative paragraph would silently capture a state value
+        // ending wherever the first random `---` happens to land.
+        let output = "---STATE:counter=3\nsome unrelated content\n---END_THING---";
+        let st = extract_state(output);
+        assert!(st.is_empty(), "open-ended STATE without same-line close must be skipped");
+    }
+
+    #[test]
+    fn template_context_renders_state_after_step_output() {
+        let mut ctx = TemplateContext::new();
+        let step_output = "Did the work.\n---STATE:retry_count=1---";
+        ctx.set_step_output("review", step_output);
+        let rendered = ctx.render("Retry #{{state.retry_count}}").unwrap();
+        assert_eq!(rendered, "Retry #1");
+    }
+
+    #[test]
+    fn template_context_seed_state_pre_first_step() {
+        // Use case: resume after Gate pause / daemon restart. The run
+        // row carries `state.counter=2`; the next step's prompt must
+        // see it BEFORE the step executes.
+        let mut ctx = TemplateContext::new();
+        let mut seed = ::std::collections::HashMap::new();
+        seed.insert("counter".to_string(), "2".to_string());
+        ctx.seed_state(&seed);
+        let rendered = ctx.render("Iter {{state.counter}}").unwrap();
+        assert_eq!(rendered, "Iter 2");
+    }
+
+    #[test]
+    fn state_overwritten_on_later_step() {
+        // implement → review → implement: the second `last_verdict`
+        // emission overwrites the first in the template ctx.
+        let mut ctx = TemplateContext::new();
+        ctx.set_step_output("r1", "---STATE:last_verdict=needs_changes---");
+        ctx.set_step_output("r2", "---STATE:last_verdict=approved---");
+        let rendered = ctx.render("{{state.last_verdict}}").unwrap();
+        assert_eq!(rendered, "approved");
     }
 }

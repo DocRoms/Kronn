@@ -85,6 +85,15 @@
   border-color: rgba(var(--kr-accent-rgb), 0.15);
 }
 
+/* In-flight workflows: subtle cyan glow on the left edge so the user
+   can spot active runs at a glance in long workflow lists. The
+   spinner next to the name is the primary signal; this border is the
+   secondary, peripherally-visible one. Stays subtle to avoid stealing
+   attention from data-active="true" (current selection). */
+.wf-card[data-running="true"] {
+  border-left: 2px solid var(--kr-cyan);
+}
+
 /* ── Small button ──────────────────────────────────────── */
 .wf-small-btn {
   padding: var(--kr-sp-2) var(--kr-sp-5);
@@ -209,6 +218,16 @@
   font-weight: 700;
   background: rgba(var(--kr-accent-rgb), 0.1);
   color: var(--kr-accent);
+}
+
+/* Inline variant rendered next to "→ Goto" in the on_result recap.
+   Same shape as the row badge so the user reads "Goto (3)" as
+   "jump to step 3", but slightly smaller because it sits inside
+   prose at text-xs size. */
+.wf-step-number-chip {
+  width: 16px;
+  height: 16px;
+  font-size: 10px;
 }
 
 .wf-step-prompt-preview {
@@ -1106,12 +1125,151 @@
 }
 
 /* ── Step type toggle buttons ──────────────────────────── */
+/* 0.6.0 UX pass — step type selector. Equal-width buttons with icon
+   + short label, gap-aligned. Avoids the "Notify=6char vs Récupérer
+   des données=21char" width-jump that Marie flaggait. The data-type
+   colour overrides are applied per-type when selected. */
+.wf-step-type-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .wf-step-type-btn {
-  padding: 3px var(--kr-sp-5);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 92px;
+  padding: 5px 10px;
   font-size: var(--kr-fs-xs);
+  font-weight: 500;
   border-radius: var(--kr-r-sm);
   cursor: pointer;
-  border: 1px solid;
+  border: 1px solid var(--kr-border-medium);
+  background: transparent;
+  color: var(--kr-text-muted);
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.wf-step-type-btn:hover:not([data-selected="true"]) {
+  background: var(--kr-bg-elevated);
+  color: var(--kr-text-secondary);
+}
+
+/* Caption below the type row — surfaces the selected type's role
+   without requiring a hover. Italic to read as "secondary info". */
+.wf-step-type-caption {
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-faint);
+  font-style: italic;
+  padding-left: 2px;
+}
+
+/* 0.6.0 UX pass — Insert-here divider between steps. Discrete by
+   default (a thin line + small + button), expands on hover with a
+   label. Pattern from Notion / Linear "add row" affordance. Lets
+   the user insert a step before the first one OR between any two
+   existing ones, without having to drag-drop. */
+.wf-step-insert-divider {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  height: 14px;
+  margin: -4px 0;        /* reduce visual gap when no hover */
+  opacity: 0.45;
+  transition: opacity 0.15s ease;
+}
+
+.wf-step-insert-divider:hover {
+  opacity: 1;
+}
+
+.wf-step-insert-divider::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 1px;
+  background: var(--kr-border-faint);
+  z-index: 0;
+}
+
+.wf-step-insert-btn {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  font-size: var(--kr-fs-2xs, 10px);
+  font-weight: 600;
+  color: var(--kr-text-muted);
+  background: var(--kr-bg-base);
+  border: 1px solid var(--kr-border-faint);
+  border-radius: var(--kr-r-sm);
+  cursor: pointer;
+}
+
+.wf-step-insert-btn:hover {
+  color: var(--kr-accent);
+  border-color: rgba(var(--kr-accent-rgb), 0.4);
+  background: rgba(var(--kr-accent-rgb), 0.06);
+}
+
+.wf-step-insert-btn span {
+  /* Hide the label by default, show on hover for discoverable
+     compactness (Marie said the buttons feel cluttered). */
+  display: none;
+}
+
+.wf-step-insert-divider:hover .wf-step-insert-btn span {
+  display: inline;
+}
+
+/* 0.6.0 UX pass — Conditions on_result, layout 2 lignes.
+   La rangée précédente (1 ligne) débordait dès qu'on choisissait Goto :
+   action select 220px + step select 140px + max input 56px + 2 labels
+   = ~500px de fixe, ne laissant plus de place pour `contains`.
+   Ici on stack : ligne 1 = label + input plein large + remove,
+                  ligne 2 = → + action + (si Goto) target + max + N + label.
+   Wrap-friendly sur les écrans étroits (line2 reste dense mais flex-wrap). */
+.wf-condition-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--kr-border-faint);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-elevated);
+}
+
+.wf-condition-row-line1 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.wf-condition-row-line2 {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding-left: var(--kr-sp-3);
+}
+
+.wf-condition-action-select {
+  flex: 0 0 auto;
+  width: 220px;
+  max-width: 100%;
+}
+
+.wf-condition-goto-select {
+  flex: 1 1 140px;
+  min-width: 120px;
+  max-width: 220px;
 }
 
 .wf-step-type-btn[data-type="agent"][data-selected="true"] {
@@ -1124,6 +1282,401 @@
   background: rgba(var(--kr-cyan-rgb), 0.12);
   color: var(--kr-cyan);
   border-color: rgba(var(--kr-cyan-rgb), 0.3);
+}
+
+.wf-step-type-btn[data-type="gate"][data-selected="true"] {
+  background: rgba(var(--kr-warning-rgb), 0.12);
+  color: var(--kr-warning);
+  border-color: rgba(var(--kr-warning-rgb), 0.3);
+}
+
+.wf-step-type-btn[data-type="exec"][data-selected="true"] {
+  background: rgba(var(--kr-error-rgb), 0.12);
+  color: var(--kr-error);
+  border-color: rgba(var(--kr-error-rgb), 0.3);
+}
+
+/* 0.7+ — homogénéiser les autres step types qui n'avaient pas de variant
+   sélectionné, pour que l'utilisateur voit clairement quel type est actif
+   sur chaque step (pas juste sur Agent/API/Gate/Exec). */
+.wf-step-type-btn[data-type="batch-qp"][data-selected="true"] {
+  background: rgba(var(--kr-purple-rgb), 0.12);
+  color: var(--kr-purple, rgb(var(--kr-purple-rgb)));
+  border-color: rgba(var(--kr-purple-rgb), 0.3);
+}
+
+.wf-step-type-btn[data-type="batch-api"][data-selected="true"] {
+  background: rgba(var(--kr-info-rgb), 0.12);
+  color: var(--kr-info, rgb(var(--kr-info-rgb)));
+  border-color: rgba(var(--kr-info-rgb), 0.3);
+}
+
+.wf-step-type-btn[data-type="notify"][data-selected="true"] {
+  background: rgba(var(--kr-success-rgb), 0.12);
+  color: var(--kr-success);
+  border-color: rgba(var(--kr-success-rgb), 0.3);
+}
+
+.wf-step-type-btn[data-type="json-data"][data-selected="true"] {
+  background: rgba(var(--kr-cyan-rgb), 0.12);
+  color: var(--kr-cyan, rgb(var(--kr-cyan-rgb)));
+  border-color: rgba(var(--kr-cyan-rgb), 0.3);
+}
+
+.wf-exec-form {
+  display: flex;
+  flex-direction: column;
+  padding: var(--kr-sp-4);
+  border: 1px solid rgba(var(--kr-error-rgb), 0.25);
+  border-radius: var(--kr-r-md);
+  background: rgba(var(--kr-error-rgb), 0.04);
+}
+
+/* 0.7.0 Phase 5b — actionable CTA inside the "Exec disabled" warning.
+   Inverts the surrounding warning's tint so the button stands out as
+   the primary action, not part of the message. */
+.wf-allowlist-cta {
+  padding: 4px 10px;
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  color: var(--kr-bg-base);
+  background: var(--kr-warning);
+  border: 1px solid var(--kr-warning);
+  border-radius: var(--kr-r-sm);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: filter 0.15s ease;
+}
+
+.wf-allowlist-cta:hover {
+  filter: brightness(1.1);
+}
+
+.wf-gate-form {
+  display: flex;
+  flex-direction: column;
+  padding: var(--kr-sp-4);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.25);
+  border-radius: var(--kr-r-md);
+  background: rgba(var(--kr-warning-rgb), 0.05);
+}
+
+/* 0.7.0 Phase 7 — workflow-level rollback section in wizard.
+   Visually offset from the main steps with an amber tint to read
+   as a "fail-only / safety net" rather than a regular step. */
+.wf-rollback-section {
+  padding: var(--kr-sp-5);
+  border: 1px dashed rgba(var(--kr-warning-rgb), 0.35);
+  border-radius: var(--kr-r-md);
+  background: rgba(var(--kr-warning-rgb), 0.04);
+}
+
+.wf-rollback-step {
+  padding: var(--kr-sp-4);
+  border: 1px solid var(--kr-border-faint);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-elevated);
+}
+
+/* 0.7.0 UX pass — Per-item export / import (workflow + QP).
+   Modal-style overlay with a drag-and-drop dropzone fallback to file
+   picker. Preview block + project dropdown before confirm. */
+.wf-create-btn-secondary {
+  background: transparent;
+  color: var(--kr-text-secondary);
+  border: 1px solid var(--kr-border-medium);
+}
+
+.wf-create-btn-secondary:hover {
+  background: var(--kr-bg-hover);
+}
+
+.wf-import-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--kr-sp-5);
+}
+
+.wf-import-modal {
+  width: 100%;
+  max-width: 540px;
+  max-height: 90vh;
+  overflow-y: auto;
+  padding: var(--kr-sp-6);
+  background: var(--kr-bg-base);
+  border-radius: var(--kr-r-lg);
+  border: 1px solid var(--kr-border-medium);
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.45);
+}
+
+.wf-import-dropzone {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: var(--kr-sp-7) var(--kr-sp-5);
+  border: 2px dashed var(--kr-border-medium);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-elevated);
+  text-align: center;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.wf-import-dropzone[data-drag-over="true"] {
+  border-color: var(--kr-accent);
+  background: rgba(var(--kr-accent-rgb), 0.06);
+}
+
+.wf-import-dropzone-icon {
+  color: var(--kr-text-muted);
+  margin-bottom: var(--kr-sp-4);
+}
+
+.wf-import-dropzone-title {
+  font-size: var(--kr-fs-sm);
+  font-weight: 600;
+  color: var(--kr-text-primary);
+  margin-bottom: var(--kr-sp-2);
+}
+
+.wf-import-dropzone-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-muted);
+  margin-bottom: var(--kr-sp-4);
+}
+
+.wf-import-dropzone-pick-btn {
+  padding: 5px 14px;
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  color: var(--kr-accent);
+  background: rgba(var(--kr-accent-rgb), 0.1);
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.3);
+  border-radius: var(--kr-r-sm);
+  cursor: pointer;
+}
+
+.wf-import-dropzone-pick-btn:hover {
+  background: rgba(var(--kr-accent-rgb), 0.18);
+}
+
+.wf-import-dropzone-error {
+  margin-top: var(--kr-sp-3);
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-error);
+}
+
+.wf-import-dropzone-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: var(--kr-text-faint);
+  border: none;
+  cursor: pointer;
+}
+
+.wf-import-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--kr-sp-4);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-elevated);
+  border: 1px solid var(--kr-border-faint);
+}
+
+/* B4 (0.7.0 UX pass) — Bandeau "Démarrer depuis un pattern" en haut
+   du wizard Steps. 3 cartes de présets non-triviaux. Auto-disparaît
+   dès que l'user customise. */
+.wf-presets-bandeau {
+  padding: var(--kr-sp-5);
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.3);
+  border-radius: var(--kr-r-md);
+  background: rgba(var(--kr-accent-rgb), 0.04);
+}
+
+.wf-presets-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: var(--kr-sp-4);
+}
+
+.wf-preset-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  text-align: left;
+  padding: var(--kr-sp-4) var(--kr-sp-5);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-elevated);
+  cursor: pointer;
+  transition: border-color 0.15s ease, transform 0.15s ease;
+  font-family: inherit;
+}
+
+.wf-preset-card:hover {
+  border-color: var(--kr-accent);
+  transform: translateY(-2px);
+}
+
+.wf-preset-icon {
+  font-size: 24px;
+  line-height: 1;
+  margin-bottom: var(--kr-sp-3);
+}
+
+.wf-preset-title {
+  font-size: var(--kr-fs-sm);
+  font-weight: 700;
+  color: var(--kr-text-primary);
+  margin-bottom: var(--kr-sp-2);
+}
+
+.wf-preset-desc {
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-muted);
+  line-height: 1.4;
+  margin-bottom: var(--kr-sp-3);
+}
+
+.wf-preset-primitives {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: auto;
+}
+
+.wf-preset-chip {
+  padding: 1px 6px;
+  font-size: var(--kr-fs-2xs, 10px);
+  font-weight: 600;
+  border-radius: var(--kr-r-sm);
+  background: rgba(var(--kr-accent-rgb), 0.1);
+  color: var(--kr-accent);
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.25);
+}
+
+/* B3 (0.7.0 UX pass) — STATE pedagogy chips. Show up only when the
+   step is part of a Goto loop (source or target). Color: accent-ink
+   (cyan/blue) to read as "informational shortcut", distinct from the
+   warning ambres around Gate/Rollback and the error red of Exec. */
+.wf-state-chips {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border-radius: var(--kr-r-sm);
+  background: rgba(var(--kr-cyan-rgb), 0.06);
+  border: 1px dashed rgba(var(--kr-cyan-rgb), 0.3);
+}
+
+.wf-state-chip {
+  padding: 3px 8px;
+  font-size: var(--kr-fs-xs);
+  font-weight: 500;
+  color: var(--kr-cyan);
+  background: rgba(var(--kr-cyan-rgb), 0.12);
+  border: 1px solid rgba(var(--kr-cyan-rgb), 0.3);
+  border-radius: var(--kr-r-sm);
+  cursor: pointer;
+  font-family: var(--kr-font-mono, monospace);
+  white-space: nowrap;
+}
+
+.wf-state-chip:hover {
+  background: rgba(var(--kr-cyan-rgb), 0.2);
+}
+
+/* P2 (0.6.0 UX pass) — Undeclared variable warning under prompts.
+   Same visual language as the rollback matrix (warning ambré sur fond
+   subtil), avec une chip par var non-déclarée + bouton actionnable
+   pour la déclarer en 1 clic. */
+.wf-undeclared-warning {
+  padding: 8px 10px;
+  border-radius: var(--kr-r-sm);
+  background: rgba(var(--kr-warning-rgb), 0.06);
+  border: 1px dashed rgba(var(--kr-warning-rgb), 0.4);
+}
+
+.wf-undeclared-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  font-size: var(--kr-fs-xs);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-elevated);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.3);
+}
+
+.wf-undeclared-chip code {
+  font-family: var(--kr-font-mono, monospace);
+  color: var(--kr-warning);
+}
+
+.wf-undeclared-add-btn {
+  padding: 1px 6px;
+  font-size: var(--kr-fs-2xs, 10px);
+  font-weight: 600;
+  color: var(--kr-bg-base);
+  background: var(--kr-warning);
+  border: 1px solid var(--kr-warning);
+  border-radius: var(--kr-r-sm);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.wf-undeclared-add-btn:hover {
+  filter: brightness(1.1);
+}
+
+/* B6 (0.7.0 UX pass) — matrice "rollback fire conditions" inline.
+   Petite typographie, espacée, le ✓/✗ en colonne fixe pour scan rapide. */
+.wf-rollback-matrix {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 10px;
+  padding: var(--kr-sp-3);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-elevated);
+  border: 1px solid var(--kr-border-faint);
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-muted);
+}
+
+.wf-rollback-matrix-row {
+  display: contents;
+}
+
+.wf-rollback-matrix-row[data-fires="true"] > span:first-child {
+  color: var(--kr-success);
+  font-weight: 600;
+}
+
+.wf-rollback-matrix-row > span:first-child {
+  color: var(--kr-text-faint);
+  text-align: center;
+  width: 16px;
+}
+
+.wf-rollback-matrix-row[data-fires="true"] > span:last-child {
+  color: var(--kr-text-secondary);
 }
 
 .wf-step-type-btn[data-selected="false"] {
@@ -1627,6 +2180,122 @@
   color: var(--kr-warning);
 }
 
+/* ── 0.7+ — QP/QA reference banner ──────────────────────────────────────
+   Surface clairement ce qui vient d'un Quick Prompt / Quick API référencé
+   versus ce que l'utilisateur peut overrider au niveau du step. Utilisé
+   dans le wizard Agent step (picker QP) et dans ApiCallStepCard (picker QA).
+   Le pattern : un bandeau "🔗 Hérité de X" qui montre les valeurs canoniques,
+   puis les fields override sont enroulés dans un <details> "Personnaliser". */
+.wf-qref-banner {
+  margin-top: var(--kr-sp-2);
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  border-radius: var(--kr-r-sm);
+  background: rgba(var(--kr-accent-rgb, 100, 150, 255), 0.08);
+  border: 1px solid rgba(var(--kr-accent-rgb, 100, 150, 255), 0.25);
+  font-size: var(--kr-fs-xs);
+  line-height: 1.45;
+}
+.wf-qref-banner-header {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  margin-bottom: var(--kr-sp-2);
+}
+.wf-qref-banner-header strong {
+  flex: 1;
+  color: var(--kr-text);
+}
+.wf-qref-override-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(var(--kr-warning-rgb), 0.15);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.4);
+  color: var(--kr-warning);
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.wf-qref-banner-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+  margin: var(--kr-sp-2) 0;
+}
+.wf-qref-field {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--kr-sp-2);
+  align-items: baseline;
+}
+.wf-qref-field-label {
+  color: var(--kr-text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+  min-width: 60px;
+}
+.wf-qref-field-value {
+  flex: 1;
+  font-family: var(--kr-font-mono);
+  font-size: 10.5px;
+  color: var(--kr-text-secondary);
+  background: rgba(var(--kr-text-faint-rgb, 128, 128, 128), 0.06);
+  padding: 2px 6px;
+  border-radius: 3px;
+  word-break: break-word;
+  white-space: pre-wrap;
+  display: inline-block;
+}
+.wf-qref-var-chip {
+  display: inline-block;
+  padding: 1px 6px;
+  margin: 0 4px 0 0;
+  font-size: 10px;
+  background: rgba(var(--kr-accent-rgb, 100, 150, 255), 0.12);
+  border-radius: 3px;
+  font-family: var(--kr-font-mono);
+}
+.wf-qref-hint {
+  margin: var(--kr-sp-2) 0 0;
+  font-size: 10.5px;
+  color: var(--kr-text-muted);
+  font-style: italic;
+}
+/* Le <details> override : visuellement séparé du bandeau, summary cliquable
+   avec une teinte légère pour signaler qu'on entre en mode "perso". */
+.wf-qref-override {
+  margin-top: var(--kr-sp-3);
+  border-radius: var(--kr-r-sm);
+  border: 1px dashed rgba(var(--kr-text-faint-rgb, 128, 128, 128), 0.3);
+  background: rgba(var(--kr-text-faint-rgb, 128, 128, 128), 0.03);
+}
+.wf-qref-override-summary {
+  cursor: pointer;
+  padding: var(--kr-sp-2) var(--kr-sp-3);
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-muted);
+  user-select: none;
+  list-style: none;
+}
+.wf-qref-override-summary::-webkit-details-marker {
+  display: none;
+}
+.wf-qref-override-summary:hover {
+  color: var(--kr-text);
+}
+.wf-qref-override[open] > .wf-qref-override-summary {
+  color: var(--kr-text);
+  border-bottom: 1px dashed rgba(var(--kr-text-faint-rgb, 128, 128, 128), 0.3);
+}
+.wf-qref-override-body {
+  padding: var(--kr-sp-3);
+}
+
 /* Required-field marker — kept bold + slightly larger to pop on dark bg */
 .wf-required {
   color: var(--kr-error);
@@ -1677,6 +2346,182 @@
   color: var(--kr-purple-soft, var(--kr-accent));
   background: rgba(var(--kr-purple-rgb, 168 85 247), 0.1);
   border-color: rgba(var(--kr-purple-rgb, 168 85 247), 0.35);
+}
+
+.wf-step-kind-badge[data-kind='gate'] {
+  color: var(--kr-warning);
+  background: rgba(var(--kr-warning-rgb), 0.1);
+  border-color: rgba(var(--kr-warning-rgb), 0.35);
+}
+
+.wf-step-kind-badge[data-kind='exec'] {
+  color: var(--kr-error);
+  background: rgba(var(--kr-error-rgb), 0.1);
+  border-color: rgba(var(--kr-error-rgb), 0.35);
+}
+
+.wf-step-kind-badge[data-kind='batch-api'] {
+  color: var(--kr-info, rgb(var(--kr-info-rgb)));
+  background: rgba(var(--kr-info-rgb), 0.1);
+  border-color: rgba(var(--kr-info-rgb), 0.35);
+}
+
+.wf-step-kind-badge[data-kind='json-data'] {
+  color: var(--kr-cyan, rgb(var(--kr-cyan-rgb)));
+  background: rgba(var(--kr-cyan-rgb), 0.08);
+  border-color: rgba(var(--kr-cyan-rgb), 0.3);
+}
+
+/* B5 (0.7.0 UX pass) — distinct status badge + paused-since counter
+   for runs in WaitingApproval. The badge uses warning tint (consistent
+   with the GatePanel below), the counter is muted to keep the focus
+   on the badge. */
+.wf-run-status-badge {
+  padding: 2px 8px;
+  font-size: var(--kr-fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  border-radius: var(--kr-r-sm);
+}
+
+.wf-run-status-badge--gate {
+  color: var(--kr-bg-base);
+  background: var(--kr-warning);
+  animation: wf-pulse 2.4s ease-in-out infinite;
+}
+
+@keyframes wf-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.65; }
+}
+
+.wf-paused-since {
+  color: var(--kr-warning);
+  font-weight: 600;
+}
+
+.wf-paused-zero-tokens {
+  color: var(--kr-success);
+  font-weight: 600;
+}
+
+/* 0.7.0 Phase 4 — Gate decision panel. Rendered on a paused run
+   (status=WaitingApproval) above the step list. Three-button row,
+   primary action is "Approuver" so that's the highlighted CTA;
+   "Demander des changements" and "Rejeter" are secondary. The whole
+   block is wrapped in a soft amber tint to read as "the run is
+   waiting on you". */
+.wf-gate-panel {
+  margin-top: 16px;
+  padding: 14px 16px;
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.35);
+  border-radius: 8px;
+  background: rgba(var(--kr-warning-rgb), 0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.wf-gate-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-primary);
+}
+
+.wf-gate-message {
+  white-space: pre-wrap;
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-secondary);
+  padding: 8px 10px;
+  background: var(--kr-bg-elevated);
+  border-radius: 4px;
+  border: 1px solid var(--kr-border-faint);
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.wf-gate-comment {
+  width: 100%;
+  padding: 8px 10px;
+  font-family: inherit;
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-primary);
+  background: var(--kr-bg-elevated);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: 4px;
+  resize: vertical;
+}
+
+.wf-gate-comment:focus {
+  outline: none;
+  border-color: var(--kr-accent);
+}
+
+.wf-gate-error {
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-error);
+}
+
+.wf-gate-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.wf-gate-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: var(--kr-fs-sm);
+  font-weight: 600;
+  border: 1px solid var(--kr-border-medium);
+  border-radius: 4px;
+  background: var(--kr-bg-elevated);
+  color: var(--kr-text-primary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.wf-gate-btn:hover:not(:disabled) {
+  background: var(--kr-bg-hover);
+}
+
+.wf-gate-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.wf-gate-btn--approve {
+  border-color: rgba(var(--kr-success-rgb), 0.5);
+  color: var(--kr-success);
+  background: rgba(var(--kr-success-rgb), 0.08);
+}
+
+.wf-gate-btn--approve:hover:not(:disabled) {
+  background: rgba(var(--kr-success-rgb), 0.15);
+}
+
+.wf-gate-btn--changes {
+  border-color: rgba(var(--kr-warning-rgb), 0.5);
+  color: var(--kr-warning);
+  background: rgba(var(--kr-warning-rgb), 0.08);
+}
+
+.wf-gate-btn--changes:hover:not(:disabled) {
+  background: rgba(var(--kr-warning-rgb), 0.15);
+}
+
+.wf-gate-btn--reject {
+  border-color: rgba(var(--kr-error-rgb), 0.5);
+  color: var(--kr-error);
+  background: rgba(var(--kr-error-rgb), 0.08);
+}
+
+.wf-gate-btn--reject:hover:not(:disabled) {
+  background: rgba(var(--kr-error-rgb), 0.15);
 }
 
 /* Live status of the currently-running step in the run-detail
@@ -1898,6 +2743,74 @@
   border: 1px solid rgba(var(--kr-warning-rgb), 0.15);
   font-size: var(--kr-fs-sm);
   color: var(--kr-warning);
+}
+
+/* Discrete informational chip — used to surface "this run is isolated in a
+   git worktree" in the wizard and on the Exec step, where users worry
+   whether successive Agent → Exec steps actually see the same files. Tone:
+   informational (accent ink), not warning. */
+.wf-worktree-hint {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  padding: var(--kr-sp-2) var(--kr-sp-4);
+  border-radius: var(--kr-r-md);
+  background: rgba(var(--kr-accent-rgb), 0.05);
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.12);
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-accent-ink);
+  width: fit-content;
+}
+
+.wf-worktree-hint svg {
+  flex-shrink: 0;
+  opacity: 0.8;
+}
+
+/* Worktree path row on the run detail card. Compact, monospace, with a
+   copy-to-clipboard button. The path can be long (~80 chars on Linux), so
+   it overflows-ellipsis and the full value is in the title attribute. */
+.wf-run-worktree-row {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  padding: var(--kr-sp-2) var(--kr-sp-3);
+  border-radius: var(--kr-r-sm);
+  background: rgba(var(--kr-text-faint-rgb, 128, 128, 128), 0.04);
+  border: 1px solid var(--kr-border-faint);
+  font-size: var(--kr-fs-xs);
+}
+
+.wf-run-worktree-path {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--kr-font-mono);
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 2px var(--kr-sp-2);
+  background: transparent;
+}
+
+.wf-run-worktree-copy {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 6px;
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  border: 1px solid var(--kr-border-faint);
+  color: var(--kr-text-muted);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.wf-run-worktree-copy:hover {
+  background: rgba(var(--kr-accent-rgb), 0.08);
+  color: var(--kr-accent-ink);
 }
 
 /* ── Validation errors ─────────────────────────────────── */

@@ -7,7 +7,13 @@ pub mod template;
 pub mod workspace;
 pub mod steps;
 pub mod batch_step;
+pub mod batch_apicall_step;
+pub mod quick_api_hydrate;
+pub mod quick_prompt_hydrate;
+pub mod json_data_step;
 pub mod notify_step;
+pub mod gate_step;
+pub mod exec_step;
 pub mod api_call_step;
 pub mod api_call_security;
 pub mod api_call_executor;
@@ -227,6 +233,7 @@ impl WorkflowEngine {
             batch_failed: 0,
             batch_name: None,
             parent_run_id: None,
+            state: ::std::collections::HashMap::new(),
         };
 
         // Persist the run
@@ -302,6 +309,8 @@ mod tests {
             batch_max_items: None,
             batch_workspace_mode: None,
             batch_chain_prompt_ids: vec![],
+            batch_concurrent_limit: None,
+            quick_api_id: None,
             notify_config: None,
             api_plugin_slug: None,
             api_config_id: None,
@@ -316,6 +325,14 @@ mod tests {
             api_timeout_ms: None,
             api_max_retries: None,
             api_output_var: None,
+            gate_message: None,
+            gate_request_changes_target: None,
+            gate_notify_url: None,
+            exec_command: None,
+            exec_args: vec![],
+            exec_timeout_secs: None,
+            quick_prompt_id: None,
+            json_data_payload: None,
         }
     }
 
@@ -421,6 +438,7 @@ mod tests {
             batch_failed: 0,
             batch_name: None,
             parent_run_id: None,
+            state: ::std::collections::HashMap::new(),
         };
 
         assert_eq!(run.status, RunStatus::Pending);
@@ -461,6 +479,7 @@ mod tests {
             batch_failed: 0,
             batch_name: None,
             parent_run_id: None,
+            state: ::std::collections::HashMap::new(),
         };
         let tc = run.trigger_context.unwrap();
         assert_eq!(tc["type"], "tracker");

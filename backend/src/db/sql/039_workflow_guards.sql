@@ -1,0 +1,15 @@
+-- 0.7.0 Phase 1 — execution limits per workflow.
+--
+-- `guards` stores the user-set overrides as JSON: an `Option<WorkflowGuards>`
+-- where each field is itself optional. NULL = full backend defaults
+-- (DEFAULT_GUARD_TIMEOUT_SECS, DEFAULT_GUARD_MAX_LLM_CALLS,
+-- DEFAULT_GUARD_LOOP_MAX_REVISITS) — keeps existing workflows protected
+-- without forcing an explicit migration of every row. New workflows
+-- created via the UI also leave this column NULL unless the user opens
+-- the "Limites d'exécution" section.
+--
+-- Stored as JSON (not three columns) so future guard fields
+-- (max_total_cost_usd, max_total_minutes_active, etc.) don't require
+-- another migration — same lesson as `definition_json` in the rest of
+-- the schema. The runner reads/parses it once at run start.
+ALTER TABLE workflows ADD COLUMN guards TEXT;

@@ -215,6 +215,16 @@ Unified automation system: `Trigger → Steps`. Superset of OpenAI Symphony's WO
 - Reuses existing agent runner and multi-agent debate system.
 - Symphony is a strict subset: single-agent, single-prompt, tracker-driven. Kronn adds multi-step, multi-agent, conditional branching, per-step MCPs.
 
+**0.6.0 engine extensions** (full detail in `ai/index.md § Workflow Engine 0.7.x features`):
+- `WorkflowGuards` (timeout / max-llm-calls / loop-revisits) → `RunStatus::StoppedByGuard`.
+- `StepOutputFormat::TypedSchema` (JSON-schema-validated step output).
+- `Workflow.artifacts` + `---ARTIFACT:name---` envelope persisted to workspace files.
+- `StepType::Gate` (`WaitingApproval` + `POST /api/workflows/.../decide` + optional webhook).
+- `StepType::Exec` (allowlisted binaries, argv literal, never `sh -c`).
+- `ConditionAction::Goto { max_iterations }` loops + `WorkflowRun.state` (`---STATE:k=v---`, `{{state.X}}`, `{{iter.X}}`).
+- `Workflow.on_failure` rollback steps (only on `Failed`, not on `Cancelled`/`StoppedByGuard`/Gate-reject).
+- Per-item Export/Import for Workflows + Quick Prompts (workflow export bundles referenced QPs).
+
 ### MCP system (3-tier architecture)
 
 Kronn manages MCPs with a 3-tier model:

@@ -99,6 +99,101 @@ pub async fn delete(
     }
 }
 
+const QP_EXPORT_KIND: &str = "kronn.quick_prompt";
+const QP_EXPORT_VERSION: u32 = 1;
+
+/// GET /api/quick-prompts/:id/export
+///
+/// Returns a self-contained `QuickPromptExportEnvelope` JSON download.
+/// Mirror of [`crate::api::workflows::export_workflow`] for QPs — same
+/// envelope discipline (`kind` + `version` + `exported_at`).
+pub async fn export_qp(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    let qp_id = id.clone();
+    let qp = match state.db.with_conn(move |conn| crate::db::quick_prompts::get_quick_prompt(conn, &qp_id)).await {
+        Ok(Some(qp)) => qp,
+        Ok(None) => return (StatusCode::NOT_FOUND, "Quick prompt not found").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {}", e)).into_response(),
+    };
+
+    let envelope = QuickPromptExportEnvelope {
+        kind: QP_EXPORT_KIND.to_string(),
+        version: QP_EXPORT_VERSION,
+        exported_at: Utc::now(),
+        quick_prompt: qp.clone(),
+    };
+
+    let safe_name: String = qp.name.chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    let filename = format!("{}.kronn-qp.json", safe_name);
+
+    let body = match serde_json::to_string_pretty(&envelope) {
+        Ok(s) => s,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("Serialization error: {}", e)).into_response(),
+    };
+
+    (
+        [
+            (header::CONTENT_TYPE, "application/json".to_string()),
+            (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{}\"", filename)),
+        ],
+        body,
+    ).into_response()
+}
+
+/// POST /api/quick-prompts/import
+///
+/// Body: `ImportQuickPromptRequest { content, project_id }`. Mints a
+/// fresh id + timestamps, attaches to `project_id` (or null), inserts.
+pub async fn import_qp(
+    State(state): State<AppState>,
+    Json(req): Json<ImportQuickPromptRequest>,
+) -> Json<ApiResponse<QuickPrompt>> {
+    let envelope: QuickPromptExportEnvelope = match serde_json::from_str(&req.content) {
+        Ok(env) => env,
+        Err(e) => return Json(ApiResponse::err(format!("JSON invalide : {}", e))),
+    };
+
+    if envelope.kind != QP_EXPORT_KIND {
+        return Json(ApiResponse::err(format!(
+            "Type incorrect : attendu `{}`, reçu `{}`. Vérifie que tu importes bien un Quick Prompt exporté depuis Kronn.",
+            QP_EXPORT_KIND, envelope.kind
+        )));
+    }
+    if envelope.version > QP_EXPORT_VERSION {
+        return Json(ApiResponse::err(format!(
+            "Version d'export non supportée ({} > {} max). Mets à jour Kronn pour importer ce fichier.",
+            envelope.version, QP_EXPORT_VERSION
+        )));
+    }
+
+    let mut qp = envelope.quick_prompt;
+    if qp.name.trim().is_empty() {
+        return Json(ApiResponse::err("Le Quick Prompt importé n'a pas de nom — fichier corrompu ?"));
+    }
+    if qp.prompt_template.trim().is_empty() {
+        return Json(ApiResponse::err("Le Quick Prompt importé n'a pas de prompt template — fichier corrompu ?"));
+    }
+
+    let now = Utc::now();
+    qp.id = Uuid::new_v4().to_string();
+    qp.project_id = req.project_id;
+    qp.created_at = now;
+    qp.updated_at = now;
+
+    let q = qp.clone();
+    match state.db.with_conn(move |conn| crate::db::quick_prompts::insert_quick_prompt(conn, &q)).await {
+        Ok(()) => Json(ApiResponse::ok(qp)),
+        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Batch execution — fan out a Quick Prompt to N discussions in parallel
 // ═══════════════════════════════════════════════════════════════════════════════

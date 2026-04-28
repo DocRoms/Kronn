@@ -2,9 +2,23 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Bot, X, Send, Sparkles, Loader2, Minus, Maximize2 } from 'lucide-react';
 import { discussions as discussionsApi } from '../../lib/api';
 import { AGENT_LABELS, agentColor } from '../../lib/constants';
+import { t as translate, type UILocale } from '../../lib/i18n';
 import type { AgentType, McpServer, WorkflowStep } from '../../types/generated';
 import { authSlotsForServer, managedHeaderNames, managedQueryNames, stripManagedHeaders, stripManagedQuery } from './apiCallAuth';
 import { tipsForSlug } from './apiCallPluginTips';
+
+type Translator = (key: string, ...args: (string | number)[]) => string;
+
+/** Coerce a backend "output language" string to a UI locale supported by the
+ *  i18n dictionary. Backend allows fr/en/es/zh/br but only fr/en/es have
+ *  translations; for the rest we fall back to English (the most universal
+ *  language that all dictionaries cover). The agent will still reply in the
+ *  full backend language because the discussion's `language` param is
+ *  forwarded as-is. */
+function toUILocale(lang: string | undefined): UILocale {
+  if (lang === 'fr' || lang === 'en' || lang === 'es') return lang;
+  return 'en';
+}
 
 export interface ApiCallAiHelperProps {
   step: WorkflowStep;
@@ -24,6 +38,12 @@ export interface ApiCallAiHelperProps {
   /** Last "Test the call" error message (HTTP status + body excerpt). When
    *  present, the helper forwards it so the agent can debug "why 400 ?". */
   lastTestError?: string | null;
+  /** Backend "output language" (Settings → Output language). Drives the
+   *  language of the system prompt + the discussion's `language` param
+   *  (which the backend uses to instruct the agent on its reply language).
+   *  Distinct from the UI `t` translator, which targets the user's
+   *  interface labels — `t` stays UI-locale, the agent stays config-locale. */
+  configLanguage?: string;
   t: (key: string, ...args: (string | number)[]) => string;
 }
 
@@ -139,18 +159,22 @@ export function buildContextBlock(
   step: WorkflowStep,
   lastTestResponse?: unknown,
   lastTestError?: string | null,
+  t?: Translator,
 ): string {
-  const baseUrl = server?.api_spec?.base_url ?? '(inconnu)';
-  const apiName = server?.name ?? '(aucun plugin sélectionné)';
-  const currentEndpoint = step.api_endpoint_path ?? '(aucun)';
-  const currentMethod = step.api_method ?? '(par défaut)';
-  const currentQuery = step.api_query ? JSON.stringify(step.api_query) : '(vide)';
-  const currentHeaders = step.api_headers ? JSON.stringify(step.api_headers) : '(aucun)';
-  const currentBody = step.api_body ? step.api_body : '(aucun)';
-  const currentExtract = step.api_extract?.path ?? '(aucun)';
+  // Fallback translator used by unit tests that don't pass one — keeps the
+  // pure-function tests independent of the i18n provider.
+  const tr: Translator = t ?? ((k: string) => k);
+  const baseUrl = server?.api_spec?.base_url ?? tr('wf.apicall.helper.sys.unknown');
+  const apiName = server?.name ?? tr('wf.apicall.helper.sys.noPlugin');
+  const currentEndpoint = step.api_endpoint_path ?? tr('wf.apicall.helper.sys.none');
+  const currentMethod = step.api_method ?? tr('wf.apicall.helper.sys.default');
+  const currentQuery = step.api_query ? JSON.stringify(step.api_query) : tr('wf.apicall.helper.sys.empty');
+  const currentHeaders = step.api_headers ? JSON.stringify(step.api_headers) : tr('wf.apicall.helper.sys.none');
+  const currentBody = step.api_body ? step.api_body : tr('wf.apicall.helper.sys.none');
+  const currentExtract = step.api_extract?.path ?? tr('wf.apicall.helper.sys.none');
 
   const lines = [
-    '### CONTEXTE COURANT (snapshot au moment de cet envoi)',
+    tr('wf.apicall.helper.sys.ctxHeader'),
     `- API : ${apiName} (${baseUrl})`,
     `- endpoint : ${currentEndpoint}`,
     `- method   : ${currentMethod}`,
@@ -161,11 +185,11 @@ export function buildContextBlock(
   ];
 
   if (lastTestError) {
-    lines.push('', '### DERNIER TEST → ÉCHEC', lastTestError);
+    lines.push('', tr('wf.apicall.helper.sys.ctxLastFail'), lastTestError);
   } else if (lastTestResponse !== undefined && lastTestResponse !== null) {
     lines.push(
       '',
-      '### DERNIER TEST → SUCCÈS (extrait de réponse)',
+      tr('wf.apicall.helper.sys.ctxLastOk'),
       '```json',
       truncateJson(lastTestResponse),
       '```',
@@ -178,19 +202,16 @@ export function buildContextBlock(
 /** Build the auth-info block injected into every prompt: tells the agent
  *  what's already wired so it doesn't keep suggesting `apikey: 'YOUR_KEY'`
  *  in query params. Empty string when auth is `None`. */
-function buildAuthBlock(server: McpServer | null): string {
+function buildAuthBlock(server: McpServer | null, t: Translator): string {
   const slots = authSlotsForServer(server);
   if (slots.length === 0) return '';
   const lines = slots.map(s => {
-    const where = s.kind === 'query' ? 'query param' : 'header';
-    return `- ${where} \`${s.name}\` (valeur tirée de l'env \`${s.envKey}\`, déjà configurée dans Kronn)`;
+    const key = s.kind === 'query'
+      ? 'wf.apicall.helper.sys.authQueryItem'
+      : 'wf.apicall.helper.sys.authHeaderItem';
+    return t(key, s.name, s.envKey);
   });
-  return `### AUTH — gérée automatiquement par Kronn (NE PAS suggérer)
-Le backend injecte ces champs au moment de la requête, avec la clé que le
-user a entrée dans Settings → APIs. ⚠️ Ne JAMAIS les remettre dans une
-suggestion KRONN:APPLY ; cela écraserait la vraie valeur par un placeholder
-("VOTRE_API_KEY", etc.) et casserait l'auth.
-${lines.join('\n')}`;
+  return `${t('wf.apicall.helper.sys.authHeader')}\n${lines.join('\n')}`;
 }
 
 /** Build the initial system prompt that bootstraps the helper conversation.
@@ -201,66 +222,34 @@ ${lines.join('\n')}`;
 function buildSystemPrompt(
   server: McpServer | null,
   step: WorkflowStep,
-  lastTestResponse?: unknown,
-  lastTestError?: string | null,
+  lastTestResponse: unknown,
+  lastTestError: string | null | undefined,
+  t: Translator,
 ): string {
   const endpoints = (server?.api_spec?.endpoints ?? [])
     .map(ep => `- ${ep.method} ${ep.path}${ep.description ? ` — ${ep.description}` : ''}`)
     .join('\n');
-  const authBlock = buildAuthBlock(server);
-  const contextBlock = buildContextBlock(server, step, lastTestResponse, lastTestError);
+  const authBlock = buildAuthBlock(server, t);
+  const contextBlock = buildContextBlock(server, step, lastTestResponse, lastTestError, t);
   const tips = tipsForSlug(server?.id ?? null);
   const docsUrl = server?.api_spec?.docs_url ?? tips?.docsUrl ?? null;
 
-  return `# Rôle
-Tu es un assistant de configuration pour une étape "Récupérer des données" (\`StepType::ApiCall\`)
-dans un workflow Kronn. Cette étape fait un appel HTTP direct (sans LLM consommé) et extrait
-une valeur via JSONPath, qui pipe vers le step suivant.
+  return `${t('wf.apicall.helper.sys.role')}
 
-# Ce que tu peux et ne peux PAS faire
-- ✅ Lire la spec API ci-dessous, l'état courant du step, le résultat du dernier test.
-- ✅ Proposer des modifications de config (endpoint, method, query, headers, body, extract).
-- ❌ Tu n'as **AUCUN** outil pour appeler l'API toi-même. Pas de Bash, pas de MCP, pas de fetch.
-     C'est Kronn (backend Rust) qui fait l'appel quand l'utilisateur clique "Test the call".
-- ❌ Ne propose JAMAIS d'aller "vérifier en ligne" via un MCP — ce n'est pas dispo dans cette
-     conversation. Si la cause d'un échec t'échappe, oriente vers la doc officielle ou le
-     dashboard du fournisseur.
+${t('wf.apicall.helper.sys.boundaries')}
 
-# Ta seule action utile : proposer un \`KRONN:APPLY\`
-Quand tu suggères une config, écris EXACTEMENT ce format (sinon l'UI ne te lit pas) :
+${t('wf.apicall.helper.sys.action')}
 
-KRONN:APPLY
-\`\`\`json
-{ "endpoint": "/path/v4", "query": { "k": "v" }, "extract": "$.data[*]" }
-\`\`\`
+${t('wf.apicall.helper.sys.debug')}
 
-Champs autorisés : \`endpoint\`, \`method\`, \`query\`, \`headers\`, \`body\`, \`extract\`.
-Tu peux ne mettre QU'UN champ — le reste du step est préservé.
-Pas plus d'un bloc \`KRONN:APPLY\` par message (sinon l'utilisateur ne sait plus lequel choisir).
+${t('wf.apicall.helper.sys.endpointsHeader')}
+${endpoints || t('wf.apicall.helper.sys.endpointsEmpty')}
 
-# Méthode de debug (à appliquer dès qu'un test échoue)
-1. Lis le bloc \`### DERNIER TEST → ÉCHEC\` — il contient \`HTTP <status> on <method> <url> — <body excerpt>\`.
-2. Note le **status** (4xx vs 5xx → 4xx = ta config est en cause, 5xx = côté serveur).
-3. Note les **query params** dans l'URL composée (l'apikey est masquée — c'est normal et ATTENDU).
-4. Croise avec les TIPS du plugin ci-dessous + les endpoints autorisés.
-5. Propose **UNE** modification ciblée (un seul KRONN:APPLY). Pas de salve de 3 hypothèses simultanées.
-6. Si l'échec persiste après 2 tentatives, recommande à l'utilisateur de vérifier dans le dashboard
-   du fournisseur (URL de doc plus bas) — ne tourne pas en rond.
+${authBlock ? authBlock + '\n\n' : ''}${tips ? `${t('wf.apicall.helper.sys.tipsHeader', server?.name ?? '')}\n${tips.body}\n\n` : ''}${docsUrl ? `${t('wf.apicall.helper.sys.docsHeader')}\n${docsUrl}\n\n` : ''}${contextBlock}
 
-# Endpoints AUTORISÉS (n'invente jamais hors de cette liste)
-${endpoints || '(aucun — l\'utilisateur n\'a pas encore choisi d\'API)'}
+${t('wf.apicall.helper.sys.style')}
 
-${authBlock ? authBlock + '\n\n' : ''}${tips ? `# TIPS PLUGIN — ${server?.name ?? ''}\n${tips.body}\n\n` : ''}${docsUrl ? `# Doc officielle\n${docsUrl}\n\n` : ''}${contextBlock}
-
-# Style
-- Français, ≤ 3 lignes par message.
-- Pas de blabla, pas de "je vais analyser", pas de "voilà ce que je suggère :" — direct au but.
-- L'apikey/token affichés en \`••••••••\` ou \`***\` dans les logs sont MASQUÉS UNIQUEMENT À L'AFFICHAGE.
-  La vraie valeur configurée par l'utilisateur EST envoyée par Kronn. Si on te demande "tu es sûr
-  que la clé est bien envoyée ?" — réponds OUI sans réserve, et redirige le diag ailleurs (host,
-  endpoint, scope du token).
-
-Pour démarrer, demande au user ce qu'il veut récupérer.`;
+${t('wf.apicall.helper.sys.starter')}`;
 }
 
 export function ApiCallAiHelper({
@@ -271,8 +260,17 @@ export function ApiCallAiHelper({
   installedAgents,
   lastTestResponse,
   lastTestError,
+  configLanguage,
   t,
 }: ApiCallAiHelperProps) {
+  // The agent's reply language follows the backend "output language" config
+  // (Settings → Output language) — separate from the UI locale. We build a
+  // dedicated translator for the system prompt + injected context that
+  // resolves keys against `configLanguage`, while `t` keeps driving UI labels.
+  const agentT = useCallback<Translator>(
+    (key, ...args) => translate(toUILocale(configLanguage), key, ...args),
+    [configLanguage],
+  );
   const [phase, setPhase] = useState<Phase>('closed');
   const [discussionId, setDiscussionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -350,7 +348,11 @@ export function ApiCallAiHelper({
         project_id: projectId,
         title: `🤖 ${t('wf.apicall.helper.discTitle')}`,
         agent,
-        initial_prompt: buildSystemPrompt(selectedServer, step, lastTestResponse, lastTestError),
+        // Backend reads `language` to inject "Respond in {lang}" into the
+        // agent's prompt. Without this the agent defaulted to French
+        // regardless of the user's Output Language config.
+        language: configLanguage ?? 'fr',
+        initial_prompt: buildSystemPrompt(selectedServer, step, lastTestResponse, lastTestError, agentT),
       });
       setDiscussionId(disc.id);
 
@@ -384,7 +386,7 @@ export function ApiCallAiHelper({
       setError(String(e));
       setStreaming(false);
     }
-  }, [projectId, selectedServer, step, lastTestResponse, lastTestError, t]);
+  }, [projectId, selectedServer, step, lastTestResponse, lastTestError, t, configLanguage, agentT]);
 
   const sendMessage = useCallback(async () => {
     const userText = input.trim();
@@ -398,8 +400,9 @@ export function ApiCallAiHelper({
     setMessages(prev => [...prev, { role: 'user', text: userText }, { role: 'assistant', text: '' }]);
     setStreaming(true);
 
-    const contextBlock = buildContextBlock(selectedServer, step, lastTestResponse, lastTestError);
-    const enriched = `${contextBlock}\n\n### QUESTION DU USER\n${userText}`;
+    // The agent reads this context — must be in its reply language, not the UI's.
+    const contextBlock = buildContextBlock(selectedServer, step, lastTestResponse, lastTestError, agentT);
+    const enriched = `${contextBlock}\n\n${agentT('wf.apicall.helper.sys.userQuestion')}\n${userText}`;
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -424,7 +427,7 @@ export function ApiCallAiHelper({
       },
       controller.signal,
     );
-  }, [input, discussionId, streaming, selectedServer, step, lastTestResponse, lastTestError]);
+  }, [input, discussionId, streaming, selectedServer, step, lastTestResponse, lastTestError, agentT]);
 
   const stopStream = useCallback(() => {
     abortRef.current?.abort();

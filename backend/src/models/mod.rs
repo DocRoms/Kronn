@@ -715,6 +715,13 @@ pub enum ApiAuthKind {
     /// from the encrypted config env so Kronn never stores them in
     /// plaintext.
     Basic { user_env: String, password_env: String },
+    /// HTTP Basic with the API key as the username and an empty password
+    /// — `Authorization: Basic <base64(API_KEY:)>`. The flavor used by
+    /// SpeedCurve, Stripe, and a few other API-key-only providers that
+    /// chose Basic as the wire format. Reduces the env-key footprint to
+    /// 1 (the secret) and avoids forcing operators to type a placeholder
+    /// "empty password" in Settings → APIs.
+    BasicApiKey { env_key: String },
     /// OAuth2 client-credentials grant — Kronn exchanges `client_id` +
     /// `client_secret` against `token_url` to get a short-lived
     /// `access_token`, caches it until expiry, and injects a fresh
@@ -963,6 +970,83 @@ pub struct CreateQuickPromptRequest {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Quick APIs (0.6.0) — reusable API call templates with {{variables}}.
+// Same pattern as QuickPrompt but the engine is HTTP, not LLM. Field names
+// follow `WorkflowStep` ApiCall fields verbatim so the frontend can reuse
+// `ApiCallStepCard` (and therefore `ApiCallAiHelper`) as the editor.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct QuickApi {
+    pub id: String,
+    pub name: String,
+    pub icon: String,
+    /// Optional human description — shown in the BatchApiCall picker.
+    #[serde(default)]
+    pub description: String,
+    pub project_id: Option<String>,
+
+    // API request shape — same field names as WorkflowStep ApiCall fields.
+    pub api_plugin_slug: String,
+    pub api_config_id: String,
+    pub api_endpoint_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_query: Option<std::collections::HashMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_path_params: Option<std::collections::HashMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_headers: Option<std::collections::HashMap<String, String>>,
+    /// Same shape as `WorkflowStep.api_body`: a JSON `Value` rather than a
+    /// raw string. The runtime engine walks the tree and interpolates
+    /// string leaves only — no string-level templating that would let a
+    /// `{{var}}` containing `","` punch through into JSON injection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_body: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_extract: Option<ExtractSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_pagination: Option<PaginationSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_max_retries: Option<u8>,
+
+    /// Variables prompted at run-time (single-call) or whose names become
+    /// the keys mapped from each batch item (batch-call).
+    pub variables: Vec<PromptVariable>,
+
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct CreateQuickApiRequest {
+    pub name: String,
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub description: String,
+    pub project_id: Option<String>,
+    pub api_plugin_slug: String,
+    pub api_config_id: String,
+    pub api_endpoint_path: String,
+    pub api_method: Option<String>,
+    pub api_query: Option<std::collections::HashMap<String, String>>,
+    pub api_path_params: Option<std::collections::HashMap<String, String>>,
+    pub api_headers: Option<std::collections::HashMap<String, String>>,
+    pub api_body: Option<serde_json::Value>,
+    pub api_extract: Option<ExtractSpec>,
+    pub api_pagination: Option<PaginationSpec>,
+    pub api_timeout_ms: Option<u64>,
+    pub api_max_retries: Option<u8>,
+    #[serde(default)]
+    pub variables: Vec<PromptVariable>,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Workflows (replaces scheduled tasks)
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -978,9 +1062,147 @@ pub struct Workflow {
     pub safety: WorkflowSafety,
     pub workspace_config: Option<WorkspaceConfig>,
     pub concurrency_limit: Option<u32>,
+    /// Execution limits (timeout, LLM calls cap, loop detection). 0.7.0 —
+    /// Phase 1 of the Auto-Dev workflow expansion. `None` = use the soft
+    /// backend defaults (120 min wall-clock, 100 LLM calls, 10 revisits
+    /// per step) so existing workflows get the safety net automatically.
+    /// Explicit `Some(WorkflowGuards { ... })` lets users override per
+    /// workflow without touching server config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guards: Option<WorkflowGuards>,
+    /// 0.7.0 Phase 3 — declared artifacts the workflow's steps may write.
+    /// Map key = artifact name (referenced in steps as `{{artifacts.<name>}}`).
+    /// Value = relative path inside the run's workspace where Kronn
+    /// persists whatever the agent emits in `---ARTIFACT:<name>---...---END_ARTIFACT---`.
+    /// Empty by default (rétro-compat). Reading an undeclared artifact
+    /// from a template renders empty string — no hard error so partial
+    /// pipelines (artifact only set on round 2+ of a loop) keep flowing.
+    #[serde(default, skip_serializing_if = "::std::collections::HashMap::is_empty")]
+    #[ts(type = "Record<string, ArtifactSpec>")]
+    pub artifacts: ::std::collections::HashMap<String, ArtifactSpec>,
+    /// 0.7.0 Phase 7 — compensating steps run when the main pipeline ends
+    /// in `RunStatus::Failed`. Empty by default (rétro-compat). NOT fired on
+    /// Cancelled / StoppedByGuard / Gate-Reject — those are intentional
+    /// stops, the operator doesn't want any further automation. Each
+    /// rollback step sees the regular template context PLUS
+    /// `{{failed_step.name}}` and `{{failed_step.output}}` so the
+    /// rollback can react to what specifically broke. If a rollback step
+    /// itself fails, subsequent rollback steps are skipped (no recursive
+    /// compensation) — the run remains `Failed`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub on_failure: Vec<WorkflowStep>,
+    /// 0.7.0 Phase 5 — allowlist of binaries that `StepType::Exec` is
+    /// permitted to invoke for this workflow. Empty list = `Exec` steps
+    /// are completely disabled (default: safe). Match is exact on the
+    /// binary name (no glob, no regex, no path), so `npm` and
+    /// `/usr/local/bin/npm` are different — only the bare name passes.
+    /// Validate-time error when an Exec step's `exec_command` isn't in
+    /// this list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exec_allowlist: Vec<String>,
+    /// 0.6.0 UX pass — variables prompted at manual launch time (mirrors
+    /// `QuickPrompt.variables`). When the user clicks "Lancer" on a
+    /// workflow with `trigger == Manual` and `!variables.is_empty()`,
+    /// the launcher shows a form asking for one value per variable;
+    /// the values are merged into the run's `trigger_context` so they
+    /// resolve as `{{var_name}}` in step prompts. Empty for trigger-
+    /// driven workflows that get their context from the trigger
+    /// (issue.* / cron payload). Required variables fail launch when
+    /// the value is empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variables: Vec<PromptVariable>,
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Declared artifact in a workflow. Phase-3 minimal model — only
+/// path + optional format hint. Path is resolved relative to the run's
+/// workspace; absolute paths and `..` traversal are rejected at
+/// validate-time (`validate_artifact_specs`).
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[ts(export)]
+pub struct ArtifactSpec {
+    /// Workspace-relative path (e.g. `.kronn/plan.md`).
+    pub path: String,
+    /// Hint for the UI — `"markdown"`, `"yaml"`, `"json"`, `"text"` —
+    /// informational only, the engine doesn't enforce a format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+}
+
+/// Per-workflow execution limits enforced by the runner. Each field is
+/// optional: `None` means "use the runner's soft default". 0 / negative
+/// values are rejected at save time (`api::workflows::validate_guards`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS, PartialEq)]
+#[ts(export)]
+pub struct WorkflowGuards {
+    /// Wall-clock max duration of the run from `WorkflowRun.started_at`.
+    /// Includes time spent in `WaitingApproval` (Phase 2 GATE) UNLESS the
+    /// runner is later updated to pause the timer there. Triggers
+    /// `RunStatus::StoppedByGuard` + `RunEvent::GuardTriggered { kind: Timeout }`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
+
+    /// Hard cap on the number of LLM-spending steps. `Agent` counts as 1,
+    /// `BatchQuickPrompt` counts as N (post-fan-out, after items are
+    /// resolved), `ApiCall` and `Notify` count as 0. Prevents a Goto
+    /// loop or a misconfigured workflow from burning a budget overnight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_llm_calls: Option<u32>,
+
+    /// Max number of times the runner is allowed to revisit the same
+    /// step (via `ConditionAction::Goto`). Per-step counter, not total
+    /// iterations — a 100-step linear workflow won't trigger this.
+    /// Defaults to 10. Triggers `RunStatus::StoppedByGuard`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_detection_max_revisits: Option<usize>,
+}
+
+/// Soft backend defaults applied when `Workflow.guards` is `None` or any
+/// individual field is `None`. Acts as a kill-switch against runaway runs
+/// without forcing every user to configure the limits manually.
+pub const DEFAULT_GUARD_TIMEOUT_SECS: u64 = 7200;       // 2 hours
+pub const DEFAULT_GUARD_MAX_LLM_CALLS: u32 = 100;
+pub const DEFAULT_GUARD_LOOP_MAX_REVISITS: usize = 10;
+
+impl WorkflowGuards {
+    /// Resolve the effective limits, falling back to backend defaults.
+    /// Always returns concrete values — never `None`.
+    pub fn resolved(&self) -> ResolvedGuards {
+        ResolvedGuards {
+            timeout_seconds: self.timeout_seconds.unwrap_or(DEFAULT_GUARD_TIMEOUT_SECS),
+            max_llm_calls: self.max_llm_calls.unwrap_or(DEFAULT_GUARD_MAX_LLM_CALLS),
+            loop_detection_max_revisits: self.loop_detection_max_revisits
+                .unwrap_or(DEFAULT_GUARD_LOOP_MAX_REVISITS),
+        }
+    }
+
+    /// Resolve from an `Option<WorkflowGuards>` — `None` (no overrides at
+    /// all) yields full defaults.
+    pub fn resolve_optional(opt: Option<&WorkflowGuards>) -> ResolvedGuards {
+        opt.map(|g| g.resolved()).unwrap_or_else(|| WorkflowGuards::default().resolved())
+    }
+}
+
+/// All-fields-resolved variant used internally by the runner so the
+/// guard-check code never has to deal with `Option`s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedGuards {
+    pub timeout_seconds: u64,
+    pub max_llm_calls: u32,
+    pub loop_detection_max_revisits: usize,
+}
+
+/// Which guard tripped — surfaced verbatim in the SSE `GuardTriggered`
+/// event so the frontend can render the right badge / toast / explainer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "type")]
+pub enum GuardKind {
+    Timeout,
+    MaxLlmCalls,
+    LoopDetection { step_name: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -1014,6 +1236,12 @@ pub enum TrackerSourceConfig {
 /// `Structured`: engine injects format instructions and extracts a JSON envelope
 ///   (`{"data": ..., "status": "OK|NO_RESULTS|ERROR", "summary": "..."}`).
 ///   Downstream steps can use `{{previous_step.data}}` and `{{previous_step.summary}}`.
+/// `TypedSchema { schema }` (0.7.0 Phase 2): like Structured, but the
+///   `data` field is validated against a JSON-Schema subset provided
+///   by the workflow author. The schema is serialised into the prompt
+///   so the LLM produces conforming output, and the engine rejects
+///   non-conforming responses with a repair prompt. Used by Auto-Dev's
+///   `validate_ticket` step (output_schema with status enum + score range).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(tag = "type")]
@@ -1021,6 +1249,19 @@ pub enum StepOutputFormat {
     #[default]
     FreeText,
     Structured,
+    /// 0.7.0 Phase 2 — like `Structured` but the `data` field is
+    /// constrained by a JSON-Schema subset (`type`, `properties`,
+    /// `required`, `enum`, `items`, `min`/`max`, `minLength`/`maxLength`).
+    /// The schema is serialised into the prompt and validated post-extract.
+    /// Mismatches trigger a single repair prompt (same pattern as the
+    /// vanilla `Structured` envelope flow).
+    TypedSchema {
+        /// JSON Schema (subset). Stored verbatim; the runner serialises
+        /// it into the prompt as-is so the LLM sees the exact shape it
+        /// must produce.
+        #[ts(type = "any")]
+        schema: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -1100,6 +1341,36 @@ pub struct WorkflowStep {
     /// Example: `["qp-review", "qp-summary"]` after the primary `batch_quick_prompt_id`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub batch_chain_prompt_ids: Vec<String>,
+
+    /// Concurrent fan-out cap for `StepType::BatchApiCall` (HTTP path only).
+    /// `None` falls back to a conservative default (5). HTTP can scale much
+    /// higher than agent runs (no LLM, just network) but providers rate-limit
+    /// — Jira/GitHub typically OK up to 10-20 in parallel, beyond that you
+    /// risk 429s. Distinct from BatchQuickPrompt (which goes through the
+    /// global agent_semaphore).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_concurrent_limit: Option<u32>,
+
+    /// 0.6.0 — when set on a `BatchApiCall` step, the executor loads the
+    /// referenced `QuickApi` from the DB at run-time and uses its API
+    /// config (plugin, endpoint, method, body, etc.) instead of the
+    /// step's own inline `api_*` fields. Mirror of `batch_quick_prompt_id`.
+    /// `None` keeps inline-config behaviour. 0.7+ — étendu à `StepType::ApiCall`
+    /// (single, non-batch) avec la même sémantique per-field override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quick_api_id: Option<String>,
+
+    /// 0.7+ — référence vers un `QuickPrompt` saved. Quand set sur un step
+    /// `Agent`, le runner charge le QP au run-time et utilise son
+    /// `prompt_template`, son `agent`, son `tier`, et ses `skill_ids` ; les
+    /// fields renseignés sur le step écrasent ceux du QP (per-field override).
+    /// Permet de définir un prompt canonique côté Quick Prompts et de le
+    /// réutiliser dans N workflows. Pas de variables au niveau step :
+    /// les `{{var}}` du QP sont résolus avec le `TemplateContext` du
+    /// workflow (launch variables / state / steps.X / etc.). Mirror du
+    /// pattern `quick_api_id` pour les ApiCall.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quick_prompt_id: Option<String>,
 
     // ─── Notify fields ───────────────────────────────────────────────────
     // Only meaningful when `step_type == Notify`. Webhook-based workflow
@@ -1199,6 +1470,80 @@ pub struct WorkflowStep {
     /// Defaults to the step's `name` field when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_output_var: Option<String>,
+
+    // ─── Gate fields (0.7.0 Phase 4 — human-in-the-loop) ─────────────
+    // Only meaningful when `step_type == Gate`. The runner stops the
+    // run with `RunStatus::WaitingApproval`; a human decides via the
+    // dashboard. Templates resolve at gate-execution time so the
+    // operator sees the actual values, not the literal `{{X}}`.
+
+    /// Markdown message shown to the operator on the run-detail page.
+    /// Templates supported. Empty string falls back to a default
+    /// "Décision humaine requise" placeholder in the UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_message: Option<String>,
+
+    /// Step name to jump to when the operator picks "Request Changes".
+    /// `None` → falls back to the previous step (one step back), which
+    /// matches the Auto-Dev `pause_pre_merge` → `goto: implement` pattern.
+    /// Set explicitly to a step name for non-default targets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_request_changes_target: Option<String>,
+
+    /// 0.7.0 P1-1 — optional webhook URL to POST when the run enters
+    /// `WaitingApproval` on this gate. Best-effort fire-and-forget;
+    /// failures are logged but never block the run. Templated, so
+    /// users can drop `{{state.slack_url}}` etc. Body :
+    /// `{run_id, workflow_id, workflow_name, step_name, message}`.
+    /// The "ping ops when a Gate fires" use case Cyndie + Antony
+    /// flagged as blocker for team-wide deployment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_notify_url: Option<String>,
+
+    // ─── Exec fields (0.7.0 Phase 5 — direct shell, no LLM) ──────────────
+    // Only meaningful when `step_type == Exec`. Defence in depth:
+    //   1. `command` is the binary name verbatim — match-tested against
+    //      `Workflow.exec_allowlist` at save time (rejected if absent).
+    //   2. NEVER passed through a shell (`sh -c`, `bash -c`) — spawned
+    //      directly via `crate::core::cmd::async_cmd` with args as
+    //      separate argv elements. So pipes, redirections, glob
+    //      expansion DO NOT apply.
+    //   3. Args ARE templated (`{{steps.X.summary}}` etc.) but the
+    //      rendered value is passed as a single literal argument — even
+    //      if it contains `; rm -rf /`, the OS receives one argv string,
+    //      not a shell command.
+    //   4. `command` itself is NOT templated — locked at save time.
+
+    /// Binary to execute. Must match an entry in `Workflow.exec_allowlist`
+    /// exactly (no glob, no regex). NOT templated — locked at save time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec_command: Option<String>,
+
+    /// Arguments passed verbatim to the binary. Each entry is one argv
+    /// element. Templates `{{steps.X}}` are rendered, but the result
+    /// becomes a literal argument — no shell metachar interpretation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exec_args: Vec<String>,
+
+    /// Per-step timeout in seconds. Defaults to 300s (5 min) if unset.
+    /// Hard-capped at 1800s (30 min) at validate time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec_timeout_secs: Option<u32>,
+
+    // ─── JsonData fields (0.7+ — déterministe data source) ───────────────
+    // Only meaningful when `step_type == JsonData`. Zéro token, zéro
+    // réseau. Le runner sérialise `json_data_payload` dans une envelope
+    // Structured et la passe au step suivant. Cas d'usage : alimenter un
+    // BatchQuickPrompt sans API derrière. Voir json_data_step.rs.
+
+    /// Payload JSON émis par le step. Validé au save (parse JSON valide,
+    /// taille raisonnable). Aucun templating au runtime — la valeur est
+    /// retournée telle quelle, ce qui permet à un downstream batch de la
+    /// consommer via `{{steps.<name>.data}}` exactement comme une réponse
+    /// API. Si tu as besoin de `{{var}}` dans le payload, mets ça dans
+    /// un Agent step ou un ApiCall.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub json_data_payload: Option<serde_json::Value>,
 }
 
 /// Extraction specification for an `ApiCall` step's JSON response.
@@ -1324,6 +1669,39 @@ pub enum StepType {
     /// a mechanical data step (create GitHub issue, post to Slack) without
     /// spawning an LLM. Shipped 0.3.5.
     Notify,
+    /// 0.7.0 Phase 4 — human-in-the-loop pause. The run halts at this
+    /// step with `RunStatus::WaitingApproval`; a human operator decides
+    /// from the UI (`POST /api/workflows/runs/:id/decide`) whether the
+    /// workflow continues, jumps to another step (request_changes), or
+    /// stops. Zero tokens — no LLM is spawned for the gate itself.
+    Gate,
+    /// 0.7.0 Phase 5 — direct shell execution. Zero tokens, runs a
+    /// pre-allowlisted binary in the workflow's workspace. Defence in
+    /// depth: binary must be in `Workflow.exec_allowlist`, NEVER goes
+    /// through `sh -c`, args are templated but passed as literal argv
+    /// (no shell interpretation), workdir locked to the workspace,
+    /// timeout-bounded. Typical use: `cargo test`, `npm run build`,
+    /// `make deploy`.
+    Exec,
+    /// 0.6.0 — fan out an API call over a list of items, in parallel,
+    /// **with zero LLM tokens**. The mechanical counterpart of
+    /// `BatchQuickPrompt`: same fan-out semantics, but each child fires
+    /// a templated HTTP request via the configured plugin instead of
+    /// spawning an agent. Used by Feature Planner to bulk-create Jira
+    /// tickets (one POST /issue per planned sub-task) without paying
+    /// the per-ticket agent loop. Concurrency capped by
+    /// `batch_concurrent_limit` (default 5) to avoid hammering the
+    /// upstream API.
+    BatchApiCall,
+    /// 0.7+ — déterministe data source : émet un payload JSON littéral
+    /// stocké dans le step (`json_data_payload`). Zéro token, zéro réseau.
+    /// Cas d'usage : workflow batch sur une liste figée (ex: 10 hosts
+    /// hardcodés alimentent un BatchQuickPrompt sans avoir à monter une
+    /// API). Aussi utile comme fixture de dev — on construit le pipeline
+    /// sur du JsonData puis on remplace par un `ApiCall` quand la vraie
+    /// source est prête. Output toujours `Structured` : envelope
+    /// `{data: payload, status: "OK", summary: "JSON data (N items)"}`.
+    JsonData,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -1354,7 +1732,19 @@ pub struct StepConditionRule {
 pub enum ConditionAction {
     Stop,
     Skip,
-    Goto { step_name: String },
+    /// Jump back (or forward) to `step_name`. Optional `max_iterations`
+    /// scopes the loop: after the same Goto fires that many times,
+    /// the runner falls through instead of jumping (run continues
+    /// past the loop). Without `max_iterations` the workflow-level
+    /// `loop_detection_max_revisits` guard remains the only safety
+    /// net — fine for short loops, but per-loop scoping is cleaner
+    /// when you have several independent loops in the same workflow.
+    /// 0.7.0 Phase 6.
+    Goto {
+        step_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_iterations: Option<u32>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -1460,6 +1850,16 @@ pub struct WorkflowRun {
     /// runs and manual batch runs triggered from the UI).
     #[serde(default)]
     pub parent_run_id: Option<String>,
+    /// 0.7.0 Phase 6 — durable state map carried across iterations and
+    /// resume cycles (Gate, restart). Agents write entries by emitting
+    /// `---STATE:<key>=<value>---` blocks in their output (parsed
+    /// alongside artifacts); steps read them via `{{state.<key>}}`.
+    /// Used for retry counters, accumulated verdicts, and any other
+    /// cross-iteration memory that doesn't belong in step outputs.
+    /// Empty by default. Persisted as a JSON object on the run row.
+    #[serde(default, skip_serializing_if = "::std::collections::HashMap::is_empty")]
+    #[ts(type = "Record<string, string>")]
+    pub state: ::std::collections::HashMap<String, String>,
 }
 
 fn default_run_type() -> String { "linear".to_string() }
@@ -1473,6 +1873,11 @@ pub enum RunStatus {
     Failed,
     Cancelled,
     WaitingApproval,
+    /// 0.7.0 — terminal state distinct from `Failed`: the run hit a
+    /// `WorkflowGuards` limit (timeout, max LLM calls, loop detection).
+    /// UX surfaces this with a shield icon (orange, not red) so users
+    /// can tell a self-protected stop from a real failure.
+    StoppedByGuard,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -2056,6 +2461,17 @@ pub struct CreateWorkflowRequest {
     pub workspace_config: Option<WorkspaceConfig>,
     #[serde(default)]
     pub concurrency_limit: Option<u32>,
+    #[serde(default)]
+    pub guards: Option<WorkflowGuards>,
+    #[serde(default)]
+    #[ts(type = "Record<string, ArtifactSpec>")]
+    pub artifacts: ::std::collections::HashMap<String, ArtifactSpec>,
+    #[serde(default)]
+    pub on_failure: Vec<WorkflowStep>,
+    #[serde(default)]
+    pub exec_allowlist: Vec<String>,
+    #[serde(default)]
+    pub variables: Vec<PromptVariable>,
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -2070,6 +2486,25 @@ pub struct UpdateWorkflowRequest {
     pub safety: Option<WorkflowSafety>,
     pub workspace_config: Option<WorkspaceConfig>,
     pub concurrency_limit: Option<u32>,
+    pub guards: Option<WorkflowGuards>,
+    /// Replace the artifact map entirely when present. To clear all
+    /// declarations, send `Some({})`. Omit the field to leave existing
+    /// declarations untouched.
+    #[serde(default)]
+    #[ts(type = "Record<string, ArtifactSpec> | null")]
+    pub artifacts: Option<::std::collections::HashMap<String, ArtifactSpec>>,
+    /// Replace the rollback chain entirely when present. To clear it,
+    /// send `Some([])`. Omit to leave the existing chain untouched.
+    #[serde(default)]
+    pub on_failure: Option<Vec<WorkflowStep>>,
+    /// Replace the Exec allowlist entirely when present. Send
+    /// `Some([])` to disable Exec steps; omit to leave it untouched.
+    #[serde(default)]
+    pub exec_allowlist: Option<Vec<String>>,
+    /// Replace launch-time variables entirely when present. `Some([])`
+    /// to clear, omit to keep existing.
+    #[serde(default)]
+    pub variables: Option<Vec<PromptVariable>>,
     pub enabled: Option<bool>,
 }
 
@@ -2143,12 +2578,154 @@ pub struct WorkflowSuggestion {
     pub steps: Vec<WorkflowStep>,
 }
 
-#[allow(dead_code)]
+/// 0.7.0 UX pass — payload for `POST /api/workflows/import`.
+/// `content` is the raw JSON of a `WorkflowExportEnvelope` (string
+/// rather than nested object so the frontend can `JSON.parse` once
+/// from the dropped file and pass it through). `project_id` is the
+/// importer's project to attach the workflow to — `None` keeps it
+/// unattached (the user picks a project later via the wizard).
 #[derive(Debug, Deserialize, TS)]
 #[ts(export)]
 pub struct ImportWorkflowRequest {
     pub content: String,
     pub project_id: Option<String>,
+}
+
+/// 0.7.0 UX pass — payload for `POST /api/quick-prompts/import`.
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct ImportQuickPromptRequest {
+    pub content: String,
+    pub project_id: Option<String>,
+}
+
+/// 0.6.0 UX pass — optional payload for `POST /api/workflows/:id/trigger`.
+/// `variables` carries user-entered values matching `Workflow.variables`
+/// (manual launch). The keys become `{{var_name}}` in step prompts via
+/// the run's `trigger_context`. Empty/missing body keeps the legacy
+/// "trigger with no variables" flow working — back-compat for tracker
+/// triggers that don't need variables.
+#[derive(Debug, Deserialize, Default, TS)]
+#[ts(export)]
+pub struct TriggerWorkflowRequest {
+    #[serde(default)]
+    #[ts(type = "Record<string, string>")]
+    pub variables: ::std::collections::HashMap<String, String>,
+}
+
+/// Self-contained envelope produced by `GET /api/workflows/:id/export`.
+/// Designed to be saved to disk, mailed, attached to a Github issue, etc.
+/// `version: 1` is the current shape; future incompatible changes bump
+/// the version and add a migration path at import time.
+#[derive(Debug, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WorkflowExportEnvelope {
+    /// Discriminator: always `"kronn.workflow"` for this envelope.
+    pub kind: String,
+    /// Schema version. Bumped on incompatible changes.
+    pub version: u32,
+    /// ISO-8601 timestamp of the export, for audit and human readability.
+    pub exported_at: DateTime<Utc>,
+    /// The workflow definition. `id`, `project_id`, `created_at`,
+    /// `updated_at`, `enabled` are kept in the wire format (so a
+    /// roundtrip is lossless to inspect) but DROPPED at import — the
+    /// importer mints fresh values for those fields.
+    pub workflow: Workflow,
+    /// QPs referenced by `BatchQuickPrompt` steps. Bundled so the
+    /// importer doesn't need to fetch them separately. Empty when no
+    /// step references a QP.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub referenced_quick_prompts: Vec<QuickPrompt>,
+}
+
+/// Self-contained envelope produced by `GET /api/quick-prompts/:id/export`.
+#[derive(Debug, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct QuickPromptExportEnvelope {
+    pub kind: String,
+    pub version: u32,
+    pub exported_at: DateTime<Utc>,
+    /// Like the workflow envelope: `id`, `project_id`, `created_at`,
+    /// `updated_at` are present on the wire but reset at import.
+    pub quick_prompt: QuickPrompt,
+}
+
+/// 0.6.0 — payload for `POST /api/quick-apis/import`. Mirrors the QP shape.
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct ImportQuickApiRequest {
+    pub content: String,
+    pub project_id: Option<String>,
+}
+
+/// Self-contained envelope produced by `GET /api/quick-apis/:id/export`.
+#[derive(Debug, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct QuickApiExportEnvelope {
+    pub kind: String,
+    pub version: u32,
+    pub exported_at: DateTime<Utc>,
+    /// `id`, `project_id`, `created_at`, `updated_at` are present on the
+    /// wire but reset at import — fresh values are minted by the importer.
+    pub quick_api: QuickApi,
+}
+
+/// 0.6.0 — payload for `POST /api/quick-apis/:id/run`. Lets the user
+/// launch a saved QuickApi standalone (Run drawer in the Quick APIs page),
+/// passing values for the declared `variables`.
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct RunQuickApiRequest {
+    /// Map of variable name → user-entered value. Keys must match
+    /// `QuickApi.variables[*].name`. Missing keys for required variables
+    /// get the call rejected before any HTTP fires.
+    #[serde(default)]
+    #[ts(type = "Record<string, string>")]
+    pub variables: ::std::collections::HashMap<String, String>,
+}
+
+/// Response from `POST /api/quick-apis/:id/run`. Mirrors the
+/// `/test-api-call` shape so the frontend can reuse the same UI.
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+pub struct RunQuickApiResponse {
+    pub success: bool,
+    pub duration_ms: u64,
+    /// Parsed envelope (data/status/summary) on success, `None` on failure.
+    pub envelope: Option<serde_json::Value>,
+    /// Error message on failure, `None` on success.
+    pub error: Option<String>,
+}
+
+/// 0.6.0 — payload for `POST /api/quick-apis/:id/batch`. Fan-out the same
+/// QA over a list of items (sub-domains, ticket keys, languages, etc.)
+/// without needing a workflow. Mirror of the `BatchApiCall` step type
+/// but standalone — uses the same parallel HTTP executor under the hood.
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct BatchRunQuickApiRequest {
+    /// Items to fan-out over. Accepts:
+    ///   - JSON array of strings (each fills the QA's first variable):
+    ///     `["www.example.com", "de.example.com", "fr.example.com"]`
+    ///   - JSON array of objects (each key maps to a variable name):
+    ///     `[{"host":"www.example.com","limit":"5"}, ...]`
+    pub items: serde_json::Value,
+    /// Max parallel HTTP calls (default 5, hard-capped at 20).
+    #[serde(default)]
+    pub concurrent_limit: Option<u32>,
+}
+
+/// Response from `POST /api/quick-apis/:id/batch`. The full aggregated
+/// envelope produced by the BatchApiCall executor — the frontend renders
+/// `envelope.data.items[]` as a per-item result table.
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+pub struct BatchRunQuickApiResponse {
+    /// Overall status: `OK` (all succeeded), `PARTIAL` (some failed), `ERROR` (all failed).
+    pub status: String,
+    pub duration_ms: u64,
+    pub envelope: Option<serde_json::Value>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Deserialize, TS)]

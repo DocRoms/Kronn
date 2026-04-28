@@ -10,7 +10,7 @@
 //     counter instead of the static "running…" placeholder.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, act } from '@testing-library/react';
 import { buildApiMock } from '../../../test/apiMock';
 import type { WorkflowRun, WorkflowStep, StepResult } from '../../../types/generated';
 
@@ -83,6 +83,12 @@ const mkStep = (over: Partial<WorkflowStep>): WorkflowStep => ({
   api_timeout_ms: null,
   api_max_retries: null,
   api_output_var: null,
+  gate_message: null,
+  gate_request_changes_target: null,
+  gate_notify_url: null,
+  exec_command: null,
+  exec_args: [],
+  exec_timeout_secs: null,
   ...over,
 });
 
@@ -202,5 +208,165 @@ describe('RunDetail — LiveStepStatus (in-flight step UX)', () => {
       />,
     );
     expect(screen.getByText('20s')).toBeInTheDocument();
+  });
+});
+
+describe('RunDetail — Gate decision panel (0.7.0 Phase 4 — human-in-the-loop)', () => {
+  beforeEach(() => {
+    // Sibling describes leave fake timers installed; the gate tests
+    // rely on synchronous state updates and don't need fakes.
+    vi.useRealTimers();
+  });
+
+  it('renders the gate panel with the rendered message when run is WaitingApproval', () => {
+    const run = mkRun({
+      status: 'WaitingApproval',
+      finished_at: null,
+      step_results: [
+        mkResult({
+          step_name: 'pause_pre_merge',
+          step_kind: 'Gate',
+          status: 'WaitingApproval',
+          output: 'Validate the PR for ticket EW-42?',
+        }),
+      ],
+    });
+    const { container } = render(<RunDetail run={run} onDelete={() => {}} onDecide={() => {}} />);
+    // Title and message visible (the message also appears in the step
+    // list preview, hence we scope the assertion to the panel itself).
+    expect(screen.getByText(/wf\.gate\.title/)).toBeInTheDocument();
+    const panel = container.querySelector('.wf-gate-panel');
+    expect(panel).not.toBeNull();
+    expect(panel!.textContent).toContain('Validate the PR for ticket EW-42?');
+    // All three buttons.
+    expect(screen.getByText(/wf\.gate\.approve/)).toBeInTheDocument();
+    expect(screen.getByText(/wf\.gate\.requestChanges/)).toBeInTheDocument();
+    expect(screen.getByText(/wf\.gate\.reject/)).toBeInTheDocument();
+  });
+
+  it('does not render the panel when no onDecide handler is provided', () => {
+    const run = mkRun({
+      status: 'WaitingApproval',
+      finished_at: null,
+      step_results: [
+        mkResult({
+          step_name: 'pause_pre_merge',
+          step_kind: 'Gate',
+          status: 'WaitingApproval',
+          output: 'Approve?',
+        }),
+      ],
+    });
+    render(<RunDetail run={run} onDelete={() => {}} />);
+    expect(screen.queryByText(/wf\.gate\.title/)).not.toBeInTheDocument();
+  });
+
+  it('does not render the panel when status is WaitingApproval but trailing step is not Gate', () => {
+    // Defensive: should never happen in practice (only Gate steps emit
+    // WaitingApproval), but the render path must guard against it
+    // rather than try to read a message off a non-Gate StepResult.
+    const run = mkRun({
+      status: 'WaitingApproval',
+      finished_at: null,
+      step_results: [
+        mkResult({
+          step_name: 'agent_step',
+          step_kind: 'Agent',
+          status: 'WaitingApproval',
+          output: 'mismatched state',
+        }),
+      ],
+    });
+    render(<RunDetail run={run} onDelete={() => {}} onDecide={() => {}} />);
+    expect(screen.queryByText(/wf\.gate\.title/)).not.toBeInTheDocument();
+  });
+
+  it('calls onDecide with approve + null comment when Approve is clicked', async () => {
+    const onDecide = vi.fn().mockResolvedValue(undefined);
+    const run = mkRun({
+      status: 'WaitingApproval',
+      finished_at: null,
+      step_results: [
+        mkResult({ step_name: 'gate', step_kind: 'Gate', status: 'WaitingApproval', output: 'OK?' }),
+      ],
+    });
+    render(<RunDetail run={run} onDelete={() => {}} onDecide={onDecide} />);
+    const approveBtn = screen.getByText(/wf\.gate\.approve/).closest('button')!;
+    await act(async () => {
+      approveBtn.click();
+    });
+    expect(onDecide).toHaveBeenCalledWith({ decision: 'approve', comment: null });
+  });
+
+  it('blocks request_changes when comment is empty (UX guard before API)', async () => {
+    const onDecide = vi.fn().mockResolvedValue(undefined);
+    const run = mkRun({
+      status: 'WaitingApproval',
+      finished_at: null,
+      step_results: [
+        mkResult({ step_name: 'gate', step_kind: 'Gate', status: 'WaitingApproval', output: 'OK?' }),
+      ],
+    });
+    render(<RunDetail run={run} onDelete={() => {}} onDecide={onDecide} />);
+    const changesBtn = screen.getByText(/wf\.gate\.requestChanges/).closest('button')!;
+    await act(async () => {
+      changesBtn.click();
+    });
+    expect(onDecide).not.toHaveBeenCalled();
+    // Inline error visible to operator after the React state flush.
+    expect(screen.getByText(/wf\.gate\.commentRequired/)).toBeInTheDocument();
+  });
+});
+
+describe('RunDetail — B5 (0.6.0 UX pass) WaitingApproval badge + PausedSince', () => {
+  beforeEach(() => {
+    // Freeze the clock so PausedSince is deterministic. Run started at
+    // 12:00:00 + 1 step took 60s (gate enters at 12:01:00). "Now" is
+    // 12:31:00 → expected pause = 30 min.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-26T12:31:00Z'));
+  });
+
+  it('renders the À VALIDER badge instead of generic status when WaitingApproval', () => {
+    const run = mkRun({
+      status: 'WaitingApproval',
+      finished_at: null,
+      step_results: [
+        mkResult({ step_name: 'prep', step_kind: 'Agent', duration_ms: 60000 }),
+        mkResult({ step_name: 'gate', step_kind: 'Gate', status: 'WaitingApproval', output: 'OK?' }),
+      ],
+    });
+    render(<RunDetail run={run} onDelete={() => {}} onDecide={() => {}} />);
+    // The badge replaces the raw status text — explicit translation key.
+    expect(screen.getByText(/wf\.runStatusToReview/)).toBeInTheDocument();
+  });
+
+  it('shows "paused for 30 min" counter using completed step durations', () => {
+    const run = mkRun({
+      status: 'WaitingApproval',
+      finished_at: null,
+      step_results: [
+        // Step duration: 1 minute. Pause start = run.started_at + 60s.
+        mkResult({ step_name: 'prep', step_kind: 'Agent', duration_ms: 60000 }),
+        mkResult({ step_name: 'gate', step_kind: 'Gate', status: 'WaitingApproval', duration_ms: 0, output: 'OK?' }),
+      ],
+    });
+    render(<RunDetail run={run} onDelete={() => {}} onDecide={() => {}} />);
+    // Translation key carries `{0}` — i18n stub `t(key, ...args)` renders
+    // it as `wf.pausedMinutes:30`. Substring match is enough.
+    expect(screen.getByText(/wf\.pausedMinutes:30/)).toBeInTheDocument();
+    // The "0 token" badge sits next to the counter — argument commercial
+    // qu'Antony a flaggé comme killer feature à mettre en avant.
+    expect(screen.getByText(/wf\.pausedZeroTokens/)).toBeInTheDocument();
+  });
+
+  it('does NOT show the pause counter when run is not WaitingApproval', () => {
+    const run = mkRun({
+      status: 'Success',
+      step_results: [mkResult({ step_name: 'main', step_kind: 'Agent' })],
+    });
+    render(<RunDetail run={run} onDelete={() => {}} />);
+    expect(screen.queryByText(/wf\.pausedMinutes/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/wf\.runStatusToReview/)).not.toBeInTheDocument();
   });
 });

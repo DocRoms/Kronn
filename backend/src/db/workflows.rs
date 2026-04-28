@@ -24,6 +24,7 @@ fn parse_run_status(s: &str) -> RunStatus {
         "Failed" => RunStatus::Failed,
         "Cancelled" => RunStatus::Cancelled,
         "WaitingApproval" => RunStatus::WaitingApproval,
+        "StoppedByGuard" => RunStatus::StoppedByGuard,
         _ => RunStatus::Pending,
     }
 }
@@ -36,6 +37,7 @@ fn run_status_str(s: &RunStatus) -> &'static str {
         RunStatus::Failed => "Failed",
         RunStatus::Cancelled => "Cancelled",
         RunStatus::WaitingApproval => "WaitingApproval",
+        RunStatus::StoppedByGuard => "StoppedByGuard",
     }
 }
 
@@ -54,7 +56,7 @@ pub fn list_workflows(conn: &Connection) -> Result<Vec<Workflow>> {
     let mut stmt = conn.prepare(
         "SELECT id, name, project_id, trigger_json, steps_json, actions_json,
                 safety_json, workspace_config_json, concurrency_limit, enabled,
-                created_at, updated_at
+                created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables
          FROM workflows WHERE id NOT LIKE 'qp:%' ORDER BY updated_at DESC"
     )?;
 
@@ -70,7 +72,7 @@ pub fn get_workflow(conn: &Connection, id: &str) -> Result<Option<Workflow>> {
     let mut stmt = conn.prepare(
         "SELECT id, name, project_id, trigger_json, steps_json, actions_json,
                 safety_json, workspace_config_json, concurrency_limit, enabled,
-                created_at, updated_at
+                created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables
          FROM workflows WHERE id = ?1"
     )?;
 
@@ -378,6 +380,7 @@ pub fn create_batch_run(
         batch_failed: 0,
         batch_name: input.batch_name.clone(),
         parent_run_id: input.parent_run_id.clone(),
+        state: ::std::collections::HashMap::new(),
     };
 
     let lang = if input.language.is_empty() { "fr".to_string() } else { input.language };
@@ -465,8 +468,8 @@ pub fn create_batch_run(
 pub fn insert_workflow(conn: &Connection, wf: &Workflow) -> Result<()> {
     conn.execute(
         "INSERT INTO workflows (id, name, project_id, trigger_json, steps_json, actions_json,
-         safety_json, workspace_config_json, concurrency_limit, enabled, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+         safety_json, workspace_config_json, concurrency_limit, enabled, created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             wf.id,
             wf.name,
@@ -480,6 +483,15 @@ pub fn insert_workflow(conn: &Connection, wf: &Workflow) -> Result<()> {
             wf.enabled as i32,
             wf.created_at.to_rfc3339(),
             wf.updated_at.to_rfc3339(),
+            wf.guards.as_ref().map(serde_json::to_string).transpose()?,
+            if wf.artifacts.is_empty() { None } else { Some(serde_json::to_string(&wf.artifacts)?) },
+            if wf.on_failure.is_empty() { None } else { Some(serde_json::to_string(&wf.on_failure)?) },
+            if wf.exec_allowlist.is_empty() { None } else { Some(serde_json::to_string(&wf.exec_allowlist)?) },
+            // 0.6.0 UX pass — same NULL-vs-empty discipline. Empty
+            // variables = no manual launch form. NULL on disk so a
+            // `WHERE variables IS NOT NULL` lists only workflows that
+            // actually need a launch dialog.
+            if wf.variables.is_empty() { None } else { Some(serde_json::to_string(&wf.variables)?) },
         ],
     )?;
     Ok(())
@@ -489,7 +501,8 @@ pub fn update_workflow(conn: &Connection, wf: &Workflow) -> Result<()> {
     conn.execute(
         "UPDATE workflows SET name = ?2, project_id = ?3, trigger_json = ?4, steps_json = ?5,
          actions_json = ?6, safety_json = ?7, workspace_config_json = ?8,
-         concurrency_limit = ?9, enabled = ?10, updated_at = ?11
+         concurrency_limit = ?9, enabled = ?10, updated_at = ?11, guards = ?12, artifacts = ?13,
+         on_failure = ?14, exec_allowlist = ?15, variables = ?16
          WHERE id = ?1",
         params![
             wf.id,
@@ -503,6 +516,11 @@ pub fn update_workflow(conn: &Connection, wf: &Workflow) -> Result<()> {
             wf.concurrency_limit,
             wf.enabled as i32,
             wf.updated_at.to_rfc3339(),
+            wf.guards.as_ref().map(serde_json::to_string).transpose()?,
+            if wf.artifacts.is_empty() { None } else { Some(serde_json::to_string(&wf.artifacts)?) },
+            if wf.on_failure.is_empty() { None } else { Some(serde_json::to_string(&wf.on_failure)?) },
+            if wf.exec_allowlist.is_empty() { None } else { Some(serde_json::to_string(&wf.exec_allowlist)?) },
+            if wf.variables.is_empty() { None } else { Some(serde_json::to_string(&wf.variables)?) },
         ],
     )?;
     Ok(())
@@ -563,8 +581,8 @@ pub fn insert_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
     conn.execute(
         "INSERT INTO workflow_runs (id, workflow_id, status, trigger_context,
          step_results_json, tokens_used, workspace_path, started_at, finished_at,
-         run_type, batch_total, batch_completed, batch_failed, batch_name, parent_run_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+         run_type, batch_total, batch_completed, batch_failed, batch_name, parent_run_id, state)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             run.id,
             run.workflow_id,
@@ -581,6 +599,9 @@ pub fn insert_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
             run.batch_failed as i64,
             run.batch_name,
             run.parent_run_id,
+            // Empty map → NULL (lets a `WHERE state IS NOT NULL` query
+            // surface only runs that actually carried state).
+            if run.state.is_empty() { None } else { Some(serde_json::to_string(&run.state)?) },
         ],
     )?;
     Ok(())
@@ -636,6 +657,9 @@ pub struct RunProgressSnapshot {
     pub tokens_used: u64,
     pub workspace_path: Option<String>,
     pub finished_at: Option<DateTime<Utc>>,
+    /// 0.7.0 Phase 6 — durable state map. Persisted on every progress
+    /// write so a daemon crash mid-run doesn't lose accumulated counters.
+    pub state: ::std::collections::HashMap<String, String>,
 }
 
 impl RunProgressSnapshot {
@@ -647,6 +671,7 @@ impl RunProgressSnapshot {
             tokens_used: run.tokens_used,
             workspace_path: run.workspace_path.clone(),
             finished_at: run.finished_at,
+            state: run.state.clone(),
         }
     }
 }
@@ -654,7 +679,7 @@ impl RunProgressSnapshot {
 pub fn update_run_progress(conn: &Connection, snap: RunProgressSnapshot) -> Result<()> {
     conn.execute(
         "UPDATE workflow_runs SET status = ?2, step_results_json = ?3,
-         tokens_used = ?4, workspace_path = ?5, finished_at = ?6
+         tokens_used = ?4, workspace_path = ?5, finished_at = ?6, state = ?7
          WHERE id = ?1",
         params![
             snap.id,
@@ -663,6 +688,7 @@ pub fn update_run_progress(conn: &Connection, snap: RunProgressSnapshot) -> Resu
             snap.tokens_used as i64,
             snap.workspace_path,
             snap.finished_at.map(|d| d.to_rfc3339()),
+            if snap.state.is_empty() { None } else { Some(serde_json::to_string(&snap.state)?) },
         ],
     )?;
     Ok(())
@@ -688,7 +714,8 @@ pub fn get_last_runs_all(conn: &Connection) -> Result<std::collections::HashMap<
     let mut stmt = conn.prepare(
         "SELECT wr.id, wr.workflow_id, wr.status, wr.trigger_context, wr.step_results_json,
                 wr.tokens_used, wr.workspace_path, wr.started_at, wr.finished_at,
-                wr.run_type, wr.batch_total, wr.batch_completed, wr.batch_failed, wr.batch_name
+                wr.run_type, wr.batch_total, wr.batch_completed, wr.batch_failed, wr.batch_name,
+                wr.parent_run_id, wr.state
          FROM workflow_runs wr
          INNER JOIN (
              SELECT workflow_id, MAX(started_at) AS max_started
@@ -759,6 +786,11 @@ fn row_to_workflow(row: &rusqlite::Row) -> Workflow {
     let safety_str: String = row.get(6).unwrap_or_default();
     let ws_config_str: Option<String> = row.get(7).unwrap_or(None);
     let concurrency: Option<u32> = row.get(8).unwrap_or(None);
+    let guards_str: Option<String> = row.get(12).unwrap_or(None);
+    let artifacts_str: Option<String> = row.get(13).unwrap_or(None);
+    let on_failure_str: Option<String> = row.get(14).unwrap_or(None);
+    let exec_allowlist_str: Option<String> = row.get(15).unwrap_or(None);
+    let variables_str: Option<String> = row.get(16).unwrap_or(None);
 
     Workflow {
         id: row.get(0).unwrap_or_default(),
@@ -772,6 +804,36 @@ fn row_to_workflow(row: &rusqlite::Row) -> Workflow {
         }),
         workspace_config: ws_config_str.and_then(|s| serde_json::from_str(&s).ok()),
         concurrency_limit: concurrency,
+        // Defensive: a corrupt JSON blob in `guards` should NOT silently
+        // disable the safety net — fall back to the column being absent
+        // (= backend defaults applied) so the runner still kills runaway
+        // runs. Logging would be nice to add when we wire structured
+        // tracing for the workflow engine.
+        guards: guards_str.as_deref().and_then(|s| serde_json::from_str::<WorkflowGuards>(s).ok()),
+        // Same defensive pattern: corrupt artifacts JSON falls back to
+        // empty (workflow runs without artifact persistence) instead of
+        // failing the whole load. The user sees missing artifacts in
+        // the UI rather than a workflow that won't list at all.
+        artifacts: artifacts_str.as_deref()
+            .and_then(|s| serde_json::from_str::<::std::collections::HashMap<String, ArtifactSpec>>(s).ok())
+            .unwrap_or_default(),
+        // Same defensive pattern as artifacts: corrupt JSON or missing
+        // column → empty rollback chain. The main pipeline still runs;
+        // only the safety net is silently skipped.
+        on_failure: on_failure_str.as_deref()
+            .and_then(|s| serde_json::from_str::<Vec<WorkflowStep>>(s).ok())
+            .unwrap_or_default(),
+        // 0.7.0 Phase 5 — defensive parse; corrupt allowlist JSON →
+        // empty (Exec disabled). Failing closed is the right default
+        // for a security-sensitive feature.
+        exec_allowlist: exec_allowlist_str.as_deref()
+            .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+            .unwrap_or_default(),
+        // 0.6.0 UX pass — defensive parse; corrupt JSON / missing
+        // column → empty (legacy workflows without manual variables).
+        variables: variables_str.as_deref()
+            .and_then(|s| serde_json::from_str::<Vec<PromptVariable>>(s).ok())
+            .unwrap_or_default(),
         enabled: row.get::<_, i32>(9).unwrap_or(1) != 0,
         created_at: parse_dt(row.get::<_, String>(10).unwrap_or_default()),
         updated_at: parse_dt(row.get::<_, String>(11).unwrap_or_default()),
@@ -791,6 +853,10 @@ fn row_to_run(row: &rusqlite::Row) -> WorkflowRun {
     let batch_failed: i64 = row.get(12).unwrap_or(0);
     let batch_name: Option<String> = row.get(13).unwrap_or(None);
     let parent_run_id: Option<String> = row.get(14).unwrap_or(None);
+    // 0.7.0 Phase 6 — state map. Tolerant: missing column on legacy
+    // rows or corrupt JSON falls back to empty (the run still loads,
+    // just without prior state — fresh runs aren't affected).
+    let state_str: Option<String> = row.get(15).unwrap_or(None);
 
     WorkflowRun {
         id: row.get(0).unwrap_or_default(),
@@ -808,6 +874,9 @@ fn row_to_run(row: &rusqlite::Row) -> WorkflowRun {
         batch_failed: batch_failed as u32,
         batch_name,
         parent_run_id,
+        state: state_str.as_deref()
+            .and_then(|s| serde_json::from_str::<::std::collections::HashMap<String, String>>(s).ok())
+            .unwrap_or_default(),
     }
 }
 
@@ -815,4 +884,4 @@ fn row_to_run(row: &rusqlite::Row) -> WorkflowRun {
 /// Centralized so adding/removing columns doesn't drift between queries.
 const WORKFLOW_RUN_COLS: &str = "id, workflow_id, status, trigger_context, step_results_json, \
     tokens_used, workspace_path, started_at, finished_at, \
-    run_type, batch_total, batch_completed, batch_failed, batch_name, parent_run_id";
+    run_type, batch_total, batch_completed, batch_failed, batch_name, parent_run_id, state";

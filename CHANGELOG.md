@@ -7,6 +7,133 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.6.0] - 2026-05-03
+
+**Modularité unitaire des workflows** — trois briques pour factoriser :
+réutiliser un Quick Prompt / Quick API depuis un step au lieu de
+dupliquer la config, et alimenter un workflow batch sur une liste
+figée sans monter d'API. La désagentification poussée d'un cran : le
+runtime sait maintenant charger une config canonique au run-time, le
+wizard la pointe en deux clics.
+
+### Added
+- **`StepType::JsonData` — source de données déterministe** — émet un
+  payload JSON littéral comme envelope Structured. Zéro token, zéro
+  réseau. Use case canonique : alimenter un `BatchQuickPrompt` /
+  `BatchApiCall` sur une liste figée (10 hosts en dur, 5 régions, 3
+  envs) sans monter une API juste pour tenir la liste. Aussi : fixture
+  de dev — on construit le pipeline sur du JsonData puis on remplace
+  par un `ApiCall` quand la vraie source est prête. Validation au save
+  (payload non-null + ≤ 1 MiB). Pas de templating runtime — la valeur
+  est retournée littéralement, ce qui élimine l'ambiguïté
+  "est-ce que `{{var}}` a été substitué ?". Code : `backend/src/workflows/json_data_step.rs`.
+- **`quick_prompt_id` sur `StepType::Agent`** — référence vers un Quick
+  Prompt sauvegardé. Le runner charge `prompt_template`, `tier` et
+  `skill_ids` du QP via `quick_prompt_hydrate::hydrate_step_from_quick_prompt`.
+  Per-field override : si le step a son propre `prompt_template`
+  non-vide, il gagne. Pas de variables au niveau step — les `{{var}}`
+  du QP sont résolus avec le `TemplateContext` du workflow (launch
+  variables / state / previous_step / steps.X). Pattern : un QP
+  canonique réutilisé dans N workflows. Wizard expose un picker
+  "Depuis un Quick Prompt existant" + bandeau "🔗 Hérité de {QP}" dans
+  la step Agent card.
+- **`quick_api_id` étendu à `StepType::ApiCall` single** (initialement
+  disponible uniquement sur `BatchApiCall`). Le runner appelle
+  `quick_api_hydrate::hydrate_step_from_quick_api` au début de
+  `execute_api_call_step_with_db` ; per-field override identique au
+  pattern batch. Wizard `ApiCallStepCard` expose le picker QA + bandeau
+  d'héritage. Validation : un step ApiCall accepte SOIT
+  `quick_api_id`, SOIT (`api_plugin_slug` + `api_config_id` +
+  `api_endpoint_path`).
+- **Préset `daily-host-audit`** (`v07-presets.ts`) — démontre la combo
+  `JsonData → BatchQuickPrompt → Notify` avec 5 hosts pré-câblés.
+  L'utilisateur édite la liste + picke son QP audit.
+
+### Changed
+- Le helper d'hydratation QA est extrait dans
+  `backend/src/workflows/quick_api_hydrate.rs` (auparavant inliné dans
+  `batch_apicall_step.rs`). Réutilisé par single + batch sans
+  divergence.
+- `workflow-architect.md` mis à jour — nouvelles entrées dans le
+  decision tree (`JsonData` en n°1, mention `quick_prompt_id` /
+  `quick_api_id` dans les sections Agent / ApiCall / BatchApiCall).
+- **Présets `AUTO_DEV` et `PR_GATE`** — le step `fetch_issue` démarre
+  maintenant en `JsonData` (fixture avec un ticket exemple) au lieu
+  d'un `ApiCall` blank. Le préset tourne immédiatement après création,
+  sans plugin tracker installé. Description du step explicite : *"Édite
+  le payload, ou switch en `ApiCall` quand tu auras un plugin tracker."*
+  La variable launch `issue_key` est retirée du préset par défaut (pas
+  utilisée en mode JsonData) ; le scanner live-warning du wizard la
+  recrée automatiquement si l'utilisateur swap en ApiCall et tape
+  `{{issue_key}}`.
+- **Picker QP / QA dans le wizard** — quand un Quick Prompt /
+  Quick API est référencé, le bandeau d'héritage est enrichi
+  (preview du prompt template + variables QP, ou plugin/method/endpoint/extract
+  du QA) et les fields override sont enroulés derrière un disclosure
+  "✏️ Personnaliser pour ce step". Le disclosure s'ouvre auto si un
+  override est déjà rempli ; un badge `🔓 override actif` apparaît dans
+  le bandeau. Évite la confusion "il faut tout remplir" sur les fields
+  qui ne sont pas pertinents quand un QP/QA fournit déjà la config.
+- **Boutons step type homogénéisés** — `BatchQuickPrompt` (violet),
+  `BatchApiCall` (bleu info), `Notify` (vert succès), `JsonData` (cyan)
+  ont maintenant un variant sélectionné coloré, comme `Agent` /
+  `ApiCall` / `Gate` / `Exec` qui en avaient déjà un. Le user voit
+  clairement quel type est actif sur chaque step.
+- **Audit + nettoyage des présets** : description shared `runTestsDesc`
+  explique l'adaptation Rust/Node/Python/Make ; `DEPLOY_ROLLBACK`
+  `exec_allowlist` réduit à `['make']` (cargo/npm/kubectl orphelins
+  retirés). Le tableau de résultats du batch Quick API affiche
+  maintenant le résultat complet sur clic d'une ligne (déplie en
+  pre-wrap + JSON pretty-print, plusieurs lignes ouvertes en parallèle
+  pour comparer).
+
+### Fixed
+- **CI lint** — la règle `no raw Command::new in prod code` ignorait
+  les commentaires. Faux positifs sur `exec_step.rs` (doc comment
+  qui mentionne `Command::new`) et `models/mod.rs` (idem). La règle
+  CI skip maintenant les lignes commentaires (`^[0-9]+:[[:space:]]*//`)
+  et les commentaires inexacts ont été reformulés (le code utilise
+  `cmd::async_cmd`, pas `Command::new`).
+- **Quick APIs — onglet Automatisation** — l'onglet `quickApis`
+  affichait les boutons d'action de l'onglet Quick Prompts (ternaire
+  buggé) et son bouton "Créer" était dans le contenu. Header aligné
+  sur les deux autres onglets ; le bouton vit dans le header, masqué
+  tant qu'aucun plugin API n'est câblé.
+- **Wizard "Create" silencieux** — le predicate `disabled` du bouton
+  Create n'avait pas été synchronisé avec les nouveaux step types : un
+  step `JsonData` sans `prompt_template` tombait dans le bras
+  `else if (!s.prompt_template) return true` → bouton désactivé sans
+  feedback. Predicate refait avec un cas par step type (`JsonData` :
+  payload non-null ; `ApiCall` / `BatchApiCall` : `quick_api_id` OU
+  triplet plugin/config/endpoint ; `Agent` : `prompt_template` OU
+  `quick_prompt_id`). En complément : `handleSave` affiche maintenant
+  un bandeau d'erreur rouge (au lieu d'un `console.warn` invisible)
+  quand le backend rejette un workflow — l'utilisateur voit le message
+  exact (ex : *"L'étape 'fetch_issue' est en output_format: FreeText"*).
+- **Validator backend `validate_step_references`** — ne reconnaissait
+  un producer Structured que pour `Agent` avec `output_format:
+  Structured`, alors que tous les autres step types (`Notify`,
+  `ApiCall`, `Gate`, `Exec`, `BatchApiCall`, `BatchQuickPrompt`,
+  `JsonData`) émettent toujours une envelope Structured au runtime.
+  Refactor avec un helper `produces_structured(step)` qui débloque les
+  workflows qui consommaient `{{steps.fetch_issue.data}}` après un
+  step JsonData.
+- **JsonData step affichait le label "Claude Code"** dans le détail du
+  workflow — `isAgentLike` était calculé en négation et n'excluait pas
+  les nouveaux step types (`BatchApiCall`, `JsonData`). Refactor en
+  whitelist explicite (`isAgentLike = step.step_type.type === 'Agent'`)
+  pour rendre le bug par omission impossible. Ajout de badges dédiés
+  pour `BatchApiCall`, `Gate`, `Exec`, `JsonData` dans le récap workflow.
+
+### Tests
+- Backend : **1369 tests** (+11 net : 5 hydrate QA, 6 hydrate QP, 5 JsonData, recouvrements).
+- Frontend : **934 tests passent**.
+- Pas de migration SQL — les nouveaux champs `quick_prompt_id` et
+  `json_data_payload` sont `Option<...>` avec `serde(default)`, les
+  workflows existants se rechargent inchangés.
+
+---
+
 ## [0.5.1] - 2026-04-25
 
 Polish + playful additions on top of 0.5.0: the light theme got a proper

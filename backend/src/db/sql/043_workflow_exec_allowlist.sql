@@ -1,0 +1,14 @@
+-- 0.7.0 Phase 5 — direct shell execution allowlist.
+--
+-- Stored as JSON: a `Vec<String>` of permitted binary names. NULL or
+-- empty `[]` = `StepType::Exec` is completely disabled for this
+-- workflow (the safe default). Match is exact on the binary name,
+-- so `npm` and `/usr/local/bin/npm` are different — only the bare
+-- name passes the allowlist check.
+--
+-- The runner rejects any `Exec` step whose `exec_command` isn't in
+-- this list; validation also fires at save time so the wizard can
+-- surface the error inline. Loose JSON typing kept for future
+-- per-binary policy (timeout caps per binary, env scope, etc.)
+-- without needing another migration.
+ALTER TABLE workflows ADD COLUMN exec_allowlist TEXT;

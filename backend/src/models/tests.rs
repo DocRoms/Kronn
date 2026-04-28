@@ -136,12 +136,50 @@ fn workflow_step_without_step_type_defaults_to_agent() {
 
 #[test]
 fn condition_action_goto_roundtrip() {
-    let action = ConditionAction::Goto { step_name: "step2".into() };
+    let action = ConditionAction::Goto { step_name: "step2".into(), max_iterations: None };
     let json = serde_json::to_string(&action).unwrap();
     assert!(json.contains("Goto"));
     let parsed: ConditionAction = serde_json::from_str(&json).unwrap();
     match parsed {
-        ConditionAction::Goto { step_name } => assert_eq!(step_name, "step2"),
+        ConditionAction::Goto { step_name, max_iterations } => {
+            assert_eq!(step_name, "step2");
+            assert_eq!(max_iterations, None);
+        }
+        _ => panic!("Expected Goto"),
+    }
+}
+
+#[test]
+fn condition_action_goto_with_max_iterations_roundtrip() {
+    let action = ConditionAction::Goto {
+        step_name: "implement".into(),
+        max_iterations: Some(5),
+    };
+    let json = serde_json::to_string(&action).unwrap();
+    assert!(json.contains("max_iterations"));
+    assert!(json.contains("5"));
+    let parsed: ConditionAction = serde_json::from_str(&json).unwrap();
+    match parsed {
+        ConditionAction::Goto { step_name, max_iterations } => {
+            assert_eq!(step_name, "implement");
+            assert_eq!(max_iterations, Some(5));
+        }
+        _ => panic!("Expected Goto"),
+    }
+}
+
+#[test]
+fn condition_action_goto_back_compat_no_max() {
+    // Existing workflows pre-Phase-6 serialised Goto without
+    // `max_iterations`. They must still parse cleanly with the new
+    // field absent → None.
+    let json = r#"{"type":"Goto","step_name":"implement"}"#;
+    let parsed: ConditionAction = serde_json::from_str(json).unwrap();
+    match parsed {
+        ConditionAction::Goto { step_name, max_iterations } => {
+            assert_eq!(step_name, "implement");
+            assert_eq!(max_iterations, None);
+        }
         _ => panic!("Expected Goto"),
     }
 }
@@ -484,6 +522,8 @@ fn workflow_step_api_call_roundtrip() {
         batch_max_items: None,
         batch_workspace_mode: None,
         batch_chain_prompt_ids: vec![],
+        batch_concurrent_limit: None,
+        quick_api_id: None,
         notify_config: None,
         api_plugin_slug: Some("jira".into()),
         api_config_id: Some("cfg-123".into()),
@@ -502,6 +542,14 @@ fn workflow_step_api_call_roundtrip() {
         api_timeout_ms: Some(15_000),
         api_max_retries: Some(3),
         api_output_var: Some("issues".into()),
+        gate_message: None,
+        gate_request_changes_target: None,
+        gate_notify_url: None,
+        exec_command: None,
+        exec_args: vec![],
+        exec_timeout_secs: None,
+        quick_prompt_id: None,
+        json_data_payload: None,
     };
     let json = serde_json::to_string(&step).unwrap();
     let parsed: WorkflowStep = serde_json::from_str(&json).unwrap();

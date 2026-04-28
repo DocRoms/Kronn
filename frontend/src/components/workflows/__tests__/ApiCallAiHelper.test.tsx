@@ -87,6 +87,9 @@ describe('buildContextBlock — fresh context attached to every message', () => 
         api_query: { host: 'www.euronews.com', limit: '5' },
         api_extract: { path: '$.pages[*].title', fallback: null, fail_on_empty: false },
       }),
+      undefined,
+      undefined,
+      t,
     );
     expect(block).toContain('API : Chartbeat');
     expect(block).toContain('endpoint : /live/toppages/v4');
@@ -100,8 +103,9 @@ describe('buildContextBlock — fresh context attached to every message', () => 
       mkStep({ api_endpoint_path: '/live/toppages/v4' }),
       undefined,
       'HTTP 400 Bad Request — Missing required parameter `host`',
+      t,
     );
-    expect(block).toContain('DERNIER TEST → ÉCHEC');
+    expect(block).toContain('wf.apicall.helper.sys.ctxLastFail');
     expect(block).toContain('Missing required parameter `host`');
   });
 
@@ -110,14 +114,16 @@ describe('buildContextBlock — fresh context attached to every message', () => 
       fakeServer,
       mkStep({ api_endpoint_path: '/live/toppages/v4' }),
       { pages: [{ title: 'Article A', path: '/a' }] },
+      undefined,
+      t,
     );
-    expect(block).toContain('DERNIER TEST → SUCCÈS');
+    expect(block).toContain('wf.apicall.helper.sys.ctxLastOk');
     expect(block).toContain('"Article A"');
   });
 
   it('omits both blocks when no test has run yet', () => {
-    const block = buildContextBlock(fakeServer, mkStep());
-    expect(block).not.toContain('DERNIER TEST');
+    const block = buildContextBlock(fakeServer, mkStep(), undefined, undefined, t);
+    expect(block).not.toContain('wf.apicall.helper.sys.ctxLast');
   });
 });
 
