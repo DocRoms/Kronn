@@ -827,6 +827,18 @@ export const workflows = {
     api<import('../types/generated').DecideRunResponse>(
       'POST', `/workflows/${id}/runs/${runId}/decide`, payload
     ),
+  /** 0.7.0 — create an isolated test worktree on a run's preserved branch.
+   *  The agent committed locally but couldn't push (pre-push hook, no auth, …);
+   *  this hands the operator a path they can `cd` into to verify the work
+   *  without touching their main checkout. Idempotent — re-creating returns
+   *  the same path. Pair with `deleteTestWorktree` to clean up. */
+  createTestWorktree: (id: string, runId: string, branchIndex?: number) =>
+    api<{ worktree_path: string; branch_name: string; head_sha: string }>(
+      'POST', `/workflows/${id}/runs/${runId}/test-worktree`,
+      branchIndex != null ? { branch_index: branchIndex } : {},
+    ),
+  deleteTestWorktree: (id: string, runId: string) =>
+    api<void>('DELETE', `/workflows/${id}/runs/${runId}/test-worktree`),
   /** 0.7.0 UX pass — export a single workflow as a self-contained JSON.
    *  Triggers a browser file download via Content-Disposition. Different
    *  contract from the regular `api()` helper (binary-style response,

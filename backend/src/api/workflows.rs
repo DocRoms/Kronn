@@ -787,6 +787,7 @@ pub async fn trigger(
         batch_name: None,
         parent_run_id: None,
         state: ::std::collections::HashMap::new(),
+        produced_branches: vec![],
     };
 
     let r = run.clone();
@@ -1604,6 +1605,188 @@ pub async fn delete_run(
         Ok(()) => Json(ApiResponse::ok(())),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct TestWorktreeRequest {
+    /// Index into `run.produced_branches` (0-based). Defaults to 0 when
+    /// omitted — most runs only ever preserve a single branch, so picking
+    /// the first one is the right answer 99% of the time.
+    #[serde(default)]
+    pub branch_index: Option<usize>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct TestWorktreeResponse {
+    /// Absolute path to the test worktree on the host. The operator pastes
+    /// this into their terminal: `cd <path> && make test`.
+    pub worktree_path: String,
+    /// Branch name checked out in the worktree.
+    pub branch_name: String,
+    /// HEAD SHA the worktree is parked on.
+    pub head_sha: String,
+}
+
+/// POST /api/workflows/:id/runs/:run_id/test-worktree
+///
+/// Creates a fresh `.kronn/test-runs/<run_id>/` worktree on the run's
+/// produced branch so the operator can `cd` in, run tests, and `git diff`
+/// without polluting their main checkout. Returns the absolute path.
+///
+/// **Why a separate worktree** : a `git stash` + `git checkout <branch>`
+/// on main would risk losing uncommitted host changes. Worktrees are
+/// isolated by design.
+///
+/// **Idempotent**: re-creating an existing test worktree returns the
+/// same path; the caller can use the `Cleanup` action separately when
+/// they're done.
+pub async fn test_worktree(
+    State(state): State<AppState>,
+    Path((_id, run_id)): Path<(String, String)>,
+    body: Option<Json<TestWorktreeRequest>>,
+) -> Json<ApiResponse<TestWorktreeResponse>> {
+    let req = body.map(|Json(b)| b).unwrap_or(TestWorktreeRequest { branch_index: None });
+    let idx = req.branch_index.unwrap_or(0);
+
+    // Load the run + parent workflow to find the project repo path.
+    let run = match state.db.with_conn({
+        let run_id = run_id.clone();
+        move |conn| crate::db::workflows::get_run(conn, &run_id)
+    }).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return Json(ApiResponse::err("Run not found")),
+        Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
+    };
+
+    let branch = match run.produced_branches.get(idx) {
+        Some(b) => b.clone(),
+        None => return Json(ApiResponse::err(
+            "No produced branch at that index for this run",
+        )),
+    };
+
+    let workflow = match state.db.with_conn({
+        let wf_id = run.workflow_id.clone();
+        move |conn| crate::db::workflows::get_workflow(conn, &wf_id)
+    }).await {
+        Ok(Some(w)) => w,
+        Ok(None) => return Json(ApiResponse::err("Parent workflow not found")),
+        Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
+    };
+
+    let project_path = if let Some(pid) = workflow.project_id.clone() {
+        match state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &pid)).await {
+            Ok(Some(p)) => p.path,
+            _ => return Json(ApiResponse::err("Project not found for this workflow")),
+        }
+    } else {
+        return Json(ApiResponse::err("Workflow has no project — cannot create a test worktree"));
+    };
+
+    let repo_path = crate::core::scanner::resolve_host_path(&project_path);
+    let test_dir = repo_path.join(".kronn/test-runs").join(&run_id);
+
+    // If the test worktree already exists, return its path (idempotent).
+    if test_dir.exists() {
+        return Json(ApiResponse::ok(TestWorktreeResponse {
+            worktree_path: test_dir.to_string_lossy().into_owned(),
+            branch_name: branch.branch_name,
+            head_sha: branch.head_sha,
+        }));
+    }
+
+    if let Err(e) = std::fs::create_dir_all(test_dir.parent().unwrap_or(&test_dir)) {
+        return Json(ApiResponse::err(format!("Failed to create parent dir: {}", e)));
+    }
+
+    // `git worktree add --detach <path> <sha>` parks the worktree at the
+    // recovery commit without creating a new branch (we already have one,
+    // and a duplicate branch would conflict). The operator can then
+    // experiment freely; deleting the worktree leaves the original
+    // preserved branch untouched.
+    let output = match crate::core::cmd::async_cmd("git")
+        .args(["worktree", "add", "--detach"])
+        .arg(&test_dir)
+        .arg(&branch.head_sha)
+        .current_dir(&repo_path)
+        .output()
+        .await
+    {
+        Ok(o) => o,
+        Err(e) => return Json(ApiResponse::err(format!("git worktree add failed: {}", e))),
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Json(ApiResponse::err(format!("git worktree add failed: {}", stderr)));
+    }
+
+    Json(ApiResponse::ok(TestWorktreeResponse {
+        worktree_path: test_dir.to_string_lossy().into_owned(),
+        branch_name: branch.branch_name,
+        head_sha: branch.head_sha,
+    }))
+}
+
+/// DELETE /api/workflows/:id/runs/:run_id/test-worktree
+///
+/// Removes the test worktree the operator was using to verify the run's
+/// produced commit. Idempotent: missing worktree → 200 with a message.
+/// The preserved branch in the parent repo is untouched.
+pub async fn delete_test_worktree(
+    State(state): State<AppState>,
+    Path((_id, run_id)): Path<(String, String)>,
+) -> Json<ApiResponse<()>> {
+    let run = match state.db.with_conn({
+        let run_id = run_id.clone();
+        move |conn| crate::db::workflows::get_run(conn, &run_id)
+    }).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return Json(ApiResponse::err("Run not found")),
+        Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
+    };
+
+    let workflow = match state.db.with_conn({
+        let wf_id = run.workflow_id.clone();
+        move |conn| crate::db::workflows::get_workflow(conn, &wf_id)
+    }).await {
+        Ok(Some(w)) => w,
+        _ => return Json(ApiResponse::err("Parent workflow not found")),
+    };
+
+    let project_path = if let Some(pid) = workflow.project_id.clone() {
+        match state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &pid)).await {
+            Ok(Some(p)) => p.path,
+            _ => return Json(ApiResponse::err("Project not found")),
+        }
+    } else {
+        return Json(ApiResponse::err("Workflow has no project"));
+    };
+
+    let repo_path = crate::core::scanner::resolve_host_path(&project_path);
+    let test_dir = repo_path.join(".kronn/test-runs").join(&run_id);
+
+    if !test_dir.exists() {
+        return Json(ApiResponse::ok(()));
+    }
+
+    let output = match crate::core::cmd::async_cmd("git")
+        .args(["worktree", "remove", "--force"])
+        .arg(&test_dir)
+        .current_dir(&repo_path)
+        .output()
+        .await
+    {
+        Ok(o) => o,
+        Err(e) => return Json(ApiResponse::err(format!("git worktree remove failed: {}", e))),
+    };
+
+    if !output.status.success() {
+        // Fallback: rm -rf
+        let _ = std::fs::remove_dir_all(&test_dir);
+    }
+
+    Json(ApiResponse::ok(()))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

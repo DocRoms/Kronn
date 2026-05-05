@@ -17,6 +17,12 @@ frontend/node_modules_old/
 frontend/dist/
 frontend/.pnpm-store/
 
+# Playwright E2E
+frontend/test-results/
+frontend/playwright-report/
+frontend/playwright/.cache/
+frontend/blob-report/
+
 # Config (generated at first run)
 kronn.toml
 

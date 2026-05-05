@@ -259,6 +259,35 @@ pub async fn execute_step(
     }
 }
 
+/// Build the suffix that closes a `🔧 ToolName` live-progress line.
+/// Tries to parse `raw_input` (the assembled JSON the model emitted as the
+/// tool's input) and surface the most informative field for the operator
+/// watching the live view: file path, command, pattern, URL.
+///
+/// Returns either ` · <detail>\n` (parseable JSON with a known field) or
+/// just `\n` (unparseable input or unknown shape — keeps the tool name
+/// readable but adds no detail).
+///
+/// Char-truncates at 120 to keep the live feed on one line; multi-byte
+/// codepoints at the cut are safe by construction.
+fn format_tool_input_suffix(raw_input: &str) -> String {
+    let detail = serde_json::from_str::<serde_json::Value>(raw_input)
+        .ok()
+        .and_then(|v| {
+            ["file_path", "path", "command", "pattern", "url"]
+                .iter()
+                .find_map(|k| v.get(*k).and_then(|s| s.as_str()).map(str::to_string))
+        });
+    match detail {
+        Some(d) if d.chars().count() > 120 => {
+            let truncated: String = d.chars().take(120).collect();
+            format!(" · {}…\n", truncated)
+        }
+        Some(d) => format!(" · {}\n", d),
+        None => "\n".into(),
+    }
+}
+
 /// Run an agent with optional stall timeout.
 /// Returns the agent output text and token usage.
 ///
@@ -273,9 +302,16 @@ async fn run_agent_with_timeout(
     full_access: bool,
     progress_tx: Option<&ProgressSender>,
 ) -> Result<AgentOutput> {
+    // 30 min default — generous safety net rather than aggressive ceiling.
+    // With tool-call streaming (cf. format_tool_input_suffix), an active
+    // agent emits a chunk every Edit/Bash/Read, so the only legitimate
+    // stalls are pure-thinking pauses or network hangs. Big implementation
+    // steps on real tickets routinely run 20-30 min — the older 10 min
+    // default cut them short. Per-step `stall_timeout_secs` overrides this
+    // when a step needs more (cf. wizard wf-label `wiz.stallTimeout`).
     let stall_timeout = step.stall_timeout_secs
         .map(Duration::from_secs)
-        .unwrap_or(Duration::from_secs(600)); // 10 min default
+        .unwrap_or(Duration::from_secs(1800));
 
     let mut agent_process = runner::start_agent_with_config(runner::AgentStartConfig {
         agent_type: &step.agent,
@@ -298,6 +334,16 @@ async fn run_agent_with_timeout(
     let mut output = String::new();
     let is_stream_json = agent_process.output_mode == OutputMode::StreamJson;
     let mut stream_json_tokens: u64 = 0;
+    // Tool-call accumulator. Claude Code's stream-json emits tool input as
+    // a series of partial JSON deltas (potentially many small fragments).
+    // We buffer the deltas, then on ToolEnd parse the assembled JSON to
+    // extract the most informative field (file_path / command / pattern)
+    // and surface a one-liner like `🔧 Edit · src/foo.rs` to the operator.
+    // Without this, the live view is silent for the entire tool-call loop
+    // (Edit / Bash / Read / Glob…) — frequently > 30 s of "nothing
+    // happening" UX even though the agent is fully active.
+    let mut current_tool: Option<String> = None;
+    let mut current_tool_input = String::new();
 
     loop {
         match timeout(stall_timeout, agent_process.next_line()).await {
@@ -313,7 +359,32 @@ async fn run_agent_with_timeout(
                         StreamJsonEvent::Usage { input_tokens, output_tokens, .. } => {
                             stream_json_tokens = input_tokens + output_tokens;
                         }
-                        StreamJsonEvent::ToolStart(_) | StreamJsonEvent::ToolInputDelta(_) | StreamJsonEvent::ToolEnd | StreamJsonEvent::Skip => {}
+                        StreamJsonEvent::ToolStart(name) => {
+                            // Emit the tool name immediately — gives the user
+                            // a sign of life before the first input delta.
+                            // The actual file/command will follow on ToolEnd
+                            // once we've assembled the partial JSON.
+                            if let Some(tx) = progress_tx {
+                                let _ = tx.send(format!("\n🔧 {}", name)).await;
+                            }
+                            current_tool = Some(name);
+                            current_tool_input.clear();
+                        }
+                        StreamJsonEvent::ToolInputDelta(partial) => {
+                            current_tool_input.push_str(&partial);
+                        }
+                        StreamJsonEvent::ToolEnd => {
+                            // Closes the `🔧 ToolName` line streamed at
+                            // ToolStart with the tool's most informative
+                            // input field (cf. format_tool_input_suffix).
+                            if current_tool.take().is_some() {
+                                if let Some(tx) = progress_tx {
+                                    let _ = tx.send(format_tool_input_suffix(&current_tool_input)).await;
+                                }
+                            }
+                            current_tool_input.clear();
+                        }
+                        StreamJsonEvent::Skip => {}
                     }
                 } else {
                     let chunk = if output.is_empty() {
@@ -347,19 +418,31 @@ async fn run_agent_with_timeout(
         .context("Failed to wait for agent process")?;
     agent_process.fix_ownership();
 
+    // Drain stderr through the flushed accessor — `captured_stderr()` races
+    // with the stderr reader task and returns empty when the agent crashes
+    // fast (the reader hasn't yet appended its buffered lines). Without
+    // this fix, every crash on a non-zero exit surfaced as the useless
+    // "Agent exited with status: exit status: 1" with the actual error
+    // (auth expiry, rate limit, context overflow, panic stack…) silently
+    // dropped on the floor.
+    let stderr_lines = agent_process.captured_stderr_flushed().await;
+
     if !status.success() {
-        let stderr = agent_process.captured_stderr().join("\n");
-        if stderr.is_empty() {
-            anyhow::bail!("Agent exited with status: {}", status);
+        // Show the last ~20 lines of stderr — Claude Code panics dump a
+        // full backtrace; older lines rarely add signal once we've seen
+        // the message.
+        let tail: Vec<&String> = stderr_lines.iter().rev().take(20).collect();
+        let stderr_tail = tail.iter().rev().map(|s| s.as_str()).collect::<Vec<_>>().join("\n");
+        if stderr_tail.is_empty() {
+            anyhow::bail!("Agent exited with {} but produced no stderr (likely killed by signal or sandbox). Check the host's container logs (`docker logs kronn-backend` or journald) for the underlying cause.", status);
         } else {
-            anyhow::bail!("Agent failed: {}", stderr);
+            anyhow::bail!("Agent exited with {}:\n{}", status, stderr_tail);
         }
     }
 
     // Extract token usage — same logic as discussions:
     // 1. Claude Code: tokens from stream-json events (input + output)
     // 2. Codex/Kiro/etc: tokens parsed from stderr/stdout after execution
-    let stderr_lines = agent_process.captured_stderr();
     let tokens_used = if stream_json_tokens > 0 {
         stream_json_tokens
     } else {
@@ -637,5 +720,70 @@ mod tests {
         let output = "[SIGNAL: STOP_SIGNAL]\nline2\nline3\nline4\nline5\nline6\nline7";
         let action = evaluate_conditions(&rules, output);
         assert!(action.is_none());
+    }
+
+    // ── format_tool_input_suffix (live-progress tool-call surfacing) ──
+
+    #[test]
+    fn tool_suffix_extracts_file_path() {
+        let s = format_tool_input_suffix(r#"{"file_path": "src/foo.rs", "old_string": "x", "new_string": "y"}"#);
+        assert_eq!(s, " · src/foo.rs\n");
+    }
+
+    #[test]
+    fn tool_suffix_extracts_command_for_bash() {
+        let s = format_tool_input_suffix(r#"{"command": "cargo test --lib", "description": "run tests"}"#);
+        assert_eq!(s, " · cargo test --lib\n");
+    }
+
+    #[test]
+    fn tool_suffix_extracts_pattern_for_grep() {
+        let s = format_tool_input_suffix(r#"{"pattern": "TODO", "path": "."}"#);
+        // priority list checks file_path → path before pattern, so `path: "."`
+        // wins. Fine: directory is what matters for the operator's mental model.
+        assert_eq!(s, " · .\n");
+    }
+
+    #[test]
+    fn tool_suffix_extracts_url_for_webfetch() {
+        let s = format_tool_input_suffix(r#"{"url": "https://example.com/foo", "prompt": "summary"}"#);
+        assert_eq!(s, " · https://example.com/foo\n");
+    }
+
+    #[test]
+    fn tool_suffix_unparseable_falls_back_to_newline() {
+        // ToolInputDelta sometimes truncates mid-emission; we don't crash.
+        let s = format_tool_input_suffix("not json at all");
+        assert_eq!(s, "\n");
+    }
+
+    #[test]
+    fn tool_suffix_unknown_shape_falls_back_to_newline() {
+        // No recognized field → no detail to show, just close the line.
+        let s = format_tool_input_suffix(r#"{"weird": "shape", "no": "match"}"#);
+        assert_eq!(s, "\n");
+    }
+
+    #[test]
+    fn tool_suffix_truncates_long_command_with_ellipsis() {
+        let long_cmd = "echo ".to_string() + &"x".repeat(200);
+        let s = format_tool_input_suffix(&format!(r#"{{"command": "{}"}}"#, long_cmd));
+        assert!(s.ends_with("…\n"), "got: {:?}", s);
+        // 120 char body + " · " prefix + "…\n" suffix → ≤ 130 bytes is the
+        // ASCII case, but we just verify the truncation happened.
+        assert!(s.chars().count() < long_cmd.chars().count() + 5);
+    }
+
+    #[test]
+    fn tool_suffix_handles_utf8_safely() {
+        // Multi-byte codepoint at the cut point: `é` is 2 bytes. 120 chars
+        // of `é` = 240 bytes. The char-based truncation must not split.
+        let path: String = "é".repeat(150);
+        let s = format_tool_input_suffix(&format!(r#"{{"file_path": "{}"}}"#, path));
+        // No panic + ends with the ellipsis suffix.
+        assert!(s.ends_with("…\n"));
+        // The truncated body should be exactly 120 `é` chars.
+        let body = s.trim_start_matches(" · ").trim_end_matches("…\n");
+        assert_eq!(body.chars().count(), 120);
     }
 }

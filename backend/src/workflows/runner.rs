@@ -40,6 +40,31 @@ pub enum RunEvent {
 /// Optional sender for real-time progress events.
 pub type EventSender = tokio::sync::mpsc::Sender<RunEvent>;
 
+/// Compute the workflow-step index where execution should pick up.
+///
+/// Fresh runs (no prior results) → 0. Resuming runs → the index of the step
+/// that follows the last recorded result *in the workflow definition*, not
+/// in the result vector — Goto loops can produce more results than there
+/// are declared steps, so `step_results.len()` is wrong on resume.
+///
+/// Returns `workflow.steps.len()` when the last result's step name is no
+/// longer in the workflow (the workflow was edited mid-run): treat the run
+/// as already past the end so the runner gracefully wraps up rather than
+/// re-running steps the operator removed.
+pub(crate) fn next_step_index_for_resume(
+    steps: &[crate::models::WorkflowStep],
+    step_results: &[crate::models::StepResult],
+) -> usize {
+    match step_results.last() {
+        None => 0,
+        Some(last) => steps
+            .iter()
+            .position(|s| s.name == last.step_name)
+            .map(|i| i + 1)
+            .unwrap_or(steps.len()),
+    }
+}
+
 /// Execute a complete workflow run.
 pub async fn execute_run(
     state: AppState,
@@ -175,10 +200,7 @@ pub async fn execute_run(
     let mut cancelled_by_user = false;
     let mut stopped_by_guard = false;
     let mut paused_for_approval = false;
-    // 0.7.0 Phase 4 — when resuming a paused run, skip all completed
-    // steps. `step_results` carries the prior history; the next step to
-    // execute is at index `step_results.len()`. For fresh runs this is 0.
-    let mut step_idx = run.step_results.len();
+    let mut step_idx = next_step_index_for_resume(&workflow.steps, &run.step_results);
     let total_steps = workflow.steps.len();
     let max_total_iterations = max_iterations_for(total_steps); // safeguard against infinite Goto loops
     let mut iteration_count = 0;
@@ -970,7 +992,29 @@ pub async fn execute_run(
     // the operator decides to resume or reject.
     if !paused_for_approval {
         if let Some(ws) = workspace {
-            let _ = ws.cleanup().await;
+            match ws.cleanup().await {
+                Ok(outcome) => {
+                    if let Some(preserved) = outcome.preserved {
+                        // Persist the preserved branch on the run row so the
+                        // UI can surface it — without this, the operator only
+                        // sees a tracing log line they'll never read.
+                        run.produced_branches.push(crate::models::ProducedBranch {
+                            branch_name: preserved.branch_name,
+                            head_sha: preserved.head_sha,
+                            ahead: preserved.ahead,
+                            pushed_upstream: preserved.pushed_upstream,
+                        });
+                        let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
+                        let db = state.db.clone();
+                        let _ = db.with_conn(move |conn| {
+                            crate::db::workflows::update_run_progress(conn, snap)
+                        }).await;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Workspace cleanup failed: {}", e);
+                }
+            }
         }
     }
 
@@ -1096,7 +1140,24 @@ pub async fn resume_run(
                         &run.id,
                         workflow.workspace_config.as_ref().map(|c| c.hooks.clone()),
                     );
-                    let _ = ws.cleanup().await;
+                    if let Ok(outcome) = ws.cleanup().await {
+                        if let Some(preserved) = outcome.preserved {
+                            // Reject still preserves anything the agent committed —
+                            // the operator's "no" is on the gate, not on the work
+                            // already on disk. They may want to recover it.
+                            run.produced_branches.push(crate::models::ProducedBranch {
+                                branch_name: preserved.branch_name,
+                                head_sha: preserved.head_sha,
+                                ahead: preserved.ahead,
+                                pushed_upstream: preserved.pushed_upstream,
+                            });
+                            let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
+                            let db = state.db.clone();
+                            let _ = db.with_conn(move |conn| {
+                                crate::db::workflows::update_run_progress(conn, snap)
+                            }).await;
+                        }
+                    }
                 }
             }
         }
@@ -1287,6 +1348,128 @@ fn inject_trigger_context(ctx: &mut TemplateContext, trigger_json: &serde_json::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── next_step_index_for_resume — Goto-loop bug fix (0.7.0) ─────────
+
+    fn fake_step(name: &str) -> crate::models::WorkflowStep {
+        crate::models::WorkflowStep {
+            name: name.into(),
+            step_type: crate::models::StepType::Agent,
+            description: None,
+            agent: crate::models::AgentType::ClaudeCode,
+            prompt_template: String::new(),
+            mode: crate::models::StepMode::Normal,
+            output_format: crate::models::StepOutputFormat::FreeText,
+            on_result: vec![],
+            agent_settings: None,
+            stall_timeout_secs: None,
+            retry: None,
+            delay_after_secs: None,
+            mcp_config_ids: vec![],
+            skill_ids: vec![],
+            profile_ids: vec![],
+            directive_ids: vec![],
+            batch_quick_prompt_id: None,
+            batch_items_from: None,
+            batch_wait_for_completion: None,
+            batch_max_items: None,
+            batch_workspace_mode: None,
+            batch_chain_prompt_ids: vec![],
+            batch_concurrent_limit: None,
+            quick_api_id: None,
+            notify_config: None,
+            api_plugin_slug: None,
+            api_config_id: None,
+            api_endpoint_path: None,
+            api_method: None,
+            api_query: None,
+            api_path_params: None,
+            api_headers: None,
+            api_body: None,
+            api_extract: None,
+            api_pagination: None,
+            api_timeout_ms: None,
+            api_max_retries: None,
+            api_output_var: None,
+            gate_message: None,
+            gate_request_changes_target: None,
+            gate_notify_url: None,
+            exec_command: None,
+            exec_args: vec![],
+            exec_timeout_secs: None,
+            quick_prompt_id: None,
+            json_data_payload: None,
+        }
+    }
+    fn fake_result(name: &str) -> crate::models::StepResult {
+        crate::models::StepResult {
+            step_name: name.into(),
+            status: crate::models::RunStatus::Success,
+            output: String::new(),
+            tokens_used: 0,
+            duration_ms: 0,
+            condition_result: None,
+            envelope_detected: None,
+            step_kind: None,
+            step_agent: None,
+            step_api_plugin_slug: None,
+            step_api_endpoint_path: None,
+        }
+    }
+
+    #[test]
+    fn fresh_run_starts_at_zero() {
+        let steps = vec![fake_step("a"), fake_step("b")];
+        let results: Vec<crate::models::StepResult> = vec![];
+        assert_eq!(next_step_index_for_resume(&steps, &results), 0);
+    }
+
+    #[test]
+    fn linear_resume_continues_after_last_result() {
+        let steps = vec![fake_step("a"), fake_step("b"), fake_step("c")];
+        let results = vec![fake_result("a"), fake_result("b")];
+        assert_eq!(next_step_index_for_resume(&steps, &results), 2);
+    }
+
+    #[test]
+    fn resume_after_goto_loop_uses_step_name_not_results_len() {
+        // Ticket Autopilot regression: review→implement Goto fired twice,
+        // so step_results has duplicate entries. The next index after the
+        // gate (last result) must come from the workflow definition, NOT
+        // from `step_results.len()` which would overshoot the workflow.
+        let steps = vec![
+            fake_step("fetch"),       // 0
+            fake_step("analyze"),     // 1
+            fake_step("plan_gate"),   // 2
+            fake_step("implement"),   // 3
+            fake_step("run_tests"),   // 4
+            fake_step("review"),      // 5
+            fake_step("create_pr"),   // 6
+            fake_step("ready_gate"),  // 7
+            fake_step("notify_done"), // 8
+        ];
+        // Two extra results from the Goto loop firing twice.
+        let results = vec![
+            fake_result("fetch"), fake_result("analyze"), fake_result("plan_gate"),
+            fake_result("implement"), fake_result("run_tests"), fake_result("review"),
+            // Goto loop iteration:
+            fake_result("implement"), fake_result("run_tests"), fake_result("review"),
+            fake_result("create_pr"), fake_result("ready_gate"),
+        ];
+        assert_eq!(results.len(), 11, "sanity: 11 results, 9 steps");
+        // Buggy old logic would return 11 → loop never runs → notify_done skipped.
+        // Correct: ready_gate is at index 7, next is 8 (notify_done).
+        assert_eq!(next_step_index_for_resume(&steps, &results), 8);
+    }
+
+    #[test]
+    fn last_result_name_not_in_workflow_returns_steps_len() {
+        // Workflow was edited mid-run (a step renamed/removed). Don't
+        // re-run earlier steps blindly — wrap up gracefully.
+        let steps = vec![fake_step("a"), fake_step("b")];
+        let results = vec![fake_result("ghost_step")];
+        assert_eq!(next_step_index_for_resume(&steps, &results), 2);
+    }
 
     // ─── inject_trigger_context ──────────────────────────────────────────
 

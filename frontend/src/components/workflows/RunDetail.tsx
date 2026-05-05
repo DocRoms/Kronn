@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useT } from '../../lib/I18nContext';
-import type { WorkflowRun, WorkflowStep, DecideRunRequest } from '../../types/generated';
-import { Trash2, ChevronRight, Square, Loader2, Plug, Send, Layers, Shield, Hand, Check, X, RotateCcw, Terminal, GitBranch, Copy } from 'lucide-react';
+import { workflows as workflowsApi } from '../../lib/api';
+import type { WorkflowRun, WorkflowStep, DecideRunRequest, ProducedBranch } from '../../types/generated';
+import { Trash2, ChevronRight, Square, Loader2, Plug, Send, Layers, Shield, Hand, Check, X, RotateCcw, Terminal, GitBranch, Copy, FlaskConical, AlertTriangle } from 'lucide-react';
 import { AGENT_LABELS, AGENT_COLORS } from '../../lib/constants';
 import '../../pages/WorkflowsPage.css';
 
@@ -209,6 +210,147 @@ function GatePanel({
   );
 }
 
+/** 0.7.0 — surfaces commits the agent produced in its worktree but that
+ *  outlived the cleanup (typically because the push step failed). Without
+ *  this, the operator's only recourse is `git reflog` + dangling commit
+ *  archaeology — visible to none but the very-comfortable git users.
+ *
+ *  Each row exposes:
+ *    - Branch name + short SHA + commit-count-ahead vs base
+ *    - "Push status" pill (✓ pushed | ⚠ local-only)
+ *    - Copy git-checkout / git-diff command (no shell required)
+ *    - "Tester en worktree" button — POSTs to /test-worktree, returns a
+ *      path the operator can `cd` into. Stays as a separate worktree to
+ *      avoid clobbering main.
+ */
+function ProducedBranchesPanel({
+  run,
+  branches,
+  t,
+}: {
+  run: WorkflowRun;
+  branches: ProducedBranch[];
+  t: (key: string, ...args: (string | number)[]) => string;
+}) {
+  type State = { kind: 'idle' } | { kind: 'creating' } | { kind: 'ready', path: string } | { kind: 'error', msg: string };
+  const [state, setState] = useState<Record<number, State>>({});
+
+  const setStateFor = (i: number, s: State) =>
+    setState(prev => ({ ...prev, [i]: s }));
+
+  const onCreate = async (i: number) => {
+    setStateFor(i, { kind: 'creating' });
+    try {
+      // `api()` unwraps the envelope and throws on error — the resolved
+      // value is `{worktree_path, branch_name, head_sha}` directly.
+      const res = await workflowsApi.createTestWorktree(run.workflow_id, run.id, i);
+      setStateFor(i, { kind: 'ready', path: res.worktree_path });
+    } catch (e) {
+      setStateFor(i, { kind: 'error', msg: e instanceof Error ? e.message : String(e) });
+    }
+  };
+
+  const onCleanup = async (i: number) => {
+    try {
+      await workflowsApi.deleteTestWorktree(run.workflow_id, run.id);
+      setStateFor(i, { kind: 'idle' });
+    } catch { /* swallow */ }
+  };
+
+  const copy = (s: string) => navigator.clipboard?.writeText(s).catch(() => {});
+
+  return (
+    <div className="wf-produced-branches mt-3">
+      <div className="wf-produced-branches-title">
+        <GitBranch size={11} />
+        <span>{t('wf.produced.title', branches.length)}</span>
+      </div>
+      {branches.map((b, i) => {
+        const st = state[i] ?? { kind: 'idle' };
+        const checkoutCmd = `git checkout ${b.branch_name}`;
+        const diffCmd = `git log -p ${b.head_sha}~..${b.head_sha}`;
+        return (
+          <div key={i} className="wf-produced-branch-row">
+            <div className="wf-produced-branch-head">
+              <code title={b.branch_name}>{b.branch_name}</code>
+              <span className="text-xs text-faint">·</span>
+              <code className="text-xs" title={b.head_sha}>{b.head_sha.slice(0, 8)}</code>
+              <span className="text-xs text-faint">·</span>
+              <span className="text-xs text-muted">{t('wf.produced.aheadCount', b.ahead)}</span>
+              {b.pushed_upstream ? (
+                <span className="wf-produced-pill wf-produced-pill--pushed">
+                  <Check size={9} /> {t('wf.produced.pushed')}
+                </span>
+              ) : (
+                <span className="wf-produced-pill wf-produced-pill--local">
+                  <AlertTriangle size={9} /> {t('wf.produced.localOnly')}
+                </span>
+              )}
+            </div>
+            <div className="wf-produced-branch-actions">
+              <button
+                type="button"
+                className="wf-small-btn"
+                onClick={() => copy(checkoutCmd)}
+                title={t('wf.produced.copyCheckout')}
+              >
+                <Copy size={9} /> {t('wf.produced.copyCheckout')}
+              </button>
+              <button
+                type="button"
+                className="wf-small-btn"
+                onClick={() => copy(diffCmd)}
+                title={t('wf.produced.copyDiff')}
+              >
+                <Copy size={9} /> {t('wf.produced.copyDiff')}
+              </button>
+              {st.kind === 'idle' && (
+                <button
+                  type="button"
+                  className="wf-small-btn wf-produced-test-btn"
+                  onClick={() => onCreate(i)}
+                  title={t('wf.produced.testHint')}
+                >
+                  <FlaskConical size={9} /> {t('wf.produced.test')}
+                </button>
+              )}
+              {st.kind === 'creating' && (
+                <span className="text-xs text-muted"><Loader2 size={9} className="spin" /> {t('wf.produced.creating')}</span>
+              )}
+              {st.kind === 'ready' && (
+                <>
+                  <button
+                    type="button"
+                    className="wf-small-btn"
+                    onClick={() => copy(`cd "${st.path}"`)}
+                    title={t('wf.produced.copyCd')}
+                  >
+                    <Copy size={9} /> cd
+                  </button>
+                  <code className="wf-produced-test-path" title={st.path}>{st.path}</code>
+                  <button
+                    type="button"
+                    className="wf-small-btn wf-small-btn-delete-all"
+                    onClick={() => onCleanup(i)}
+                    title={t('wf.produced.cleanup')}
+                  >
+                    <Trash2 size={9} /> {t('wf.produced.cleanup')}
+                  </button>
+                </>
+              )}
+              {st.kind === 'error' && (
+                <span className="wf-produced-error" title={st.msg}>
+                  <AlertTriangle size={9} /> {st.msg.slice(0, 80)}
+                </span>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export function RunDetail({ run, workflowSteps, onDelete, onCancel, onDecide }: RunDetailProps) {
   const { t } = useT();
   const [expandedStep, setExpandedStep] = useState<number | null>(null);
@@ -317,6 +459,13 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onDecide }: 
             <Copy size={10} />
           </button>
         </div>
+      )}
+      {/* 0.7.0 — Produced branches panel. Surfaces commits the agent
+          made in its worktree but that were preserved on cleanup
+          (typically because push failed). The agent's work is otherwise
+          invisible to non-git-experts. */}
+      {run.produced_branches && run.produced_branches.length > 0 && (
+        <ProducedBranchesPanel run={run} branches={run.produced_branches} t={t} />
       )}
 
       {/* Step progress — show workflow steps with completion status when running */}

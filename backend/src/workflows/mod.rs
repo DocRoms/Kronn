@@ -234,6 +234,7 @@ impl WorkflowEngine {
             batch_name: None,
             parent_run_id: None,
             state: ::std::collections::HashMap::new(),
+            produced_branches: vec![],
         };
 
         // Persist the run
@@ -439,6 +440,7 @@ mod tests {
             batch_name: None,
             parent_run_id: None,
             state: ::std::collections::HashMap::new(),
+            produced_branches: vec![],
         };
 
         assert_eq!(run.status, RunStatus::Pending);
@@ -480,6 +482,7 @@ mod tests {
             batch_name: None,
             parent_run_id: None,
             state: ::std::collections::HashMap::new(),
+            produced_branches: vec![],
         };
         let tc = run.trigger_context.unwrap();
         assert_eq!(tc["type"], "tracker");

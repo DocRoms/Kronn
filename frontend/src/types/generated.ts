@@ -713,6 +713,17 @@ export interface WorkflowRun {
   batch_failed?: number;
   /** Batch runs only: display name in the sidebar group header */
   batch_name?: string | null;
+  /** 0.7.0 — branches preserved by the runner during worktree cleanup
+   *  because their HEAD held commits not on any known base. Empty when
+   *  nothing was preserved (most cases). */
+  produced_branches?: ProducedBranch[];
+}
+
+export interface ProducedBranch {
+  branch_name: string;
+  head_sha: string;
+  ahead: number;
+  pushed_upstream: boolean;
 }
 
 export type RunStatus = "Pending" | "Running" | "Success" | "Failed" | "Cancelled" | "WaitingApproval" | "StoppedByGuard";
@@ -998,6 +1009,11 @@ export interface Skill {
    *  frontmatter. When a message in the relevant locale matches any
    *  pattern, the frontend auto-adds this skill to the discussion. */
   auto_triggers?: AutoTriggers | null;
+  /** 0.7+ — true when the skill content was vendored from a third-party
+   *  open-source project. UI renders a "🔗 External" badge. */
+  external?: boolean;
+  /** 0.7+ — when `external` is true, upstream project URL (for attribution). */
+  source_url?: string | null;
 }
 
 export interface AutoTriggers {

@@ -370,3 +370,69 @@ describe('RunDetail — B5 (0.6.0 UX pass) WaitingApproval badge + PausedSince',
     expect(screen.queryByText(/wf\.runStatusToReview/)).not.toBeInTheDocument();
   });
 });
+
+// ─── ProducedBranches panel (0.7.0 — surfaces commits the agent committed
+//    in its worktree but couldn't push) ────────────────────────────────
+describe('RunDetail — ProducedBranches panel', () => {
+  it('renders when the run carries non-empty produced_branches', () => {
+    const run = mkRun({
+      status: 'Success',
+      produced_branches: [
+        {
+          branch_name: 'kronn/Autobot/abcdef12',
+          head_sha: 'b71d816b77f04670d6e07a937530e20d83f76010',
+          ahead: 1,
+          pushed_upstream: false,
+        },
+      ],
+    });
+    render(<RunDetail run={run} onDelete={() => {}} />);
+    // The localized title carries the count; we use the i18n stub which
+    // renders `wf.produced.title:1`.
+    expect(screen.getByText(/wf\.produced\.title/)).toBeInTheDocument();
+    expect(screen.getByText('kronn/Autobot/abcdef12')).toBeInTheDocument();
+    // Short SHA shown (8 chars).
+    expect(screen.getByText('b71d816b')).toBeInTheDocument();
+    // "Local only" pill for unpushed branches.
+    expect(screen.getByText(/wf\.produced\.localOnly/)).toBeInTheDocument();
+  });
+
+  it('shows the "pushed" pill when pushed_upstream=true', () => {
+    const run = mkRun({
+      status: 'Success',
+      produced_branches: [
+        {
+          branch_name: 'kronn/Autobot/pushed',
+          head_sha: 'aaaaaaaa11112222333344445555666677778888',
+          ahead: 0,
+          pushed_upstream: true,
+        },
+      ],
+    });
+    render(<RunDetail run={run} onDelete={() => {}} />);
+    expect(screen.getByText(/wf\.produced\.pushed/)).toBeInTheDocument();
+    expect(screen.queryByText(/wf\.produced\.localOnly/)).not.toBeInTheDocument();
+  });
+
+  it('does NOT render the panel when produced_branches is empty/undefined', () => {
+    const runEmpty = mkRun({ status: 'Success', produced_branches: [] });
+    const { rerender } = render(<RunDetail run={runEmpty} onDelete={() => {}} />);
+    expect(screen.queryByText(/wf\.produced\.title/)).not.toBeInTheDocument();
+    // Same for missing field (legacy run row).
+    rerender(<RunDetail run={mkRun({ status: 'Success' })} onDelete={() => {}} />);
+    expect(screen.queryByText(/wf\.produced\.title/)).not.toBeInTheDocument();
+  });
+
+  it('renders one row per branch when there are several', () => {
+    const run = mkRun({
+      status: 'Success',
+      produced_branches: [
+        { branch_name: 'kronn/A/11111111', head_sha: '1'.repeat(40), ahead: 1, pushed_upstream: false },
+        { branch_name: 'kronn/A/22222222', head_sha: '2'.repeat(40), ahead: 2, pushed_upstream: true },
+      ],
+    });
+    render(<RunDetail run={run} onDelete={() => {}} />);
+    expect(screen.getByText('kronn/A/11111111')).toBeInTheDocument();
+    expect(screen.getByText('kronn/A/22222222')).toBeInTheDocument();
+  });
+});

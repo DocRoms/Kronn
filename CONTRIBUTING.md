@@ -84,8 +84,9 @@ This project uses an AI-optimized context system in `ai/`. Before making changes
 3. **Sign off every commit** (`git commit -s`)
 4. Test your changes:
    - Backend: `cargo check && cargo clippy && cargo test`
-   - Frontend: `npm run build && npm run lint && npm test`
+   - Frontend: `pnpm build && pnpm lint && pnpm test`
    - Shell: `make test-shell`
+   - E2E (Playwright, optional but recommended for UI changes): `make test-e2e` — requires the backend running. See [`frontend/e2e/README.md`](frontend/e2e/README.md) for the full setup + how to add a spec.
 5. Write a clear PR description with a summary and test plan
 
 ## Reporting Bugs

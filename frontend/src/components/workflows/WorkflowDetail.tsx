@@ -138,6 +138,13 @@ export interface WorkflowDetailProps {
   /** 0.7.0 UX pass — export the workflow as a JSON file. The handler
    *  is wired in the parent page (it has the api binding + toast). */
   onExport?: () => void;
+  /** Called when the operator approves/rejects/requests-changes on a Gate.
+   *  The SSE stream closed when the run paused, so the parent's `liveRun`
+   *  is now stale ("Awaiting your decision" stays on screen forever).
+   *  The page wipes its liveRun state in response — the runs list (which
+   *  refreshes from DB on the same callback) takes over showing the
+   *  post-decision progress. */
+  onGateDecided?: () => void;
 }
 
 /** Renders the per-item preview of a BatchQuickPrompt dry-run.
@@ -954,7 +961,52 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
   );
 }
 
-export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onExport }: WorkflowDetailProps) {
+/** Banner shown beneath the live run progress once the SSE stream emits
+ *  its terminal `run_done` event. Three colour states:
+ *    - **Success** : green check + `wf.runDone — Success`
+ *    - **WaitingApproval** : amber Hand + `wf.runWaiting`. Distinct from
+ *      the failed state so the operator instantly sees "your turn" vs
+ *      "broken". Earlier 0.6.x versions painted this red, which read as
+ *      an error even though the run was healthily paused on a Gate.
+ *    - **anything else** (Failed / Cancelled / StoppedByGuard) : red X.
+ *
+ *  Exported so the unit tests in `__tests__/WorkflowDetail.test.tsx`
+ *  can mount it in isolation without spinning up the whole detail tree.
+ */
+export function LiveFinishedBanner({
+  status,
+  stepsExecuted,
+  t,
+}: {
+  status: string | null;
+  stepsExecuted: number;
+  t: (key: string, ...args: (string | number)[]) => string;
+}) {
+  const isSuccess = status === 'Success';
+  const isWaiting = status === 'WaitingApproval';
+  const dataStatus = isSuccess ? 'success' : isWaiting ? 'waiting' : 'failed';
+  const color = isSuccess
+    ? 'var(--kr-success)'
+    : isWaiting
+      ? 'var(--kr-warning)'
+      : 'var(--kr-error)';
+  const label = isWaiting ? t('wf.runWaiting') : t('wf.runDone', status ?? '');
+  return (
+    <div className="wf-live-finished" data-status={dataStatus}>
+      {isSuccess
+        ? <Check size={12} className="text-success" />
+        : isWaiting
+          ? <Hand size={12} style={{ color }} />
+          : <X size={12} className="text-error" />}
+      <span className="text-base font-semibold" style={{ color }}>{label}</span>
+      <span className="text-xs text-dim">
+        {t('wf.stepsExecuted', stepsExecuted)}
+      </span>
+    </div>
+  );
+}
+
+export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onExport, onGateDecided }: WorkflowDetailProps) {
   const { t } = useT();
   const [showRuns, setShowRuns] = useState(true);
   // Per-step expand state for the live run view. Keyed by step name (not
@@ -1270,20 +1322,15 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
         </div>
       )}
 
-      {/* Live run finished banner */}
+      {/* Live run finished banner. Extracted to <LiveFinishedBanner> so its
+          three-state colour mapping (success/waiting/failed) can be unit
+          tested without booting the whole WorkflowDetail tree. */}
       {liveRun && liveRun.workflowId === workflow.id && liveRun.finished && (
-        <div className="wf-live-finished" data-status={liveRun.status === 'Success' ? 'success' : 'failed'}>
-          {liveRun.status === 'Success'
-            ? <Check size={12} className="text-success" />
-            : <X size={12} className="text-error" />
-          }
-          <span className="text-base font-semibold" style={{ color: liveRun.status === 'Success' ? 'var(--kr-success)' : 'var(--kr-error)' }}>
-            {t('wf.runDone', liveRun.status ?? '')}
-          </span>
-          <span className="text-xs text-dim">
-            {t('wf.stepsExecuted', liveRun.completedSteps.length)}
-          </span>
-        </div>
+        <LiveFinishedBanner
+          status={liveRun.status}
+          stepsExecuted={liveRun.completedSteps.length}
+          t={t}
+        />
       )}
 
       {/* Runs */}
@@ -1334,6 +1381,10 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
               onDecide={async (payload) => {
                 await workflowsApi.decideRun(workflow.id, run.id, payload);
                 onRefresh();
+                // Wipe the now-stale "Awaiting your decision" live banner.
+                // The post-decision progress is visible in the runs list,
+                // which onRefresh just reloaded.
+                onGateDecided?.();
               }}
             />
             {childBatch && onNavigateToBatch && (

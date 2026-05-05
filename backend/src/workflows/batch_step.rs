@@ -25,6 +25,20 @@ const BATCH_WAIT_TIMEOUT: Duration = Duration::from_secs(2 * 3600);
 /// the same 50-item hard cap enforced by `create_batch_run` for manual batches.
 const DEFAULT_MAX_ITEMS: u32 = 50;
 
+/// Default per-batch concurrent agent cap when `batch_concurrent_limit` is
+/// unset. The global `max_concurrent_agents` semaphore already throttles the
+/// system as a whole, but on a single big batch (17+ Jira tickets) the
+/// global cap stays saturated for the whole run — that creates auth file
+/// contention (multiple `claude` processes writing `~/.claude/state.json`),
+/// network pool pressure, and amplifies the silent-CLI-crash failure mode.
+/// 5 in flight at once is a sweet spot: the agents finish the batch in
+/// ~⌈N/5⌉ waves, errors stay isolated, the global pool has room left for a
+/// concurrent linear workflow. Operators can override per-step.
+const DEFAULT_BATCH_CONCURRENT_LIMIT: u32 = 5;
+/// Hard ceiling regardless of operator override. Matches the `batch_apicall`
+/// hard cap and keeps a single batch from owning every agent slot.
+const MAX_BATCH_CONCURRENT_LIMIT: u32 = 20;
+
 pub async fn execute_batch_quick_prompt_step(
     step: &WorkflowStep,
     parent_run_id: &str,
@@ -176,9 +190,14 @@ pub async fn execute_batch_quick_prompt_step(
     let mut ws_rx = state.ws_broadcast.subscribe();
 
     // ── Fan out: spawn agent runs on every child discussion ─────────────
-    // Each call into `spawn_agent_run_with_chain` runs its own detached
-    // `tokio::spawn`, so the work happens in parallel. The agent_semaphore
-    // on AppState caps real concurrency.
+    // Throttled by a per-batch semaphore so a single big batch (17+ items)
+    // doesn't saturate the global agent pool. The global
+    // `max_concurrent_agents` cap still applies on top — actual concurrency
+    // is `min(global, per_batch)`. Without this throttle, the spawn loop
+    // hands every child to the runtime instantly; the global semaphore's
+    // queue grows long, all children share a single auth-file mutex
+    // (`~/.claude/state.json`), and the network pool reaches its ceiling —
+    // amplifying the Claude Code silent-exit failure mode.
     //
     // If `batch_chain_prompt_ids` is non-empty, each discussion will
     // sequentially execute the chained QPs after the initial response —
@@ -188,17 +207,40 @@ pub async fn execute_batch_quick_prompt_step(
     // The batch progress counter only bumps when the ENTIRE chain
     // finishes (the last `make_agent_stream` hits the batch_run_id hook
     // in discussions.rs).
+    let concurrent_limit = step
+        .batch_concurrent_limit
+        .unwrap_or(DEFAULT_BATCH_CONCURRENT_LIMIT)
+        .clamp(1, MAX_BATCH_CONCURRENT_LIMIT);
+    let batch_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrent_limit as usize));
     let chain_ids = step.batch_chain_prompt_ids.clone();
     // `outcome.discussion_ids` is ordered identically to `items` (see
     // `create_batch_run` in db/workflows.rs), so zipping by index is safe.
     for (idx, disc_id) in outcome.discussion_ids.iter().enumerate() {
         let batch_item = items.get(idx).cloned();
-        crate::api::discussions::spawn_agent_run_with_chain(
-            state.clone(),
-            disc_id.clone(),
-            chain_ids.clone(),
-            batch_item,
-        ).await;
+        let permit_holder = batch_semaphore.clone();
+        let state_for_spawn = state.clone();
+        let chain_for_spawn = chain_ids.clone();
+        let disc_for_spawn = disc_id.clone();
+        // Acquire the batch slot synchronously here so we block the spawn
+        // loop until there's room — without this, all N tokio tasks fire
+        // immediately and queue inside the global semaphore.
+        let permit = match permit_holder.clone().acquire_owned().await {
+            Ok(p) => p,
+            Err(_) => break, // semaphore closed (shouldn't happen)
+        };
+        tokio::spawn(async move {
+            // Permit is dropped when this task ends, freeing the next
+            // discussion's slot. Hold for the full duration of the agent
+            // run so the global pool isn't oversubscribed.
+            let _permit = permit;
+            crate::api::discussions::spawn_agent_run_with_chain(
+                state_for_spawn,
+                disc_for_spawn,
+                chain_for_spawn,
+                batch_item,
+            ).await;
+        });
+        let _ = idx; // index already consumed via zip
     }
 
     // ── Wait for completion (optional) ──────────────────────────────────

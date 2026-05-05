@@ -727,6 +727,13 @@
   border: 1px solid rgba(var(--kr-error-rgb), 0.2);
 }
 
+/* Paused on a Gate — distinct from success/failed. Amber/warn tone signals
+   "your turn", not "broken". */
+.wf-live-finished[data-status="waiting"] {
+  background: rgba(var(--kr-warning-rgb), 0.07);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.25);
+}
+
 /* ── Group header ──────────────────────────────────────── */
 .wf-group-header {
   display: flex;
@@ -2811,6 +2818,107 @@
 .wf-run-worktree-copy:hover {
   background: rgba(var(--kr-accent-rgb), 0.08);
   color: var(--kr-accent-ink);
+}
+
+/* ── Produced branches panel (0.7.0 — recover commits the agent left
+   behind when push failed). Distinct visual tone from the worktree row
+   so the operator notices these need attention vs. the always-on
+   workspace_path display. ──────────────────────────────────── */
+.wf-produced-branches {
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.25);
+  background: rgba(var(--kr-warning-rgb), 0.05);
+  border-radius: var(--kr-r-md);
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+}
+
+.wf-produced-branches-title {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  color: var(--kr-warning);
+}
+
+.wf-produced-branch-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+  padding: var(--kr-sp-2);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-card);
+  border: 1px solid var(--kr-border-faint);
+}
+
+.wf-produced-branch-head {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  flex-wrap: wrap;
+  font-size: var(--kr-fs-xs);
+}
+
+.wf-produced-branch-head code {
+  font-family: var(--kr-font-mono);
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-secondary);
+  background: transparent;
+}
+
+.wf-produced-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: var(--kr-fs-2xs);
+  font-weight: 600;
+}
+
+.wf-produced-pill--pushed {
+  background: rgba(var(--kr-success-rgb), 0.1);
+  color: var(--kr-success);
+}
+
+.wf-produced-pill--local {
+  background: rgba(var(--kr-warning-rgb), 0.15);
+  color: var(--kr-warning);
+}
+
+.wf-produced-branch-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  flex-wrap: wrap;
+}
+
+.wf-produced-test-btn {
+  border-color: rgba(var(--kr-warning-rgb), 0.3);
+  color: var(--kr-warning);
+}
+
+.wf-produced-test-path {
+  font-family: var(--kr-font-mono);
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-secondary);
+  background: var(--kr-bg-hover);
+  padding: 2px var(--kr-sp-2);
+  border-radius: var(--kr-r-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 360px;
+}
+
+.wf-produced-error {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-error);
 }
 
 /* ── Validation errors ─────────────────────────────────── */

@@ -213,6 +213,21 @@ test-backend:
 	@echo "$(CYAN)▸ Running backend tests...$(RESET)"
 	cd backend && cargo test --lib -- --skip export_bindings
 
+## Run frontend unit tests (vitest)
+test-frontend:
+	@echo "$(CYAN)▸ Running frontend unit tests (vitest)...$(RESET)"
+	cd frontend && pnpm test
+
+## Run frontend E2E tests (Playwright). Pre-req: `make dev` running (Vite + backend).
+test-e2e:
+	@echo "$(CYAN)▸ Running E2E tests (Playwright)...$(RESET)"
+	cd frontend && pnpm test:e2e
+
+## Run frontend E2E tests with the Playwright UI (visual debug).
+test-e2e-ui:
+	@echo "$(CYAN)▸ Launching Playwright UI...$(RESET)"
+	cd frontend && pnpm test:e2e:ui
+
 ## Run clippy lints in Docker (same toolchain as CI)
 lint-backend:
 	@echo "$(CYAN)▸ Running cargo clippy in Docker...$(RESET)"

@@ -619,7 +619,7 @@ pub async fn set_server_config(
         config.server.max_concurrent_agents = max.clamp(1, 20);
     }
     if let Some(timeout) = req.agent_stall_timeout_min {
-        config.server.agent_stall_timeout_min = timeout.clamp(1, 60) as u32;
+        config.server.agent_stall_timeout_min = clamp_stall_timeout_min(timeout);
     }
     if let Some(pseudo) = req.pseudo {
         config.server.pseudo = if pseudo.is_empty() { None } else { Some(pseudo) };
@@ -778,6 +778,17 @@ fn mask_token(token: &str) -> String {
         return "*".repeat(token.len());
     }
     format!("{}...{}", &token[..4], &token[token.len()-4..])
+}
+
+/// Clamp the operator-supplied agent inactivity timeout (in minutes) to
+/// the supported range. The upper bound was 60 min until 0.7.0 — bumped
+/// to 120 because heavy Ticket Autopilot implements (real enterprise
+/// tickets with 8-10 sub-tasks) routinely run 60-90 min of streamed
+/// activity. A 60 min cap killed those mid-run even when the agent was
+/// healthily emitting tool calls. The operator can still set 1 min if
+/// they want aggressive babysitting.
+pub(crate) fn clamp_stall_timeout_min(input: u64) -> u32 {
+    input.clamp(1, 120) as u32
 }
 
 /// GET /api/config/db-info
@@ -1233,6 +1244,42 @@ pub async fn open_url(Json(req): Json<OpenUrlRequest>) -> Json<ApiResponse<()>> 
 mod tests {
     use super::*;
     use crate::core::config;
+
+    // ─── clamp_stall_timeout_min (0.7.0 — 60 min cap was too aggressive
+    //    for heavy implements; bumped to 120). ─────────────────────────
+
+    #[test]
+    fn stall_timeout_zero_clamps_to_one() {
+        // Operator can't disable the safety net — minimum of 1 min.
+        assert_eq!(clamp_stall_timeout_min(0), 1);
+    }
+
+    #[test]
+    fn stall_timeout_inside_range_passes_through() {
+        // Mid-range value isn't altered.
+        assert_eq!(clamp_stall_timeout_min(30), 30);
+        assert_eq!(clamp_stall_timeout_min(1), 1);
+        assert_eq!(clamp_stall_timeout_min(120), 120);
+    }
+
+    #[test]
+    fn stall_timeout_above_120_clamps_to_120() {
+        // 0.7.0 ceiling. Critical regression guard: the previous cap was
+        // 60. If anyone reverts the clamp, this test fails.
+        assert_eq!(clamp_stall_timeout_min(121), 120);
+        assert_eq!(clamp_stall_timeout_min(9999), 120);
+    }
+
+    #[test]
+    fn stall_timeout_max_is_at_least_120_minutes() {
+        // Documents the 0.7.0 contract: heavy Ticket Autopilot implements
+        // (60-90 min streamed) must fit. Catches an accidental rollback
+        // to the 0.6.x ceiling that would silently re-break those runs.
+        assert!(
+            clamp_stall_timeout_min(120) >= 120,
+            "stall timeout cap must allow at least 120 min for heavy implements"
+        );
+    }
 
     #[test]
     fn build_export_config_strips_secrets() {

@@ -61,6 +61,19 @@ export function ProjectSkills({ projectId, currentSkillIds, allSkills, onUpdate 
             }}>
               {skill.category}
             </span>
+            {skill.external && (
+              <span
+                style={{
+                  fontSize: 9, padding: '0 4px', borderRadius: 3, fontWeight: 600,
+                  background: 'rgba(var(--kr-info-rgb, 96 165 250), 0.15)',
+                  color: 'var(--kr-info, rgb(96, 165, 250))',
+                  opacity: 0.85,
+                }}
+                title={skill.source_url ? `Vendored from ${skill.source_url}` : 'Vendored from a third-party project'}
+              >
+                🔗 External
+              </span>
+            )}
           </button>
         );
       })}

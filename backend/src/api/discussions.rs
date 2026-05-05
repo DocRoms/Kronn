@@ -743,6 +743,83 @@ pub async fn spawn_agent_run_background(state: AppState, discussion_id: String) 
     spawn_agent_run_with_chain(state, discussion_id, Vec::new(), None).await;
 }
 
+/// Run an agent on `discussion_id` and, if the first attempt comes back with
+/// the silent-crash signature, retry once.
+///
+/// The signature: an assistant message that starts with `[Agent exited with
+/// error]` AND mentions `No output captured` — the discussion path's
+/// canonical "Claude Code died, no stderr to explain why" footer (cf.
+/// the message generation in `make_agent_stream` around line 1500).
+///
+/// Why retry pays off: the failure mode is intermittent, NOT deterministic.
+/// Heavy parallel runs (Ticket Autopilot batch on 17 tickets, two workflows
+/// concurrent) hit auth-file races, network pool saturation, and shared
+/// resource contention that resolves on its own within a few seconds. A
+/// fresh spawn after a brief backoff usually goes through.
+///
+/// Capped at 1 retry to keep token spend bounded — a deterministic failure
+/// (auth genuinely expired, rate limit, broken prompt) won't be saved by
+/// looping forever.
+async fn run_with_silent_retry(state: &AppState, discussion_id: &str) {
+    for attempt in 0..2 {
+        let _sse = make_agent_stream(state.clone(), discussion_id.to_string(), None).await;
+        drop(_sse);
+        if attempt == 0 && last_message_is_silent_crash(state, discussion_id).await {
+            tracing::warn!(
+                "Discussion {} matched silent-crash pattern on attempt 1 — \
+                 retrying once after a brief backoff (auth/network may have \
+                 been transiently saturated)",
+                discussion_id
+            );
+            // Wipe the failed message so the retry doesn't append a 2nd
+            // assistant turn alongside the broken one. Idempotent: deletes
+            // the trailing assistant message(s) since the last user turn.
+            let did = state.db.clone();
+            let did2 = discussion_id.to_string();
+            let _ = did.with_conn(move |conn| {
+                crate::db::discussions::delete_last_agent_messages(conn, &did2)
+            }).await;
+            // Backoff: lets the auth file lock release, the API rate
+            // limiter window slide, etc. 5s is the sweet spot we observed
+            // empirically — short enough not to feel laggy on the UI,
+            // long enough to clear typical contention.
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            continue;
+        }
+        break;
+    }
+}
+
+/// Pure, sync detector for the silent-crash footer pattern in a single
+/// agent message. Extracted for testability — the async DB-touching wrapper
+/// `last_message_is_silent_crash` calls this.
+pub(crate) fn message_matches_silent_crash(content: &str) -> bool {
+    content.contains("[Agent exited with error]")
+        && content.contains("No output captured")
+}
+
+/// Inspect the most recent assistant message of a discussion: returns true
+/// when it carries the canonical silent-crash footer. Defensive about DB
+/// failures — those count as "not silent-crash" so the retry path doesn't
+/// fire spuriously when the lookup itself goes wrong.
+async fn last_message_is_silent_crash(state: &AppState, discussion_id: &str) -> bool {
+    let did = discussion_id.to_string();
+    let messages = match state.db.clone().with_conn(move |conn| {
+        crate::db::discussions::list_messages(conn, &did)
+    }).await {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    let last_assistant = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == crate::models::MessageRole::Agent);
+    match last_assistant {
+        Some(m) => message_matches_silent_crash(&m.content),
+        None => false,
+    }
+}
+
 /// Spawn an agent run and, after it completes, execute chained Quick Prompts
 /// sequentially inside the SAME discussion. Each chain step:
 ///
@@ -769,8 +846,10 @@ pub async fn spawn_agent_run_with_chain(
     batch_item: Option<String>,
 ) {
     // First run — the initial QP prompt was already inserted by create_batch_run.
-    let _sse = make_agent_stream(state.clone(), discussion_id.clone(), None).await;
-    drop(_sse);
+    // Wrapped in `run_with_silent_retry` to absorb the Claude Code CLI's
+    // "exit 1 + zero output" failure mode that hits batch children under
+    // concurrency pressure (auth file contention, network pool saturation).
+    run_with_silent_retry(&state, &discussion_id).await;
 
     // Chain: for each subsequent QP, inject its prompt and re-run the agent.
     for (i, qp_id) in chain_prompt_ids.iter().enumerate() {
@@ -3095,6 +3174,48 @@ mod terminal_signal_tests {
             super::MAX_AGENT_RESPONSE_BYTES <= 5_000_000,
             "size cap must stay under 5 MB so a runaway agent can't burn $$$"
         );
+    }
+}
+
+#[cfg(test)]
+mod silent_crash_detector_tests {
+    use super::message_matches_silent_crash;
+
+    #[test]
+    fn matches_canonical_silent_crash_footer() {
+        let msg = "[Agent exited with error] (exit code: Some(1))\n\n\
+                   ⚠️ **No output captured.** Possible causes:\n\
+                   - Expired session → run `/login` in the terminal";
+        assert!(message_matches_silent_crash(msg));
+    }
+
+    #[test]
+    fn rejects_normal_agent_response() {
+        // A successful agent response shouldn't trigger the retry path.
+        let msg = "Implemented the BrandContext service. All 44 tests pass.";
+        assert!(!message_matches_silent_crash(msg));
+    }
+
+    #[test]
+    fn rejects_partial_match_either_marker_alone() {
+        // Both substrings must be present — neither one alone is enough,
+        // because legitimate diagnostics might mention "No output" without
+        // the full silent-crash pattern.
+        assert!(!message_matches_silent_crash("[Agent exited with error] (exit code: Some(2))"));
+        assert!(!message_matches_silent_crash("⚠️ No output captured from the test runner."));
+    }
+
+    #[test]
+    fn rejects_other_agent_failure_modes() {
+        // Stall timeout has its own message — distinct from silent crash.
+        // Retrying it would be wrong (the stall is real, not transient).
+        let stall = "⚠️ Partial response — the agent was interrupted after 40 min without output.";
+        assert!(!message_matches_silent_crash(stall));
+    }
+
+    #[test]
+    fn empty_message_is_not_a_silent_crash() {
+        assert!(!message_matches_silent_crash(""));
     }
 }
 

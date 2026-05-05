@@ -22,12 +22,111 @@ pub struct Workspace {
     hooks: Option<WorkspaceHooks>,
 }
 
+/// Snapshot of a branch that the runner kept alive instead of deleting on
+/// cleanup. Returned by `Workspace::cleanup` so the caller can persist the
+/// info on the run row and surface it in the UI ("commit produit ici").
+///
+/// Without this, agents that committed locally but failed to push (e.g.
+/// pre-push hook blocked, network down, no auth) lose visibility entirely:
+/// the worktree gets removed, the branch gets deleted, and the commits
+/// drift into git's dangling-object pool until the next `gc`.
+#[derive(Debug, Clone)]
+pub struct PreservedBranch {
+    /// The kept-alive branch name in the parent repo (e.g. `kronn/Autobot/68dccb12`).
+    pub branch_name: String,
+    /// HEAD SHA at cleanup time. Lets the caller render the commit and
+    /// recover even if the branch is later deleted.
+    pub head_sha: String,
+    /// Commits ahead of the chosen base (upstream / origin/main / main).
+    pub ahead: u32,
+    /// True if the branch had an upstream tracking ref — i.e. the agent
+    /// at least *attempted* to push (and may have partially succeeded).
+    /// False = no push was ever attempted.
+    pub pushed_upstream: bool,
+}
+
+/// Outcome of `Workspace::cleanup`. The branch field is `Some` whenever
+/// the worktree's HEAD held local commits not present on a known base —
+/// the runner records it on `WorkflowRun.produced_branches` so the run
+/// detail UI can show "commit produit, push bloqué — branche `X` preservée".
+#[derive(Debug, Clone, Default)]
+pub struct CleanupOutcome {
+    pub preserved: Option<PreservedBranch>,
+}
+
 /// Sanitize a workflow name for use in branch names and directory paths.
 /// Keeps alphanumeric, dash, and underscore; replaces everything else with `-`.
 pub(crate) fn sanitize_name(name: &str) -> String {
     name.chars()
         .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
         .collect()
+}
+
+/// Decide whether the branch backing this worktree should outlive cleanup.
+///
+/// Returns `Some(PreservedBranch)` when HEAD holds commits not on any known
+/// base ref (upstream → origin/main → origin/master → main → master). Returns
+/// `None` only when HEAD is fully synced with one of those bases (nothing to
+/// salvage). On total failure (no base ref found, or git errors) we return
+/// `Some` with `ahead=0` to err on the side of preservation — losing real
+/// work is much worse than leaving a stale empty branch behind.
+async fn check_branch_for_preservation(
+    worktree: &Path,
+    branch: &str,
+) -> Option<PreservedBranch> {
+    // HEAD sha is the anchor we want to be able to recover via the branch.
+    let head_sha = git_text_output(worktree, &["rev-parse", "HEAD"]).await?;
+
+    // Was an upstream set on the worktree's branch ? Tells us whether the
+    // agent tried to push at all. `@{u}` resolves only when set.
+    let pushed_upstream =
+        git_text_output(worktree, &["rev-parse", "--abbrev-ref", "@{u}"]).await.is_some();
+
+    // Walk through plausible bases in order of relevance. The first one
+    // that resolves wins — count commits ahead.
+    let mut bases: Vec<&str> = Vec::with_capacity(5);
+    if pushed_upstream {
+        bases.push("@{u}");
+    }
+    bases.extend(["origin/main", "origin/master", "main", "master"]);
+
+    for base in bases {
+        let count_str = git_text_output(
+            worktree,
+            &["rev-list", "--count", &format!("{}..HEAD", base)],
+        )
+        .await;
+        if let Some(count_str) = count_str {
+            let ahead: u32 = count_str.trim().parse().unwrap_or(0);
+            if ahead == 0 {
+                // Synced — drop the branch.
+                return None;
+            }
+            return Some(PreservedBranch {
+                branch_name: branch.to_string(),
+                head_sha,
+                ahead,
+                pushed_upstream,
+            });
+        }
+    }
+
+    // No base resolved — preserve defensively.
+    Some(PreservedBranch {
+        branch_name: branch.to_string(),
+        head_sha,
+        ahead: 0,
+        pushed_upstream,
+    })
+}
+
+/// Run `git <args>` in `cwd`, return trimmed stdout if exit was 0.
+async fn git_text_output(cwd: &Path, args: &[&str]) -> Option<String> {
+    let out = async_cmd("git").args(args).current_dir(cwd).output().await.ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// Build a branch name for a workflow run: `kronn/<sanitized_name>/<run_id_prefix>`.
@@ -137,8 +236,23 @@ impl Workspace {
     }
 
     /// Clean up the workspace: run before_remove hook, then remove the worktree.
-    pub async fn cleanup(self) -> Result<()> {
+    ///
+    /// Branch lifecycle:
+    ///   - The branch is preserved (left alive in the parent repo) when the
+    ///     worktree's HEAD has local commits not present on any known base
+    ///     ref. Returned in `CleanupOutcome.preserved`. The runner records
+    ///     it on the run so the UI can surface "commit available here".
+    ///   - The branch is deleted when the worktree is fully synced with a
+    ///     known base — nothing of value would survive its deletion.
+    ///
+    /// Failures: best-effort. If the preserve check itself errors out, we
+    /// default to preserving the branch (safer than silently dropping work).
+    pub async fn cleanup(self) -> Result<CleanupOutcome> {
         self.run_hook("before_remove").await?;
+
+        // Snapshot branch state BEFORE removing the worktree — afterwards
+        // the worktree path is gone and `git -C <worktree>` calls fail.
+        let preserve = check_branch_for_preservation(&self.path, &self.branch).await;
 
         // Remove the worktree
         let output = async_cmd("git")
@@ -158,15 +272,26 @@ impl Workspace {
             }
         }
 
-        // Delete the branch
-        let _ = async_cmd("git")
-            .args(["branch", "-D", &self.branch])
-            .current_dir(&self.repo_path)
-            .output()
-            .await;
+        let outcome = if let Some(info) = preserve {
+            // Keep the branch alive in the parent repo.
+            tracing::info!(
+                "Preserved branch '{}' (HEAD={}, {} commit(s) ahead of base, upstream_set={}) — \
+                 the worktree had local commits the operator may want to recover.",
+                info.branch_name, info.head_sha, info.ahead, info.pushed_upstream
+            );
+            CleanupOutcome { preserved: Some(info) }
+        } else {
+            // Fully synced — safe to drop the branch ref.
+            let _ = async_cmd("git")
+                .args(["branch", "-D", &self.branch])
+                .current_dir(&self.repo_path)
+                .output()
+                .await;
+            CleanupOutcome::default()
+        };
 
         tracing::info!("Cleaned up worktree: {}", self.path.display());
-        Ok(())
+        Ok(outcome)
     }
 
     /// Execute a lifecycle hook shell command in the workspace directory.
@@ -298,5 +423,73 @@ mod tests {
         let dir_name = build_worktree_dir_name("audit", "aabbccdd-1234");
         let full = base.join(&dir_name);
         assert_eq!(full.to_str().unwrap(), "/repos/myapp/.kronn/worktrees/audit-aabbccdd");
+    }
+
+    // ─── check_branch_for_preservation (P3 — preserve commits cleanup
+    //    would otherwise orphan). Uses real git on a tempdir; serial so
+    //    parallel test runs don't trip over each other on shared global
+    //    git config. ─────────────────────────────────────────────────────
+
+    /// Set up a tempdir with `git init`, an initial commit on `main`,
+    /// then create a branch pointing at HEAD. Returns the repo path so
+    /// the test can call our detector against it as the "worktree".
+    async fn make_test_repo() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = dir.path().to_path_buf();
+
+        // Init + minimal user config (commit -m needs an identity).
+        let _ = crate::core::cmd::async_cmd("git").args(["init", "-q", "-b", "main"]).current_dir(&repo).output().await.unwrap();
+        let _ = crate::core::cmd::async_cmd("git").args(["config", "user.email", "test@kronn.local"]).current_dir(&repo).output().await.unwrap();
+        let _ = crate::core::cmd::async_cmd("git").args(["config", "user.name", "test"]).current_dir(&repo).output().await.unwrap();
+        std::fs::write(repo.join("README.md"), "test\n").unwrap();
+        let _ = crate::core::cmd::async_cmd("git").args(["add", "."]).current_dir(&repo).output().await.unwrap();
+        let _ = crate::core::cmd::async_cmd("git").args(["commit", "-q", "-m", "init"]).current_dir(&repo).output().await.unwrap();
+
+        (dir, repo)
+    }
+
+    #[tokio::test]
+    async fn preserve_when_branch_synced_with_main_returns_none() {
+        // Branch HEAD == main HEAD → nothing to preserve.
+        let (_dir, repo) = make_test_repo().await;
+        let result = check_branch_for_preservation(&repo, "test-branch").await;
+        assert!(result.is_none(), "synced HEAD should NOT be preserved");
+    }
+
+    #[tokio::test]
+    async fn preserve_when_branch_ahead_of_main_returns_some() {
+        // Mirror the production scenario: a worktree branched off main
+        // gets its own commit, leaving main behind by 1.
+        let (_dir, repo) = make_test_repo().await;
+        let _ = crate::core::cmd::async_cmd("git").args(["checkout", "-q", "-b", "kronn/test"]).current_dir(&repo).output().await.unwrap();
+        std::fs::write(repo.join("CHANGELOG.md"), "v1\n").unwrap();
+        let _ = crate::core::cmd::async_cmd("git").args(["add", "."]).current_dir(&repo).output().await.unwrap();
+        let _ = crate::core::cmd::async_cmd("git").args(["commit", "-q", "-m", "feat: changelog"]).current_dir(&repo).output().await.unwrap();
+
+        let result = check_branch_for_preservation(&repo, "kronn/test").await;
+        let preserved = result.expect("branch ahead of main should be preserved");
+        assert_eq!(preserved.branch_name, "kronn/test");
+        assert!(!preserved.head_sha.is_empty(), "head_sha should be filled");
+        assert_eq!(preserved.ahead, 1, "exactly one commit beyond main");
+        assert!(!preserved.pushed_upstream, "no remote → upstream_set=false");
+    }
+
+    #[tokio::test]
+    async fn preserve_when_no_base_resolves_falls_back_to_some() {
+        // Fresh repo with no `main` ref and no remotes → detector can't
+        // count ahead; it returns Some(ahead=0) defensively rather than
+        // None (preferring "preserve too much" over "lose work").
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = dir.path().to_path_buf();
+        let _ = crate::core::cmd::async_cmd("git").args(["init", "-q", "-b", "weird-default"]).current_dir(&repo).output().await.unwrap();
+        let _ = crate::core::cmd::async_cmd("git").args(["config", "user.email", "test@kronn.local"]).current_dir(&repo).output().await.unwrap();
+        let _ = crate::core::cmd::async_cmd("git").args(["config", "user.name", "test"]).current_dir(&repo).output().await.unwrap();
+        std::fs::write(repo.join("README.md"), "x\n").unwrap();
+        let _ = crate::core::cmd::async_cmd("git").args(["add", "."]).current_dir(&repo).output().await.unwrap();
+        let _ = crate::core::cmd::async_cmd("git").args(["commit", "-q", "-m", "init"]).current_dir(&repo).output().await.unwrap();
+
+        let result = check_branch_for_preservation(&repo, "test-branch").await;
+        let preserved = result.expect("no resolvable base → defensive preserve");
+        assert_eq!(preserved.ahead, 0, "ahead unknown → 0 (still preserve)");
     }
 }

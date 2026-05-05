@@ -467,6 +467,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/workflows/:id/runs/:run_id", get(api::workflows::get_run).delete(api::workflows::delete_run))
         .route("/api/workflows/:id/runs/:run_id/cancel", post(api::workflows::cancel_run))
         .route("/api/workflows/:id/runs/:run_id/decide", post(api::workflows::decide_run))
+        .route(
+            "/api/workflows/:id/runs/:run_id/test-worktree",
+            post(api::workflows::test_worktree).delete(api::workflows::delete_test_worktree),
+        )
         // 0.7.0 UX pass — per-item export / import (single workflow or QP).
         // Distinct from /api/config/export which exports the whole DB.
         .route("/api/workflows/:id/export", get(api::workflows::export_workflow))
