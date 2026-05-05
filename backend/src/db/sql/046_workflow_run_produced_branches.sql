@@ -1,0 +1,19 @@
+-- 0.7.0 — produced branches on workflow runs.
+--
+-- When a workflow run produces commits in its worktree (typically via the
+-- Ticket Autopilot's `create_pr` step) and we cleanup the worktree, the
+-- runner now preserves any branch that has commits not on a known base.
+-- This column persists those branches so the run-detail UI can surface
+-- "commit available here" with checkout/diff/push actions even after the
+-- worktree has been cleaned up.
+--
+-- Stored as JSON array of `PreservedBranch` (cf. workspace::PreservedBranch):
+--   [{
+--     "branch_name": "kronn/Autobot/68dccb12",
+--     "head_sha": "b71d816b77f04670d6e07a937530e20d83f76010",
+--     "ahead": 1,
+--     "pushed_upstream": false
+--   }]
+--
+-- NULL or empty `[]` = nothing produced (or fully synced with main).
+ALTER TABLE workflow_runs ADD COLUMN produced_branches TEXT;

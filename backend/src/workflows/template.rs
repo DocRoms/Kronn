@@ -129,6 +129,8 @@ impl TemplateContext {
                 let key = var_name.trim();
                 if let Some(value) = self.values.get(key) {
                     result.push_str(value);
+                } else if let Some(value) = resolve_nested_path(&self.values, key) {
+                    result.push_str(&value);
                 } else {
                     // Unknown variable — leave placeholder for debugging
                     result.push_str("{{");
@@ -144,6 +146,83 @@ impl TemplateContext {
     }
 }
 
+/// Resolve a dotted path like `steps.X.data.subtasks.0.title` against a flat
+/// values map. The map only stores the top-level pseudo-keys
+/// (`steps.X.data`, `steps.X.data_json`, `previous_step.data`, etc.); to look
+/// up a sub-field we parse the always-JSON sibling (`*.data_json`) and walk
+/// the parsed value.
+///
+/// **Why JSON over the unwrapped `.data`** : `data` strips quotes for clean
+/// prompt interpolation (`"hello"` → `hello`), making it unparseable when
+/// `data` was a plain string. `data_json` preserves a valid JSON representation
+/// in every case, so traversal is always well-defined.
+///
+/// **Path semantics** :
+///   - dot-separated segments after `.data` (e.g. `data.subtasks.0.title`)
+///   - numeric segments index arrays (`subtasks.0` = first subtask)
+///   - string segments index objects
+///   - missing field anywhere → returns None (renderer leaves the literal
+///     `{{...}}` so the broken reference is visible to the operator)
+///
+/// **Output shape** :
+///   - JSON strings → raw string content (no surrounding quotes), to mirror
+///     `.data`'s unwrapping behavior
+///   - numbers / booleans / null → their stringified form
+///   - arrays / objects → pretty-printed JSON (operator-friendly inside a
+///     markdown code block, indexable downstream)
+pub(crate) fn resolve_nested_path(values: &HashMap<String, String>, key: &str) -> Option<String> {
+    // We only support nesting through `<prefix>.data.<path>`. Locate the
+    // `.data` segment that anchors the JSON traversal.
+    let parts: Vec<&str> = key.split('.').collect();
+    let data_idx = parts.iter().position(|p| *p == "data")?;
+    if data_idx == parts.len() - 1 {
+        // Bare `<prefix>.data` — that's a flat key, already handled by the
+        // caller before we got here. If we reach this branch the key was
+        // missing, so don't fabricate a value.
+        return None;
+    }
+    if data_idx == 0 {
+        // No prefix in front of `data` — not a recognized pattern.
+        return None;
+    }
+
+    let prefix = parts[..data_idx].join(".");
+    let path = &parts[data_idx + 1..];
+
+    // Prefer the JSON sibling (`<prefix>.data_json`) — guaranteed parseable.
+    // Fall back to `<prefix>.data` (which may or may not be valid JSON
+    // depending on whether the original `data` was a string vs an object).
+    let json_str = values
+        .get(&format!("{}.data_json", prefix))
+        .or_else(|| values.get(&format!("{}.data", prefix)))?;
+
+    let parsed: serde_json::Value = serde_json::from_str(json_str).ok()?;
+    let mut current = &parsed;
+    for segment in path {
+        current = if let Ok(idx) = segment.parse::<usize>() {
+            current.as_array()?.get(idx)?
+        } else {
+            current.get(*segment)?
+        };
+    }
+    Some(stringify_json_leaf(current))
+}
+
+fn stringify_json_leaf(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        // Arrays / objects: pretty JSON. The operator usually consumes this
+        // inside a markdown code block (gates) or downstream agent prompt
+        // (which can re-parse). Compact form would be unreadable in gates.
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            serde_json::to_string_pretty(v).unwrap_or_default()
+        }
+    }
+}
+
 /// Validate that every `{{steps.X.Y}}` / `{{previous_step.Y}}` reference in
 /// the workflow's step prompts points to a valid upstream step whose
 /// `output_format` is `Structured`. Returns `Ok(())` if the workflow is
@@ -156,9 +235,16 @@ impl TemplateContext {
 /// failing even though `output_format` is Structured).
 pub fn validate_step_references(steps: &[crate::models::WorkflowStep]) -> Result<(), Vec<String>> {
     use crate::models::{StepOutputFormat, StepType};
+    // Field group captures the immediate `<field>` after the step prefix.
+    // For nested traversal (`steps.X.data.subtasks.0.title`) we still
+    // anchor the validation on the top-level `data|data_json|summary|status`
+    // — what matters at design time is that the producing step exposes a
+    // structured envelope at all. Sub-path validity is best-effort
+    // (resolved at run time, leaves placeholder if missing) since we don't
+    // know the actual JSON shape ahead of execution.
     static RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
         regex_lite::Regex::new(
-            r"\{\{\s*(?:steps\.([A-Za-z0-9_\-]+)\.(data|summary|status|data_json)|previous_step\.(data|summary|status|data_json))\s*\}\}"
+            r"\{\{\s*(?:steps\.([A-Za-z0-9_\-]+)\.(data|summary|status|data_json)(?:\.[A-Za-z0-9_\-]+)*|previous_step\.(data|summary|status|data_json)(?:\.[A-Za-z0-9_\-]+)*)\s*\}\}"
         ).unwrap()
     });
 
@@ -297,11 +383,12 @@ pub fn healable_producer_names(steps: &[crate::models::WorkflowStep]) -> Vec<Str
 /// broken and nobody told you."
 pub fn find_unresolved_critical_refs(rendered: &str) -> Vec<String> {
     static RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
-        // Matches `{{steps.NAME.data|data_json|summary|status}}` or the
-        // `{{previous_step.*}}` equivalent, tolerating whitespace inside
-        // the braces the way TemplateContext::render does.
+        // Matches `{{steps.NAME.<field>}}` and `{{previous_step.<field>}}`
+        // where `<field>` is `data|summary|status|data_json` optionally
+        // followed by a nested path (e.g. `data.subtasks.0.title`). Tolerates
+        // whitespace inside the braces the way TemplateContext::render does.
         regex_lite::Regex::new(
-            r"\{\{\s*(steps\.[A-Za-z0-9_\-]+\.(?:data|summary|status|data_json)|previous_step\.(?:data|summary|status|data_json))\s*\}\}"
+            r"\{\{\s*(steps\.[A-Za-z0-9_\-]+\.(?:data|summary|status|data_json)(?:\.[A-Za-z0-9_\-]+)*|previous_step\.(?:data|summary|status|data_json)(?:\.[A-Za-z0-9_\-]+)*)\s*\}\}"
         ).unwrap()
     });
     let mut seen = std::collections::BTreeSet::new();
@@ -806,6 +893,130 @@ mod tests {
         let ctx = TemplateContext::new();
         let s = "Hello world, no braces here!";
         assert_eq!(ctx.render(s).unwrap(), s);
+    }
+
+    // ── Nested-path tests (regression: 0.7.0 Ticket Autopilot gate
+    //    recap displayed `{{steps.analyze.data.subtasks}}` literally
+    //    because the templater only resolved top-level fields). ──
+
+    /// Helper: feed a structured envelope to the context and let the regular
+    /// `set_step_output` machinery populate `steps.X.data` + `steps.X.data_json`.
+    fn ctx_with_envelope(step: &str, data_json_obj: &str, summary: &str) -> TemplateContext {
+        let mut ctx = TemplateContext::new();
+        ctx.set_step_output(
+            step,
+            &format!(
+                "preamble\n---STEP_OUTPUT---\n{{\"data\": {}, \"status\": \"OK\", \"summary\": \"{}\"}}\n---END_STEP_OUTPUT---",
+                data_json_obj, summary
+            ),
+        );
+        ctx
+    }
+
+    #[test]
+    fn nested_object_field_resolves() {
+        // `{{steps.analyze.data.subtasks}}` should pretty-print the array
+        // (the operator usually drops it inside a markdown code block).
+        let ctx = ctx_with_envelope(
+            "analyze",
+            r#"{"subtasks": [{"id": 1, "title": "Setup CI"}], "test_strategy": "TDD"}"#,
+            "Plan en 1 sous-tâche",
+        );
+        let rendered = ctx.render("{{steps.analyze.data.test_strategy}}").unwrap();
+        assert_eq!(rendered, "TDD");
+    }
+
+    #[test]
+    fn nested_array_with_index_resolves() {
+        let ctx = ctx_with_envelope(
+            "analyze",
+            r#"{"subtasks": [{"id": 1, "title": "Setup CI"}, {"id": 2, "title": "Wire DB"}]}"#,
+            "Plan",
+        );
+        let rendered = ctx
+            .render("{{steps.analyze.data.subtasks.1.title}}")
+            .unwrap();
+        assert_eq!(rendered, "Wire DB");
+    }
+
+    #[test]
+    fn nested_object_pretty_prints() {
+        // Final value being an object → pretty-printed JSON. Lets the
+        // operator paste it into a markdown code block.
+        let ctx = ctx_with_envelope(
+            "analyze",
+            r#"{"subtasks": [{"id": 1, "title": "Setup"}]}"#,
+            "Plan",
+        );
+        let rendered = ctx.render("{{steps.analyze.data.subtasks}}").unwrap();
+        assert!(rendered.contains("\"id\": 1"), "got: {}", rendered);
+        assert!(rendered.contains("\"title\": \"Setup\""), "got: {}", rendered);
+    }
+
+    #[test]
+    fn nested_exec_envelope_exit_code() {
+        // Mirrors the Exec step contract: `{{steps.run_tests.data.exit_code}}`
+        // is the canonical way for downstream agents to read the test result.
+        let ctx = ctx_with_envelope(
+            "run_tests",
+            r#"{"exit_code": 0, "stdout": "all green", "stderr": "", "duration_ms": 1234}"#,
+            "exit 0",
+        );
+        assert_eq!(
+            ctx.render("{{steps.run_tests.data.exit_code}}").unwrap(),
+            "0"
+        );
+        assert_eq!(
+            ctx.render("{{steps.run_tests.data.stdout}}").unwrap(),
+            "all green"
+        );
+    }
+
+    #[test]
+    fn nested_previous_step_path_resolves() {
+        let ctx = ctx_with_envelope(
+            "fetch",
+            r#"{"key": "EW-42", "title": "Login bug"}"#,
+            "Loaded",
+        );
+        assert_eq!(
+            ctx.render("{{previous_step.data.key}}").unwrap(),
+            "EW-42"
+        );
+    }
+
+    #[test]
+    fn missing_nested_field_leaves_placeholder() {
+        // Broken refs stay visible so the operator notices — silent
+        // empty-string substitution would mask bugs in gate recaps.
+        let ctx = ctx_with_envelope("analyze", r#"{"a": 1}"#, "ok");
+        let rendered = ctx.render("Result: {{steps.analyze.data.missing}}").unwrap();
+        assert_eq!(rendered, "Result: {{steps.analyze.data.missing}}");
+    }
+
+    #[test]
+    fn nested_path_on_non_data_prefix_is_left_alone() {
+        // `state.X.foo` shouldn't accidentally match the nested resolver —
+        // state values are flat strings, not JSON.
+        let mut ctx = TemplateContext::new();
+        ctx.values.insert("state.last_review".into(), "needs work".into());
+        let rendered = ctx.render("{{state.last_review.foo}}").unwrap();
+        assert_eq!(rendered, "{{state.last_review.foo}}");
+    }
+
+    #[test]
+    fn flat_data_still_resolves_after_nested_addition() {
+        // Regression guard: bare `{{steps.X.data}}` must still resolve via
+        // the direct lookup path — the nested resolver is only a fallback.
+        let ctx = ctx_with_envelope(
+            "analyze",
+            r#"{"subtasks": [{"id": 1}]}"#,
+            "Plan",
+        );
+        let rendered = ctx.render("{{steps.analyze.data}}").unwrap();
+        // `.data` is the unwrapped form (compact JSON since `data` is an
+        // object, not a plain string).
+        assert!(rendered.starts_with("{\"subtasks\""), "got: {}", rendered);
     }
 
     // ── Extraction tests ──

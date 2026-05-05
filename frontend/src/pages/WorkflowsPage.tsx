@@ -57,6 +57,18 @@ const TRIGGER_LABELS: Record<string, string> = {
   manual: 'Manuel',
 };
 
+/** FIFO-cap a live text buffer at `max` characters — keep the trailing
+ *  window, drop the oldest content. Used to bound the live-progress feed
+ *  on long Agent steps so React doesn't re-render a multi-MB `<pre>`.
+ *
+ *  Exported so unit tests cover the boundary cases (exact-fit, just over,
+ *  much over, multibyte safety) without instantiating the full page. */
+export function appendLiveBuffer(prev: string, chunks: string, max: number): string {
+  const merged = prev + chunks;
+  if (merged.length <= max) return merged;
+  return merged.slice(merged.length - max);
+}
+
 const STATUS_COLORS: Record<string, string> = {
   Pending: 'var(--kr-warning)',
   Running: 'var(--kr-cyan)',
@@ -265,6 +277,39 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     const abort = new AbortController();
     abortRef.current = abort;
 
+    // 0.7.0 — bound + coalesce live-progress chunks.
+    //
+    // Without this fix, the workflow page lagged hard whenever an Agent
+    // step ran longer than ~5 min: tool-call streaming emits chunks at
+    // 10-20/s, each one triggered a setLiveRun → React re-render of the
+    // full <pre>currentStepText</pre>. The buffer also grew unbounded
+    // (1MB+ on heavy implements). Two compounding problems:
+    //   1. setState rate (every chunk = re-render storm)
+    //   2. buffer size (re-rendering 1MB of text on every chunk)
+    //
+    // The fix:
+    //   1. Coalesce chunks within a single animation frame (~60fps cap).
+    //      All chunks that arrive between two RAFs land in one setState.
+    //   2. FIFO-drop oldest content past `LIVE_BUFFER_MAX` chars. Live
+    //      view shows the most recent activity — older chunks are
+    //      already off-screen anyway.
+    const LIVE_BUFFER_MAX = 50_000;
+    let pendingChunks = '';
+    let rafId: number | null = null;
+    const flushChunks = () => {
+      rafId = null;
+      const chunks = pendingChunks;
+      if (!chunks) return;
+      pendingChunks = '';
+      setLiveRun(prev => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          currentStepText: appendLiveBuffer(prev.currentStepText, chunks, LIVE_BUFFER_MAX),
+        };
+      });
+    };
+
     await workflowsApi.triggerStream(
       id,
       (data) => {
@@ -272,6 +317,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         // the previous step don't bleed into the new one. Stamp the
         // step's start time so the per-step elapsed badge ticks from 0
         // (and not from the workflow start).
+        pendingChunks = ''; // discard any in-flight chunks from the prior step
         setLiveRun(prev => prev ? {
           ...prev,
           currentStep: data.step_name,
@@ -282,6 +328,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         } : prev);
       },
       (stepResult) => {
+        pendingChunks = '';
         setLiveRun(prev => prev ? {
           ...prev,
           currentStep: null,
@@ -291,26 +338,30 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         } : prev);
       },
       (data) => {
+        if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
+        pendingChunks = '';
         setLiveRun(prev => prev ? { ...prev, finished: true, status: data.status, currentStep: null } : prev);
         setTriggering(null);
         refetch();
         if (selectedId === id) openDetail(id);
       },
       (error) => {
+        if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
         console.warn('Workflow trigger error:', error);
         setLiveRun(prev => prev ? { ...prev, finished: true, status: 'Failed', currentStep: null } : prev);
         setTriggering(null);
       },
       abort.signal,
       variables,
-      // Live progress — append to the current step's text buffer. The
-      // workflow live view reads `currentStepText` to render the
-      // streaming agent output for the in-flight step.
+      // Live progress — accumulate into a coalescing buffer; flush on
+      // the next animation frame. The workflow live view reads
+      // `currentStepText` to render the streaming agent output for the
+      // in-flight step.
       (text) => {
-        setLiveRun(prev => prev ? {
-          ...prev,
-          currentStepText: prev.currentStepText + text,
-        } : prev);
+        pendingChunks += text;
+        if (rafId === null) {
+          rafId = requestAnimationFrame(flushChunks);
+        }
       },
       // run_start carries the backend-minted run_id — needed for the
       // Stop button to call cancelRun(workflowId, runId). Without it,
@@ -956,6 +1007,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 triggering={triggering === detailWorkflow.id}
                 agentAccess={agentAccess}
                 onNavigateToBatch={onNavigateToBatch}
+                onGateDecided={() => setLiveRun(null)}
                 onExport={async () => {
                   try {
                     const { filename, blob } = await workflowsApi.exportWorkflow(detailWorkflow.id);

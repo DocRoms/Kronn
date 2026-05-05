@@ -379,8 +379,9 @@ These shape engine behavior across the whole run.
 - `{{previous_step.summary}}` — one-line summary (Structured Agent only)
 - `{{previous_step.status}}` — `OK`, `NO_RESULTS`, or `ERROR` (Structured Agent only)
 - `{{steps.STEP_NAME.output}}` — output from any named step
-- `{{steps.STEP_NAME.data}}` — structured/extracted data from any named step
-- `{{steps.STEP_NAME.data.exit_code}}` / `.stdout` / `.stderr` / `.duration_ms` — Exec step output fields
+- `{{steps.STEP_NAME.data}}` — structured/extracted data from any named step (compact JSON if object/array, raw string if `data` was a plain string)
+- `{{steps.STEP_NAME.data_json}}` — same data, always-serialized JSON (use when piping into an HTTP body or another JSON parser)
+- `{{steps.STEP_NAME.data.<path>}}` / `{{previous_step.data.<path>}}` — **nested-path traversal** through the structured `data`. Dot-separated; numeric segments index arrays. Examples: `{{steps.run-tests.data.exit_code}}`, `{{steps.analyze.data.subtasks.0.title}}`, `{{steps.fetch.data.items.2.id}}`. Returns the leaf as a string (scalars stringified, objects/arrays pretty-printed JSON). Missing fields leave the placeholder visible (`{{...}}`) so broken refs don't silently render as empty
 - `{{state.<key>}}` — durable run state. Agents emit `---STATE:key=value---` in their output; the runner persists on the run row and exposes here on next iterations. Use for loops with feedback (review writes verdict, next implement reads it)
 - `{{iter.<step_name>}}` — per-step revisit counter (1, 2, 3…). Useful in Goto loops (e.g. "iteration {{iter.implement}} of 5")
 - `{{artifacts.<name>}}` — content of an artifact declared in `Workflow.artifacts` and emitted via `---ARTIFACT:<name>---...---END_ARTIFACT---`. Pre-seeded as empty string before round 1 so referencing it on the first iteration renders cleanly

@@ -17,7 +17,7 @@ import type { WorkflowStep, PromptVariable } from '../../types/generated';
 
 export interface WorkflowPreset {
   /** Stable id for keying & i18n */
-  id: 'auto-dev' | 'pr-gate' | 'deploy-rollback' | 'feature-planner' | 'daily-host-audit';
+  id: 'auto-dev' | 'pr-gate' | 'deploy-rollback' | 'feature-planner' | 'daily-host-audit' | 'ticket-to-pr';
   /** Icon emoji shown on the card */
   icon: string;
   /** i18n key for the card title */
@@ -463,5 +463,240 @@ export function buildV07Presets(t: Translator): WorkflowPreset[] {
     ],
   };
 
-  return [AUTO_DEV, PR_GATE, DEPLOY_ROLLBACK, FEATURE_PLANNER, DAILY_HOST_AUDIT];
+  // 0.7+ — Ticket Autopilot. Compose les briques 0.6.0 + les skills
+  // méthodologiques externes vendored (test-driven-development,
+  // systematic-debugging, writing-plans, brainstorming, verification-
+  // before-completion, requesting-code-review, receiving-code-review,
+  // finishing-a-development-branch — toutes adaptées de obra/superpowers
+  // MIT, voir backend/src/skills/external/) pour livrer un pipeline
+  // "ticket en entrée → PR créée et prête au merge".
+  //
+  // Limites assumées en v1 (Sprint 1) :
+  //   - Pas d'attente CI auto (Sprint 3 — step Wait/Poll). L'humain
+  //     valide la PR via `ready_gate` avant le merge éventuel.
+  //   - Pas de gestion auto des review comments humaines après merge
+  //     (relance manuelle du workflow). Sprint 4 — Webhook receiver.
+  //   - Pas de "Agent asks human mid-run" dynamique (Sprint 2 —
+  //     skip_if + Ask Human pattern).
+  //   - Pas d'auto-merge ApiCall (à packager en v2 quand l'utilisateur
+  //     a un plugin GitHub/GitLab actif).
+  //
+  // Le step `fetch_issue` démarre en JsonData (fixture) pour que le
+  // préset tourne immédiatement, sans plugin tracker installé. Cf.
+  // AUTO_DEV pour le même pattern.
+  const TICKET_TO_PR: WorkflowPreset = {
+    id: 'ticket-to-pr',
+    icon: '🎫',
+    titleKey: 'wiz.preset.ticketToPr.title',
+    descKey: 'wiz.preset.ticketToPr.desc',
+    primitives: ['JsonData', 'Agent', 'Exec', 'Gate', 'Loop', 'State', 'Notify'],
+    // `bash` lets `run_tests` use a generic detection script that adapts to
+    // any project (Cargo / npm-pnpm-yarn / composer / pytest / make).
+    // Without it, the preset would only work on Rust projects.
+    execAllowlist: ['bash', 'cargo', 'pnpm', 'npm', 'yarn', 'pytest', 'make', 'composer'],
+    steps: [
+      // Étape 1 — Source du ticket. JsonData fixture par défaut, swap
+      // en ApiCall (+ quick_api_id) quand un plugin tracker est actif.
+      step({
+        name: 'fetch_issue',
+        step_type: { type: 'JsonData' },
+        output_format: { type: 'Structured' },
+        description: t('wiz.preset.ticketToPr.fetchIssueDesc'),
+        json_data_payload: {
+          key: 'DEMO-1',
+          title: 'Exemple : ajoute un toggle clair / sombre dans le header',
+          description: 'Ajoute un bouton ☀/🌙 dans le header global qui bascule la classe `theme-dark` sur `<html>`. Persistance via localStorage. À tester sur les 3 pages principales.',
+          labels: ['feature', 'ui'],
+          priority: 'medium',
+        },
+      }),
+      // Étape 2 — Analyse + plan. Le `writing-plans` skill apprend à
+      // produire un plan structured, `brainstorming` force à explorer
+      // l'intent avant l'implémentation, `verification` interdit les
+      // claims sans evidence.
+      step({
+        name: 'analyze',
+        step_type: { type: 'Agent' },
+        output_format: { type: 'Structured' },
+        prompt_template: t('wiz.preset.ticketToPr.analyzePrompt'),
+        skill_ids: [
+          'writing-plans',
+          'brainstorming',
+          'verification-before-completion',
+        ],
+      }),
+      // Étape 3 — Validation humaine du plan. `gate_request_changes_target`
+      // pointe vers `analyze` pour que le user puisse demander un re-plan.
+      step({
+        name: 'plan_gate',
+        step_type: { type: 'Gate' },
+        gate_message: t('wiz.preset.ticketToPr.planGateMessage'),
+        gate_request_changes_target: 'analyze',
+      }),
+      // Étape 4 — Implémentation. Combo de 4 skills méthodologiques :
+      //   - tdd : red-green-refactor strict, no production code without
+      //     a failing test first
+      //   - systematic-debugging : root-cause à 4 phases quand un test
+      //     casse en milieu de loop
+      //   - verification-before-completion : interdit les "ça devrait
+      //     marcher" sans evidence
+      //   - receiving-code-review : si on revient ici depuis le step
+      //     `review` avec NEEDS_CHANGES, l'agent sait quoi faire de
+      //     `state.last_review` (technique pour appliquer feedback).
+      step({
+        name: 'implement',
+        step_type: { type: 'Agent' },
+        output_format: { type: 'Structured' },
+        prompt_template: t('wiz.preset.ticketToPr.implementPrompt'),
+        skill_ids: [
+          'test-driven-development',
+          'systematic-debugging',
+          'verification-before-completion',
+          'receiving-code-review',
+        ],
+        // One auto-retry on heavy implements. Claude Code CLI can exit
+        // silently (`exit 1`, no stderr) on long-running streamed sessions
+        // — the failure mode looks deterministic from Kronn's side but is
+        // intermittent from the CLI's, so a fresh retry typically gets
+        // through. The agent sees the partial worktree state from the
+        // first attempt; the prompt's "if review left feedback" branch
+        // doubles as a "if a previous attempt left files modified" cue.
+        retry: { max_retries: 1, backoff: 'exponential' },
+        stall_timeout_secs: 1800,
+      }),
+      // Étape 5 — Tests. Generic auto-detect: probes the worktree for the
+      // most likely test framework (Make / Cargo / pnpm-yarn-npm / composer /
+      // pytest) and runs it. Falls back to a soft skip with `[SIGNAL: SKIPPED]`
+      // when no framework matches OR the worktree's deps aren't installed —
+      // this keeps the workflow alive on fresh worktrees rather than blocking
+      // every run on an environment problem the workflow can't solve itself.
+      // Sur ERROR, retour à implement (max 2 cycles — tokens count up).
+      step({
+        name: 'run_tests',
+        step_type: { type: 'Exec' },
+        description: t('wiz.preset.shared.runTestsDesc'),
+        exec_command: 'bash',
+        exec_args: [
+          '-c',
+          [
+            'set -e',
+            // Make has highest priority — projects with a Makefile usually
+            // have an opinionated `test` target that already wires up linters,
+            // type-checks, the right test runner with the right env vars.
+            "if [ -f Makefile ] && grep -qE '^test:' Makefile; then echo '→ make test'; exec make test; fi",
+            // Rust: cargo test --lib (skip integration crate tests by default
+            // — they often need extra setup; the workflow author can edit).
+            "if [ -f Cargo.toml ]; then echo '→ cargo test --lib'; exec cargo test --lib; fi",
+            // JS/TS: respect the lockfile to pick the package manager. If the
+            // worktree is fresh (no node_modules), skip rather than fail —
+            // installing deps is project-specific and out of scope here.
+            'if [ -f package.json ] && grep -q \'"test"\' package.json; then',
+            '  if [ ! -d node_modules ]; then echo "⚠ node_modules absent dans le worktree — skip"; echo "[SIGNAL: SKIPPED]"; exit 0; fi',
+            "  if [ -f pnpm-lock.yaml ]; then echo '→ pnpm test'; exec pnpm test",
+            "  elif [ -f yarn.lock ]; then echo '→ yarn test'; exec yarn test",
+            "  else echo '→ npm test'; exec npm test; fi",
+            'fi',
+            // PHP: composer test (or vendor/bin/phpunit fallback).
+            'if [ -f composer.json ]; then',
+            '  if [ ! -d vendor ]; then echo "⚠ vendor/ absent — skip"; echo "[SIGNAL: SKIPPED]"; exit 0; fi',
+            '  if grep -q \'"test"\' composer.json; then echo "→ composer test"; exec composer test',
+            "  elif [ -x vendor/bin/phpunit ]; then echo '→ vendor/bin/phpunit'; exec vendor/bin/phpunit",
+            "  else echo 'no PHP test runner'; echo '[SIGNAL: SKIPPED]'; exit 0; fi",
+            'fi',
+            // Python: pytest if pyproject/setup.py exists.
+            "if [ -f pyproject.toml ] || [ -f setup.py ]; then echo '→ pytest'; exec pytest; fi",
+            // Nothing matched — soft skip.
+            "echo '→ aucun framework de tests détecté — skip'",
+            "echo '[SIGNAL: SKIPPED]'",
+            'exit 0',
+          ].join('\n'),
+        ],
+        exec_timeout_secs: 900,
+        on_result: [
+          { contains: 'ERROR', action: { type: 'Goto', step_name: 'implement', max_iterations: 2 } },
+        ],
+      }),
+      // Étape 6 — Review par un agent (idéalement DIFFÉRENT de celui
+      // qui a implémenté, anti confirmation-bias). Le user peut
+      // changer `agent` après création du préset. `requesting-code-review`
+      // structure la review (priorité, blocking issues, YAGNI check).
+      // Sur NEEDS_CHANGES, écrit `state.last_review` puis Goto implement.
+      step({
+        name: 'review',
+        step_type: { type: 'Agent' },
+        output_format: { type: 'Structured' },
+        prompt_template: t('wiz.preset.ticketToPr.reviewPrompt'),
+        skill_ids: [
+          'requesting-code-review',
+          'verification-before-completion',
+        ],
+        // Same auto-retry as `implement` — review on a heavy implementation
+        // also runs long enough to hit the Claude Code CLI silent-exit
+        // pattern. One retry is cheap insurance; subsequent attempts read
+        // the same artifacts so the verdict converges.
+        retry: { max_retries: 1, backoff: 'exponential' },
+        stall_timeout_secs: 1800,
+        // Only NEEDS_CHANGES has an explicit action (loop back to implement).
+        // APPROVED has no rule because the natural fall-through (continue to
+        // the next step `create_pr`) is exactly what we want — adding a Stop
+        // rule here would terminate the workflow prematurely. Earlier preset
+        // versions had `APPROVED → Stop` which silently skipped create_pr,
+        // ready_gate and notify_done.
+        on_result: [
+          { contains: 'NEEDS_CHANGES', action: { type: 'Goto', step_name: 'implement', max_iterations: 2 } },
+        ],
+      }),
+      // Étape 7 — Création de la PR. `finishing-a-development-branch`
+      // guide l'agent à travers les 4 options (merge local / PR / keep
+      // / discard) avec verify-tests-first et structured PR body. Pour
+      // le préset on pousse le pattern PR (option 2 du skill) — l'user
+      // peut switcher dans le prompt.
+      step({
+        name: 'create_pr',
+        step_type: { type: 'Agent' },
+        output_format: { type: 'Structured' },
+        prompt_template: t('wiz.preset.ticketToPr.createPrPrompt'),
+        skill_ids: [
+          'finishing-a-development-branch',
+          'verification-before-completion',
+        ],
+      }),
+      // Étape 8 — Validation humaine avant le merge. L'humain peut
+      // demander des changements (Goto implement) ou approuver (continue
+      // vers notify). Pas d'auto-merge en v1 — l'humain reste le gatekeeper.
+      step({
+        name: 'ready_gate',
+        step_type: { type: 'Gate' },
+        gate_message: t('wiz.preset.ticketToPr.readyGateMessage'),
+        gate_request_changes_target: 'implement',
+      }),
+      // Étape 9 — Notification finale (Slack par défaut, à adapter).
+      step({
+        name: 'notify_done',
+        step_type: { type: 'Notify' },
+        notify_config: {
+          url: 'https://hooks.slack.com/services/REPLACE_ME',
+          method: 'POST',
+          headers: {},
+          body_template: JSON.stringify({ text: t('wiz.preset.ticketToPr.notifyDoneBody') }),
+        },
+      }),
+    ],
+    // En cas d'échec à n'importe quel step (RunStatus::Failed après
+    // exhaustion des Goto loops par exemple), notif d'alerte.
+    onFailure: [
+      step({
+        name: 'rollback_notify',
+        step_type: { type: 'Notify' },
+        notify_config: {
+          url: 'https://hooks.slack.com/services/REPLACE_ME',
+          method: 'POST',
+          headers: {},
+          body_template: JSON.stringify({ text: t('wiz.preset.ticketToPr.rollbackBody') }),
+        },
+      }),
+    ],
+  };
+
+  return [AUTO_DEV, PR_GATE, DEPLOY_ROLLBACK, FEATURE_PLANNER, DAILY_HOST_AUDIT, TICKET_TO_PR];
 }

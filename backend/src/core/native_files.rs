@@ -494,6 +494,8 @@ mod tests {
             license: None,
             allowed_tools: None,
             auto_triggers: None,
+            external: false,
+            source_url: None,
         }
     }
 

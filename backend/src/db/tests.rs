@@ -1124,6 +1124,7 @@ fn sample_run(id: &str, workflow_id: &str) -> WorkflowRun {
         batch_name: None,
         parent_run_id: None,
         state: ::std::collections::HashMap::new(),
+        produced_branches: vec![],
     }
 }
 
@@ -1168,6 +1169,79 @@ fn workflow_runs_update() {
     assert_eq!(updated.tokens_used, 500);
     assert!(updated.finished_at.is_some());
     assert_eq!(updated.step_results.len(), 1);
+}
+
+#[test]
+fn workflow_runs_produced_branches_round_trip() {
+    // Regression: 0.7.0 added the `produced_branches` column on
+    // workflow_runs. Ensure it serialises on insert + parses back on
+    // load — without this test, a JSON typo or column-index drift in
+    // row_to_run would silently swallow the data.
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    let mut run = sample_run("r1", "w1");
+    run.produced_branches = vec![
+        crate::models::ProducedBranch {
+            branch_name: "kronn/Autobot/abcdef12".into(),
+            head_sha: "0123456789abcdef0123456789abcdef01234567".into(),
+            ahead: 3,
+            pushed_upstream: false,
+        },
+        crate::models::ProducedBranch {
+            branch_name: "kronn/Autobot/abcdef12-fix".into(),
+            head_sha: "fedcba9876543210fedcba9876543210fedcba98".into(),
+            ahead: 1,
+            pushed_upstream: true,
+        },
+    ];
+    crate::db::workflows::insert_run(&conn, &run).unwrap();
+
+    let loaded = crate::db::workflows::get_run(&conn, "r1").unwrap().unwrap();
+    assert_eq!(loaded.produced_branches.len(), 2);
+    assert_eq!(loaded.produced_branches[0].branch_name, "kronn/Autobot/abcdef12");
+    assert_eq!(loaded.produced_branches[0].ahead, 3);
+    assert!(!loaded.produced_branches[0].pushed_upstream);
+    assert!(loaded.produced_branches[1].pushed_upstream);
+}
+
+#[test]
+fn workflow_runs_legacy_row_has_empty_produced_branches() {
+    // A run inserted with no preserved branches → loaded back as Vec::new(),
+    // not a parse error. Documents the migration-compatibility contract.
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    let run = sample_run("r1", "w1");
+    assert!(run.produced_branches.is_empty(), "sample_run starts with empty");
+    crate::db::workflows::insert_run(&conn, &run).unwrap();
+
+    let loaded = crate::db::workflows::get_run(&conn, "r1").unwrap().unwrap();
+    assert!(loaded.produced_branches.is_empty());
+}
+
+#[test]
+fn workflow_runs_produced_branches_survive_update() {
+    // After an `update_run` that doesn't touch the field, prior
+    // `produced_branches` must still be present on reload — validates the
+    // SET clause in update_run_progress includes the column.
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    let mut run = sample_run("r1", "w1");
+    run.produced_branches = vec![crate::models::ProducedBranch {
+        branch_name: "kronn/Autobot/persisted".into(),
+        head_sha: "deadbeef".into(),
+        ahead: 1,
+        pushed_upstream: false,
+    }];
+    crate::db::workflows::insert_run(&conn, &run).unwrap();
+
+    // Mutate something else and persist.
+    run.status = RunStatus::Success;
+    run.finished_at = Some(Utc::now());
+    crate::db::workflows::update_run(&conn, &run).unwrap();
+
+    let loaded = crate::db::workflows::get_run(&conn, "r1").unwrap().unwrap();
+    assert_eq!(loaded.produced_branches.len(), 1, "produced_branches must survive update");
+    assert_eq!(loaded.produced_branches[0].branch_name, "kronn/Autobot/persisted");
 }
 
 #[test]
@@ -1223,6 +1297,7 @@ fn sample_batch_run(id: &str, qp_id: &str, total: u32) -> WorkflowRun {
         batch_name: Some(format!("Cadrage — {}", id)),
         parent_run_id: None,
         state: ::std::collections::HashMap::new(),
+        produced_branches: vec![],
     }
 }
 

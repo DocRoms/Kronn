@@ -381,6 +381,7 @@ pub fn create_batch_run(
         batch_name: input.batch_name.clone(),
         parent_run_id: input.parent_run_id.clone(),
         state: ::std::collections::HashMap::new(),
+        produced_branches: vec![],
     };
 
     let lang = if input.language.is_empty() { "fr".to_string() } else { input.language };
@@ -581,8 +582,9 @@ pub fn insert_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
     conn.execute(
         "INSERT INTO workflow_runs (id, workflow_id, status, trigger_context,
          step_results_json, tokens_used, workspace_path, started_at, finished_at,
-         run_type, batch_total, batch_completed, batch_failed, batch_name, parent_run_id, state)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+         run_type, batch_total, batch_completed, batch_failed, batch_name, parent_run_id, state,
+         produced_branches)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             run.id,
             run.workflow_id,
@@ -602,6 +604,7 @@ pub fn insert_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
             // Empty map → NULL (lets a `WHERE state IS NOT NULL` query
             // surface only runs that actually carried state).
             if run.state.is_empty() { None } else { Some(serde_json::to_string(&run.state)?) },
+            if run.produced_branches.is_empty() { None } else { Some(serde_json::to_string(&run.produced_branches)?) },
         ],
     )?;
     Ok(())
@@ -660,6 +663,10 @@ pub struct RunProgressSnapshot {
     /// 0.7.0 Phase 6 — durable state map. Persisted on every progress
     /// write so a daemon crash mid-run doesn't lose accumulated counters.
     pub state: ::std::collections::HashMap<String, String>,
+    /// 0.7.0 — branches preserved during worktree cleanup. Cleared
+    /// every snapshot — the runner re-sets it (typically once at the
+    /// terminal write) so we don't accumulate duplicates across writes.
+    pub produced_branches: Vec<crate::models::ProducedBranch>,
 }
 
 impl RunProgressSnapshot {
@@ -672,6 +679,7 @@ impl RunProgressSnapshot {
             workspace_path: run.workspace_path.clone(),
             finished_at: run.finished_at,
             state: run.state.clone(),
+            produced_branches: run.produced_branches.clone(),
         }
     }
 }
@@ -679,7 +687,8 @@ impl RunProgressSnapshot {
 pub fn update_run_progress(conn: &Connection, snap: RunProgressSnapshot) -> Result<()> {
     conn.execute(
         "UPDATE workflow_runs SET status = ?2, step_results_json = ?3,
-         tokens_used = ?4, workspace_path = ?5, finished_at = ?6, state = ?7
+         tokens_used = ?4, workspace_path = ?5, finished_at = ?6, state = ?7,
+         produced_branches = ?8
          WHERE id = ?1",
         params![
             snap.id,
@@ -689,6 +698,7 @@ pub fn update_run_progress(conn: &Connection, snap: RunProgressSnapshot) -> Resu
             snap.workspace_path,
             snap.finished_at.map(|d| d.to_rfc3339()),
             if snap.state.is_empty() { None } else { Some(serde_json::to_string(&snap.state)?) },
+            if snap.produced_branches.is_empty() { None } else { Some(serde_json::to_string(&snap.produced_branches)?) },
         ],
     )?;
     Ok(())
@@ -857,6 +867,9 @@ fn row_to_run(row: &rusqlite::Row) -> WorkflowRun {
     // rows or corrupt JSON falls back to empty (the run still loads,
     // just without prior state — fresh runs aren't affected).
     let state_str: Option<String> = row.get(15).unwrap_or(None);
+    // 0.7.0 — branches preserved by the runner during worktree cleanup.
+    // Same tolerance as `state` for legacy / corrupt rows.
+    let produced_branches_str: Option<String> = row.get(16).unwrap_or(None);
 
     WorkflowRun {
         id: row.get(0).unwrap_or_default(),
@@ -877,6 +890,9 @@ fn row_to_run(row: &rusqlite::Row) -> WorkflowRun {
         state: state_str.as_deref()
             .and_then(|s| serde_json::from_str::<::std::collections::HashMap<String, String>>(s).ok())
             .unwrap_or_default(),
+        produced_branches: produced_branches_str.as_deref()
+            .and_then(|s| serde_json::from_str::<Vec<crate::models::ProducedBranch>>(s).ok())
+            .unwrap_or_default(),
     }
 }
 
@@ -884,4 +900,5 @@ fn row_to_run(row: &rusqlite::Row) -> WorkflowRun {
 /// Centralized so adding/removing columns doesn't drift between queries.
 const WORKFLOW_RUN_COLS: &str = "id, workflow_id, status, trigger_context, step_results_json, \
     tokens_used, workspace_path, started_at, finished_at, \
-    run_type, batch_total, batch_completed, batch_failed, batch_name, parent_run_id, state";
+    run_type, batch_total, batch_completed, batch_failed, batch_name, parent_run_id, state, \
+    produced_branches";

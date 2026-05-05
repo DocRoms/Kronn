@@ -8,6 +8,36 @@ if [ -n "$KRONN_HOST_HOME" ] && [ "$KRONN_HOST_HOME" != "$HOME" ] && [ ! -e "$KR
   ln -sf "$HOME" "$KRONN_HOST_HOME" 2>/dev/null || true
 fi
 
+# Bridge agent installs that live under ~/.local/share/<tool> on the host.
+#
+# The launcher symlinks at ~/.local/bin/<tool> (mounted at /host-bin/local/<tool>
+# in the container) store the LITERAL host path of their target — typically
+# /home/<host_user>/.local/share/<tool>/<version>/binary. Inside the container
+# `~/.local/share` is mounted at /host-home/.local/share, NOT under $HOME, so
+# those symlinks resolve into the void → spawning the direct binary fails and
+# Kronn silently falls back to `npx`.
+#
+# Why we care: the npx fallback wraps the agent in an additional Node.js
+# process. On long Claude Code sessions (heavy implementation steps, > 20 min)
+# the npx-wrapped path crashed with `exit 1` and no stderr — a UX-breaking
+# regression for the workflow runner. Resolving the direct binary fixes the
+# whole class of issues since the standalone Bun-bundled binary (Claude),
+# Codex CLI, etc. handle their own lifecycle without an extra runtime.
+#
+# The bridge: drop a per-tool symlink under ~/.local/share so the host paths
+# resolve. Idempotent — only creates the symlink when the target dir exists
+# under /host-home and the link doesn't already exist locally.
+if [ -d "/host-home/.local/share" ]; then
+  mkdir -p "${HOME}/.local/share"
+  for tool in claude vibe codex copilot gemini kiro junie; do
+    src="/host-home/.local/share/${tool}"
+    dst="${HOME}/.local/share/${tool}"
+    if [ -d "$src" ] && [ ! -e "$dst" ]; then
+      ln -sf "$src" "$dst" 2>/dev/null || true
+    fi
+  done
+fi
+
 # Global gitignore for Kronn runtime directories (covers all repos + worktrees)
 KRONN_GITIGNORE="${HOME}/.kronn-gitignore"
 cat > "$KRONN_GITIGNORE" <<'GITIGNORE'

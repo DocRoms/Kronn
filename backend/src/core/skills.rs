@@ -48,6 +48,18 @@ const BUILTIN_SKILLS: &[BuiltinSkill] = &[
     BuiltinSkill { id: "gdpr", content: include_str!("../skills/gdpr.md") },
     // Meta
     BuiltinSkill { id: "structured-questions", content: include_str!("../skills/structured-questions.md") },
+    // External skills (vendored from third-party MIT-licensed projects).
+    // See THIRD_PARTY_SKILLS.md at repo root for sources, licenses, commit
+    // hashes, and update process. Each skill's frontmatter includes
+    // `external: true` + `source_url` for in-app attribution.
+    BuiltinSkill { id: "test-driven-development", content: include_str!("../skills/external/test-driven-development.md") },
+    BuiltinSkill { id: "systematic-debugging", content: include_str!("../skills/external/systematic-debugging.md") },
+    BuiltinSkill { id: "writing-plans", content: include_str!("../skills/external/writing-plans.md") },
+    BuiltinSkill { id: "brainstorming", content: include_str!("../skills/external/brainstorming.md") },
+    BuiltinSkill { id: "verification-before-completion", content: include_str!("../skills/external/verification-before-completion.md") },
+    BuiltinSkill { id: "requesting-code-review", content: include_str!("../skills/external/requesting-code-review.md") },
+    BuiltinSkill { id: "receiving-code-review", content: include_str!("../skills/external/receiving-code-review.md") },
+    BuiltinSkill { id: "finishing-a-development-branch", content: include_str!("../skills/external/finishing-a-development-branch.md") },
 ];
 
 // ─── Frontmatter parsing ────────────────────────────────────────────────────
@@ -70,6 +82,8 @@ fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Skill> 
     let mut category = SkillCategory::Domain;
     let mut license: Option<String> = None;
     let mut allowed_tools: Option<String> = None;
+    let mut external = false;
+    let mut source_url: Option<String> = None;
     let auto_triggers = parse_auto_triggers_block(yaml_str);
 
     for line in yaml_str.lines() {
@@ -99,6 +113,11 @@ fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Skill> 
         } else if let Some(val) = line.strip_prefix("allowed-tools:") {
             let v = val.trim().to_string();
             if !v.is_empty() { allowed_tools = Some(v); }
+        } else if let Some(val) = line.strip_prefix("external:") {
+            external = matches!(val.trim(), "true" | "yes" | "1");
+        } else if let Some(val) = line.strip_prefix("source_url:") {
+            let v = val.trim().to_string();
+            if !v.is_empty() { source_url = Some(v); }
         }
     }
 
@@ -122,6 +141,8 @@ fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Skill> 
         license,
         allowed_tools,
         auto_triggers,
+        external,
+        source_url,
     })
 }
 

@@ -1860,6 +1860,28 @@ pub struct WorkflowRun {
     #[serde(default, skip_serializing_if = "::std::collections::HashMap::is_empty")]
     #[ts(type = "Record<string, string>")]
     pub state: ::std::collections::HashMap<String, String>,
+    /// 0.7.0 — branches preserved by the runner during worktree cleanup
+    /// because their HEAD held commits not on any known base ref. The UI
+    /// surfaces them on the run detail page so the operator can recover
+    /// the work even when the agent's push step failed (pre-push hook
+    /// blocked, no auth, network down, …).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub produced_branches: Vec<ProducedBranch>,
+}
+
+/// One preserved branch on a workflow run. Mirrors `workspace::PreservedBranch`
+/// but lives on the model side so it can serialize to JSON for storage and
+/// type-export for the frontend.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ProducedBranch {
+    pub branch_name: String,
+    pub head_sha: String,
+    pub ahead: u32,
+    /// True when the branch had an upstream tracking ref at cleanup time —
+    /// i.e. the agent at least *tried* to push (and may have partially
+    /// succeeded; check `ahead` for unpushed commits).
+    pub pushed_upstream: bool,
 }
 
 fn default_run_type() -> String { "linear".to_string() }
@@ -1965,6 +1987,18 @@ pub struct Skill {
     /// frontmatter convention in `backend/src/skills/kronn-docs.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_triggers: Option<AutoTriggers>,
+    /// 0.7+ — true when the skill content was vendored from a third-party
+    /// open-source project (see `THIRD_PARTY_SKILLS.md` at repo root).
+    /// The frontend renders a "🔗 External" badge to make attribution
+    /// visible in-app. Set via the `external: true` frontmatter field on
+    /// builtin skills under `backend/src/skills/external/`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub external: bool,
+    /// 0.7+ — when `external` is true, points to the upstream project
+    /// (clickable in the UI for attribution). Set via the `source_url`
+    /// frontmatter field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
 }
 
 /// Auto-trigger regex buckets declared in a skill's frontmatter YAML.

@@ -37,6 +37,10 @@ export default defineConfig({
     css: false,
     testTimeout: 30000,
     hookTimeout: 30000,
+    // E2E specs live under e2e/ and use Playwright's runner; vitest must
+    // skip them or `import { test } from '@playwright/test'` blows up
+    // with "test.describe() called outside Playwright".
+    exclude: ['node_modules/**', 'dist/**', 'e2e/**'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'lcov'],

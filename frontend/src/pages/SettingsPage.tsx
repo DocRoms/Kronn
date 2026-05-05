@@ -21,6 +21,38 @@ import { setAuthToken } from '../lib/api';
 import { useTheme, type ThemeMode } from '../lib/ThemeContext';
 import { AgentsSection } from '../components/settings/AgentsSection';
 import { HostDiscoverySection } from '../components/settings/HostDiscoverySection';
+
+/** 0.7+ — Render a description paragraph and visually separate the optional
+ *  attribution suffix ("Adapted from <url> (<license>).") so the user sees
+ *  upstream attribution without having to read the description carefully.
+ *  Used for skill cards AND directive cards (Caveman + vendored skills).
+ *  No-op when the description doesn't end with the Adapted-from pattern.
+ */
+const ATTRIBUTION_RE = /\s*Adapted from [^\s]+ \([^)]+\)\.\s*$/;
+function AttributedDescription({ text, className }: { text: string; className?: string }) {
+  const match = text.match(ATTRIBUTION_RE);
+  if (!match) {
+    return <div className={className}>{text}</div>;
+  }
+  const main = text.replace(ATTRIBUTION_RE, '').trim();
+  const attribution = match[0].trim();
+  return (
+    <div className={className}>
+      {main && <div>{main}</div>}
+      <div
+        style={{
+          fontStyle: 'italic',
+          opacity: 0.7,
+          fontSize: '0.92em',
+          marginTop: main ? 8 : 0,
+        }}
+      >
+        {attribution}
+      </div>
+    </div>
+  );
+}
+
 import { IdentitySection } from '../components/settings/IdentitySection';
 import { ProfilesSection } from '../components/settings/ProfilesSection';
 import { UsageSection } from '../components/settings/UsageSection';
@@ -73,6 +105,12 @@ export function SettingsPage({
   // from hanging around in memory or localStorage between sessions).
   const [secretCode, setSecretCode] = useState('');
   const [secretSubmitting, setSecretSubmitting] = useState(false);
+
+  // 0.7+ — "See more" toggle for skill / directive content (mirror of the
+  // Profile persona_prompt expand pattern). One id at a time, otherwise
+  // the page becomes a scroll wall of full markdown bodies.
+  const [expandedSkillId, setExpandedSkillId] = useState<string | null>(null);
+  const [expandedDirectiveId, setExpandedDirectiveId] = useState<string | null>(null);
 
   // The Secret Code row is hidden by default — it reveals itself when
   // the user enters the Konami code (↑↑↓↓←→←→BA) anywhere on the page.
@@ -710,7 +748,67 @@ export function SettingsPage({
                   </div>
                 </div>
                 {skill.description && (
-                  <div className="text-sm text-muted mb-3">{skill.description}</div>
+                  <AttributedDescription
+                    text={skill.description}
+                    className="text-sm text-muted mb-3"
+                  />
+                )}
+                {/* 0.7+ — "See more" expands the full SKILL.md body (the
+                    procedures + rituals the agent actually loads). Mirror
+                    of the Profile persona_prompt see-more so the user can
+                    audit what each skill ships, including vendored ones. */}
+                {skill.content && skill.content.trim().length > 100 && (
+                  <div className="mb-3">
+                    <div
+                      className="text-xs text-muted"
+                      style={{
+                        lineHeight: 1.45,
+                        whiteSpace: 'pre-wrap',
+                        ...(expandedSkillId !== skill.id ? {
+                          overflow: 'hidden',
+                          display: '-webkit-box',
+                          WebkitLineClamp: 2 as const,
+                          WebkitBoxOrient: 'vertical' as const,
+                        } : {
+                          maxHeight: 360,
+                          overflowY: 'auto' as const,
+                          padding: '8px 10px',
+                          background: 'var(--kr-bg-subtle)',
+                          borderRadius: 6,
+                          border: '1px solid var(--kr-border-faint)',
+                          fontFamily: 'var(--kr-font-mono)',
+                          fontSize: 11,
+                        }),
+                      }}
+                    >
+                      {skill.content}
+                    </div>
+                    <button
+                      className="set-see-more-btn"
+                      onClick={() => setExpandedSkillId(expandedSkillId === skill.id ? null : skill.id)}
+                    >
+                      {expandedSkillId === skill.id ? t('common.seeLess') : t('common.seeMore')}
+                    </button>
+                  </div>
+                )}
+                {/* 0.7+ — External skill attribution (vendored from third-party).
+                    Mirror of the Caveman directive's "Source" link in the
+                    directives section: makes the upstream project visible
+                    even when the user doesn't read the description suffix. */}
+                {skill.external && skill.source_url && (
+                  <a
+                    href={skill.source_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-xs"
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 4,
+                      color: 'var(--kr-accent)', textDecoration: 'none',
+                      marginBottom: 12,
+                    }}
+                  >
+                    <ExternalLink size={10} /> {t('skills.source')}
+                  </a>
                 )}
                 {/* Auto-activation toggle — only relevant when the skill
                     declares `auto_triggers` in its YAML frontmatter.
@@ -925,7 +1023,45 @@ export function SettingsPage({
                   </div>
                 </div>
                 {directive.description && (
-                  <div className="text-sm text-muted mb-2">{directive.description}</div>
+                  <AttributedDescription
+                    text={directive.description}
+                    className="text-sm text-muted mb-2"
+                  />
+                )}
+                {/* See-more for the directive body (the actual prompt content). */}
+                {directive.content && directive.content.trim().length > 100 && (
+                  <div className="mb-2">
+                    <div
+                      className="text-xs text-muted"
+                      style={{
+                        lineHeight: 1.45,
+                        whiteSpace: 'pre-wrap',
+                        ...(expandedDirectiveId !== directive.id ? {
+                          overflow: 'hidden',
+                          display: '-webkit-box',
+                          WebkitLineClamp: 2 as const,
+                          WebkitBoxOrient: 'vertical' as const,
+                        } : {
+                          maxHeight: 360,
+                          overflowY: 'auto' as const,
+                          padding: '8px 10px',
+                          background: 'var(--kr-bg-subtle)',
+                          borderRadius: 6,
+                          border: '1px solid var(--kr-border-faint)',
+                          fontFamily: 'var(--kr-font-mono)',
+                          fontSize: 11,
+                        }),
+                      }}
+                    >
+                      {directive.content}
+                    </div>
+                    <button
+                      className="set-see-more-btn"
+                      onClick={() => setExpandedDirectiveId(expandedDirectiveId === directive.id ? null : directive.id)}
+                    >
+                      {expandedDirectiveId === directive.id ? t('common.seeLess') : t('common.seeMore')}
+                    </button>
+                  </div>
                 )}
                 {directive.source_url && (
                   <a
@@ -1188,7 +1324,7 @@ export function SettingsPage({
             </div>
             <div className="flex-row gap-6">
               <input
-                type="range" min={1} max={60} step={1}
+                type="range" min={1} max={120} step={1}
                 value={serverStallTimeout}
                 onChange={async (e) => {
                   const v = Number(e.target.value);

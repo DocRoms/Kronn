@@ -284,6 +284,47 @@ Workflow export bundles all Quick Prompts referenced by `BatchQuickPrompt` steps
 - STATE pedagogy chips on Agent step cards when an `on_result: Goto` is detected (hint at `{{state.X}}` write/read pattern).
 - Rollback wizard accepts Notify + Agent + ApiCall, explicitly rejects Gate.
 
+### Ticket Autopilot — preset 0.7+ (Sprint 1)
+
+`TICKET_TO_PR` dans `frontend/src/lib/workflow-templates/v07-presets.ts` — workflow opinionated qui prend un ticket en entrée et drive jusqu'à la PR prête au merge. 9 steps + on_failure rollback :
+
+```
+fetch_issue (JsonData fixture, swappable→ApiCall)
+  → analyze (Agent + writing-plans + brainstorming + verification)
+  → plan_gate (humain valide le plan)
+  → implement (Agent + tdd + debugging + verification + receiving-code-review)
+  → run_tests (Exec, Goto implement on ERROR max 5)
+  → review (Agent + requesting-code-review + verification, Goto implement on NEEDS_CHANGES)
+  → create_pr (Agent + finishing-a-development-branch + verification)
+  → ready_gate (humain valide la PR)
+  → notify_done (Notify webhook)
+```
+
+Limites assumées Sprint 1 : pas de `Wait`/Poll CI auto (Sprint 3), pas de `skip_if` ni "Ask Human" mid-run dynamique (Sprint 2), pas de webhook receiver pour reprendre sur retours review humaine (Sprint 4), pas d'auto-merge ApiCall (v2).
+
+Doc utilisateur complète : [`docs/ticket-autopilot.md`](../docs/ticket-autopilot.md).
+
+### Vendored external skills (0.7+)
+
+`backend/src/skills/external/` contient 8 skills méthodologiques **vendored** depuis [`obra/superpowers`](https://github.com/obra/superpowers) (MIT, commit `e7a2d164`, imported 2026-05-04) :
+
+| Skill | Use case |
+|-------|----------|
+| `test-driven-development` | rituel red-green-refactor strict |
+| `systematic-debugging` | root-cause à 4 phases |
+| `writing-plans` | structurer un plan multi-step |
+| `brainstorming` | explorer intent + design avant code |
+| `verification-before-completion` | anti "done = compiled" — evidence avant claim |
+| `requesting-code-review` | structurer une review |
+| `receiving-code-review` | technique pour appliquer feedback review |
+| `finishing-a-development-branch` | créer PR avec verify-tests-first |
+
+Toutes auto-loadées par `BUILTIN_SKILLS` dans `core/skills.rs`. Frontmatter étendu avec `external: true`, `source_url`, `source_path`, `source_commit`, `imported_at`. Le pattern d'attribution (Caveman directive) est appliqué : description suffix `Adapted from <url> (<license>).` séparé visuellement (italique + opacité 70%) dans la skill card. Lien `🔗 Source` cliquable + badge `🔗 External` rendus par `SettingsPage::AttributedDescription`.
+
+Pas de migration SQL : les skills sont embeddées au compile-time via `include_str!()`. Bump backend version → restart pour les voir.
+
+Catalog des sources + licences : [`THIRD_PARTY_SKILLS.md`](../THIRD_PARTY_SKILLS.md). Update process documenté.
+
 ### Modularité unitaire des workflows (0.7+)
 
 Trois briques pour factoriser les workflows et coller au use-case "remplacer un step mécanique par un appel direct" :

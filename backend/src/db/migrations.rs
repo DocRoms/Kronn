@@ -65,6 +65,7 @@ pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> 
         ("043_workflow_exec_allowlist", include_str!("sql/043_workflow_exec_allowlist.sql")),
         ("044_workflow_variables", include_str!("sql/044_workflow_variables.sql")),
         ("045_quick_apis", include_str!("sql/045_quick_apis.sql")),
+        ("046_workflow_run_produced_branches", include_str!("sql/046_workflow_run_produced_branches.sql")),
     ];
 
     // Check if there are pending migrations before backing up

@@ -9,7 +9,7 @@ import {
   Trash2,
   Pencil, ShieldCheck, Check, Zap, FileText, Settings, Rocket,
   Menu, Lock, Unlock, RefreshCw, Share2, Users2, Star,
-  FlaskConical, Info,
+  FlaskConical, Info, ChevronRight, UserCircle,
 } from 'lucide-react';
 import { MatrixText } from './MatrixText';
 import { ProfileTooltip } from './ProfileTooltip';
@@ -78,6 +78,13 @@ export function ChatHeader({
   const [showMcpPopover, setShowMcpPopover] = useState(false);
   const [mcpSearchFilter, setMcpSearchFilter] = useState('');
   const [showProfileEditor, setShowProfileEditor] = useState(false);
+  // Which collapsible section in the profile editor popover is open
+  // (only one at a time). Mirrors NewDiscussionForm's pattern so the
+  // popover stays a manageable height even when there are many skills /
+  // profiles / directives configured. Default = null (everything
+  // collapsed; the operator clicks the section they want to edit).
+  const [expandedConfigSection, setExpandedConfigSection] =
+    useState<'profiles' | 'skills' | 'directives' | null>(null);
   const [showAgentSwitch, setShowAgentSwitch] = useState(false);
   // Which inline badge popover is currently open, if any. Encoded as
   // "type:id" (e.g. "profile:default-architect", "skill:bootstrap-architect")
@@ -545,64 +552,93 @@ export function ChatHeader({
                 </select>
               </div>
 
-              {/* Profiles */}
+              {/* Profiles — collapsed accordion (was always-open chip wall;
+                  with N profiles configured the popover overflowed the
+                  viewport and clipped the Directives + Tier sections at
+                  the bottom). */}
               {availableProfiles.length > 0 && (
                 <div className="disc-popover-section">
-                  <div className="disc-popover-label">{t('profiles.select')}</div>
-                  <div className="flex-wrap gap-2">
-                    {availableProfiles.map(profile => {
-                      const active = (discussion.profile_ids ?? []).includes(profile.id);
-                      return (
-                        <ProfileTooltip key={profile.id} profile={profile}>
-                          <button
-                            className="disc-toggle-pill"
-                            data-active={active}
-                            data-color="purple"
-                            style={{
-                              borderColor: active ? (profile.color || 'rgba(var(--kr-purple-rgb), 0.4)') : undefined,
-                              background: active ? `${profile.color}15` : undefined,
-                              color: active ? (profile.color || 'var(--kr-purple-soft)') : undefined,
-                            }}
-                            onClick={async () => {
-                              const current = discussion.profile_ids ?? [];
-                              const next = active ? current.filter((id: string) => id !== profile.id) : [...current, profile.id];
-                              await discussionsApi.update(discussion.id, { profile_ids: next });
-                              onDiscussionUpdated();
-                            }}>
-                            {active && <Check size={8} />}
-                            {profile.avatar} {profile.persona_name || profile.name}
-                          </button>
-                        </ProfileTooltip>
-                      );
-                    })}
-                  </div>
+                  <button
+                    type="button"
+                    className="disc-advanced-section-toggle"
+                    onClick={() => setExpandedConfigSection(prev => prev === 'profiles' ? null : 'profiles')}
+                  >
+                    <ChevronRight size={9} className="disc-chevron" data-expanded={expandedConfigSection === 'profiles'} />
+                    <UserCircle size={10} />
+                    <span>{t('profiles.select')}</span>
+                    {(discussion.profile_ids ?? []).length > 0 && (
+                      <span className="disc-advanced-count">{(discussion.profile_ids ?? []).length}</span>
+                    )}
+                  </button>
+                  {expandedConfigSection === 'profiles' && (
+                    <div className="flex-wrap gap-2" style={{ paddingTop: 6 }}>
+                      {availableProfiles.map(profile => {
+                        const active = (discussion.profile_ids ?? []).includes(profile.id);
+                        return (
+                          <ProfileTooltip key={profile.id} profile={profile}>
+                            <button
+                              className="disc-toggle-pill"
+                              data-active={active}
+                              data-color="purple"
+                              style={{
+                                borderColor: active ? (profile.color || 'rgba(var(--kr-purple-rgb), 0.4)') : undefined,
+                                background: active ? `${profile.color}15` : undefined,
+                                color: active ? (profile.color || 'var(--kr-purple-soft)') : undefined,
+                              }}
+                              onClick={async () => {
+                                const current = discussion.profile_ids ?? [];
+                                const next = active ? current.filter((id: string) => id !== profile.id) : [...current, profile.id];
+                                await discussionsApi.update(discussion.id, { profile_ids: next });
+                                onDiscussionUpdated();
+                              }}>
+                              {active && <Check size={8} />}
+                              {profile.avatar} {profile.persona_name || profile.name}
+                            </button>
+                          </ProfileTooltip>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               )}
 
-              {/* Skills */}
+              {/* Skills — same collapsed-by-default treatment. */}
               {availableSkills.length > 0 && (
                 <div className="disc-popover-section">
-                  <div className="disc-popover-label">{t('skills.selectSkills')}</div>
-                  <div className="flex-wrap gap-2">
-                    {availableSkills.map(skill => {
-                      const active = (discussion.skill_ids ?? []).includes(skill.id);
-                      return (
-                        <button key={skill.id}
-                          className="disc-toggle-pill"
-                          data-active={active}
-                          data-color="accent"
-                          onClick={async () => {
-                            const current = discussion.skill_ids ?? [];
-                            const next = active ? current.filter((id: string) => id !== skill.id) : [...current, skill.id];
-                            await discussionsApi.update(discussion.id, { skill_ids: next });
-                            onDiscussionUpdated();
-                          }}>
-                          {active && <Check size={8} />}
-                          {skill.name}
-                        </button>
-                      );
-                    })}
-                  </div>
+                  <button
+                    type="button"
+                    className="disc-advanced-section-toggle"
+                    onClick={() => setExpandedConfigSection(prev => prev === 'skills' ? null : 'skills')}
+                  >
+                    <ChevronRight size={9} className="disc-chevron" data-expanded={expandedConfigSection === 'skills'} />
+                    <Zap size={10} />
+                    <span>{t('skills.selectSkills')}</span>
+                    {(discussion.skill_ids ?? []).length > 0 && (
+                      <span className="disc-advanced-count">{(discussion.skill_ids ?? []).length}</span>
+                    )}
+                  </button>
+                  {expandedConfigSection === 'skills' && (
+                    <div className="flex-wrap gap-2" style={{ paddingTop: 6 }}>
+                      {availableSkills.map(skill => {
+                        const active = (discussion.skill_ids ?? []).includes(skill.id);
+                        return (
+                          <button key={skill.id}
+                            className="disc-toggle-pill"
+                            data-active={active}
+                            data-color="accent"
+                            onClick={async () => {
+                              const current = discussion.skill_ids ?? [];
+                              const next = active ? current.filter((id: string) => id !== skill.id) : [...current, skill.id];
+                              await discussionsApi.update(discussion.id, { skill_ids: next });
+                              onDiscussionUpdated();
+                            }}>
+                            {active && <Check size={8} />}
+                            {skill.name}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -628,30 +664,43 @@ export function ChatHeader({
                 </div>
               </div>
 
-              {/* Directives */}
+              {/* Directives — same accordion pattern. */}
               {availableDirectives.length > 0 && (
-                <div>
-                  <div className="disc-popover-label">{t('directives.title')}</div>
-                  <div className="flex-wrap gap-2">
-                    {availableDirectives.map(directive => {
-                      const active = (discussion.directive_ids ?? []).includes(directive.id);
-                      return (
-                        <button key={directive.id}
-                          className="disc-toggle-pill"
-                          data-active={active}
-                          data-color="warning"
-                          onClick={async () => {
-                            const current = discussion.directive_ids ?? [];
-                            const next = active ? current.filter((id: string) => id !== directive.id) : [...current, directive.id];
-                            await discussionsApi.update(discussion.id, { directive_ids: next });
-                            onDiscussionUpdated();
-                          }}>
-                          {active && <Check size={8} />}
-                          {directive.icon} {directive.name}
-                        </button>
-                      );
-                    })}
-                  </div>
+                <div className="disc-popover-section">
+                  <button
+                    type="button"
+                    className="disc-advanced-section-toggle"
+                    onClick={() => setExpandedConfigSection(prev => prev === 'directives' ? null : 'directives')}
+                  >
+                    <ChevronRight size={9} className="disc-chevron" data-expanded={expandedConfigSection === 'directives'} />
+                    <FileText size={10} />
+                    <span>{t('directives.title')}</span>
+                    {(discussion.directive_ids ?? []).length > 0 && (
+                      <span className="disc-advanced-count">{(discussion.directive_ids ?? []).length}</span>
+                    )}
+                  </button>
+                  {expandedConfigSection === 'directives' && (
+                    <div className="flex-wrap gap-2" style={{ paddingTop: 6 }}>
+                      {availableDirectives.map(directive => {
+                        const active = (discussion.directive_ids ?? []).includes(directive.id);
+                        return (
+                          <button key={directive.id}
+                            className="disc-toggle-pill"
+                            data-active={active}
+                            data-color="warning"
+                            onClick={async () => {
+                              const current = discussion.directive_ids ?? [];
+                              const next = active ? current.filter((id: string) => id !== directive.id) : [...current, directive.id];
+                              await discussionsApi.update(discussion.id, { directive_ids: next });
+                              onDiscussionUpdated();
+                            }}>
+                            {active && <Check size={8} />}
+                            {directive.icon} {directive.name}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
