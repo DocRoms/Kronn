@@ -24,3 +24,4 @@ pub mod debug;
 pub mod themes;
 pub mod docs;
 pub mod rtk;
+pub mod user_context;

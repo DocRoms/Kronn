@@ -31,6 +31,7 @@ pub fn list_projects(conn: &Connection) -> Result<Vec<Project>> {
                 .unwrap_or(AiConfigStatus { detected: false, configs: vec![] }),
             audit_status: AiAuditStatus::default(), // enriched by API layer
             ai_todo_count: 0,  // enriched by API layer
+            needs_docs_migration: false,  // enriched by API layer
             default_skill_ids: serde_json::from_str(&skill_ids_str).unwrap_or_default(),
             default_profile_id: row.get(9)?,
             briefing_notes: row.get(10)?,
@@ -68,6 +69,7 @@ pub fn get_project(conn: &Connection, id: &str) -> Result<Option<Project>> {
                 .unwrap_or(AiConfigStatus { detected: false, configs: vec![] }),
             audit_status: AiAuditStatus::default(),
             ai_todo_count: 0,
+            needs_docs_migration: false,
             default_skill_ids: serde_json::from_str(&skill_ids_str).unwrap_or_default(),
             default_profile_id: row.get(9)?,
             briefing_notes: row.get(10)?,

@@ -1314,7 +1314,8 @@ fn trigger_mcp_drift(state: &AppState, project_ids: Vec<String>) {
 
         for project in audited {
             let project_path = crate::core::scanner::resolve_host_path(&project.path);
-            let checksums_path = project_path.join("ai/checksums.json");
+            // Path-agnostic — picks docs/ (post-pivot) or ai/ (legacy).
+            let checksums_path = crate::core::scanner::detect_docs_dir(&project_path).join("checksums.json");
             if !checksums_path.exists() {
                 continue;
             }

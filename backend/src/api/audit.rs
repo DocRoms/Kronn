@@ -44,12 +44,12 @@ pub(crate) struct AnalysisStep {
 pub(crate) const ANALYSIS_STEPS: &[AnalysisStep] = &[
     // Step 1: Project analysis + index
     AnalysisStep {
-        target_file: "ai/index.md",
+        target_file: "docs/AGENTS.md",
         prompt: "\
 Read README.md, package.json (or composer.json, Cargo.toml, go.mod), Makefile, Dockerfile, docker-compose.yml, \
 CI configs (.github/workflows, .gitlab-ci.yml), and main config files.\n\
 Determine: tech stack, project structure, build/dev/test commands, key patterns, third-party services, CI/CD pipeline.\n\n\
-Then fill ai/index.md — replace ALL {{PLACEHOLDERS}} in each section:\n\
+Then fill docs/AGENTS.md — replace ALL {{PLACEHOLDERS}} in each section:\n\
 - {{PROJECT_NAME}} and {{STACK_SUMMARY}}: project name and one-line stack description\n\
 - Common tasks table: replace {{TASK_EXAMPLE_*}} with 5-7 real task→file mappings\n\
 - Prerequisites table: replace {{PREREQ_*}} with Docker, language versions, build commands\n\
@@ -64,12 +64,12 @@ Then fill ai/index.md — replace ALL {{PLACEHOLDERS}} in each section:\n\
 
     // Step 2: Glossary (early — defines vocabulary for subsequent steps)
     AnalysisStep {
-        target_file: "ai/glossary.md",
+        target_file: "docs/glossary.md",
         prompt: "\
-Read ai/index.md. Search codebase for domain terms, abbreviations, naming conventions.\n\n\
-Fill ai/glossary.md — replace ALL {{PLACEHOLDERS}}:\n\
+Read docs/AGENTS.md. Search codebase for domain terms, abbreviations, naming conventions.\n\n\
+Fill docs/glossary.md — replace ALL {{PLACEHOLDERS}}:\n\
 - Categorize: Architecture, Domain, Environments, External, Abbreviations\n\
-- Each term: one-line definition + optional ai/ reference\n\
+- Each term: one-line definition + optional docs/ reference\n\
 - Unknown domain terms: add `<!-- TODO: ask user -->` after the definition\n\
 - Cover: framework terms, model names, services, acronyms in code",
         sources: &[],
@@ -77,10 +77,10 @@ Fill ai/glossary.md — replace ALL {{PLACEHOLDERS}}:\n\
 
     // Step 3: Repo map
     AnalysisStep {
-        target_file: "ai/repo-map.md",
+        target_file: "docs/repo-map.md",
         prompt: "\
-Read ai/index.md and ai/glossary.md for context. Explore the directory structure (2-3 levels deep).\n\n\
-Fill ai/repo-map.md — replace ALL {{PLACEHOLDERS}}:\n\
+Read docs/AGENTS.md and docs/glossary.md for context. Explore the directory structure (2-3 levels deep).\n\n\
+Fill docs/repo-map.md — replace ALL {{PLACEHOLDERS}}:\n\
 - {{STACK_OVERVIEW}}: one paragraph summarizing the architecture\n\
 - Key folders tree: replace {{FOLDER_*}} with every major directory (2-3 levels deep), tree format with annotations\n\
 - Entrypoints table: replace {{ENTRYPOINT_*}} with 5-7 key files (config, routes, models, etc.)\n\
@@ -90,11 +90,11 @@ Fill ai/repo-map.md — replace ALL {{PLACEHOLDERS}}:\n\
 
     // Step 4: Coding rules
     AnalysisStep {
-        target_file: "ai/coding-rules.md",
+        target_file: "docs/coding-rules.md",
         prompt: "\
-Read ai/index.md for context. Find ALL linter, formatter, and type-checker configs in the repo \
+Read docs/AGENTS.md for context. Find ALL linter, formatter, and type-checker configs in the repo \
 (e.g. .eslintrc, eslint.config.js, prettier, rustfmt.toml, tsconfig.json, phpcs.xml, etc.).\n\n\
-Fill ai/coding-rules.md — replace ALL {{PLACEHOLDERS}}:\n\
+Fill docs/coding-rules.md — replace ALL {{PLACEHOLDERS}}:\n\
 - Replace {{LANGUAGE_*}} with one section per language/framework used in the project\n\
 - For each language, fill the Tools table: {{CONFIG}} and {{COMMAND}} for linter, formatter, type checker\n\
 - Replace {{CONVENTION_*}} with coding conventions OBSERVED in existing code (naming, error handling, imports). Write fewer rather than inventing.\n\
@@ -106,11 +106,11 @@ Fill ai/coding-rules.md — replace ALL {{PLACEHOLDERS}}:\n\
 
     // Step 5: Testing & quality
     AnalysisStep {
-        target_file: "ai/testing-quality.md",
+        target_file: "docs/testing-quality.md",
         prompt: "\
-Read ai/index.md for context. Find test framework configs (jest, vitest, phpunit, pytest, cargo test, bats, etc.) \
+Read docs/AGENTS.md for context. Find test framework configs (jest, vitest, phpunit, pytest, cargo test, bats, etc.) \
 and CI quality gates.\n\n\
-Fill ai/testing-quality.md — replace ALL {{PLACEHOLDERS}}:\n\
+Fill docs/testing-quality.md — replace ALL {{PLACEHOLDERS}}:\n\
 - Build & quality checks table: replace {{CHECK_*}} and {{COMMAND}} with all quality checks (compile, lint, format, test, build)\n\
 - Test infrastructure table: replace {{LANG_*}}, {{RUNNER}}, {{CONFIG}} for each language\n\
 - Test suites table: replace {{SUITE_*}} with test files/suites and approximate counts\n\
@@ -122,10 +122,10 @@ Fill ai/testing-quality.md — replace ALL {{PLACEHOLDERS}}:\n\
 
     // Step 6: Architecture overview
     AnalysisStep {
-        target_file: "ai/architecture/overview.md",
+        target_file: "docs/architecture/overview.md",
         prompt: "\
-Read ai/index.md and ai/repo-map.md for context. Analyze the high-level architecture.\n\n\
-Fill ai/architecture/overview.md — replace ALL {{PLACEHOLDERS}}:\n\
+Read docs/AGENTS.md and docs/repo-map.md for context. Analyze the high-level architecture.\n\n\
+Fill docs/architecture/overview.md — replace ALL {{PLACEHOLDERS}}:\n\
 - Apps/services table: replace {{SERVICE_*}}, {{PORT}}, {{TECH}}, {{ROLE}} for each service\n\
 - Key patterns: replace {{PATTERN_*_NAME}} and {{PATTERN_*_DESCRIPTION}} with 3-5 architectural patterns \
   (API pattern, state management, auth, data flow, caching, etc.) — 2-3 sentences each\n\
@@ -137,11 +137,11 @@ Fill ai/architecture/overview.md — replace ALL {{PLACEHOLDERS}}:\n\
 
     // Step 7: Debug operations
     AnalysisStep {
-        target_file: "ai/operations/debug-operations.md",
+        target_file: "docs/operations/debug-operations.md",
         prompt: "\
-Read ai/index.md for context. Find operational commands from Makefile, package.json scripts, \
+Read docs/AGENTS.md for context. Find operational commands from Makefile, package.json scripts, \
 docker-compose commands, and any run/build/debug procedures.\n\n\
-Fill ai/operations/debug-operations.md — replace ALL {{PLACEHOLDERS}}:\n\
+Fill docs/operations/debug-operations.md — replace ALL {{PLACEHOLDERS}}:\n\
 - Common commands table: replace {{ACTION_*}} and {{COMMAND_*}} for start, stop, logs, test, build, deploy\n\
 - Docker services table: replace {{SERVICE_*}}, {{PORT}}, {{ROLE}}, {{HEALTH}} for each container\n\
 - Troubleshooting: replace {{ISSUE_*_TITLE}}, {{SYMPTOM}}, {{CAUSE}}, {{FIX}} with 3-5 common issues",
@@ -150,11 +150,11 @@ Fill ai/operations/debug-operations.md — replace ALL {{PLACEHOLDERS}}:\n\
 
     // Step 8: MCP servers overview + capability introspection
     AnalysisStep {
-        target_file: "ai/operations/mcp-servers.md",
+        target_file: "docs/operations/mcp-servers.md",
         prompt: "\
-Read ai/index.md for context. Check if .mcp.json or .mcp.json.example or .env.mcp.example exists in the repo.\n\n\
+Read docs/AGENTS.md for context. Check if .mcp.json or .mcp.json.example or .env.mcp.example exists in the repo.\n\n\
 If MCP config exists:\n\n\
-### A) Document each server in ai/operations/mcp-servers.md\n\
+### A) Document each server in docs/operations/mcp-servers.md\n\
 Fill the table with: name, package, purpose, key capabilities (3-5 main tools), credentials.\n\n\
 ### B) Introspect capabilities\n\
 For each MCP server that has tools available, use the MCP tools to discover:\n\
@@ -170,7 +170,7 @@ For each tool: name, one-line description, whether it is read-only or mutating, 
    If a tool call fails or credentials are missing, note it and move on.\n\n\
 ### C) Create per-MCP context files\n\
 For each server where you discovered capabilities or project context, \
-create ai/operations/mcp-servers/<slug>.md following the TEMPLATE.md structure:\n\
+create docs/operations/mcp-servers/<slug>.md following the TEMPLATE.md structure:\n\
 - Fill the Capabilities table with discovered tools\n\
 - Fill Project context with real identifiers found via introspection\n\
 - Add rules and gotchas based on what you observed\n\
@@ -179,16 +179,16 @@ Do NOT create empty or boilerplate context files — only if you have real data.
 Based on the MCP combinations present, suggest 2-5 possible automated workflows.\n\
 For each: which MCPs are combined, what the workflow does, and who benefits (Dev/PM/Ops).\n\
 Only suggest workflows where all required MCPs are actually configured.\n\n\
-If no MCP config exists: replace ai/operations/mcp-servers.md content with:\n\
+If no MCP config exists: replace docs/operations/mcp-servers.md content with:\n\
 '# MCP Servers\\n\\nNo MCP servers configured for this project.'",
         sources: &[".mcp.json"],
     },
 
     // Step 9: Inconsistencies & tech debt
     AnalysisStep {
-        target_file: "ai/inconsistencies-tech-debt.md",
+        target_file: "docs/inconsistencies-tech-debt.md",
         prompt: "\
-Real issues only, not hypothetical. Read all ai/ files AND scan source code.\n\
+Real issues only, not hypothetical. Read all docs/ files AND scan source code.\n\
 Scan: entry points, config files, Dockerfiles, CI configs, and 5-10 core source files \
 (prioritize auth, data persistence, external input handling).\n\n\
 Systematically audit across these dimensions:\n\
@@ -199,9 +199,9 @@ Systematically audit across these dimensions:\n\
 - Maintainability: tight coupling, circular dependencies, missing tests for critical paths, unclear naming\n\
 - Compliance: GDPR issues (external resources, data retention), license incompatibilities\n\
 - Infrastructure: Docker misconfigs (root user, no resource limits), CI gaps, missing health checks\n\n\
-Fill ai/inconsistencies-tech-debt.md — replace ALL {{PLACEHOLDERS}} and <!-- ... --> comments:\n\
+Fill docs/inconsistencies-tech-debt.md — replace ALL {{PLACEHOLDERS}} and <!-- ... --> comments:\n\
 1. Outdated prerequisites table: flag EOL/deprecated/behind-stable runtimes, frameworks, packages\n\
-2. For each issue found: (a) create `ai/tech-debt/TD-YYYYMMDD-slug.md` (YYYYMMDD=today) first, \
+2. For each issue found: (a) create `docs/tech-debt/TD-YYYYMMDD-slug.md` (YYYYMMDD=today) first, \
 then (b) add the one-line entry to the Current list table. Do both or neither.\n\
    Severity: Critical=security/data loss, High=blocks prod, Medium=dev friction/perf, Low=cosmetic. Cite file paths.\n\
 3. Limit to 15-20 most impactful findings. Prioritize Critical and High.\n\
@@ -215,7 +215,7 @@ Detail file format:\n\
 - **Where (pointers)**: file paths with line numbers\n\
 - **Suggested direction**: non-binding fix suggestion\n\
 - **Next step**: create ticket\n\n\
-Also fill `ai/decisions.md` with intentional architectural choices observed in the code that might look unusual \
+Also fill `docs/decisions.md` with intentional architectural choices observed in the code that might look unusual \
 to a newcomer (e.g., why a certain pattern was chosen over a simpler one).",
         sources: &["__GIT_HEAD__"],
     },
@@ -224,7 +224,7 @@ to a newcomer (e.g., why a certain pattern was chosen over a simpler one).",
     AnalysisStep {
         target_file: "REVIEW",
         prompt: "\
-Read ALL ai/ files. Final quality pass — fix issues directly.\n\n\
+Read ALL docs/ files. Final quality pass — fix issues directly.\n\n\
 Check: no remaining `{{` placeholders · no orphan `<!-- fill -->` comments (keep `<!-- TODO: ask user -->`) \
 · no duplicated facts · consistent terminology with glossary · valid cross-references \
 · no contradictions · no empty critical sections · clean markdown · each tech-debt entry has a detail file \
@@ -263,7 +263,7 @@ pub async fn run_audit(
     let briefing_notes = super::projects::resolve_briefing_notes(&project_path, &project.briefing_notes);
 
     // Remove bootstrap prompt before running audit
-    let index_file = project_path.join("ai/index.md");
+    let index_file = project_path.join("docs/AGENTS.md");
     if index_file.exists() {
         remove_bootstrap_block(&index_file);
     }
@@ -319,7 +319,7 @@ pub async fn run_audit(
             }
 
             // No profiles for audit — solo agent mode produces clean factual documentation.
-            // Multi-profile debate format would pollute ai/ files with discussion artifacts.
+            // Multi-profile debate format would pollute docs/ files with discussion artifacts.
 
             // Always use full_access for audit (agent needs to write files)
             match runner::start_agent_with_config(runner::AgentStartConfig {
@@ -379,7 +379,7 @@ pub async fn run_audit(
                 if let Err(e) = crate::core::checksums::write_checksums_file(&pp, &mappings) {
                     tracing::warn!("Failed to write checksums: {}", e);
                 } else {
-                    tracing::info!("Wrote ai/checksums.json with {} mappings", mappings.len());
+                    tracing::info!("Wrote docs/checksums.json with {} mappings", mappings.len());
                 }
             }).await;
         }
@@ -421,7 +421,7 @@ pub async fn audit_info(
 }
 
 /// GET /api/projects/:id/drift
-/// Check which ai/ sections are stale based on source file checksums.
+/// Check which docs/ sections are stale based on source file checksums.
 /// Pure computation — no LLM tokens consumed.
 pub async fn check_drift(
     State(state): State<AppState>,
@@ -625,7 +625,7 @@ pub async fn partial_audit(
                 if let Err(e) = crate::core::checksums::write_checksums_file(&pp, &merged) {
                     tracing::warn!("Failed to write checksums after partial audit: {}", e);
                 } else {
-                    tracing::info!("Updated ai/checksums.json for {} re-run steps", steps_clone.len());
+                    tracing::info!("Updated docs/checksums.json for {} re-run steps", steps_clone.len());
                 }
             }).await;
         }
@@ -642,7 +642,7 @@ pub async fn partial_audit(
 }
 
 /// POST /api/projects/:id/validate-audit
-/// Marks the audit as validated by injecting a KRONN:VALIDATED marker into ai/index.md.
+/// Marks the audit as validated by injecting a KRONN:VALIDATED marker into docs/AGENTS.md.
 pub async fn validate_audit(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -658,14 +658,14 @@ pub async fn validate_audit(
     // Run filesystem I/O on blocking thread pool
     let validate_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
         let project_path = scanner::resolve_host_path(&project_path_str);
-        let index_file = project_path.join("ai/index.md");
+        let index_file = project_path.join("docs/AGENTS.md");
 
         if !index_file.exists() {
-            return Err("ai/index.md not found — run the audit first".into());
+            return Err("docs/AGENTS.md not found — run the audit first".into());
         }
 
         let content = std::fs::read_to_string(&index_file)
-            .map_err(|e| format!("Cannot read ai/index.md: {}", e))?;
+            .map_err(|e| format!("Cannot read docs/AGENTS.md: {}", e))?;
 
         if content.contains("KRONN:VALIDATED") {
             return Ok(());
@@ -690,7 +690,7 @@ pub async fn validate_audit(
 }
 
 /// POST /api/projects/:id/mark-bootstrapped
-/// Marks the project as bootstrapped by injecting a KRONN:BOOTSTRAPPED marker into ai/index.md.
+/// Marks the project as bootstrapped by injecting a KRONN:BOOTSTRAPPED marker into docs/AGENTS.md.
 pub async fn mark_bootstrapped(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -705,14 +705,14 @@ pub async fn mark_bootstrapped(
 
     let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
         let project_path = scanner::resolve_host_path(&project_path_str);
-        let index_file = project_path.join("ai/index.md");
+        let index_file = project_path.join("docs/AGENTS.md");
 
         if !index_file.exists() {
-            return Err("ai/index.md not found".into());
+            return Err("docs/AGENTS.md not found".into());
         }
 
         let content = std::fs::read_to_string(&index_file)
-            .map_err(|e| format!("Cannot read ai/index.md: {}", e))?;
+            .map_err(|e| format!("Cannot read docs/AGENTS.md: {}", e))?;
 
         if content.contains("KRONN:BOOTSTRAPPED") {
             return Ok(());
@@ -739,18 +739,20 @@ pub async fn mark_bootstrapped(
 // ─── Shared helpers ─────────────────────────────────────────────────────────
 
 /// Compute audit info (files + TODOs) from the filesystem.
+/// Path-agnostic — walks `docs/` post-pivot or `ai/` legacy via
+/// `detect_docs_dir`.
 fn compute_audit_info_sync(project_path_str: &str) -> AuditInfo {
     let project_path = scanner::resolve_host_path(project_path_str);
-    let ai_dir = project_path.join("ai");
+    let docs_dir = scanner::detect_docs_dir(&project_path);
 
-    if !ai_dir.is_dir() {
+    if !docs_dir.is_dir() {
         return AuditInfo { files: vec![], todos: vec![], tech_debt_items: vec![] };
     }
 
     let mut files = Vec::new();
     let mut todos = Vec::new();
 
-    for entry in walkdir::WalkDir::new(&ai_dir).max_depth(4).into_iter().filter_map(|e| e.ok()) {
+    for entry in walkdir::WalkDir::new(&docs_dir).max_depth(4).into_iter().filter_map(|e| e.ok()) {
         if !entry.file_type().is_file() || entry.path().extension().is_none_or(|ext| ext != "md") {
             continue;
         }
@@ -783,7 +785,7 @@ fn compute_audit_info_sync(project_path_str: &str) -> AuditInfo {
 
     // Parse tech-debt items from the "Current list" table in inconsistencies-tech-debt.md
     let mut tech_debt_items = Vec::new();
-    let tech_debt_file = ai_dir.join("inconsistencies-tech-debt.md");
+    let tech_debt_file = docs_dir.join("inconsistencies-tech-debt.md");
     if let Ok(content) = std::fs::read_to_string(&tech_debt_file) {
         // Parse markdown table rows: | ID | Problem | Area | Severity |
         for line in content.lines() {
@@ -816,19 +818,19 @@ pub(crate) fn build_validation_prompt(language: &str, info: &AuditInfo, has_issu
                 "Validate the AI context (ai/ folder). Follow this 4-phase protocol. ",
                 "Do NOT emit KRONN:VALIDATION_COMPLETE until ALL phases are done.\n\n",
                 "**CRITICAL RULE: You are a DOCUMENTATION auditor, not a code fixer. ",
-                "NEVER modify source code, Makefile, configs, or any file outside `ai/`. ",
-                "Your ONLY job is to make `ai/` files accurate and complete.**\n\n",
+                "NEVER modify source code, Makefile, configs, or any file outside `docs/`. ",
+                "Your ONLY job is to make `docs/` files accurate and complete.**\n\n",
                 "## Phase 1 — Auto-fix (autonomous)\n",
-                "Read source code to understand the project. Fix ONLY `ai/` files: orphan TODO markers, empty/skeleton files inferable from code, outdated info. ",
-                "Update `ai/` files directly. Report fixes. Do NOT touch source code.\n\n",
+                "Read source code to understand the project. Fix ONLY `docs/` files: orphan TODO markers, empty/skeleton files inferable from code, outdated info. ",
+                "Update `docs/` files directly. Report fixes. Do NOT touch source code.\n\n",
                 "## Phase 2 — Ambiguity questions (interactive)\n",
-                "Ask remaining ambiguities **one by one**. After each answer, update the relevant `ai/` file (repo-map, coding-rules, architecture, etc.). ",
-                "If the user reports a code issue, document it in `ai/inconsistencies-tech-debt.md` — do NOT fix the code yourself.\n",
+                "Ask remaining ambiguities **one by one**. After each answer, update the relevant `docs/` file (repo-map, coding-rules, architecture, etc.). ",
+                "If the user reports a code issue, document it in `docs/inconsistencies-tech-debt.md` — do NOT fix the code yourself.\n",
                 "If user answers 'I don't know' or 'skip', mark as `<!-- TODO: unknown -->` and move on.\n",
                 "Phase 2 ends when all TODOs are addressed or explicitly skipped.\n\n",
                 "## Phase 3 — Tech debt review (interactive)\n",
-                "For each entry in `ai/inconsistencies-tech-debt.md`:\n",
-                "1. Read its detail file in `ai/tech-debt/`\n",
+                "For each entry in `docs/inconsistencies-tech-debt.md`:\n",
+                "1. Read its detail file in `docs/tech-debt/`\n",
                 "2. Verify against source code — does the issue still exist? Is the description accurate?\n",
                 "3. Present to user one by one (or grouped by area if >10). Ask: confirm/reject? correct severity? priority?\n",
             ));
@@ -836,12 +838,12 @@ pub(crate) fn build_validation_prompt(language: &str, info: &AuditInfo, has_issu
                 s.push_str("Also ask: create a ticket? (issue tracker available via MCP)\n");
             }
             s.push_str(concat!(
-                "Do not batch-confirm. Update/remove `ai/` entries per feedback. Do NOT fix code — only update documentation.\n",
+                "Do not batch-confirm. Update/remove `docs/` entries per feedback. Do NOT fix code — only update documentation.\n",
                 "Also ask: did the audit miss anything obvious? (security, performance, compliance)\n\n",
                 "## Phase 4 — Doc challenge (interactive)\n",
-                "Ask 2-3 practical onboarding questions that must be answerable from `ai/` files alone. ",
+                "Ask 2-3 practical onboarding questions that must be answerable from `docs/` files alone. ",
                 "Examples: 'How would a new dev add a new API endpoint?', 'What command runs all tests?', 'Where is the DB schema?'. ",
-                "Check if `ai/` docs answer them correctly. Fix gaps in `ai/` files.\n\n",
+                "Check if `docs/` docs answer them correctly. Fix gaps in `docs/` files.\n\n",
                 "## Completion\n",
                 "All phases done → end with exact phrase: \"KRONN:VALIDATION_COMPLETE\". Never emit early.",
             ));
@@ -852,18 +854,18 @@ pub(crate) fn build_validation_prompt(language: &str, info: &AuditInfo, has_issu
                 "Valida el contexto AI (carpeta ai/). Sigue este protocolo de 4 fases. ",
                 "NO emitas KRONN:VALIDATION_COMPLETE hasta completar TODAS las fases.\n\n",
                 "**REGLA CRITICA: Eres un auditor de DOCUMENTACION, no un corrector de codigo. ",
-                "NUNCA modifiques codigo fuente, Makefile, configs, ni ningun archivo fuera de `ai/`. ",
-                "Tu UNICO trabajo: hacer los archivos `ai/` precisos y completos.**\n\n",
+                "NUNCA modifiques codigo fuente, Makefile, configs, ni ningun archivo fuera de `docs/`. ",
+                "Tu UNICO trabajo: hacer los archivos `docs/` precisos y completos.**\n\n",
                 "## Fase 1 — Auto-correccion (autonoma)\n",
-                "Lee el codigo para entender el proyecto. Corrige SOLO archivos `ai/`: TODOs huerfanos, archivos esqueleto inferibles del codigo, info obsoleta. ",
-                "Actualiza `ai/` directamente. Reporta. NO toques el codigo fuente.\n\n",
+                "Lee el codigo para entender el proyecto. Corrige SOLO archivos `docs/`: TODOs huerfanos, archivos esqueleto inferibles del codigo, info obsoleta. ",
+                "Actualiza `docs/` directamente. Reporta. NO toques el codigo fuente.\n\n",
                 "## Fase 2 — Preguntas (interactiva)\n",
-                "Pregunta ambiguedades **una por una**. Tras cada respuesta, actualiza el archivo `ai/` correspondiente (repo-map, coding-rules, architecture, etc.). ",
-                "Si el usuario reporta un problema de codigo, documentalo en `ai/inconsistencies-tech-debt.md` — NO corrijas el codigo tu mismo.\n",
+                "Pregunta ambiguedades **una por una**. Tras cada respuesta, actualiza el archivo `docs/` correspondiente (repo-map, coding-rules, architecture, etc.). ",
+                "Si el usuario reporta un problema de codigo, documentalo en `docs/inconsistencies-tech-debt.md` — NO corrijas el codigo tu mismo.\n",
                 "Si el usuario responde 'no se' o 'saltar', marca como `<!-- TODO: unknown -->` y continua.\n\n",
                 "## Fase 3 — Deuda tecnica (interactiva)\n",
-                "Para cada entrada en `ai/inconsistencies-tech-debt.md`:\n",
-                "1. Lee su archivo detalle en `ai/tech-debt/`\n",
+                "Para cada entrada en `docs/inconsistencies-tech-debt.md`:\n",
+                "1. Lee su archivo detalle en `docs/tech-debt/`\n",
                 "2. Verifica contra el codigo fuente — ¿el problema existe? ¿la descripcion es correcta?\n",
                 "3. Presenta al usuario una por una (o agrupadas por area si >10). Pregunta: ¿confirmar/rechazar? ¿severidad? ¿prioridad?\n",
             ));
@@ -871,11 +873,11 @@ pub(crate) fn build_validation_prompt(language: &str, info: &AuditInfo, has_issu
                 s.push_str("Tambien: ¿crear ticket? (gestor de issues disponible via MCP)\n");
             }
             s.push_str(concat!(
-                "No confirmar en lote. Actualiza/elimina entradas `ai/` segun feedback. NO corrijas codigo — solo documenta.\n",
+                "No confirmar en lote. Actualiza/elimina entradas `docs/` segun feedback. NO corrijas codigo — solo documenta.\n",
                 "Tambien pregunta: ¿la auditoria omitio algo obvio? (seguridad, rendimiento, cumplimiento)\n\n",
                 "## Fase 4 — Challenge doc (interactiva)\n",
-                "Haz 2-3 preguntas practicas de onboarding que deben ser respondibles solo con los archivos `ai/`. ",
-                "Ejemplos: '¿Como agregar un endpoint?', '¿Que comando ejecuta los tests?'. Corrige gaps en archivos `ai/`.\n\n",
+                "Haz 2-3 preguntas practicas de onboarding que deben ser respondibles solo con los archivos `docs/`. ",
+                "Ejemplos: '¿Como agregar un endpoint?', '¿Que comando ejecuta los tests?'. Corrige gaps en archivos `docs/`.\n\n",
                 "## Fin\n",
                 "Todas las fases completas → termina con: \"KRONN:VALIDATION_COMPLETE\". Nunca antes.",
             ));
@@ -886,18 +888,18 @@ pub(crate) fn build_validation_prompt(language: &str, info: &AuditInfo, has_issu
                 "Valide le contexte AI (dossier ai/). Suis ce protocole en 4 phases. ",
                 "NE PAS emettre KRONN:VALIDATION_COMPLETE avant la fin des 4 phases.\n\n",
                 "**REGLE CRITIQUE : Tu es un auditeur de DOCUMENTATION, pas un correcteur de code. ",
-                "NE MODIFIE JAMAIS le code source, Makefile, configs, ou tout fichier hors de `ai/`. ",
-                "Ton SEUL travail : rendre les fichiers `ai/` precis et complets.**\n\n",
+                "NE MODIFIE JAMAIS le code source, Makefile, configs, ou tout fichier hors de `docs/`. ",
+                "Ton SEUL travail : rendre les fichiers `docs/` precis et complets.**\n\n",
                 "## Phase 1 — Auto-correction (autonome)\n",
-                "Lis le code source pour comprendre le projet. Corrige UNIQUEMENT les fichiers `ai/` : TODOs orphelins, fichiers squelettes inferables du code, infos obsoletes. ",
-                "Mets a jour `ai/` directement. Rapporte les corrections. NE touche PAS au code source.\n\n",
+                "Lis le code source pour comprendre le projet. Corrige UNIQUEMENT les fichiers `docs/` : TODOs orphelins, fichiers squelettes inferables du code, infos obsoletes. ",
+                "Mets a jour `docs/` directement. Rapporte les corrections. NE touche PAS au code source.\n\n",
                 "## Phase 2 — Questions (interactif)\n",
-                "Pose les ambiguites **une par une**. Apres chaque reponse, mets a jour le fichier `ai/` concerne (repo-map, coding-rules, architecture, etc.). ",
-                "Si l'utilisateur signale un probleme de code, documente-le dans `ai/inconsistencies-tech-debt.md` — NE corrige PAS le code toi-meme.\n",
+                "Pose les ambiguites **une par une**. Apres chaque reponse, mets a jour le fichier `docs/` concerne (repo-map, coding-rules, architecture, etc.). ",
+                "Si l'utilisateur signale un probleme de code, documente-le dans `docs/inconsistencies-tech-debt.md` — NE corrige PAS le code toi-meme.\n",
                 "Si l'utilisateur repond 'je ne sais pas' ou 'passer', marque `<!-- TODO: unknown -->` et continue.\n\n",
                 "## Phase 3 — Dette technique (interactif)\n",
-                "Pour chaque entree dans `ai/inconsistencies-tech-debt.md` :\n",
-                "1. Lis son fichier detail dans `ai/tech-debt/`\n",
+                "Pour chaque entree dans `docs/inconsistencies-tech-debt.md` :\n",
+                "1. Lis son fichier detail dans `docs/tech-debt/`\n",
                 "2. Verifie dans le code source — le probleme existe-t-il ? La description est-elle exacte ?\n",
                 "3. Presente a l'utilisateur un par un (ou par domaine si >10). Demande : confirmer/rejeter ? severite ? priorite ?\n",
             ));
@@ -905,11 +907,11 @@ pub(crate) fn build_validation_prompt(language: &str, info: &AuditInfo, has_issu
                 s.push_str("Aussi : creer un ticket ? (gestionnaire d'issues dispo via MCP)\n");
             }
             s.push_str(concat!(
-                "Pas de confirmation en lot. Mets a jour/supprime les entrees `ai/` selon feedback. NE corrige PAS le code — documente seulement.\n",
+                "Pas de confirmation en lot. Mets a jour/supprime les entrees `docs/` selon feedback. NE corrige PAS le code — documente seulement.\n",
                 "Demande aussi : l'audit a-t-il rate quelque chose d'evident ? (securite, performance, conformite)\n\n",
                 "## Phase 4 — Challenge doc (interactif)\n",
-                "Pose 2-3 questions pratiques d'onboarding qui doivent etre couvertes par les fichiers `ai/` seuls. ",
-                "Exemples : 'Comment ajouter un endpoint ?', 'Quelle commande lance les tests ?'. Corrige les lacunes dans les fichiers `ai/`.\n\n",
+                "Pose 2-3 questions pratiques d'onboarding qui doivent etre couvertes par les fichiers `docs/` seuls. ",
+                "Exemples : 'Comment ajouter un endpoint ?', 'Quelle commande lance les tests ?'. Corrige les lacunes dans les fichiers `docs/`.\n\n",
                 "## Fin\n",
                 "Toutes les phases terminees → termine par : \"KRONN:VALIDATION_COMPLETE\". Jamais avant.",
             ));
@@ -924,27 +926,27 @@ pub(crate) fn build_validation_prompt(language: &str, info: &AuditInfo, has_issu
     let total_files = info.files.len();
     if total_files > 0 {
         let summary = match language {
-            "en" => format!("{} AI files detected ({} still incomplete). Read `ai/index.md` for the full tree.", total_files, unfilled_count),
-            "es" => format!("{} archivos AI detectados ({} aun incompletos). Lee `ai/index.md` para el arbol completo.", total_files, unfilled_count),
-            _ => format!("{} fichiers AI detectes ({} encore incomplets). Lis `ai/index.md` pour l'arbre complet.", total_files, unfilled_count),
+            "en" => format!("{} AI files detected ({} still incomplete). Read `docs/AGENTS.md` for the full tree.", total_files, unfilled_count),
+            "es" => format!("{} archivos AI detectados ({} aun incompletos). Lee `docs/AGENTS.md` para el arbol completo.", total_files, unfilled_count),
+            _ => format!("{} fichiers AI detectes ({} encore incomplets). Lis `docs/AGENTS.md` pour l'arbre complet.", total_files, unfilled_count),
         };
         prompt.push_str(&format!("\n\n{}", summary));
     }
 
     if !info.todos.is_empty() {
         let hint = match language {
-            "en" => format!("{} remaining TODO markers across AI files. Scan `ai/` for `<!-- TODO` to find them all.", info.todos.len()),
-            "es" => format!("{} marcadores TODO restantes en archivos AI. Busca `<!-- TODO` en `ai/` para encontrarlos.", info.todos.len()),
-            _ => format!("{} marqueurs TODO restants dans les fichiers AI. Cherche `<!-- TODO` dans `ai/` pour les trouver.", info.todos.len()),
+            "en" => format!("{} remaining TODO markers across AI files. Scan `docs/` for `<!-- TODO` to find them all.", info.todos.len()),
+            "es" => format!("{} marcadores TODO restantes en archivos AI. Busca `<!-- TODO` en `docs/` para encontrarlos.", info.todos.len()),
+            _ => format!("{} marqueurs TODO restants dans les fichiers AI. Cherche `<!-- TODO` dans `docs/` pour les trouver.", info.todos.len()),
         };
         prompt.push_str(&format!("\n\n{}", hint));
     }
 
     if !info.tech_debt_items.is_empty() {
         let hint = match language {
-            "en" => format!("{} tech debt items to review in Phase 3. Read `ai/inconsistencies-tech-debt.md` and `ai/tech-debt/` for details.", info.tech_debt_items.len()),
-            "es" => format!("{} items de deuda tecnica a revisar en Fase 3. Lee `ai/inconsistencies-tech-debt.md` y `ai/tech-debt/` para detalles.", info.tech_debt_items.len()),
-            _ => format!("{} items de dette technique a revoir en Phase 3. Lis `ai/inconsistencies-tech-debt.md` et `ai/tech-debt/` pour les details.", info.tech_debt_items.len()),
+            "en" => format!("{} tech debt items to review in Phase 3. Read `docs/inconsistencies-tech-debt.md` and `docs/tech-debt/` for details.", info.tech_debt_items.len()),
+            "es" => format!("{} items de deuda tecnica a revisar en Fase 3. Lee `docs/inconsistencies-tech-debt.md` y `docs/tech-debt/` para detalles.", info.tech_debt_items.len()),
+            _ => format!("{} items de dette technique a revoir en Phase 3. Lis `docs/inconsistencies-tech-debt.md` et `docs/tech-debt/` pour les details.", info.tech_debt_items.len()),
         };
         prompt.push_str(&format!("\n\n{}", hint));
     }
@@ -1029,10 +1031,15 @@ pub async fn full_audit(
                     return Err(format!("Project path not found: {}", project_path.display()));
                 }
 
-                let ai_target = project_path.join("ai");
-                if ai_target.exists() {
-                    if let Err(e) = check_ai_dir_permissions(&ai_target) {
-                        return Err(format!("ai/ permission error: {}", e));
+                // 0.7.1 — bootstrap to docs/ (or respect legacy ai/ when
+                // present). Permission check runs on whichever the project
+                // already uses, then template install lands at docs/ for
+                // fresh projects (default).
+                let docs_target = scanner::detect_docs_dir(&project_path);
+                if docs_target.exists() {
+                    if let Err(e) = check_ai_dir_permissions(&docs_target) {
+                        return Err(format!("{}/ permission error: {}",
+                            docs_target.file_name().and_then(|n| n.to_str()).unwrap_or("docs"), e));
                     }
                 }
 
@@ -1041,10 +1048,11 @@ pub async fn full_audit(
                     return Err(format!("Templates directory not found: {}", template_dir.display()));
                 }
 
-                let ai_template = template_dir.join("ai");
-                if ai_template.is_dir() {
-                    super::projects::copy_dir_nondestructive(&ai_template, &ai_target)?;
+                let docs_template = template_dir.join("docs");
+                if docs_template.is_dir() {
+                    super::projects::copy_dir_nondestructive(&docs_template, &docs_target)?;
                 }
+                super::projects::ensure_agent_writable_subfolders(&docs_target)?;
 
                 for filename in &["CLAUDE.md", ".cursorrules", ".windsurfrules", ".clinerules"] {
                     let src = template_dir.join(filename);
@@ -1056,7 +1064,7 @@ pub async fn full_audit(
                     }
                 }
 
-                let index_file = project_path.join("ai/index.md");
+                let index_file = project_path.join("docs/AGENTS.md");
                 if index_file.exists() {
                     super::projects::inject_bootstrap_prompt(&index_file);
                 }
@@ -1074,7 +1082,7 @@ pub async fn full_audit(
                 return;
             }
 
-            crate::core::mcp_scanner::ensure_gitignore_public(&project_path_str, "ai/var/");
+            crate::core::mcp_scanner::ensure_gitignore_public(&project_path_str, "docs/var/");
         }
 
         let tmpl_event = serde_json::json!({ "installed": template_installed });
@@ -1082,7 +1090,7 @@ pub async fn full_audit(
 
         // ── Phase 2: Run 10-step audit ──
         // Remove bootstrap prompt
-        let index_file = project_path.join("ai/index.md");
+        let index_file = project_path.join("docs/AGENTS.md");
         if index_file.exists() {
             remove_bootstrap_block(&index_file);
         }
@@ -1296,7 +1304,7 @@ pub async fn full_audit(
                 if let Err(e) = crate::core::checksums::write_checksums_file(&pp, &mappings) {
                     tracing::warn!("Failed to write checksums: {}", e);
                 } else {
-                    tracing::info!("Wrote ai/checksums.json with {} mappings", mappings.len());
+                    tracing::info!("Wrote docs/checksums.json with {} mappings", mappings.len());
                 }
             }).await;
         }
@@ -1474,12 +1482,22 @@ pub async fn cancel_audit(
             return Err(format!("Project path not found: {}", project_path.display()));
         }
 
-        // Remove ai/ directory entirely
-        let ai_dir = project_path.join("ai");
-        if ai_dir.exists() {
-            std::fs::remove_dir_all(&ai_dir)
-                .map_err(|e| format!("Failed to remove ai/: {}", e))?;
-            tracing::info!("Removed ai/ directory from {}", project_path.display());
+        // Remove the project's docs folder entirely. Cleanup hits both
+        // post-pivot `docs/` AND legacy `ai/` if both happen to be on
+        // disk (e.g. half-finished migration), so the operator gets a
+        // clean slate.
+        for folder in ["docs", "doc", "ai"] {
+            let dir = project_path.join(folder);
+            if dir.exists() && dir.is_dir() && !dir.is_symlink() {
+                std::fs::remove_dir_all(&dir)
+                    .map_err(|e| format!("Failed to remove {}/: {}", folder, e))?;
+                tracing::info!("Removed {}/ directory from {}", folder, project_path.display());
+            }
+        }
+        // Drop a `ai` symlink if one was left over from a migration.
+        let ai_link = project_path.join("ai");
+        if ai_link.is_symlink() {
+            let _ = std::fs::remove_file(&ai_link);
         }
 
         // Remove redirector files (CLAUDE.md, .cursorrules, etc.)
@@ -1653,13 +1671,13 @@ pub async fn start_briefing(
     Json(ApiResponse::ok(StartBriefingResponse { discussion_id }))
 }
 
-/// Try to detect permission issues on an existing ai/ directory.
+/// Try to detect permission issues on an existing docs/ directory.
 /// Returns Ok(()) if all files are accessible, or Err with description if unfixable.
 pub(crate) fn check_ai_dir_permissions(ai_dir: &std::path::Path) -> Result<(), String> {
     for entry in walkdir::WalkDir::new(ai_dir).max_depth(5).into_iter() {
         let entry = match entry {
             Ok(e) => e,
-            Err(e) => return Err(format!("Cannot traverse ai/ directory: {}", e)),
+            Err(e) => return Err(format!("Cannot traverse docs/ directory: {}", e)),
         };
         let path = entry.path();
         if path.is_file() {
@@ -1671,7 +1689,7 @@ pub(crate) fn check_ai_dir_permissions(ai_dir: &std::path::Path) -> Result<(), S
     Ok(())
 }
 
-/// Remove the KRONN:BOOTSTRAP block from ai/index.md
+/// Remove the KRONN:BOOTSTRAP block from docs/AGENTS.md
 fn remove_bootstrap_block(index_file: &std::path::Path) {
     let content = match std::fs::read_to_string(index_file) {
         Ok(c) => c,
@@ -1712,10 +1730,10 @@ pub(crate) fn build_briefing_prompt(language: &str) -> String {
     match language {
         "en" => concat!(
             "ROLE: You are a project briefing assistant.\n\n",
-            "ABSOLUTE RULE: Do NOT read source code, project files, or any file outside ai/. ",
+            "ABSOLUTE RULE: Do NOT read source code, project files, or any file outside docs/. ",
             "Do NOT guess ANYTHING. You ask questions and use ONLY the user's answers.\n\n",
             "IF YOU HAVE FILE SYSTEM ACCESS: do NOT use it for this task. ",
-            "No ls, cat, read, glob, grep. The only allowed file operation is the final write of ai/briefing.md.\n\n",
+            "No ls, cat, read, glob, grep. The only allowed file operation is the final write of docs/briefing.md.\n\n",
             "NOTE: The tech stack will be auto-detected during the audit (from package.json, Cargo.toml, etc.). No need to ask about it.\n\n",
             "STEP 1 — Ask the following 6 questions IN A SINGLE MESSAGE, then STOP. Wait for answers.\n\n",
             "1. What does this project do? (one sentence — what it does for its users)\n",
@@ -1725,7 +1743,7 @@ pub(crate) fn build_briefing_prompt(language: &str) -> String {
             "5. What would a new contributor get wrong on day one? (traps, implicit rules, fragile areas)\n",
             "6. Anything else the audit should know? (optional, keep it short)\n\n",
             "STEP 2 — Check that the user answered questions 1-5. If some are missing, ask ONLY the unanswered ones before proceeding. Q6 is optional. ",
-            "Once you have answers 1-5 (or the user explicitly says 'skip' for some), write the file ai/briefing.md with THIS EXACT FORMAT:\n\n",
+            "Once you have answers 1-5 (or the user explicitly says 'skip' for some), write the file docs/briefing.md with THIS EXACT FORMAT:\n\n",
             "# Project Briefing\n",
             "> Auto-generated by AI briefing. Source: user answers (not code analysis).\n",
             "## Purpose\n[answer Q1]\n",
@@ -1734,7 +1752,7 @@ pub(crate) fn build_briefing_prompt(language: &str) -> String {
             "## External Dependencies\n[answer Q4 — if none, write \"None.\"]\n",
             "## Traps & Fragile Areas\n[answer Q5 — bullet list if multiple]\n",
             "## Additional Context\n[answer Q6 — if skipped, write \"None.\"]\n\n",
-            "Write ai/briefing.md IN ENGLISH even if the conversation is in another language.\n",
+            "Write docs/briefing.md IN ENGLISH even if the conversation is in another language.\n",
             "If the user does not answer a question, write \"Not provided\" — do NOT invent ANYTHING.\n",
             "Do NOT modify ANY other file.\n\n",
             "STEP 3 — After writing the file, end your last message with: KRONN:BRIEFING_COMPLETE",
@@ -1744,7 +1762,7 @@ pub(crate) fn build_briefing_prompt(language: &str) -> String {
             "REGLA ABSOLUTA: NO leas el codigo fuente, los archivos del proyecto, ni ningun archivo fuera de ai/. ",
             "NO adivines NADA. Haces preguntas y usas UNICAMENTE las respuestas del usuario.\n\n",
             "SI TIENES ACCESO AL SISTEMA DE ARCHIVOS: NO lo uses para esta tarea. ",
-            "Nada de ls, cat, read, glob, grep. La unica operacion de archivo permitida es la escritura final de ai/briefing.md.\n\n",
+            "Nada de ls, cat, read, glob, grep. La unica operacion de archivo permitida es la escritura final de docs/briefing.md.\n\n",
             "NOTA: La stack tecnica sera auto-detectada durante la auditoria (desde package.json, Cargo.toml, etc.). No es necesario preguntar por ella.\n\n",
             "PASO 1 — Haz las 6 preguntas siguientes EN UN SOLO MENSAJE, luego PARA. Espera las respuestas.\n\n",
             "1. Que hace este proyecto? (una frase — que hace para sus usuarios)\n",
@@ -1754,7 +1772,7 @@ pub(crate) fn build_briefing_prompt(language: &str) -> String {
             "5. Que haria mal un nuevo contributor el primer dia? (trampas, reglas implicitas, zonas fragiles)\n",
             "6. Algo mas que la auditoria deberia saber? (opcional, breve)\n\n",
             "PASO 2 — Verifica que el usuario respondio las preguntas 1-5. Si faltan algunas, pregunta SOLO las que faltan. La Q6 es opcional. ",
-            "Cuando tengas las respuestas 1-5 (o el usuario diga 'saltar'), escribe el archivo ai/briefing.md con ESTE FORMATO EXACTO:\n\n",
+            "Cuando tengas las respuestas 1-5 (o el usuario diga 'saltar'), escribe el archivo docs/briefing.md con ESTE FORMATO EXACTO:\n\n",
             "# Project Briefing\n",
             "> Auto-generated by AI briefing. Source: user answers (not code analysis).\n",
             "## Purpose\n[respuesta Q1]\n",
@@ -1763,7 +1781,7 @@ pub(crate) fn build_briefing_prompt(language: &str) -> String {
             "## External Dependencies\n[respuesta Q4 — si ninguna, escribir \"None.\"]\n",
             "## Traps & Fragile Areas\n[respuesta Q5 — lista de puntos si hay varios]\n",
             "## Additional Context\n[respuesta Q6 — si omitida, escribir \"None.\"]\n\n",
-            "Escribe ai/briefing.md EN INGLES aunque la conversacion sea en otro idioma.\n",
+            "Escribe docs/briefing.md EN INGLES aunque la conversacion sea en otro idioma.\n",
             "Si el usuario no responde a una pregunta, escribe \"Not provided\" — NO inventes NADA.\n",
             "NO modifiques NINGUN otro archivo.\n\n",
             "PASO 3 — Despues de escribir el archivo, termina tu ultimo mensaje con: KRONN:BRIEFING_COMPLETE",
@@ -1773,7 +1791,7 @@ pub(crate) fn build_briefing_prompt(language: &str) -> String {
             "REGLE ABSOLUE: Tu ne lis PAS le code source, les fichiers du projet, ni aucun fichier en dehors de ai/. ",
             "Tu ne devines RIEN. Tu poses des questions et tu utilises UNIQUEMENT les reponses de l'utilisateur.\n\n",
             "SI TU AS ACCES AU SYSTEME DE FICHIERS: ne l'utilise PAS pour cette tache. ",
-            "Pas de ls, cat, read, glob, grep. La seule operation fichier autorisee est l'ecriture finale de ai/briefing.md.\n\n",
+            "Pas de ls, cat, read, glob, grep. La seule operation fichier autorisee est l'ecriture finale de docs/briefing.md.\n\n",
             "NOTE: La stack technique sera auto-detectee pendant l'audit (depuis package.json, Cargo.toml, etc.). Inutile d'en parler ici.\n\n",
             "ETAPE 1 — Pose les 6 questions suivantes EN UN SEUL MESSAGE, puis STOP. Attends les reponses.\n\n",
             "1. Que fait ce projet ? (une phrase — ce qu'il fait pour ses utilisateurs)\n",
@@ -1783,7 +1801,7 @@ pub(crate) fn build_briefing_prompt(language: &str) -> String {
             "5. Qu'est-ce qu'un nouveau contributeur ferait mal le premier jour ? (pieges, regles implicites, zones fragiles)\n",
             "6. Autre chose que l'audit devrait savoir ? (optionnel, en bref)\n\n",
             "ETAPE 2 — Verifie que l'utilisateur a repondu aux questions 1-5. S'il en manque, redemande UNIQUEMENT celles qui manquent. La Q6 est optionnelle. ",
-            "Une fois les reponses 1-5 obtenues (ou si l'utilisateur dit 'passer'), ecris le fichier ai/briefing.md avec CE FORMAT EXACT :\n\n",
+            "Une fois les reponses 1-5 obtenues (ou si l'utilisateur dit 'passer'), ecris le fichier docs/briefing.md avec CE FORMAT EXACT :\n\n",
             "# Project Briefing\n",
             "> Auto-generated by AI briefing. Source: user answers (not code analysis).\n",
             "## Purpose\n[reponse Q1]\n",
@@ -1792,7 +1810,7 @@ pub(crate) fn build_briefing_prompt(language: &str) -> String {
             "## External Dependencies\n[reponse Q4 — si aucune, ecrire \"None.\"]\n",
             "## Traps & Fragile Areas\n[reponse Q5 — liste a puces si plusieurs]\n",
             "## Additional Context\n[reponse Q6 — si omise, ecrire \"None.\"]\n\n",
-            "Ecris ai/briefing.md EN ANGLAIS meme si la conversation est en francais.\n",
+            "Ecris docs/briefing.md EN ANGLAIS meme si la conversation est en francais.\n",
             "Si l'utilisateur ne repond pas a une question, ecris \"Not provided\" — n'invente RIEN.\n",
             "Ne modifie AUCUN autre fichier.\n\n",
             "ETAPE 3 — Apres avoir ecrit le fichier, termine ton dernier message par : KRONN:BRIEFING_COMPLETE",

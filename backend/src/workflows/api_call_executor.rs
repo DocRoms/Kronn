@@ -14,7 +14,7 @@
 //! request path covers the Chartbeat vertical (P1) and feeds real wiremock
 //! tests today — it's the minimal fit for the "first vertical" milestone.
 //!
-//! See `ai/operations/deagent-apicall.md` for scope + decisions.
+//! See `docs/operations/deagent-apicall.md` for scope + decisions.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -31,7 +31,7 @@ use super::api_call_step::{apply_extract, ExtractError, ExtractionOutcome};
 use super::steps::StepOutcome;
 use super::template::TemplateContext;
 
-// ── Defaults — keep in sync with `ai/operations/deagent-apicall.md` ──
+// ── Defaults — keep in sync with `docs/operations/deagent-apicall.md` ──
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_MAX_RETRIES: u8 = 2;
 const RETRY_BACKOFF_INITIAL_MS: u64 = 250;

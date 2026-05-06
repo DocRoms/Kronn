@@ -1754,11 +1754,9 @@ async fn discussions_create_without_profile_id_defaults_null() {
 #[test]
 fn templates_use_placeholder_syntax() {
     // All template files should use {{PLACEHOLDER}} syntax, not <!-- fill --> or <!-- ... -->
-    let template_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../templates/ai");
-    if !template_dir.exists() {
-        // Skip if templates dir not available (CI without full repo)
-        return;
-    }
+    // 0.7.1 pivot — templates moved from `templates/ai/` to `templates/docs/`.
+    let template_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../templates/docs");
+    assert!(template_dir.is_dir(), "templates/docs/ must exist");
 
     let ambiguous_patterns = ["<!-- fill", "<!-- Add ", "<!-- Describe ", "<!-- List "];
 
@@ -1786,10 +1784,9 @@ fn templates_use_placeholder_syntax() {
 
 #[test]
 fn templates_have_no_empty_comment_placeholders() {
-    let template_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../templates/ai");
-    if !template_dir.exists() {
-        return;
-    }
+    // 0.7.1 pivot — templates/ai → templates/docs.
+    let template_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../templates/docs");
+    assert!(template_dir.is_dir(), "templates/docs/ must exist");
 
     for entry in walkdir::WalkDir::new(&template_dir).into_iter().filter_map(|e| e.ok()) {
         if !entry.file_type().is_file() || entry.path().extension().is_none_or(|ext| ext != "md") {
@@ -1822,13 +1819,13 @@ fn templates_have_no_empty_comment_placeholders() {
 #[test]
 fn templates_all_have_placeholders() {
     // Verify that key template files contain {{PLACEHOLDER}} patterns (they're skeletons, not empty)
-    let template_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../templates/ai");
-    if !template_dir.exists() {
-        return;
-    }
+    // 0.7.1 pivot — templates/ai → templates/docs.
+    let template_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../templates/docs");
+    assert!(template_dir.is_dir(), "templates/docs/ must exist");
 
+    // 0.7.1 — `index.md` (legacy LLM entry) was renamed to `AGENTS.md`.
     let expected_files = [
-        "index.md",
+        "AGENTS.md",
         "glossary.md",
         "repo-map.md",
         "coding-rules.md",
@@ -1852,10 +1849,9 @@ fn templates_all_have_placeholders() {
 
 #[test]
 fn template_mcp_template_exists() {
-    let template_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../templates/ai");
-    if !template_dir.exists() {
-        return;
-    }
+    // 0.7.1 pivot — templates/ai → templates/docs.
+    let template_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../templates/docs");
+    assert!(template_dir.is_dir(), "templates/docs/ must exist");
 
     let mcp_template = template_dir.join("operations/mcp-servers/TEMPLATE.md");
     assert!(mcp_template.exists(), "MCP TEMPLATE.md should exist");
@@ -1867,10 +1863,9 @@ fn template_mcp_template_exists() {
 
 #[test]
 fn template_tech_debt_dir_exists() {
-    let template_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../templates/ai");
-    if !template_dir.exists() {
-        return;
-    }
+    // 0.7.1 pivot — templates/ai → templates/docs.
+    let template_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../templates/docs");
+    assert!(template_dir.is_dir(), "templates/docs/ must exist");
 
     let td_dir = template_dir.join("tech-debt");
     assert!(td_dir.exists(), "tech-debt/ directory should exist in templates");
@@ -1879,23 +1874,28 @@ fn template_tech_debt_dir_exists() {
 
 #[test]
 fn template_inconsistencies_has_outdated_prerequisites_table() {
-    let template_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../templates/ai");
-    if !template_dir.exists() {
-        return;
-    }
+    // 0.7.1 pivot — templates moved from `templates/ai/` to
+    // `templates/docs/`. Path is required to exist now (no silent
+    // early-return); a missing template means a packaging bug.
+    let template_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../templates/docs");
+    assert!(template_dir.is_dir(), "templates/docs/ must exist");
 
     let content = std::fs::read_to_string(template_dir.join("inconsistencies-tech-debt.md")).unwrap();
     assert!(content.contains("Outdated dependencies") || content.contains("Outdated prerequisites"), "Should have outdated dependencies/prerequisites section");
     assert!(content.contains("Severity"), "Should have severity column");
-    assert!(content.contains("ai/tech-debt/"), "Should reference tech-debt detail files");
+    // The template reference can be `tech-debt/...` (relative to docs/)
+    // or the fully-qualified `docs/tech-debt/...`. Either is correct.
+    assert!(
+        content.contains("docs/tech-debt/") || content.contains("tech-debt/TD-"),
+        "Should reference tech-debt detail files",
+    );
 }
 
 #[test]
 fn template_glossary_has_todo_marker_guidance() {
-    let template_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../templates/ai");
-    if !template_dir.exists() {
-        return;
-    }
+    // 0.7.1 pivot — templates/ai → templates/docs.
+    let template_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../templates/docs");
+    assert!(template_dir.is_dir(), "templates/docs/ must exist");
 
     let content = std::fs::read_to_string(template_dir.join("glossary.md")).unwrap();
     assert!(content.contains("TODO: ask user"), "Glossary should mention TODO: ask user markers");
@@ -1919,9 +1919,13 @@ fn analysis_steps_glossary_mentions_todo_markers() {
 #[test]
 fn analysis_steps_tech_debt_creates_detail_files() {
     let source = include_str!("../src/api/audit.rs");
+    // 0.7.1 pivot — prompts now reference `docs/tech-debt/` (post-pivot
+    // convention). Legacy `ai/tech-debt/` projects keep working through
+    // `detect_docs_dir`, but the bootstrap prompt instructs agents on
+    // the modern path.
     assert!(
-        source.contains("ai/tech-debt/TD-"),
-        "Tech debt step should instruct creating detail files in ai/tech-debt/"
+        source.contains("docs/tech-debt/TD-"),
+        "Tech debt step should instruct creating detail files in docs/tech-debt/"
     );
 }
 
@@ -2074,6 +2078,7 @@ async fn bootstrap_find_common_parent_logic() {
             },
             audit_status: kronn::models::AiAuditStatus::NoTemplate,
             ai_todo_count: 0,
+            needs_docs_migration: false,
             default_skill_ids: vec![],
             default_profile_id: None,
             briefing_notes: None,
@@ -2535,6 +2540,7 @@ async fn exec_returns_expected_fields() {
         },
         audit_status: kronn::models::AiAuditStatus::NoTemplate,
         ai_todo_count: 0,
+        needs_docs_migration: false,
         default_skill_ids: vec![],
         default_profile_id: None,
         briefing_notes: None,

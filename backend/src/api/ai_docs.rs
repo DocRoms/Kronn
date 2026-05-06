@@ -1,4 +1,6 @@
-//! AI Documentation File Browser — list, search, and read ai/ files.
+//! AI Documentation File Browser — list, search, and read files from
+//! the project's docs folder (post-pivot `docs/`, alt `doc/`, or
+//! legacy `ai/` — picked by `detect_docs_dir`).
 
 use axum::{
     extract::{Path, Query, State},
@@ -29,17 +31,20 @@ pub async fn list_ai_files(
 
     let result = tokio::task::spawn_blocking(move || {
         let project_path = scanner::resolve_host_path(&project_path_str);
-        let ai_dir = project_path.join("ai");
-        if !ai_dir.is_dir() {
+        let docs_dir = scanner::detect_docs_dir(&project_path);
+        if !docs_dir.is_dir() {
             return vec![];
         }
-        build_ai_file_tree(&ai_dir, "ai")
+        // Use the actual folder name (`docs`, `doc` or `ai`) as the tree
+        // root so the frontend's display matches the on-disk reality.
+        let prefix = docs_dir.file_name().and_then(|n| n.to_str()).unwrap_or("docs");
+        build_ai_file_tree(&docs_dir, prefix)
     }).await.unwrap_or_default();
 
     Json(ApiResponse::ok(result))
 }
 
-/// Recursively build a tree of `.md` files from the `ai/` directory.
+/// Recursively build a tree of `.md` files from the project's docs folder.
 fn build_ai_file_tree(dir: &std::path::Path, rel_prefix: &str) -> Vec<AiFileNode> {
     let mut nodes = Vec::new();
     let entries = match std::fs::read_dir(dir) {
@@ -102,12 +107,13 @@ pub async fn search_ai_files(
 
     let result = tokio::task::spawn_blocking(move || {
         let project_path = scanner::resolve_host_path(&project_path_str);
-        let ai_dir = project_path.join("ai");
-        if !ai_dir.is_dir() {
+        let docs_dir = scanner::detect_docs_dir(&project_path);
+        if !docs_dir.is_dir() {
             return vec![];
         }
+        let prefix = docs_dir.file_name().and_then(|n| n.to_str()).unwrap_or("docs");
         let mut results = Vec::new();
-        search_ai_dir_recursive(&ai_dir, "ai", &q.to_lowercase(), &mut results);
+        search_ai_dir_recursive(&docs_dir, prefix, &q.to_lowercase(), &mut results);
         // Sort by match_count descending
         results.sort_by_key(|r| std::cmp::Reverse(r.match_count));
         results
@@ -148,15 +154,20 @@ fn search_ai_dir_recursive(dir: &std::path::Path, rel_prefix: &str, query: &str,
 }
 
 /// GET /api/projects/:id/ai-file?path=ai/index.md
-/// Reads a single file from the `ai/` directory with path traversal protection.
+/// Reads a single file from the project's docs folder (post-pivot
+/// `docs/`, alt `doc/`, or legacy `ai/`) with path traversal protection.
 pub async fn read_ai_file(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<AiFileQuery>,
 ) -> Json<ApiResponse<AiFileContent>> {
-    // Path traversal protection
-    if query.path.contains("..") || !query.path.starts_with("ai/") {
-        return Json(ApiResponse::err("Invalid path: must start with ai/ and not contain .."));
+    // Path traversal protection — must be confined to one of the
+    // recognised docs roots and never contain `..`.
+    let allowed_prefix = query.path.starts_with("docs/")
+        || query.path.starts_with("doc/")
+        || query.path.starts_with("ai/");
+    if query.path.contains("..") || !allowed_prefix {
+        return Json(ApiResponse::err("Invalid path: must start with docs/, doc/ or ai/ and not contain .."));
     }
 
     let project = match state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &id)).await {

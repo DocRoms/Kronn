@@ -2,7 +2,7 @@
 
 ## What this document is
 - Focus: *where* code/config/tests live.
-- For *how to run checks*: see `ai/testing-quality.md`.
+- For *how to run checks*: see `docs/testing-quality.md`.
 
 ## Stack overview (facts)
 
@@ -272,7 +272,7 @@ Kronn/
 - CSS system: `src/styles/` (tokens, utilities, components) + per-page CSS. ~319 inline styles remain (dynamic only).
 - TTS/STT logic extracted into `lib/tts-*.ts` and `lib/stt-*.ts` modules (7 files, ~400 lines total). Web Workers for WASM inference run off the main thread.
 - Shared constants (AGENT_COLORS, AGENT_LABELS) extracted to `lib/constants.ts` — imported by Dashboard and WorkflowsPage.
-- Frontend tests in `__tests__/` directories alongside source (51 suites, 629 tests as of 2026-04-17). See `ai/testing-quality.md`.
-- Shell tests in `tests/bats/` (8 suites, 186 tests via bats-core). See `ai/testing-quality.md`.
+- Frontend tests in `__tests__/` directories alongside source (51 suites, 629 tests as of 2026-04-17). See `docs/testing-quality.md`.
+- Shell tests in `tests/bats/` (8 suites, 186 tests via bats-core). See `docs/testing-quality.md`.
 - CI pipeline: `.github/workflows/ci-test.yml` triggered on push to main + all PRs (backend clippy/test + frontend tsc/test + shell bats + security scan). Desktop build: `.github/workflows/desktop-build.yml`.
 - `templates/` directory contains the AI context template files (ai/ skeleton, CLAUDE.md, .cursorrules, etc.) mounted at `/app/templates:ro` in Docker.

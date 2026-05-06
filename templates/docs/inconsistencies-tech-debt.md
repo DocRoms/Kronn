@@ -3,11 +3,11 @@
 > **TEMPLATE FILE.** Do not refactor items listed here without reading their detail file first.
 
 Track-only list. Prevents AI from doing large refactors without context.
-Details in `ai/tech-debt/TD-YYYYMMDD-slug.md` (use today's date for YYYYMMDD).
+Details in `tech-debt/TD-YYYYMMDD-slug.md` (use today's date for YYYYMMDD).
 
 **To add:** create detail file, add one-line entry below.
 
-**Detail file example** (`ai/tech-debt/TD-20260315-hardcoded-secret.md`):
+**Detail file example** (`tech-debt/TD-20260315-hardcoded-secret.md`):
 - **ID**: TD-20260315-hardcoded-secret
 - **Area**: Backend
 - **Severity**: Critical

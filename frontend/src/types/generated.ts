@@ -257,6 +257,11 @@ export interface Project {
   ai_config: AiConfigStatus;
   audit_status: AiAuditStatus;
   ai_todo_count: number;
+  /** True when the project still uses the legacy `ai/index.md` layout
+   *  and no migrated `docs/AGENTS.md` exists. Drives the migration
+   *  banner on `ProjectCard`. Computed by the API layer from the
+   *  filesystem; not persisted in DB. */
+  needs_docs_migration?: boolean;
   default_skill_ids?: string[];
   briefing_notes?: string | null;
   created_at: string; // ISO 8601

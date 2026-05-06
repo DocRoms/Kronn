@@ -74,7 +74,11 @@ mod tests {
     fn all_instruction_files_contain_required_sections() {
         let base = templates_dir();
 
-        /// Strings that every instruction file must contain (after stripping frontmatter).
+        /// Strings that every instruction file must contain (after stripping
+        /// frontmatter). Updated for the 0.7.1 pivot from `ai/` to `docs/`:
+        /// redirectors are now short stubs pointing at `docs/AGENTS.md` —
+        /// the per-file pointers (`repo-map.md`, `coding-rules.md`) live
+        /// inside `docs/AGENTS.md` itself, not duplicated in every redirector.
         const REQUIRED: &[&str] = &[
             "{{PROJECT_NAME}}",
             "{{STACK_SUMMARY}}",
@@ -85,9 +89,7 @@ mod tests {
             "DO NOT guess",
             "DO NOT edit auto-generated",
             "DO NOT skip tests",
-            "ai/repo-map.md",
-            "ai/coding-rules.md",
-            "ai/index.md",
+            "docs/AGENTS.md",
         ];
 
         let mut failures: Vec<String> = Vec::new();
@@ -275,9 +277,10 @@ mod tests {
 
     #[test]
     fn decisions_template_exists_and_has_required_structure() {
+        // 0.7.1 pivot — templates/ai/ → templates/docs/
         let base = templates_dir();
-        let path = base.join("ai/decisions.md");
-        assert!(path.exists(), "templates/ai/decisions.md must exist");
+        let path = base.join("docs/decisions.md");
+        assert!(path.exists(), "templates/docs/decisions.md must exist");
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("Architecture decisions"), "decisions.md must have 'Architecture decisions' header");
         assert!(content.contains("What NOT to do"), "decisions.md must have 'What NOT to do' column");

@@ -14,12 +14,5 @@ Lint: {{LINT_CMD}} [ex: "cargo clippy && npx tsc --noEmit"]
 - DO NOT edit auto-generated files (e.g., types exported from another language).
 - DO NOT skip tests — every code change must include tests.
 
-## Where to put code
-Check `ai/repo-map.md` before creating new files.
-
-## Coding conventions
-Check `ai/coding-rules.md` before writing code.
-
 ## More context
-Read `ai/index.md` for the full project rules, architecture, and constraints.
-This file is a summary — `ai/index.md` is the source of truth.
+Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what each task needs). Source of truth.

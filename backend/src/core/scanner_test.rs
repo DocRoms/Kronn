@@ -237,6 +237,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    // ─── needs_docs_migration ─────────────────────────────────────────────────
+
+    #[test]
+    fn needs_migration_when_legacy_ai_only() {
+        let tmp = std::env::temp_dir().join("kronn-test-needs-mig-legacy");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("ai")).unwrap();
+        std::fs::write(tmp.join("ai/index.md"), "# legacy\n").unwrap();
+        assert!(needs_docs_migration(&tmp));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn needs_migration_false_when_docs_agents_exists() {
+        let tmp = std::env::temp_dir().join("kronn-test-needs-mig-migrated");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("docs")).unwrap();
+        std::fs::write(tmp.join("docs/AGENTS.md"), "# agents\n").unwrap();
+        // Even with a residual ai/index.md (e.g. operator chose symlink rétro-compat)
+        // the migrated marker wins.
+        std::fs::create_dir_all(tmp.join("ai")).unwrap();
+        std::fs::write(tmp.join("ai/index.md"), "# old\n").unwrap();
+        assert!(!needs_docs_migration(&tmp));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn needs_migration_false_for_fresh_project() {
+        let tmp = std::env::temp_dir().join("kronn-test-needs-mig-fresh");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        // No ai/ and no docs/ — fresh, no banner.
+        assert!(!needs_docs_migration(&tmp));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn needs_migration_false_for_doc_agents_layout() {
+        let tmp = std::env::temp_dir().join("kronn-test-needs-mig-doc-variant");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("doc")).unwrap();
+        std::fs::write(tmp.join("doc/AGENTS.md"), "# agents\n").unwrap();
+        std::fs::create_dir_all(tmp.join("ai")).unwrap();
+        std::fs::write(tmp.join("ai/index.md"), "# old\n").unwrap();
+        assert!(!needs_docs_migration(&tmp));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     // ─── detect_audit_status: ai/ dir exists but no index.md ─────────────────
 
     #[test]

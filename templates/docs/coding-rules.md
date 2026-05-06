@@ -3,13 +3,13 @@
 > **TEMPLATE FILE.** Sections marked `{{...}}` must be filled by the AI audit.
 > If you see unfilled `{{...}}`, say `NOT_FOUND` — **never invent tool names, conventions, or commands**.
 
-> Glossary: `ai/glossary.md`.
+> Glossary: [glossary](glossary.md).
 
 ## Global
 
 - Prefer smallest diffs. Avoid drive-by refactors.
 - Follow existing naming in adjacent code. Avoid generic names (`Helper`, `Utils`).
-- **Every change must include tests** — see `ai/testing-quality.md`.
+- **Every change must include tests** — see [testing-quality](testing-quality.md).
 
 ## {{LANGUAGE_1}} [ex: "Rust", "TypeScript", "Python"]
 

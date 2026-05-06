@@ -3,7 +3,7 @@
 > **TEMPLATE FILE.** Sections marked `{{...}}` must be filled by the AI audit.
 > If the test runner or commands are not filled, say `NOT_FOUND` — **never assume Jest, Mocha, or any specific runner**.
 
-> **Rule: every code change MUST include tests.** See `ai/index.md` § 4.
+> **Rule: every code change MUST include tests.** See [AGENTS](AGENTS.md) § 4.
 
 ## Build checks
 

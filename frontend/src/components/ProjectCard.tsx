@@ -17,6 +17,7 @@ import {
   Loader2,
   MessageSquare, AlertTriangle,
   Play, FileCode, ShieldCheck, StopCircle, BookOpen, Rocket, Check, RefreshCw, Puzzle,
+  FolderInput,
 } from 'lucide-react';
 
 const STATUS_COLORS: Record<string, string> = {
@@ -101,6 +102,18 @@ export function ProjectCard({
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [deleteConfirmInput, setDeleteConfirmInput] = useState('');
 
+  // ── Docs migration (legacy ai/ → docs/) state ──
+  // Defaults to symlink ON because most projects have CLI tooling, scripts,
+  // CI configs that still reference `ai/`. The opt-out checkbox is one
+  // click away for users who want a hard cut.
+  const [migrating, setMigrating] = useState(false);
+  const [migrationCreateSymlink, setMigrationCreateSymlink] = useState(true);
+  const [migrationError, setMigrationError] = useState<string | null>(null);
+  /** Set after a successful migration — keeps the banner visible briefly
+   *  with a green confirmation row so the operator gets unmistakable
+   *  feedback before the refetch removes the banner entirely. */
+  const [migrationSuccess, setMigrationSuccess] = useState<{ filesMoved: number } | null>(null);
+
   // ── Computed ──
   const validationDisc = projDiscussions.find(d => d.title === 'Validation audit AI');
   const validationInProgress = !!validationDisc && proj.audit_status === 'Audited';
@@ -125,6 +138,42 @@ export function ProjectCard({
     setDeleteConfirmId(null);
     setDeleteConfirmInput('');
     onRefetch();
+  };
+
+  // Trigger the ai/ → docs/ migration. Backend handles git mv + ref
+  // rewriting + optional symlink. On success we hold the banner in
+  // a "✓ Migré" state for ~1.6s, THEN refetch so the operator sees
+  // confirmation before the banner disappears entirely (without the
+  // dwell, the banner vanishes faster than a toast registers).
+  const handleMigrateDocs = async () => {
+    setMigrating(true);
+    setMigrationError(null);
+    setMigrationSuccess(null);
+    try {
+      const res = await projectsApi.migrateDocs(proj.id, { create_symlink: migrationCreateSymlink });
+      if (res.status === 'Failed') {
+        setMigrationError(res.reason ?? t('migration.failedGeneric'));
+        toast(t('migration.failedToast', proj.name), 'error');
+      } else if (res.status === 'Migrated') {
+        const filesMoved = res.files_moved ?? 0;
+        setMigrationSuccess({ filesMoved });
+        toast(t('migration.successToast', String(filesMoved)), 'success');
+        // Hold the green confirmation row, then refetch.
+        window.setTimeout(() => onRefetch(), 1600);
+      } else if (res.status === 'AlreadyMigrated') {
+        toast(t('migration.alreadyToast'), 'info');
+        onRefetch();
+      } else {
+        // NotApplicable — also refetch so the stale banner goes away.
+        onRefetch();
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setMigrationError(msg);
+      toast(t('migration.failedToast', proj.name), 'error');
+    } finally {
+      setMigrating(false);
+    }
   };
 
   // Stop polling the audit-status endpoint and drop the local checkpoint.
@@ -424,6 +473,69 @@ export function ProjectCard({
 
       {isOpen && (
         <div className="dash-card-body" onClick={(e) => e.stopPropagation()}>
+          {/* Docs migration banner — shown only on projects still using
+              the legacy `ai/index.md` layout. Disappears the next time
+              the project list is fetched after a successful migration. */}
+          {proj.needs_docs_migration && (
+            <div
+              className="dash-migration-banner"
+              data-testid={`migration-banner-${proj.id}`}
+              data-state={migrationSuccess ? 'success' : migrating ? 'pending' : 'idle'}
+            >
+              <div className="dash-migration-icon" aria-hidden="true">
+                {migrationSuccess
+                  ? <Check size={16} />
+                  : <FolderInput size={16} />}
+              </div>
+              <div className="dash-migration-content">
+                <div className="dash-migration-title">{t('migration.title')}</div>
+                <div className="dash-migration-desc">{t('migration.desc')}</div>
+                <label className="dash-migration-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={migrationCreateSymlink}
+                    onChange={e => setMigrationCreateSymlink(e.target.checked)}
+                    disabled={migrating || !!migrationSuccess}
+                  />
+                  <span>{t('migration.symlink')}</span>
+                </label>
+                {migrationError && (
+                  <div className="dash-migration-error" role="alert">
+                    <AlertTriangle size={11} /> {migrationError}
+                  </div>
+                )}
+                {migrating && (
+                  <div className="dash-migration-progress" role="status">
+                    <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
+                    {t('migration.inProgress')}
+                  </div>
+                )}
+                {migrationSuccess && (
+                  <div className="dash-migration-success" role="status">
+                    <Check size={11} />
+                    {t('migration.successInline', String(migrationSuccess.filesMoved))}
+                  </div>
+                )}
+              </div>
+              <button
+                type="button"
+                className="dash-migration-btn"
+                onClick={handleMigrateDocs}
+                disabled={migrating || !!migrationSuccess}
+                data-testid={`migrate-docs-btn-${proj.id}`}
+              >
+                {migrating
+                  ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
+                  : <Check size={11} />}
+                {migrating
+                  ? t('migration.ctaPending')
+                  : migrationSuccess
+                  ? t('migration.ctaDone')
+                  : t('migration.cta')}
+              </button>
+            </div>
+          )}
+
           {/* -- 1. Discussions -- */}
           <div className="dash-section">
             <button className="dash-collapsible-header" onClick={() => toggleSection('discussions')} aria-expanded={isSectionOpen('discussions')}>

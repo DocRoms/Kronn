@@ -169,6 +169,19 @@ pub async fn execute_run(
         }
     }
 
+    // 0.7.1 — scan sensitive files once at run start so the docs/ write
+    // filter can flag agent-written content that overlaps with .env/.pem/
+    // .ssh/credentials. Cheap (only reads small files), happens once per
+    // run, results reused across every Agent step audit. Empty when the
+    // run has no project (Notify-only / ApiCall-only workflows).
+    let sensitive_substrings = std::sync::Arc::new(
+        if work_dir.is_empty() {
+            crate::core::docs_write_filter::SensitiveSubstrings::new()
+        } else {
+            crate::core::docs_write_filter::scan_sensitive_files(std::path::Path::new(&work_dir))
+        }
+    );
+
     // Build template context from trigger context
     let mut ctx = TemplateContext::new();
     if let Some(ref trigger_ctx) = run.trigger_context {
@@ -496,6 +509,31 @@ pub async fn execute_run(
                     // tail of the channel buffer, losing the last few chunks
                     // of the step's output to the SSE stream).
                     let _ = forwarder.await;
+                    // 0.7.1 — anti-secret audit on docs/ writes the agent
+                    // produced during this step. Soft-reject : we revert
+                    // via `git checkout` and log; the step itself stays
+                    // Success unless the agent's code write itself failed.
+                    // Only fires when there's a real worktree (skips
+                    // ApiCall-only / Notify-only workflows where work_dir
+                    // is empty or unmounted).
+                    if !work_dir.is_empty() {
+                        let rejections = crate::core::docs_write_filter::audit_docs_writes(
+                            std::path::Path::new(&work_dir),
+                            sensitive_substrings.as_ref(),
+                        ).await;
+                        if !rejections.is_empty() {
+                            for (path, reason) in &rejections {
+                                tracing::warn!(
+                                    target: "kronn::docs_write_filter",
+                                    "Step '{}': reverted docs write {} — {}",
+                                    step.name, path, reason.explain()
+                                );
+                            }
+                            // Surface count in run state for UI visibility.
+                            let count_key = format!("docs_write_rejections.{}", step.name);
+                            run.state.insert(count_key, rejections.len().to_string());
+                        }
+                    }
                     outcome
                     }
                 }

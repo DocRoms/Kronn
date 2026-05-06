@@ -15,11 +15,11 @@
 > - Getting it right matters more than answering fast — hallucinations waste everyone's time.
 
 > **CRITICAL — MCP tool usage.**
-> Before calling any MCP tool, **read the matching context file** in `ai/operations/mcp-servers/<mcp-name>.md`.
+> Before calling any MCP tool, **read the matching context file** in `docs/operations/mcp-servers/<mcp-name>.md`.
 > These files contain project-specific rules, constraints, and examples that prevent hallucinations and misuse.
 > If no context file exists for an MCP you need to use, ask the user before proceeding.
 
-**Unknown term?** → `ai/glossary.md` first.
+**Unknown term?** → `docs/glossary.md` first.
 
 This folder (`ai/`) contains AI-optimized project context (not human docs). Use paths relative to repo root.
 
@@ -30,7 +30,7 @@ This folder (`ai/`) contains AI-optimized project context (not human docs). Use 
 ### Tiered context loading strategy
 
 #### Tier 1 — Always read
-- `ai/index.md` (this file)
+- `docs/AGENTS.md` (this file)
 
 **Trivial tasks** (typos, config tweaks, simple style fixes): Tier 1 may suffice.
 
@@ -38,30 +38,30 @@ This folder (`ai/`) contains AI-optimized project context (not human docs). Use 
 
 | Task | Files to load |
 |------|---------------|
-| Backend API changes | `ai/repo-map.md`, `ai/coding-rules.md` |
-| Frontend UI changes | `ai/repo-map.md`, `ai/coding-rules.md` |
-| Add new API endpoint | `ai/repo-map.md`, `ai/architecture/overview.md` |
-| Workflow engine work | `ai/architecture/overview.md`, `ai/inconsistencies-tech-debt.md`, `ai/coding-rules.md` |
-| Docker / deployment | `ai/operations/debug-operations.md` |
-| Secret themes / unlock-gated features | `ai/operations/secret-themes.md` |
-| **Désagentification / `ApiCall` step** (workflow engine calls APIs directly, zero tokens) — incl. AI helper bubble | `ai/operations/deagent-apicall.md` |
-| Fix known issue | `ai/inconsistencies-tech-debt.md` |
+| Backend API changes | `docs/repo-map.md`, `docs/coding-rules.md` |
+| Frontend UI changes | `docs/repo-map.md`, `docs/coding-rules.md` |
+| Add new API endpoint | `docs/repo-map.md`, `docs/architecture/overview.md` |
+| Workflow engine work | `docs/architecture/overview.md`, `docs/inconsistencies-tech-debt.md`, `docs/coding-rules.md` |
+| Docker / deployment | `docs/operations/debug-operations.md` |
+| Secret themes / unlock-gated features | `docs/operations/secret-themes.md` |
+| **Désagentification / `ApiCall` step** (workflow engine calls APIs directly, zero tokens) — incl. AI helper bubble | `docs/operations/deagent-apicall.md` |
+| Fix known issue | `docs/inconsistencies-tech-debt.md` |
 
 #### Tier 2 — For needs not covered above (max 3 files)
 
 | Need | File |
 |------|------|
-| repo structure / code placement | `ai/repo-map.md` |
-| testing / quality | `ai/testing-quality.md` |
-| coding rules | `ai/coding-rules.md` |
-| known issues / tech debt | `ai/inconsistencies-tech-debt.md` |
-| Architecture decisions | `ai/decisions.md` |
-| term definitions / project jargon | `ai/glossary.md` |
+| repo structure / code placement | `docs/repo-map.md` |
+| testing / quality | `docs/testing-quality.md` |
+| coding rules | `docs/coding-rules.md` |
+| known issues / tech debt | `docs/inconsistencies-tech-debt.md` |
+| Architecture decisions | `docs/decisions.md` |
+| term definitions / project jargon | `docs/glossary.md` |
 
 #### Tier 3 — Escalation
 Only if Tier 1 + 2 are insufficient: state which file you need and why, read it, or ask the user.
 Never load everything "just in case".
-- Architecture overview → `ai/architecture/overview.md`
+- Architecture overview → `docs/architecture/overview.md`
 
 ---
 
@@ -136,7 +136,7 @@ Never load everything "just in case".
 
 ## 6. Code placement
 
-Use `ai/repo-map.md` to decide.
+Use `docs/repo-map.md` to decide.
 - New API endpoints: add handler in `backend/src/api/<domain>.rs`, register route in `backend/src/lib.rs` (`build_router()`).
 - Workflow engine code: `backend/src/workflows/`.
 - New frontend pages: `frontend/src/pages/`.
@@ -149,9 +149,9 @@ Use `ai/repo-map.md` to decide.
 ## 7. Code generation (critical behavior)
 
 - Search the repo for similar implementations before writing.
-- Use `ai/repo-map.md` to decide where code goes.
+- Use `docs/repo-map.md` to decide where code goes.
 - If info is missing or ambiguous: ask questions; do not guess.
-- If a "logical fix" requires a large/risky refactor: add an entry to `ai/inconsistencies-tech-debt.md`.
+- If a "logical fix" requires a large/risky refactor: add an entry to `docs/inconsistencies-tech-debt.md`.
 - **Write tests for every change** — see § 4 Testing rule. No exceptions.
 
 ### AI context maintenance rule
@@ -172,7 +172,7 @@ After completing a task: if you discovered something non-obvious (a gotcha, a mi
 | Streaming | SSE (Server-Sent Events) for agent responses and workflow run updates |
 | Container | Docker Compose (backend + frontend + nginx gateway) |
 | Agents | Claude Code CLI, OpenAI Codex CLI, Vibe (Mistral), Gemini CLI (Google), Kiro (Amazon), **Ollama (local, v0.4.0)** — HTTP API streaming `/api/chat` with system/user role separation, zero cost. Planned: OpenCode, DeepSeek |
-| MCP sync | 7 formats: `.mcp.json` (Claude), `.kiro/settings/mcp.json` (Kiro), `.ai/mcp/mcp.json` (Kiro new), `.gemini/settings.json` (Gemini CLI), `.vibe/config.toml` (Vibe), `~/.codex/config.toml` (Codex), `~/.copilot/mcp-config.json` (Copilot CLI). Also syncs Claude Code's `.claude/settings.local.json` `enabledMcpjsonServers` whitelist |
+| MCP sync | 7 formats: `.mcp.json` (Claude), `.kiro/settings/mcp.json` (Kiro), `.docs/mcp/mcp.json` (Kiro new), `.gemini/settings.json` (Gemini CLI), `.vibe/config.toml` (Vibe), `~/.codex/config.toml` (Codex), `~/.copilot/mcp-config.json` (Copilot CLI). Also syncs Claude Code's `.claude/settings.local.json` `enabledMcpjsonServers` whitelist |
 | Skills sync | Native SKILL.md files written to `.claude/skills/`, `.agents/skills/` (Codex), `.gemini/skills/` for progressive agent discovery. Profiles synced as agent files (`.claude/agents/`, `.gemini/agents/`, `.codex/agents/`, `.copilot/agents/`). Vibe/Kiro: prompt injection fallback |
 | API keys | Multi-key per provider (named keys, active selection), stored in `config.toml` as `[[tokens.keys]]` array. Agent auth files synced (e.g. `~/.codex/auth.json`). Override toggle per provider without deleting keys. |
 | Token tracking | Per-message `tokens_used` + `auth_mode` (override/local). Codex: parsed from stderr. Claude Code: `--output-format stream-json --verbose --include-partial-messages` (tokens from `result` event and `message_delta`). Ollama: `prompt_eval_count` + `eval_count` from streaming JSON `done` chunk (cost: $0). Gemini/Vibe: TODO. |
@@ -188,7 +188,7 @@ Dashboard tabs (current / planned):
 | Projets | Done | Project list, AI audit pipeline (template → audit → validation), project bootstrap (create from scratch), MCP overview, per-project workflows/skills/doc viewer |
 | Discussions | Done | Single/multi-agent chat, @mentions, orchestration, global discussions, archive/unarchive (swipe gestures), inline title editing, disabled agent detection. **⏹ Stop agent** button (CancellationToken via `AppState.cancel_registry`, CancelGuard RAII). **Partial response recovery (0.3.5)**: agent output checkpointed every ~30s/~100 chunks into `discussions.partial_response` (+ `partial_response_started_at` for chronological order). Backend restart converts dangling partials into Agent messages with "⚠️ Réflexion interrompue" footer + broadcasts `WsMessage::PartialResponseRecovered`. `POST /api/discussions/:id/dismiss-partial` for manual recovery. `send_message` refuses a new run while a partial is pending (`partial_pending` SSE error → frontend waits or dismisses). **Structured agent questions (0.3.5)**: `{{var}}: question` patterns in agent messages auto-render a mini-form (`AgentQuestionForm`) above ChatInput. **0.5.0 — Test mode (worktree swap-in-main)**: `🧪 Tester cette version` CTA in the ChatHeader swaps the main repo to the discussion's branch, global banner stays pinned while active, single-click exit restores previous branch + pops auto-stash + re-creates the worktree. Triple preflight (worktree dirty, main dirty, detached HEAD) with a dedicated modal for the MainDirty case (stash-and-proceed / commit-first / cancel). `POST /api/discussions/:id/test-mode/{enter,exit}` return tagged envelopes. Persistent across reboots via migration 034. **0.5.0 — Decoder-loop detection**: agent streams now kill the child after 50 consecutive identical non-whitespace deltas (fixes Claude Opus extended-thinking `</thinking>`-loop leaking 76 KB into one response on EW-7189). Parser-level strip of literal `<thinking>` tags is the first line of defense. **0.5.0 — Prompt over stdin for Claude Code**: `start_agent_with_config` writes the prompt to `stdin` instead of argv, bypassing Linux `ARG_MAX` (~128 KiB). `--append-system-prompt` still travels via argv but truncates at 100 KiB with a clear marker. **Split into 8 components**: DiscussionsPage (orchestrator) + ChatHeader, ChatInput, DiscussionSidebar, NewDiscussionForm, MessageBubble, SwipeableDiscItem, AgentQuestionForm — plus 2 test-mode components (`TestModeBanner`, `TestModeModal`) in 0.5.0 |
 | Plugins | Done | Plugin registry — card grid + category pills, inline detail panel, per-project navigation. **0.5.0 — plugin kind: MCP \| API \| hybrid** (see §12). **56 plugins: 53 MCPs + 3 API plugins** (Chartbeat `apikey` query, Adobe Analytics OAuth2 S2S, Google Search `apikey` query). Per-card badges `🔌 MCP` / `🌐 API` / `MCP + API`. Kind-filter pills `All \| MCP \| API` on top. Publisher origin badges (official/community). Per-project MCP load indicator (green/orange/red). Env placeholders with realistic hints (sourced from `api_spec.config_keys` for API plugins, else static map). Eye toggle on add form; API plugins auto-expose non-secret fields as plain text with inline description. OAuth2 plugins get Kronn-managed bearer refresh transparent to the agent. Recent additions: MongoDB, Kubernetes, Qdrant, Perplexity, Microsoft 365, Chartbeat, Adobe Analytics, Google Search. Puppeteer removed (use Playwright). |
-| Automatisation | Done | Two tabs: **Workflows** + **Quick Prompts**. Workflows: list (grouped by project), creation wizard (simple 3-step + advanced 5-step), detail + runs with live SSE, manual trigger, run deletion. MCP-based suggestions (10 templates). Structured inter-step contracts. AI Architect ("Create with AI" → discussion → `KRONN:WORKFLOW_READY`). Test step (dry-run + live streaming, state survives tab switches via module-level tracker). Starter templates (6 examples). Raw cron editor. **⏹ Cancel run** with cascade to child batch discussions via `parent_run_id`. **Notify step (0.3.5)**: `StepType::Notify` with webhook support (POST/PUT/GET), zero tokens, template rendering in URL + body. **Quick Prompts**: reusable prompt templates with `{{variables}}` and conditional sections `{{#var}}text{{/var}}`. Launch creates a discussion with rendered prompt and dynamic title. **Batch Quick Prompts (0.3.5)**: fan-out to N items (tickets / list / resolved template), each child gets its own discussion + optional worktree, aggregated in sidebar groups. Dry-run preview with per-item rendered prompt + per-item test button. **Active-runs popover (0.5.1)**: `ActiveRunsPopover` hijacks the nav-icon click when `runningWorkflows > 0` — renders a tray listing every live run (workflow name + project + live elapsed timer + one-click `⏹ Arrêter`) without leaving the current page. Inline `⏹ Stop` button also present on every `.wf-card` whose `last_run.status === Running \| Pending` (`stopPropagation` guards against opening the detail panel). `onMouseDown` stop on the nav button prevents the outside-click-closes-popover race. **0.6.0 — Workflow Engine 0.7.x step types**: `StepType::Gate` (human approval, `WaitingApproval` run status, `POST /api/workflows/.../decide`), `StepType::Exec` (allowlisted binary, argv literal, no shell), plus `WorkflowGuards` (timeout / max LLM calls / loop revisits → `StoppedByGuard`), artifacts (`---ARTIFACT:name---` → workspace files), durable run state (`---STATE:k=v---` + `{{state.X}}` + `{{iter.X}}`), `ConditionAction::Goto` loops, `on_failure` rollback steps, per-item Workflow + QP Export/Import. See § Workflow Engine 0.7.x features in section 9 below. **`StepType::ApiCall` (0.5.1 — désagentification)**: workflow step that hits an API plugin directly from the Rust engine (0 tokens), extracts JSON via `serde_json_path` (RFC 9535), pipes to the next step. Full wizard card (`ApiCallStepCard.tsx`) with plugin+endpoint pickers, Test button, clickable JSON tree for click-to-pick path generation, live preview debounced 150 ms via `/api/workflow-steps/test-extract`, 3 example-path buttons, next-step-batch compatibility banner, advanced options collapsible (timeout/retries/output_var/fail_on_empty). Starter template "Chartbeat top 5 → Agent résumé → Slack" cloneable from the wizard. Security triple-guard: SSRF host allowlist, DNS rebind block, `ResolvedAuth` redact (Bearer / api-keys / OAuth2). Auto-pagination shape detection (Jira offset / CF cursor / Stripe has_more / Jira v3 nextPageToken). See [`ai/operations/deagent-apicall.md`](operations/deagent-apicall.md). |
+| Automatisation | Done | Two tabs: **Workflows** + **Quick Prompts**. Workflows: list (grouped by project), creation wizard (simple 3-step + advanced 5-step), detail + runs with live SSE, manual trigger, run deletion. MCP-based suggestions (10 templates). Structured inter-step contracts. AI Architect ("Create with AI" → discussion → `KRONN:WORKFLOW_READY`). Test step (dry-run + live streaming, state survives tab switches via module-level tracker). Starter templates (6 examples). Raw cron editor. **⏹ Cancel run** with cascade to child batch discussions via `parent_run_id`. **Notify step (0.3.5)**: `StepType::Notify` with webhook support (POST/PUT/GET), zero tokens, template rendering in URL + body. **Quick Prompts**: reusable prompt templates with `{{variables}}` and conditional sections `{{#var}}text{{/var}}`. Launch creates a discussion with rendered prompt and dynamic title. **Batch Quick Prompts (0.3.5)**: fan-out to N items (tickets / list / resolved template), each child gets its own discussion + optional worktree, aggregated in sidebar groups. Dry-run preview with per-item rendered prompt + per-item test button. **Active-runs popover (0.5.1)**: `ActiveRunsPopover` hijacks the nav-icon click when `runningWorkflows > 0` — renders a tray listing every live run (workflow name + project + live elapsed timer + one-click `⏹ Arrêter`) without leaving the current page. Inline `⏹ Stop` button also present on every `.wf-card` whose `last_run.status === Running \| Pending` (`stopPropagation` guards against opening the detail panel). `onMouseDown` stop on the nav button prevents the outside-click-closes-popover race. **0.6.0 — Workflow Engine 0.7.x step types**: `StepType::Gate` (human approval, `WaitingApproval` run status, `POST /api/workflows/.../decide`), `StepType::Exec` (allowlisted binary, argv literal, no shell), plus `WorkflowGuards` (timeout / max LLM calls / loop revisits → `StoppedByGuard`), artifacts (`---ARTIFACT:name---` → workspace files), durable run state (`---STATE:k=v---` + `{{state.X}}` + `{{iter.X}}`), `ConditionAction::Goto` loops, `on_failure` rollback steps, per-item Workflow + QP Export/Import. See § Workflow Engine 0.7.x features in section 9 below. **`StepType::ApiCall` (0.5.1 — désagentification)**: workflow step that hits an API plugin directly from the Rust engine (0 tokens), extracts JSON via `serde_json_path` (RFC 9535), pipes to the next step. Full wizard card (`ApiCallStepCard.tsx`) with plugin+endpoint pickers, Test button, clickable JSON tree for click-to-pick path generation, live preview debounced 150 ms via `/api/workflow-steps/test-extract`, 3 example-path buttons, next-step-batch compatibility banner, advanced options collapsible (timeout/retries/output_var/fail_on_empty). Starter template "Chartbeat top 5 → Agent résumé → Slack" cloneable from the wizard. Security triple-guard: SSRF host allowlist, DNS rebind block, `ResolvedAuth` redact (Bearer / api-keys / OAuth2). Auto-pagination shape detection (Jira offset / CF cursor / Stripe has_more / Jira v3 nextPageToken). See [`docs/operations/deagent-apicall.md`](operations/deagent-apicall.md). |
 | Config | Done | Multi-key API management (incl. Mistral/Vibe API keys), token usage tracking, language, agent detection + permissions, agent usage dashboard links, Directives CRUD with live cards, DB management (**export ZIP** with data.json + config.toml, **import ZIP/JSON** with config merge + path remapping). **Global context (0.3.5)**: markdown textarea + mode dropdown (always/no_project/never), injected into agent prompts via `ServerConfig.global_context`. Skills/Profiles are now managed per-project on the Project page. **Skill auto-trigger opt-out (0.5.1)**: per-skill toggle backed by `auto_triggers` table — disable a skill from contributing to prompt injection without removing it. **RTK integration (0.5.1)** in the Agents section: `<CompressionSection />` card at the top with 3 activation states, one-click "Activate on all compatible agents" CTA, install modal with copy-paste curl when the binary is absent, live savings counter + 3-card expand (tokens / ratio / samples), sobriety (?) tooltip nuancing the "eco mode" label. Per-agent badge inline next to the version: 🟢 `RTK actif` / 🟡 hook missing / ⚪ not installed / italic `Non pris en charge par RTK` (Kiro, Copilot CLI, Vibe). See §13. |
 
 Note: the old "Agents" tab has been merged into Config. Nav order: Projets → Discussions → Plugins → Workflows → Config. **"?" button** in nav replays the guided tour.
@@ -206,7 +206,7 @@ Frontend modal includes **drag & drop file upload** for documents. Files uploade
 
 ### Pre-audit briefing (optional)
 
-`POST /api/projects/:id/start-briefing` — creates a briefing discussion where the AI asks 5 quick questions (project purpose, stack, team, conventions, watch points). The agent writes `ai/briefing.md` and emits `KRONN:BRIEFING_COMPLETE`. The briefing content is injected into each audit step via `PROMPT_PREAMBLE`. Agents without filesystem access (Vibe) are excluded from briefing/audit.
+`POST /api/projects/:id/start-briefing` — creates a briefing discussion where the AI asks 5 quick questions (project purpose, stack, team, conventions, watch points). The agent writes `docs/briefing.md` and emits `KRONN:BRIEFING_COMPLETE`. The briefing content is injected into each audit step via `PROMPT_PREAMBLE`. Agents without filesystem access (Vibe) are excluded from briefing/audit.
 
 ### CI pipeline
 
@@ -231,12 +231,12 @@ Projects display 3 badges next to the title: `[FileCode] AI context`, `[Cpu] AI 
 - **AI audit**: 10-step SSE streaming, ~20 min. **Token cost: ~50K–150K tokens per audit** (depends on project size and agent model). With Claude Sonnet API pricing, expect ~$0.50–$2.00 per audit. Fills all `ai/` files.
 - **Validation**: opens a prefilled discussion (locked title/prompt) where the AI asks questions about ambiguities. AI updates `ai/` files after each answer. Project page shows "validation en cours" + link to discussion (no validate button on project page).
 - When the AI finishes all questions, it includes `KRONN:VALIDATION_COMPLETE` in its last message. This triggers a green banner in the discussion with a "Marquer l'audit comme valide" button. Similarly, `KRONN:BRIEFING_COMPLETE` signals the end of a pre-audit briefing discussion. `KRONN:WORKFLOW_READY` signals the AI Architect has produced a deployable workflow JSON (extracted from ```json block → one-click creation). **Bootstrap++ signals**: `KRONN:ARCHITECTURE_READY` → validate architecture, `KRONN:PLAN_READY` → validate plan, `KRONN:ISSUES_CREATED` → view project. Each gate sends a user message to continue the agent.
-- **Mark as validated**: injects `<!-- KRONN:VALIDATED:date -->` marker into `ai/index.md`.
+- **Mark as validated**: injects `<!-- KRONN:VALIDATED:date -->` marker into `docs/AGENTS.md`.
 - AI config file badges (CLAUDE.md, .cursorrules, etc.) shown on a second line below the status badges.
 
 ### Audit drift detection
 
-`GET /api/projects/:id/drift` — compares source file checksums against `ai/checksums.json` (generated during audit). Returns stale sections without consuming tokens. `POST /api/projects/:id/partial-audit` re-runs only stale steps (~3-5K tokens vs ~20K for full audit). UI shows an amber badge on stale projects with a "Mettre à jour" button.
+`GET /api/projects/:id/drift` — compares source file checksums against `docs/checksums.json` (generated during audit). Returns stale sections without consuming tokens. `POST /api/projects/:id/partial-audit` re-runs only stale steps (~3-5K tokens vs ~20K for full audit). UI shows an amber badge on stale projects with a "Mettre à jour" button.
 
 **MCP drift auto-detection**: adding/removing/relinking a plugin on an audited project automatically invalidates the `.mcp.json` checksum, flagging drift for step 8 (MCP introspection) re-run.
 
@@ -365,7 +365,7 @@ Kronn plugins expose capabilities to agents in two ways:
 - The `collect_active_api_plugins()` helper fetches + decrypts active API configs per project.
 - `config_keys` lets a plugin declare non-secret parameters (e.g. Chartbeat's `host`, Adobe's `company_id`). The UI renders them as plain inputs with the provided `label` + `placeholder` + `description`; the prompt injection surfaces them alongside the auth so the agent has enough to build a full URL.
 - `{ENV_KEY}` templating works in `ApiSpec.base_url` AND `OAuth2ExtraHeader.value_template`. Missing keys render as `<NOT_CONFIGURED:KEY>`.
-- Default context (`default_context` on the registry entry) is auto-written to `ai/operations/mcp-servers/<slug>.md` at install time — for API plugins too.
+- Default context (`default_context` on the registry entry) is auto-written to `docs/operations/mcp-servers/<slug>.md` at install time — for API plugins too.
 
 **OAuth2 client-credentials (`ApiAuthKind::OAuth2ClientCredentials`)**:
 - New module `backend/src/core/oauth2_cache.rs` — in-memory `HashMap<config_id, CachedToken>` on `AppState.oauth2_cache` (Tokio `Mutex`, `tokio::sync::Mutex`). Thread-safe refresh: concurrent discussion starts on the same plugin share one HTTPS exchange.
@@ -442,7 +442,7 @@ Auto-activation: the skill carries `auto_triggers.common/fr/en/es` regex buckets
 
 ## 10. RTK integration (0.5.1) — "Mode économique"
 
-RTK (Rust Token Killer, `github.com/rtk-ai/rtk`) is a Rust shell-output compressor that intercepts commands like `git`, `cargo`, `ls`, test runners and rewrites their output before it reaches the LLM. Measured ~89% compression on the author's local fleet. Kronn ships a first-class integration covering detection, activation, and savings readout.
+RTK (Rust Token Killer, `github.com/rtk-docs/rtk`) is a Rust shell-output compressor that intercepts commands like `git`, `cargo`, `ls`, test runners and rewrites their output before it reaches the LLM. Measured ~89% compression on the author's local fleet. Kronn ships a first-class integration covering detection, activation, and savings readout.
 
 **Scope — what Kronn does NOT do**: we do not wrap or intercept agent shell calls ourselves. The agent CLI (Claude Code, Codex, Gemini CLI) is the process that executes Bash tool calls, and it runs its *own* `Command::new("bash")`. RTK installs per-agent hooks that those CLIs invoke; Kronn detects + activates + observes, never proxies. This is the correct separation of concerns: RTK owns the format of each hook, Kronn owns the UX.
 
@@ -496,7 +496,7 @@ Regression tests in `backend/src/core/rtk_detect.rs::tests` and `backend/src/api
 ### Out of scope (intentionally)
 
 - **RTK timeseries / sparkline** — `daily[]`/`weekly[]`/`monthly[]` arrays are available in `rtk gain` JSON but the UI only surfaces `summary.*`. Reason: RTK is 0.x (breaking changes unannounced), and the counter covers 80% of the perceived value. Revisit when RTK hits 1.0.
-- **Scoping RTK savings by discussion / agent** — RTK's SQLite is global, Kronn doesn't instrument per-message. "Compression par discussion Kronn" requires a `ContextCompressor` trait that intercepts at the MCP output / workflow-step output level (the "désagentification" vision). See `ai/decisions.md` for the longer note.
+- **Scoping RTK savings by discussion / agent** — RTK's SQLite is global, Kronn doesn't instrument per-message. "Compression par discussion Kronn" requires a `ContextCompressor` trait that intercepts at the MCP output / workflow-step output level (the "désagentification" vision). See `docs/decisions.md` for the longer note.
 
 ---
 
@@ -504,7 +504,7 @@ Regression tests in `backend/src/core/rtk_detect.rs::tests` and `backend/src/api
 
 Redirectors to this file: `CLAUDE.md`, `GEMINI.md`, `AGENTS.md`, `.kiro/steering/instructions.md`, `.vibe/instructions.md`, `.cursorrules`, `.cursor/rules/repo-instructions.mdc`, `.github/copilot-instructions.md`, `.windsurfrules`, `.clinerules`.
 
-**Maintenance rule**: all content lives in `ai/`. Redirectors contain a summary of critical rules + pointer to `ai/index.md` as source of truth.
+**Maintenance rule**: all content lives in `ai/`. Redirectors contain a summary of critical rules + pointer to `docs/AGENTS.md` as source of truth.
 
 ---
 

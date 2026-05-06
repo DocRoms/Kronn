@@ -349,14 +349,28 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         crate::core::profiles::build_profiles_prompt(config.profile_ids)
     };
 
+    // 0.7.1 — user-scoped cross-project context : the `~/.kronn/user-context/`
+    // markdown directory. Universal across all CLIs (no per-tool format
+    // proliferation), opt-in (user creates the files), and stable for
+    // prompt cache (alphabetical ordering inside the helper).
+    let user_context = crate::core::user_context::read_user_context();
+
+    // 0.7.1 — agent memory prelude : encourages agents to update `docs/`
+    // when they discover stable facts, names the writable subfolders,
+    // forbids `docs/AGENTS.md` direct edits, references the anti-secret
+    // filter. Universal text, no per-agent customisation.
+    let memory_prelude = crate::core::user_context::build_memory_prelude_prompt();
+
     // Combine all context parts with explicit section markers
     // (helps non-Claude agents distinguish instructions from task)
     let mut parts = Vec::new();
+    if !user_context.is_empty() { parts.push(format!("=== USER CONTEXT (cross-project) ===\n\n{}", user_context)); }
     if !profiles_prompt.is_empty() { parts.push(format!("=== YOUR ROLE ===\n\n{}", profiles_prompt)); }
     if !skills_prompt.is_empty() { parts.push(format!("=== YOUR EXPERTISE ===\n\n{}", skills_prompt)); }
     if !config.context_files_prompt.is_empty() { parts.push(format!("=== CONTEXT FILES ===\n\n{}", config.context_files_prompt)); }
     if !mcp_context.is_empty() { parts.push(format!("=== AVAILABLE TOOLS ===\n\n{}", mcp_context)); }
     if !directives_prompt.is_empty() { parts.push(format!("=== OUTPUT REQUIREMENTS ===\n\n{}", directives_prompt)); }
+    parts.push(format!("=== PROJECT MEMORY (write back what you learn) ===\n\n{}", memory_prelude));
     let extra_context = parts.join("\n\n");
 
     // 0.6.0 — observability log : trace ce qui est INJECTÉ à chaque

@@ -1711,9 +1711,10 @@ async fn make_agent_stream(
                         let briefing_project_path = project_path.clone();
                         let briefing_state = state.clone();
                         tokio::spawn(async move {
-                            // Read ai/briefing.md from the project filesystem
+                            // Read briefing.md from the project's docs folder.
+                            // Path-agnostic — works on docs/ post-pivot AND legacy ai/.
                             let resolved = crate::core::scanner::resolve_host_path(&briefing_project_path);
-                            let briefing_file = resolved.join("ai/briefing.md");
+                            let briefing_file = crate::core::scanner::detect_docs_dir(&resolved).join("briefing.md");
                             let notes = tokio::task::spawn_blocking(move || {
                                 std::fs::read_to_string(&briefing_file).ok()
                             }).await.unwrap_or(None);

@@ -1,6 +1,6 @@
 # Glossary — Project terminology
 
-Project-specific terms. For deep dives, follow the linked `ai/architecture/` files.
+Project-specific terms. For deep dives, follow the linked `docs/architecture/` files.
 
 ---
 
@@ -82,7 +82,7 @@ Project-specific terms. For deep dives, follow the linked `ai/architecture/` fil
 
 **KronnOwnership** — 0.6.0 — Discovery classification: `NotManaged` (entry the user configured manually outside Kronn — preserved on sync), `ManagedByMarker(config_id)` (entry has the `_kronn` marker pointing at a known config), `ManagedByHash(config_id)` (entry's hash matches an existing `mcp_configs.config_hash` — fallback for entries written by older Kronn versions before the marker existed).
 
-**MCP context file** — Per-project instructions for AI agents using a specific MCP. Stored at `ai/operations/mcp-servers/<slug>.md`. Auto-created with default template on first sync; customized files are injected into agent system prompts. Managed via `McpPage.tsx` context editor modal.
+**MCP context file** — Per-project instructions for AI agents using a specific MCP. Stored at `docs/operations/mcp-servers/<slug>.md`. Auto-created with default template on first sync; customized files are injected into agent system prompts. Managed via `McpPage.tsx` context editor modal.
 
 **MCP injection** — `read_all_mcp_contexts()` in `core/mcp_scanner.rs` reads `.mcp.json` and MCP context files, then generates a prompt section listing all available MCP servers. Injected into agent prompts for workflow steps and discussions so agents use `mcp__<server>__<tool>` tools instead of Bash workarounds.
 
@@ -106,7 +106,7 @@ Project-specific terms. For deep dives, follow the linked `ai/architecture/` fil
 
 **ai_todo_count** — Number of `<!-- TODO -->` markers remaining in `ai/*.md` files. Computed on-the-fly by `scanner::count_ai_todos()`, exposed on `Project` struct.
 
-**Bootstrap prompt** — Block injected into `ai/index.md` between `KRONN:BOOTSTRAP:START` and `KRONN:BOOTSTRAP:END` markers. Instructs AI agents to analyze the repo and fill the `ai/` skeleton. Removed before running the automated audit.
+**Bootstrap prompt** — Block injected into `docs/AGENTS.md` between `KRONN:BOOTSTRAP:START` and `KRONN:BOOTSTRAP:END` markers. Instructs AI agents to analyze the repo and fill the `ai/` skeleton. Removed before running the automated audit.
 
 **Project Bootstrap** — Feature to create a new project from scratch via `POST /api/projects/bootstrap`. Creates directory, runs `git init`, installs AI template, and creates a bootstrap discussion with architect + product-owner profiles. The bootstrap prompt guides through Vision → Architecture → Structure → MVP → Action Plan. Parent directory resolved from existing projects' common parent path or `KRONN_REPOS_DIR` env var.
 
@@ -120,7 +120,7 @@ Project-specific terms. For deep dives, follow the linked `ai/architecture/` fil
 
 **Validation discussion** — Discussion with title "Validation audit AI" created from the project page. Uses a locked (read-only) prompt. The AI asks questions about ambiguities, updates `ai/` files after each answer. Detected by matching `title === 'Validation audit AI'` + `project_id`.
 
-**KRONN:VALIDATED marker** — HTML comment `<!-- KRONN:VALIDATED:YYYY-MM-DD -->` injected at the end of `ai/index.md` when audit is marked as validated.
+**KRONN:VALIDATED marker** — HTML comment `<!-- KRONN:VALIDATED:YYYY-MM-DD -->` injected at the end of `docs/AGENTS.md` when audit is marked as validated.
 
 ## Workflows
 
@@ -231,7 +231,7 @@ Project-specific terms. For deep dives, follow the linked `ai/architecture/` fil
 
 **Toast notifications** — `useToast()` hook in `frontend/src/hooks/useToast.tsx`. Returns `{ toast, ToastContainer }`. Types: `success` (green), `error` (red), `info` (blue). As of 0.5.1, errors are **persistent by default** (user dismisses via X) with optional `copyable: string` rendering a monospace `<pre>` + copy button; success/info still auto-dismiss (3s/5s). Max 3 visible, slide-in animation. Replaces all `alert()` calls. Signature: `toast(message, type?, options?: { persistent?, copyable? })`.
 
-**RTK (Rust Token Killer)** — External Rust tool (`github.com/rtk-ai/rtk`) that hooks into AI agent CLIs and compresses shell-command outputs (git, cargo, ls, test runners) before they reach the LLM. ~89 % compression observed. Kronn integrates RTK as the "Mode économique" section in Settings > Agents — see §10 of `ai/index.md` for the full contract (detection paths per agent, activation flags, savings parser). Kronn does NOT wrap agent shell calls itself; RTK owns the hook format, Kronn owns the detection + activation UX + savings readout.
+**RTK (Rust Token Killer)** — External Rust tool (`github.com/rtk-docs/rtk`) that hooks into AI agent CLIs and compresses shell-command outputs (git, cargo, ls, test runners) before they reach the LLM. ~89 % compression observed. Kronn integrates RTK as the "Mode économique" section in Settings > Agents — see §10 of `docs/AGENTS.md` for the full contract (detection paths per agent, activation flags, savings parser). Kronn does NOT wrap agent shell calls itself; RTK owns the hook format, Kronn owns the detection + activation UX + savings readout.
 
 **CompressionSection** — React component (`frontend/src/components/settings/CompressionSection.tsx`) rendering the "Mode économique" card at the top of the Agents list. Three activation states (none/partial/all), one-click CTA, install modal when RTK binary is absent, live savings counter from `GET /api/rtk/savings`, 3-card details expand, sobriety (?) tooltip. Attribution always visible: "Propulsé par RTK (open source)".
 
@@ -257,7 +257,7 @@ Project-specific terms. For deep dives, follow the linked `ai/architecture/` fil
 
 **PartialAudit** — Re-audit of only stale sections detected by drift check. Triggered via `POST /api/projects/:id/partial-audit` with a `PartialAuditRequest` specifying which sections to re-run. Costs ~3-5K tokens vs ~20K for a full audit.
 
-**Briefing** — Optional pre-audit conversational step where the AI asks 5 quick questions about the project. Output saved to `ai/briefing.md` and `briefing_notes` field on the project (migration 018). Injected into audit prompts via `PROMPT_PREAMBLE`.
+**Briefing** — Optional pre-audit conversational step where the AI asks 5 quick questions about the project. Output saved to `docs/briefing.md` and `briefing_notes` field on the project (migration 018). Injected into audit prompts via `PROMPT_PREAMBLE`.
 
 **pin_first_message** — Boolean flag on discussions (migration 019). When true, the first message is pinned at the top of the chat view and always visible, even when scrolling. Used for bootstrap and validation discussions where the initial prompt provides important context.
 

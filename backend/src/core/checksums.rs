@@ -154,13 +154,15 @@ pub fn compute_step_checksums(project_path: &Path, patterns: &[&str]) -> BTreeMa
     map
 }
 
-/// Write a checksums file to `ai/checksums.json` inside the project directory.
+/// Write a `checksums.json` to the project's docs folder (post-pivot
+/// `docs/`, legacy `ai/`). Path-agnostic via `detect_docs_dir`.
 pub fn write_checksums_file(
     project_path: &Path,
     mappings: &[ChecksumMapping],
 ) -> Result<(), String> {
-    let ai_dir = project_path.join("ai");
-    std::fs::create_dir_all(&ai_dir).map_err(|e| format!("Failed to create ai/ dir: {e}"))?;
+    let docs_dir = crate::core::scanner::detect_docs_dir(project_path);
+    std::fs::create_dir_all(&docs_dir)
+        .map_err(|e| format!("Failed to create {} dir: {e}", docs_dir.display()))?;
 
     let file = ChecksumsFile {
         audited_at: chrono::Utc::now().to_rfc3339(),
@@ -170,15 +172,16 @@ pub fn write_checksums_file(
     let json =
         serde_json::to_string_pretty(&file).map_err(|e| format!("JSON serialize error: {e}"))?;
 
-    std::fs::write(ai_dir.join("checksums.json"), json)
+    std::fs::write(docs_dir.join("checksums.json"), json)
         .map_err(|e| format!("Failed to write checksums.json: {e}"))?;
 
     Ok(())
 }
 
-/// Read and parse the checksums file from `ai/checksums.json`. Returns None if missing or malformed.
+/// Read and parse the checksums file. Returns None if missing or malformed.
+/// Path-agnostic via `detect_docs_dir` (handles `docs/`, `doc/`, `ai/`).
 pub fn read_checksums_file(project_path: &Path) -> Option<ChecksumsFile> {
-    let path = project_path.join("ai").join("checksums.json");
+    let path = crate::core::scanner::detect_docs_dir(project_path).join("checksums.json");
     let data = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&data).ok()
 }
