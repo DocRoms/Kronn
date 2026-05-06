@@ -525,15 +525,18 @@ pub fn ensure_redirectors_public(project_path: &str) {
     ensure_redirectors(project_path);
 }
 
-/// Ensure all agent redirector files exist in a project that has an ai/ directory.
+/// Ensure all agent redirector files exist in a project that has a
+/// docs folder (post-pivot `docs/`, alt `doc/`, or legacy `ai/`).
 /// Non-destructive: only creates missing files, never overwrites existing ones.
 /// Called during MCP sync to keep redirectors up-to-date when Kronn adds new agent support.
 fn ensure_redirectors(project_path: &str) {
     let resolved = resolve_host_path(project_path);
     let project_dir = Path::new(&resolved);
 
-    // Only for projects that have an ai/ directory
-    if !project_dir.join("ai").is_dir() {
+    // Only for projects that have ANY docs folder. Without a docs/
+    // (or ai/) at all there's no point dropping CLAUDE.md redirectors.
+    let docs_dir = crate::core::scanner::detect_docs_dir(project_dir);
+    if !docs_dir.is_dir() {
         return;
     }
 

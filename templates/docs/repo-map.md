@@ -3,7 +3,7 @@
 > **TEMPLATE FILE.** If sections below are empty or contain `{{...}}`, say `NOT_FOUND` — never invent folder names or file paths.
 
 - Focus: *where* code/config/tests live.
-- For *how to run checks*: see `ai/testing-quality.md`.
+- For *how to run checks*: see [testing-quality](testing-quality.md).
 
 ## Stack overview
 

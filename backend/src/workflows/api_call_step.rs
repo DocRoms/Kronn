@@ -7,7 +7,7 @@
 //! Keeping them split lets us hammer extraction edge cases with unit tests
 //! that never touch the network.
 //!
-//! See `ai/operations/deagent-apicall.md` for the strategic context.
+//! See `docs/operations/deagent-apicall.md` for the strategic context.
 
 use crate::models::{ExtractSpec, PaginationSpec};
 use serde_json::Value;
@@ -144,7 +144,7 @@ fn has_graphql_page_info(obj: &serde_json::Map<String, Value>) -> bool {
 
 /// Hard cap for pagination walks to prevent runaway loops. An API that
 /// claims `hasMore: true` forever would otherwise lock a worker for
-/// hours. Matches the strategic decision in `ai/operations/deagent-apicall.md`.
+/// hours. Matches the strategic decision in `docs/operations/deagent-apicall.md`.
 pub const DEFAULT_MAX_PAGES: u32 = 50;
 
 /// Returns the `max_pages` bound on a pagination spec. `None` → default cap.

@@ -1,6 +1,6 @@
 # Architecture (AI context)
 
-> Folder structure: `ai/repo-map.md`.
+> Folder structure: `docs/repo-map.md`.
 
 ## Apps / services (facts)
 
@@ -196,7 +196,7 @@ Unified automation system: `Trigger → Steps`. Superset of OpenAI Symphony's WO
 - Cleanup on completion/failure.
 
 **MCP injection:**
-- `read_all_mcp_contexts()` reads `.mcp.json` and per-project MCP context files (`ai/operations/mcp-servers/*.md`).
+- `read_all_mcp_contexts()` reads `.mcp.json` and per-project MCP context files (`docs/operations/mcp-servers/*.md`).
 - Available MCP servers are listed in agent prompts with instruction to use `mcp__<server>__<tool>` tools instead of Bash workarounds.
 - Applied to both workflow steps and discussions.
 
@@ -215,7 +215,7 @@ Unified automation system: `Trigger → Steps`. Superset of OpenAI Symphony's WO
 - Reuses existing agent runner and multi-agent debate system.
 - Symphony is a strict subset: single-agent, single-prompt, tracker-driven. Kronn adds multi-step, multi-agent, conditional branching, per-step MCPs.
 
-**0.6.0 engine extensions** (full detail in `ai/index.md § Workflow Engine 0.7.x features`):
+**0.6.0 engine extensions** (full detail in `docs/AGENTS.md § Workflow Engine 0.7.x features`):
 - `WorkflowGuards` (timeout / max-llm-calls / loop-revisits) → `RunStatus::StoppedByGuard`.
 - `StepOutputFormat::TypedSchema` (JSON-schema-validated step output).
 - `Workflow.artifacts` + `---ARTIFACT:name---` envelope persisted to workspace files.
@@ -241,12 +241,12 @@ mcp_servers (type)  →  mcp_configs (configured instance)  →  mcp_config_proj
 
 **Registry** — 34 built-in official MCP servers in `core/registry.rs`, grouped by category: Git & Code (GitHub, GitLab, Git), Databases (PostgreSQL, SQLite, Redis), BaaS (Supabase), Cloud & Infra (Cloudflare, AWS CloudWatch, Docker, Azure), Search & Web (Brave Search, Fetch, Exa), Browser (Puppeteer, Chrome DevTools, Playwright, Browserbase), Scraping (Firecrawl), Monitoring (Sentry, Grafana), Communication (Slack), Email (Resend), Project Management (Linear, Atlassian), Design (Figma), Knowledge & Docs (Notion, Context7), Payments (Stripe), AI & Reasoning (Memory, Sequential Thinking), SEO (Ahrefs), Files (Filesystem), Sandbox (E2B). Each has `env_keys` listing required environment variables, plus optional `token_url` (link to provider's token generation page) and `token_help` (short guidance text).
 
-**Disk sync** — When linkages or config values change, Kronn writes agent-specific config files. The full mapping (Claude / Vibe / Kiro / Gemini / Codex / Copilot, per-project and global) plus the 0.6.0 outbound host sync (scope-aware Claude routing, `_kronn` marker, host_sync field, Phase 1+2+3 architecture) is documented in `ai/index.md § Host MCP sync` — single source of truth, do not duplicate here.
+**Disk sync** — When linkages or config values change, Kronn writes agent-specific config files. The full mapping (Claude / Vibe / Kiro / Gemini / Codex / Copilot, per-project and global) plus the 0.6.0 outbound host sync (scope-aware Claude routing, `_kronn` marker, host_sync field, Phase 1+2+3 architecture) is documented in `docs/AGENTS.md § Host MCP sync` — single source of truth, do not duplicate here.
 
 Quick recap (per-project files):
 - Claude Code → `<project>/.mcp.json`
 - Vibe → `<project>/.vibe/config.toml`
-- Kiro → `<project>/.kiro/settings/mcp.json` + `<project>/.ai/mcp/mcp.json`
+- Kiro → `<project>/.kiro/settings/mcp.json` + `<project>/.docs/mcp/mcp.json`
 - Gemini → `<project>/.gemini/settings.json`
 
 Quick recap (host-level / global files, written when `host_sync ≠ None`):
@@ -257,7 +257,7 @@ Quick recap (host-level / global files, written when `host_sync ≠ None`):
 
 Sync triggers: toggle project, toggle global, toggle host_sync, create/update/delete config. Key naming: single config for a server → `server.name.to_lowercase()`, multiple configs of same server → `config.label`. Files are added to `.gitignore`. Codex/Copilot only support stdio (SSE/streamable skipped). All host-level files preserve non-Kronn entries (`_kronn` marker distinguishes ownership).
 
-**MCP context files** — Per-MCP per-project instruction files at `ai/operations/mcp-servers/<slug>.md`. Auto-created with a default template on first disk sync. Customized files are injected into agent system prompts via `--append-system-prompt`. The `McpOverview` response includes `customized_contexts` (list of `"slug:projectId"` pairs) so the frontend can show colored icons for customized vs default context files.
+**MCP context files** — Per-MCP per-project instruction files at `docs/operations/mcp-servers/<slug>.md`. Auto-created with a default template on first disk sync. Customized files are injected into agent system prompts via `--append-system-prompt`. The `McpOverview` response includes `customized_contexts` (list of `"slug:projectId"` pairs) so the frontend can show colored icons for customized vs default context files.
 
 **Detection & matching** — `POST /api/mcps/refresh` scans all projects' `.mcp.json` files, matches detected entries against the registry by command + package name (with version stripping), migrates `detected:*` server IDs to registry IDs, and cleans up orphan servers.
 
@@ -284,13 +284,13 @@ Sync triggers: toggle project, toggle global, toggle host_sync, create/update/de
 NoTemplate → TemplateInstalled → Audited → Validated
 ```
 
-- **Detection**: `scanner::detect_audit_status()` checks `ai/index.md` existence, `KRONN:BOOTSTRAP`/`{{` markers, and `KRONN:VALIDATED` marker.
+- **Detection**: `scanner::detect_audit_status()` checks `docs/AGENTS.md` existence, `KRONN:BOOTSTRAP`/`{{` markers, and `KRONN:VALIDATED` marker.
 - **TODO counting**: `scanner::count_ai_todos()` walks `ai/*.md` files and counts `<!-- TODO` occurrences. Exposed as `Project.ai_todo_count` (computed on-the-fly by `enrich_audit_status()`).
 - **Template install** (`POST /api/projects/:id/install-template`): copies `ai/` skeleton + redirectors (CLAUDE.md, .cursorrules, etc.) non-destructively, injects bootstrap prompt block (`KRONN:BOOTSTRAP:START` to `KRONN:BOOTSTRAP:END`).
 - **AI audit** (`POST /api/projects/:id/ai-audit`): SSE-streamed 10-step analysis. Each step runs an agent call with `full_access: true` and default profiles (Architect + Tech Lead + Mentor) for multi-perspective analysis. Bootstrap block removed before audit starts. Steps defined in `ANALYSIS_STEPS` constant.
 - **Validation**: creates a Discussion with title "Validation audit AI" and a locked prompt. The AI asks questions about ambiguities/TODOs, updates `ai/` files after each answer. Frontend detects validation-in-progress by matching discussion title + project_id. Project page only shows "validation en cours" + link (no validate button).
 - **Completion detection**: the prompt instructs the AI to include `KRONN:VALIDATION_COMPLETE` in its final message. Frontend detects this in the last agent message and shows a green banner with "Marquer l'audit comme valide" button — only in the discussion view.
-- **Mark validated** (`POST /api/projects/:id/validate-audit`): injects `<!-- KRONN:VALIDATED:YYYY-MM-DD -->` at end of `ai/index.md`.
+- **Mark validated** (`POST /api/projects/:id/validate-audit`): injects `<!-- KRONN:VALIDATED:YYYY-MM-DD -->` at end of `docs/AGENTS.md`.
 
 **Skill auto-detection**: between audit Phase 2 and Phase 3, `detect_project_skills()` scans project filesystem for config files (Cargo.toml, tsconfig.json, go.mod, etc.) and maps them to skill IDs. Detected skills are saved to DB and used for the validation discussion.
 

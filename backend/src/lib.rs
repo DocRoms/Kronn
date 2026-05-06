@@ -402,6 +402,17 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/projects/:id/cancel-audit", post(api::audit::cancel_audit))
         .route("/api/projects/:id/audit-status", get(api::audit::audit_status))
         .route("/api/projects/:id/remap-path", post(api::projects::remap_path))
+        // 0.7.1 — `ai/` → `docs/` convention migration. Idempotent, safe
+        // to call on already-migrated or never-bootstrapped projects.
+        .route("/api/projects/:id/migrate-docs", post(api::projects::migrate_docs))
+        // 0.7.1 — User-scoped context CRUD : files in ~/.kronn/user-context/
+        // are auto-injected into every agent's prompt. UI-editable so the
+        // operator never needs a terminal.
+        .route("/api/user-context", get(api::user_context::list))
+        .route("/api/user-context/:name",
+            get(api::user_context::get)
+                .put(api::user_context::put)
+                .delete(api::user_context::delete))
         .route("/api/projects/:id/default-skills", put(api::projects::set_default_skills))
         .route("/api/projects/:id/default-profile", put(api::projects::set_default_profile))
         .route("/api/projects/:id/briefing", get(api::audit::get_briefing).put(api::audit::set_briefing))

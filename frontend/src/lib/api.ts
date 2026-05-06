@@ -338,6 +338,17 @@ export const contacts = {
 
 // ─── Projects ───────────────────────────────────────────────────────────────
 
+/** Response shape of `POST /api/projects/:id/migrate-docs`. Backend
+ *  returns one of NotApplicable / AlreadyMigrated / Migrated / Failed,
+ *  with optional counters (files moved, refs rewritten, symlink). */
+export interface MigrateDocsResponse {
+  status: 'NotApplicable' | 'AlreadyMigrated' | 'Migrated' | 'Failed';
+  files_moved?: number;
+  refs_rewritten?: number;
+  symlink_created?: boolean;
+  reason?: string;
+}
+
 export const projects = {
   list: () => api<Project[]>('GET', '/projects'),
   get: (id: string) => api<Project>('GET', `/projects/${id}`),
@@ -345,6 +356,12 @@ export const projects = {
   create: (repo: DetectedRepo) => api<Project>('POST', '/projects', repo),
   addFolder: (req: { path: string; name?: string }) => api<Project>('POST', '/projects/add-folder', req),
   bootstrap: (req: BootstrapProjectRequest) => api<BootstrapProjectResponse>('POST', '/projects/bootstrap', req),
+  /** Migrate the project's legacy `ai/` directory to the new `docs/`
+   *  convention (`ai/index.md` → `docs/AGENTS.md`, internal refs rewritten,
+   *  optional symlink for retro-compat). Idempotent — re-running on an
+   *  already-migrated project returns `status: "AlreadyMigrated"`. */
+  migrateDocs: (id: string, req: { create_symlink?: boolean }) =>
+    api<MigrateDocsResponse>('POST', `/projects/${id}/migrate-docs`, req),
   delete: (id: string, hard?: boolean) => api<void>('DELETE', `/projects/${id}${hard ? '?hard=true' : ''}`),
   clone: (req: CloneProjectRequest) => api<CloneProjectResponse>('POST', '/projects/clone', req),
   discoverRepos: (req?: DiscoverReposRequest) => api<DiscoverReposResponse>('POST', '/projects/discover-repos', req ?? { source_ids: [] }),
@@ -1212,3 +1229,25 @@ export async function fetchHealth(): Promise<HealthResponse> {
   if (!res.ok) throw new Error(`Health check failed: HTTP ${res.status}`);
   return res.json() as Promise<HealthResponse>;
 }
+
+// ─── User context (~/.kronn/user-context/) ──────────────────────────────────
+
+export interface UserContextFile {
+  name: string;
+  size: number;
+  content?: string;
+}
+
+/** 0.7.1 — cross-project user-scoped agent context. Markdown files in
+ *  ~/.kronn/user-context/ are auto-injected into every agent's system
+ *  prompt at spawn time, regardless of CLI. UI lets the operator manage
+ *  them without ever opening a terminal. */
+export const userContext = {
+  list: () => api<UserContextFile[]>('GET', '/user-context'),
+  get: (name: string) =>
+    api<UserContextFile>('GET', `/user-context/${encodeURIComponent(name)}`),
+  put: (name: string, content: string) =>
+    api<UserContextFile>('PUT', `/user-context/${encodeURIComponent(name)}`, { content }),
+  delete: (name: string) =>
+    api<void>('DELETE', `/user-context/${encodeURIComponent(name)}`),
+};

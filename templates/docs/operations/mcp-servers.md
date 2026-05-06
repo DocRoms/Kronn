@@ -20,7 +20,7 @@
 
 ## Per-MCP context files
 
-Each MCP has a context file at `ai/operations/mcp-servers/<slug>.md` with project-specific rules.
+Each MCP has a context file at `operations/mcp-servers/<slug>.md` with project-specific rules.
 If a context file exists for an MCP, agents should read it before calling that MCP's tools.
 
 ## Files

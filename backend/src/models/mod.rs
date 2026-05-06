@@ -429,6 +429,12 @@ pub struct Project {
     pub audit_status: AiAuditStatus,
     #[serde(default)]
     pub ai_todo_count: u32,
+    /// True when the project still uses the legacy `ai/index.md` layout
+    /// and no migrated `docs/AGENTS.md` exists. Computed by
+    /// `enrich_audit_status` — drives the migration banner on
+    /// `ProjectCard`. Not persisted in DB.
+    #[serde(default)]
+    pub needs_docs_migration: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub default_skill_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

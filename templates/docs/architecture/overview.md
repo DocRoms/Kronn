@@ -2,7 +2,7 @@
 
 > **TEMPLATE FILE.** If sections below contain `{{...}}`, say `NOT_FOUND` — never invent services, ports, or patterns.
 
-> Folder structure: `ai/repo-map.md`.
+> Folder structure: [repo-map](../repo-map.md).
 
 ## Services
 

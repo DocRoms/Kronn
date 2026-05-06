@@ -1201,3 +1201,131 @@
 .dash-bootstrap-option input[type="checkbox"] {
   accent-color: var(--kr-accent);
 }
+
+/* ── Docs migration banner (legacy ai/ → docs/) ───────────────────────
+   Surfaces inside ProjectCard body when `proj.needs_docs_migration`
+   is true. Warning amber tint to set it apart from success/error
+   patterns elsewhere — operator action recommended, not blocking. */
+.dash-migration-banner {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: var(--kr-sp-6);
+  align-items: start;
+  padding: var(--kr-sp-6) var(--kr-sp-7);
+  margin: var(--kr-sp-6) 0;
+  background: rgba(var(--kr-warning-amber-rgb), 0.06);
+  border: 1px solid rgba(var(--kr-warning-amber-rgb), 0.25);
+  border-radius: var(--kr-r-md);
+}
+
+.dash-migration-icon {
+  color: var(--kr-warning-amber);
+  margin-top: 2px;
+}
+
+.dash-migration-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-3);
+  min-width: 0;
+}
+
+.dash-migration-title {
+  font-weight: 600;
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-primary);
+}
+
+.dash-migration-desc {
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-secondary);
+  line-height: 1.45;
+}
+
+.dash-migration-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-tertiary);
+  cursor: pointer;
+}
+
+.dash-migration-checkbox input[type="checkbox"] {
+  accent-color: var(--kr-warning-amber);
+}
+
+.dash-migration-error {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-error-soft);
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  background: rgba(var(--kr-error-rgb), 0.08);
+  border: 1px solid rgba(var(--kr-error-rgb), 0.2);
+  border-radius: var(--kr-r-sm);
+}
+
+/* In-flight progress row — visible only while the API request is open. */
+.dash-migration-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-secondary);
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  background: var(--kr-bg-hover);
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-sm);
+}
+
+/* Brief success row held for ~1.6 s before refetch removes the banner.
+   Green to leave no doubt the migration went through. */
+.dash-migration-success {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  color: var(--kr-success);
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  background: rgba(var(--kr-success-rgb), 0.1);
+  border: 1px solid rgba(var(--kr-success-rgb), 0.3);
+  border-radius: var(--kr-r-sm);
+}
+
+/* Success state on the whole banner — switches the icon + border tint
+   to green so the eye catches the change without reading. */
+.dash-migration-banner[data-state="success"] {
+  background: rgba(var(--kr-success-rgb), 0.06);
+  border-color: rgba(var(--kr-success-rgb), 0.3);
+}
+.dash-migration-banner[data-state="success"] .dash-migration-icon {
+  color: var(--kr-success);
+}
+
+.dash-migration-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-3) var(--kr-sp-6);
+  background: rgba(var(--kr-warning-amber-rgb), 0.12);
+  border: 1px solid rgba(var(--kr-warning-amber-rgb), 0.4);
+  border-radius: var(--kr-r-sm);
+  color: var(--kr-warning-amber);
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  align-self: center;
+}
+
+.dash-migration-btn:hover:not(:disabled) {
+  background: rgba(var(--kr-warning-amber-rgb), 0.2);
+}
+
+.dash-migration-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

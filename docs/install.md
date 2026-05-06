@@ -147,7 +147,7 @@ On first launch, Kronn opens a **setup wizard** at `http://localhost:3140` that:
 2. Configures API keys and permissions
 3. Scans your repositories
 
-If an agent is not detected, install it manually (e.g. `npm install -g @anthropic-ai/claude-code`) and re-run detection from the Config page.
+If an agent is not detected, install it manually (e.g. `npm install -g @anthropic-docs/claude-code`) and re-run detection from the Config page.
 
 You're ready to go.
 

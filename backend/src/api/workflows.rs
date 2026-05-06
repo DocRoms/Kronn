@@ -2019,9 +2019,11 @@ pub async fn suggestions(
         return Json(ApiResponse::ok(vec![]));
     }
 
-    // 3. Also try to read workflow hints from ai/operations/mcp-servers.md (if audited)
+    // 3. Also try to read workflow hints from <docs>/operations/mcp-servers.md (if audited).
+    // Path-agnostic — works for docs/ post-pivot and legacy ai/.
     let project_path = crate::core::scanner::resolve_host_path(&project.path);
-    let _hints_path = project_path.join("ai/operations/mcp-servers.md");
+    let _hints_path = crate::core::scanner::detect_docs_dir(&project_path)
+        .join("operations/mcp-servers.md");
     // Future: parse the hints table for project-specific suggestions.
     // For now, we use only the static catalogue.
 

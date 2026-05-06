@@ -52,6 +52,7 @@ export const API_NAMESPACES = [
   'docs',
   'autoTriggersApi',
   'rtk',
+  'userContext',
 ] as const;
 
 /** Flat top-level helpers (non-namespace exports). */
@@ -91,6 +92,7 @@ interface DefaultMock {
   docs: Record<string, AnyFn>;
   autoTriggersApi: Record<string, AnyFn>;
   rtk: Record<string, AnyFn>;
+  userContext: Record<string, AnyFn>;
 }
 
 /**
@@ -160,6 +162,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       listAiFiles: resolve([]),
       createPr: resolve({ url: '' }),
       bootstrap: resolve({}),
+      migrateDocs: resolve({ status: 'NotApplicable' }),
       partialAudit: resolve({}),
       exportZip: resolve(new Blob()),
       importZip: resolve({ imported: 0 }),
@@ -300,6 +303,13 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     autoTriggersApi: {
       listDisabled: resolve([]),
       toggle: resolve(false),
+    },
+
+    userContext: {
+      list: resolve([]),
+      get: resolve({ name: '', size: 0, content: '' }),
+      put: resolve({ name: '', size: 0, content: '' }),
+      delete: resolve(undefined),
     },
   };
 

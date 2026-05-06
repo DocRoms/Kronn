@@ -1857,3 +1857,211 @@
     animation: none;
   }
 }
+
+/* ── User context editor ─────────────────────────────────
+   Inline list of files in ~/.kronn/user-context/, each row
+   collapses an editor. Visual logic mirrors the discussion
+   "disc-*" rows so an operator who knows the chat list can
+   drive this editor without surprises. */
+.user-context-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-6);
+}
+
+.user-context-header h3 {
+  margin: 0 0 var(--kr-sp-2);
+}
+
+.user-context-create {
+  display: flex;
+  gap: var(--kr-sp-4);
+  align-items: stretch;
+}
+
+.user-context-name-input {
+  flex: 1;
+  padding: var(--kr-sp-3) var(--kr-sp-5);
+  background: var(--kr-bg-hover);
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-md);
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-sm);
+  font-family: inherit;
+  outline: none;
+}
+
+.user-context-name-input:focus {
+  border-color: var(--kr-accent-border-light);
+}
+
+.user-context-add-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-3) var(--kr-sp-6);
+  background: var(--kr-accent-bg);
+  border: 1px solid var(--kr-accent-border);
+  border-radius: var(--kr-r-md);
+  color: var(--kr-accent);
+  font-size: var(--kr-fs-sm);
+  cursor: pointer;
+}
+
+.user-context-add-btn:hover:not(:disabled) {
+  background: var(--kr-accent-bg-hover);
+}
+
+.user-context-add-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.user-context-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+}
+
+.user-context-row {
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-subtle);
+}
+
+.user-context-row-head {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-3) var(--kr-sp-5);
+}
+
+.user-context-toggle {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-4);
+  background: transparent;
+  border: none;
+  color: var(--kr-text-primary);
+  cursor: pointer;
+  text-align: left;
+  padding: 0;
+  font-family: inherit;
+  font-size: var(--kr-fs-sm);
+}
+
+.user-context-name {
+  font-family: var(--kr-font-mono);
+  color: var(--kr-text-primary);
+}
+
+.user-context-delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--kr-r-sm);
+  color: var(--kr-error);
+  cursor: pointer;
+  opacity: 0.55;
+}
+
+.user-context-delete:hover {
+  opacity: 1;
+  background: rgba(var(--kr-error-rgb), 0.08);
+  border-color: rgba(var(--kr-error-rgb), 0.2);
+}
+
+.user-context-edit {
+  padding: 0 var(--kr-sp-5) var(--kr-sp-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-3);
+}
+
+.user-context-textarea {
+  width: 100%;
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  background: var(--kr-bg-code-panel);
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-sm);
+  color: var(--kr-text-primary);
+  font-family: var(--kr-font-mono);
+  font-size: var(--kr-fs-xs);
+  line-height: 1.5;
+  outline: none;
+  resize: vertical;
+  min-height: 120px;
+}
+
+.user-context-textarea:focus {
+  border-color: var(--kr-accent-border-light);
+}
+
+.user-context-textarea:disabled {
+  opacity: 0.6;
+}
+
+.user-context-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--kr-sp-3);
+}
+
+.user-context-save {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-3) var(--kr-sp-6);
+  background: var(--kr-accent-bg);
+  border: 1px solid var(--kr-accent-border);
+  border-radius: var(--kr-r-sm);
+  color: var(--kr-accent);
+  font-size: var(--kr-fs-sm);
+  cursor: pointer;
+}
+
+.user-context-save:hover:not(:disabled) {
+  background: var(--kr-accent-bg-hover);
+}
+
+.user-context-save:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.user-context-loading,
+.user-context-empty {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-5);
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-sm);
+}
+
+.user-context-empty {
+  background: var(--kr-bg-subtle);
+  border: 1px dashed var(--kr-border-light);
+  border-radius: var(--kr-r-md);
+  justify-content: center;
+}
+
+.user-context-error {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-3) var(--kr-sp-5);
+  background: rgba(var(--kr-error-rgb), 0.08);
+  border: 1px solid rgba(var(--kr-error-rgb), 0.2);
+  border-radius: var(--kr-r-sm);
+  color: var(--kr-error-soft);
+  font-size: var(--kr-fs-xs);
+}

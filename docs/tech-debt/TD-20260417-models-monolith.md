@@ -72,4 +72,4 @@ Dedicated session (~45 min). Plan:
 3. `cargo check` — fix any missing `pub(crate)` on shared helpers.
 4. `cargo test --lib` — expect 0 behavioural diff.
 5. `make typegen` + diff `backend/bindings/` — expect identical output.
-6. Update `ai/repo-map.md` and this TD entry status to FIXED.
+6. Update `docs/repo-map.md` and this TD entry status to FIXED.

@@ -35,6 +35,12 @@ services:
       - ${SSH_AUTH_SOCK:-/dev/null}:/run/host-ssh-agent.sock  # SSH agent socket (Linux)
       - ${KRONN_MACOS_SSH_SOCK:-/dev/null}:/run/host-services/ssh-auth.sock  # SSH agent socket (macOS Docker Desktop)
       # Agent auth directories (local subscriptions)
+      # 0.7.1 — User-scoped agent context directory (cross-project, multi-CLI).
+      # Markdown files here are auto-injected into the system prompt of every
+      # agent Kronn spawns, regardless of CLI. Bridges the per-tool gap left
+      # by ~/.claude/CLAUDE.md, ~/.codex/..., etc. Auto-bootstrapped with a
+      # README on first read if the dir doesn't exist.
+      - ${HOME}/.kronn/user-context:/home/kronn/.kronn/user-context:rw
       - ${HOME}/.claude.json:/home/kronn/.claude.json:ro    # Claude Code main config
       - ${HOME}/.claude:/home/kronn/.claude:rw              # Claude Code auth/config + session state (needs write)
       - claude-projects:/home/kronn/.claude/projects         # Isolate Docker sessions from host (avoids ghost /host-home project dirs)

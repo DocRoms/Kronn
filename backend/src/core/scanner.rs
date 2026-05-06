@@ -368,19 +368,100 @@ pub(crate) fn host_home_aliases() -> Vec<String> {
     aliases
 }
 
+/// Detect or default the project's documentation directory.
+///
+/// Preference order : `docs/` (post-0.7.1 convention, modern plural) →
+/// `doc/` (legacy singular, some Ruby/Rails projects) → `ai/` (Kronn 0.7.0
+/// and earlier). Discriminated by the entry-point file:
+///   - `docs/AGENTS.md` (post-pivot)
+///   - `doc/AGENTS.md` (post-pivot, singular projects)
+///   - `ai/index.md` (legacy)
+///
+/// When NONE exists, returns `docs/` so fresh bootstraps install the new
+/// convention. Caller is responsible for creating the directory if it
+/// doesn't exist (some flows only need to know "where to write" not "is
+/// it real yet").
+///
+/// Path-agnostic detect-and-adapt strategy : every site that hardcoded
+/// `ai/` should call this instead. Existing projects keep working,
+/// migration becomes a `git mv` away, and new projects ship the new
+/// convention without ceremony.
+pub fn detect_docs_dir(project_path: &Path) -> PathBuf {
+    // Prefer the dir that has the canonical entry file — most reliable
+    // signal that an audit was actually completed there.
+    if project_path.join("docs/AGENTS.md").is_file() {
+        return project_path.join("docs");
+    }
+    if project_path.join("doc/AGENTS.md").is_file() {
+        return project_path.join("doc");
+    }
+    if project_path.join("ai/index.md").is_file() {
+        return project_path.join("ai");
+    }
+    // No entry file — fall back to whichever folder physically exists
+    // (e.g. half-finished bootstrap, audit started but never sealed).
+    // Without this fallback, `ensure_redirectors`-style helpers that
+    // check `dir.is_dir()` no-op on legacy projects whose template was
+    // copied but where `ai/index.md` was never written.
+    if project_path.join("docs").is_dir() {
+        return project_path.join("docs");
+    }
+    if project_path.join("doc").is_dir() {
+        return project_path.join("doc");
+    }
+    if project_path.join("ai").is_dir() {
+        return project_path.join("ai");
+    }
+    // Default for fresh projects.
+    project_path.join("docs")
+}
+
+/// File path of the docs directory's entry point. `AGENTS.md` post-pivot,
+/// legacy `index.md` for projects that haven't migrated yet.
+pub fn detect_docs_entry(project_path: &Path) -> PathBuf {
+    let dir = detect_docs_dir(project_path);
+    if dir.file_name().and_then(|n| n.to_str()) == Some("ai") {
+        dir.join("index.md")
+    } else {
+        dir.join("AGENTS.md")
+    }
+}
+
+/// True when the project still has the legacy `ai/index.md` layout AND
+/// no migrated `docs/AGENTS.md` (or `doc/AGENTS.md`) has appeared yet.
+///
+/// Drives the "Migrer vers docs/" banner on `ProjectCard` — once the
+/// operator triggers `migrate_docs`, the helper flips back to false on
+/// next list refresh and the banner disappears. We deliberately do NOT
+/// treat a symlinked `ai/` (created post-migration for retro-compat) as
+/// "needs migration" because the docs/AGENTS.md check short-circuits.
+pub fn needs_docs_migration(project_path: &Path) -> bool {
+    if project_path.join("docs/AGENTS.md").is_file() {
+        return false;
+    }
+    if project_path.join("doc/AGENTS.md").is_file() {
+        return false;
+    }
+    project_path.join("ai/index.md").is_file()
+}
+
 /// Detect the AI audit status for a project based on filesystem state.
 pub fn detect_audit_status(project_path: &str) -> crate::models::AiAuditStatus {
     use crate::models::AiAuditStatus;
 
     let path = resolve_host_path(project_path);
-    let ai_dir = path.join("ai");
-    let index_file = path.join("ai/index.md");
 
-    if !ai_dir.exists() {
+    // Audit status detection accepts both the new (`docs/AGENTS.md`) and
+    // legacy (`ai/index.md`) conventions during the migration window.
+    // A directory in EITHER shape with NO entry file = TemplateInstalled
+    // (partial state, audit was started but never finished).
+    let any_docs_dir_exists = path.join("docs").is_dir()
+        || path.join("doc").is_dir()
+        || path.join("ai").is_dir();
+    if !any_docs_dir_exists {
         return AiAuditStatus::NoTemplate;
     }
-
-    // ai/ directory exists but index.md doesn't — treat as template installed (partial state)
+    let index_file = detect_docs_entry(&path);
     if !index_file.exists() {
         return AiAuditStatus::TemplateInstalled;
     }
@@ -389,7 +470,9 @@ pub fn detect_audit_status(project_path: &str) -> crate::models::AiAuditStatus {
         Ok(c) => c,
         Err(e) => {
             // File exists but can't be read (permission issue) — don't confuse with "no template"
-            tracing::warn!("Cannot read ai/index.md at {}: {} — treating as TemplateInstalled", index_file.display(), e);
+            tracing::warn!("Cannot read {} at {}: {} — treating as TemplateInstalled",
+                index_file.file_name().and_then(|n| n.to_str()).unwrap_or("entry"),
+                index_file.display(), e);
             return AiAuditStatus::TemplateInstalled;
         }
     };
@@ -419,16 +502,19 @@ pub fn detect_audit_status(project_path: &str) -> crate::models::AiAuditStatus {
     AiAuditStatus::Audited
 }
 
-/// Count remaining <!-- TODO --> markers in ai/ files.
+/// Count remaining `<!-- TODO -->` markers under the project's docs
+/// folder. Path-agnostic — picks `docs/` (post-pivot) or `ai/`
+/// (legacy) via `detect_docs_dir`, so projects on either layout get
+/// the same count without the caller having to know.
 pub fn count_ai_todos(project_path: &str) -> u32 {
     let path = resolve_host_path(project_path);
-    let ai_dir = path.join("ai");
-    if !ai_dir.is_dir() {
+    let docs_dir = detect_docs_dir(&path);
+    if !docs_dir.is_dir() {
         return 0;
     }
 
     let mut count = 0u32;
-    for entry in WalkDir::new(&ai_dir).max_depth(3).into_iter().filter_map(|e| e.ok()) {
+    for entry in WalkDir::new(&docs_dir).max_depth(3).into_iter().filter_map(|e| e.ok()) {
         if entry.file_type().is_file() && entry.path().extension().is_some_and(|ext| ext == "md") {
             if let Ok(content) = std::fs::read_to_string(entry.path()) {
                 count += content.matches("<!-- TODO").count() as u32;
@@ -649,5 +735,96 @@ mod tests {
         std::env::remove_var("KRONN_HOST_HOME");
         let result = resolve_host_path("/Users/john/Code/proj");
         assert_eq!(result, PathBuf::from("/Users/john/Code/proj"));
+    }
+
+    // ─── detect_docs_dir / detect_docs_entry (0.7.1 convention pivot) ──────
+
+    #[test]
+    fn detect_docs_dir_prefers_modern_plural_when_present() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("docs")).unwrap();
+        std::fs::write(tmp.path().join("docs/AGENTS.md"), "# x").unwrap();
+        // Also add a legacy ai/ — the modern path wins.
+        std::fs::create_dir_all(tmp.path().join("ai")).unwrap();
+        std::fs::write(tmp.path().join("ai/index.md"), "# legacy").unwrap();
+
+        let dir = detect_docs_dir(tmp.path());
+        assert_eq!(dir, tmp.path().join("docs"));
+        assert_eq!(detect_docs_entry(tmp.path()), tmp.path().join("docs/AGENTS.md"));
+    }
+
+    #[test]
+    fn detect_docs_dir_falls_back_to_singular_doc_when_only_that_present() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("doc")).unwrap();
+        std::fs::write(tmp.path().join("doc/AGENTS.md"), "# x").unwrap();
+
+        let dir = detect_docs_dir(tmp.path());
+        assert_eq!(dir, tmp.path().join("doc"));
+        assert_eq!(detect_docs_entry(tmp.path()), tmp.path().join("doc/AGENTS.md"));
+    }
+
+    #[test]
+    fn detect_docs_dir_falls_back_to_legacy_ai_when_only_that_present() {
+        // Existing Kronn-managed project (pre-0.7.1) — must still resolve
+        // to ai/ so runtime doesn't break before the migration runs.
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("ai")).unwrap();
+        std::fs::write(tmp.path().join("ai/index.md"), "# legacy").unwrap();
+
+        let dir = detect_docs_dir(tmp.path());
+        assert_eq!(dir, tmp.path().join("ai"));
+        // Entry file is the legacy index.md, not AGENTS.md.
+        assert_eq!(detect_docs_entry(tmp.path()), tmp.path().join("ai/index.md"));
+    }
+
+    #[test]
+    fn detect_docs_dir_defaults_to_modern_docs_for_fresh_project() {
+        // No docs/, no doc/, no ai/ — fresh bootstrap target is docs/
+        // (the new convention).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = detect_docs_dir(tmp.path());
+        assert_eq!(dir, tmp.path().join("docs"));
+        assert_eq!(detect_docs_entry(tmp.path()), tmp.path().join("docs/AGENTS.md"));
+    }
+
+    #[test]
+    fn detect_docs_dir_ignores_directories_without_entry_file() {
+        // A `docs/` that exists but contains NO `AGENTS.md` is not a Kronn
+        // docs dir — could be an existing human docs/ folder. Falls
+        // through to legacy `ai/` if that has the entry, else default.
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("docs")).unwrap();
+        std::fs::write(tmp.path().join("docs/some-other-doc.md"), "# human").unwrap();
+        std::fs::create_dir_all(tmp.path().join("ai")).unwrap();
+        std::fs::write(tmp.path().join("ai/index.md"), "# legacy").unwrap();
+
+        let dir = detect_docs_dir(tmp.path());
+        // Falls back to ai/ because docs/AGENTS.md doesn't exist yet.
+        // Migration (T9) will populate docs/AGENTS.md and the next call
+        // will return docs/.
+        assert_eq!(dir, tmp.path().join("ai"));
+    }
+
+    #[test]
+    fn detect_docs_dir_falls_back_to_existing_dir_without_entry_file() {
+        // Half-finished bootstrap: `ai/` exists but `ai/index.md` was
+        // never written. Without the existence-fallback, detect_docs_dir
+        // would return the default `docs/` (which doesn't exist) and
+        // helpers like `ensure_redirectors` no-op silently.
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("ai")).unwrap();
+        // No ai/index.md, no docs/, no doc/.
+        assert_eq!(detect_docs_dir(tmp.path()), tmp.path().join("ai"));
+    }
+
+    #[test]
+    fn detect_docs_dir_prefers_docs_when_both_are_empty() {
+        // Both folders exist with no entry files. Picks `docs/` first
+        // (post-pivot is the modern convention).
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("docs")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("ai")).unwrap();
+        assert_eq!(detect_docs_dir(tmp.path()), tmp.path().join("docs"));
     }
 }

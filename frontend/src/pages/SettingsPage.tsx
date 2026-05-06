@@ -57,6 +57,7 @@ import { IdentitySection } from '../components/settings/IdentitySection';
 import { ProfilesSection } from '../components/settings/ProfilesSection';
 import { UsageSection } from '../components/settings/UsageSection';
 import { DebugSection } from '../components/settings/DebugSection';
+import { UserContextEditor } from '../components/UserContextEditor';
 import { MatrixText } from '../components/MatrixText';
 import './SettingsPage.css';
 
@@ -279,6 +280,7 @@ export function SettingsPage({
           { id: 'settings-scan', label: 'Scan' },
           { id: 'settings-agent-config', label: 'Agents & Skills' },
           { id: 'settings-identity', label: t('settings.identity') },
+          { id: 'settings-user-context', label: t('userContext.title') },
           { id: 'settings-usage', label: t('config.usage') },
           { id: 'settings-server', label: t('config.server') },
           { id: 'settings-debug', label: t('settings.debugSection'), live: serverDebugMode },
@@ -1196,6 +1198,15 @@ export function SettingsPage({
 
       {/* Identity */}
       <IdentitySection toast={toast} t={t} />
+
+      {/* User context — cross-project markdown notes injected into every agent.
+          Lives in ~/.kronn/user-context/ on disk; this editor is the
+          terminal-free entry point for operators to manage them. */}
+      <div id="settings-user-context" className="set-card">
+        <div className="set-section">
+          <UserContextEditor />
+        </div>
+      </div>
 
       {/* Usage — moved before Server so non-dev users see their consumption first */}
       <UsageSection onNavigateDiscussion={onNavigateDiscussion} />

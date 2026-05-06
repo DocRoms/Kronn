@@ -39,8 +39,15 @@ export function AiDocViewer({ projectId, onDiscussFile }: AiDocViewerProps) {
     projectsApi.listAiFiles(projectId).then(files => {
       setTree(files);
       setTreeLoading(false);
-      const indexFile = findFile(files, 'ai/index.md');
-      if (indexFile) setSelectedPath(indexFile.path);
+      // Pick the canonical entry file. Path-agnostic — backend's
+      // `listAiFiles` returns either `docs/AGENTS.md` (post-pivot),
+      // `doc/AGENTS.md`, or `ai/index.md` (legacy) depending on the
+      // project's layout. First match wins.
+      const entry =
+        findFile(files, 'docs/AGENTS.md')
+        ?? findFile(files, 'doc/AGENTS.md')
+        ?? findFile(files, 'ai/index.md');
+      if (entry) setSelectedPath(entry.path);
     }).catch(() => setTreeLoading(false));
   }, [projectId]);
 

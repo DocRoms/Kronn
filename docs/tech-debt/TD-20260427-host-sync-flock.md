@@ -32,7 +32,7 @@ Adding `fs2::FileExt::try_lock_exclusive` (or `flock(2)` advisory lock) cross-pl
 1. Add `fs2 = "0.4"` to `backend/Cargo.toml`.
 2. Wrap `atomic_write` for the 4 host-sync paths with a CAS-style approach: read mtime → flock_ex → re-read + diff → if mtime changed, abort with `ConcurrentWrite` error → UI surfaces "Claude Code seems to be writing — retrying in 5s" toast.
 3. Don't wrap `atomic_write` globally — only for the host-sync paths where the concurrent-writer scenario is real.
-4. Document in `ai/operations/mcp-servers/<cli>.md` that "closing your Claude Code session before clicking Save in Kronn" is the recommended workflow.
+4. Document in `docs/operations/mcp-servers/<cli>.md` that "closing your Claude Code session before clicking Save in Kronn" is the recommended workflow.
 
 ## Next step
 Create ticket. Schedule for the next milestone where users start using the host sync feature heavily.

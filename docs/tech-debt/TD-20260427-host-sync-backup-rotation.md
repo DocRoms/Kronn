@@ -25,7 +25,7 @@ None of these are blockers, but they are scope-creep for what was meant to be a 
 ## Suggested direction (non-binding)
 - Rotate to `.kronn-backup.1` (most recent) → `.5` (oldest), `mv` chain on each new backup.
 - Add a CLI command `kronn restore --backup <path>` that lists available backups and lets the user restore.
-- Document in `ai/operations/mcp-servers/<cli>.md` that backups exist and where.
+- Document in `docs/operations/mcp-servers/<cli>.md` that backups exist and where.
 
 ## Next step
 Create ticket. Schedule when a user reports losing data through the single-slot mechanism (or annual review).

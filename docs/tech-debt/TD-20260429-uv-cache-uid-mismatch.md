@@ -39,7 +39,7 @@ Option 1 is the safe default. Option 2/3 are correct-but-fiddly and need cross-p
 
 ## Impact
 - Correctness: silently kills `uvx`-based MCP servers when invoked from host CLIs (CC, Codex, Gemini). User sees `Failed to connect`, no actionable error.
-- Trust: the whole point of `Host MCP sync — bidirectional CLI integration` (section 9 of `ai/index.md`) is that Kronn-configured MCPs *just work* in the host CLI. This breaks that promise.
+- Trust: the whole point of `Host MCP sync — bidirectional CLI integration` (section 9 of `docs/AGENTS.md`) is that Kronn-configured MCPs *just work* in the host CLI. This breaks that promise.
 - Severity climbs with usage: every Kronn run as agent (audit, workflow, MCP test) re-creates root-owned dirs even if the user fixes the cache manually.
 
 ## Where (pointers)
@@ -52,7 +52,7 @@ Option 1 is the safe default. Option 2/3 are correct-but-fiddly and need cross-p
 1. ~~**Short-term**: switch `~/.cache/uv` to a named volume (`uv-cache:/home/kronn/.cache/uv`)~~ — **DONE 2026-04-29**. Mirrors `npm-cache` and `uv-tools`. Trade-off accepted: container's uv re-downloads packages (~50 MB one-time, no impact on host's own cache).
 2. ~~**Same patch**: do the same for `~/.local/share/rtk` (line 53)~~ — **REJECTED 2026-04-29**. RTK's design *requires* the bidirectional bind so `rtk gain` inside the container can read the host SQLite for the savings counter (see CLAUDE.md L419). Switching to a named volume would silently break the RTK integration shipped in 0.5.1 (counter always reports zero). Container + host share uid 1000 today, so the bind is safe as long as `APP_UID` stays correctly wired. Risk = regression on that build arg.
 3. **Defensive** (broader sweep, in a follow-up): add a `kronn doctor` command (or auto-run on startup) that detects host paths owned by uid 0 under `$HOME/.cache` / `$HOME/.local/share` and surfaces a clear warning + one-click fix in the UI. Catches future drift as we add new bind-mounted dirs **and** flags legacy root-owned files left over from pre-`APP_UID` upgrades. The actual mitigation for the surviving RTK bind mount.
-4. **Documentation**: add a section to `ai/operations/mcp-servers/` (or a new `ai/operations/host-mcp-runtime.md`) listing the **runtime prerequisites on the host** for each MCP transport (`uvx` ≥ 0.x, `glab` ≥ 1.59, npx clean cache, etc.) — the bidirectional sync is only as good as the host toolchain.
+4. **Documentation**: add a section to `docs/operations/mcp-servers/` (or a new `docs/operations/host-mcp-runtime.md`) listing the **runtime prerequisites on the host** for each MCP transport (`uvx` ≥ 0.x, `glab` ≥ 1.59, npx clean cache, etc.) — the bidirectional sync is only as good as the host toolchain.
 5. **Enhancement**: have the host-sync writer (`sync_*_global_config`) emit a one-time warning when it writes an MCP entry whose `command` (`uvx`, `glab`, `fastly-mcp`, …) isn't found in the host's PATH. Surfaces the missing-binary class of bug at config-write time, not at MCP-spawn time.
 
 ## Next step

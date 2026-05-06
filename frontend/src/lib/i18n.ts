@@ -1763,6 +1763,34 @@ Termine par [SIGNAL: OK].`,
   'wf.guards.stoppedBy.timeout': 'Durée max atteinte ({0} s)',
   'wf.guards.stoppedBy.maxLlmCalls': 'Trop d\'appels IA ({0} sur {1})',
   'wf.guards.stoppedBy.loopDetection': 'Boucle détectée sur le step « {0} » ({1} fois)',
+
+  // ── Migration ai/ → docs/ banner ──
+  'migration.title': 'Convention `ai/` héritée détectée',
+  'migration.desc': 'Ce projet utilise encore `ai/index.md`. Migre vers la convention `docs/AGENTS.md` (Kronn 0.7.1+) — `git mv` préserve l\'historique, les liens internes sont réécrits.',
+  'migration.symlink': 'Créer un symlink `ai → docs` pour la rétro-compatibilité',
+  'migration.cta': 'Migrer vers docs/',
+  'migration.ctaPending': 'Migration en cours…',
+  'migration.ctaDone': 'Migration terminée',
+  'migration.inProgress': 'Déplacement des fichiers, réécriture des liens…',
+  'migration.successInline': '{0} fichiers déplacés — `docs/AGENTS.md` prêt',
+  'migration.successToast': 'Migration réussie ({0} fichiers déplacés)',
+  'migration.alreadyToast': 'Projet déjà migré',
+  'migration.failedToast': 'Échec de la migration de {0}',
+  'migration.failedGeneric': 'Migration échouée — voir les logs serveur',
+
+  // ── User context (cross-project agent prompts) ──
+  'userContext.title': 'Mes contextes',
+  'userContext.subtitle': 'Notes markdown injectées dans tous les agents, quels que soient le projet et le CLI. Stockées dans ~/.kronn/user-context/.',
+  'userContext.newNamePlaceholder': 'nom-du-fichier (ajoutera .md automatiquement)',
+  'userContext.newNameAria': 'Nom du nouveau fichier de contexte',
+  'userContext.add': 'Ajouter',
+  'userContext.deleteConfirm': 'Supprimer le fichier « {0} » ?',
+  'userContext.deleteAria': 'Supprimer {0}',
+  'userContext.delete': 'Supprimer',
+  'userContext.loading': 'Chargement…',
+  'userContext.empty': 'Aucun fichier. Ajoute-en un pour partager des notes avec tous tes agents.',
+  'userContext.save': 'Enregistrer',
+  'userContext.editingAria': 'Édition de {0}',
 };
 
 const en: TranslationDict = {
@@ -3501,6 +3529,34 @@ End with [SIGNAL: OK].`,
   'wf.guards.stoppedBy.timeout': 'Max duration reached ({0} s)',
   'wf.guards.stoppedBy.maxLlmCalls': 'Too many AI calls ({0} of {1})',
   'wf.guards.stoppedBy.loopDetection': 'Loop detected on step "{0}" ({1} times)',
+
+  // ── Migration ai/ → docs/ banner ──
+  'migration.title': 'Legacy `ai/` convention detected',
+  'migration.desc': 'This project still uses `ai/index.md`. Migrate to the `docs/AGENTS.md` convention (Kronn 0.7.1+) — `git mv` preserves history, internal refs are rewritten.',
+  'migration.symlink': 'Create an `ai → docs` symlink for retro-compatibility',
+  'migration.cta': 'Migrate to docs/',
+  'migration.ctaPending': 'Migrating…',
+  'migration.ctaDone': 'Migration complete',
+  'migration.inProgress': 'Moving files, rewriting refs…',
+  'migration.successInline': '{0} files moved — `docs/AGENTS.md` ready',
+  'migration.successToast': 'Migration succeeded ({0} files moved)',
+  'migration.alreadyToast': 'Project already migrated',
+  'migration.failedToast': 'Migration failed for {0}',
+  'migration.failedGeneric': 'Migration failed — check server logs',
+
+  // ── User context (cross-project agent prompts) ──
+  'userContext.title': 'My contexts',
+  'userContext.subtitle': 'Markdown notes injected into every agent, regardless of project or CLI. Stored in ~/.kronn/user-context/.',
+  'userContext.newNamePlaceholder': 'file-name (will append .md)',
+  'userContext.newNameAria': 'New context file name',
+  'userContext.add': 'Add',
+  'userContext.deleteConfirm': 'Delete file "{0}"?',
+  'userContext.deleteAria': 'Delete {0}',
+  'userContext.delete': 'Delete',
+  'userContext.loading': 'Loading…',
+  'userContext.empty': 'No files yet. Add one to share notes with all your agents.',
+  'userContext.save': 'Save',
+  'userContext.editingAria': 'Editing {0}',
 };
 
 const es: TranslationDict = {
@@ -5239,6 +5295,34 @@ Termina con [SIGNAL: OK].`,
   'wf.guards.stoppedBy.timeout': 'Duración máx alcanzada ({0} s)',
   'wf.guards.stoppedBy.maxLlmCalls': 'Demasiadas llamadas IA ({0} de {1})',
   'wf.guards.stoppedBy.loopDetection': 'Bucle detectado en step "{0}" ({1} veces)',
+
+  // ── Migration ai/ → docs/ banner ──
+  'migration.title': 'Convención `ai/` heredada detectada',
+  'migration.desc': 'Este proyecto aún usa `ai/index.md`. Migra hacia la convención `docs/AGENTS.md` (Kronn 0.7.1+) — `git mv` preserva el historial, las referencias internas se reescriben.',
+  'migration.symlink': 'Crear un symlink `ai → docs` para retro-compatibilidad',
+  'migration.cta': 'Migrar a docs/',
+  'migration.ctaPending': 'Migrando…',
+  'migration.ctaDone': 'Migración completada',
+  'migration.inProgress': 'Moviendo archivos, reescribiendo referencias…',
+  'migration.successInline': '{0} archivos movidos — `docs/AGENTS.md` listo',
+  'migration.successToast': 'Migración exitosa ({0} archivos movidos)',
+  'migration.alreadyToast': 'Proyecto ya migrado',
+  'migration.failedToast': 'Migración fallida para {0}',
+  'migration.failedGeneric': 'Migración fallida — revisa los logs del servidor',
+
+  // ── User context (cross-project agent prompts) ──
+  'userContext.title': 'Mis contextos',
+  'userContext.subtitle': 'Notas markdown inyectadas en cada agente, sin importar el proyecto ni el CLI. Almacenadas en ~/.kronn/user-context/.',
+  'userContext.newNamePlaceholder': 'nombre-de-archivo (añadirá .md)',
+  'userContext.newNameAria': 'Nombre del nuevo archivo de contexto',
+  'userContext.add': 'Añadir',
+  'userContext.deleteConfirm': '¿Eliminar el archivo «{0}»?',
+  'userContext.deleteAria': 'Eliminar {0}',
+  'userContext.delete': 'Eliminar',
+  'userContext.loading': 'Cargando…',
+  'userContext.empty': 'Sin archivos. Añade uno para compartir notas con todos tus agentes.',
+  'userContext.save': 'Guardar',
+  'userContext.editingAria': 'Editando {0}',
 };
 
 /** Exposed for tests (key-parity check) and dev tooling. Do not mutate. */
