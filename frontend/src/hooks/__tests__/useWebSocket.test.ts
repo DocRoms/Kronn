@@ -164,20 +164,40 @@ describe('useWebSocket', () => {
     expect(ws.url).toContain('token=my-secret-token');
   });
 
-  it('sends heartbeat ping every 30s when connected', () => {
+  it('sends Presence as the very first frame on open', () => {
+    // TD-20260507-ws-no-presence-on-open — backend's verification gate
+    // requires Presence; without it the local connection stays
+    // verified=false forever (mitigated by Phase-2 backend tolerance
+    // for pre-Presence Pings, but still required for any local→server
+    // broadcast in multi-user mode).
     const handler = vi.fn();
     renderHook(() => useWebSocket(handler));
 
     const ws = MockWebSocket.instances[0];
     act(() => ws.simulateOpen());
 
-    expect(ws.sent).toHaveLength(0);
+    expect(ws.sent).toHaveLength(1);
+    const parsed = JSON.parse(ws.sent[0]);
+    expect(parsed.type).toBe('presence');
+    expect(parsed.from_invite_code).toBe('');
+    expect(parsed.online).toBe(true);
+  });
 
-    // Advance 30s — should send ping
-    act(() => { vi.advanceTimersByTime(30000); });
+  it('sends heartbeat ping every 30s after the initial Presence', () => {
+    const handler = vi.fn();
+    renderHook(() => useWebSocket(handler));
+
+    const ws = MockWebSocket.instances[0];
+    act(() => ws.simulateOpen());
+
+    // After open: Presence already sent (test above).
     expect(ws.sent).toHaveLength(1);
 
-    const parsed = JSON.parse(ws.sent[0]);
+    // Advance 30s — should send ping next.
+    act(() => { vi.advanceTimersByTime(30000); });
+    expect(ws.sent).toHaveLength(2);
+
+    const parsed = JSON.parse(ws.sent[1]);
     expect(parsed.type).toBe('ping');
     expect(typeof parsed.timestamp).toBe('number');
   });

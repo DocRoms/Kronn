@@ -237,6 +237,65 @@
   padding: 2px 0;
 }
 
+/* Pickable variant — the read-only check icon is replaced by a radio
+ * dot; the whole row becomes a clickable target. We keep
+ * `.set-ollama-model-row` for back-compat with any future "info only"
+ * usage; the `-pickable` modifier adds the affordance + hover state. */
+.set-ollama-model-row-pickable {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  padding: 4px var(--kr-sp-3);
+  border: 1px solid transparent;
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  transition: background 60ms ease;
+}
+.set-ollama-model-row-pickable:hover,
+.set-ollama-model-row-pickable:focus-visible {
+  background: rgba(var(--kr-text-rgb), 0.04);
+  border-color: rgba(var(--kr-text-rgb), 0.08);
+  outline: none;
+}
+.set-ollama-model-row-pickable[data-selected="true"] {
+  background: rgba(var(--kr-success-rgb), 0.08);
+  border-color: rgba(var(--kr-success-rgb), 0.25);
+}
+.set-ollama-model-row-pickable:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.set-ollama-radio {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1px solid var(--kr-border);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.set-ollama-radio[data-checked="true"] {
+  border-color: var(--kr-success);
+  background: rgba(var(--kr-success-rgb), 0.1);
+}
+
+.set-ollama-default-tag {
+  margin-left: auto;
+  font-size: var(--kr-fs-2xs);
+  font-weight: 600;
+  color: var(--kr-success);
+  padding: 1px 6px;
+  border-radius: var(--kr-r-sm);
+  background: rgba(var(--kr-success-rgb), 0.12);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
 .set-ollama-model-name {
   font-size: var(--kr-fs-xs);
   color: var(--kr-text-primary);
@@ -544,6 +603,87 @@
   background: rgba(var(--kr-warning-rgb), 0.1);
   color: var(--kr-warning);
   margin-left: var(--kr-sp-3);
+}
+
+/* Clickable variant — turns the badge into an "update available" CTA
+ * opening the per-agent update modal. Same color tokens as the static
+ * variant; we add an inset border on hover so the affordance reads
+ * "button" without shifting layout. */
+.set-update-badge-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+.set-update-badge-cta:hover,
+.set-update-badge-cta:focus-visible {
+  border-color: rgba(var(--kr-warning-rgb), 0.4);
+  background: rgba(var(--kr-warning-rgb), 0.18);
+  outline: none;
+}
+
+/* RTK section freshness pill — same shape as the agent update CTA,
+ * scoped to the compression card. Mirrors visual weight so users
+ * recognize "update available" wherever it appears. */
+.set-compression-update-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--kr-fs-2xs);
+  font-weight: 600;
+  padding: 1px var(--kr-sp-3);
+  border-radius: var(--kr-r-sm);
+  background: rgba(var(--kr-warning-rgb), 0.12);
+  color: var(--kr-warning);
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+.set-compression-update-pill:hover,
+.set-compression-update-pill:focus-visible {
+  border-color: rgba(var(--kr-warning-rgb), 0.4);
+  background: rgba(var(--kr-warning-rgb), 0.2);
+  outline: none;
+}
+
+/* Modal "Copy command" button — used by both the per-agent update
+ * modal and the RTK update modal. Subtle, sits flush with the pre
+ * block above. */
+.set-compression-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: var(--kr-sp-2);
+  padding: 4px var(--kr-sp-3);
+  font-size: var(--kr-fs-xs);
+  background: rgba(var(--kr-text-rgb), 0.04);
+  border: 1px solid rgba(var(--kr-text-rgb), 0.1);
+  border-radius: var(--kr-r-sm);
+  color: var(--kr-text-secondary);
+  cursor: pointer;
+}
+.set-compression-copy-btn:hover,
+.set-compression-copy-btn:focus-visible {
+  background: rgba(var(--kr-text-rgb), 0.08);
+  outline: none;
+}
+
+/* ── Account / usage link per agent (added 2026-05-10) ──── */
+/* Sits in the same row as the version badge — discrete, opens
+ * the provider's billing/usage dashboard in a new tab. The arrow
+ * glyph already telegraphs "external link" so we keep the chrome
+ * minimal. */
+.set-agent-account-link {
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-tertiary);
+  text-decoration: none;
+  padding: 1px var(--kr-sp-2);
+  border-radius: var(--kr-r-sm);
+  transition: color 0.12s, background 0.12s;
+}
+.set-agent-account-link:hover {
+  color: var(--kr-text-primary);
+  background: rgba(var(--kr-accent-rgb), 0.08);
 }
 
 /* ── Toggle switch ─────────────────────────────────────── */
@@ -1014,6 +1154,21 @@
 .set-agent-rtk-badge[data-state="not-installed"] {
   background: rgba(var(--kr-text-ghost-rgb, 140, 140, 140), 0.1);
   color: var(--kr-text-ghost);
+}
+
+/* Inline runtime-degradation warning under an agent row in Settings →
+ * Agents (e.g. Vibe SDK fallback). Subtle warning tint, matches the
+ * popover note used in ChatHeader's summary-strategy section so the
+ * UX language is consistent. */
+.set-agent-runtime-warning {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: var(--kr-r-sm);
+  font-size: var(--kr-fs-xs);
+  line-height: 1.35;
+  background: rgba(var(--kr-warning-rgb), 0.10);
+  color: var(--kr-warning);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.25);
 }
 
 .set-agent-rtk-badge[data-state="not-applicable"] {
@@ -2064,4 +2219,28 @@
   border-radius: var(--kr-r-sm);
   color: var(--kr-error-soft);
   font-size: var(--kr-fs-xs);
+}
+
+/* canirun.ai hint — surfaced under the Ollama model picker /
+ * suggestions to let the user check hardware sizing before
+ * pulling a 30 GB model. Discreet, single-line, neutral grey. */
+.set-ollama-canirun {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed rgba(var(--kr-border-medium-rgb, 100, 100, 100), 0.25);
+}
+
+.set-ollama-canirun-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-muted);
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+
+.set-ollama-canirun-link:hover {
+  color: var(--kr-info);
+  text-decoration: underline;
 }

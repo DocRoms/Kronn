@@ -1,0 +1,33 @@
+# pnpm 11 split a few config keys out of `package.json` into this
+# workspace file:
+#
+# - `allowBuilds` — explicit allowlist for transitive packages that run
+#   install scripts. Vetted entries:
+#     • sharp: native libvips bindings pulled via @huggingface/transformers
+#       (image preprocessing for the local model surface).
+#     • onnxruntime-node: native ORT runtime via vits-web (TTS).
+#     • protobufjs: postinstall codegen for the gRPC client transitively
+#       pulled by onnxruntime.
+#   Re-vet any addition — pnpm 11 errors out (ERR_PNPM_IGNORED_BUILDS,
+#   exit 1) on `pnpm install --frozen-lockfile` if a build-script dep
+#   is missing from this list, so CI catches drift.
+#
+# - `overrides` — force-patch versions for known-vuln transitive deps.
+#   Moved here from `package.json#pnpm.overrides` in 0.8.1 because pnpm
+#   11 reads workspace.yaml as the source of truth and compares its
+#   content against the lockfile (ERR_PNPM_LOCKFILE_CONFIG_MISMATCH
+#   otherwise). Drop each entry once the direct upstream dep picks it
+#   up. GHSA refs:
+#     • postcss          → qx2v-qp2m-jg93 (XSS)
+#     • flatted          → rf6f-7fwh-wjgh (proto-pollution via eslint)
+#     • brace-expansion  → f886-m6hf-6m8v (DoS via eslint)
+#     • protobufjs       → xq3m-2v4x-88gg (RCE via vits-web/onnxruntime-web)
+allowBuilds:
+  onnxruntime-node: true
+  protobufjs: true
+  sharp: true
+overrides:
+  postcss: '>=8.5.10'
+  flatted: '>=3.4.2'
+  brace-expansion: '>=5.0.5'
+  protobufjs: '>=7.5.5'

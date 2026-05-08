@@ -136,6 +136,7 @@ export function ProfilesSection({ toast, t }: ProfilesSectionProps) {
                   <button
                     className="set-icon-btn text-error"
                     style={{ padding: '2px 6px', borderColor: 'rgba(var(--kr-error-rgb), 0.2)' }}
+                    aria-label={t('common.delete')}
                     onClick={async () => {
                       if (!confirm(t('profiles.deleteConfirm'))) return;
                       try {
@@ -237,6 +238,7 @@ export function ProfilesSection({ toast, t }: ProfilesSectionProps) {
               </button>
               <button
                 className="set-icon-btn"
+                aria-label={t('common.cancel')}
                 onClick={() => { setShowCreateProfile(false); setNewProfileName(''); setNewProfilePersonaName(''); setNewProfileRole(''); setNewProfileAvatar('\uD83E\uDD16'); setNewProfileColor('#a78bfa'); setNewProfilePersona(''); }}
               >
                 <X size={12} />

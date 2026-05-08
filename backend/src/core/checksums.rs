@@ -40,7 +40,11 @@ pub fn compute_sha256(path: &Path) -> Option<String> {
     let mut hasher = Sha256::new();
     hasher.update(&data);
     let result = hasher.finalize();
-    Some(format!("{:x}", result))
+    // sha2 0.11 returns `hybrid_array::Array<u8, _>` instead of
+    // `GenericArray<u8, _>`. The new type does not implement `LowerHex`,
+    // so `format!("{:x}", _)` no longer compiles. Use `result.iter()`
+    // and a manual hex encoding (no extra dep).
+    Some(result.iter().map(|b| format!("{:02x}", b)).collect())
 }
 
 /// Expand a glob-like pattern within a directory, returning matching (relative, absolute) pairs.
@@ -131,7 +135,8 @@ pub fn compute_step_checksums(project_path: &Path, patterns: &[&str]) -> BTreeMa
                     let sorted = lines.join("\n");
                     let mut hasher = Sha256::new();
                     hasher.update(sorted.as_bytes());
-                    let digest = format!("{:x}", hasher.finalize());
+                    // sha2 0.11 — see compute_sha256 above for context.
+                    let digest: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
                     map.insert("__GIT_LS_FILES__".to_string(), digest);
                 }
             }

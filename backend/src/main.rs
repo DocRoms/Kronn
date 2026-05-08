@@ -70,6 +70,21 @@ async fn main() -> anyhow::Result<()> {
     } else {
         app_config.server.host.clone()
     };
+
+    // Make the backend URL available to every child process we spawn —
+    // the kronn-internal MCP bridge running inside the agent's child
+    // process inherits this env var and calls back to the right port.
+    // Pre-fix the script defaulted to :3140, which broke whenever the
+    // backend ran on any other port (sandbox tests, custom configs).
+    // We only set it when the operator hasn't already pinned a value
+    // (Docker compose may inject the cluster-internal hostname).
+    if std::env::var("KRONN_BACKEND_URL").is_err() {
+        // Loopback is correct for both native and Docker: agents run
+        // inside the same container/process tree as the backend, so
+        // 127.0.0.1:<port> always reaches us. Nginx + cross-container
+        // setups override this via the env.
+        std::env::set_var("KRONN_BACKEND_URL", format!("http://127.0.0.1:{}", port));
+    }
     let max_agents = if app_config.server.max_concurrent_agents > 0 {
         app_config.server.max_concurrent_agents
     } else {

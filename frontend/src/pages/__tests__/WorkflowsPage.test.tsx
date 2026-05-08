@@ -475,4 +475,38 @@ describe('WorkflowsPage', () => {
     // openDetail would have fetched the full Workflow — it must not have.
     expect(mockWorkflowsApi.get).not.toHaveBeenCalled();
   });
+
+  it('Delete workflow button asks for confirmation before calling the API', async () => {
+    // Pre-fix: the red trash button on each workflow card called
+    // `workflowsApi.delete` instantly. A mis-click destroyed the
+    // workflow + every run + every child discussion. Now an explicit
+    // `confirm()` is required.
+    const summary: WorkflowSummary = {
+      id: 'wf-del',
+      name: 'DeleteMe',
+      project_id: null,
+      project_name: null,
+      trigger_type: 'manual',
+      step_count: 1,
+      enabled: true,
+      last_run: null,
+      created_at: '2026-01-01T00:00:00Z',
+    };
+    mockWorkflowsApi.list.mockResolvedValue([summary]);
+    mockWorkflowsApi.delete.mockClear();
+    window.confirm = vi.fn();
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+
+    await wrap(
+      <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />
+    );
+
+    const deleteBtn = document.querySelector('.wf-small-btn-danger') as HTMLButtonElement;
+    expect(deleteBtn).not.toBeNull();
+    await act(async () => { fireEvent.click(deleteBtn); });
+
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(mockWorkflowsApi.delete).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
 });

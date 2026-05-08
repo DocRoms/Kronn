@@ -101,7 +101,11 @@ export function ActiveRunsPopover({
       ) : (
         <ul className="wf-active-runs-list">
           {activeRuns.map(wf => {
-            const run = wf.last_run!;
+            // `last_run` is non-null by `activeRuns` filter above —
+            // narrow it for TS via an explicit guard so the rest of the
+            // map stays type-safe without a non-null assertion.
+            const run = wf.last_run;
+            if (!run) return null;
             const isCancelling = cancellingIds.has(run.id);
             const elapsedMs = nowTick - new Date(run.started_at).getTime();
             return (

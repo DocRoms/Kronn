@@ -54,6 +54,7 @@ fn sample_discussion(id: &str, project_id: Option<&str>) -> Discussion {
         pin_first_message: false,
         summary_cache: None,
         summary_up_to_msg_idx: None,
+        summary_strategy: crate::models::SummaryStrategy::Auto, introspection_call_count: 0,
             shared_id: None,
             shared_with: vec![],
         workflow_run_id: None,
@@ -1264,6 +1265,49 @@ fn workflow_runs_count_active() {
 }
 
 #[test]
+fn has_running_run_false_when_no_runs() {
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    assert!(!crate::db::workflows::has_running_run(&conn).unwrap());
+}
+
+#[test]
+fn has_running_run_true_when_running() {
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    crate::db::workflows::insert_run(&conn, &sample_run("r1", "w1")).unwrap();
+    // sample_run defaults to Running status.
+    assert!(crate::db::workflows::has_running_run(&conn).unwrap());
+}
+
+#[test]
+fn has_running_run_true_when_pending() {
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    let mut r = sample_run("r1", "w1");
+    r.status = RunStatus::Pending;
+    crate::db::workflows::insert_run(&conn, &r).unwrap();
+    assert!(crate::db::workflows::has_running_run(&conn).unwrap());
+}
+
+#[test]
+fn has_running_run_false_when_only_terminal() {
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    for (id, status) in [
+        ("r1", RunStatus::Success),
+        ("r2", RunStatus::Failed),
+        ("r3", RunStatus::Cancelled),
+    ] {
+        let mut r = sample_run(id, "w1");
+        r.status = status;
+        crate::db::workflows::insert_run(&conn, &r).unwrap();
+    }
+    // Even with 3 finished runs, there's nothing to defer host-sync for.
+    assert!(!crate::db::workflows::has_running_run(&conn).unwrap());
+}
+
+#[test]
 fn workflow_runs_delete_all() {
     let conn = test_db();
     crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
@@ -1555,9 +1599,33 @@ fn create_batch_run_pure_fn_roundtrip_toplevel() {
         crate::db::workflows::CreateBatchRunInput {
             quick_prompt: &qp,
             items: vec![
-                ("EW-100".into(), "Analyse le ticket EW-100 en profondeur".into()),
-                ("EW-101".into(), "Analyse le ticket EW-101 en profondeur".into()),
-                ("EW-102".into(), "Analyse le ticket EW-102 en profondeur".into()),
+                crate::db::workflows::BatchItemInput {
+
+                    title: "EW-100".into(),
+
+                    prompt: "Analyse le ticket EW-100 en profondeur".into(),
+
+                    agent_override: None,
+
+                },
+                crate::db::workflows::BatchItemInput {
+
+                    title: "EW-101".into(),
+
+                    prompt: "Analyse le ticket EW-101 en profondeur".into(),
+
+                    agent_override: None,
+
+                },
+                crate::db::workflows::BatchItemInput {
+
+                    title: "EW-102".into(),
+
+                    prompt: "Analyse le ticket EW-102 en profondeur".into(),
+
+                    agent_override: None,
+
+                },
             ],
             batch_name: Some("Cadrage hebdo".into()),
             project_id: None,
@@ -1609,8 +1677,24 @@ fn create_batch_run_chained_from_linear_parent() {
         crate::db::workflows::CreateBatchRunInput {
             quick_prompt: &qp,
             items: vec![
-                ("EW-200".into(), "rendered prompt A".into()),
-                ("EW-201".into(), "rendered prompt B".into()),
+                crate::db::workflows::BatchItemInput {
+
+                    title: "EW-200".into(),
+
+                    prompt: "rendered prompt A".into(),
+
+                    agent_override: None,
+
+                },
+                crate::db::workflows::BatchItemInput {
+
+                    title: "EW-201".into(),
+
+                    prompt: "rendered prompt B".into(),
+
+                    agent_override: None,
+
+                },
             ],
             batch_name: Some("Chained batch".into()),
             project_id: None,
@@ -1665,6 +1749,7 @@ fn partial_response_set_then_recover_inserts_agent_message() {
         pin_first_message: false,
         summary_cache: None,
         summary_up_to_msg_idx: None,
+        summary_strategy: crate::models::SummaryStrategy::Auto, introspection_call_count: 0,
         shared_id: None,
         shared_with: vec![],
         workflow_run_id: None,
@@ -1736,7 +1821,7 @@ fn partial_response_preserves_started_at_across_checkpoints() {
         archived: false,
         pinned: false, workspace_mode: "Direct".into(),
         workspace_path: None, worktree_branch: None, tier: ModelTier::Default,
-        pin_first_message: false, summary_cache: None, summary_up_to_msg_idx: None,
+        pin_first_message: false, summary_cache: None, summary_up_to_msg_idx: None, summary_strategy: crate::models::SummaryStrategy::Auto, introspection_call_count: 0,
         shared_id: None, shared_with: vec![], workflow_run_id: None,
         test_mode_restore_branch: None, test_mode_stash_ref: None,
         created_at: now, updated_at: now,
@@ -1785,7 +1870,7 @@ fn has_pending_partial_returns_true_when_set() {
         archived: false,
         pinned: false, workspace_mode: "Direct".into(),
         workspace_path: None, worktree_branch: None, tier: ModelTier::Default,
-        pin_first_message: false, summary_cache: None, summary_up_to_msg_idx: None,
+        pin_first_message: false, summary_cache: None, summary_up_to_msg_idx: None, summary_strategy: crate::models::SummaryStrategy::Auto, introspection_call_count: 0,
         shared_id: None, shared_with: vec![], workflow_run_id: None,
         test_mode_restore_branch: None, test_mode_stash_ref: None,
         created_at: now, updated_at: now,
@@ -1810,7 +1895,7 @@ fn partial_response_clear_with_none_wipes_column() {
         archived: false,
         pinned: false, workspace_mode: "Direct".into(),
         workspace_path: None, worktree_branch: None, tier: ModelTier::Default,
-        pin_first_message: false, summary_cache: None, summary_up_to_msg_idx: None,
+        pin_first_message: false, summary_cache: None, summary_up_to_msg_idx: None, summary_strategy: crate::models::SummaryStrategy::Auto, introspection_call_count: 0,
         shared_id: None, shared_with: vec![], workflow_run_id: None,
         test_mode_restore_branch: None, test_mode_stash_ref: None,
         created_at: now, updated_at: now,
@@ -1840,9 +1925,33 @@ fn delete_batch_run_cascades_discussions_and_messages() {
         crate::db::workflows::CreateBatchRunInput {
             quick_prompt: &qp,
             items: vec![
-                ("EW-1".into(), "p1".into()),
-                ("EW-2".into(), "p2".into()),
-                ("EW-3".into(), "p3".into()),
+                crate::db::workflows::BatchItemInput {
+
+                    title: "EW-1".into(),
+
+                    prompt: "p1".into(),
+
+                    agent_override: None,
+
+                },
+                crate::db::workflows::BatchItemInput {
+
+                    title: "EW-2".into(),
+
+                    prompt: "p2".into(),
+
+                    agent_override: None,
+
+                },
+                crate::db::workflows::BatchItemInput {
+
+                    title: "EW-3".into(),
+
+                    prompt: "p3".into(),
+
+                    agent_override: None,
+
+                },
             ],
             batch_name: Some("To-be-deleted".into()),
             project_id: None,
@@ -1939,8 +2048,24 @@ fn create_batch_run_isolated_mode_persists_on_children() {
         crate::db::workflows::CreateBatchRunInput {
             quick_prompt: &qp,
             items: vec![
-                ("EW-1".into(), "prompt 1".into()),
-                ("EW-2".into(), "prompt 2".into()),
+                crate::db::workflows::BatchItemInput {
+
+                    title: "EW-1".into(),
+
+                    prompt: "prompt 1".into(),
+
+                    agent_override: None,
+
+                },
+                crate::db::workflows::BatchItemInput {
+
+                    title: "EW-2".into(),
+
+                    prompt: "prompt 2".into(),
+
+                    agent_override: None,
+
+                },
             ],
             batch_name: Some("Isolated batch".into()),
             project_id: None,
@@ -1970,7 +2095,7 @@ fn create_batch_run_direct_mode_is_default_when_empty() {
         &conn,
         crate::db::workflows::CreateBatchRunInput {
             quick_prompt: &qp,
-            items: vec![("EW-1".into(), "prompt 1".into())],
+            items: vec![crate::db::workflows::BatchItemInput { title: "EW-1".into(), prompt: "prompt 1".into(), agent_override: None }],
             batch_name: None,
             project_id: None,
             parent_run_id: None,
@@ -1998,7 +2123,7 @@ fn create_batch_run_sets_workflow_run_id_on_discussions() {
         &conn,
         crate::db::workflows::CreateBatchRunInput {
             quick_prompt: &qp,
-            items: vec![("X-1".into(), "prompt 1".into())],
+            items: vec![crate::db::workflows::BatchItemInput { title: "X-1".into(), prompt: "prompt 1".into(), agent_override: None }],
             batch_name: None,
             project_id: None,
             parent_run_id: None,
@@ -2682,6 +2807,7 @@ fn cross_agent_db_round_trip_all_types() {
             pin_first_message: false,
             summary_cache: None,
             summary_up_to_msg_idx: None,
+            summary_strategy: crate::models::SummaryStrategy::Auto, introspection_call_count: 0,
             shared_id: None,
             shared_with: vec![],
             workflow_run_id: None,

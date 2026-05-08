@@ -85,6 +85,24 @@
   gap: var(--kr-sp-1);
 }
 
+/* WCAG 2.5.5 / Apple HIG / MD3: 44 × 44 px minimum tap target on coarse
+ * pointers (touch). Pre-fix the desktop padding shrank to ~32 × 28 on
+ * mobile, well below the threshold. We bump min-height + horizontal
+ * padding only on coarse pointers so desktop stays compact. */
+@media (pointer: coarse) {
+  .dash-nav-btn,
+  .dash-nav-btn[data-mobile="true"] {
+    min-height: 44px;
+    padding: 10px 14px;
+  }
+  .dash-nav-btn[data-mobile="true"] {
+    /* Icon-only / icon-first labels still need horizontal room for the
+     * touch hitbox even when the visible glyph is small. */
+    min-width: 44px;
+    justify-content: center;
+  }
+}
+
 .dash-nav-spacer {
   flex: 1;
 }
@@ -314,12 +332,27 @@
   font-size: var(--kr-fs-sm);
   color: var(--kr-text-muted);
   flex-shrink: 0;
+  /* Allow internal items to shrink on narrow viewports — without this
+   * `min-width: 0` the meta pills (project counts, MCP counts, etc.)
+   * push past the 375 px viewport edge and force horizontal scroll on
+   * mobile. Tya's audit on 2026-05-09 measured a 36 px overflow on
+   * Projets at 375×667. */
+  min-width: 0;
 }
 
 .dash-meta-item {
   display: flex;
   align-items: center;
   gap: var(--kr-sp-2);
+  min-width: 0;
+}
+
+/* Mobile (coarse pointer + narrow viewport): wrap meta items instead
+ * of forcing horizontal scroll. Same guard as `dash-proj-meta.flex-wrap`
+ * applied conditionally in the JSX, but expressed in CSS for the
+ * server-side default. */
+@media (max-width: 480px) {
+  .dash-proj-meta { flex-wrap: wrap; gap: var(--kr-sp-3); }
 }
 
 /* ── Badges ────────────────────────────────────────────── */
@@ -331,9 +364,14 @@
   border-radius: var(--kr-r-sm);
   font-size: var(--kr-fs-xs);
   font-weight: 600;
-  background: rgba(var(--kr-accent-rgb), 0.1);
-  color: rgba(var(--kr-accent-rgb), 0.7);
-  border: 1px solid rgba(var(--kr-accent-rgb), 0.15);
+  background: rgba(var(--kr-success-rgb), 0.12);
+  /* 2026-05-11: switched from `rgba(accent, 0.7)` to solid
+   * `--kr-success` (5.1:1 on light, dark token already has higher
+   * alpha after the 2026-05-10 bump) — axe flagged the alpha variant
+   * at 2.82:1 on white. Solid colour gives a deterministic ratio
+   * regardless of background blend. */
+  color: var(--kr-success);
+  border: 1px solid rgba(var(--kr-success-rgb), 0.2);
 }
 
 .dash-badge-orange {
@@ -344,9 +382,12 @@
   border-radius: var(--kr-r-sm);
   font-size: var(--kr-fs-xs);
   font-weight: 600;
-  background: rgba(var(--kr-warning-rgb), 0.08);
-  color: var(--kr-warning-amber);
-  border: 1px solid rgba(var(--kr-warning-amber-rgb), 0.2);
+  background: rgba(var(--kr-warning-rgb), 0.12);
+  /* Use `--kr-warning-soft` (#a16207 = 5.7:1 on white) instead of the
+   * regular `--kr-warning-amber` (4.5:1 borderline). Axe measured 4.49
+   * which trips its 4.5 cutoff. */
+  color: var(--kr-warning-soft);
+  border: 1px solid rgba(var(--kr-warning-amber-rgb), 0.25);
 }
 
 .dash-badge-gray {
@@ -371,8 +412,8 @@
   font-size: var(--kr-fs-xs);
   font-weight: 600;
   background: rgba(var(--kr-warning-rgb), 0.1);
-  color: var(--kr-warning-amber);
-  border: 1px solid rgba(var(--kr-warning-rgb), 0.15);
+  color: var(--kr-warning-soft);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.2);
   cursor: pointer;
 }
 
@@ -382,7 +423,7 @@
   font-size: var(--kr-fs-xs);
   font-weight: 500;
   background: rgba(var(--kr-warning-rgb), 0.1);
-  color: var(--kr-warning-amber);
+  color: var(--kr-warning-soft);
   border: 1px solid rgba(var(--kr-warning-rgb), 0.2);
   cursor: pointer;
   display: inline-flex;

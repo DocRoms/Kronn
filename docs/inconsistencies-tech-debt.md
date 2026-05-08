@@ -23,22 +23,17 @@
 
 ## Current list
 
+> Only OPEN items live here. Once a TD is fully fixed, drop the row —
+> git history (and the linked detail file, if any) keeps the receipt.
+> Partial fixes stay until the residual work is closed out.
+
 | ID | Problem | Area | Severity |
 |----|---------|------|----------|
-| TD-20260314-no-tls | No TLS/HTTPS — nginx TLS setup pending. Tailscale encrypts P2P traffic as interim. Not blocking for local/VPN use. | Infra | Medium |
-| TD-20260314-no-api-docs | No OpenAPI/Swagger API documentation | Docs | Medium |
+| TD-20260314-no-tls | No TLS/HTTPS — nginx TLS setup pending. Tailscale encrypts P2P traffic as interim. Code-side opt-out shipped: `server.auth_strict_localhost = true` requires Bearer token even on loopback. Migration plan in `docs/operations/auth-and-tls.md`. Not blocking for local/VPN use. | Infra | Medium |
+| TD-20260314-openapi-coverage | OpenAPI scaffold shipped (utoipa + Swagger UI at `/api/docs`); 1 of ~170 routes annotated. Residual = incremental enrichment by feature owner — every PR that touches an endpoint adds a `#[utoipa::path]` macro. | Docs | Low |
 | TD-20260318-token-tracking-incomplete | Token usage returns 0 for Gemini CLI and Vibe — SDK doesn't expose token counts. Blocked by upstream. | Backend | Medium |
-| TD-20260314-home-mount | `$HOME` mounted read-only in container — security + portability risk | Infra | Low |
-| TD-20260328-localhost-exempt | Auth middleware skips localhost + Docker bridge IPs. Pragmatic for self-hosted but needs: (1) token rotation mechanism if leaked, (2) removal when TLS generalized. See `lib.rs:auth_middleware`. | Security | Low |
-| TD-20260328-discussions-backend | `discussions.rs` partial progress (2026-04-17): 3400L→2880L. Extracted `disc_helpers.rs` (9 pure helpers, 15 tests) + `disc_prompts.rs` (3 prompt builders + OrchestrationContext, 9 tests). SSE/streaming/cancel core still coupled — separate session needed to split the handler layer. | Backend | Medium |
-| [TD-20260417-models-monolith](tech-debt/TD-20260417-models-monolith.md) | `backend/src/models/mod.rs` (~2225L, 147 types) — single file for all data models + ts-rs source. Mechanical split planned (15 sub-modules by domain). | Backend | Medium |
-| [TD-20260417-audit-monolith](tech-debt/TD-20260417-audit-monolith.md) | `backend/src/api/audit.rs` (~1966L) — 10-step AI-audit pipeline + drift + validation + briefing in one file. Needs `AuditEngine` abstraction before split. | Backend | Medium |
-| [TD-20260417-projects-monolith](tech-debt/TD-20260417-projects-monolith.md) | `backend/src/api/projects.rs` (~1819L) — CRUD + bootstrap + clone + git ops + PR creation. Straightforward sub-directory split planned. | Backend | Medium |
-| ~~TD-20260329-toast-no-warning~~ | ~~FIXED 0.6.0~~ — `warning` type added to `useToast` (amber color, 7s auto-dismiss, aria-live=assertive). Contact diagnostics + partial-batch toasts migrated. | Frontend | ~~Low~~ |
-| [TD-20260427-host-sync-trait](tech-debt/TD-20260427-host-sync-trait.md) | 4 nearly-identical `sync_*_global_config` functions for Codex/Copilot/Claude/Gemini. Trait-based factorization deferred during Phase-3 ship. Bites when adding Ollama/OpenCode CLI. | Backend | Medium |
-| [TD-20260427-host-sync-flock](tech-debt/TD-20260427-host-sync-flock.md) | No advisory `flock` on host config writes — race window with Claude Code itself rewriting `~/.claude.json` (cache, recents, mcpContextUris) can clobber user state. Atomic-rename protects readers, not concurrent writers. | Backend | Medium |
-| [TD-20260427-host-sync-workflow-race](tech-debt/TD-20260427-host-sync-workflow-race.md) | `sync_affected_projects` writes host config files without checking `workflow_runs.status='Running'` — agent mid-spawn may read stale/inconsistent file. Rare but silent. | Backend | Low |
-| ~~[TD-20260427-host-sync-backup-rotation](tech-debt/TD-20260427-host-sync-backup-rotation.md)~~ | ~~FIXED 0.6.0~~ — `rotate_backup(path, N=5)` helper. Slots `.1` (most recent) → `.5` (oldest) shift on each corruption; oldest dropped. Used by both `load_codex_config_for_merge` and `load_json_config_for_merge`. Restore CLI deferred (manual file rename suffices). | Backend | ~~Low~~ |
-| [TD-20260429-uv-cache-uid-mismatch](tech-debt/TD-20260429-uv-cache-uid-mismatch.md) | `~/.cache/uv` bind → named volume (DONE 2026-04-29). RTK bind (line 52) kept by design — container needs read access to host SQLite for the savings counter. Open items: `kronn doctor` startup check for legacy uid-0 host caches + host runtime prereq docs (uvx, glab ≥ 1.59) + host-sync writer warning on missing host binary. | Infra | Medium |
-| [TD-20260504-ws-reconnect-stale-ui](tech-debt/TD-20260504-ws-reconnect-stale-ui.md) | After Docker/backend restart with active stream: backend WS rejects reconnect Pings (`first message must be Presence`), frontend has no stale-streaming watchdog → spinner stuck forever even though message is persisted. Mandatory F5 to recover. | Backend+Frontend | Medium |
+| TD-20260509-react19-effect-rules | 99 React 19/20 strict warnings remain (down from 122 on 2026-05-10). Cheap categories cleared (no-non-null-assertion: 0, no-explicit-any: 4 SSE-only). Heavy ones left: 42 `set-state-in-effect`, 20 `exhaustive-deps`, 14 `immutability`, 10 `refs`, 4 `purity`, 2 `preserve-manual-memoization`. Per-directory passes from here. | Frontend | Medium |
+| TD-20260510-codex-mcp-sandbox-block | Codex 0.121 sees `kronn-internal` MCP and attempts the call but its exec-mode sandbox cancels the spawn (`user cancelled MCP tool call`) — wiring is correct, blocker is upstream. | Backend / agents | Medium |
+| TD-20260510-codex-upstream-issue-draft | Draft of the upstream codex-cli issue ready to paste; needs to be filed once. | External | Low |
+| TD-20260510-a11y-form-labels | Partial — ~6 inputs labelled (Settings password, Sidebar search, nav tabs, 1 skill input). ~16 more in SettingsPage forms + NewDiscussionForm + WorkflowWizard. Per-form sweep planned. | Frontend | Low |
 

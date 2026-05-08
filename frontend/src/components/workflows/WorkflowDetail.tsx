@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useT } from '../../lib/I18nContext';
 import { workflows as workflowsApi, quickPrompts as quickPromptsApi } from '../../lib/api';
+import type { BatchPreview } from '../../lib/api';
 import { AGENT_COLORS, AGENT_LABELS, isAgentRestricted } from '../../lib/constants';
 import { extractLikelyOutput } from '../../lib/extractLikelyOutput';
 import type { Workflow, WorkflowRun, StepResult, AgentsConfig, WorkflowStep, QuickPrompt, BatchRunSummary, AgentType } from '../../types/generated';
@@ -44,9 +45,9 @@ interface ActiveStepTest {
   mockInput: string;
   dryRun: boolean;
   liveOutput: string;
-  result: import('../../types/generated').StepResult | null;
+  result: StepResult | null;
   error: string | null;
-  batchPreview: import('../../lib/api').BatchPreview | null;
+  batchPreview: BatchPreview | null;
   startedAt: number | null;
   /** Kept alive as long as the test is running. Not serialized, never
    *  aborted automatically on unmount — lets the test survive tab switches. */
@@ -61,12 +62,19 @@ const activeStepTests = new Map<string, ActiveStepTest>();
 const stepTestListeners = new Map<string, Set<() => void>>();
 
 function subscribeStepTest(key: string, cb: () => void): () => void {
-  let set = stepTestListeners.get(key);
-  if (!set) { set = new Set(); stepTestListeners.set(key, set); }
-  set.add(cb);
+  let listeners = stepTestListeners.get(key);
+  if (!listeners) {
+    listeners = new Set();
+    stepTestListeners.set(key, listeners);
+  }
+  // Hoist into a const so the unsubscribe closure below captures a
+  // non-nullable reference (avoids `listeners!` and the React-19
+  // strict-rule warning for non-null assertions on a let binding).
+  const captured = listeners;
+  captured.add(cb);
   return () => {
-    set!.delete(cb);
-    if (set!.size === 0) stepTestListeners.delete(key);
+    captured.delete(cb);
+    if (captured.size === 0) stepTestListeners.delete(key);
   };
 }
 
@@ -373,8 +381,9 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
   // render recomputes it from the timestamp). Reset when testRunning drops.
   const [testElapsed, setTestElapsed] = useState(0);
   useEffect(() => {
-    if (!testRunning || !current?.startedAt) { setTestElapsed(0); return; }
-    const tick = () => setTestElapsed(Math.floor((Date.now() - current.startedAt!) / 1000));
+    const startedAt = current?.startedAt;
+    if (!testRunning || !startedAt) { setTestElapsed(0); return; }
+    const tick = () => setTestElapsed(Math.floor((Date.now() - startedAt) / 1000));
     tick();
     const handle = setInterval(tick, 1000);
     return () => clearInterval(handle);
@@ -685,11 +694,11 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
           </div>
 
           {/* QP Chain (Phase 2) — show the sequenced follow-up QPs if any */}
-          {(step.batch_chain_prompt_ids?.length ?? 0) > 0 && (
+          {step.batch_chain_prompt_ids && step.batch_chain_prompt_ids.length > 0 && (
             <div className="wf-batch-step-row">
               <span className="text-xs text-muted">{t('wf.batchStepChainLabel')}</span>
               <div className="flex-row flex-wrap gap-2">
-                {step.batch_chain_prompt_ids!.map((qpId, chainIdx) => {
+                {step.batch_chain_prompt_ids.map((qpId, chainIdx) => {
                   const qp = quickPromptsById?.get(qpId);
                   const label = qp ? `${qp.icon} ${qp.name}` : `⚠️ ${qpId}`;
                   return (
@@ -1370,7 +1379,9 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
                   const res = await workflowsApi.cancelRun(workflow.id, run.id);
                   // No toast system here — use a silent refresh so the user
                   // sees the status flip to Cancelled without a popup.
-                  console.info('Cancelled run:', res);
+                  // (Removed console.info — eslint no-console; the WS event
+                  // path provides confirmation.)
+                  void res;
                   onRefresh();
                 } catch {
                   // Cancel errors are rare (run already finished, registry

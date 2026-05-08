@@ -111,6 +111,7 @@ export function UsageSection({ onNavigateDiscussion }: UsageSectionProps) {
               onClick={refetch}
               disabled={loading}
               style={{ padding: '3px 8px' }}
+              aria-label={t('config.refresh')}
             >
               <RefreshCw size={11} className={loading ? 'set-spin' : ''} />
             </button>

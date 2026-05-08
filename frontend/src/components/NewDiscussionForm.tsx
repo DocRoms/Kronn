@@ -37,7 +37,7 @@ export interface NewDiscussionFormProps {
   onClose: () => void;
   onPrefillConsumed?: () => void;
   onNavigate: (page: string) => void;
-  t: (key: string, ...args: any[]) => string;
+  t: (key: string, ...args: (string | number)[]) => string;
 }
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -112,9 +112,16 @@ export function NewDiscussionForm({
       setNewDiscProjectId(prefill.projectId);
       setNewDiscTitle(prefill.title);
       setNewDiscPrompt(prefill.prompt);
-      // Auto-select mandatory profiles for audit validation
-      const validationProfileIds = ['architect', 'tech-lead', 'qa-engineer'];
-      setNewDiscProfileIds(validationProfileIds);
+      // Auto-select mandatory profiles ONLY for validation audits.
+      // Pre-fix this fired on every prefill — including the "New discussion"
+      // button on a project card and the "Discuss this file" CTA from the AI
+      // doc viewer — which silently pre-selected architect/tech-lead/qa-
+      // engineer profiles for unrelated chats. Bound to `locked` because
+      // only the validation entry-point sets that flag.
+      if (prefill.locked) {
+        const validationProfileIds = ['architect', 'tech-lead', 'qa-engineer'];
+        setNewDiscProfileIds(validationProfileIds);
+      }
       onPrefillConsumed?.();
     }
   }, [prefill, onPrefillConsumed]);
@@ -130,24 +137,41 @@ export function NewDiscussionForm({
   };
 
   const [creating, setCreating] = useState(false);
+  const creatingRef = useRef(false);
 
-  const handleCreate = () => {
-    if (!newDiscPrompt.trim() || !newDiscAgent || creating) return;
+  const handleCreate = async () => {
+    if (!newDiscPrompt.trim() || !newDiscAgent || creatingRef.current) return;
+    creatingRef.current = true;
     setCreating(true);
-    onSubmit({
-      title: newDiscTitle.trim() || newDiscPrompt.trim().slice(0, 60),
-      agent: newDiscAgent as AgentType,
-      projectId: newDiscProjectId || null,
-      prompt: newDiscPrompt.trim(),
-      skillIds: newDiscSkillIds,
-      profileIds: newDiscProfileIds,
-      directiveIds: newDiscDirectiveIds,
-      workspaceMode: newDiscWorkspaceMode,
-      tier: newDiscTier,
-      branchName: newDiscBranchName,
-      baseBranch: newDiscBaseBranch,
-      pendingFiles: pendingFiles.length > 0 ? pendingFiles : undefined,
-    });
+    try {
+      // `onSubmit` is typed `=> void` but the parent's implementation may be
+      // async — await it through Promise.resolve so failures unblock the
+      // button. Without this, if `discussions.create` throws, `creating`
+      // stays true forever and the form is wedged until close+reopen.
+      await Promise.resolve(onSubmit({
+        title: newDiscTitle.trim() || newDiscPrompt.trim().slice(0, 60),
+        agent: newDiscAgent as AgentType,
+        projectId: newDiscProjectId || null,
+        prompt: newDiscPrompt.trim(),
+        skillIds: newDiscSkillIds,
+        profileIds: newDiscProfileIds,
+        directiveIds: newDiscDirectiveIds,
+        workspaceMode: newDiscWorkspaceMode,
+        tier: newDiscTier,
+        branchName: newDiscBranchName,
+        baseBranch: newDiscBaseBranch,
+        pendingFiles: pendingFiles.length > 0 ? pendingFiles : undefined,
+      }));
+    } catch (e) {
+      // Parent (`handleCreateDiscussion` in DiscussionsPage) already toasts
+      // its own errors. We swallow here only to keep the form unwedged —
+      // the `finally` reset alone isn't enough because an uncaught throw
+      // becomes an unhandled-rejection warning in the dev console.
+      console.warn('[NewDiscussionForm] onSubmit rejected:', e);
+    } finally {
+      creatingRef.current = false;
+      setCreating(false);
+    }
   };
 
   // ─── Render ──────────────────────────────────────────────────────────────
@@ -165,7 +189,16 @@ export function NewDiscussionForm({
         className="disc-new-card"
         onKeyDown={e => {
           if (e.key === 'Escape') { e.stopPropagation(); handleClose(); }
-          if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && newDiscPrompt.trim()) handleCreate();
+          // Pre-fix: no `preventDefault` here, so Ctrl+Enter inside the
+          // prompt textarea inserted a newline AND triggered submit. The
+          // submitted prompt ended with a stray "\n" — visible in agent
+          // transcripts as a blank line at the bottom of the first
+          // message. Suppress the default keypress so only the submit
+          // path fires.
+          if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.nativeEvent.isComposing && newDiscPrompt.trim()) {
+            e.preventDefault();
+            handleCreate();
+          }
         }}
       >
         <div className="disc-new-header">
@@ -277,6 +310,7 @@ export function NewDiscussionForm({
                       value={newDiscBranchName}
                       onChange={e => setNewDiscBranchName(e.target.value)}
                       placeholder="feature/my-branch"
+                      aria-label={t('disc.branchName')}
                     />
                   </div>
                   <div>
@@ -286,6 +320,7 @@ export function NewDiscussionForm({
                       value={newDiscBaseBranch}
                       onChange={e => setNewDiscBaseBranch(e.target.value)}
                       placeholder="main"
+                      aria-label={t('disc.baseBranch')}
                     />
                   </div>
                 </div>
@@ -437,6 +472,7 @@ export function NewDiscussionForm({
           data-locked={newDiscPrefilled}
           placeholder={t('disc.titlePlaceholder')}
           value={newDiscTitle}
+          aria-label={t('disc.title')}
           onChange={e => {
             if (newDiscPrefilled) return;
             const val = e.target.value;
@@ -455,6 +491,7 @@ export function NewDiscussionForm({
           data-locked={newDiscPrefilled}
           placeholder={t('disc.promptPlaceholder')}
           value={newDiscPrompt}
+          aria-label={t('disc.prompt')}
           onChange={e => !newDiscPrefilled && setNewDiscPrompt(e.target.value)}
           readOnly={newDiscPrefilled}
           rows={4}
@@ -468,6 +505,7 @@ export function NewDiscussionForm({
             multiple
             style={{ display: 'none' }}
             ref={newDiscFileInputRef}
+            aria-label={t('disc.attachFiles')}
             onChange={e => {
               const files = Array.from(e.target.files ?? []);
               if (files.length > 0) {

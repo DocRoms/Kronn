@@ -88,13 +88,18 @@ Never load everything "just in case".
 - Do **not** edit `frontend/src/types/generated.ts` by hand — run `make typegen`.
 - Do **not** register two `.route()` calls with the same path in axum — chain methods: `.route("/path", get(h1).post(h2))`.
 - Do **not** forget `#[derive(PartialEq)]` on enums used in comparisons (`AgentType`, `MessageRole`).
+- Do **not** use the old axum 0.7 path-param syntax `:id` — axum 0.8 expects `{id}`. Failure to migrate means the route panics on registration.
+- Do **not** wrap an extractor in `Option<Query<…>>` or `Option<ConnectInfo<…>>` — axum 0.8 dropped `OptionalFromRequestParts` for those. Use the concrete extractor with a sentinel default (`Query<…>` with `page=0` "no pagination") or wrap via `Option<Extension<…>>`.
+- Do **not** slice `&str` with a hard-coded byte index (`&s[..N]`) when truncating user/agent text — UTF-8 (French, emoji, accented filenames) panics at non-boundary bytes. Use `s.chars().take(N).collect::<String>()` instead. Pattern documented in `feedback_rust_str_slicing` memory.
+- Do **not** rely on `disabled={state}` alone to gate an async button handler — React's state update is async, so two synchronous clicks read the stale closure and fire two API calls. Use `useRef` + check at top of handler. Helper: `useAsyncGuard` in `frontend/src/hooks/useAsyncGuard.ts`.
+- Do **not** nest a `<button>` inside another `<button>` — invalid HTML and produces a React dev warning. Convert the outer to `<div role="button" tabIndex={0}>` with explicit `onKeyDown` for Enter/Space.
 
 ---
 
 ## 4. Development constraints
 
 - **Docker-first**: the full app runs via `docker compose`. Backend, frontend, and gateway are separate services.
-- **Quality is mandatory**: `cargo clippy -- -D warnings` must pass. Frontend: `npx tsc --noEmit` + `pnpm test`. Shell: `make test-shell`.
+- **Quality is mandatory**: `cargo clippy -- -D warnings` must pass. Frontend: `npx tsc --noEmit` + `pnpm test`. Shell: `make test-shell`. E2E: `pnpm test:e2e` (Playwright; backend must be running, Vite is auto-spawned). The `frontend/e2e/` tree has its own README — fixtures + page objects + 35+ specs covering the smoke surface, the wizard, the guided tour, MCP host-discovery, and the QP launch double-click race.
 - **Type generation**: Rust models are the source of truth. TypeScript types are auto-generated via `ts-rs`.
 - If stdout/stderr is missing: ask the user to copy/paste the full output.
 
@@ -125,7 +130,7 @@ Never load everything "just in case".
 
 ## 5. Source of truth
 
-- AI context: `ai/`.
+- AI context: `docs/AGENTS.md` (this file) + `~/.kronn/user-context/` for personal/role-specific overrides. The legacy `ai/` directory has been migrated to `docs/` (0.7.1).
 - Rust data models: `backend/src/models/mod.rs`.
 - TypeScript types: `frontend/src/types/generated.ts` (auto-generated from Rust).
 - API routes: `backend/src/lib.rs` (router definition in `build_router()`).
@@ -163,8 +168,8 @@ After completing a task: if you discovered something non-obvious (a gotcha, a mi
 
 | Layer | Technology |
 |-------|------------|
-| Backend | Rust (axum 0.7, tokio, serde, anyhow) |
-| Frontend | React 18 + TypeScript (Vite 5, Lucide icons, Node >= 24 LTS) |
+| Backend | Rust (axum 0.8, tokio 1.x, serde 1, anyhow 1, rusqlite 0.39, ts-rs 12, reqwest 0.13, calamine 0.34, pdf-extract 0.10) |
+| Frontend | React 19 + TypeScript 6 (Vite 8 / rolldown, Lucide icons 1.x, Node >= 24 LTS) |
 | Styling | CSS tokens + utility classes + component classes (`src/styles/`). Inline `style={{}}` only for dynamic values. No CSS framework |
 | i18n | Custom lightweight system (fr/en/es), localStorage, no external lib |
 | Type bridge | ts-rs (Rust → TypeScript) |
@@ -416,11 +421,17 @@ All four filter `host_sync ∈ {GlobalOnly, MirrorAll}` (= "synced to host"), sk
 - `HostSyncPreview` (`frontend/src/components/HostSyncPreview.tsx`) — dynamic preview under the checkbox listing the exact destination per CLI based on current scope (e.g. `Claude Code → ~/.claude.json › projects[/home/me/Repos/APP_ANDROID]`, `Gemini → ~/.gemini/settings.json (top-level — scope projet non supporté)`). Renders the asymmetry (Claude scope-aware vs others top-level only) before the user clicks Save.
 - Empty-state banner on Plugins page when no config has `host_sync !== 'None'` (one-click jump to first config). Coach mark "✨ Nouveau" on the checkbox section, one-shot localStorage flag.
 
-**Tech-debts** documented in `inconsistencies-tech-debt.md`:
-- `TD-20260427-host-sync-trait` — 4 sync functions duplicate scaffolding; trait abstraction deferred until Ollama/OpenCode integration.
-- `TD-20260427-host-sync-flock` — no advisory `flock` on host writes; race window with Claude Code itself rewriting `~/.claude.json`.
-- `TD-20260427-host-sync-workflow-race` — `sync_affected_projects` doesn't gate on `workflow_runs.status='Running'`; rare interleave with mid-spawn agent.
-- `TD-20260427-host-sync-backup-rotation` — `.kronn-backup` is single-slot, no rotation, no restore CLI.
+**Host-sync resilience** (resolved 0.6.0 / 2026-05-07 — kept here as
+historical context for code reviewers):
+- Trait abstraction: `HostMcpSync` + `run_host_sync` driver.
+  Adding a 5th CLI = 1 struct + 1 entry in the registry slice.
+- Concurrent-write guard: `atomic_write_checked` snapshots mtime
+  before read and aborts the rename if a third party (Claude Code,
+  Gemini CLI, …) bumped it.
+- Workflow-run gate: `db::workflows::has_running_run` short-circuits
+  `sync_affected_projects` when an agent is mid-spawn.
+- Backup rotation: `rotate_backup(path, 5)` keeps `.1` (newest) →
+  `.5` (oldest) on each parse-fail; oldest dropped automatically.
 
 ### Document generation — Kronn Docs (0.5.1)
 

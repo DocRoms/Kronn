@@ -28,10 +28,17 @@ pub fn rtk_binary_available() -> bool {
 /// applicable" rather than "not configured".
 pub fn rtk_hook_configured_for(agent_type: &AgentType) -> bool {
     let Some(home) = resolve_home() else { return false; };
-    // Gemini uses a shell-rc hook, fall back to that path before trying
-    // the per-file scan.
+    // Gemini: the most authoritative signal is the hook script file RTK
+    // drops at `~/.gemini/hooks/rtk-hook-gemini.sh` — it exists post-install
+    // and is removed on `--uninstall`. We fall back to scanning GEMINI.md
+    // (RTK also writes that companion file) so detection survives a user
+    // who manually removed the script but left the rest of the install.
+    // Pre-fix we scanned bash/zsh rc files, but RTK 0.37 doesn't touch
+    // shell rc for Gemini at all — the detection returned false even on a
+    // successful install, leaving the badge stuck on "not configured" and
+    // the user clicking "Enable on the 1 remaining" in a loop.
     if matches!(agent_type, AgentType::GeminiCli) {
-        return gemini_shell_rc_mentions_rtk(&home);
+        return gemini_hook_present(&home);
     }
     let Some(rel_path) = agent_config_relpath(agent_type) else { return false; };
     let path = home.join(rel_path);
@@ -58,8 +65,9 @@ fn agent_config_relpath(agent_type: &AgentType) -> Option<&'static Path> {
         // path on the first pass because `config.toml` felt more natural;
         // RTK `--codex` actually injects into AGENTS.md.
         AgentType::Codex      => Some(Path::new(".codex/AGENTS.md")),
-        // Gemini CLI is hooked via shell rc (bash/zsh), not via
-        // .gemini/settings.json — see `gemini_shell_rc_mentions_rtk`.
+        // Gemini CLI hook is detected via the hook-script file existence
+        // + GEMINI.md scan — see `gemini_hook_present`. No per-file
+        // relpath because we need a 2-source check, not a substring scan.
         AgentType::GeminiCli  => None,
         // Not in RTK's supported list.
         AgentType::Kiro | AgentType::CopilotCli => None,
@@ -68,17 +76,24 @@ fn agent_config_relpath(agent_type: &AgentType) -> Option<&'static Path> {
     }
 }
 
-/// Gemini CLI is hooked by RTK via a shell rc, not a per-agent config file.
-/// We check the usual suspects for an `rtk` reference. Any match = hook
-/// present.
-fn gemini_shell_rc_mentions_rtk(home: &Path) -> bool {
-    const RCS: &[&str] = &[
-        ".bashrc", ".zshrc", ".bash_profile", ".profile", ".config/fish/config.fish",
-    ];
-    RCS.iter().any(|rc| {
-        let path = home.join(rc);
-        matches!(std::fs::read_to_string(&path), Ok(c) if c.to_lowercase().contains("rtk"))
-    })
+/// Gemini CLI is hooked by RTK via three artifacts inside `~/.gemini`:
+///   1. `hooks/rtk-hook-gemini.sh` — the actual `exec rtk hook gemini` shim
+///   2. `GEMINI.md` — RTK.md-style companion (instructions for the agent)
+///   3. `settings.json` — a `BeforeTool` hook entry pointing at #1, only
+///      when the user accepted the settings.json patch (or rtk ≥ 0.37
+///      received `--auto-patch`)
+///
+/// We treat any of the three as "hook configured" — robustness over
+/// strictness. The hook file is the most authoritative since RTK creates
+/// it unconditionally on install and removes it on `--uninstall`.
+fn gemini_hook_present(home: &Path) -> bool {
+    if home.join(".gemini/hooks/rtk-hook-gemini.sh").is_file() {
+        return true;
+    }
+    if config_mentions_rtk(&home.join(".gemini/GEMINI.md")) {
+        return true;
+    }
+    config_mentions_rtk(&home.join(".gemini/settings.json"))
 }
 
 /// MVP detection: read the file and look for the substring `rtk`. RTK's hook
@@ -192,24 +207,59 @@ mod tests {
     }
 
     #[test]
-    fn gemini_detection_scans_shell_rc_not_gemini_settings() {
-        // RTK hooks Gemini via bash/zsh rc, not via .gemini/settings.json.
-        // If we look at the wrong file we report false even when the hook
-        // is active.
+    fn gemini_detection_finds_hook_script_file() {
+        // RTK's primary install artifact for Gemini is the hook .sh script
+        // at `~/.gemini/hooks/rtk-hook-gemini.sh`. Its presence alone is
+        // enough to flip the badge to "configured" — RTK removes it on
+        // `--uninstall`, so it's a faithful proxy.
         with_home(|home| {
-            fs::write(home.join(".bashrc"), "source /opt/rtk/hook.sh # rtk").unwrap();
-            // Decoy: .gemini/settings.json is empty.
-            fs::create_dir_all(home.join(".gemini")).unwrap();
-            fs::write(home.join(".gemini/settings.json"), "{}").unwrap();
+            fs::create_dir_all(home.join(".gemini/hooks")).unwrap();
+            fs::write(
+                home.join(".gemini/hooks/rtk-hook-gemini.sh"),
+                "#!/bin/bash\nexec rtk hook gemini\n",
+            ).unwrap();
             assert!(rtk_hook_configured_for(&AgentType::GeminiCli));
         });
     }
 
     #[test]
-    fn gemini_detection_checks_zshrc_too() {
+    fn gemini_detection_falls_back_to_gemini_md() {
+        // If the hook script is missing but GEMINI.md mentions rtk
+        // (e.g. user deleted just the .sh), we still say "configured" —
+        // the partial state is the user's call to fix, not our place
+        // to lie about.
         with_home(|home| {
-            fs::write(home.join(".zshrc"), "# RTK shell hook\nalias ai='rtk wrap ai'").unwrap();
+            fs::create_dir_all(home.join(".gemini")).unwrap();
+            fs::write(home.join(".gemini/GEMINI.md"), "# RTK\n").unwrap();
             assert!(rtk_hook_configured_for(&AgentType::GeminiCli));
+        });
+    }
+
+    #[test]
+    fn gemini_detection_falls_back_to_settings_json() {
+        // Third fallback: settings.json's BeforeTool entry points at the
+        // hook. Catches the user who blew away `.gemini/hooks/` but kept
+        // the JSON patch.
+        with_home(|home| {
+            fs::create_dir_all(home.join(".gemini")).unwrap();
+            fs::write(
+                home.join(".gemini/settings.json"),
+                r#"{"hooks":{"BeforeTool":[{"command":"/home/x/.gemini/hooks/rtk-hook-gemini.sh"}]}}"#,
+            ).unwrap();
+            assert!(rtk_hook_configured_for(&AgentType::GeminiCli));
+        });
+    }
+
+    #[test]
+    fn gemini_detection_ignores_shell_rc() {
+        // Regression: pre-fix we scanned ~/.bashrc, ~/.zshrc and friends
+        // — RTK 0.37 doesn't touch shell rc for Gemini. An unrelated `rtk`
+        // mention in a shell rc must NOT make us claim the hook is wired.
+        with_home(|home| {
+            fs::write(home.join(".bashrc"), "# unrelated rtk-alike\n").unwrap();
+            fs::write(home.join(".zshrc"), "alias rtk-fake='echo nope'\n").unwrap();
+            // No .gemini dir at all → still false.
+            assert!(!rtk_hook_configured_for(&AgentType::GeminiCli));
         });
     }
 

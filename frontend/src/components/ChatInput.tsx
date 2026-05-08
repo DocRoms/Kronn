@@ -68,7 +68,7 @@ export interface ChatInputProps {
   onQueueQP?: (qp: QuickPrompt) => void;
   onCancelQueuedQP?: () => void;
   toast: ToastFn;
-  t: (key: string, ...args: any[]) => string;
+  t: (key: string, ...args: (string | number)[]) => string;
 }
 
 export function ChatInput({
@@ -127,7 +127,17 @@ export function ChatInput({
   const updateChatInput = useCallback((val: string) => {
     chatInputValueRef.current = val;
     setChatInput(val);
-    if (chatInputRef.current) chatInputRef.current.value = val;
+    if (chatInputRef.current) {
+      chatInputRef.current.value = val;
+      // Re-snap height to the content. Pre-fix the textarea kept the
+      // multi-line height it had grown to during typing — after a send
+      // (`updateChatInput('')`) the empty composer stayed 4-5 lines tall
+      // until the user clicked it again. The same recompute is used by
+      // the onChange handler, so behaviour is consistent for typed,
+      // pasted and programmatic value changes.
+      chatInputRef.current.style.height = 'auto';
+      chatInputRef.current.style.height = Math.min(chatInputRef.current.scrollHeight, 160) + 'px';
+    }
   }, []);
 
   // ─── Draft persistence (per-discussion) ─────────────────────────────────
@@ -283,6 +293,19 @@ export function ChatInput({
   const [debateRounds, setDebateRounds] = useState(2);
   const [debateSkillIds, setDebateSkillIds] = useState<string[]>(['token-saver', 'devils-advocate']);
   const [debateDirectiveIds, setDebateDirectiveIds] = useState<string[]>([]);
+
+  // Esc-to-close on the debate popover. Pre-fix the popover had no
+  // dismiss handler — once open the user was stuck until they clicked
+  // the Users icon again (Tya's audit, 2026-05-09). Mirrors the same
+  // pattern used by ChatHeader's badge popover.
+  useEffect(() => {
+    if (!showDebatePopover) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setShowDebatePopover(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [showDebatePopover]);
 
   const handleSendMessageRef = useRef<(() => void) | null>(null);
 
@@ -486,6 +509,16 @@ export function ChatInput({
       });
     }, 1000);
     voiceCountdownRef.current = interval;
+    // Cleanup on unmount or when deps change before the countdown
+    // expires — without this, leaving the discussion mid-countdown left
+    // a dangling 1 Hz interval setting state on an unmounted component
+    // (silent in React 18 but still leaks the timer + closure).
+    return () => {
+      clearInterval(interval);
+      if (voiceCountdownRef.current === interval) {
+        voiceCountdownRef.current = null;
+      }
+    };
   }, [voiceMode, ttsState, sending, sttState, voiceCountdown]);
 
   // When countdown reaches null (finished) → start recording
@@ -747,7 +780,22 @@ export function ChatInput({
           }}
           onKeyUp={e => {
             // Caret-only moves (arrow keys inside existing text) don't
-            // fire onChange but still need to refresh the emoji popover.
+            // fire onChange but still need to refresh the emoji popover
+            // so that moving the caret into / out of a `:word` segment
+            // shows or hides the popover.
+            //
+            // BUT: when the popover is already open, Up/Down navigate
+            // the popover (handled in onKeyDown above) and the keydown
+            // calls `preventDefault` so the textarea caret doesn't
+            // move. If we still call `refreshEmojiQuery` here it
+            // reaches `setEmojiIndex(0)` and wipes whatever index the
+            // keydown just set, locking the user at index 0 — they can
+            // briefly flash to 1 between keydown/keyup but never reach
+            // 2+. Reported as "seuls les 2 premiers emojis sont
+            // sélectionnables". Skip refresh on Up/Down while the
+            // popover is open; Left/Right/Home/End still refresh
+            // because they DO move the caret and may exit the query.
+            if (emojiMatch && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) return;
             if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(e.key)) {
               const ta = e.currentTarget;
               refreshEmojiQuery(ta.value, ta.selectionStart ?? ta.value.length);
@@ -789,7 +837,14 @@ export function ChatInput({
               }
               if (e.key === 'Escape') { setMentionQuery(null); return; }
             }
-            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendMessage(); }
+            // `nativeEvent.isComposing` is true while an IME is
+            // composing a candidate (CJK, accented dead keys on some
+            // layouts). Pressing Enter to confirm the composition
+            // should not send the message.
+            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+              e.preventDefault();
+              handleSendMessage();
+            }
           }}
           disabled={sending || disabled}
         />
@@ -869,7 +924,7 @@ export function ChatInput({
                     <Users size={12} /> {t('debate.header')}
                   </div>
                   <p className="disc-debate-desc">
-                    {t('debate.instructions')}
+                    {t('debate.instructions', debateRounds, debateRounds > 1 ? 's' : '')}
                   </p>
                   {installedAgentsList.map(a => {
                     const isPrincipal = a.agent_type === discussion?.agent;

@@ -6,7 +6,7 @@
 // per design (see `models/mod.rs::QuickApi`). This means the AI helper
 // (`ApiCallAiHelper`) is automatically available when editing a QuickApi
 // — same UX as editing an ApiCall step in a workflow.
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Save, X, Plus } from 'lucide-react';
 import { useT } from '../../lib/I18nContext';
 import type {
@@ -82,6 +82,9 @@ export function QuickApiForm({
   const [projectId, setProjectId] = useState(editApi?.project_id ?? '');
   const [variables, setVariables] = useState<PromptVariable[]>(editApi?.variables ?? []);
   const [saving, setSaving] = useState(false);
+  // Race-free guard, cf QuickPromptForm. Without this, a fast double-
+  // click on Save would create the QuickApi twice.
+  const savingRef = useRef(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
   // The API config — shape mirrors WorkflowStep ApiCall fields one-to-one.
@@ -192,6 +195,8 @@ export function QuickApiForm({
   }, [apiEndpointPath, apiQuery, apiPathParams, apiHeaders, apiBody]);
 
   const handleSave = async () => {
+    if (savingRef.current) return;
+    savingRef.current = true;
     setSaving(true);
     setSaveError(null);
     try {
@@ -222,6 +227,7 @@ export function QuickApiForm({
       console.error('[QuickApiForm] save failed:', e);
       setSaveError(e instanceof Error ? e.message : String(e));
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   };

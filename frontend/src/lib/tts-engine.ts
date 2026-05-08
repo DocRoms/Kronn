@@ -132,7 +132,14 @@ export async function speakText(
     for (let i = 0; i < sentences.length; i++) {
       if (gen !== ttsGeneration) return;
 
-      const wav = await nextWav!;
+      // `nextWav` is null only after the LAST sentence's await wraps up,
+      // and the for-condition `i < sentences.length` is satisfied so we
+      // entered this iteration with `nextWav` set in the previous one
+      // (or in the initial seed before the loop). Defensive fallback so
+      // TS doesn't complain — the early return covers a torn-down
+      // generation anyway.
+      if (!nextWav) return;
+      const wav = await nextWav;
       if (gen !== ttsGeneration) return;
 
       nextWav = (i + 1 < sentences.length)

@@ -76,6 +76,12 @@ import type {
   BatchRunQuickApiResponse,
   OllamaHealthResponse,
   OllamaModelsResponse,
+  DecideRunRequest,
+  DecideRunResponse,
+  ImportWorkflowRequest,
+  ImportQuickPromptRequest,
+  VersionCheck,
+  DbBackupResponse,
 } from '../types/generated';
 import type { DiscoverKeysResponse, TestModeEnterResult, TestModeExitResponse } from '../types/extensions';
 
@@ -193,6 +199,27 @@ async function parseSSEStream(
  * Initiate a fetch for SSE and parse the stream. Handles AbortSignal and common error patterns.
  * Returns null if aborted before response.
  */
+/** Union of fields that any audit / partial-audit / full-audit SSE
+ *  event might carry. Each field is optional because the same handler
+ *  branches on `type` and only reads the subset relevant to that
+ *  event. Using a typed union (instead of `any`) lets the callsites
+ *  cast once at function entry and TS still complains if a typo
+ *  invents a non-existent field. The runtime payload comes from
+ *  `parseSSEStream` which JSON-parses the `data:` line — we don't
+ *  validate shape, the cast trusts the backend (which we own).
+ */
+interface AuditSseEvent {
+  step?: number;
+  total?: number;
+  file?: string;
+  text?: string;
+  success?: boolean;
+  installed?: boolean;
+  error?: string;
+  discussion_id?: string;
+  template_was_installed?: boolean;
+}
+
 async function fetchAndParseSSE(
   url: string,
   options: { method: string; headers: Record<string, string>; body?: string; signal?: AbortSignal },
@@ -260,6 +287,13 @@ export const setup = {
   reset: () => api<void>('POST', '/setup/reset'),
 };
 
+export const version = {
+  /** `GET /api/version/check` — current+latest pair for the auto-update
+   *  banner. Backend caches 6h so a UI tab burst doesn't fan out to
+   *  GitHub; safe to call from `useEffect` on every mount. */
+  check: () => api<VersionCheck>('GET', '/version/check'),
+};
+
 // ─── Config ─────────────────────────────────────────────────────────────────
 
 export const config = {
@@ -300,6 +334,10 @@ export const config = {
   getModelTiers: () => api<ModelTiersConfig>('GET', '/config/model-tiers'),
   setModelTiers: (tiers: ModelTiersConfig) => api<void>('POST', '/config/model-tiers', tiers),
   dbInfo: () => api<DbInfo>('GET', '/config/db-info'),
+  /** SQLite online-backup snapshot. Backend writes to
+   *  `<data_dir>/backups/kronn-YYYYMMDD-HHMMSS.db`. Returns the
+   *  resulting path so the Settings UI can toast it. */
+  dbBackup: () => api<DbBackupResponse>('POST', '/db/backup'),
   exportData: async (): Promise<Blob> => {
     const res = await fetch(`${_apiBase}/api/config/export`, {
       headers: authHeaders(),
@@ -416,11 +454,12 @@ export const projects = {
       `${_apiBase}/api/projects/${id}/ai-audit`,
       { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify(req), signal },
       {
-        onEvent: (type, p: any) => {
+        onEvent: (type, payload) => {
+          const p = payload as AuditSseEvent;
           switch (type) {
-            case 'step_start': handlers.onStepStart(p.step, p.total, p.file); break;
-            case 'chunk': handlers.onChunk(p.text, p.step); break;
-            case 'step_done': handlers.onStepDone(p.step, p.success); break;
+            case 'step_start': handlers.onStepStart(p.step as number, p.total as number, p.file as string); break;
+            case 'chunk': handlers.onChunk(p.text as string, p.step as number); break;
+            case 'step_done': handlers.onStepDone(p.step as number, p.success as boolean); break;
             case 'step_error': handlers.onError(p.error ?? 'Step error'); break;
             case 'done': done(); break;
             case 'error': handlers.onError(p.error ?? 'Unknown error'); break;
@@ -451,11 +490,12 @@ export const projects = {
       `${_apiBase}/api/projects/${id}/partial-audit`,
       { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify(req), signal },
       {
-        onEvent: (type, p: any) => {
+        onEvent: (type, payload) => {
+          const p = payload as AuditSseEvent;
           switch (type) {
-            case 'step_start': handlers.onStepStart(p.step, p.total, p.file); break;
-            case 'chunk': handlers.onChunk(p.text, p.step); break;
-            case 'step_done': handlers.onStepDone(p.step, p.success); break;
+            case 'step_start': handlers.onStepStart(p.step as number, p.total as number, p.file as string); break;
+            case 'chunk': handlers.onChunk(p.text as string, p.step as number); break;
+            case 'step_done': handlers.onStepDone(p.step as number, p.success as boolean); break;
             case 'step_error': handlers.onError(p.error ?? 'Step error'); break;
             case 'done': done(); break;
             case 'error': handlers.onError(p.error ?? 'Unknown error'); break;
@@ -490,14 +530,15 @@ export const projects = {
       `${_apiBase}/api/projects/${id}/full-audit`,
       { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify(req), signal },
       {
-        onEvent: (type, p: any) => {
+        onEvent: (type, payload) => {
+          const p = payload as AuditSseEvent;
           switch (type) {
-            case 'template_installed': handlers.onTemplateInstalled(p.installed); break;
-            case 'step_start': handlers.onStepStart(p.step, p.total, p.file); break;
-            case 'chunk': handlers.onChunk(p.text, p.step); break;
-            case 'step_done': handlers.onStepDone(p.step, p.success); break;
+            case 'template_installed': handlers.onTemplateInstalled(p.installed as boolean); break;
+            case 'step_start': handlers.onStepStart(p.step as number, p.total as number, p.file as string); break;
+            case 'chunk': handlers.onChunk(p.text as string, p.step as number); break;
+            case 'step_done': handlers.onStepDone(p.step as number, p.success as boolean); break;
             case 'step_error': handlers.onError(p.error ?? 'Step error'); break;
-            case 'validation_created': handlers.onValidationCreated(p.discussion_id); break;
+            case 'validation_created': handlers.onValidationCreated(p.discussion_id as string); break;
             case 'done': done(p.discussion_id ?? null, p.template_was_installed ?? false); break;
             case 'error': handlers.onError(p.error ?? 'Unknown error'); break;
           }
@@ -546,7 +587,7 @@ export const discussions = {
   get: (id: string) => api<Discussion>('GET', `/discussions/${id}`),
   create: (req: CreateDiscussionRequest) => api<Discussion>('POST', '/discussions', req),
   delete: (id: string) => api<void>('DELETE', `/discussions/${id}`),
-  update: (id: string, body: { title?: string; archived?: boolean; pinned?: boolean; skill_ids?: string[]; profile_ids?: string[]; directive_ids?: string[]; project_id?: string | null; tier?: ModelTier; agent?: AgentType }) => api<void>('PATCH', `/discussions/${id}`, body),
+  update: (id: string, body: { title?: string; archived?: boolean; pinned?: boolean; skill_ids?: string[]; profile_ids?: string[]; directive_ids?: string[]; project_id?: string | null; tier?: ModelTier; agent?: AgentType; summary_strategy?: 'Auto' | 'OnDemand' | 'Off' }) => api<void>('PATCH', `/discussions/${id}`, body),
   share: (id: string, contactIds: string[]) => api<string>('POST', `/discussions/${id}/share`, { contact_ids: contactIds }),
   /** Abort the currently-running agent on this discussion. Backend kills the
    *  child process and saves a partial response with an "⏹️ Interrompu" footer. */
@@ -579,7 +620,8 @@ export const discussions = {
       url,
       { method: 'POST', headers: hdrs, body: body ? JSON.stringify(body) : undefined, signal },
       {
-        onEvent: (type, parsed: any) => {
+        onEvent: (type, payload) => {
+          const parsed = payload as { text?: string; error?: string };
           if (type === 'chunk' && parsed.text !== undefined) {
             onChunk(parsed.text);
           } else if (type === 'log' && parsed.text !== undefined) {
@@ -840,8 +882,8 @@ export const workflows = {
    *  `comment` is required for request_changes (the agent needs feedback).
    *  Returns the new run status (Running on approve / request_changes,
    *  Failed on reject). The actual continuation runs in the background. */
-  decideRun: (id: string, runId: string, payload: import('../types/generated').DecideRunRequest) =>
-    api<import('../types/generated').DecideRunResponse>(
+  decideRun: (id: string, runId: string, payload: DecideRunRequest) =>
+    api<DecideRunResponse>(
       'POST', `/workflows/${id}/runs/${runId}/decide`, payload
     ),
   /** 0.7.0 — create an isolated test worktree on a run's preserved branch.
@@ -869,7 +911,7 @@ export const workflows = {
     return { filename, blob: await r.blob() };
   },
   /** 0.7.0 UX pass — import a workflow from a previously-exported JSON. */
-  importWorkflow: (payload: import('../types/generated').ImportWorkflowRequest) =>
+  importWorkflow: (payload: ImportWorkflowRequest) =>
     api<Workflow>('POST', '/workflows/import', payload),
   /** Dry-run preview of a BatchQuickPrompt step: returns parsed items, sample
    *  rendered prompt, QP info, errors. NO discussion is created. */
@@ -992,6 +1034,16 @@ export const quickPrompts = {
    */
   batchRun: (qpId: string, req: BatchRunRequest) =>
     api<BatchRunResponse>('POST', `/quick-prompts/${qpId}/batch`, req),
+  /**
+   * Compare-agents fan-out — same prompt across N agents in parallel
+   * (one disc per agent, all under one batch group). Mirrors `batchRun`
+   * but the variation axis is the agent, not the input. Cf.
+   * `project_qp_compare_agents` memory.
+   */
+  compareAgents: (
+    qpId: string,
+    req: { prompt: string; batch_name: string; agents: AgentType[]; tier?: ModelTier; project_id?: string },
+  ) => api<BatchRunResponse>('POST', `/quick-prompts/${qpId}/compare-agents`, req),
   /** 0.7.0 UX pass — export a single QP as JSON file download. */
   exportQp: async (id: string): Promise<{ filename: string; blob: Blob }> => {
     const r = await fetch(`/api/quick-prompts/${id}/export`, { credentials: 'same-origin' });
@@ -1001,7 +1053,7 @@ export const quickPrompts = {
     const filename = m?.[1] || `quick-prompt-${id}.kronn-qp.json`;
     return { filename, blob: await r.blob() };
   },
-  importQp: (payload: import('../types/generated').ImportQuickPromptRequest) =>
+  importQp: (payload: ImportQuickPromptRequest) =>
     api<QuickPrompt>('POST', '/quick-prompts/import', payload),
 };
 
@@ -1095,6 +1147,16 @@ export interface RtkSavings {
   sample_count: number;
 }
 
+/** Response shape of `GET /api/rtk/version`. `update_available: true`
+ *  drives the "update available" pill in the RTK Settings card. */
+export interface RtkVersionInfo {
+  available: boolean;
+  installed: string | null;
+  latest_known: string;
+  update_available: boolean;
+  update_command: string;
+}
+
 export const rtk = {
   /** Wire RTK hooks into each supported agent. The backend filters to
    *  agents RTK actually supports (Claude Code, Codex, Gemini CLI at the
@@ -1106,6 +1168,9 @@ export const rtk = {
     api<RtkActivateResponse>('POST', '/rtk/deactivate', { agents }),
   /** Read the global savings counter RTK keeps in its own SQLite. */
   savings: () => api<RtkSavings>('GET', '/rtk/savings'),
+  /** Read the installed-vs-latest RTK version and precomputed
+   *  `update_available` flag — feeds the freshness pill. */
+  version: () => api<RtkVersionInfo>('GET', '/rtk/version'),
 };
 
 // ─── Ollama (local LLM) ────────────────────────────────────────────────────

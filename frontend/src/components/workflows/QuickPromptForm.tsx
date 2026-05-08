@@ -31,6 +31,10 @@ export function QuickPromptForm({ editPrompt, projects, onSave, onCancel }: Prop
   const [agent, setAgent] = useState<AgentType>(editPrompt?.agent ?? 'ClaudeCode');
   const [projectId, setProjectId] = useState(editPrompt?.project_id ?? '');
   const [saving, setSaving] = useState(false);
+  // Race-free guard: `disabled={saving}` is closure-stale between two
+  // synchronous clicks, so a fast double-click on Save creates the
+  // QuickPrompt twice (`quickPromptsApi.create` is not idempotent).
+  const savingRef = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Auto-sync variables from template. We preserve any description /
@@ -64,6 +68,8 @@ export function QuickPromptForm({ editPrompt, projects, onSave, onCancel }: Prop
   };
 
   const handleSave = async () => {
+    if (savingRef.current) return;
+    savingRef.current = true;
     setSaving(true);
     try {
       await onSave({
@@ -78,6 +84,7 @@ export function QuickPromptForm({ editPrompt, projects, onSave, onCancel }: Prop
         description,
       });
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   };

@@ -280,7 +280,13 @@ pub async fn batch_run(
     // Delegate to the shared pure fn — same logic as the workflow step executor.
     let batch_name_for_log = req.batch_name.clone();
     let qp_name_for_log = qp.name.clone();
-    let items: Vec<(String, String)> = req.items.into_iter().map(|i| (i.title, i.prompt)).collect();
+    let items: Vec<crate::db::workflows::BatchItemInput> = req.items.into_iter()
+        .map(|i| crate::db::workflows::BatchItemInput {
+            title: i.title,
+            prompt: i.prompt,
+            agent_override: None, // classic batch mode = same agent for all items
+        })
+        .collect();
     let workspace_mode = req.workspace_mode.unwrap_or_else(|| "Direct".into());
 
     // Safety: Isolated mode needs a project (git repo) to worktree against.
@@ -314,6 +320,143 @@ pub async fn batch_run(
     tracing::info!(
         "Created batch run {} with {} discussions (QP: {}, name: {})",
         outcome.run_id, outcome.batch_total, qp_name_for_log, batch_name_for_log
+    );
+
+    Json(ApiResponse::ok(BatchRunResponse {
+        run_id: outcome.run_id,
+        discussion_ids: outcome.discussion_ids,
+        batch_total: outcome.batch_total,
+    }))
+}
+
+// ─── Compare-agents mode (2026-05-10) ───────────────────────────────────
+//
+// Fan out the SAME prompt across N agents in parallel — one
+// discussion per agent, all linked under a single batch group. Lets
+// the user click between siblings and read responses side-by-side
+// without rewriting the QP per agent.
+//
+// vs. the regular `batch_run`: regular = N inputs × 1 agent (vary
+// input). Compare = 1 input × N agents (vary agent). Both reuse
+// `create_batch_run` with the new `agent_override` per item.
+
+#[derive(Debug, Deserialize)]
+pub struct CompareAgentsRequest {
+    /// Pre-rendered prompt — caller has already substituted any
+    /// QP variables. We don't re-render here so the same prompt
+    /// hits every agent verbatim.
+    pub prompt: String,
+    /// Display name for the batch group, e.g.
+    /// "Compare · summarise PR #42 · 14:00".
+    pub batch_name: String,
+    /// Tier override for all child discussions. Optional — falls
+    /// back to the QP's default tier when None.
+    #[serde(default)]
+    pub tier: Option<ModelTier>,
+    /// Subset of agents to compare. Frontend usually sends every
+    /// installed+enabled agent, but a power user could pick e.g.
+    /// `["ClaudeCode", "Codex"]` to skip the heavier ones.
+    pub agents: Vec<AgentType>,
+    /// Optional project to attach all child discussions to.
+    /// Overrides the QP's default project when set.
+    #[serde(default)]
+    pub project_id: Option<String>,
+}
+
+/// `POST /api/quick-prompts/:id/compare-agents` — Compare-agents
+/// batch fan-out (Phase 1 of `project_qp_compare_agents`).
+pub async fn compare_agents(
+    State(state): State<AppState>,
+    Path(qp_id): Path<String>,
+    Json(req): Json<CompareAgentsRequest>,
+) -> Json<ApiResponse<BatchRunResponse>> {
+    // Hard cap mirrors `batch_run`'s — keeps a runaway "compare 50
+    // agents" from blowing up the agent semaphore.
+    const MAX_BATCH_SIZE: usize = 50;
+    if req.agents.is_empty() {
+        return Json(ApiResponse::err("Compare-agents needs at least 1 agent in the list"));
+    }
+    if req.agents.len() > MAX_BATCH_SIZE {
+        return Json(ApiResponse::err(format!(
+            "Compare-agents too large: {} agents (max {})",
+            req.agents.len(), MAX_BATCH_SIZE
+        )));
+    }
+    if req.prompt.trim().is_empty() {
+        return Json(ApiResponse::err("Prompt is required"));
+    }
+    if req.batch_name.trim().is_empty() {
+        return Json(ApiResponse::err("batch_name is required"));
+    }
+
+    // De-dupe agents — the frontend usually filters but a paranoid
+    // guard avoids 2 disc on the same agent.
+    let mut seen = std::collections::HashSet::new();
+    let agents: Vec<AgentType> = req.agents.into_iter()
+        .filter(|a| seen.insert(format!("{:?}", a)))
+        .collect();
+
+    // Load the QP for skill_ids + tier defaults + (optional)
+    // project_id fallback.
+    let qp_lookup = qp_id.clone();
+    let qp = match state.db.with_conn(move |conn| {
+        crate::db::quick_prompts::get_quick_prompt(conn, &qp_lookup)
+    }).await {
+        Ok(Some(q)) => q,
+        Ok(None) => return Json(ApiResponse::err("Quick prompt not found")),
+        Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
+    };
+
+    // If the request specified a tier, write it onto a cloned QP
+    // so each child discussion picks it up via `qp.tier`. The DB
+    // QP isn't mutated.
+    let mut qp_for_run = qp.clone();
+    if let Some(t) = req.tier {
+        qp_for_run.tier = t;
+    }
+
+    let (author_pseudo, author_avatar_email) = {
+        let config = state.config.read().await;
+        (config.server.pseudo.clone(), config.server.avatar_email.clone())
+    };
+
+    // Build one item per agent — same prompt, same title prefix,
+    // agent suffix so the user can tell siblings apart in the
+    // sidebar.
+    let prompt = req.prompt.clone();
+    let qp_display_name = qp.name.clone();
+    let items: Vec<crate::db::workflows::BatchItemInput> = agents.into_iter()
+        .map(|agent| {
+            let agent_label = format!("{:?}", agent); // ClaudeCode, Codex, …
+            crate::db::workflows::BatchItemInput {
+                title: format!("{} · {}", qp_display_name, agent_label),
+                prompt: prompt.clone(),
+                agent_override: Some(agent),
+            }
+        })
+        .collect();
+
+    let batch_total = items.len() as u32;
+    let outcome = match state.db.with_conn(move |conn| {
+        crate::db::workflows::create_batch_run(conn, crate::db::workflows::CreateBatchRunInput {
+            quick_prompt: &qp_for_run,
+            items,
+            batch_name: Some(req.batch_name.clone()),
+            project_id: req.project_id,
+            parent_run_id: None,
+            author_pseudo,
+            author_avatar_email,
+            language: "fr".into(),
+            workspace_mode: "Direct".into(),
+        })
+    }).await {
+        Ok(o) => o,
+        Err(e) => return Json(ApiResponse::err(format!("Failed to create compare-agents batch: {}", e))),
+    };
+
+    tracing::info!(
+        "Created compare-agents batch {} with {} discussions (QP: {})",
+        outcome.run_id, batch_total, qp.name,
     );
 
     Json(ApiResponse::ok(BatchRunResponse {

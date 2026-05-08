@@ -1,0 +1,19 @@
+{
+  "_doc": "Per-page a11y baseline — `<rule_id>: <node_count>`. Updates require explicit review (= a passing PR that intentionally raised or lowered a count). axe rules listed here are KNOWN serious/critical issues that pre-existed this baseline; the test enforces 'no new rule' AND 'no count increase' against this snapshot. Lower a count when fixing nodes; remove the entry when fixing the rule entirely. Captured 2026-05-10 against the prod backend.",
+  "Projects": {
+    "color-contrast": 51,
+    "nested-interactive": 2
+  },
+  "Discussions": {
+    "color-contrast": 2
+  },
+  "Plugins": {
+    "color-contrast": 2
+  },
+  "Workflows": {
+    "color-contrast": 13
+  },
+  "Settings": {
+    "color-contrast": 36
+  }
+}

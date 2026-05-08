@@ -3,12 +3,21 @@
 FROM node:24-alpine AS builder
 WORKDIR /app
 
-# corepack enables pnpm natively — no global npm install needed
-RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
+# corepack enables pnpm natively — no global npm install needed.
+# The pnpm version comes from `packageManager` in package.json
+# (currently pnpm@11.0.9) — corepack auto-fetches it on first invocation,
+# so this stays in sync with what local devs + CI use without hand-pinning
+# a version here.
+RUN corepack enable
 
-COPY package.json pnpm-lock.yaml* ./
+# `pnpm-workspace.yaml` is REQUIRED at install time in pnpm 11: it carries
+# both `overrides` (security patches) and `allowBuilds` (whitelist of
+# install-script deps). Missing it triggers ERR_PNPM_LOCKFILE_CONFIG_MISMATCH
+# on `--frozen-lockfile`. The `*` glob keeps the COPY tolerant if the file
+# isn't present in older branches.
+COPY package.json pnpm-lock.yaml* pnpm-workspace.yaml* ./
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
-    pnpm install --frozen-lockfile || pnpm install
+    pnpm install --frozen-lockfile
 
 COPY . .
 RUN pnpm build

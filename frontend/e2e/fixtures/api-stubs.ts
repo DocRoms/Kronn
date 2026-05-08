@@ -43,4 +43,29 @@ export async function stubBootEndpoints(page: Page) {
       body: JSON.stringify({ success: true, data: 'fr', error: null }),
     })
   );
+  // Auto-update banner check fires once on Dashboard mount. Stub it to
+  // a "no update" response so tests don't depend on either GitHub
+  // reachability or the prod backend already running 0.7.2+. Tests
+  // that specifically verify the banner override this stub.
+  await page.route('**/api/version/check', route =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        data: { current: '0.7.1', latest: null, release_url: null, up_to_date: true },
+        error: null,
+      }),
+    })
+  );
+  // Backend health pill polls `/api/health` every 30s. Stub a healthy
+  // reply so the BackendStatus pill stays hidden during E2E runs —
+  // tests that want to assert the offline pill override this stub.
+  await page.route('**/api/health', route =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ ok: true, version: '0.7.1' }),
+    })
+  );
 }

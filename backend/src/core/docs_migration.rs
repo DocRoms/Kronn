@@ -132,6 +132,13 @@ pub async fn migrate_project(
     refs_rewritten += rewrite_internal_refs(&docs_dir);
     refs_rewritten += rewrite_root_redirectors(project_path);
 
+    // Pre-fill obvious template placeholders (PROJECT_NAME, STACK_SUMMARY,
+    // TEST_CMD, LINT_CMD, PROJECT_LANGUAGE) that the agent's bootstrap
+    // pass is supposed to fill. Idempotent: only replaces literal `{{...}}`
+    // tokens, never overwrites filled-in content. Counts toward the
+    // refs_rewritten tally so the operator sees "X files changed" in the UI.
+    refs_rewritten += prefill_template_placeholders(project_path);
+
     let symlink_created = if create_symlink {
         create_ai_symlink(project_path).is_ok()
     } else {
@@ -527,6 +534,260 @@ fn count_md_files(dir: &Path) -> usize {
     n
 }
 
+/// Pre-fill the obvious template placeholders (`{{PROJECT_NAME}}`,
+/// `{{STACK_SUMMARY}}`, `{{TEST_CMD}}`, `{{LINT_CMD}}`,
+/// `{{PROJECT_LANGUAGE}}`) on every `*.md` under `docs/` and the root
+/// redirector files.
+///
+/// **Why**: the template files ship with `{{...}}` placeholders that the
+/// agent's bootstrap pass is supposed to fill. For projects where the
+/// bootstrap was never run (or skipped step 1), the raw placeholder
+/// syntax leaks to users — confusing and unprofessional. This pre-fill
+/// gives sensible defaults derived from the filesystem; the agent
+/// refines them later when bootstrap runs.
+///
+/// **Idempotent**: only replaces literal `{{TOKEN}}` substrings; if the
+/// placeholder is already filled, the regex doesn't match and we skip.
+/// Safe to re-run on every migration/install without clobbering
+/// hand-edited content.
+///
+/// **Scope**: every `*.md` under `docs/` (or whatever the entry folder
+/// is) + the root redirectors (`CLAUDE.md`, `.cursorrules`, etc.) so
+/// agents on either side of the entry see consistent content.
+///
+/// Returns the number of files modified (for telemetry / UI feedback).
+pub fn prefill_template_placeholders(project_path: &Path) -> usize {
+    let docs_dir = crate::core::scanner::detect_docs_dir(project_path);
+    if !docs_dir.is_dir() {
+        return 0;
+    }
+    let replacements = compute_replacements(project_path);
+    if replacements.is_empty() {
+        return 0;
+    }
+
+    let mut files_changed = 0usize;
+    // 1. Every `*.md` under docs/.
+    walk_md_files(&docs_dir, &mut |path| {
+        if rewrite_file_with_replacements(path, &replacements) {
+            files_changed += 1;
+        }
+    });
+    // 2. Root redirectors — same shape as `rewrite_root_redirectors`.
+    static REDIRECTORS: &[&str] = &[
+        "CLAUDE.md",
+        "AGENTS.md",
+        "GEMINI.md",
+        ".cursorrules",
+        ".windsurfrules",
+        ".clinerules",
+        ".kiro/steering/instructions.md",
+        ".vibe/instructions.md",
+        ".github/copilot-instructions.md",
+        ".cursor/rules/repo-instructions.mdc",
+    ];
+    for &rel in REDIRECTORS {
+        let path = project_path.join(rel);
+        if !path.is_file() {
+            continue;
+        }
+        if rewrite_file_with_replacements(&path, &replacements) {
+            files_changed += 1;
+        }
+    }
+    files_changed
+}
+
+/// Build the (placeholder → value) map from filesystem heuristics.
+/// Only emits entries for placeholders we can answer with confidence;
+/// unknown ones stay as `{{...}}` for the agent to fill during bootstrap.
+fn compute_replacements(project_path: &Path) -> Vec<(&'static str, String)> {
+    let mut out: Vec<(&'static str, String)> = Vec::new();
+
+    // PROJECT_NAME — directory basename, Title-Cased + dashes/underscores → spaces.
+    if let Some(name) = project_path.file_name().and_then(|s| s.to_str()) {
+        let pretty = name
+            .replace(['-', '_'], " ")
+            .split_whitespace()
+            .map(|w| {
+                let mut chars = w.chars();
+                match chars.next() {
+                    Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+                    None => String::new(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !pretty.is_empty() {
+            out.push(("{{PROJECT_NAME}}", pretty));
+        }
+    }
+
+    // Stack signals → drive STACK_SUMMARY, TEST_CMD, LINT_CMD.
+    let stack = detect_stack_signals(project_path);
+    if let Some(summary) = stack.summary() {
+        out.push(("{{STACK_SUMMARY}}", summary));
+    }
+    if let Some(test_cmd) = stack.test_cmd() {
+        out.push(("{{TEST_CMD}}", test_cmd));
+    }
+    if let Some(lint_cmd) = stack.lint_cmd() {
+        out.push(("{{LINT_CMD}}", lint_cmd));
+    }
+
+    // PROJECT_LANGUAGE: detect from a README locale hint, default English.
+    // We don't want to guess wrong here — the agent overrides easily.
+    out.push(("{{PROJECT_LANGUAGE}}", "English".to_string()));
+
+    out
+}
+
+/// Replace every occurrence of each placeholder with its value, write back
+/// only if the content changed. Returns `true` on a real write.
+fn rewrite_file_with_replacements(path: &Path, replacements: &[(&'static str, String)]) -> bool {
+    let original = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let mut updated = original.clone();
+    for (token, value) in replacements {
+        if updated.contains(token) {
+            updated = updated.replace(token, value);
+        }
+    }
+    if updated == original {
+        return false;
+    }
+    std::fs::write(path, updated).is_ok()
+}
+
+/// Compact view of which package managers / build tools are present in
+/// the project. Drives `STACK_SUMMARY`, `TEST_CMD`, `LINT_CMD`.
+#[derive(Default)]
+struct StackSignals {
+    rust: bool,
+    typescript: bool,
+    javascript: bool,
+    python: bool,
+    go: bool,
+    php: bool,
+    /// `pnpm` if `pnpm-lock.yaml`, `npm` if `package-lock.json`, etc.
+    js_pm: Option<&'static str>,
+}
+
+impl StackSignals {
+    /// "Rust + TypeScript + Python" style. None when no signal is found.
+    fn summary(&self) -> Option<String> {
+        let mut parts: Vec<&'static str> = Vec::new();
+        if self.rust { parts.push("Rust"); }
+        if self.typescript { parts.push("TypeScript"); }
+        else if self.javascript { parts.push("JavaScript"); }
+        if self.python { parts.push("Python"); }
+        if self.go { parts.push("Go"); }
+        if self.php { parts.push("PHP"); }
+        if parts.is_empty() { None } else { Some(parts.join(" + ")) }
+    }
+
+    /// Best-effort `test` command(s) chained with `&&`. Conservative on
+    /// purpose — we only emit commands we're confident the project
+    /// supports given the lockfile / config evidence.
+    fn test_cmd(&self) -> Option<String> {
+        let mut parts: Vec<String> = Vec::new();
+        if self.rust { parts.push("cargo test".into()); }
+        if let Some(pm) = self.js_pm {
+            if self.typescript || self.javascript {
+                parts.push(format!("{} test", pm));
+            }
+        }
+        if self.python { parts.push("pytest".into()); }
+        if self.go { parts.push("go test ./...".into()); }
+        if self.php { parts.push("phpunit".into()); }
+        if parts.is_empty() { None } else { Some(parts.join(" && ")) }
+    }
+
+    fn lint_cmd(&self) -> Option<String> {
+        let mut parts: Vec<String> = Vec::new();
+        if self.rust { parts.push("cargo clippy --all-targets -- -D warnings".into()); }
+        if let Some(pm) = self.js_pm {
+            if self.typescript {
+                parts.push(format!("{} tsc --noEmit && {} lint", pm, pm));
+            } else if self.javascript {
+                parts.push(format!("{} lint", pm));
+            }
+        }
+        if self.python { parts.push("ruff check".into()); }
+        if self.go { parts.push("go vet ./...".into()); }
+        if self.php { parts.push("phpcs".into()); }
+        if parts.is_empty() { None } else { Some(parts.join(" && ")) }
+    }
+}
+
+fn detect_stack_signals(project_path: &Path) -> StackSignals {
+    let mut s = StackSignals::default();
+    // Recurse one level: many monorepos put `backend/Cargo.toml` and
+    // `frontend/package.json`. Detecting at the root only would miss
+    // them and leave the test/lint cmds blank.
+    let candidates: Vec<std::path::PathBuf> = std::iter::once(project_path.to_path_buf())
+        .chain(
+            std::fs::read_dir(project_path)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                .map(|e| e.path())
+                .filter(|p| {
+                    let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                    !matches!(
+                        name,
+                        ".git" | "node_modules" | "target" | "vendor" | ".kronn"
+                            | "dist" | "build" | "docs" | "doc" | "ai"
+                    )
+                })
+        )
+        .collect();
+    for p in &candidates {
+        if p.join("Cargo.toml").is_file() {
+            s.rust = true;
+        }
+        if p.join("package.json").is_file() {
+            if p.join("tsconfig.json").is_file() || p.join("tsconfig.app.json").is_file() {
+                s.typescript = true;
+            } else {
+                s.javascript = true;
+            }
+            // Resolve a package manager once. Pin to the first one we see;
+            // monorepos that mix pnpm + npm hit weirder problems than a
+            // shaky test_cmd default.
+            if s.js_pm.is_none() {
+                if p.join("pnpm-lock.yaml").is_file() {
+                    s.js_pm = Some("pnpm");
+                } else if p.join("yarn.lock").is_file() {
+                    s.js_pm = Some("yarn");
+                } else if p.join("bun.lockb").is_file() {
+                    s.js_pm = Some("bun");
+                } else if p.join("package-lock.json").is_file() {
+                    s.js_pm = Some("npm");
+                } else {
+                    s.js_pm = Some("npm"); // sensible default when no lockfile
+                }
+            }
+        }
+        if p.join("pyproject.toml").is_file()
+            || p.join("requirements.txt").is_file()
+            || p.join("setup.py").is_file()
+        {
+            s.python = true;
+        }
+        if p.join("go.mod").is_file() {
+            s.go = true;
+        }
+        if p.join("composer.json").is_file() {
+            s.php = true;
+        }
+    }
+    s
+}
+
 fn has_visible_files(dir: &Path) -> bool {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -872,5 +1133,172 @@ mod tests {
         }
         let ai = root.join("ai");
         assert!(ai.is_symlink() || ai.exists(), "ai → docs symlink should exist");
+    }
+
+    // ─── prefill_template_placeholders ────────────────────────────────
+
+    /// Drops a minimal Rust-project skeleton (Cargo.toml + a docs/
+    /// AGENTS.md riddled with the 5 placeholders we auto-fill).
+    fn write_rust_with_placeholders() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+        std::fs::write(root.join("Cargo.toml"),
+            "[package]\nname = \"foo\"\nversion = \"0.1.0\"\n").unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(
+            root.join("docs/AGENTS.md"),
+            "# {{PROJECT_NAME}} — {{STACK_SUMMARY}}\n\
+             Working language: {{PROJECT_LANGUAGE}}\n\
+             Test: {{TEST_CMD}}\n\
+             Lint: {{LINT_CMD}}\n\
+             ## Rules\n- {{DO_NOT_1}}\n- {{DO_NOT_2}}\n",
+        ).unwrap();
+        (tmp, root)
+    }
+
+    #[test]
+    fn prefill_replaces_the_five_known_placeholders() {
+        // Project named `amp-easy-backo` with a Cargo.toml at root →
+        // we expect: PROJECT_NAME=Amp Easy Backo, STACK_SUMMARY=Rust,
+        // TEST_CMD=cargo test, LINT_CMD=cargo clippy …, language=English.
+        // The two unknown placeholders (DO_NOT_1/2) stay untouched —
+        // those are for the agent to fill during bootstrap step 1.
+        let (_tmp, generic_root) = write_rust_with_placeholders();
+        // Rename to a meaningful directory name so PROJECT_NAME comes out right.
+        let parent = generic_root.parent().unwrap();
+        let renamed = parent.join("amp-easy-backo");
+        std::fs::rename(&generic_root, &renamed).unwrap();
+
+        let modified = prefill_template_placeholders(&renamed);
+        assert!(modified >= 1, "at least the AGENTS.md should be touched");
+
+        let body = std::fs::read_to_string(renamed.join("docs/AGENTS.md")).unwrap();
+        assert!(body.contains("Amp Easy Backo"), "PROJECT_NAME pretty-formatted");
+        assert!(body.contains("# Amp Easy Backo — Rust"), "STACK_SUMMARY filled");
+        assert!(body.contains("Test: cargo test"));
+        assert!(body.contains("Lint: cargo clippy --all-targets -- -D warnings"));
+        assert!(body.contains("Working language: English"));
+        // Unknown placeholders we don't touch — bootstrap agent's job.
+        assert!(body.contains("{{DO_NOT_1}}"));
+        assert!(body.contains("{{DO_NOT_2}}"));
+        // Cleanup so the rename doesn't leak.
+        std::fs::remove_dir_all(&renamed).ok();
+    }
+
+    #[test]
+    fn prefill_is_idempotent_and_noops_when_no_placeholders_left() {
+        let (_tmp, root) = write_rust_with_placeholders();
+        let _ = prefill_template_placeholders(&root);
+        // Second pass — no `{{KNOWN}}` left for us to replace.
+        let modified = prefill_template_placeholders(&root);
+        assert_eq!(modified, 0, "second pass must be a noop");
+    }
+
+    #[test]
+    fn prefill_handles_typescript_monorepo_subfolder() {
+        // Many projects put their JS deps in `frontend/package.json`,
+        // not at the root. `detect_stack_signals` walks one level
+        // down to catch that — without the walk, TEST_CMD/LINT_CMD
+        // would come out blank on these layouts.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("frontend")).unwrap();
+        std::fs::write(root.join("frontend/package.json"), "{}").unwrap();
+        std::fs::write(root.join("frontend/tsconfig.json"), "{}").unwrap();
+        std::fs::write(root.join("frontend/pnpm-lock.yaml"), "lockfileVersion: 9.0\n").unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(
+            root.join("docs/AGENTS.md"),
+            "Stack: {{STACK_SUMMARY}}\nTest: {{TEST_CMD}}\nLint: {{LINT_CMD}}\n",
+        ).unwrap();
+
+        prefill_template_placeholders(root);
+
+        let body = std::fs::read_to_string(root.join("docs/AGENTS.md")).unwrap();
+        assert!(body.contains("Stack: TypeScript"), "got: {body}");
+        assert!(body.contains("Test: pnpm test"), "got: {body}");
+        assert!(body.contains("Lint: pnpm tsc --noEmit && pnpm lint"), "got: {body}");
+    }
+
+    #[test]
+    fn prefill_chains_test_and_lint_commands_for_multi_stack() {
+        // Rust + Python both detected → `cargo test && pytest`,
+        // `cargo clippy … && ruff check`. Stack summary lists both.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        std::fs::write(root.join("pyproject.toml"), "[project]\nname = \"x\"\n").unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(
+            root.join("docs/AGENTS.md"),
+            "Stack: {{STACK_SUMMARY}}\nTest: {{TEST_CMD}}\nLint: {{LINT_CMD}}\n",
+        ).unwrap();
+
+        prefill_template_placeholders(root);
+
+        let body = std::fs::read_to_string(root.join("docs/AGENTS.md")).unwrap();
+        assert!(body.contains("Stack: Rust + Python"), "got: {body}");
+        assert!(body.contains("Test: cargo test && pytest"));
+        assert!(body.contains("Lint: cargo clippy --all-targets -- -D warnings && ruff check"));
+    }
+
+    #[test]
+    fn prefill_also_rewrites_root_redirectors() {
+        // CLAUDE.md / .cursorrules / etc. ship from the same template
+        // tree and carry the same placeholders. They must be patched
+        // alongside docs/*.md so agents on either side of the entry
+        // see consistent values.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/AGENTS.md"), "stub\n").unwrap();
+        std::fs::write(root.join("CLAUDE.md"), "Project: {{PROJECT_NAME}} ({{STACK_SUMMARY}})").unwrap();
+        std::fs::write(root.join(".cursorrules"), "Stack: {{STACK_SUMMARY}}").unwrap();
+
+        prefill_template_placeholders(root);
+
+        let claude = std::fs::read_to_string(root.join("CLAUDE.md")).unwrap();
+        let cursor = std::fs::read_to_string(root.join(".cursorrules")).unwrap();
+        assert!(!claude.contains("{{PROJECT_NAME}}"), "CLAUDE.md still raw");
+        assert!(!claude.contains("{{STACK_SUMMARY}}"));
+        assert!(!cursor.contains("{{STACK_SUMMARY}}"));
+        assert!(cursor.contains("Stack: Rust"));
+    }
+
+    #[test]
+    fn prefill_is_safe_on_a_project_with_no_docs_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // No docs/ at all — must return 0, not panic, not create the dir.
+        let n = prefill_template_placeholders(tmp.path());
+        assert_eq!(n, 0);
+        assert!(!tmp.path().join("docs").exists());
+    }
+
+    #[tokio::test]
+    async fn migration_prefills_placeholders_in_one_pass() {
+        // Regression: the user-reported `amp-easy-backo` shape. The
+        // legacy `ai/` had raw `{{PROJECT_NAME}}` etc. that no agent
+        // ever filled. Running the migration should now move AND
+        // prefill in a single operator action.
+        let (_tmp, root) = make_legacy_project().await;
+        // Drop a placeholdered file inside ai/ before migration.
+        std::fs::write(
+            root.join("ai/agents.md"),
+            "{{PROJECT_NAME}} — Test: {{TEST_CMD}}\n",
+        ).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        let _ = crate::core::cmd::async_cmd("git").args(["add", "."]).current_dir(&root).output().await.unwrap();
+        let _ = crate::core::cmd::async_cmd("git").args(["commit", "-q", "-m", "+placeholders"]).current_dir(&root).output().await.unwrap();
+
+        let outcome = migrate_project(&root, false).await;
+        assert!(matches!(outcome, MigrationOutcome::Migrated { .. }));
+
+        let body = std::fs::read_to_string(root.join("docs/agents.md")).unwrap();
+        assert!(!body.contains("{{PROJECT_NAME}}"),
+            "migration should have prefilled PROJECT_NAME — got: {body}");
+        assert!(!body.contains("{{TEST_CMD}}"),
+            "migration should have prefilled TEST_CMD — got: {body}");
+        assert!(body.contains("cargo test"), "expected detected Rust test cmd, got: {body}");
     }
 }

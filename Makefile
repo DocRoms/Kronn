@@ -46,8 +46,20 @@ RESET  := \033[0m
 	@echo "KRONN_HOST_GID=$$(id -g)" >> .env
 	@echo "UID=$$(id -u)" >> .env
 	@echo "GID=$$(id -g)" >> .env
-	@# Auto-detect repos dir = parent of Kronn install dir
+	@# Auto-detect repos dir = parent of Kronn install dir.
+	@# Edge case (TD-20260507-makefile-repos-rel-home-edge): when Kronn lives
+	@# directly under $$HOME, the parent IS $$HOME, which collides with the
+	@# read-only `${HOME}:/host-home:ro` mount in docker-compose.yml. Refuse
+	@# rather than silently produce a broken mount layout — the operator
+	@# either moves Kronn under a sub-dir OR sets KRONN_REPOS_DIR explicitly.
 	@repos_dir=$$(cd "$(CURDIR)/.." && pwd); \
+	if [ -z "$$KRONN_REPOS_DIR" ] && [ "$$repos_dir" = "$$HOME" ]; then \
+		echo "$(RED)KRONN_REPOS_DIR auto-detect picked $$HOME, which collides with the read-only /host-home mount.$(RESET)"; \
+		echo "$(YELLOW)Move Kronn into a sub-directory (e.g. $$HOME/Kronn-host/Kronn)$(RESET)"; \
+		echo "$(YELLOW)OR set KRONN_REPOS_DIR=path/to/your/repos before running 'make start'.$(RESET)"; \
+		exit 1; \
+	fi; \
+	if [ -n "$$KRONN_REPOS_DIR" ]; then repos_dir="$$KRONN_REPOS_DIR"; fi; \
 	repos_rel=$${repos_dir#$$HOME/}; \
 	echo "KRONN_REPOS_DIR=$$repos_dir" >> .env; \
 	echo "KRONN_REPOS_REL=$$repos_rel" >> .env; \
@@ -232,6 +244,22 @@ test-e2e-ui:
 lint-backend:
 	@echo "$(CYAN)▸ Running cargo clippy in Docker...$(RESET)"
 	@docker build --target linter -f backend/Dockerfile backend/
+
+## Run clippy locally with the ts-rs 9.x noise filtered out.
+## ts-rs's proc macro emits "failed to parse serde attribute" for any
+## #[serde] attribute combination it doesn't recognize (skip_serializing_if,
+## deserialize_with, ...). These don't affect the generated TypeScript and
+## aren't actionable on our side — wait for the ts-rs 10 release. Until
+## then, this target makes `cargo clippy` actually scannable for real
+## warnings.
+lint-backend-local:
+	@echo "$(CYAN)▸ Running cargo clippy locally (ts-rs noise filtered)...$(RESET)"
+	@cd backend && cargo clippy --all-targets 2>&1 \
+	  | awk 'BEGIN { skip=0 } \
+	         /^warning: failed to parse serde attribute/ { skip=6; next } \
+	         skip>0 { skip--; next } \
+	         { print }' \
+	  | tee /dev/stderr | grep -qE "^(warning|error):" && exit 1 || exit 0
 
 ## Run shell script tests (bats)
 test-shell:

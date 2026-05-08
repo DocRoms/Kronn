@@ -208,6 +208,60 @@ pub async fn execute_run(
     // first step after the pause sees them through `{{state.<k>}}`.
     ctx.seed_state(&run.state);
 
+    // Pre-flight: validate every Agent step's agent is actually installed
+    // (or runtime-available) before we start. Without this the run fails
+    // mid-execution at the spawn site with a confusing subprocess error
+    // ("vibe: command not found" or worse), wasting work that's been done
+    // by earlier steps. Mirrors the same guard added to the multi-agent
+    // debate orchestrator. We skip this on resume — the workflow is
+    // already partway through and the user may have intentionally
+    // uninstalled an agent that's only used in skipped branches.
+    if !is_resume {
+        let agent_steps: Vec<&str> = workflow.steps.iter()
+            .filter(|s| matches!(s.step_type, StepType::Agent))
+            .map(|s| s.name.as_str())
+            .collect();
+        if !agent_steps.is_empty() {
+            let detections = crate::agents::detect_all().await;
+            let usable: Vec<crate::models::AgentType> = detections.iter()
+                .filter(|d| (d.installed || d.runtime_available) && d.enabled)
+                .map(|d| d.agent_type.clone())
+                .collect();
+            let mut missing: Vec<(String, String)> = Vec::new();
+            for step in workflow.steps.iter().filter(|s| matches!(s.step_type, StepType::Agent)) {
+                let ok = usable.iter().any(|u| std::mem::discriminant(u) == std::mem::discriminant(&step.agent));
+                if !ok {
+                    missing.push((step.name.clone(), format!("{:?}", step.agent)));
+                }
+            }
+            if !missing.is_empty() {
+                let msg = format!(
+                    "Workflow refuses to start — agent(s) not installed/enabled: {}. Install or enable them in Config before running this workflow.",
+                    missing.iter().map(|(n, a)| format!("'{}' needs {}", n, a)).collect::<Vec<_>>().join(", ")
+                );
+                run.status = RunStatus::Failed;
+                run.step_results.push(StepResult {
+                    step_name: "__preflight__".to_string(),
+                    status: RunStatus::Failed,
+                    output: msg.clone(),
+                    tokens_used: 0,
+                    duration_ms: 0,
+                    condition_result: None,
+                    envelope_detected: None,
+                    step_kind: Some("Preflight".into()),
+                    step_api_plugin_slug: None,
+                    step_api_endpoint_path: None,
+                    step_agent: None,
+                });
+                let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
+                let db_p = db.clone();
+                db_p.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap)).await?;
+                emit(RunEvent::RunError { error: msg }).await;
+                return Ok(());
+            }
+        }
+    }
+
     // Execute steps sequentially
     let mut all_success = true;
     let mut cancelled_by_user = false;
@@ -2034,5 +2088,64 @@ mod tests {
 
         let written = dir.path().join(".kronn/review.yaml");
         assert_eq!(std::fs::read_to_string(&written).unwrap(), "v2 with more");
+    }
+}
+
+#[cfg(test)]
+mod preflight_validation_tests {
+    use crate::models::AgentType;
+
+    /// Mirror the discriminant-comparison logic from execute_run's preflight
+    /// block — keeps the contract testable without spinning up `detect_all`
+    /// (which hits the host filesystem and depends on which agent binaries
+    /// are actually on PATH).
+    fn missing_step_agents(step_agents: &[(&str, AgentType)], usable: &[AgentType])
+        -> Vec<(String, AgentType)>
+    {
+        step_agents.iter()
+            .filter(|(_, a)| !usable.iter().any(|u| std::mem::discriminant(u) == std::mem::discriminant(a)))
+            .map(|(n, a)| (n.to_string(), a.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn empty_workflow_yields_no_missing() {
+        assert!(missing_step_agents(&[], &[AgentType::ClaudeCode]).is_empty());
+    }
+
+    #[test]
+    fn all_agents_usable_yields_no_missing() {
+        let steps = vec![("plan", AgentType::ClaudeCode), ("test", AgentType::Codex)];
+        let usable = vec![AgentType::ClaudeCode, AgentType::Codex];
+        assert!(missing_step_agents(&steps, &usable).is_empty());
+    }
+
+    #[test]
+    fn cross_agent_workflow_with_one_uninstalled_step_is_flagged() {
+        // Real-world case: workflow uses ClaudeCode for planning + Vibe for
+        // a cheap summarisation step. User uninstalls Vibe between editing
+        // the workflow and clicking Run. Pre-fix the run would fail
+        // mid-execution at the spawn site with "vibe: command not found".
+        let steps = vec![
+            ("plan", AgentType::ClaudeCode),
+            ("summarise", AgentType::Vibe),
+            ("review", AgentType::ClaudeCode),
+        ];
+        let usable = vec![AgentType::ClaudeCode]; // Vibe uninstalled
+        let missing = missing_step_agents(&steps, &usable);
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].0, "summarise");
+        assert!(matches!(missing[0].1, AgentType::Vibe));
+    }
+
+    #[test]
+    fn empty_usable_flags_every_step() {
+        let steps = vec![
+            ("a", AgentType::ClaudeCode),
+            ("b", AgentType::Codex),
+            ("c", AgentType::Vibe),
+        ];
+        let missing = missing_step_agents(&steps, &[]);
+        assert_eq!(missing.len(), 3);
     }
 }

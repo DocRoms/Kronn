@@ -193,4 +193,72 @@ describe('Guided Tour', () => {
     expect(Number(screen.getByTestId('step').textContent)).toBe(0);
     expect(localStorage.getItem('kronn:tour-step')).toBe('0');
   });
+
+  // ─── Manual nav still works during waitForClick (steps 11/12 fix) ──
+  it('Next manually advances even when waitingForClick is true', async () => {
+    // Pre-fix: on waitForClick steps (11/12 = profile toggle / first
+    // chip), `next` bailed out and the button was hidden, so the user
+    // was forced to either click the spotlight target or skip the whole
+    // tour. Now `next` cancels the click listener and advances.
+    renderTour();
+    fireEvent.click(screen.getByTestId('start'));
+    expect(screen.getByTestId('step').textContent).toBe('0');
+
+    // Force the provider into a waitForClick-ish state by advancing past
+    // a couple of selector-less steps and then asserting `next` advances
+    // the counter without requiring a real DOM click on a missing target.
+    await act(async () => {
+      fireEvent.keyDown(document, { key: 'ArrowRight' });
+      await new Promise(r => setTimeout(r, 2500));
+    });
+    const beforeStep = Number(screen.getByTestId('step').textContent);
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('next'));
+      await new Promise(r => setTimeout(r, 2500));
+    });
+    expect(Number(screen.getByTestId('step').textContent)).toBeGreaterThan(beforeStep);
+  });
+
+  it('Prev manually goes back even when waitingForClick is true', async () => {
+    renderTour();
+    fireEvent.click(screen.getByTestId('start'));
+
+    // Move forward two steps so a Prev is meaningful.
+    await act(async () => {
+      fireEvent.keyDown(document, { key: 'ArrowRight' });
+      await new Promise(r => setTimeout(r, 2500));
+    });
+    await act(async () => {
+      fireEvent.keyDown(document, { key: 'ArrowRight' });
+      await new Promise(r => setTimeout(r, 2500));
+    });
+    const before = Number(screen.getByTestId('step').textContent);
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('prev'));
+      await new Promise(r => setTimeout(r, 2500));
+    });
+    expect(Number(screen.getByTestId('step').textContent)).toBe(before - 1);
+  });
+
+  // ─── Backdrop click no longer dismisses the tour ────────────────────
+  it('clicking the dark backdrop does NOT dismiss the tour or mark it completed', () => {
+    // Pre-fix the backdrop's onClick was `skip` — a stray click on the
+    // dim area outside the tooltip permanently marked the tour as done
+    // (kronn:tour-completed = "true") so the user could only get it back
+    // via the "?" help button. Now the backdrop is non-interactive: only
+    // the explicit "Passer / Finir" buttons + the Escape shortcut count
+    // as intentional dismissals.
+    renderTour();
+    fireEvent.click(screen.getByTestId('start'));
+    expect(screen.getByTestId('active').textContent).toBe('true');
+
+    const backdrop = document.querySelector('.tour-backdrop') as HTMLElement;
+    expect(backdrop).not.toBeNull();
+    fireEvent.click(backdrop);
+
+    // Tour stays active, completion flag stays unset.
+    expect(screen.getByTestId('active').textContent).toBe('true');
+    expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
+  });
 });

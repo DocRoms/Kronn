@@ -27,6 +27,13 @@ services:
       - /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro  # Docker compose plugin
       - /var/run/docker.sock:/var/run/docker.sock  # Docker socket for docker compose
       - ${HOME}/.local/share:/host-home/.local/share:ro  # Symlink targets (claude, vibe)
+      # Self-mount so absolute-path symlinks created by host installers
+      # (e.g. `~/.local/bin/claude` → `/home/<user>/.local/share/claude/versions/<v>/claude`)
+      # resolve inside the container at the same absolute host path.
+      # Without this, find_binary detects the binary via fallback but
+      # exec fails on the broken symlink target
+      # (TD-20260507-claude-symlink-not-resolvable).
+      - ${HOME}/.local/share:${HOME}/.local/share:ro
       - npm-cache:/home/kronn/.npm  # Persistent npm cache for npx agent execution
       - uv-cache:/home/kronn/.cache/uv  # Isolated uv cache (named volume — see TD-20260429-uv-cache-uid-mismatch: bind-mounting ~/.cache/uv left root-owned files on host pre-APP_UID, breaking host `uvx` for MCP servers in CC CLI / Codex / Gemini)
       - uv-tools:/home/kronn/.local/share/uv  # Persistent uv tool installs (CloudWatch, Atlassian MCP servers)
@@ -44,6 +51,7 @@ services:
       - ${HOME}/.claude.json:/home/kronn/.claude.json:ro    # Claude Code main config
       - ${HOME}/.claude:/home/kronn/.claude:rw              # Claude Code auth/config + session state (needs write)
       - claude-projects:/home/kronn/.claude/projects         # Isolate Docker sessions from host (avoids ghost /host-home project dirs)
+      - claude-sessions:/home/kronn/.claude/sessions         # Isolate PID files (TD-20260507-claude-sessions-host-leak)
       - ${HOME}/.codex:/home/kronn/.codex:rw                # Codex auth + state (needs write)
       - ${HOME}/.config/codex:/home/kronn/.config/codex:ro  # Codex config (legacy path)
       - ${HOME}/.vibe:/home/kronn/.vibe:rw                  # Vibe auth + state (needs write)
@@ -58,10 +66,25 @@ services:
       - ${HOME}/.config/rtk:/home/kronn/.config/rtk:rw
       - ${HOME}/.local/share/rtk:/home/kronn/.local/share/rtk:rw
       - ./templates:/app/templates:ro                   # AI context templates for project init
+      # Self-mount Kronn's scripts dir at the SAME absolute path inside
+      # the container as on the host. Required so `kronn-internal` MCP
+      # entries written into project-level config files (`.mcp.json`,
+      # `.kiro/settings/mcp.json`, …) carry a path string that resolves
+      # for BOTH the Kronn-spawned-in-container agent AND the user's
+      # host CLI sessions (`kiro-cli`, `claude`, …). Without this the
+      # host CLIs hit `Broken pipe (os error 32)` on every spawn.
+      # Falls back gracefully when the source dir isn't present — the
+      # injector skips kronn-internal rather than write a broken path.
+      - ./backend/scripts:${PWD}/backend/scripts:ro
     environment:
       - KRONN_TEMPLATES_DIR=/app/templates
       - KRONN_DATA_DIR=/data
       - KRONN_HOST_HOME=${HOME}
+      # Path written into project-level `.mcp.json` / `.kiro/settings/…`
+      # / `.gemini/settings.json` / `~/.codex/config.toml` for the
+      # `kronn-internal` MCP entry. Must resolve identically inside the
+      # container and on the host — the self-mount above makes that work.
+      - KRONN_INTROSPECTION_PUBLIC_PATH=${PWD}/backend/scripts/disc-introspection-mcp.py
       - KRONN_HOST_BIN=/host-bin/local:/host-bin/global:/host-bin/npm
       - PATH=/home/kronn/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/host-bin/local:/host-bin/global:/host-bin/npm:/host-bin/sysbin:/host-bin/syssbin
       - KRONN_HOST_OS=${KRONN_HOST_OS:-Linux}
@@ -92,8 +115,16 @@ services:
       test: ["CMD", "curl", "-f", "http://localhost:3140/api/health"]
       interval: 10s
       timeout: 3s
-      retries: 3
-      start_period: 5s
+      # 60 s start_period covers the worst-case cold start on a fresh
+      # machine: migrations + sidecar Python venv + tool installs +
+      # ts-rs codegen. Inside `start_period` Docker is patient — failures
+      # don't count toward `retries`. After the window, 5×10 s gives
+      # another 50 s margin. Pre-fix this was 5 s × 3 retries → ~35 s
+      # total, just below the real cold-start time, causing
+      # `dependency failed to start` on every fresh `make start` (TD
+      # TD-20260507-cold-start-healthcheck-race).
+      retries: 5
+      start_period: 60s
 
   frontend:
     restart: unless-stopped
@@ -142,3 +173,7 @@ volumes:
   uv-cache:        # Isolated from host ~/.cache/uv to avoid uid-mismatch pollution (see TD-20260429)
   uv-tools:
   claude-projects:  # Isolates Docker Claude Code sessions from host ~/.claude/projects
+  claude-sessions:  # Isolates `.claude/sessions/` PID files from the host daemon — without
+                    # this, the container's Claude tries to talk to a host daemon at
+                    # 127.0.0.1:<port> that doesn't exist there and hangs silently
+                    # (TD-20260507-claude-sessions-host-leak).

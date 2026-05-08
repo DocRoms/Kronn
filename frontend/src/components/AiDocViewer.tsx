@@ -155,7 +155,7 @@ export function AiDocViewer({ projectId, onDiscussFile }: AiDocViewerProps) {
   }, [currentMatchIdx, filesWithMatches, selectedPath, searchResults, globalPosition.total]);
 
   const handleSearchKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (e.key === 'Enter') { e.preventDefault(); e.shiftKey ? goPrev() : goNext(); }
+    if (e.key === 'Enter') { e.preventDefault(); if (e.shiftKey) goPrev(); else goNext(); }
     if (e.key === 'Escape') { setSearchQuery(''); }
   }, [goNext, goPrev]);
 
@@ -343,13 +343,17 @@ function applyHighlights(container: HTMLElement, query: string, activeIdx: numbe
   // Group by node, process each node's matches from end to start
   const byNode = new Map<Text, { start: number; globalIdx: number }[]>();
   matches.forEach((m, i) => {
-    if (!byNode.has(m.node)) byNode.set(m.node, []);
-    byNode.get(m.node)!.push({ start: m.start, globalIdx: i });
+    let arr = byNode.get(m.node);
+    if (!arr) {
+      arr = [];
+      byNode.set(m.node, arr);
+    }
+    arr.push({ start: m.start, globalIdx: i });
   });
 
   for (const [node, nodeMatches] of byNode.entries()) {
     const sorted = [...nodeMatches].sort((a, b) => b.start - a.start);
-    let currentNode: Text = node;
+    const currentNode: Text = node;
 
     for (const { start, globalIdx } of sorted) {
       const isActive = globalIdx === safeActive;
@@ -367,7 +371,9 @@ function applyHighlights(container: HTMLElement, query: string, activeIdx: numbe
       mark.style.padding = '0 1px';
       if (isActive) mark.style.outline = '1.5px solid #c8ff00';
 
-      matchNode.parentNode!.replaceChild(mark, matchNode);
+      const parent = matchNode.parentNode;
+      if (!parent) continue;
+      parent.replaceChild(mark, matchNode);
       mark.appendChild(matchNode);
     }
   }

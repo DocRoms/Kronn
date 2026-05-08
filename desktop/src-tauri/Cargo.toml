@@ -1,6 +1,6 @@
 [package]
 name = "kronn-desktop"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 description = "Kronn Desktop — Self-hosted AI coding agent control plane"
 license = "AGPL-3.0-only"
@@ -18,8 +18,8 @@ kronn = { path = "../../backend" }
 
 # Async runtime (shared with backend)
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "signal"] }
-axum = { version = "0.7", features = ["macros"] }
-tower-http = { version = "0.5", features = ["fs", "set-header"] }
+axum = { version = "0.8", features = ["macros"] }
+tower-http = { version = "0.6", features = ["fs", "set-header"] }
 anyhow = "1"
 
 # Shared deps with backend

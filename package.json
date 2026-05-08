@@ -1,5 +1,6 @@
 {
 	"devDependencies": {
 		"@tauri-apps/api": "^2.10.1"
-	}
+	},
+	"packageManager": "pnpm@11.0.9"
 }

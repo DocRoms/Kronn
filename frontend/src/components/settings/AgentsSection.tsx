@@ -1,15 +1,17 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { config as configApi, agents as agentsApi } from '../../lib/api';
+import { userError } from '../../lib/userError';
 import { OllamaCard } from './OllamaCard';
 import { CompressionSection } from './CompressionSection';
 import { useApi } from '../../hooks/useApi';
 import type { AgentDetection, AgentsConfig, ModelTiersConfig } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
+import { isUpdateAvailable } from '../../lib/version';
 import {
   Key, AlertTriangle, Save,
   Plus, Trash2, Download, Check,
   Loader2, RefreshCw, X, Eye, EyeOff, Play, StopCircle,
-  ExternalLink, FolderSearch,
+  ExternalLink, FolderSearch, ArrowUpCircle, Copy,
 } from 'lucide-react';
 import '../../pages/SettingsPage.css';
 
@@ -36,15 +38,25 @@ export function AgentsSection({
   const [addingKeyFor, setAddingKeyFor] = useState<string | null>(null);
   const [tokenVisible, setTokenVisible] = useState<Set<string>>(new Set());
   const [tierEditing, setTierEditing] = useState<Record<string, { economy: string; reasoning: string }>>({});
+  // When set to an agent name, the per-agent update modal is shown. The
+  // modal is small + global to the section (rather than per-row state) so
+  // we never re-render rows on its open/close — keeps the agent grid
+  // scroll position stable.
+  const [updateModalFor, setUpdateModalFor] = useState<AgentDetection | null>(null);
 
   const { data: tokenConfig, refetch: refetchTokens } = useApi(() => configApi.getTokens(), []);
 
-  // Load model tiers once
+  // Load model tiers once. Pre-fix the loop only seeded 5 of the 7 agents
+  // (copilot_cli + ollama were missing), so when the user opened the
+  // tier dropdowns for those two agents the inputs showed empty even
+  // when the backend already had saved values — and a subsequent save
+  // wiped the side that wasn't being edited (saveTiers reads from the
+  // editing map and writes both economy + reasoning back to the API).
   useEffect(() => {
     configApi.getModelTiers().then(tiers => {
       if (tiers) {
         const editing: Record<string, { economy: string; reasoning: string }> = {};
-        for (const key of ['claude_code', 'codex', 'gemini_cli', 'kiro', 'vibe'] as const) {
+        for (const key of ['claude_code', 'codex', 'gemini_cli', 'kiro', 'vibe', 'copilot_cli', 'ollama'] as const) {
           editing[key] = { economy: tiers[key]?.economy ?? '', reasoning: tiers[key]?.reasoning ?? '' };
         }
         setTierEditing(editing);
@@ -52,14 +64,28 @@ export function AgentsSection({
     }).catch(() => {});
   }, []);
 
+  // Synchronous re-entry guard — `setInstalling(...)` is async-rendered,
+  // so two fast clicks on the same install button (or two different ones)
+  // would both pass the closure-stale `disabled={installing !== null}`
+  // check and fire two parallel `agentsApi.install()` calls. The ref blocks
+  // the second invocation before the network round-trip starts.
+  const installingRef = useRef(false);
   const handleInstallAgent = async (agent: AgentDetection) => {
+    if (installingRef.current) return;
+    installingRef.current = true;
     setInstalling(agent.name);
     try {
       await agentsApi.install(agent.agent_type);
       refetchAgents();
-    } catch {
-      // silently fail
+    } catch (e) {
+      // Surface the failure so the user knows the install didn't go
+      // through (network glitch, missing npm/uvx, permission issues,
+      // …). Pre-fix this swallowed the error and the button just
+      // reverted with no feedback. Mirrors the uninstall path's
+      // toast pattern just below.
+      toast(t('config.installFailed', agent.name, userError(e)), 'error');
     } finally {
+      installingRef.current = false;
       setInstalling(null);
     }
   };
@@ -152,9 +178,59 @@ export function AgentsSection({
                   <span className="font-semibold text-base">{agent.name}</span>
                   <span className="set-origin-badge">{agent.origin}</span>
                   {agent.version && <code className="set-code text-xs">v{agent.version}</code>}
-                  {agent.latest_version && agent.latest_version !== agent.version && (
-                    <span className="set-update-badge">&#x2B06; {agent.latest_version}</span>
+                  {/* Lenient semver compare (mirror of backend `versions.rs`).
+                   *  Pre-fix this used `!==` which fired on `v2.0.51` vs
+                   *  `2.0.51` etc. Now clicking the pill opens an upgrade
+                   *  modal with a copyable command (= the agent's
+                   *  install_command, since npm/curl install scripts are
+                   *  idempotent re-runs). */}
+                  {agent.installed && agent.version && agent.latest_version
+                    && isUpdateAvailable(agent.version, agent.latest_version) && (
+                    <button
+                      type="button"
+                      className="set-update-badge set-update-badge-cta"
+                      onClick={() => setUpdateModalFor(agent)}
+                      aria-label={t('config.agentUpdateAvailableAria', agent.name, agent.latest_version)}
+                      title={t('config.agentUpdateAvailableTitle', agent.version, agent.latest_version)}
+                    >
+                      <ArrowUpCircle size={10} /> {agent.latest_version}
+                    </button>
                   )}
+                  {/* Provider account / usage dashboard — handy for "am I
+                   *  about to hit my rate limit / quota?" without leaving
+                   *  Kronn for the docs. User-reported 2026-05-10. Each
+                   *  link opens in a new tab; we only surface it when we
+                   *  have a meaningful URL for the agent. Kiro's "account"
+                   *  is AWS Builder ID — same console as the install
+                   *  flow. */}
+                  {(() => {
+                    const accountUrl = ({
+                      ClaudeCode:  'https://console.anthropic.com/settings/usage',
+                      Codex:       'https://platform.openai.com/usage',
+                      GeminiCli:   'https://aistudio.google.com/app/usage',
+                      // Vibe runs on Mistral — the workspace admin
+                      // console is where you see consumption + plan
+                      // limits (the user-reported correct link, the
+                      // earlier `console.mistral.ai/usage` 404s).
+                      Vibe:        'https://admin.mistral.ai/organization/workspaces',
+                      Kiro:        'https://kiro.dev/account',
+                      CopilotCli:  'https://github.com/settings/copilot',
+                      Ollama:      '',
+                    } as Record<string, string>)[agent.agent_type];
+                    if (!accountUrl) return null;
+                    return (
+                      <a
+                        href={accountUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="set-agent-account-link"
+                        title={t('config.viewAccount', agent.name)}
+                        aria-label={t('config.viewAccount', agent.name)}
+                      >
+                        ↗ {t('config.account')}
+                      </a>
+                    );
+                  })()}
                   {(agent.installed || agent.runtime_available) && (() => {
                     // Agents RTK doesn't support or can't hook. Mirrors
                     // `rtk_flag_for` in backend/src/api/rtk.rs and
@@ -208,6 +284,11 @@ export function AgentsSection({
                     runtime OK <span className="text-ghost">— via npx</span>
                   </div>
                 )}
+                {agent.runtime_warning && (
+                  <div className="set-agent-runtime-warning" role="note">
+                    ⚠️ {t(`agentRuntimeWarning.${agent.runtime_warning}`)}
+                  </div>
+                )}
               </div>
               {(agent.installed || agent.runtime_available) ? (
                 <div className="flex-row gap-3">
@@ -231,6 +312,7 @@ export function AgentsSection({
                   <button
                     className="set-icon-btn text-ghost"
                     title={t('config.uninstall')}
+                    aria-label={t('config.uninstall')}
                     onClick={async () => {
                       if (!confirm(t('config.uninstallConfirm', agent.name))) return;
                       setInstalling(agent.name);
@@ -311,6 +393,7 @@ export function AgentsSection({
                     <button
                       className="set-icon-btn set-icon-btn-bare"
                       title={isDisabled ? t('config.enableOverride') : t('config.disableOverride')}
+                      aria-label={isDisabled ? t('config.enableOverride') : t('config.disableOverride')}
                       onClick={async () => {
                         try { await configApi.toggleTokenOverride(tf.key); } catch (err) { console.warn('Settings action failed:', err); }
                         refetchTokens();
@@ -475,7 +558,12 @@ export function AgentsSection({
                 },
                 codex: {
                   economy: ['gpt-5-codex-mini', 'gpt-5.1-codex', 'gpt-5-codex'],
-                  reasoning: ['gpt-5.4', 'gpt-5.3-codex', 'gpt-5.2-codex', 'gpt-5.1-codex-max'],
+                  // GPT-5.5 (released 2026-05) is the new top reasoning model.
+                  // Listed first so it surfaces above the older 5.4 default
+                  // for new tier picks. Existing users with `gpt-5.4`
+                  // selected stay on 5.4 — the dropdown picks via the
+                  // current saved value, no auto-migration.
+                  reasoning: ['gpt-5.5', 'gpt-5.4', 'gpt-5.3-codex', 'gpt-5.2-codex', 'gpt-5.1-codex-max'],
                   modelsUrl: 'https://developers.openai.com/codex/models',
                 },
                 gemini_cli: {
@@ -515,6 +603,7 @@ export function AgentsSection({
                       className="set-tier-select"
                       value={editing[field]}
                       onChange={e => saveTiers(field, e.target.value)}
+                      aria-label={t('disc.modelTier') + ' ' + field}
                     >
                       <option value="">{t('config.defaultModel')} ({options[0]})</option>
                       {options.map(m => (
@@ -563,6 +652,53 @@ export function AgentsSection({
           </div>
         </div>
       </div>
+
+      {/* Per-agent update modal — opened from the freshness pill on a
+       *  given agent row. Surfaces the same install_command the backend
+       *  uses for fresh installs (npm/curl/uv tool install scripts are
+       *  idempotent — re-running upgrades in place). */}
+      {updateModalFor && (
+        <div className="dash-modal-overlay" onClick={() => setUpdateModalFor(null)}>
+          <div
+            className="dash-modal set-compression-modal"
+            onClick={e => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="agent-update-title"
+            onKeyDown={e => { if (e.key === 'Escape') setUpdateModalFor(null); }}
+          >
+            <div className="dash-modal-header">
+              <h3 id="agent-update-title" className="dash-modal-title">
+                {t('config.agentUpdateModalTitle', updateModalFor.name)}
+              </h3>
+              <button
+                onClick={() => setUpdateModalFor(null)}
+                className="dash-modal-close"
+                aria-label="Close"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="set-compression-modal-body">
+              <p>
+                {t('config.agentUpdateModalBody',
+                  updateModalFor.version ?? '?',
+                  updateModalFor.latest_version ?? '?')}
+              </p>
+              <div className="set-compression-install-label">{t('config.rtk.installCommand')}</div>
+              <pre className="set-compression-install-cmd">{updateModalFor.install_command ?? ''}</pre>
+              <button
+                type="button"
+                className="set-compression-copy-btn"
+                onClick={() => navigator.clipboard.writeText(updateModalFor.install_command ?? '').catch(() => {})}
+                aria-label={t('common.copy')}
+              >
+                <Copy size={12} /> {t('common.copy')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

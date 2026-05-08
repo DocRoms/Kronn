@@ -122,9 +122,14 @@ export function GitPanel({ projectId, discussionId, onClose, terminalEnabled = f
     setDiffPath(path);
     setDiffLoading(true);
     try {
-      const res = discussionId
-        ? await discussionsApi.gitDiff(discussionId, path)
-        : await projectsApi.gitDiff(projectId!, path);
+      let res;
+      if (discussionId) {
+        res = await discussionsApi.gitDiff(discussionId, path);
+      } else if (projectId) {
+        res = await projectsApi.gitDiff(projectId, path);
+      } else {
+        return; // GitPanel always mounted with one or the other; defensive.
+      }
       setDiffContent(res.diff);
     } catch (e) {
       setDiffContent(`Error: ${e}`);
@@ -155,8 +160,10 @@ export function GitPanel({ projectId, discussionId, onClose, terminalEnabled = f
       const commitReq = { files: selectedFiles, message: commitMsg.trim(), amend: commitAmend, sign: commitSign };
       if (discussionId) {
         await discussionsApi.gitCommit(discussionId, commitReq);
+      } else if (projectId) {
+        await projectsApi.gitCommit(projectId, commitReq);
       } else {
-        await projectsApi.gitCommit(projectId!, commitReq);
+        return;
       }
       setShowCommit(false);
       setCommitMsg('');
@@ -176,8 +183,10 @@ export function GitPanel({ projectId, discussionId, onClose, terminalEnabled = f
     try {
       if (discussionId) {
         await discussionsApi.gitPush(discussionId);
+      } else if (projectId) {
+        await projectsApi.gitPush(projectId);
       } else {
-        await projectsApi.gitPush(projectId!);
+        return;
       }
       setPushResult('success');
       await fetchStatus();
@@ -191,7 +200,8 @@ export function GitPanel({ projectId, discussionId, onClose, terminalEnabled = f
   const openPrForm = async () => {
     if (!status) return;
     const api = discussionId ? discussionsApi : projectsApi;
-    const id = discussionId || projectId!;
+    const id = discussionId || projectId;
+    if (!id) return;
     // Auto-fill title from branch name
     setPrTitle(status.branch.replace('kronn/', '').replace(/-/g, ' '));
     setPrPreview(false);
@@ -212,7 +222,8 @@ export function GitPanel({ projectId, discussionId, onClose, terminalEnabled = f
     setPrLoading(true);
     try {
       const api = discussionId ? discussionsApi : projectsApi;
-      const id = discussionId || projectId!;
+      const id = discussionId || projectId;
+      if (!id) return;
       // Auto-push if branch has no upstream yet
       if (status && !status.has_upstream) {
         await api.gitPush(id);
@@ -253,9 +264,14 @@ export function GitPanel({ projectId, discussionId, onClose, terminalEnabled = f
     setTermLoading(true);
     setTermInput('');
     try {
-      const res = discussionId
-        ? await discussionsApi.exec(discussionId, cmd)
-        : await projectsApi.exec(projectId!, cmd);
+      let res;
+      if (discussionId) {
+        res = await discussionsApi.exec(discussionId, cmd);
+      } else if (projectId) {
+        res = await projectsApi.exec(projectId, cmd);
+      } else {
+        return;
+      }
       setTermHistory(prev => [...prev, { cmd, stdout: res.stdout, stderr: res.stderr, code: res.exit_code }]);
     } catch (e) {
       setTermHistory(prev => [...prev, { cmd, stdout: '', stderr: String(e), code: 1 }]);

@@ -157,19 +157,63 @@ def run_with_api_fallback(args, api_key):
         sys.exit(1)
 
 
+# Sentinel file written by the *first* failing SDK invocation in a given
+# Kronn lifetime. Once present, subsequent calls skip the SDK import +
+# bootstrap entirely (~4 s saved per call). The path is deterministic
+# under XDG_RUNTIME_DIR / TMPDIR so it auto-clears on machine reboot —
+# we re-probe the SDK after every reboot in case the user fixed the
+# upstream signature mismatch via `uv tool upgrade mistral-vibe`. Per-
+# user namespacing (uid suffix) prevents one user's broken SDK from
+# poisoning another's tested-OK install on shared hosts.
+def _sdk_sentinel_path():
+    base = os.environ.get("XDG_RUNTIME_DIR") or os.environ.get("TMPDIR") or "/tmp"
+    return os.path.join(base, f"kronn-vibe-no-sdk-{os.getuid() if hasattr(os, 'getuid') else 'win'}")
+
+
+def _sdk_known_broken():
+    """Returns True if a previous call this boot cycle saw the SDK fail."""
+    try:
+        return os.path.exists(_sdk_sentinel_path())
+    except Exception:
+        return False
+
+
+def _mark_sdk_broken(reason):
+    """Best-effort write of the sentinel — silently swallows IO errors so
+    the user-facing call still completes via the fallback path."""
+    try:
+        with open(_sdk_sentinel_path(), "w", encoding="utf-8") as f:
+            f.write(f"{reason}\n")
+    except Exception:
+        pass
+
+
 def main():
     args = parse_args()
     api_key = ensure_api_key()
+
+    # Fast path: a prior call this boot already proved the SDK is broken
+    # (typically signature mismatch upstream). Skip the 300-500 ms heavy
+    # `import vibe` + `init_harness_files_manager` + `bootstrap_config_files`
+    # + `load_config_or_exit` chain entirely — cuts the time-to-first-token
+    # from ~4.6 s to ~400 ms on broken hosts. See TD-20260509-vibe-sdk-
+    # bootstrap-latency.md for the rationale.
+    if _sdk_known_broken():
+        run_with_api_fallback(args, api_key)
+        return
 
     try:
         import vibe  # noqa: F401
         run_with_vibe_sdk(args)
     except ImportError:
-        # Vibe not installed (e.g. Docker) — use API fallback
+        # Vibe not installed (e.g. Docker) — use API fallback. Persist the
+        # sentinel so future calls in this boot skip even the import probe.
+        _mark_sdk_broken("ImportError: vibe not installed")
         run_with_api_fallback(args, api_key)
     except Exception as e:
         print(f"Vibe SDK error: {e}", file=sys.stderr)
         print("Falling back to direct API...", file=sys.stderr)
+        _mark_sdk_broken(f"{type(e).__name__}: {e}")
         run_with_api_fallback(args, api_key)
 
 

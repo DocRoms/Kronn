@@ -63,3 +63,99 @@
   font-size: var(--kr-fs-md);
   font-family: var(--kr-font-mono);
 }
+
+/* ── Auto-update banner (UpdateBanner.tsx) ──────────────────────────
+ * Subtle floating pill anchored top-right. Stays out of the way of
+ * the main app chrome but visible enough that the user notices a new
+ * release. Click an external link to the GitHub release page; the X
+ * dismisses for that specific version (next release re-shows). */
+.kronn-update-banner {
+  position: fixed;
+  top: 8px;
+  right: 12px;
+  z-index: 9999;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: var(--kr-fs-xs);
+  font-weight: 500;
+  background: rgba(var(--kr-info-rgb), 0.12);
+  color: var(--kr-info);
+  border: 1px solid rgba(var(--kr-info-rgb), 0.30);
+  box-shadow: var(--kr-shadow-sm);
+  backdrop-filter: blur(4px);
+  pointer-events: auto;
+}
+
+.kronn-update-banner-text {
+  font-family: var(--kr-font-mono);
+  white-space: nowrap;
+}
+
+.kronn-update-banner-link {
+  color: inherit;
+  text-decoration: underline;
+  font-weight: 600;
+}
+
+.kronn-update-banner-link:hover {
+  filter: brightness(1.2);
+}
+
+.kronn-update-banner-dismiss {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+  opacity: 0.6;
+}
+
+.kronn-update-banner-dismiss:hover {
+  opacity: 1;
+}
+
+/* ── Backend health indicator (BackendStatus.tsx) ────────────────────
+ * Hidden while the backend answers /api/health. Surfaces as a red
+ * pill below the UpdateBanner area when /api/health fails — zero
+ * noise on the happy path. */
+.kronn-backend-status {
+  position: fixed;
+  top: 48px; /* sits below the UpdateBanner pill */
+  right: 12px;
+  z-index: 9999;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: var(--kr-fs-xs);
+  font-weight: 500;
+  background: rgba(var(--kr-error-rgb), 0.12);
+  color: var(--kr-error);
+  border: 1px solid rgba(var(--kr-error-rgb), 0.30);
+  box-shadow: var(--kr-shadow-sm);
+  backdrop-filter: blur(4px);
+}
+
+.kronn-backend-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--kr-error);
+  animation: kronn-backend-pulse 1.4s ease-in-out infinite;
+}
+
+.kronn-backend-status-text {
+  font-family: var(--kr-font-mono);
+  white-space: nowrap;
+}
+
+@keyframes kronn-backend-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.4; }
+}

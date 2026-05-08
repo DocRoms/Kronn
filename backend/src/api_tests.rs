@@ -497,6 +497,7 @@ mod tests {
                 pin_first_message: false,
                 summary_cache: None,
                 summary_up_to_msg_idx: None,
+                summary_strategy: crate::models::SummaryStrategy::Auto, introspection_call_count: 0,
             shared_id: None,
             shared_with: vec![],
         workflow_run_id: None,
@@ -627,7 +628,7 @@ mod tests {
                 workspace_path: None, worktree_branch: None,
                 tier: crate::models::ModelTier::Default,
                 pin_first_message: false,
-                summary_cache: None, summary_up_to_msg_idx: None,
+                summary_cache: None, summary_up_to_msg_idx: None, summary_strategy: crate::models::SummaryStrategy::Auto, introspection_call_count: 0,
             shared_id: None,
             shared_with: vec![],
         workflow_run_id: None,
@@ -856,7 +857,7 @@ mod tests {
                     workspace_path: None, worktree_branch: None,
                     tier: crate::models::ModelTier::Default,
                     pin_first_message: false,
-                    summary_cache: None, summary_up_to_msg_idx: None,
+                    summary_cache: None, summary_up_to_msg_idx: None, summary_strategy: crate::models::SummaryStrategy::Auto, introspection_call_count: 0,
             shared_id: None,
             shared_with: vec![],
         workflow_run_id: None,
@@ -1190,8 +1191,10 @@ mod tests {
     #[tokio::test]
     async fn detect_error_hint_mcp_config() {
         use crate::api::discussions::detect_agent_error_hint;
+        use crate::models::AgentType;
         let hint = detect_agent_error_hint(
-            "Error: Invalid MCP configuration: MCP config file not found: /host-home/Repositories/test/"
+            "Error: Invalid MCP configuration: MCP config file not found: /host-home/Repositories/test/",
+            &AgentType::ClaudeCode,
         );
         assert!(hint.is_some(), "Should detect MCP config error");
         assert!(hint.unwrap().contains("MCP"), "Hint should mention MCP");
@@ -1200,14 +1203,16 @@ mod tests {
     #[tokio::test]
     async fn detect_error_hint_auth() {
         use crate::api::discussions::detect_agent_error_hint;
-        let hint = detect_agent_error_hint("authentication_error: invalid API key");
+        use crate::models::AgentType;
+        let hint = detect_agent_error_hint("authentication_error: invalid API key", &AgentType::ClaudeCode);
         assert!(hint.is_some(), "Should detect auth error");
     }
 
     #[tokio::test]
     async fn detect_error_hint_no_match() {
         use crate::api::discussions::detect_agent_error_hint;
-        let hint = detect_agent_error_hint("Everything is fine, no errors here");
+        use crate::models::AgentType;
+        let hint = detect_agent_error_hint("Everything is fine, no errors here", &AgentType::ClaudeCode);
         assert!(hint.is_none(), "Should not detect error in normal output");
     }
 
@@ -1520,7 +1525,7 @@ mod tests {
                 workspace_path: None, worktree_branch: None,
                 tier: crate::models::ModelTier::Default,
                 pin_first_message: true,
-                summary_cache: None, summary_up_to_msg_idx: None,
+                summary_cache: None, summary_up_to_msg_idx: None, summary_strategy: crate::models::SummaryStrategy::Auto, introspection_call_count: 0,
             shared_id: None,
             shared_with: vec![],
         workflow_run_id: None,

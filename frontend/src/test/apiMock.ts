@@ -53,6 +53,7 @@ export const API_NAMESPACES = [
   'autoTriggersApi',
   'rtk',
   'userContext',
+  'version',
 ] as const;
 
 /** Flat top-level helpers (non-namespace exports). */
@@ -93,6 +94,7 @@ interface DefaultMock {
   autoTriggersApi: Record<string, AnyFn>;
   rtk: Record<string, AnyFn>;
   userContext: Record<string, AnyFn>;
+  version: Record<string, AnyFn>;
 }
 
 /**
@@ -136,6 +138,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       getGlobalContextMode: resolve('always'),
       saveGlobalContextMode: resolve(undefined),
       getServerConfig: resolve({ pseudo: null, avatar_email: null, host: 'localhost', port: 3140 }),
+      dbBackup: resolve({ backup_path: '/tmp/test-backup.db', size_bytes: 0, taken_at: '2026-05-09T00:00:00Z' }),
     },
 
     contacts: {
@@ -310,6 +313,13 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       get: resolve({ name: '', size: 0, content: '' }),
       put: resolve({ name: '', size: 0, content: '' }),
       delete: resolve(undefined),
+    },
+
+    version: {
+      // Default mock = "no update available" so the UpdateBanner stays
+      // hidden in tests that don't explicitly opt in. Tests that want
+      // to render the banner can override with `up_to_date: false`.
+      check: resolve({ current: '0.7.1', latest: null, release_url: null, up_to_date: true }),
     },
   };
 

@@ -5,6 +5,7 @@ use axum::{
         State, WebSocketUpgrade,
     },
     response::IntoResponse,
+    Extension,
 };
 use chrono::Utc;
 use futures::{SinkExt, StreamExt};
@@ -140,6 +141,47 @@ mod rate_limit {
     }
 }
 
+/// What the recv-task should do with a single inbound frame, before
+/// the peer has sent its `Presence`. Pure decision — no side-effect —
+/// so we can unit-test the handshake policy without standing up a
+/// full WebSocket harness. Mirrors the in-line logic in `handle_socket`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PrePresenceAction {
+    /// Heartbeat — answer Pong, stay unverified.
+    Heartbeat,
+    /// Caller can run the Presence verification path.
+    Presence,
+    /// Anything else: drop silently (debug-log), wait for Presence.
+    Drop,
+}
+
+pub(crate) fn classify_pre_presence(msg: &WsMessage) -> PrePresenceAction {
+    match msg {
+        WsMessage::Ping { .. } => PrePresenceAction::Heartbeat,
+        WsMessage::Presence { .. } => PrePresenceAction::Presence,
+        _ => PrePresenceAction::Drop,
+    }
+}
+
+/// Whether to reject a `Presence` frame *before* the contact lookup.
+///
+/// Empty `from_invite_code` is reserved for the local frontend, which
+/// connects on the loopback interface and never carries a user-facing
+/// invite code. Any non-loopback peer that sends an empty code is
+/// trying to slip past the contact-lookup + rate-limit gate (which
+/// only fires for non-empty codes) — the post-Presence verified
+/// state would then let them broadcast `ChatMessage` /
+/// `DiscussionInvite` into the local shared discussions.
+///
+/// Pure decision so we can unit-test the policy without mounting a
+/// full WebSocket harness.
+pub(crate) fn should_reject_empty_invite(
+    invite_code: &str,
+    is_local: bool,
+) -> bool {
+    invite_code.is_empty() && !is_local
+}
+
 /// GET /api/ws — WebSocket upgrade handler.
 ///
 /// Accepts connections from:
@@ -156,11 +198,14 @@ mod rate_limit {
 /// servers in `main.rs` and `desktop/src-tauri/src/main.rs` always wire it.
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
-    connect_info: Option<ConnectInfo<SocketAddr>>,
+    // axum 0.8 dropped `OptionalFromRequestParts` for `ConnectInfo`; the
+    // underlying request extension still lives behind `Extension<…>`, which
+    // does implement it, so we extract that instead.
+    connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
     let peer_ip = connect_info
-        .map(|ci| ci.0.ip())
+        .map(|ext| ext.0.0.ip())
         .unwrap_or_else(|| IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
     ws.on_upgrade(move |socket| handle_socket(socket, state, peer_ip))
 }
@@ -184,7 +229,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: IpAddr) {
     let mut send_task = tokio::spawn(async move {
         while let Ok(msg) = broadcast_rx.recv().await {
             if let Ok(json) = serde_json::to_string(&msg) {
-                if ws_sender.send(Message::Text(json)).await.is_err() {
+                // axum 0.8 — `Message::Text` now wraps `Utf8Bytes`
+                // instead of `String`, providing zero-copy from Bytes.
+                // `.into()` covers `String -> Utf8Bytes`.
+                if ws_sender.send(Message::Text(json.into())).await.is_err() {
                     break;
                 }
             }
@@ -193,6 +241,13 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: IpAddr) {
 
     // Task 2: receive WS messages → broadcast
     let mut recv_task = tokio::spawn(async move {
+        // Pre-Presence handshake : `verified=false` until a `Presence`
+        // is seen. Heartbeats (`Ping`) are answered before the gate
+        // (cf. TD-20260504 — Ping racing reconnect Presence over a
+        // paused-Docker boundary used to close the channel forever).
+        // Other message types are silently dropped pre-Presence so the
+        // attacker model stays the same: no ChatMessage / Invite goes
+        // through without a peer-authenticating Presence.
         let mut verified = false;
 
         while let Some(Ok(msg)) = ws_receiver.next().await {
@@ -202,15 +257,70 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: IpAddr) {
                         continue;
                     };
 
-                    // First message from a remote peer MUST be Presence with a valid invite code.
-                    // Local frontend connections send Presence with empty invite code (accepted).
-                    // Any other message type as first message → reject.
+                    // Pre-Presence policy (single source of truth via
+                    // `classify_pre_presence`, unit-tested in
+                    // `handshake_tests`). Heartbeats are answered
+                    // before the gate so a remote peer resuming from
+                    // suspend keeps a usable channel; non-Presence
+                    // non-heartbeat frames are dropped silently —
+                    // attack vectors stay closed because the
+                    // post-verify block is the only place ChatMessage /
+                    // DiscussionInvite get broadcast.
+                    if !verified {
+                        match classify_pre_presence(&ws_msg) {
+                            PrePresenceAction::Heartbeat => {
+                                if let WsMessage::Ping { timestamp } = &ws_msg {
+                                    let pong = WsMessage::Pong {
+                                        timestamp: *timestamp,
+                                    };
+                                    let _ = broadcast_tx.send(pong);
+                                }
+                                continue;
+                            }
+                            PrePresenceAction::Drop => {
+                                tracing::debug!(
+                                    "WS: ignoring pre-presence frame from {}: {:?}",
+                                    peer_ip, ws_msg
+                                );
+                                continue;
+                            }
+                            PrePresenceAction::Presence => {
+                                // Fall through to the verification block below.
+                            }
+                        }
+                    }
+
+                    // Post-verify Ping handler (regular heartbeat).
+                    if let WsMessage::Ping { timestamp } = &ws_msg {
+                        let pong = WsMessage::Pong {
+                            timestamp: *timestamp,
+                        };
+                        let _ = broadcast_tx.send(pong);
+                        continue;
+                    }
+
+                    // Presence verification path. Always reached when
+                    // `!verified` and the frame is a Presence (the
+                    // classifier above already filtered the rest).
                     if !verified {
                         if let WsMessage::Presence {
                             ref from_invite_code,
                             ..
                         } = ws_msg
                         {
+                            // Reject the empty-invite-code shortcut from
+                            // non-loopback peers (security). The local
+                            // frontend connects on 127.0.0.1 and is the
+                            // only legitimate caller for the empty path.
+                            if should_reject_empty_invite(from_invite_code, is_local) {
+                                tracing::warn!(
+                                    "WS: rejecting empty invite_code from non-loopback peer {} \
+                                     (only the local frontend may use the empty-code shortcut)",
+                                    peer_ip
+                                );
+                                let _crossed = rate_limit::record_failure(peer_ip);
+                                break;
+                            }
                             if !from_invite_code.is_empty() {
                                 let code = from_invite_code.clone();
                                 let found = state
@@ -253,20 +363,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: IpAddr) {
                                 }
                             }
                             verified = true;
-                        } else {
-                            // First message is NOT Presence → reject
-                            tracing::warn!("WS: first message must be Presence, got {:?}", ws_msg);
-                            break;
                         }
-                    }
-
-                    // Handle ping/pong at protocol level
-                    if let WsMessage::Ping { timestamp } = &ws_msg {
-                        let pong = WsMessage::Pong {
-                            timestamp: *timestamp,
-                        };
-                        let _ = broadcast_tx.send(pong);
-                        continue;
+                        // The else branch is unreachable: classify_pre_presence
+                        // already returned `Drop` for non-Presence frames above.
                     }
 
                     // Handle incoming chat messages from remote peers:
@@ -415,6 +514,8 @@ fn handle_discussion_invite(
         pin_first_message: false,
         summary_cache: None,
         summary_up_to_msg_idx: None,
+        summary_strategy: crate::models::SummaryStrategy::Auto,
+        introspection_call_count: 0,
         shared_id: Some(shared_discussion_id.to_string()),
         shared_with: vec![],
         workflow_run_id: None,
@@ -457,4 +558,92 @@ async fn auto_add_peer(
         .ok()?;
 
     Some(contact)
+}
+
+#[cfg(test)]
+mod handshake_tests {
+    use super::*;
+
+    #[test]
+    fn ping_is_heartbeat_pre_presence() {
+        let m = WsMessage::Ping { timestamp: 1 };
+        assert_eq!(classify_pre_presence(&m), PrePresenceAction::Heartbeat);
+    }
+
+    #[test]
+    fn presence_is_presence_pre_presence() {
+        let m = WsMessage::Presence {
+            from_pseudo: "x".into(),
+            from_invite_code: "".into(),
+            online: true,
+        };
+        assert_eq!(classify_pre_presence(&m), PrePresenceAction::Presence);
+    }
+
+    #[test]
+    fn pong_is_dropped_pre_presence() {
+        // Pong is a server-→-client frame; if a client sends one,
+        // either bug or noise — drop, don't verify.
+        let m = WsMessage::Pong { timestamp: 1 };
+        assert_eq!(classify_pre_presence(&m), PrePresenceAction::Drop);
+    }
+
+    #[test]
+    fn chat_message_is_dropped_pre_presence() {
+        // Pre-0.7.2 this would have closed the channel. Now drop
+        // silently and wait for Presence — fixes TD-20260504.
+        let m = WsMessage::ChatMessage {
+            shared_discussion_id: "d".into(),
+            message_id: "m".into(),
+            from_pseudo: "p".into(),
+            from_avatar_email: None,
+            from_invite_code: "i".into(),
+            content: "hello".into(),
+            timestamp: 1,
+        };
+        assert_eq!(classify_pre_presence(&m), PrePresenceAction::Drop);
+    }
+
+    #[test]
+    fn invite_is_dropped_pre_presence() {
+        let m = WsMessage::DiscussionInvite {
+            shared_discussion_id: "d".into(),
+            title: "t".into(),
+            from_pseudo: "p".into(),
+            from_invite_code: "i".into(),
+        };
+        assert_eq!(classify_pre_presence(&m), PrePresenceAction::Drop);
+    }
+
+    // ─── Empty-invite-code rejection (security regression test) ───────────
+    //
+    // Pre-fix, a remote peer could bypass the contact lookup + rate-limit
+    // gate by sending `Presence { from_invite_code: "" }` — the empty
+    // shortcut was meant ONLY for the loopback-frontend connection but
+    // had no `is_local` guard, leaving the channel verified=true and
+    // open for `ChatMessage` / `DiscussionInvite` injection into local
+    // shared discussions.
+
+    #[test]
+    fn empty_invite_from_loopback_is_accepted() {
+        // The local frontend connects on 127.0.0.1 with an empty
+        // invite_code — must continue to work.
+        assert!(!should_reject_empty_invite("", true));
+    }
+
+    #[test]
+    fn empty_invite_from_remote_is_rejected() {
+        // Non-loopback + empty invite_code = the bypass attempt that
+        // pre-fix slipped through.
+        assert!(should_reject_empty_invite("", false));
+    }
+
+    #[test]
+    fn nonempty_invite_is_not_short_circuit_rejected() {
+        // The empty-code rejection must not fire for real codes —
+        // those go through the normal contact-lookup path, regardless
+        // of where the peer connects from.
+        assert!(!should_reject_empty_invite("kronn:peer@host:9090", false));
+        assert!(!should_reject_empty_invite("kronn:peer@host:9090", true));
+    }
 }

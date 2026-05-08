@@ -38,7 +38,10 @@ describe('App', () => {
   it('shows loading screen initially', () => {
     (setupApi.getStatus as ReturnType<typeof vi.fn>).mockReturnValue(new Promise(() => {}));
     render(<App />);
-    expect(screen.getByText('Entering the grid...')).toBeDefined();
+    // The splash cycles through hints every 1.5s — the first one always
+    // starts with "Entering the grid". The trailing character is a
+    // unicode ellipsis (…), not three dots.
+    expect(screen.getByText(/^Entering the grid…?$/)).toBeDefined();
   });
 
   it('shows SetupWizard when setup is incomplete', async () => {

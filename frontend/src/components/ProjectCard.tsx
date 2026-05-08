@@ -3,7 +3,7 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { projects as projectsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { useIsMobile } from '../hooks/useMediaQuery';
-import { isValidationDisc, isUsable } from '../lib/constants';
+import { isValidationDisc, isBriefingDisc, isBootstrapDisc, isUsable } from '../lib/constants';
 import { AiDocViewer } from './AiDocViewer';
 import { ProjectSkills } from './ProjectSkills';
 import {
@@ -92,6 +92,17 @@ export function ProjectCard({
   const [auditCurrentFile, setAuditCurrentFile] = useState('');
   const [auditAbortController, setAuditAbortController] = useState<AbortController | null>(null);
   const [auditAgentChoice, setAuditAgentChoice] = useState<AgentType | undefined>(undefined);
+  /// Briefing-start in flight — pre-fix the button was only disabled when
+  /// `agents.length === 0`, so a double-click on a slow connection created
+  /// two briefing discussions on the same project. The companion ref makes
+  /// the guard race-free against two synchronous click events that fire
+  /// before React re-renders the disabled state.
+  const [briefingStarting, setBriefingStarting] = useState(false);
+  const briefingStartingRef = useRef(false);
+  /// Companion ref for `auditActive` — keeps `handleFullAudit` and
+  /// `startPartialAudit` race-free against a double-click that fires
+  /// before React re-renders.
+  const auditActiveRef = useRef(false);
   /// Handle to the polling interval so we can clear it on unmount / done.
   const auditPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   /// `true` once the mount-time resume effect has run — avoids racing a
@@ -115,11 +126,16 @@ export function ProjectCard({
   const [migrationSuccess, setMigrationSuccess] = useState<{ filesMoved: number } | null>(null);
 
   // ── Computed ──
-  const validationDisc = projDiscussions.find(d => d.title === 'Validation audit AI');
+  const validationDisc = projDiscussions.find(d => isValidationDisc(d.title));
   const validationInProgress = !!validationDisc && proj.audit_status === 'Audited';
-  const bootstrapDisc = projDiscussions.find(d => d.title.startsWith('Bootstrap: '));
+  const bootstrapDisc = projDiscussions.find(d => isBootstrapDisc(d.title));
   const bootstrapInProgress = !!bootstrapDisc && proj.audit_status === 'TemplateInstalled';
-  const briefingDisc = projDiscussions.find(d => d.title.startsWith('Briefing'));
+  // Use the locale-aware detector — the backend's `start_briefing` emits
+  // a localized title (`Project Briefing` in EN, `Briefing del proyecto`
+  // in ES, `Briefing projet` in FR). Pre-fix a startsWith('Briefing')
+  // here missed EN, leaving English users without the "Reprendre le
+  // briefing" button after they navigated away mid-briefing.
+  const briefingDisc = projDiscussions.find(d => isBriefingDisc(d.title));
   const briefingDone = proj.audit_status !== 'NoTemplate' && (
     !!proj.briefing_notes ||
     proj.audit_status === 'Audited' || proj.audit_status === 'Validated'
@@ -194,6 +210,7 @@ export function ProjectCard({
     } catch (e) {
       console.warn('Cancel audit failed:', e);
     }
+    auditActiveRef.current = false;
     setAuditActive(false);
     setAuditAbortController(null);
     stopAuditPolling();
@@ -203,6 +220,16 @@ export function ProjectCard({
   }, [auditAbortController, proj.id, toast, t, onRefetch, onRefetchDiscussions, stopAuditPolling]);
 
   const handleFullAudit = useCallback(async () => {
+    // Guard against double-click — `setAuditActive(true)` flips the UI to
+    // the progress panel synchronously, but a fast double-click can call
+    // this handler twice before React re-renders, spawning two concurrent
+    // SSE streams against the same project (template install races,
+    // duplicate validation discs, …). The closure read of `auditActive`
+    // is stale between two synchronous clicks, so a ref is the only
+    // race-free guard — the second click reads the just-written ref and
+    // bails out before the second SSE is dispatched.
+    if (auditActiveRef.current) return;
+    auditActiveRef.current = true;
     const controller = new AbortController();
     setAuditAbortController(controller);
     setAuditActive(true);
@@ -235,6 +262,7 @@ export function ProjectCard({
         onStepDone: () => {},
         onValidationCreated: () => {},
         onDone: (discussionId) => {
+          auditActiveRef.current = false;
           setAuditActive(false);
           setAuditAbortController(null);
           clearAuditCheckpoint(proj.id);
@@ -247,13 +275,25 @@ export function ProjectCard({
           }
         },
         onError: (error) => {
+          // SSE `event: error` from the backend (agent crash, install
+          // failure, etc.). Pre-fix this only logged + cleared the
+          // checkpoint, leaving `auditActive=true` so the spinner
+          // span forever and the cancel button stayed armed against
+          // a run that wasn't going anywhere. Surface the failure +
+          // refetch so the project card flips back to the right CTA.
           console.warn('Full audit error:', error);
+          auditActiveRef.current = false;
+          setAuditActive(false);
+          setAuditAbortController(null);
           clearAuditCheckpoint(proj.id);
+          toast(t('audit.streamError', error || 'unknown error'), 'error');
+          onRefetch();
         },
       }, controller.signal);
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') return;
       console.warn('Full audit failed:', e);
+      auditActiveRef.current = false;
       setAuditActive(false);
       clearAuditCheckpoint(proj.id);
     } finally {
@@ -262,6 +302,8 @@ export function ProjectCard({
   }, [auditAgentChoice, agents, proj.id, t, toast, onRefetch, onRefetchDiscussions, onAutoRunDiscussion, onNavigate]);
 
   const startPartialAudit = useCallback(async (drift: DriftCheckResponse) => {
+    if (auditActiveRef.current) return;
+    auditActiveRef.current = true;
     const steps = drift.stale_sections.map(s => s.audit_step);
     const controller = new AbortController();
     setAuditAbortController(controller);
@@ -289,6 +331,7 @@ export function ProjectCard({
         onChunk: () => {},
         onStepDone: () => {},
         onDone: () => {
+          auditActiveRef.current = false;
           setAuditActive(false);
           setAuditAbortController(null);
           clearAuditCheckpoint(proj.id);
@@ -297,13 +340,21 @@ export function ProjectCard({
           toast(t('audit.updateStale', String(steps.length)), 'success');
         },
         onError: (error) => {
+          // Same fix as `handleFullAudit.onError` — without resetting
+          // `auditActive`, the spinner stays on a dead run.
           console.warn('Partial audit error:', error);
+          auditActiveRef.current = false;
+          setAuditActive(false);
+          setAuditAbortController(null);
           clearAuditCheckpoint(proj.id);
+          toast(t('audit.partialStreamError', error || 'unknown error'), 'error');
+          onRefetch();
         },
       }, controller.signal);
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') return;
       console.warn('Partial audit failed:', e);
+      auditActiveRef.current = false;
       setAuditActive(false);
       clearAuditCheckpoint(proj.id);
     } finally {
@@ -332,6 +383,7 @@ export function ProjectCard({
         const p = await projectsApi.auditStatus(proj.id);
         if (cancelled) return;
         if (p) {
+          auditActiveRef.current = true;
           setAuditActive(true);
           setAuditStep(p.step_index);
           setAuditTotalSteps(p.total_steps);
@@ -352,6 +404,7 @@ export function ProjectCard({
           // were away or the checkpoint is orphaned (server restart, etc.).
           // Either way: drop the checkpoint, stop the UI state, refetch.
           clearAuditCheckpoint(proj.id);
+          auditActiveRef.current = false;
           setAuditActive(false);
           if (auditPollRef.current) {
             clearInterval(auditPollRef.current);
@@ -368,6 +421,7 @@ export function ProjectCard({
 
     // Seed the UI immediately from the checkpoint so the resume bar shows
     // up without waiting for the first network round-trip.
+    auditActiveRef.current = true;
     setAuditActive(true);
     setAuditStep(cp.stepIndex);
     setAuditTotalSteps(cp.totalSteps);
@@ -399,7 +453,24 @@ export function ProjectCard({
 
   return (
     <div id={`project-${proj.id}`} className="dash-card" data-active={isOpen || auditActive}>
-      <button className="dash-card-header" onClick={onToggleOpen} aria-expanded={isOpen}>
+      {/* The header used to be a <button>, but it contains a nested <button>
+          (the drift-update CTA), which is invalid HTML and produces a React
+          warning in dev. We keep the same a11y semantics via role="button"
+          + Enter/Space keyboard handling, and the inner button keeps its
+          stopPropagation guard so a click on it doesn't toggle the card. */}
+      <div
+        className="dash-card-header"
+        role="button"
+        tabIndex={0}
+        onClick={onToggleOpen}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            onToggleOpen();
+          }
+        }}
+        aria-expanded={isOpen}
+      >
         <ChevronRight size={14} style={{ color: 'var(--kr-accent-ink)', transform: isOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s' }} />
         <div className="flex-1">
           <div className="flex-row gap-3 flex-wrap">
@@ -433,33 +504,33 @@ export function ProjectCard({
               <span className="dash-badge-gray"><ShieldCheck size={9} /> Validated</span>
             ) : null}
             {/* Drift badge */}
-            {(driftStatus?.stale_sections?.length ?? 0) > 0 && (
-              <span
-                className="dash-badge-drift"
-                title={driftStatus!.stale_sections.map(s => s.ai_file).join(', ')}
-              >
-                <AlertTriangle size={9} />
-                {t('audit.staleSections', String(driftStatus!.stale_sections.length))}
-              </span>
-            )}
-            {(driftStatus?.stale_sections?.length ?? 0) > 0 && (
-              <button
-                className="dash-drift-update-btn"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  startPartialAudit(driftStatus!);
-                }}
-                disabled={auditActive}
-                title={t('audit.updateStale', String(driftStatus!.stale_sections.length))}
-              >
-                <RefreshCw size={9} />
-                {t('audit.updateStale', String(driftStatus!.stale_sections.length))}
-              </button>
+            {driftStatus && driftStatus.stale_sections.length > 0 && (
+              <>
+                <span
+                  className="dash-badge-drift"
+                  title={driftStatus.stale_sections.map(s => s.ai_file).join(', ')}
+                >
+                  <AlertTriangle size={9} />
+                  {t('audit.staleSections', String(driftStatus.stale_sections.length))}
+                </span>
+                <button
+                  className="dash-drift-update-btn"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    startPartialAudit(driftStatus);
+                  }}
+                  disabled={auditActive}
+                  title={t('audit.updateStale', String(driftStatus.stale_sections.length))}
+                >
+                  <RefreshCw size={9} />
+                  {t('audit.updateStale', String(driftStatus.stale_sections.length))}
+                </button>
+              </>
             )}
             {/* Audit date */}
             {driftStatus?.audit_date && (
               <span className="dash-audit-date">
-                {t('audit.auditDate', new Date(driftStatus.audit_date!).toLocaleDateString())}
+                {t('audit.auditDate', new Date(driftStatus.audit_date).toLocaleDateString())}
               </span>
             )}
           </div>
@@ -469,7 +540,7 @@ export function ProjectCard({
           <span className={`dash-meta-item ${projMcps.length <= 5 ? 'mcp-load-ok' : projMcps.length <= 10 ? 'mcp-load-warn' : 'mcp-load-danger'}`} title={projMcps.length <= 5 ? t('mcp.mcpLoadOk') : projMcps.length <= 10 ? t('mcp.mcpLoadWarn') : t('mcp.mcpLoadDanger')}><Puzzle size={12} /> {projMcps.length}</span>
           <span className="dash-meta-item"><MessageSquare size={12} /> {projDiscussions.length}</span>
         </div>
-      </button>
+      </div>
 
       {isOpen && (
         <div className="dash-card-body" onClick={(e) => e.stopPropagation()}>
@@ -746,6 +817,19 @@ export function ProjectCard({
                         <button
                           className="dash-icon-btn dash-btn-info"
                           onClick={async () => {
+                            // Guard against double / triple click — the
+                            // backend's `start_briefing` is not idempotent
+                            // (each call creates a new discussion), so a
+                            // distracted operator could end up with two
+                            // briefing discs on the same project. The state
+                            // alone is not enough: two synchronous clicks
+                            // both read `briefingStarting === false` from
+                            // the closure before React re-renders the
+                            // disabled prop. The ref reads/writes
+                            // synchronously so the second click bails out.
+                            if (briefingStartingRef.current) return;
+                            briefingStartingRef.current = true;
+                            setBriefingStarting(true);
                             const agent = auditAgentChoice ?? agents.filter(canAudit)[0]?.agent_type ?? 'ClaudeCode';
                             try {
                               const { discussion_id } = await projectsApi.startBriefing(proj.id, agent);
@@ -754,9 +838,12 @@ export function ProjectCard({
                               onNavigate('discussions');
                             } catch (err) {
                               toast(String(err), 'error');
+                            } finally {
+                              briefingStartingRef.current = false;
+                              setBriefingStarting(false);
                             }
                           }}
-                          disabled={agents.filter(canAudit).length === 0}
+                          disabled={briefingStarting || agents.filter(canAudit).length === 0}
                         >
                           <MessageSquare size={12} /> {t('audit.startBriefing')}
                         </button>
@@ -821,14 +908,14 @@ export function ProjectCard({
                   </div>
                 )}
 
-                {bootstrapInProgress && !auditActive && (
+                {bootstrapInProgress && bootstrapDisc && !auditActive && (
                   <div className="dash-audit-pad">
                     <p className="dash-audit-warning">
                       <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> {t('audit.bootstrapInProgress')}
                     </p>
                     <button
                       className="dash-icon-btn dash-btn-accent-border"
-                      onClick={() => { onOpenDiscussion(bootstrapDisc!.id); onNavigate('discussions'); }}
+                      onClick={() => { onOpenDiscussion(bootstrapDisc.id); onNavigate('discussions'); }}
                     >
                       <MessageSquare size={12} /> {t('audit.resumeBootstrap')}
                     </button>
@@ -866,7 +953,7 @@ export function ProjectCard({
 
                 {proj.audit_status === 'Audited' && !auditActive && (
                   <div className="dash-audit-pad">
-                    {validationInProgress ? (
+                    {validationInProgress && validationDisc ? (
                       <>
                         <p className="dash-audit-warning">
                           <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> {t('audit.validationInProgress', validationDisc.message_count ?? validationDisc.messages.length)}
@@ -876,7 +963,7 @@ export function ProjectCard({
                         </p>
                         <button
                           className="dash-icon-btn dash-btn-accent-border"
-                          onClick={() => { onOpenDiscussion(validationDisc!.id); onNavigate('discussions'); }}
+                          onClick={() => { onOpenDiscussion(validationDisc.id); onNavigate('discussions'); }}
                         >
                           <MessageSquare size={12} /> {t('audit.resumeValidation')}
                         </button>

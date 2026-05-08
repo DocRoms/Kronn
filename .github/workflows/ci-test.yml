@@ -75,8 +75,12 @@ jobs:
         with:
           node-version: 24
 
-      - name: Install pnpm
-        run: npm install -g pnpm
+      - name: Enable corepack (provides pnpm pinned by package.json)
+        # Node 24 ships corepack — it reads `packageManager` from
+        # `frontend/package.json` (pnpm@11.0.9) and fetches that exact
+        # version on first invocation. Avoids drift between `npm i -g
+        # pnpm` (latest, moving) and the version local devs run.
+        run: corepack enable
 
       - name: Install frontend dependencies
         working-directory: frontend
@@ -186,9 +190,13 @@ jobs:
           node-version: '24'
 
       - name: Setup pnpm
+        # The pnpm version is read from `frontend/package.json`'s
+        # `packageManager` field (currently pnpm@11.0.9). Passing
+        # `version:` here on top of it makes `pnpm/action-setup@v4`
+        # error with `Multiple versions of pnpm specified` — leave
+        # this section as-is so the package.json stays the single
+        # source of truth.
         uses: pnpm/action-setup@v4
-        with:
-          version: latest
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -223,9 +231,13 @@ jobs:
           node-version: '24'
 
       - name: Setup pnpm
+        # The pnpm version is read from `frontend/package.json`'s
+        # `packageManager` field (currently pnpm@11.0.9). Passing
+        # `version:` here on top of it makes `pnpm/action-setup@v4`
+        # error with `Multiple versions of pnpm specified` — leave
+        # this section as-is so the package.json stays the single
+        # source of truth.
         uses: pnpm/action-setup@v4
-        with:
-          version: latest
 
       - name: Install frontend dependencies
         working-directory: frontend
@@ -262,17 +274,49 @@ jobs:
           for i in {1..60}; do
             if curl -fsS http://localhost:3140/api/setup/status > /dev/null 2>&1; then
               echo "Backend ready after ${i}s"
-              exit 0
+              break
             fi
             sleep 1
           done
-          echo "Backend failed to start"
-          tail -50 /tmp/backend.log
-          exit 1
+          if ! curl -fsS http://localhost:3140/api/setup/status > /dev/null 2>&1; then
+            echo "Backend failed to start"
+            tail -50 /tmp/backend.log
+            exit 1
+          fi
+
+      - name: Bypass first-run setup wizard
+        # Without this step, every E2E test on a fresh KRONN_DATA_DIR
+        # hits the SetupWizard (App.tsx mounts `<SetupWizard>` when
+        # `setupStatus.is_first_run === true` OR `current_step !==
+        # "Complete"`). Specs that don't stub `/api/setup/status` (a11y-axe,
+        # audit-launch-smoke, codex-real-introspection, project-scan-mcp-sync,
+        # ws-reconnect, …) wait on `[data-tour-id="nav-projects"]` from the
+        # Dashboard — which never mounts → 60s timeout → 9 failures.
+        # Fix: seed a scan path and call /api/setup/complete so the next
+        # status read returns `is_first_run: false, current_step: Complete`.
+        run: |
+          curl -fsS -X POST -H "Content-Type: application/json" \
+            -d '{"paths":["/tmp/kronn-ci-scan"]}' \
+            http://localhost:3140/api/setup/scan-paths
+          curl -fsS -X POST http://localhost:3140/api/setup/complete
+          # Sanity check — fail loud if the wizard is still gating.
+          STATUS=$(curl -fsS http://localhost:3140/api/setup/status)
+          echo "Setup status after bypass: $STATUS"
+          echo "$STATUS" | grep -q '"is_first_run":false' || { echo "Setup bypass did not take effect"; exit 1; }
+          echo "$STATUS" | grep -q '"current_step":"Complete"' || { echo "Setup current_step is not Complete"; exit 1; }
 
       - name: Run E2E tests
         working-directory: frontend
-        run: pnpm test:e2e
+        # Two specs (`project-scan-mcp-sync`, `audit-launch-smoke`) call
+        # `mkdtempSync(join(KRONN_REPOS_DIR ?? ~/Repositories, '_kronn_pw_…'))`
+        # and throw `ENOENT` if the base dir doesn't exist. On a GitHub
+        # runner `~/Repositories` is absent — point `KRONN_REPOS_DIR` at
+        # a tmp path we create inline. `RUNNER_TEMP` is auto-cleaned by
+        # the runner after the job, no manual cleanup needed.
+        run: |
+          mkdir -p "$RUNNER_TEMP/kronn-repos"
+          export KRONN_REPOS_DIR="$RUNNER_TEMP/kronn-repos"
+          pnpm test:e2e
         env:
           CI: "true"
 
@@ -357,9 +401,13 @@ jobs:
           node-version: '24'
 
       - name: Setup pnpm
+        # The pnpm version is read from `frontend/package.json`'s
+        # `packageManager` field (currently pnpm@11.0.9). Passing
+        # `version:` here on top of it makes `pnpm/action-setup@v4`
+        # error with `Multiple versions of pnpm specified` — leave
+        # this section as-is so the package.json stays the single
+        # source of truth.
         uses: pnpm/action-setup@v4
-        with:
-          version: latest
 
       - name: Install frontend dependencies
         working-directory: frontend

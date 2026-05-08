@@ -316,6 +316,73 @@ pub fn build_agent_prompt(
         String::new()
     };
 
+    // Introspection-tools heads-up. Only printed when the agent can
+    // actually call them (the `kronn-internal` MCP server is wired in
+    // .mcp.json and `KRONN_DISCUSSION_ID` is forwarded in the env). The
+    // text is short on purpose (~120 tokens) and explicitly tells the
+    // agent NOT to call them speculatively. Without the "only when you
+    // see a context gap" framing, agents tend to call disc_summarize on
+    // every turn and we lose the savings the strategy switch buys us.
+    //
+    // Mirror of `frontend/src/lib/constants.ts::agentSupportsIntrospection` —
+    // keep them in sync.
+    //
+    //   - Vibe + Ollama: no MCP layer at all (Vibe via `vibe-runner.py`
+    //     direct API, Ollama via HTTP streaming). Slash-marker fallback
+    //     planned in TD-20260510-introspection-vibe.
+    //   - Codex (0.121): wiring lands (`~/.codex/config.toml` gets the
+    //     entry, `codex mcp list` confirms it) but Codex's exec-mode
+    //     sandbox cancels the bridge subprocess before the call lands
+    //     (`mcp: kronn-internal/disc_meta started → (failed) user
+    //     cancelled MCP tool call`). Including the notice would have
+    //     Codex try and fail on every prompt, polluting replies.
+    //     TD-20260510-codex-mcp-sandbox-block — flip back when the
+    //     upstream gate is fixed.
+    let agent_speaks_mcp = !matches!(
+        agent_type,
+        AgentType::Vibe | AgentType::Ollama | AgentType::Codex,
+    );
+    let introspection_notice = match disc.language.as_str() {
+        "fr" => "Outils d'historique disponibles via le MCP `kronn-internal` : \
+            `disc_meta()` (compte de messages, agent, tier — gratuit), \
+            `disc_get_message(idx)` (un message précis, idx négatif = depuis la fin — gratuit), \
+            `disc_summarize(from?, to?)` (synthèse à la demande — coûte des tokens). \
+            N'utilise CES OUTILS QUE si tu remarques un trou de contexte que tu ne peux pas déduire de la fenêtre courante. Pas en spéculation.\n\n",
+        "es" => "Herramientas de historial vía MCP `kronn-internal`: \
+            `disc_meta()` (cuenta de mensajes, agente, tier — gratuito), \
+            `disc_get_message(idx)` (un mensaje específico, idx negativo = desde el final — gratuito), \
+            `disc_summarize(from?, to?)` (resumen bajo demanda — cuesta tokens). \
+            Úsalos SOLO cuando notes un hueco de contexto que no puedas deducir de la ventana actual.\n\n",
+        _ => "History tools available via the `kronn-internal` MCP: \
+            `disc_meta()` (message count, agent, tier — free), \
+            `disc_get_message(idx)` (one specific message, negative idx = from end — free), \
+            `disc_summarize(from?, to?)` (on-demand summary — costs tokens). \
+            Use these ONLY when you notice a context gap you cannot infer from the current window. Never speculatively.\n\n",
+    };
+
+    // Slash-marker fallback for agents that don't speak MCP (Vibe,
+    // Ollama). They emit `KRONN:DISC_*` lines which the post-stream
+    // parser in `slash_markers.rs` resolves into System messages on
+    // the next turn. Same gating threshold as the MCP notice
+    // (≥ 3 user messages — short threads have the full context).
+    let slash_marker_notice = match disc.language.as_str() {
+        "fr" => "Outils d'historique (sans MCP) — émets sur leur propre ligne :\n\
+            • `KRONN:DISC_META` — métadonnées de la discussion\n\
+            • `KRONN:DISC_GET_MESSAGE <idx>` — un message précis (idx négatif = depuis la fin)\n\
+            • `KRONN:DISC_SUMMARIZE <from> <to>` — synthèse d'une plage [from, to)\n\
+            La réponse arrivera comme message système au tour SUIVANT. Utilise UNIQUEMENT si tu as un trou de contexte que tu ne peux pas déduire de la fenêtre courante. Pas en spéculation.\n\n",
+        "es" => "Herramientas de historial (sin MCP) — emite en su propia línea:\n\
+            • `KRONN:DISC_META` — metadatos\n\
+            • `KRONN:DISC_GET_MESSAGE <idx>` — un mensaje (idx negativo = desde el final)\n\
+            • `KRONN:DISC_SUMMARIZE <from> <to>` — resumen del rango [from, to)\n\
+            La respuesta llegará como mensaje del sistema en el SIGUIENTE turno. Úsalas SOLO ante un hueco de contexto real.\n\n",
+        _ => "History tools (no MCP) — emit on their own line:\n\
+            • `KRONN:DISC_META` — disc metadata\n\
+            • `KRONN:DISC_GET_MESSAGE <idx>` — fetch one message (negative idx = from end)\n\
+            • `KRONN:DISC_SUMMARIZE <from> <to>` — summarise the [from, to) range\n\
+            The answer arrives as a system message on the NEXT turn. Use ONLY when you have a real context gap. Never speculatively.\n\n",
+    };
+
     let worktree_notice = isolated_worktree_notice(disc);
 
     let user_msgs: Vec<_> = disc
@@ -358,7 +425,34 @@ pub fn build_agent_prompt(
         ""
     };
 
-    let header = format!("{}{}{}{}", title_ctx, worktree_notice, interactive_hint, prev_conv_label);
+    // Only include the introspection notice on threads with at least
+    // 3 user messages — shorter threads have the full transcript in
+    // window and the notice is just dead weight. The exact notice
+    // depends on whether the agent speaks MCP:
+    //   - MCP-speakers: get the `kronn-internal` tool list.
+    //   - Vibe + Ollama: get the slash-marker fallback (post-stream
+    //     parser in `slash_markers.rs` resolves them into System
+    //     messages on the next turn).
+    //   - Codex (currently): gets nothing — the wiring lands but
+    //     Codex's exec-mode sandbox cancels the call. Avoiding the
+    //     notice prevents pollution; lift this when the upstream
+    //     blocker (TD-20260510-codex-mcp-sandbox-block) is fixed.
+    let agent_uses_slash_markers = matches!(
+        agent_type,
+        AgentType::Vibe | AgentType::Ollama,
+    );
+    let intro_block: &str = if user_msgs.len() >= 3 {
+        if agent_speaks_mcp {
+            introspection_notice
+        } else if agent_uses_slash_markers {
+            slash_marker_notice
+        } else {
+            ""
+        }
+    } else {
+        ""
+    };
+    let header = format!("{}{}{}{}{}", title_ctx, worktree_notice, intro_block, interactive_hint, prev_conv_label);
     let overhead = header.len() + footer.len() + 100; // 100 = notice template space
 
     // If pin_first_message is set, extract and pin the first non-system message
@@ -521,6 +615,7 @@ mod tests {
             pin_first_message: false,
             summary_cache: None,
             summary_up_to_msg_idx: None,
+            summary_strategy: crate::models::SummaryStrategy::Auto, introspection_call_count: 0,
             shared_id: None,
             shared_with: vec![],
             workflow_run_id: None,

@@ -1048,7 +1048,13 @@ pub async fn test_batch_step(
     if items.is_empty() {
         errors.push(format!(
             "items_from resolved to an empty list. Rendered value: {:?}",
-            if rendered.len() > 200 { format!("{}…", &rendered[..200]) } else { rendered.clone() }
+            // Truncate by char count to avoid UTF-8 byte-boundary panics
+            // when the rendered template contains accented chars / emoji.
+            if rendered.chars().count() > 200 {
+                format!("{}…", rendered.chars().take(200).collect::<String>())
+            } else {
+                rendered.clone()
+            }
         ));
     }
 

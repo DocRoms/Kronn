@@ -33,13 +33,29 @@
   --kr-accent-text: rgba(200, 255, 0, 0.6);
 
   /* ── Text hierarchy ───────────────────────────────────────────────────── */
+  /* Dark-theme alpha values were bumped 2026-05-10 from
+   *   tertiary 0.5 → 0.72  ·  muted 0.45 → 0.70
+   *   faint    0.4 → 0.66  ·  dim   0.45 → 0.68
+   *   ghost    0.35 → 0.55
+   * to clear the WCAG AA 4.5:1 contrast threshold on the default dark
+   * background (~#0d0f12). Pre-fix, axe flagged 100+ nodes across the
+   * five main pages (Projects/Discussions/Plugins/Workflows/Settings)
+   * because secondary-or-lower text (timestamps, hints, badges) all
+   * sat in the 3.0-4.0:1 band — readable to most sighted users but
+   * blocking for low-vision and AAA-target audits. Light-theme
+   * overrides further down keep their solid hex colours which already
+   * pass the threshold (verified in tokens.css line 195+).
+   * Visual side effect on dark theme: low-emphasis text reads slightly
+   * brighter; if the visual designer wants a softer feel, lower the
+   * alpha back per-class with explicit `rgba(...)` rather than via
+   * the global token. */
   --kr-text-primary: #e8eaed;
-  --kr-text-secondary: rgba(255, 255, 255, 0.6);
-  --kr-text-tertiary: rgba(255, 255, 255, 0.5);
-  --kr-text-muted: rgba(255, 255, 255, 0.45);
-  --kr-text-faint: rgba(255, 255, 255, 0.4);
-  --kr-text-dim: rgba(255, 255, 255, 0.45);
-  --kr-text-ghost: rgba(255, 255, 255, 0.35);
+  --kr-text-secondary: rgba(255, 255, 255, 0.78);
+  --kr-text-tertiary: rgba(255, 255, 255, 0.72);
+  --kr-text-muted: rgba(255, 255, 255, 0.70);
+  --kr-text-faint: rgba(255, 255, 255, 0.66);
+  --kr-text-dim: rgba(255, 255, 255, 0.68);
+  --kr-text-ghost: rgba(255, 255, 255, 0.55);
 
   /* ── Semantic colors ──────────────────────────────────────────────────── */
   --kr-success: #34d399;
@@ -193,15 +209,20 @@
      regardless of the bg shade underneath (sidebar, card, modal).    */
   --kr-text-primary: #1a1d23;   /* 14.8:1 — headings, body copy */
   --kr-text-secondary: #404754; /* 8.6:1 — supporting text */
-  --kr-text-tertiary: #5a6273;  /* 5.6:1 — labels, table header cells (AA normal ✓) */
-  --kr-text-muted: #6b7280;     /* 4.6:1 — metadata, timestamps (AA normal ✓) */
+  --kr-text-tertiary: #4d5563;  /* 6.5:1 — labels, table header cells (AA normal ✓) */
+  /* 2026-05-11: tightened from #6b7280 (4.6:1 against #ffffff) to
+     #51596b. Axe measured 4.16:1 in practice because the on-screen
+     bg often sits on a slightly-darker shade (#eceef2 sidebar list)
+     rather than pure white — the 0.5:1 buffer keeps the metadata
+     readable in every theme position. */
+  --kr-text-muted: #51596b;     /* 5.5:1 — metadata, timestamps (AA normal ✓ on every shade) */
   /* faint & ghost used to sit at 3.9:1 / 3.2:1 respectively — "large text
      only" per WCAG 1.4.3 — but code applied them at 10-11px (fs-xs). AA
      audit flagged them as FAIL AA normal text. Collapsed to AA-safe
-     values: faint now = muted (4.6:1), ghost raised to 4.5:1. */
-  --kr-text-faint: #6b7280;     /* merged with muted — 4.6:1 AA ✓ */
-  --kr-text-dim: #6b7280;       /* merged with muted */
-  --kr-text-ghost: #71788a;     /* 4.5:1 AA — no longer "large text only" */
+     values: faint = muted, ghost slightly lighter for hierarchy. */
+  --kr-text-faint: #51596b;     /* merged with muted — 5.5:1 AA ✓ */
+  --kr-text-dim: #51596b;       /* merged with muted */
+  --kr-text-ghost: #5e6678;     /* 5.0:1 AA — no longer "large text only" */
 
   /* ── Semantic colors — WCAG-safe on light bg ──────────────────────────
      All chosen from Tailwind's 600/700 range so the same hue is legible

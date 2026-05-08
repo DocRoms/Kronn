@@ -176,6 +176,51 @@ mod tests {
     }
 
     #[test]
+    fn gemini_strips_mcp_issues_prefix() {
+        // Pin user-reported bug 2026-05-10: when one or more MCPs in the
+        // project's `.mcp.json` fail handshake (auth gone stale, missing
+        // binaries, network blocks), Gemini CLI 0.32 prepends a noisy
+        // header to its reply that confuses the user (they assume Gemini
+        // failed when it didn't). parse_token_usage must strip it.
+        let raw = "MCP issues detected. Run /mcp list for status.\nVoici la réponse réelle de Gemini.";
+        let (cleaned, tokens) = parse_token_usage(&AgentType::GeminiCli, raw, &[]);
+        assert_eq!(tokens, 0);
+        assert_eq!(cleaned, "Voici la réponse réelle de Gemini.");
+    }
+
+    #[test]
+    fn gemini_strips_mcp_issues_when_inline() {
+        // The same marker sometimes lands without a leading newline (Gemini
+        // streams it as a continuation of the previous line when the discovery
+        // error fires mid-output).
+        let raw = "MCP issues detected. Run /mcp list for status.Réponse: ok";
+        let (cleaned, _) = parse_token_usage(&AgentType::GeminiCli, raw, &[]);
+        assert_eq!(cleaned, "Réponse: ok");
+    }
+
+    #[test]
+    fn gemini_drops_mcp_debug_lines() {
+        // Gemini debug output (`Server '…' supports tool updates...` and
+        // `[MCP error] …`) leaks into stdout on some MCP server configs.
+        // Strip it so the saved transcript only carries the agent's own
+        // reply.
+        let raw = "\
+Server 'GitLab' supports tool updates. Listening for changes...
+[MCP error] Error during discovery for MCP server 'context7': MCP error -32000
+Réponse de Gemini.
+Suite de la réponse.";
+        let (cleaned, _) = parse_token_usage(&AgentType::GeminiCli, raw, &[]);
+        assert_eq!(cleaned, "Réponse de Gemini.\nSuite de la réponse.");
+    }
+
+    #[test]
+    fn gemini_keeps_clean_response_unchanged() {
+        let raw = "Réponse propre sans préambule MCP.";
+        let (cleaned, _) = parse_token_usage(&AgentType::GeminiCli, raw, &[]);
+        assert_eq!(cleaned, raw);
+    }
+
+    #[test]
     fn vibe_tokens_always_zero() {
         let (_, tokens) = parse_token_usage(&AgentType::Vibe, "response", &[]);
         assert_eq!(tokens, 0);
@@ -695,6 +740,7 @@ mod tests {
         let overrides = ModelTiersConfig {
             claude_code: ModelTierConfig {
                 economy: Some("custom-haiku-3".into()),
+                default: None,
                 reasoning: None,
             },
             ..Default::default()
@@ -708,6 +754,35 @@ mod tests {
         assert_eq!(
             resolve_model_flag(&AgentType::ClaudeCode, ModelTier::Reasoning, Some(&overrides)),
             Some("opus".into()),
+        );
+    }
+
+    #[test]
+    fn resolve_model_flag_default_tier_honors_user_override() {
+        // New 2026-05-11: the Default tier now reads `agent_cfg.default`
+        // before falling through to the built-in match. Primary use case
+        // = Ollama user picks `gemma3:27b` from the OllamaCard, that
+        // value overrides the hardcoded `llama3.2` fallback.
+        use crate::models::{ModelTier, ModelTiersConfig, ModelTierConfig};
+        let overrides = ModelTiersConfig {
+            ollama: ModelTierConfig {
+                economy: None,
+                default: Some("gemma3:27b".into()),
+                reasoning: None,
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_model_flag(&AgentType::Ollama, ModelTier::Default, Some(&overrides)),
+            Some("gemma3:27b".into()),
+            "Default-tier user override must win over built-in `llama3.2`",
+        );
+        // Without an override, the legacy built-in is still served.
+        let no_override = ModelTiersConfig::default();
+        assert_eq!(
+            resolve_model_flag(&AgentType::Ollama, ModelTier::Default, Some(&no_override)),
+            Some("llama3.2".into()),
+            "No override → legacy built-in default applies",
         );
     }
 
@@ -948,5 +1023,60 @@ mod tests {
     fn is_wsl_returns_bool() {
         // Just a smoke test — actual result depends on platform
         let _ = super::super::is_wsl();
+    }
+
+    // ─── HOME override skip policy (TD-20260507-home-override) ─────────────
+
+    #[test]
+    fn skip_home_override_for_known_cli_agent_binaries() {
+        // Every Kronn-managed CLI agent has its config at /home/kronn/<agent>
+        // (via docker-compose mounts) — overriding HOME to KRONN_HOST_HOME
+        // would route them to /home/<host-user>/<agent> which doesn't exist
+        // in the container. Each agent must be in the skip list.
+        for binary in ["claude", "codex", "vibe", "gemini", "kiro-cli", "copilot"] {
+            assert!(
+                should_skip_home_override(binary, None),
+                "binary {} must skip the HOME override",
+                binary
+            );
+        }
+    }
+
+    #[test]
+    fn skip_home_override_for_npx_packaged_agents() {
+        // When agents are launched via `npx <pkg>`, the binary name is
+        // "npx" — we identify them by the npx_package field instead.
+        for pkg in [
+            "@anthropic-ai/claude-code",
+            "@openai/codex",
+            "@google/gemini-cli",
+            "@github/copilot",
+        ] {
+            assert!(
+                should_skip_home_override("npx", Some(pkg)),
+                "npx package {} must skip the HOME override",
+                pkg
+            );
+        }
+    }
+
+    #[test]
+    fn skip_home_override_keeps_override_for_unknown_binaries() {
+        // Arbitrary tools the operator runs through Kronn need a host-rooted
+        // HOME (e.g. config files in $HOME the operator expects to be the
+        // host's). Don't strip the override for them.
+        assert!(!should_skip_home_override("python", None));
+        assert!(!should_skip_home_override("rg", None));
+        assert!(!should_skip_home_override("custom-tool", None));
+        // Unknown npx package: also keep override.
+        assert!(!should_skip_home_override("npx", Some("@some/random-pkg")));
+    }
+
+    #[test]
+    fn skip_home_override_ollama_keeps_override() {
+        // Ollama is a local HTTP server, not a CLI agent reading $HOME/.ollama
+        // for auth. It's not in the skip list — let the override stand to
+        // match the historical behaviour.
+        assert!(!should_skip_home_override("ollama", None));
     }
 }

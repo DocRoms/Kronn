@@ -2,6 +2,8 @@ import { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import { setup as setupApi } from './lib/api';
 import type { SetupStatus } from './types/generated';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { UpdateBanner } from './components/UpdateBanner';
+import { BackendStatus } from './components/BackendStatus';
 import './App.css';
 
 const SetupWizard = lazy(() => import('./pages/SetupWizard').then(m => ({ default: m.SetupWizard })));
@@ -65,7 +67,7 @@ export function App() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ url: href }),
-        }).catch(() => {});
+        }).catch(e => console.warn('open-url failed:', e));
       }
     };
     document.addEventListener('click', handler);
@@ -90,7 +92,7 @@ export function App() {
             initialStatus={setupStatus}
             onComplete={() => {
               // Re-fetch status to get fresh state with is_first_run=false
-              setupApi.getStatus().then(setSetupStatus).catch(() => {});
+              setupApi.getStatus().then(setSetupStatus).catch(e => console.warn('Setup status refresh failed:', e));
             }}
           />
         </Suspense>
@@ -102,12 +104,14 @@ export function App() {
   return (
     <ErrorBoundary>
       <Suspense fallback={<LoadingScreen />}>
+        <UpdateBanner />
+        <BackendStatus />
         <Dashboard onReset={() => {
         setupApi.reset().then(() => {
           setSetupStatus(null);
           setLoading(true);
           setupApi.getStatus().then(setSetupStatus).finally(() => setLoading(false));
-        }).catch(() => {});
+        }).catch(e => console.warn('Setup reset failed:', e));
       }} />
       </Suspense>
     </ErrorBoundary>
@@ -140,11 +144,35 @@ function ApiErrorScreen({ onRetry }: { onRetry: () => void }) {
 }
 
 function LoadingScreen() {
+  // Cycle through progress hints every 1.5 s so the user knows the boot
+  // is alive even when first-load takes 4-5 s (Vite cold compile + lazy
+  // chunks + setup-status round trip). Pre-fix the user just saw
+  // "Entering the grid…" frozen for 5 s and assumed the app had hung
+  // — Alicia's audit on 2026-05-09 specifically called that out.
+  // We don't translate this string set: the boot screen renders BEFORE
+  // I18nProvider mounts (it lives outside the Suspense for that very
+  // provider), so calling `useT()` here would crash with "useT must be
+  // used within I18nProvider". The hints below are written so they're
+  // self-explanatory regardless of locale.
+  const hints = [
+    'Entering the grid…',
+    'Loading config…',
+    'Detecting agents…',
+    'Almost ready…',
+  ];
+  const [hintIdx, setHintIdx] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => {
+      setHintIdx(prev => Math.min(prev + 1, hints.length - 1));
+    }, 1500);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   return (
     <div className="app-fullscreen">
       <div className="app-spinner" />
       <span className="app-loading-text">
-        Entering the grid...
+        {hints[hintIdx]}
       </span>
       {/* Keyframes (spin, pulse, reduced-motion) defined in index.html */}
     </div>

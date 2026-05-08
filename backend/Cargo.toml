@@ -1,6 +1,6 @@
 [package]
 name = "kronn"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 description = "Self-hosted AI dev workflow control plane"
 license = "AGPL-3.0-only"
@@ -15,21 +15,21 @@ path = "src/main.rs"
 
 [dependencies]
 # Web framework
-axum = { version = "0.7", features = ["ws", "macros", "multipart"] }
-tower-http = { version = "0.5", features = ["cors", "fs", "trace"] }
+axum = { version = "0.8", features = ["ws", "macros", "multipart"] }
+tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "process", "sync", "time", "io-util", "signal"] }
 tokio-util = "0.7"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.8"
+toml = "1"
 
 # Database (embedded)
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled", "backup"] }
 
 # Scheduling
-cron = "0.12"
+cron = "0.16"
 chrono = { version = "0.4", features = ["serde"] }
 
 # File system
@@ -37,7 +37,7 @@ walkdir = "2"
 open = "5"              # Open URLs in system browser
 
 # Process management
-which = "6"           # Find executables in PATH
+which = "8"           # Find executables in PATH
 
 # Async streams
 futures = "0.3"
@@ -45,45 +45,56 @@ async-stream = "0.3"
 
 # Crypto
 aes-gcm = "0.10"
-sha2 = "0.10"
+sha2 = "0.11"
 base64 = "0.22"
 
 # HTTP client (for tracker APIs)
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream", "form"] }
 
 # ApiCall step (désagentification) — JSONPath extraction, rate limiting, retry, secret redaction
 serde_json_path = "0.7"   # RFC 9535 JSONPath, runs on serde_json::Value directly
-governor = "0.8"          # Token-bucket rate limiter, per-(plugin,config) keys
+governor = "0.10"         # Token-bucket rate limiter, per-(plugin,config) keys
 backoff = { version = "0.4", features = ["tokio"] }  # Exponential retry on 5xx/429
 secrecy = "0.10"          # Wrap decrypted env so it's never Debug-logged
 
 # WebSocket client (for peer-to-peer connections between Kronn instances)
-tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 async-trait = "0.1"
 
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"] }
 regex-lite = "0.1"
-thiserror = "1"
+thiserror = "2"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-directories = "5"     # XDG paths
+directories = "6"     # XDG paths
 
 # Document extraction (context files: xlsx, docx, pptx, pdf)
-calamine = "0.26"                                           # Excel spreadsheets
+calamine = "0.35"                                           # Excel spreadsheets
 zip = { version = "2", default-features = false, features = ["deflate"] }  # Office XML (docx, pptx)
-pdf-extract = "0.7"                                         # PDF text extraction
+pdf-extract = "0.10"                                        # PDF text extraction
 
 # TypeScript type generation
-ts-rs = { version = "9", features = ["chrono-impl", "uuid-impl", "serde-json-impl"] }
+ts-rs = { version = "12", features = ["chrono-impl", "uuid-impl", "serde-json-impl"] }
+
+# OpenAPI / Swagger UI — hand-curated spec (utoipa::OpenApi derive) +
+# embedded Swagger UI served at /api/docs. utoipa-swagger-ui ships an
+# axum integration we use directly; we don't run an external swagger
+# binary in production.
+utoipa = { version = "5", features = ["chrono", "uuid", "axum_extras"] }
+# `vendored` ships the Swagger UI assets inside the crate so the build
+# doesn't need network or `curl` at compile time. Without it, the
+# build script tries to fetch the SWAGGER_UI_DOWNLOAD_URL via curl,
+# which fails inside slim Docker builders that don't ship curl.
+utoipa-swagger-ui = { version = "9", features = ["axum", "vendored"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 serial_test = "3"
 tempfile = "3"
-tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 futures = "0.3"
 wiremock = "0.6"          # HTTP mock server for ApiCall step tests
 

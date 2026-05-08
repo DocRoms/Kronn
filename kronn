@@ -532,6 +532,123 @@ cmd_logs() {
     (cd "$KRONN_DIR" && make logs)
 }
 
+cmd_doctor() {
+    # Diagnostic command — surfaces the kind of host-state corruption
+    # that silently breaks Kronn-mounted bind dirs (TD-20260429).
+    # Today checks:
+    #   1. Root-owned files under host caches the container shares
+    #      (~/.cache/uv, ~/.local/share/rtk, etc.) — leftovers from
+    #      pre-APP_UID upgrades that break host `uvx` / `rtk gain`.
+    #   2. Host runtime tooling — `uvx`, `glab` (≥ 1.59), `npx` —
+    #      required by Kronn-managed MCP servers when invoked from
+    #      the host CLI.
+    #   3. Docker presence + version — Kronn won't run without it.
+    banner
+    local total_issues=0
+
+    # ─── 1. Host cache permissions (uid-0 detection) ─────────────────
+    step "Host cache permissions"
+    # Search up to depth 4 — enough to catch the typical
+    # `~/.cache/uv/CACHEDIR.TAG` and `~/.local/share/rtk/<dir>/<file>`
+    # offenders without scanning the entire user home tree (slow on
+    # a populated $HOME).
+    local cache_paths=("$HOME/.cache" "$HOME/.local/share")
+    local me_uid; me_uid=$(id -u)
+    local cache_issues=0
+    for path in "${cache_paths[@]}"; do
+        if [[ ! -d "$path" ]]; then continue; fi
+        # `find -uid` is portable across Linux/macOS BSD find.
+        local offenders
+        offenders=$(find "$path" -maxdepth 4 -uid 0 2>/dev/null | head -10)
+        if [[ -n "$offenders" ]]; then
+            warn "Root-owned entries under $path:"
+            echo "$offenders" | sed 's/^/      /'
+            cache_issues=$((cache_issues + 1))
+        fi
+    done
+    if [[ $cache_issues -eq 0 ]]; then
+        success "No root-owned entries detected in host caches"
+    else
+        echo
+        info "Pre-APP_UID Kronn (≤ 0.5.x) ran as root and left these behind."
+        info "Fix (any of):"
+        printf "    ${DIM}sudo chown -R %s:%s <path>${RESET}                  ${DIM}# keep + reclaim${RESET}\n" "$me_uid" "$(id -g)"
+        printf "    ${DIM}sudo rm -rf <path>${RESET}                              ${DIM}# wipe — re-created clean on next use${RESET}\n"
+        total_issues=$((total_issues + cache_issues))
+    fi
+
+    # ─── 2. Host runtime tooling ─────────────────────────────────────
+    step "Host runtime prerequisites"
+    local tooling_issues=0
+    # uvx — Python MCP servers (atlassian, cloudwatch, docker, git, …)
+    if command -v uvx >/dev/null 2>&1; then
+        success "uvx — $(uvx --version 2>/dev/null | head -1)"
+    else
+        warn "uvx — not found in PATH (Python-based MCPs will fail from host CLI)"
+        printf "    ${DIM}Install: curl -LsSf https://astral.sh/uv/install.sh | sh${RESET}\n"
+        tooling_issues=$((tooling_issues + 1))
+    fi
+    # glab — GitLab MCP integration. ≥ 1.59 required for the agent-friendly
+    # `glab mcp serve` subcommand (added in 1.59).
+    if command -v glab >/dev/null 2>&1; then
+        local glab_v
+        glab_v=$(glab --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "")
+        if [[ -n "$glab_v" ]]; then
+            # Lexicographic compare on dotted-version is wrong (1.10 < 1.9).
+            # Use sort -V to pick the lowest of {observed, 1.59.0}.
+            local lowest
+            lowest=$(printf '%s\n%s\n' "$glab_v" "1.59.0" | sort -V | head -1)
+            if [[ "$lowest" == "1.59.0" ]]; then
+                success "glab — $glab_v (≥ 1.59 required)"
+            else
+                warn "glab — $glab_v (< 1.59 required for 'glab mcp serve' — please upgrade)"
+                tooling_issues=$((tooling_issues + 1))
+            fi
+        else
+            warn "glab — installed but version not parseable"
+        fi
+    else
+        info "glab — not found in PATH (only needed if you use the GitLab MCP)"
+    fi
+    # npx — npm-based MCP servers (rate-limited at first use, but always works).
+    if command -v npx >/dev/null 2>&1; then
+        success "npx — $(npx --version 2>/dev/null | head -1)"
+    else
+        warn "npx — not found in PATH (npm-based MCPs will fail from host CLI)"
+        printf "    ${DIM}Install Node.js to get npx: https://nodejs.org${RESET}\n"
+        tooling_issues=$((tooling_issues + 1))
+    fi
+    total_issues=$((total_issues + tooling_issues))
+
+    # ─── 3. Docker ──────────────────────────────────────────────────
+    step "Docker"
+    if command -v docker >/dev/null 2>&1; then
+        local docker_v
+        docker_v=$(docker --version 2>/dev/null | head -1)
+        success "${docker_v:-Docker installed}"
+        if docker info >/dev/null 2>&1; then
+            success "Docker daemon reachable"
+        else
+            warn "Docker daemon not reachable — start Docker Desktop / 'sudo systemctl start docker'"
+            total_issues=$((total_issues + 1))
+        fi
+    else
+        warn "Docker not found — Kronn requires Docker to run"
+        printf "    ${DIM}Install Docker Desktop or your platform's docker-engine package${RESET}\n"
+        total_issues=$((total_issues + 1))
+    fi
+
+    # ─── Summary ─────────────────────────────────────────────────────
+    echo
+    if [[ $total_issues -eq 0 ]]; then
+        success "All checks passed — host environment is healthy."
+    else
+        warn "$total_issues issue(s) found — see above for fix instructions."
+        info "Re-run 'kronn doctor' after applying fixes to confirm."
+        return 1
+    fi
+}
+
 cmd_help() {
     banner
     printf "${BOLD}Usage:${RESET} kronn [command]\n"
@@ -541,6 +658,7 @@ cmd_help() {
     printf "  ${CYAN}restart${RESET}        Restart services\n"
     printf "  ${CYAN}logs${RESET}           Show logs\n"
     printf "  ${CYAN}status${RESET}         Overview (auto-delegates to API when backend is up)\n"
+    printf "  ${CYAN}doctor${RESET}         Diagnose host-environment issues (uid-0 caches, missing CLIs, Docker)\n"
     printf "  ${CYAN}agents${RESET}         List detected agents\n"
     printf "  ${CYAN}projects${RESET}       List projects (requires backend)\n"
     printf "  ${CYAN}init [path]${RESET}    Configure a repository\n"
@@ -671,6 +789,7 @@ main() {
         restart)     cmd_restart ;;
         logs)        cmd_logs ;;
         status)      cmd_status ;;
+        doctor)      cmd_doctor ;;
         agents)      cmd_agents ;;
         projects)    cmd_projects ;;
         init)        cmd_init "$@" ;;

@@ -357,6 +357,7 @@ export function SettingsPage({
                 className="input"
                 style={{ flex: '0 1 180px', fontSize: 'var(--kr-fs-sm)' }}
                 placeholder={t('config.secretPlaceholder')}
+                aria-label={t('config.secretLabel')}
                 value={secretCode}
                 onChange={e => setSecretCode(e.target.value)}
                 onKeyDown={e => { if (e.key === 'Enter') handleUnlockSubmit(); }}
@@ -539,6 +540,7 @@ export function SettingsPage({
                 min={2}
                 max={10}
                 value={scanDepth}
+                aria-label={t('config.scanDepth')}
                 onChange={async (e) => {
                   const v = Number(e.target.value);
                   setScanDepth(v);
@@ -566,6 +568,7 @@ export function SettingsPage({
                 <button
                   className="set-icon-btn"
                   style={{ padding: '2px 4px' }}
+                  aria-label={t('common.delete')}
                   onClick={async () => {
                     const updated = scanPaths.filter((_, j) => j !== i);
                     setScanPaths(updated);
@@ -581,6 +584,7 @@ export function SettingsPage({
                 type="text"
                 className="set-input set-input-sm flex-1"
                 placeholder={t('config.scanPathPlaceholder')}
+                aria-label={t('config.scanPathPlaceholder')}
                 value={newScanPath}
                 onChange={e => setNewScanPath(e.target.value)}
                 onKeyDown={async (e) => {
@@ -596,6 +600,7 @@ export function SettingsPage({
               <button
                 className="set-icon-btn text-accent"
                 style={{ padding: '4px 8px' }}
+                aria-label={t('common.add')}
                 onClick={async () => {
                   if (!newScanPath.trim()) return;
                   if (scanPaths.includes(newScanPath.trim())) return;
@@ -628,6 +633,7 @@ export function SettingsPage({
                   <span className="text-secondary">{p}</span>
                   <button
                     className="set-ignore-chip-x"
+                    aria-label={t('common.delete')}
                     onClick={async () => {
                       const updated = scanIgnore.filter((_, j) => j !== i);
                       setScanIgnore(updated);
@@ -644,6 +650,7 @@ export function SettingsPage({
                 type="text"
                 className="set-input set-input-sm flex-1"
                 placeholder={t('config.scanIgnorePlaceholder')}
+                aria-label={t('config.scanIgnorePlaceholder')}
                 value={newIgnorePattern}
                 onChange={e => setNewIgnorePattern(e.target.value)}
                 onKeyDown={async (e) => {
@@ -658,6 +665,7 @@ export function SettingsPage({
               <button
                 className="set-icon-btn text-accent"
                 style={{ padding: '4px 8px' }}
+                aria-label={t('common.add')}
                 onClick={async () => {
                   if (!newIgnorePattern.trim()) return;
                   const updated = [...scanIgnore, newIgnorePattern.trim()];
@@ -839,6 +847,7 @@ export function SettingsPage({
                       className="set-icon-btn"
                       style={{ padding: '2px 6px' }}
                       title={t('skills.editCustom')}
+                      aria-label={t('skills.editCustom')}
                       onClick={() => {
                         // Strip the frontmatter before populating the textarea —
                         // the backend re-generates it from the form fields on save.
@@ -859,6 +868,7 @@ export function SettingsPage({
                     <button
                       className="set-icon-btn text-error"
                       style={{ padding: '2px 6px', borderColor: 'rgba(var(--kr-error-rgb), 0.2)' }}
+                      aria-label={t('common.delete')}
                       onClick={async () => {
                         if (!confirm(t('skills.deleteConfirm'))) return;
                         try {
@@ -888,13 +898,14 @@ export function SettingsPage({
               <div className="set-grid-2">
                 <div>
                   <label className="set-form-label">{t('skills.name')}</label>
-                  <input className="set-input" value={newSkillName} onChange={e => setNewSkillName(e.target.value)} placeholder="My Skill" />
+                  <input className="set-input" value={newSkillName} onChange={e => setNewSkillName(e.target.value)} placeholder="My Skill" aria-label={t('skills.name')} />
                 </div>
                 <div>
                   <label className="set-form-label">{t('skills.category')}</label>
                   <select
                     className="set-input cursor-pointer"
                     value={newSkillCategory}
+                    aria-label={t('skills.category')}
                     onChange={e => setNewSkillCategory(e.target.value as 'Language' | 'Domain' | 'Business')}
                   >
                     <option value="Language">{t('skills.language')}</option>
@@ -905,11 +916,11 @@ export function SettingsPage({
               </div>
               <div className="mb-5">
                 <label className="set-form-label">{t('skills.description')}</label>
-                <input className="set-input" value={newSkillDesc} onChange={e => setNewSkillDesc(e.target.value)} placeholder={t('skills.descriptionPlaceholder')} />
+                <input className="set-input" value={newSkillDesc} onChange={e => setNewSkillDesc(e.target.value)} placeholder={t('skills.descriptionPlaceholder')} aria-label={t('skills.description')} />
               </div>
               <div className="mb-5">
                 <label className="set-form-label">{t('skills.icon')}</label>
-                <input className="set-input" value={newSkillIcon} onChange={e => setNewSkillIcon(e.target.value)} placeholder="Star, Code, Shield..." />
+                <input className="set-input" value={newSkillIcon} onChange={e => setNewSkillIcon(e.target.value)} placeholder="Star, Code, Shield..." aria-label={t('skills.icon')} />
               </div>
               <div className="mb-5">
                 <label className="set-form-label">{t('skills.content')}</label>
@@ -918,6 +929,7 @@ export function SettingsPage({
                   value={newSkillContent}
                   onChange={e => setNewSkillContent(e.target.value)}
                   placeholder="System prompt instructions for this skill..."
+                  aria-label={t('skills.content')}
                 />
               </div>
               <div className="flex-row gap-4">
@@ -959,6 +971,7 @@ export function SettingsPage({
                 </button>
                 <button
                   className="set-icon-btn"
+                  aria-label={t('common.cancel')}
                   onClick={() => {
                     setShowCreateSkill(false);
                     setEditingSkillId(null);
@@ -1089,6 +1102,7 @@ export function SettingsPage({
                   <button
                     className="set-icon-btn text-error"
                     style={{ padding: '2px 6px', borderColor: 'rgba(var(--kr-error-rgb), 0.2)' }}
+                    aria-label={t('common.delete')}
                     onClick={async () => {
                       if (!confirm(t('directives.deleteConfirm'))) return;
                       try {
@@ -1118,13 +1132,14 @@ export function SettingsPage({
               <div className="set-grid-2">
                 <div>
                   <label className="set-form-label">{t('directives.name')}</label>
-                  <input className="set-input" value={newDirectiveName} onChange={e => setNewDirectiveName(e.target.value)} placeholder="My Directive" />
+                  <input className="set-input" value={newDirectiveName} onChange={e => setNewDirectiveName(e.target.value)} placeholder="My Directive" aria-label={t('directives.name')} />
                 </div>
                 <div>
                   <label className="set-form-label">{t('directives.category')}</label>
                   <select
                     className="set-input cursor-pointer"
                     value={newDirectiveCategory}
+                    aria-label={t('directives.category')}
                     onChange={e => setNewDirectiveCategory(e.target.value as 'Output' | 'Language')}
                   >
                     <option value="Output">{t('directives.output')}</option>
@@ -1134,16 +1149,16 @@ export function SettingsPage({
               </div>
               <div className="mb-5">
                 <label className="set-form-label">{t('directives.description')}</label>
-                <input className="set-input" value={newDirectiveDesc} onChange={e => setNewDirectiveDesc(e.target.value)} placeholder={t('directives.descriptionPlaceholder')} />
+                <input className="set-input" value={newDirectiveDesc} onChange={e => setNewDirectiveDesc(e.target.value)} placeholder={t('directives.descriptionPlaceholder')} aria-label={t('directives.description')} />
               </div>
               <div className="set-grid-2">
                 <div>
                   <label className="set-form-label">{t('directives.icon')}</label>
-                  <input className="set-input" value={newDirectiveIcon} onChange={e => setNewDirectiveIcon(e.target.value)} placeholder="📋, 🔇, 📊..." />
+                  <input className="set-input" value={newDirectiveIcon} onChange={e => setNewDirectiveIcon(e.target.value)} placeholder="📋, 🔇, 📊..." aria-label={t('directives.icon')} />
                 </div>
                 <div>
                   <label className="set-form-label">{t('directives.conflicts')}</label>
-                  <input className="set-input" value={newDirectiveConflicts} onChange={e => setNewDirectiveConflicts(e.target.value)} placeholder="token-saver, verbose..." />
+                  <input className="set-input" value={newDirectiveConflicts} onChange={e => setNewDirectiveConflicts(e.target.value)} placeholder="token-saver, verbose..." aria-label={t('directives.conflicts')} />
                 </div>
               </div>
               <div className="mb-5">
@@ -1153,6 +1168,7 @@ export function SettingsPage({
                   value={newDirectiveContent}
                   onChange={e => setNewDirectiveContent(e.target.value)}
                   placeholder="Instructions for agent output behavior..."
+                  aria-label={t('directives.content')}
                 />
               </div>
               <div className="flex-row gap-4">
@@ -1182,6 +1198,7 @@ export function SettingsPage({
                 </button>
                 <button
                   className="set-icon-btn"
+                  aria-label={t('common.cancel')}
                   onClick={() => { setShowCreateDirective(false); setNewDirectiveName(''); setNewDirectiveIcon('📋'); setNewDirectiveContent(''); setNewDirectiveConflicts(''); }}
                 >
                   <X size={12} />
@@ -1233,13 +1250,13 @@ export function SettingsPage({
                   <code className="set-code flex-1 text-xs truncate">
                     {authVisible ? authToken : '••••••••••••••••••••'}
                   </code>
-                  <button className="set-icon-btn" onClick={() => setAuthVisible(!authVisible)}>
+                  <button className="set-icon-btn" aria-label={authVisible ? 'Hide token' : 'Show token'} onClick={() => setAuthVisible(!authVisible)}>
                     {authVisible ? <EyeOff size={11} /> : <Eye size={11} />}
                   </button>
-                  <button className="set-icon-btn" onClick={() => { navigator.clipboard.writeText(authToken); toast(t('config.authCopied'), 'success'); }}>
+                  <button className="set-icon-btn" aria-label={t('disc.copy')} onClick={() => { navigator.clipboard.writeText(authToken); toast(t('config.authCopied'), 'success'); }}>
                     <Copy size={11} />
                   </button>
-                  <button className="set-icon-btn" onClick={async () => {
+                  <button className="set-icon-btn" aria-label={t('config.regenerate')} onClick={async () => {
                     if (!confirm(t('config.authRegenConfirm'))) return;
                     try {
                       const newToken = await configApi.regenerateAuthToken();
@@ -1287,8 +1304,9 @@ export function SettingsPage({
                 value={serverDomain}
                 onChange={e => setServerDomain(e.target.value)}
                 placeholder="kronn.local"
+                aria-label={t('config.domain')}
               />
-              <button className="set-icon-btn" onClick={async () => {
+              <button className="set-icon-btn" aria-label={t('config.domainSave')} onClick={async () => {
                 try {
                   await configApi.setServerConfig({ domain: serverDomain });
                   toast(t('config.domainSaved'), 'success');
@@ -1314,10 +1332,11 @@ export function SettingsPage({
                 min={1}
                 max={20}
                 value={serverMaxAgents}
+                aria-label={t('config.maxAgents')}
                 onChange={async e => {
                   const v = Number(e.target.value);
                   setServerMaxAgents(v);
-                  try { await configApi.setServerConfig({ max_concurrent_agents: v }); } catch {}
+                  try { await configApi.setServerConfig({ max_concurrent_agents: v }); } catch { /* network blip — slider snaps back via the next refetch */ }
                 }}
                 className="set-range"
               />
@@ -1337,10 +1356,11 @@ export function SettingsPage({
               <input
                 type="range" min={1} max={120} step={1}
                 value={serverStallTimeout}
+                aria-label={t('settings.stallTimeout')}
                 onChange={async (e) => {
                   const v = Number(e.target.value);
                   setServerStallTimeout(v);
-                  try { await configApi.setServerConfig({ agent_stall_timeout_min: v }); } catch {}
+                  try { await configApi.setServerConfig({ agent_stall_timeout_min: v }); } catch { /* network blip — slider snaps back via the next refetch */ }
                 }}
                 className="set-range"
               />
@@ -1437,6 +1457,29 @@ export function SettingsPage({
               }}
             >
               <Download size={12} /> {t('config.export')}
+            </button>
+            {/* DB snapshot — calls the SQLite online-backup API on the
+             *  live DB (consistent even while the backend is running).
+             *  Writes to <data_dir>/backups/kronn-YYYYMMDD-HHMMSS.db.
+             *  Different from Export above: backup is a 1:1 .db copy
+             *  the operator can `cp` aside or restore via `kronn
+             *  stop && cp ... ~/.config/kronn/kronn.db && kronn start`.
+             *  Export is a structured ZIP without secrets, for
+             *  cross-host migration. */}
+            <button
+              className="set-action-btn"
+              data-testid="db-backup-btn"
+              onClick={async () => {
+                try {
+                  const result = await configApi.dbBackup();
+                  toast(t('config.dbBackupSuccess', result.backup_path), 'success');
+                } catch (err) {
+                  console.warn('DB backup failed:', err);
+                  toast(t('config.dbBackupError'), 'error');
+                }
+              }}
+            >
+              <HardDrive size={12} /> {t('config.dbBackup')}
             </button>
             <button
               className="set-action-btn"

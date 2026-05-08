@@ -25,6 +25,7 @@ pub mod tailscale;
 pub mod ws_client;
 pub mod log_buffer;
 pub mod rtk_detect;
+pub mod versions;
 
 #[cfg(test)]
 #[path = "crypto_test.rs"]

@@ -109,9 +109,13 @@ pub async fn execute_batch_quick_prompt_step(
     // the substitution slot — each item fills it. If the QP has no variables,
     // the same static prompt is used for every disc (unusual but valid).
     let first_var_name = qp.variables.first().map(|v| v.name.clone());
-    let batch_items: Vec<(String, String)> = items.iter().map(|item| {
+    let batch_items: Vec<crate::db::workflows::BatchItemInput> = items.iter().map(|item| {
         let prompt = render_qp_prompt(&qp.prompt_template, first_var_name.as_deref(), item);
-        (item.clone(), prompt) // title = raw item, prompt = rendered template
+        crate::db::workflows::BatchItemInput {
+            title: item.clone(),
+            prompt,
+            agent_override: None, // workflow-step batch keeps the QP's default agent
+        }
     }).collect();
 
     // ── Pseudo/avatar for message attribution ───────────────────────────
@@ -651,5 +655,286 @@ mod tests {
         let out = build_structured_output("run-1", 5, 0, 0, &[], false);
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["status"], "PENDING");
+    }
+
+    // ─── E2E tests for `execute_batch_quick_prompt_step` ─────────────────────
+    //
+    // These exercise the full pipeline (template render → QP load →
+    // `create_batch_run` → fan-out tokio::spawn → optional WS wait → structured
+    // output) against an in-memory DB. The fan-out tasks try to spawn a real
+    // agent CLI via `spawn_agent_run_with_chain` — in the test env there's no
+    // agent binary on PATH so each detached task fails fast inside its own
+    // tokio task. We don't observe those failures from the test thread; the
+    // BatchRunFinished WS event is the wait-loop's only completion signal, and
+    // for the wait-for-completion test we synthesize one via a watchdog task.
+    //
+    // The original TD-20260510 (memory `project_batch_workflows`) called for
+    // "an E2E test on `execute_batch_quick_prompt_step` full flow with mocked
+    // WS" — this is that test, paired with the fire-and-forget variant that
+    // exercises everything except the WS wait.
+
+    use crate::{AppState, DEFAULT_MAX_CONCURRENT_AGENTS};
+    use crate::core::config::default_config;
+    use crate::db::Database;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    fn e2e_state() -> AppState {
+        let db = Arc::new(Database::open_in_memory().expect("in-memory DB"));
+        let config_arc = Arc::new(RwLock::new(default_config()));
+        AppState::new_defaults(config_arc, db, DEFAULT_MAX_CONCURRENT_AGENTS)
+    }
+
+    /// Insert a minimal QP with a single variable named `ticket`. The batch
+    /// items get substituted into `{{ticket}}` at render time.
+    async fn seed_qp(state: &AppState) -> QuickPrompt {
+        use chrono::Utc;
+        let qp = QuickPrompt {
+            id: "qp-e2e".into(),
+            name: "Analyse ticket".into(),
+            icon: "🎯".into(),
+            prompt_template: "Analyse le ticket {{ticket}} en profondeur.".into(),
+            variables: vec![PromptVariable {
+                name: "ticket".into(),
+                label: "Ticket".into(),
+                placeholder: "EW-1234".into(),
+                description: Some("Ticket ID".into()),
+                required: true,
+            }],
+            agent: AgentType::ClaudeCode,
+            project_id: None,
+            skill_ids: vec![],
+            tier: ModelTier::Default,
+            description: "E2E test QP".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let qp_for_insert = qp.clone();
+        state.db.with_conn(move |conn| {
+            crate::db::quick_prompts::insert_quick_prompt(conn, &qp_for_insert)
+        }).await.expect("insert QP");
+        qp
+    }
+
+    /// Insert a placeholder Workflow + a parent linear WorkflowRun so the
+    /// step has something to attach its child batch run to. Returns the run id.
+    async fn seed_parent_run(state: &AppState) -> String {
+        use chrono::Utc;
+        let wf_id = "wf-e2e".to_string();
+        let workflow = Workflow {
+            id: wf_id.clone(),
+            name: "E2E parent workflow".into(),
+            project_id: None,
+            trigger: WorkflowTrigger::Manual,
+            steps: vec![],
+            actions: vec![],
+            safety: WorkflowSafety {
+                sandbox: false,
+                max_files: None,
+                max_lines: None,
+                require_approval: false,
+            },
+            workspace_config: None,
+            concurrency_limit: None,
+            enabled: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            guards: None,
+            artifacts: std::collections::HashMap::new(),
+            on_failure: vec![],
+            exec_allowlist: vec![],
+            variables: vec![],
+        };
+        let run_id = "run-parent-e2e".to_string();
+        let parent_run = WorkflowRun {
+            id: run_id.clone(),
+            workflow_id: wf_id.clone(),
+            status: RunStatus::Running,
+            trigger_context: None,
+            step_results: vec![],
+            tokens_used: 0,
+            workspace_path: None,
+            started_at: Utc::now(),
+            finished_at: None,
+            run_type: "linear".into(),
+            batch_total: 0,
+            batch_completed: 0,
+            batch_failed: 0,
+            batch_name: None,
+            parent_run_id: None,
+            state: std::collections::HashMap::new(),
+            produced_branches: vec![],
+        };
+        state.db.with_conn(move |conn| -> anyhow::Result<()> {
+            crate::db::workflows::insert_workflow(conn, &workflow)?;
+            crate::db::workflows::insert_run(conn, &parent_run)?;
+            Ok(())
+        }).await.expect("insert workflow + parent run");
+        run_id
+    }
+
+    /// Build a minimal `BatchQuickPrompt` step pointing at the seeded QP.
+    fn batch_step(qp_id: &str, wait_for_completion: bool) -> WorkflowStep {
+        WorkflowStep {
+            step_type: StepType::BatchQuickPrompt,
+            output_format: StepOutputFormat::default(),
+            description: None,
+            name: "batch_e2e".into(),
+            agent: AgentType::ClaudeCode,
+            prompt_template: String::new(),
+            mode: StepMode::Normal,
+            mcp_config_ids: vec![],
+            agent_settings: None,
+            on_result: vec![],
+            stall_timeout_secs: None,
+            retry: None,
+            delay_after_secs: None,
+            skill_ids: vec![],
+            profile_ids: vec![],
+            directive_ids: vec![],
+            batch_quick_prompt_id: Some(qp_id.into()),
+            batch_items_from: Some(r#"["EW-1","EW-2","EW-3"]"#.into()),
+            batch_wait_for_completion: Some(wait_for_completion),
+            batch_max_items: Some(10),
+            batch_workspace_mode: Some("Direct".into()),
+            batch_chain_prompt_ids: vec![],
+            batch_concurrent_limit: Some(2),
+            quick_api_id: None,
+            notify_config: None,
+            api_plugin_slug: None,
+            api_config_id: None,
+            api_endpoint_path: None,
+            api_method: None,
+            api_path_params: None,
+            api_query: None,
+            api_headers: None,
+            api_body: None,
+            api_extract: None,
+            api_pagination: None,
+            api_timeout_ms: None,
+            api_max_retries: None,
+            api_output_var: None,
+            gate_message: None,
+            gate_request_changes_target: None,
+            gate_notify_url: None,
+            exec_command: None,
+            exec_args: vec![],
+            exec_timeout_secs: None,
+            quick_prompt_id: None,
+            json_data_payload: None,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn execute_batch_quick_prompt_step_fire_and_forget_full_pipeline() {
+        // Tests the full happy path EXCEPT the WS wait loop:
+        //   template render → QP load → create_batch_run → fan-out spawn →
+        //   structured output with status=PENDING.
+        let state = e2e_state();
+        let qp = seed_qp(&state).await;
+        let parent_run_id = seed_parent_run(&state).await;
+        let step = batch_step(&qp.id, /* wait */ false);
+        let ctx = TemplateContext::new();
+
+        let outcome = execute_batch_quick_prompt_step(&step, &parent_run_id, state.clone(), &ctx).await;
+
+        // ─ Step-level assertions
+        assert_eq!(outcome.result.status, RunStatus::Success,
+            "fire-and-forget should always return Success once the spawn loop fires");
+        let envelope: serde_json::Value = serde_json::from_str(&outcome.result.output)
+            .expect("structured output is JSON");
+        assert_eq!(envelope["status"], "PENDING",
+            "wait_for_completion=false must produce PENDING (caller knows it's racing)");
+        let data = &envelope["data"];
+        assert_eq!(data["total"], 3, "3 items in batch_items_from → 3 children");
+        assert_eq!(data["ok"], 0, "no completion info yet in fire-and-forget");
+        assert_eq!(data["failed"], 0);
+        assert!(data["batch_run_id"].is_string());
+        assert_eq!(data["discussion_ids"].as_array().unwrap().len(), 3);
+
+        // ─ DB-level assertions: the child batch run + 3 child discussions exist
+        let parent_id_for_query = parent_run_id.clone();
+        let (child_run, disc_count) = state.db.with_conn(move |conn| -> anyhow::Result<_> {
+            let children = conn
+                .prepare("SELECT id, batch_total FROM workflow_runs WHERE parent_run_id = ?1")?
+                .query_map(rusqlite::params![parent_id_for_query], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            assert_eq!(children.len(), 1, "exactly one child batch run");
+            let (child_id, batch_total) = children.into_iter().next().unwrap();
+            let disc_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM discussions WHERE workflow_run_id = ?1",
+                rusqlite::params![child_id],
+                |row| row.get(0),
+            )?;
+            Ok(((child_id, batch_total), disc_count))
+        }).await.expect("DB readback");
+        assert_eq!(child_run.1, 3, "child batch_total = number of items");
+        assert_eq!(disc_count, 3, "one discussion row per batch item");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn execute_batch_quick_prompt_step_wait_for_completion_with_mocked_ws() {
+        // Tests the WAIT path: a watchdog task synthesizes the
+        // `BatchRunFinished` WS event (which would normally come from the last
+        // agent's `make_agent_stream` completion in production) so the step
+        // can return without waiting on real agents.
+        let state = e2e_state();
+        let qp = seed_qp(&state).await;
+        let parent_run_id = seed_parent_run(&state).await;
+        let step = batch_step(&qp.id, /* wait */ true);
+        let ctx = TemplateContext::new();
+
+        // Watchdog: polls the DB for the child batch run id, then emits a
+        // BatchRunFinished with that id. This stands in for the real
+        // `increment_batch_progress` → WS broadcast path.
+        let watch_state = state.clone();
+        let watch_parent_id = parent_run_id.clone();
+        let watchdog = tokio::spawn(async move {
+            // Up to ~2s to find the child — `create_batch_run` runs inside a
+            // single `with_conn` transaction so it lands very fast.
+            for _ in 0..40 {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let parent = watch_parent_id.clone();
+                let child = watch_state.db.with_conn(move |conn| -> anyhow::Result<Option<String>> {
+                    let id: Option<String> = conn.query_row(
+                        "SELECT id FROM workflow_runs WHERE parent_run_id = ?1 LIMIT 1",
+                        rusqlite::params![parent],
+                        |row| row.get(0),
+                    ).ok();
+                    Ok(id)
+                }).await.ok().flatten();
+                if let Some(child_id) = child {
+                    // Tiny extra delay so the step's ws_broadcast.subscribe()
+                    // is definitely listening — without this the message can
+                    // land *before* the subscribe() call returns.
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    let _ = watch_state.ws_broadcast.send(WsMessage::BatchRunFinished {
+                        run_id: child_id,
+                        discussion_id: "any".into(),
+                        batch_name: Some("e2e".into()),
+                        batch_total: 3,
+                        batch_completed: 3,
+                        batch_failed: 0,
+                    });
+                    return;
+                }
+            }
+            panic!("Watchdog never saw a child batch run materialise within 2s");
+        });
+
+        let outcome = execute_batch_quick_prompt_step(&step, &parent_run_id, state.clone(), &ctx).await;
+        watchdog.await.expect("watchdog finished cleanly");
+
+        // ─ The wait completed and propagated the counters from our synthesized event.
+        assert_eq!(outcome.result.status, RunStatus::Success,
+            "all 3 children OK → step Success (success = at-least-one OK)");
+        let envelope: serde_json::Value = serde_json::from_str(&outcome.result.output)
+            .expect("structured output is JSON");
+        assert_eq!(envelope["status"], "OK", "3 ok / 0 failed → OK envelope");
+        assert_eq!(envelope["data"]["total"], 3);
+        assert_eq!(envelope["data"]["ok"], 3);
+        assert_eq!(envelope["data"]["failed"], 0);
     }
 }

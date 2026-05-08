@@ -10,14 +10,16 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { buildApiMock } from '../../../test/apiMock';
 import type { AgentDetection, AgentType } from '../../../types/generated';
 
-const { activateMock, savingsMock } = vi.hoisted(() => ({
+const { activateMock, savingsMock, versionMock } = vi.hoisted(() => ({
   activateMock: vi.fn(),
   savingsMock: vi.fn(),
+  versionMock: vi.fn(),
 }));
 vi.mock('../../../lib/api', () => buildApiMock({
   rtk: {
     activate: activateMock as never,
     savings: savingsMock as never,
+    version: versionMock as never,
   },
 }));
 
@@ -51,6 +53,17 @@ describe('CompressionSection', () => {
     activateMock.mockResolvedValue({ success: true, stdout: '', stderr: '' });
     savingsMock.mockReset();
     savingsMock.mockResolvedValue({ available: false, total_tokens_saved: 0, ratio_percent: 0, sample_count: 0 });
+    versionMock.mockReset();
+    // Default: same version installed as latest — keeps the freshness
+    // pill hidden in the base render assertions. Tests that explicitly
+    // care about the pill flip this on a per-case basis.
+    versionMock.mockResolvedValue({
+      available: true,
+      installed: '0.37.2',
+      latest_known: '0.37.2',
+      update_available: false,
+      update_command: 'curl -fsSL https://example.com/install.sh | sh',
+    });
   });
 
   it('hides entirely when no RTK-applicable agent is installed', () => {
@@ -198,6 +211,51 @@ describe('CompressionSection', () => {
       // formatTokens(42000) = "42k"
       expect(document.body.textContent).toMatch(/config\.rtk\.savings:42k/);
     });
+  });
+
+  it('renders the freshness pill when the backend reports an outdated RTK', async () => {
+    // Regression: pre-fix the section had no way to surface that the
+    // user's `rtk` binary was lagging the latest known stable version.
+    // Backend now sends `update_available: true` and the pill links to
+    // a modal with a copyable re-install command (RTK install.sh is
+    // idempotent).
+    versionMock.mockResolvedValue({
+      available: true,
+      installed: '0.30.0',
+      latest_known: '0.37.2',
+      update_available: true,
+      update_command: 'curl -fsSL https://example.com/install.sh | sh',
+    });
+    render(
+      <CompressionSection
+        agents={[mkAgent({ agent_type: 'ClaudeCode', rtk_hook_configured: true })]}
+        t={t}
+      />,
+    );
+    await waitFor(() => {
+      // i18n key with {0}=latest interpolated by our test `t`.
+      expect(screen.getByText(/config\.rtk\.updateAvailable:0\.37\.2/)).toBeInTheDocument();
+    });
+    // Clicking the pill opens the update modal carrying the command.
+    fireEvent.click(screen.getByText(/config\.rtk\.updateAvailable:0\.37\.2/));
+    expect(screen.getByText('config.rtk.updateModalTitle')).toBeInTheDocument();
+    expect(screen.getByText(/curl -fsSL/)).toBeInTheDocument();
+  });
+
+  it('hides the freshness pill when versions match', async () => {
+    // Default `versionMock` returns matching versions — the pill must
+    // not appear. Belt-and-suspenders: an explicit assertion guards
+    // against a regression where `update_available: false` still
+    // renders the pill (e.g. truthiness check on `installed` alone).
+    render(
+      <CompressionSection
+        agents={[mkAgent({ agent_type: 'ClaudeCode', rtk_hook_configured: true })]}
+        t={t}
+      />,
+    );
+    // Give the version fetch a tick to settle, then assert no pill.
+    await waitFor(() => expect(savingsMock).toHaveBeenCalled());
+    expect(screen.queryByText(/config\.rtk\.updateAvailable:/)).not.toBeInTheDocument();
   });
 
   it('hides the savings line when RTK is unavailable', () => {

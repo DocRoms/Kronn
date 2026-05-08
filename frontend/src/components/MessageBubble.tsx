@@ -1,4 +1,4 @@
-import { useState, useRef, useMemo, useEffect, memo } from 'react';
+import { useState, useRef, useMemo, useEffect, memo, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { useTheme } from '../lib/ThemeContext';
 import { MatrixText } from './MatrixText';
@@ -51,7 +51,7 @@ export interface MessageBubbleProps {
    *  `kronn-doc-preview` fence handler knows which generated-files
    *  directory to target when the user clicks "Export PDF". */
   discussionId?: string;
-  t: (key: string, ...args: any[]) => string;
+  t: (key: string, ...args: (string | number)[]) => string;
 }
 
 export const MessageBubble = memo(function MessageBubble(props: MessageBubbleProps) {
@@ -104,12 +104,27 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
     [msg.timestamp]
   );
 
+  // kronn-internal tool-call trace — System messages emitted by the
+  // backend (post-stream MCP capture or slash-marker resolver) so the
+  // user sees "the agent looked at message #4" inline in the
+  // transcript. Distinct visual treatment from regular System messages
+  // (which carry summary-cache notices or errors) so the user
+  // recognises tool activity at a glance.
+  const isKronnTool = msg.role === 'System' && msg.content.startsWith('[kronn-internal:');
+  const kronnToolMatch = isKronnTool
+    ? /^\[kronn-internal: ([a-z_]+)(?:\(([^)]*)\))?(?: → (.*))?\]$/s.exec(msg.content.trim())
+    : null;
+
   return (
     <div className="disc-msg-row" data-role={isUser ? 'user' : msg.role === 'System' ? 'system' : 'agent'}>
       <div
         className="disc-msg-bubble"
         data-role={isUser ? 'user' : msg.role === 'System' ? 'system' : 'agent'}
-        data-variant={msg.role === 'System' ? (msg.content.startsWith('summary cached') ? 'summary' : 'error') : undefined}
+        data-variant={msg.role === 'System' ? (
+          isKronnTool ? 'kronn-tool'
+          : msg.content.startsWith('summary cached') ? 'summary'
+          : 'error'
+        ) : undefined}
       >
         {isUser && (msg.author_pseudo || msg.author_avatar_email) && (
           <div className="disc-msg-author">
@@ -131,7 +146,35 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             {copyBtn(9, false)}
           </div>
         )}
-        {msg.role === 'System' && (
+        {msg.role === 'System' && isKronnTool && (
+          <div className="disc-msg-kronn-tool" data-testid="kronn-tool-badge">
+            {/* Wrench icon mirrors the `🔧 N` pill in ChatHeader so the
+             *  user makes the visual connection: pill counts these
+             *  badges. The tool name + args render compactly; if the
+             *  resolver returned a payload (slash-marker path) we
+             *  render it as a collapsed snippet on hover. */}
+            <span className="disc-msg-kronn-tool-icon" aria-hidden="true">🔧</span>
+            <span className="disc-msg-kronn-tool-label">
+              {kronnToolMatch ? (
+                <>
+                  <code className="disc-msg-kronn-tool-name">{kronnToolMatch[1]}</code>
+                  {kronnToolMatch[2] && (
+                    <span className="disc-msg-kronn-tool-args">({kronnToolMatch[2]})</span>
+                  )}
+                </>
+              ) : (
+                <span>{msg.content}</span>
+              )}
+            </span>
+            {kronnToolMatch && kronnToolMatch[3] && (
+              <details className="disc-msg-kronn-tool-result">
+                <summary>{t('disc.kronnToolResult')}</summary>
+                <pre>{kronnToolMatch[3]}</pre>
+              </details>
+            )}
+          </div>
+        )}
+        {msg.role === 'System' && !isKronnTool && (
           <div className="disc-msg-agent-label" style={{ color: msg.content.startsWith('summary cached') ? 'var(--kr-success)' : 'var(--kr-error)' }}>
             {msg.content.startsWith('summary cached') ? <Zap size={10} /> : <AlertTriangle size={10} />}
             {' '}{msg.content.startsWith('summary cached') ? t('disc.summaryCached') : t('disc.system')}
@@ -156,7 +199,14 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             <textarea
               value={editingText}
               onChange={e => onEditTextChange(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); onEditSubmit(); } }}
+              onKeyDown={e => {
+                // IME guard: pressing Enter during an active composition
+                // confirms the candidate, never re-submits the edit.
+                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  onEditSubmit();
+                }
+              }}
               className="disc-edit-textarea"
               autoFocus
             />
@@ -168,6 +218,11 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
               </button>
             </div>
           </div>
+        ) : isKronnTool ? (
+          // The kronn-tool badge above is the entire content. Skip
+          // the markdown render — we don't want a second copy of
+          // `[kronn-internal: ...]` rendered as raw text below.
+          null
         ) : isMatrixLastUser && !decodeDone ? (
           // Matrix: render as plain scrambled text for ~700ms before
           // flipping to Markdown. Markdown parse is skipped during
@@ -260,7 +315,7 @@ function extractText(node: HTMLElement): string {
 }
 
 /** Tiny copy button overlaid on a block (table or code). */
-function CopyableBlock({ children, className, tag }: { children: any; className?: string; tag: 'table' | 'pre' }) {
+function CopyableBlock({ children, className, tag }: { children: ReactNode; className?: string; tag: 'table' | 'pre' }) {
   const ref = useRef<HTMLDivElement>(null);
   const [copied, setCopied] = useState(false);
   const handleCopy = () => {
@@ -287,36 +342,47 @@ function CopyableBlock({ children, className, tag }: { children: any; className?
   );
 }
 
+// react-markdown's component override prop type is essentially
+// `{ children?: ReactNode; ...HTMLAttributes }` with a few extras the
+// remark plugins inject (node, index, etc.). We don't need them — only
+// `children`, `href` and `className` — so a narrow shape is enough and
+// avoids 16 `any`s.
+type MdProps = {
+  children?: ReactNode;
+  className?: string;
+  href?: string;
+};
+
 const mdComponents = {
-  p: ({ children }: any) => <p>{children}</p>,
-  h1: ({ children }: any) => <h1>{children}</h1>,
-  h2: ({ children }: any) => <h2>{children}</h2>,
-  h3: ({ children }: any) => <h3>{children}</h3>,
-  ul: ({ children }: any) => <ul>{children}</ul>,
-  ol: ({ children }: any) => <ol>{children}</ol>,
-  li: ({ children }: any) => <li>{children}</li>,
-  code: ({ className, children }: any) => {
+  p: ({ children }: MdProps) => <p>{children}</p>,
+  h1: ({ children }: MdProps) => <h1>{children}</h1>,
+  h2: ({ children }: MdProps) => <h2>{children}</h2>,
+  h3: ({ children }: MdProps) => <h3>{children}</h3>,
+  ul: ({ children }: MdProps) => <ul>{children}</ul>,
+  ol: ({ children }: MdProps) => <ol>{children}</ol>,
+  li: ({ children }: MdProps) => <li>{children}</li>,
+  code: ({ className, children }: MdProps) => {
     const isBlock = className?.includes('language-');
     return isBlock
       ? <code className="disc-md-pre-code">{children}</code>
       : <code>{children}</code>;
   },
-  pre: ({ children }: any) => (
+  pre: ({ children }: MdProps) => (
     <CopyableBlock tag="pre">
       <pre>{children}</pre>
     </CopyableBlock>
   ),
-  table: ({ children }: any) => (
+  table: ({ children }: MdProps) => (
     <CopyableBlock tag="table" className="overflow-hidden">
       <table>{children}</table>
     </CopyableBlock>
   ),
-  th: ({ children }: any) => <th>{children}</th>,
-  td: ({ children }: any) => <td>{children}</td>,
-  blockquote: ({ children }: any) => <blockquote>{children}</blockquote>,
+  th: ({ children }: MdProps) => <th>{children}</th>,
+  td: ({ children }: MdProps) => <td>{children}</td>,
+  blockquote: ({ children }: MdProps) => <blockquote>{children}</blockquote>,
   hr: () => <hr />,
-  a: ({ href, children }: any) => <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,
-  strong: ({ children }: any) => <strong>{children}</strong>,
+  a: ({ href, children }: MdProps) => <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,
+  strong: ({ children }: MdProps) => <strong>{children}</strong>,
 };
 
 // `remark-emoji` transforms GitHub-style shortcodes (`:tada:`) into the
@@ -335,13 +401,18 @@ export const MarkdownContent = memo(({ content, discussionId }: { content: strin
     if (!discussionId) return mdComponents;
     return {
       ...mdComponents,
-      pre: ({ children }: any) => {
-        const codeEl = Array.isArray(children) ? children[0] : children;
+      pre: ({ children }: { children?: ReactNode }) => {
+        // ReactMarkdown renders <pre><code>…</code></pre>; the outer pre
+        // gets a child element whose props carry the language class.
+        // We need access to that child's `props`, which ReactNode
+        // doesn't expose by default — narrow to a React element.
+        const childEl = Array.isArray(children) ? children[0] : children;
+        const codeEl = (childEl as { props?: { className?: string; children?: ReactNode } } | undefined);
         const className: string = codeEl?.props?.className ?? '';
         if (className.includes('language-kronn-doc-preview')) {
           // `children` of a fenced block is typically a string (or an
           // array with one string); coerce safely.
-          const raw = codeEl.props.children;
+          const raw = codeEl?.props?.children;
           const html = Array.isArray(raw) ? raw.join('') : String(raw ?? '');
           return <DocPreview html={html.trim()} discussionId={discussionId} />;
         }
@@ -349,7 +420,7 @@ export const MarkdownContent = memo(({ content, discussionId }: { content: strin
           // Parsed payload must carry a `format` discriminator ∈ {csv,xlsx,pptx}.
           // Malformed JSON or unknown format → fall through to a regular
           // code block so the chat keeps rendering instead of blowing up.
-          const raw = codeEl.props.children;
+          const raw = codeEl?.props?.children;
           const text = Array.isArray(raw) ? raw.join('') : String(raw ?? '');
           try {
             const parsed = JSON.parse(text);

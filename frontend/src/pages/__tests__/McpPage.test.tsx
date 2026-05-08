@@ -448,4 +448,88 @@ describe('McpPage', () => {
     expect(container.textContent).toContain('Officiel');
     expect(container.textContent).toContain('Redis Ltd');
   });
+
+  // ─── Delete confirmation (regression: previously fired on click) ──────
+  it('Delete config button asks for confirmation before deleting', async () => {
+    const servers = [makeServer('mcp-redis', 'Redis')];
+    const configs = [makeConfig('c1', 'mcp-redis', 'Redis')];
+    const overview: McpOverview = { servers, configs, customized_contexts: [], incompatibilities: [] };
+
+    // Reject the confirm dialog → handleDeleteMcpConfig must NOT call the API.
+    // happy-dom doesn't ship `window.confirm`, so install a stub before spying.
+    window.confirm = vi.fn();
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    fireEvent.click(screen.getByText('Redis'));
+
+    const deleteBtn = screen.getByText(/Supprimer cette config/);
+    await act(async () => { fireEvent.click(deleteBtn); });
+
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(mcpsApi.deleteConfig).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+
+  it('Delete confirmed → API called + success toast', async () => {
+    const servers = [makeServer('mcp-redis', 'Redis')];
+    const configs = [makeConfig('c1', 'mcp-redis', 'Redis')];
+    const overview: McpOverview = { servers, configs, customized_contexts: [], incompatibilities: [] };
+
+    window.confirm = vi.fn();
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    vi.mocked(mcpsApi.deleteConfig).mockResolvedValue(undefined);
+
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    fireEvent.click(screen.getByText('Redis'));
+
+    const deleteBtn = screen.getByText(/Supprimer cette config/);
+    await act(async () => {
+      fireEvent.click(deleteBtn);
+      await Promise.resolve();
+    });
+
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(mcpsApi.deleteConfig).toHaveBeenCalledWith('c1');
+    confirmSpy.mockRestore();
+  });
+
+  it('Incomplete-config banner lists each broken plugin with its missing keys', async () => {
+    // Pin user-reported behaviour 2026-05-10: when a plugin's config is
+    // incomplete (e.g. Adobe Analytics missing ADOBE_COMPANY_ID), Kronn
+    // SKIPS writing it to project-level files (so Gemini/Claude don't
+    // choke at boot) AND surfaces it as a UI warning so the operator
+    // knows what to fix.
+    const servers = [makeServer('adobe-analytics', 'Adobe Analytics')];
+    const configs = [makeConfig('cfg-broken', 'adobe-analytics', 'Adobe Analytics')];
+    const overview: McpOverview = {
+      servers, configs, customized_contexts: [], incompatibilities: [],
+      incomplete_configs: [{
+        config_id: 'cfg-broken',
+        label: 'Adobe Analytics',
+        server_name: 'Adobe Analytics',
+        missing_keys: ['ADOBE_COMPANY_ID', 'ADOBE_RSID'],
+        reason: '2 clé(s) requise(s) manquante(s) ou vide(s)',
+      }],
+    };
+
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+
+    const banner = screen.getByTestId('mcp-incomplete-banner');
+    expect(banner).toBeDefined();
+    expect(banner.textContent).toMatch(/Adobe Analytics/);
+    expect(banner.textContent).toMatch(/ADOBE_COMPANY_ID, ADOBE_RSID/);
+    // The `1 plugin(s) not operational` count surfaces in FR locale.
+    expect(banner.textContent).toMatch(/1 plugin/);
+  });
+
+  it('Incomplete-config banner is hidden when no broken configs', async () => {
+    // Default mock fixtures from earlier tests don't pass incomplete_configs;
+    // the banner must not appear unless explicitly populated.
+    const servers = [makeServer('mcp-redis', 'Redis')];
+    const configs = [makeConfig('c1', 'mcp-redis', 'Redis')];
+    const overview: McpOverview = { servers, configs, customized_contexts: [], incompatibilities: [] };
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    expect(screen.queryByTestId('mcp-incomplete-banner')).toBeNull();
+  });
 });

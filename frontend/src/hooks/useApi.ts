@@ -51,6 +51,12 @@ export function useApi<T>(
         setLoading(false);
       }
     }
+    // The `deps` parameter is the whole point of this generic hook — each
+    // caller passes its own dep array. The `react-hooks/use-memo` rule
+    // (new in eslint-plugin-react-hooks v7+) wants a literal array here,
+    // which defeats the hook. Suppression is correct; the contract is
+    // documented at the parameter declaration.
+    // eslint-disable-next-line react-hooks/use-memo, react-hooks/exhaustive-deps
   }, deps);
 
   useEffect(() => {

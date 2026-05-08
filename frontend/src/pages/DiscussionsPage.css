@@ -226,6 +226,36 @@
   color: var(--kr-error);
 }
 
+/* ── Retry batch button — same shape as delete, accent-coloured ─── */
+.disc-batch-retry {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  font-size: 13px;
+  line-height: 1;
+  background: transparent;
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.2);
+  border-radius: 6px;
+  color: rgba(var(--kr-accent-rgb), 0.55);
+  cursor: pointer;
+  opacity: 0.45;
+  transition: opacity 0.12s, background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.disc-batch-header:hover .disc-batch-retry,
+.disc-batch-header:focus-within .disc-batch-retry,
+.disc-batch-retry:focus {
+  opacity: 1;
+}
+
+.disc-batch-retry:hover {
+  background: rgba(var(--kr-accent-rgb), 0.12);
+  border-color: rgba(var(--kr-accent-rgb), 0.5);
+  color: var(--kr-accent);
+}
+
 /* Touch devices have no hover state — keep the icon visible so users can
    tap it. The 35% default already does this on desktop too, so this is
    mostly a safety net for explicit touch detection. */
@@ -320,9 +350,18 @@
 }
 
 /* ── Swipeable discussion item ────────────────────────── */
+/* `content-visibility: auto` lets the browser skip layout/paint for
+ * off-screen disc rows. With 500+ discussions in the sidebar this
+ * cuts initial render and scroll cost dramatically (Chromium / Firefox
+ * implement it; Safari falls back to default rendering). The `contain-
+ * intrinsic-size` hint keeps the scrollbar height stable so the user
+ * doesn't see jumpy scroll position on first visit. Must match the
+ * actual rendered height (~52 px for `.disc-item` with title + meta). */
 .disc-swipe-wrap {
   position: relative;
   overflow: hidden;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 52px;
 }
 
 .disc-swipe-bg {
@@ -798,6 +837,40 @@
   display: flex;
   align-items: center;
   gap: var(--kr-sp-3);
+}
+
+/* Introspection-tools call counter pill — sits in the title row, blue
+ * tint to distinguish it from the orange/yellow "active task" badges. */
+.disc-introspection-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  background: rgba(var(--kr-info-rgb), 0.12);
+  color: var(--kr-info);
+  border: 1px solid rgba(var(--kr-info-rgb), 0.25);
+  flex-shrink: 0;
+  cursor: help;
+}
+
+/* Inline notice rendered under a popover section when the active
+ * agent doesn't support a feature surfaced by that section (e.g. the
+ * summary-strategy section warns Vibe / Ollama users that the
+ * introspection tools won't fire). Subtle warning tint, not a hard
+ * block — the user can still pick the option, they just see what
+ * they're trading off. */
+.disc-popover-note {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: var(--kr-r-sm);
+  font-size: var(--kr-fs-xs);
+  line-height: 1.35;
+  background: rgba(var(--kr-warning-rgb), 0.10);
+  color: var(--kr-warning);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.25);
 }
 
 .disc-chat-header-sub {
@@ -1328,6 +1401,62 @@
   box-shadow: var(--kr-shadow-md);
 }
 
+/* ── Persistent scroll-top / scroll-bottom arrows ─────────
+ * Vertical stack in the bottom-right of the messages container, just
+ * above the composer. Each arrow is a circular FAB; we use plain
+ * Unicode arrows (↑ ↓) so we don't need an extra Lucide import. */
+.disc-scroll-jump-stack {
+  position: absolute;
+  right: 16px;
+  bottom: 90px;
+  z-index: 9;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none; /* let clicks pass through the gap to the messages */
+}
+
+.disc-scroll-jump-btn {
+  pointer-events: auto;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 1px solid var(--kr-border);
+  background: var(--kr-bg-surface);
+  color: var(--kr-text-secondary);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: var(--kr-shadow-sm);
+  transition: transform 0.15s, background 0.15s, color 0.15s, box-shadow 0.15s;
+  /* Touch-friendly hitbox without inflating the visible button —
+   * the tap target is 44 × 44 via padding-box on coarse pointers. */
+}
+
+@media (pointer: coarse) {
+  .disc-scroll-jump-btn { min-width: 44px; min-height: 44px; }
+}
+
+.disc-scroll-jump-btn:hover {
+  transform: translateY(-1px);
+  background: var(--kr-bg-elevated);
+  color: var(--kr-accent);
+  box-shadow: var(--kr-shadow-md);
+}
+
+/* Highlight the down arrow when there's unseen content below. The pill
+ * pattern above is still rendered alongside; the arrow gives an icon-
+ * only fallback when the user dismissed the pill or when the badge
+ * status changes during scroll. */
+.disc-scroll-jump-btn[data-has-new="true"] {
+  background: var(--kr-accent);
+  color: var(--kr-bg-base);
+  border-color: transparent;
+}
+
 .disc-messages-col {
   flex: 1;
   display: flex;
@@ -1342,9 +1471,20 @@
 }
 
 /* ── Message rows and bubbles ─────────────────────────── */
+/* `content-visibility: auto` lets the browser skip layout/paint for
+ * messages that are off-screen. Markdown parsing still happens (React's
+ * memo guards that), but the DOM-level cost of laying out 200+ message
+ * bubbles drops dramatically on long discussions. `contain-intrinsic-size`
+ * gives the scrollbar a stable height so the user doesn't see jumpy
+ * scroll position when scrolling fast. ~120 px matches the typical
+ * 2-3 line bubble + meta. Browsers without support fall back to default
+ * rendering. Issue #29 (slow long discussion) traced 60 % of the
+ * scroll-jank to layout cost on un-virtualized message lists. */
 .disc-msg-row {
   display: flex;
   margin-bottom: 12px;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 120px;
 }
 
 .disc-msg-row[data-role="user"] {
@@ -1818,6 +1958,18 @@
   display: flex;
   align-items: center;
   transition: color 0.15s, background 0.15s;
+}
+
+/* Touch / coarse pointer: bump to a 44 × 44 hitbox so the toolbar row
+ * (TTS, debate, attach, voice…) meets WCAG 2.5.5. Desktop keeps the
+ * compact 6 px padding so the toolbar doesn't grow unnecessarily. */
+@media (pointer: coarse) {
+  .disc-tool-btn {
+    min-width: 44px;
+    min-height: 44px;
+    padding: 10px;
+    justify-content: center;
+  }
 }
 
 .disc-tool-btn[data-active="true"][data-color="red"] {
@@ -3122,9 +3274,15 @@
   border-radius: var(--kr-r-md);
   color: var(--kr-accent);
   cursor: pointer;
-  padding: 6px;
+  /* WCAG 44×44 minimum tap target — the previous 6 px padding around
+   * an 18 px icon gave ~30 × 30, well below the threshold. Tya's audit
+   * (2026-05-09) flagged this as a misclick risk on touch devices. */
+  min-width: 44px;
+  min-height: 44px;
+  padding: 12px;
   display: flex;
   align-items: center;
+  justify-content: center;
   flex-shrink: 0;
 }
 
@@ -3454,4 +3612,76 @@
   gap: var(--kr-sp-3);
   padding: var(--kr-sp-4) var(--kr-sp-6);
   background: var(--kr-bg-subtle);
+}
+
+/* ── kronn-internal tool-call trace ────────────────────────────────
+ *
+ * Persisted as System messages in the disc transcript by:
+ *   - `streaming.rs` post-stream MCP-tool capture (Claude Code et al)
+ *   - `slash_markers.rs` resolver (Vibe / Ollama)
+ *
+ * Rendered as a compact badge instead of a regular system message so
+ * the user recognises tool activity at a glance. The wrench icon
+ * mirrors the `🔧 N` pill in ChatHeader — that pill counts the badges
+ * on screen.
+ */
+.disc-msg-kronn-tool {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 6px 10px;
+  border-radius: var(--kr-r-md);
+  font-size: var(--kr-fs-xs);
+  font-family: var(--kr-font-mono);
+  background: rgba(var(--kr-info-rgb), 0.08);
+  color: var(--kr-info);
+  border: 1px dashed rgba(var(--kr-info-rgb), 0.30);
+}
+
+.disc-msg-kronn-tool-icon {
+  font-size: 13px;
+  margin-right: 2px;
+}
+
+.disc-msg-kronn-tool-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.disc-msg-kronn-tool-name {
+  background: transparent;
+  padding: 0;
+  font-weight: 600;
+  color: inherit;
+}
+
+.disc-msg-kronn-tool-args {
+  color: var(--kr-text-muted);
+  font-weight: 400;
+}
+
+.disc-msg-kronn-tool-result {
+  margin-top: 4px;
+  font-family: inherit;
+}
+
+.disc-msg-kronn-tool-result summary {
+  cursor: pointer;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-2xs);
+  user-select: none;
+}
+
+.disc-msg-kronn-tool-result pre {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  background: rgba(var(--kr-info-rgb), 0.05);
+  border-radius: var(--kr-r-sm);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-width: 60ch;
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-secondary);
 }

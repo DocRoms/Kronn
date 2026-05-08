@@ -53,23 +53,26 @@ pub struct RtkActivateRequest {
 /// Returns the argv tail for `rtk init` that hooks the given agent, or
 /// `None` if RTK doesn't support it.
 ///
-/// Notes on the flag matrix (verified empirically against RTK + its
+/// Notes on the flag matrix (verified empirically against RTK 0.37.2 + its
 /// own error messages):
-///   - `--auto-patch` is the **Claude-only** "yes to the settings.json
-///     patch prompt" shortcut. Combining it with `--codex` or `--gemini`
-///     triggers `rtk: --codex cannot be combined with --auto-patch`
-///     (and the symmetric Gemini error). Those flows write to a
-///     dedicated config file (AGENTS.md / shell rc) — no prompt to
-///     auto-answer, no `--auto-patch` needed.
-///   - `--hook-only` is also Claude-only (skip the RTK.md companion).
-///     Passing it with `--codex` or `--gemini` errors out with the same
-///     "cannot be combined" message.
+///   - `--auto-patch` accepts the settings.json patch prompt non-interactively.
+///     Claude takes it (always has). Gemini takes it as of RTK 0.37 —
+///     without it, `rtk init -g --gemini` stalls on a `Patch settings.json
+///     with RTK hook? [y/N]` prompt the backend can't answer, defaults to
+///     N, and the hook entry is never written into `~/.gemini/settings.json`
+///     (only the hook .sh + GEMINI.md companion land). The user's CTA looked
+///     successful but the agent never picked up the hook. Codex still
+///     rejects the combination: `rtk: --codex cannot be combined with
+///     --auto-patch` — that flow only writes AGENTS.md, no settings.json
+///     patch to authorize.
+///   - `--hook-only` is **Claude-only** (skip the RTK.md companion). Passing
+///     it with `--codex` or `--gemini` errors out with "cannot be combined".
 ///   - Net: per-agent matrix is one well-known shape per agent.
 fn rtk_args_for(agent_type: &AgentType) -> Option<Vec<&'static str>> {
     match agent_type {
         AgentType::ClaudeCode => Some(vec!["init", "-g", "--auto-patch", "--hook-only"]),
         AgentType::Codex      => Some(vec!["init", "-g", "--codex"]),
-        AgentType::GeminiCli  => Some(vec!["init", "-g", "--gemini"]),
+        AgentType::GeminiCli  => Some(vec!["init", "-g", "--gemini", "--auto-patch"]),
         // RTK's `--copilot` targets VS Code Copilot Chat (writes to the
         // editor's settings.json), not the @github/copilot standalone
         // CLI that Kronn detects as `CopilotCli`. Treating it as
@@ -91,7 +94,9 @@ fn rtk_uninstall_args_for(agent_type: &AgentType) -> Option<Vec<&'static str>> {
     match agent_type {
         AgentType::ClaudeCode => Some(vec!["init", "-g", "--auto-patch", "--uninstall"]),
         AgentType::Codex      => Some(vec!["init", "-g", "--codex", "--uninstall"]),
-        AgentType::GeminiCli  => Some(vec!["init", "-g", "--gemini", "--uninstall"]),
+        // `--auto-patch` mirrors install: avoids the settings.json prompt
+        // that would otherwise leave the entry orphaned in the file.
+        AgentType::GeminiCli  => Some(vec!["init", "-g", "--gemini", "--auto-patch", "--uninstall"]),
         AgentType::CopilotCli
         | AgentType::Kiro
         | AgentType::Vibe
@@ -288,6 +293,66 @@ pub async fn deactivate(
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
+pub struct RtkVersionInfo {
+    /// `true` when `rtk --version` ran and we got a numeric prefix back.
+    /// Hides the freshness pill cleanly when RTK is absent.
+    pub available: bool,
+    /// Numeric prefix of `rtk --version`'s stdout, e.g. "0.37.2". `None`
+    /// when the call failed or the output couldn't be parsed.
+    pub installed: Option<String>,
+    /// Latest known stable version from our bumped-per-release registry.
+    pub latest_known: String,
+    /// True iff `installed < latest_known` under lenient semver. The
+    /// frontend renders the "update available" pill from this flag only —
+    /// keeps the freshness logic centralised in one Rust comparator.
+    pub update_available: bool,
+    /// Copy-pasteable upgrade command (idempotent — RTK install.sh
+    /// upgrades in place).
+    pub update_command: String,
+}
+
+/// GET /api/rtk/version
+/// Returns `rtk --version` output (parsed) alongside our latest-known
+/// version and a precomputed `update_available` flag. Frontend uses
+/// this to surface an "update available" pill in the RTK section
+/// without re-implementing semver compare in TypeScript.
+pub async fn version() -> Json<ApiResponse<RtkVersionInfo>> {
+    let latest_known = crate::core::versions::LATEST_RTK_VERSION.to_string();
+    let update_command = crate::core::versions::RTK_UPDATE_CMD.to_string();
+    let empty = RtkVersionInfo {
+        available: false,
+        installed: None,
+        latest_known: latest_known.clone(),
+        update_available: false,
+        update_command: update_command.clone(),
+    };
+    if !crate::core::rtk_detect::rtk_binary_available() {
+        return Json(ApiResponse::ok(empty));
+    }
+    let output = match async_cmd("rtk").arg("--version").output().await {
+        Ok(o) if o.status.success() => o,
+        _ => return Json(ApiResponse::ok(empty)),
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // `rtk --version` prints `rtk X.Y.Z` — pull the second whitespace-
+    // separated token. We're tolerant: if the shape ever changes, the
+    // pill silently hides instead of bricking the panel.
+    let installed = stdout.split_whitespace().nth(1).map(|s| s.to_string());
+    let update_available = installed
+        .as_deref()
+        .map(|i| crate::core::versions::update_available(i, &latest_known))
+        .unwrap_or(false);
+    Json(ApiResponse::ok(RtkVersionInfo {
+        available: installed.is_some(),
+        installed,
+        latest_known,
+        update_available,
+        update_command,
+    }))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct RtkSavings {
     /// `true` when we got a readable response from RTK. Frontend uses this
     /// flag to decide whether to render the counter at all — when RTK is
@@ -402,7 +467,10 @@ mod tests {
 
     #[test]
     fn rtk_args_codex_no_auto_patch_no_hook_only() {
-        // Both flags trigger `--codex cannot be combined with …` from RTK.
+        // `--codex` still rejects `--auto-patch` and `--hook-only` (verified
+        // against rtk 0.37.2 — errors with `--codex cannot be combined with
+        // --auto-patch`). Codex flow only writes AGENTS.md, no settings.json
+        // patch to authorize.
         let args = rtk_args_for(&AgentType::Codex).expect("Codex is supported");
         assert_eq!(args, vec!["init", "-g", "--codex"]);
         assert!(!args.contains(&"--auto-patch"), "Codex flow must not pass --auto-patch");
@@ -410,10 +478,16 @@ mod tests {
     }
 
     #[test]
-    fn rtk_args_gemini_no_auto_patch_no_hook_only() {
+    fn rtk_args_gemini_uses_auto_patch() {
+        // Regression: without `--auto-patch`, `rtk init -g --gemini` stalls
+        // on a `Patch settings.json with RTK hook? [y/N]` prompt. Backend
+        // has no stdin → defaults to N → settings.json never gets the hook
+        // entry → detection returns false → "RTK — hook not configured"
+        // even though the success toast fired. RTK ≥ 0.37 accepts the
+        // combination (older versions errored — this is the rtk-0.37 matrix).
         let args = rtk_args_for(&AgentType::GeminiCli).expect("Gemini is supported");
-        assert_eq!(args, vec!["init", "-g", "--gemini"]);
-        assert!(!args.contains(&"--auto-patch"));
+        assert_eq!(args, vec!["init", "-g", "--gemini", "--auto-patch"]);
+        assert!(!args.contains(&"--hook-only"), "Gemini flow must not pass --hook-only");
     }
 
     #[test]
@@ -448,7 +522,7 @@ mod tests {
         );
         assert_eq!(
             rtk_uninstall_args_for(&AgentType::GeminiCli).unwrap(),
-            vec!["init", "-g", "--gemini", "--uninstall"],
+            vec!["init", "-g", "--gemini", "--auto-patch", "--uninstall"],
         );
         // Must mirror the install matrix's "unsupported" set.
         assert!(rtk_uninstall_args_for(&AgentType::Kiro).is_none());
