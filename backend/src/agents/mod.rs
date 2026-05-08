@@ -172,6 +172,8 @@ async fn detect_agent(def: &AgentDef) -> AgentDetection {
     let rtk_available = crate::core::rtk_detect::rtk_binary_available();
     let rtk_hook_configured = crate::core::rtk_detect::rtk_hook_configured_for(&def.agent_type);
 
+    let runtime_warning = detect_runtime_warning(&def.agent_type);
+
     if let Some(loc) = found {
         // Version detection may fail if symlinks are broken inside container
         let version = get_version_from(&loc.path).await.ok();
@@ -189,7 +191,8 @@ async fn detect_agent(def: &AgentDef) -> AgentDetection {
             enabled: true,
             path: Some(loc.path),
             version,
-            latest_version: None,
+            latest_version: crate::core::versions::latest_known_agent_version(&def.agent_type)
+                .map(|s| s.to_string()),
             origin: def.origin.to_string(),
             install_command: Some(def.install_cmd.to_string()),
             host_managed: loc.host_managed,
@@ -197,6 +200,7 @@ async fn detect_agent(def: &AgentDef) -> AgentDetection {
             runtime_available: true,
             rtk_available,
             rtk_hook_configured,
+            runtime_warning,
         }
     } else {
         // No local binary — probe npx/uvx fallback
@@ -208,7 +212,8 @@ async fn detect_agent(def: &AgentDef) -> AgentDetection {
             enabled: true,
             path: None,
             version: None,
-            latest_version: None,
+            latest_version: crate::core::versions::latest_known_agent_version(&def.agent_type)
+                .map(|s| s.to_string()),
             origin: def.origin.to_string(),
             install_command: Some(def.install_cmd.to_string()),
             host_managed: false,
@@ -216,7 +221,53 @@ async fn detect_agent(def: &AgentDef) -> AgentDetection {
             runtime_available,
             rtk_available,
             rtk_hook_configured,
+            runtime_warning,
         }
+    }
+}
+
+/// Surface a per-agent runtime-degradation warning to the frontend.
+///
+/// Today only Vibe sets one: when `vibe-runner.py` has hit the SDK
+/// signature mismatch in this boot cycle, it writes a sentinel file
+/// (cf. `_sdk_sentinel_path` in the runner). Subsequent agent calls
+/// skip the SDK probe and run via the direct Mistral API path —
+/// faster, but without local tools (bash, file I/O, MCP). The UI
+/// shows a yellow note in Settings → Agents so the user knows
+/// they're in fallback mode without having to read backend logs.
+///
+/// Returns the i18n key the frontend will resolve, or `None` when the
+/// agent is running in its primary mode.
+fn detect_runtime_warning(agent_type: &AgentType) -> Option<String> {
+    if !matches!(agent_type, AgentType::Vibe) {
+        return None;
+    }
+    // Mirror of vibe-runner.py:_sdk_sentinel_path. Per-uid suffix +
+    // XDG_RUNTIME_DIR / TMPDIR / /tmp fallback. Auto-clears on
+    // machine reboot, so this warning is self-healing.
+    let base = std::env::var("XDG_RUNTIME_DIR")
+        .or_else(|_| std::env::var("TMPDIR"))
+        .unwrap_or_else(|_| "/tmp".into());
+    let uid_suffix = if cfg!(unix) {
+        // Pull libc::getuid via a tiny detour: read /proc/self/status. Avoids
+        // pulling a libc dep just for this.
+        std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find(|l| l.starts_with("Uid:"))
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .map(|n| n.to_string())
+            })
+            .unwrap_or_else(|| "unknown".to_string())
+    } else {
+        "win".to_string()
+    };
+    let sentinel = std::path::Path::new(&base).join(format!("kronn-vibe-no-sdk-{}", uid_suffix));
+    if sentinel.exists() {
+        Some("vibe.sdk_fallback".to_string())
+    } else {
+        None
     }
 }
 

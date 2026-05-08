@@ -145,8 +145,12 @@ export function HostDiscoverySection({ t: _t }: HostDiscoverySectionProps) {
   const groups = new Map<string, { scope: HostScope; items: DiscoveredHostMcp[] }>();
   for (const entry of entries) {
     const key = scopeKey(entry.scope);
-    if (!groups.has(key)) groups.set(key, { scope: entry.scope, items: [] });
-    groups.get(key)!.items.push(entry);
+    let group = groups.get(key);
+    if (!group) {
+      group = { scope: entry.scope, items: [] };
+      groups.set(key, group);
+    }
+    group.items.push(entry);
   }
   const sortedGroups = Array.from(groups.values()).sort((a, b) => scopeOrder(a.scope) - scopeOrder(b.scope));
 

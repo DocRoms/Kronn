@@ -1,8 +1,8 @@
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo, useDeferredValue } from 'react';
 import './DiscussionsPage.css';
 import { MessageBubble, MarkdownContent } from '../components/MessageBubble';
 import { ChatInput } from '../components/ChatInput';
-import { discussions as discussionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, contacts as contactsApi, workflows as workflowsApi } from '../lib/api';
+import { discussions as discussionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, contacts as contactsApi, workflows as workflowsApi, quickPrompts as quickPromptsApi } from '../lib/api';
 import { GitPanel } from '../components/GitPanel';
 import { TestModeBanner } from '../components/TestModeBanner';
 import { TestModeModal } from '../components/TestModeModal';
@@ -14,12 +14,13 @@ import type { NewDiscConfig } from '../components/NewDiscussionForm';
 import { AgentQuestionForm } from '../components/AgentQuestionForm';
 import { parseAgentQuestions } from '../lib/agent-question-parse';
 import { userError } from '../lib/userError';
-import type { Project, AgentDetection, Discussion, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile } from '../types/generated';
+import type { Project, AgentDetection, Discussion, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile, BatchRunSummary } from '../types/generated';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useQpChain } from '../hooks/useQpChain';
 import { useRafBatchedStream } from '../hooks/useRafBatchedStream';
+import { buildStreamingFlush } from '../lib/stream-flush';
 import { useT } from '../lib/I18nContext';
-import { AGENT_LABELS, agentColor, isAgentRestricted as isAgentRestrictedUtil, hasAgentFullAccess, getProjectGroup, isUsable } from '../lib/constants';
+import { AGENT_LABELS, agentColor, isAgentRestricted as isAgentRestrictedUtil, hasAgentFullAccess, getProjectGroup, isUsable, isBriefingDisc, isBootstrapDisc, isValidationDisc } from '../lib/constants';
 import type { ToastFn } from '../hooks/useToast';
 import {
   ChevronRight, Cpu, Loader2,
@@ -28,9 +29,6 @@ import {
   Menu,
 } from 'lucide-react';
 import { useIsMobile } from '../hooks/useMediaQuery';
-
-const isBootstrapDisc = (title: string) => title.startsWith('Bootstrap: ');
-const isBriefingDisc = (title: string) => title.startsWith('Briefing');
 
 export interface DiscussionsPageProps {
   projects: Project[];
@@ -44,6 +42,12 @@ export interface DiscussionsPageProps {
   prefill?: { projectId: string; title: string; prompt: string; locked?: boolean } | null;
   initialActiveDiscussionId?: string | null;
   onPrefillConsumed?: () => void;
+  /** Lets a banner inside DiscussionsPage seed a NewDiscussionForm
+   *  prefill on a sibling render — e.g. the post-bootstrap "Start dev
+   *  on issue #1" CTA needs to open the new-disc dialog with a
+   *  prefilled prompt. Symmetric with the existing path used by the
+   *  Projects page audit-validation CTA. */
+  onSetDiscPrefill?: (p: { projectId: string; title: string; prompt: string; locked?: boolean }) => void;
   /** Auto-open an existing discussion and trigger agent run (used after full audit) */
   autoRunDiscussionId?: string | null;
   onAutoRunConsumed?: () => void;
@@ -64,6 +68,9 @@ export interface DiscussionsPageProps {
   setSendingStartMap: React.Dispatch<React.SetStateAction<Record<string, number>>>;
   streamingMap: Record<string, string>;
   setStreamingMap: React.Dispatch<React.SetStateAction<Record<string, string>>>;
+  /** Watchdog tick (TD-20260504) — call from chunk handlers so the
+   *  Dashboard-side stale-stream detector knows the channel is alive. */
+  noteStreamTick: (discId: string) => void;
   abortControllers: React.MutableRefObject<Record<string, AbortController>>;
   cleanupStream: (discId: string) => void;
   // Lifted unseen tracking (lives in Dashboard for cross-page visibility)
@@ -99,6 +106,7 @@ export function DiscussionsPage({
   onNavigate,
   prefill,
   onPrefillConsumed,
+  onSetDiscPrefill,
   autoRunDiscussionId,
   onAutoRunConsumed,
   openDiscussionId,
@@ -112,6 +120,7 @@ export function DiscussionsPage({
   setSendingStartMap,
   streamingMap,
   setStreamingMap,
+  noteStreamTick,
   abortControllers,
   cleanupStream: cleanupStreamBase,
   markDiscussionSeen,
@@ -141,6 +150,12 @@ export function DiscussionsPage({
   const [testModeBlocker, setTestModeBlocker] = useState<TestModeBlocker | null>(null);
   const [testModePendingDiscId, setTestModePendingDiscId] = useState<string | null>(null);
   const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
+  // Race-free guard for handleEditMessage. A fast double Ctrl+Enter on
+  // the message-edit textarea (the only re-submit path) was reading
+  // `sending` from a stale closure → both invocations called
+  // `deleteLastAgentMessages` + `editLastUserMessage` + `runAgent` in
+  // parallel, producing duplicate user edits and parallel agent runs.
+  const editingMsgInFlightRef = useRef(false);
   const [editingText, setEditingText] = useState('');
   // Per-discussion override of the agent shown in the streaming placeholder.
   // Set when the user pings `@codex` (or any other agent) instead of the
@@ -175,7 +190,7 @@ export function DiscussionsPage({
   // back to the workflow run that spawned it. Refetched on batch WS events
   // (see handleWsMessage below) so newly-finished batches pick up their
   // parent_run_sequence label without a full page reload.
-  const [batchSummaries, setBatchSummaries] = useState<import('../types/generated').BatchRunSummary[]>([]);
+  const [batchSummaries, setBatchSummaries] = useState<BatchRunSummary[]>([]);
   const refetchBatchSummaries = useCallback(() => {
     workflowsApi.listBatchRunSummaries()
       .then(setBatchSummaries)
@@ -205,6 +220,11 @@ export function DiscussionsPage({
   // the user manually scrolls back near the bottom.
   const [stickToBottom, setStickToBottom] = useState(true);
   const [hasNewWhileScrolledUp, setHasNewWhileScrolledUp] = useState(false);
+  // Scroll-position state for the top/bottom jump arrows. Updated by
+  // `handleMessagesScroll` together with `stickToBottom`. We only render
+  // an arrow when the user actually *can* go further in that direction —
+  // the buttons stay out of the way on short discussions.
+  const [scrolledFromTop, setScrolledFromTop] = useState(false);
 
   // Persist sidebar collapse state to localStorage
   useEffect(() => {
@@ -233,15 +253,11 @@ export function DiscussionsPage({
   // Batched streaming: accumulate chunks in a ref, flush to state via rAF.
   // Extracted to hooks/useRafBatchedStream.ts — collapses dozens of SSE
   // deltas per frame into a single React state update.
-  const appendStreamChunk = useRafBatchedStream(snapshot => {
-    setStreamingMap(prev => {
-      const next = { ...prev };
-      for (const [k, v] of Object.entries(snapshot)) {
-        next[k] = (next[k] ?? '') + v;
-      }
-      return next;
-    });
-  });
+  // Flush logic (merge + watchdog tick) lives in `lib/stream-flush.ts`
+  // for unit-test coverage of the streaming contract.
+  const appendStreamChunk = useRafBatchedStream(
+    buildStreamingFlush(setStreamingMap, noteStreamTick),
+  );
 
   // Cache of fully-loaded discussions (with messages)
   const [loadedDiscussions, setLoadedDiscussions] = useState<Record<string, Discussion>>({});
@@ -276,6 +292,13 @@ export function DiscussionsPage({
 
   const sending = activeDiscussionId ? !!sendingMap[activeDiscussionId] : false;
   const streamingText = activeDiscussionId ? (streamingMap[activeDiscussionId] ?? '') : '';
+  // Deferred value for markdown rendering — every SSE chunk pushes a new
+  // streamingText, and ReactMarkdown re-parses the whole buffer each time.
+  // For long responses (5000+ chars), each parse takes 5-20 ms × 30 fps =
+  // saturated main thread. useDeferredValue lets the input/scroll handlers
+  // run first; the markdown re-parse happens at lower priority and may be
+  // interrupted if a new chunk arrives. Visible lag is ~1 frame at worst.
+  const deferredStreamingText = useDeferredValue(streamingText);
 
   // Auto-read new agent responses when TTS is enabled
   const prevMsgCountRef = useRef(-1);
@@ -355,7 +378,7 @@ export function DiscussionsPage({
     // Remote peer shared a discussion with us → refresh list
     if (msg.type === 'discussion_invite') {
       refetchDiscussions();
-      toast(`${msg.from_pseudo} shared "${msg.title}"`, 'info');
+      toast(t('contacts.sharedByPeer', msg.from_pseudo, msg.title), 'info');
     }
     // Batch workflow run finished — show a toast + refresh the disc list so
     // the sidebar group pill updates from "⏳ 7/12" to "✓ 12/12".
@@ -419,13 +442,17 @@ export function DiscussionsPage({
   // Timer for agent activity duration — uses lifted startMap to survive page switches
   useEffect(() => {
     if (sending && activeDiscussionId) {
+      // Hoist the (truthy here) id into a const so the closures below see
+      // the narrowed string instead of the original `string | null` —
+      // avoids non-null assertions and keeps the React-19 lint clean.
+      const did = activeDiscussionId;
       // Record start time if not already set
-      if (!sendingStartMap[activeDiscussionId]) {
-        setSendingStartMap(prev => ({ ...prev, [activeDiscussionId!]: Date.now() }));
+      if (!sendingStartMap[did]) {
+        setSendingStartMap(prev => ({ ...prev, [did]: Date.now() }));
       }
       // Update elapsed every second from the persistent start time
       const tick = () => {
-        const start = sendingStartMap[activeDiscussionId!] || Date.now();
+        const start = sendingStartMap[did] || Date.now();
         setSendingElapsed(Math.floor((Date.now() - start) / 1000));
       };
       tick();
@@ -464,6 +491,9 @@ export function DiscussionsPage({
     const atBottom = distanceFromBottom < 80;
     setStickToBottom(atBottom);
     if (atBottom) setHasNewWhileScrolledUp(false);
+    // Show the "jump to top" arrow once the user has scrolled past the
+    // first viewport. 80 px hysteresis at the top to avoid flicker.
+    setScrolledFromTop(el.scrollTop > 80);
   }, []);
   useEffect(() => {
     if (!stickToBottomRef.current) {
@@ -485,14 +515,39 @@ export function DiscussionsPage({
   }, [streamingText]);
   // Re-engage auto-scroll when the user switches discussions: jump to the
   // bottom of the new conversation and reset the stick flag.
+  //
+  // The two effects below split the work in two steps so the scroll
+  // actually lands on the *latest* message instead of the first:
+  //   - reset state immediately on disc switch,
+  //   - defer the scroll until messages are rendered (driven by the
+  //     `activeDiscussion?.messages.length` effect).
+  // Pre-fix the scroll fired in the same frame as the switch — the disc
+  // detail fetch (`discussionsApi.get`) was still in flight, so
+  // `chatEndRef` was beneath an empty container and the user landed on
+  // the first message of the previous render. User feedback on
+  // 2026-05-09: "quand on clique sur un message d'une discussion, on
+  // arrive toujours sur le premier message".
   useEffect(() => {
     setStickToBottom(true);
     setHasNewWhileScrolledUp(false);
-    // Defer to next frame so the new messages have rendered.
+  }, [activeDiscussionId]);
+
+  // Scroll to bottom once messages of the active disc are actually
+  // present. Triggers on: initial mount, disc switch (after the fetch
+  // settles), and every new message length change while sticky.
+  // We only auto-scroll on the cold load — once the user has scrolled
+  // away the regular `stickToBottom` logic above takes over.
+  const lastSettledDiscIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!activeDiscussion?.id) return;
+    const isFirstSettle = lastSettledDiscIdRef.current !== activeDiscussion.id;
+    if (!isFirstSettle) return;
+    if ((activeDiscussion.messages?.length ?? 0) === 0) return;
+    lastSettledDiscIdRef.current = activeDiscussion.id;
     requestAnimationFrame(() => {
       chatEndRef.current?.scrollIntoView({ behavior: 'instant' as ScrollBehavior });
     });
-  }, [activeDiscussionId]);
+  }, [activeDiscussion?.id, activeDiscussion?.messages.length]);
 
   // Refresh the pending-files count on the git-panel icon for Isolated
   // discussions. Fires on: discussion switch, every new message (typically
@@ -506,7 +561,7 @@ export function DiscussionsPage({
     if (sending) return; // let the stream finish before polling
     let cancelled = false;
     discussionsApi.gitStatus(activeDiscussion.id)
-      .then((res: any) => {
+      .then((res: { files?: unknown }) => {
         if (cancelled) return;
         const files = res?.files ?? [];
         setPendingFilesCount(Array.isArray(files) ? files.length : 0);
@@ -531,6 +586,51 @@ export function DiscussionsPage({
   }, []);
 
   const cleanupStream = useCallback((discId: string) => {
+    // Reported scroll-jump bug: when the SSE stream finishes, the
+    // streaming bubble unmounts (driven by `sending=false`) BEFORE the
+    // refetch lands the persisted agent message. The DOM briefly loses
+    // the bubble's height — the scroll position clamps up to the
+    // previous user message — and then the refetch lands and a smooth
+    // scroll animates down to the new bottom. The user perceives:
+    // "ça remonte au début du message, puis ça redescend".
+    //
+    // Fix: before flipping `sending=false`, convert the in-memory
+    // `streamingMap[discId]` buffer into an OPTIMISTIC agent message on
+    // `loadedDiscussions[discId].messages`. The streaming bubble
+    // unmounts at the same render where the optimistic bubble mounts
+    // — same content, same position, no height delta, no scroll jump.
+    // The async refetch arrives shortly after and REPLACES the
+    // optimistic with the persisted message (matching content), so the
+    // final state converges and no duplicate is left behind.
+    const streamedText = streamingMap[discId];
+    const targetAgent = streamingTargetMap[discId];
+    if (streamedText && streamedText.length > 0) {
+      setLoadedDiscussions(prev => {
+        const disc = prev[discId];
+        if (!disc) return prev;
+        // Bail out if the last message is already an Agent — guards
+        // against double-insert if cleanupStream is called twice
+        // (orchestrate cancellation, fast retry, etc.).
+        const last = disc.messages[disc.messages.length - 1];
+        if (last?.role === 'Agent') return prev;
+        return {
+          ...prev,
+          [discId]: {
+            ...disc,
+            messages: [...disc.messages, {
+              id: `optimistic-agent-${Date.now()}`,
+              role: 'Agent' as const,
+              content: streamedText,
+              agent_type: targetAgent ?? disc.agent,
+              timestamp: new Date().toISOString(),
+              tokens_used: 0,
+              auth_mode: null,
+            }],
+            message_count: disc.message_count + 1,
+          },
+        };
+      });
+    }
     cleanupStreamBase(discId);
     refetchDiscussions();
     refetchProjects(); // Refresh project audit_status for CTA updates
@@ -541,13 +641,24 @@ export function DiscussionsPage({
       const { [discId]: _drop, ...rest } = prev;
       return rest;
     });
-  }, [cleanupStreamBase, refetchDiscussions, refetchProjects, reloadDiscussion]);
+  }, [cleanupStreamBase, refetchDiscussions, refetchProjects, reloadDiscussion, streamingMap, streamingTargetMap]);
 
   // Called by ChatHeader after any inline API update (title, skills, profiles, etc.)
   const handleDiscussionUpdated = useCallback(() => {
     refetchDiscussions();
     if (activeDiscussionId) reloadDiscussion(activeDiscussionId);
   }, [refetchDiscussions, activeDiscussionId, reloadDiscussion]);
+
+  // ChatInput dispatches `kronn:discussion-updated` after auto-activating
+  // skills (or any future inline mutation that doesn't go through
+  // ChatHeader). Pre-fix this event was emitted but had no listener,
+  // so the sidebar + chips kept the old skill_ids until a manual
+  // refresh — fixed here by mirroring the WsMessage `chat_message`
+  // path: refetch the list + reload the active disc.
+  useEffect(() => {
+    window.addEventListener('kronn:discussion-updated', handleDiscussionUpdated);
+    return () => window.removeEventListener('kronn:discussion-updated', handleDiscussionUpdated);
+  }, [handleDiscussionUpdated]);
 
   // Called by ChatHeader after agent switch — triggers agent run on new agent
   const handleAgentSwitch = useCallback(async (_newAgent: AgentType) => {
@@ -576,7 +687,7 @@ export function DiscussionsPage({
   useEffect(() => {
     if (!activeDiscussionId) return;
     const disc = allDiscussions.find(d => d.id === activeDiscussionId);
-    if (disc && (isBriefingDisc(disc.title) || disc.title === 'Validation audit AI')) {
+    if (disc && (isBriefingDisc(disc.title) || isValidationDisc(disc.title))) {
       refetchProjects();
     }
   }, [activeDiscussionId, allDiscussions, refetchProjects]);
@@ -751,9 +862,21 @@ export function DiscussionsPage({
   };
 
   const handleSendMessage = async (msg: string, targetAgent?: AgentType) => {
-    if (!activeDiscussionId || !msg.trim() || sending) return;
-    stopTts();
+    if (!activeDiscussionId || !msg.trim()) return;
     const discId = activeDiscussionId;
+    // Synchronous re-entry guard: `sending` is derived from `sendingMap`
+    // which only flips true inside the SSE `onStart` callback (backend
+    // round-trip ~100 ms-2 s). A fast double / triple click on Send fires
+    // before that flip and runs handleSendMessage in parallel — both
+    // calls see `sending=false` from the same render closure, both
+    // optimistically insert a user message, and both call
+    // `sendMessageStream`, producing 2-3 parallel agent runs on the same
+    // disc with duplicate user messages in the transcript.
+    //
+    // `abortControllers.current[discId]` is set synchronously a few
+    // lines below; presence here means a previous call is in-flight.
+    if (sending || abortControllers.current[discId]) return;
+    stopTts();
 
     // Optimistically add user message to loadedDiscussions so it appears immediately
     setLoadedDiscussions(prev => {
@@ -842,6 +965,15 @@ export function DiscussionsPage({
   const handleStop = () => {
     if (!activeDiscussionId) return;
     const discId = activeDiscussionId;
+    // Backend cancellation FIRST — without this the agent keeps
+    // running and burning tokens after the user clicked Stop.
+    // Pre-fix the local abort just disconnected the SSE channel; the
+    // backend's `tx.is_closed()` branch is "keep running to save
+    // result in DB", so the agent finished its long thought + saved
+    // a full response *despite* the user explicitly stopping.
+    discussionsApi.stop(discId).catch((e) => {
+      console.warn('Backend stop failed (continuing local abort):', e);
+    });
     const controller = abortControllers.current[discId];
     if (controller) controller.abort();
     cleanupStream(discId);
@@ -977,11 +1109,16 @@ export function DiscussionsPage({
     refetchDiscussions();
   }, [refetchDiscussions]);
   const handleDiscDelete = useCallback(async (discId: string) => {
-    if (!confirm('Supprimer cette discussion et tous ses messages ?')) return;
+    if (!confirm(t('disc.confirmDelete'))) return;
+    // Abort any in-flight stream + clear lifted streaming state BEFORE the
+    // delete request so a slow agent reply doesn't try to write back to a
+    // disc that's about to vanish from the DB.
+    try { abortControllers.current[discId]?.abort(); } catch { /* noop */ }
+    cleanupStreamBase(discId);
     await discussionsApi.delete(discId);
     setActiveDiscussionId(prev => prev === discId ? null : prev);
     refetchDiscussions();
-  }, [refetchDiscussions]);
+  }, [refetchDiscussions, abortControllers, cleanupStreamBase, t]);
   const handleDiscUnarchive = useCallback(async (discId: string) => {
     await discussionsApi.update(discId, { archived: false });
     refetchDiscussions();
@@ -990,7 +1127,7 @@ export function DiscussionsPage({
   const handleToggleGroup = useCallback((key: string) => {
     setCollapsedDiscGroups(prev => {
       const n = new Set(prev);
-      prev.has(key) ? n.delete(key) : n.add(key);
+      if (prev.has(key)) n.delete(key); else n.add(key);
       return n;
     });
   }, []);
@@ -1031,10 +1168,21 @@ export function DiscussionsPage({
     try {
       const res = await discussionsApi.testModeExit(discId);
       refetchDiscussions();
-      toast(t('testMode.exitSuccess', res.restored_branch), 'success');
+      // Success path: branch restored. If the backend surfaced a
+      // post-checkout `warning` (typically a stash-pop conflict — the
+      // exit itself succeeded but the user has work left in the
+      // stash), show it as a warning toast so the operator can act on
+      // it. Pre-fix this came back as `ApiResponse::err`, which the
+      // catch arm below painted as a hard failure.
+      if (res.warning) {
+        toast(`${t('testMode.exitSuccess', res.restored_branch)} — ${res.warning}`, 'warning');
+      } else {
+        toast(t('testMode.exitSuccess', res.restored_branch), 'success');
+      }
     } catch (e) {
-      // Server returns a descriptive error (stash conflict, checkout
-      // failure) — pass it through so the user can act on it.
+      // Hard failure (checkout itself failed, DB error, …). The server
+      // never cleared `test_mode_*` fields in that case, so the disc
+      // is still considered "in test mode" — surface as error.
       toast(t('testMode.exitError', userError(e)), 'error');
     } finally {
       setTestModeBusy(false);
@@ -1061,33 +1209,45 @@ export function DiscussionsPage({
   }, [toast, t]);
 
   const handleContactDelete = useCallback(async (id: string) => {
+    // Pre-fix the X button on a contact pill in the sidebar fired
+    // delete with no confirmation. Removing a contact tears down the
+    // shared-discussion bridge and revokes every shared message —
+    // costly to recreate. Now a confirm is required.
+    if (!confirm(t('contacts.deleteConfirm'))) return;
     await contactsApi.delete(id);
     setContactsList(prev => prev.filter(x => x.id !== id));
     toast(t('contacts.deleted'), 'success');
   }, [toast, t]);
 
   const handleEditMessage = async () => {
-    if (!activeDiscussionId || !editingMsgId || !editingText.trim() || sending) return;
+    if (!activeDiscussionId || !editingMsgId || !editingText.trim()) return;
+    if (editingMsgInFlightRef.current) return;
+    if (sending || abortControllers.current[activeDiscussionId]) return;
+    editingMsgInFlightRef.current = true;
     const discId = activeDiscussionId;
-    await discussionsApi.deleteLastAgentMessages(discId);
-    await discussionsApi.editLastUserMessage(discId, editingText.trim());
-    setEditingMsgId(null);
-    setEditingText('');
-    await refetchDiscussions();
-    reloadDiscussion(discId);
-    const controller = new AbortController();
-    abortControllers.current[discId] = controller;
-    setSendingMap(prev => ({ ...prev, [discId]: true }));
-    setStreamingMap(prev => ({ ...prev, [discId]: '' }));
-    resetAgentLogs();
-    await discussionsApi.runAgent(
-      discId,
-      (text) => appendStreamChunk(discId, text),
-      () => cleanupStream(discId),
-      (error) => { console.error('Agent error:', error); const e = userError(error); if (e.includes('checked out') || e.includes('worktree')) { setWorktreeError(e); } else { toast(e, 'error'); } cleanupStream(discId); },
-      controller.signal,
-        onAgentLog,
-    );
+    try {
+      await discussionsApi.deleteLastAgentMessages(discId);
+      await discussionsApi.editLastUserMessage(discId, editingText.trim());
+      setEditingMsgId(null);
+      setEditingText('');
+      await refetchDiscussions();
+      reloadDiscussion(discId);
+      const controller = new AbortController();
+      abortControllers.current[discId] = controller;
+      setSendingMap(prev => ({ ...prev, [discId]: true }));
+      setStreamingMap(prev => ({ ...prev, [discId]: '' }));
+      resetAgentLogs();
+      await discussionsApi.runAgent(
+        discId,
+        (text) => appendStreamChunk(discId, text),
+        () => cleanupStream(discId),
+        (error) => { console.error('Agent error:', error); const e = userError(error); if (e.includes('checked out') || e.includes('worktree')) { setWorktreeError(e); } else { toast(e, 'error'); } cleanupStream(discId); },
+        controller.signal,
+          onAgentLog,
+      );
+    } finally {
+      editingMsgInFlightRef.current = false;
+    }
   };
 
   const handleOrchestrate = async (orchAgents: AgentType[], orchRounds: number, orchSkillIds: string[], orchDirectiveIds: string[]) => {
@@ -1249,6 +1409,42 @@ export function DiscussionsPage({
               void count;
             }
           }}
+          onRetryBatch={async (oldRunId, qpId, discIds) => {
+            // Rebuild the batch payload from the existing children's
+            // title + initial user prompt, then fire a fresh batch via
+            // the QP endpoint. The OLD batch is left alone (with its
+            // history) — the user can delete it manually if they want.
+            // Tya's audit on 2026-05-09 flagged the missing retry surface.
+            try {
+              const items: { title: string; prompt: string }[] = [];
+              for (const did of discIds) {
+                const disc = allDiscussions.find(d => d.id === did);
+                if (!disc) continue;
+                // Need the full disc to read messages[0]. Fetch on demand.
+                const full = await discussionsApi.get(did).catch(() => null);
+                const firstUser = full?.messages.find(m => m.role === 'User');
+                if (firstUser) {
+                  items.push({ title: disc.title, prompt: firstUser.content });
+                }
+              }
+              if (items.length === 0) {
+                toast(t('disc.batchRetryEmpty'), 'error');
+                return;
+              }
+              const batchName = `Retry · ${items.length} items`;
+              await quickPromptsApi.batchRun(qpId, {
+                batch_name: batchName,
+                items,
+                workspace_mode: 'Direct',
+              });
+              toast(t('disc.batchRetryToast', items.length), 'success');
+              refetchDiscussions();
+              refetchBatchSummaries();
+              void oldRunId; // logged + reserved for future "side-by-side" UI
+            } catch (e) {
+              toast(t('disc.batchRetryError', userError(e)), 'error');
+            }
+          }}
           collapsedGroups={collapsedDiscGroups}
           onToggleGroup={handleToggleGroup}
           onCollapse={() => setSidebarCollapsed(true)}
@@ -1381,11 +1577,16 @@ export function DiscussionsPage({
                   prevUserTs.push(lastSeenUserTs);
                   if (msgs[i].role === 'User') lastSeenUserTs = msgs[i].timestamp;
                 }
-                // Hide the initial system prompt for automated discussions (briefing, validation, bootstrap)
+                // Hide the initial system prompt for automated discussions (briefing, validation, bootstrap).
+                // Uses locale-aware detectors — `Briefing` is localized
+                // (EN `Project Briefing`, ES `Briefing del proyecto`,
+                // FR `Briefing projet`) so a `startsWith('Briefing')`
+                // here missed EN and leaked the system prompt as the
+                // first visible message for English users.
                 const isAutoPrompt = (idx: number) => idx === 0 && msgs[0]?.role === 'User' && (
-                  activeDiscussion.title.startsWith('Briefing') ||
-                  activeDiscussion.title.startsWith('Validation audit') ||
-                  activeDiscussion.title.startsWith('Bootstrap:')
+                  isBriefingDisc(activeDiscussion.title) ||
+                  isValidationDisc(activeDiscussion.title) ||
+                  isBootstrapDisc(activeDiscussion.title)
                 );
                 return msgs.map((msg, idx) => {
                 if (isAutoPrompt(idx)) return null;
@@ -1453,7 +1654,7 @@ export function DiscussionsPage({
                       // partial state and snaps into place when the closer
                       // arrives in the next chunk.
                       <div className="disc-streaming-md">
-                        <MarkdownContent content={streamingText} />
+                        <MarkdownContent content={deferredStreamingText} />
                       </div>
                     ) : (
                       <div className="disc-streaming-waiting" aria-live="assertive">
@@ -1600,7 +1801,7 @@ export function DiscussionsPage({
                       <p className="disc-cta-text" data-variant="warning">
                         <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> {t('audit.auditInProgress')}
                       </p>
-                      <button className="disc-cta-btn" data-variant="warning" onClick={() => { onNavigate('projects', { projectId: activeDiscussion.project_id! }); }}>
+                      <button className="disc-cta-btn" data-variant="warning" onClick={() => { if (activeDiscussion.project_id) onNavigate('projects', { projectId: activeDiscussion.project_id }); }}>
                         <Play size={12} /> {t('audit.goToProject')}
                       </button>
                     </div>
@@ -1613,7 +1814,7 @@ export function DiscussionsPage({
                     <p className="disc-cta-text" data-variant="info">
                       <Check size={14} /> {t('audit.briefingDone')}
                     </p>
-                    <button className="disc-cta-btn" data-variant="info" onClick={() => { onNavigate('projects', { projectId: activeDiscussion.project_id! }); }}>
+                    <button className="disc-cta-btn" data-variant="info" onClick={() => { if (activeDiscussion.project_id) onNavigate('projects', { projectId: activeDiscussion.project_id }); }}>
                       <Play size={12} /> {t('audit.goToProject')}
                     </button>
                   </div>
@@ -1674,7 +1875,7 @@ export function DiscussionsPage({
                 if (!readyMsg) return null;
                 const jsonMatch = readyMsg.content.match(/```json\s*\n([\s\S]*?)\n```/);
                 if (!jsonMatch) return null;
-                let parsedPayload: unknown = null;
+                let parsedPayload: unknown;
                 try { parsedPayload = JSON.parse(jsonMatch[1]); } catch { return null; }
                 if (!parsedPayload || typeof parsedPayload !== 'object' || !('steps' in (parsedPayload as Record<string, unknown>))) return null;
                 // Inject project_id from discussion context if the agent left it null
@@ -1781,6 +1982,33 @@ export function DiscussionsPage({
                       <p className="disc-cta-text" data-variant="accent">
                         <Check size={14} /> {t('bootstrap.issuesCreated')}
                       </p>
+                      {/* Dev kickoff (0.7.1) — closes the bootstrap_plus flow.
+                       *  Pre-fix the user had to manually create a new
+                       *  discussion or fire a Batch QP to start coding on
+                       *  the first issue. This CTA opens NewDiscussionForm
+                       *  prefilled with a localized "start coding on
+                       *  issue #1" prompt, scoped to the same project,
+                       *  unlocked so the user can tweak before sending. */}
+                      {proj && onSetDiscPrefill && (
+                        <button
+                          className="disc-cta-btn"
+                          data-variant="accent"
+                          onClick={() => {
+                            onSetDiscPrefill({
+                              projectId: proj.id,
+                              title: t('bootstrap.devKickoffTitle'),
+                              prompt: t('bootstrap.devKickoffPrompt'),
+                              // Unlocked: the user often wants to edit (pick
+                              // a different issue number, add constraints,
+                              // etc.) before firing.
+                              locked: false,
+                            });
+                            onNavigate('discussions', { projectId: proj.id });
+                          }}
+                        >
+                          <Play size={12} /> {t('bootstrap.startDev')}
+                        </button>
+                      )}
                       <button className="disc-cta-btn" data-variant="accent" onClick={() => {
                         if (proj) onNavigate('projects', { projectId: proj.id });
                       }}>
@@ -1813,6 +2041,46 @@ export function DiscussionsPage({
                 ↓ {t('disc.newContent')}
               </button>
             )}
+
+            {/* Persistent jump arrows. Render as a small vertical stack in
+             *  the bottom-right of the message list. They appear only when
+             *  there's actually scroll room in that direction — short
+             *  discussions stay clean. User feedback on 2026-05-09:
+             *  "quand on est au début ou à la fin, on doit scroller à
+             *  mort pour aller à l'autre bout, pas moyen d'avoir une
+             *  petite flèche pour y aller direct". */}
+            <div className="disc-scroll-jump-stack" aria-hidden={!scrolledFromTop && stickToBottom}>
+              {scrolledFromTop && (
+                <button
+                  type="button"
+                  className="disc-scroll-jump-btn"
+                  title={t('disc.scrollToTop')}
+                  aria-label={t('disc.scrollToTop')}
+                  onClick={() => {
+                    const el = messagesContainerRef.current;
+                    if (el) el.scrollTo({ top: 0, behavior: 'smooth' });
+                  }}
+                >
+                  ↑
+                </button>
+              )}
+              {!stickToBottom && (
+                <button
+                  type="button"
+                  className="disc-scroll-jump-btn"
+                  data-has-new={hasNewWhileScrolledUp}
+                  title={t('disc.scrollToBottom')}
+                  aria-label={t('disc.scrollToBottom')}
+                  onClick={() => {
+                    setStickToBottom(true);
+                    setHasNewWhileScrolledUp(false);
+                    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+                  }}
+                >
+                  ↓
+                </button>
+              )}
+            </div>
 
             {/* Disabled agent banner */}
             {activeAgentDisabled && activeDiscussion && (
@@ -1902,7 +2170,7 @@ export function DiscussionsPage({
                 projectId={activeDiscussion.project_id}
                 discussionId={activeDiscussion.workspace_mode === 'Isolated' ? activeDiscussion.id : undefined}
                 onClose={() => setShowGitPanel(false)}
-                terminalEnabled={agentAccess ? Object.values(agentAccess).some((v: any) => v?.full_access) : false}
+                terminalEnabled={agentAccess ? Object.values(agentAccess).some(v => (v as { full_access?: boolean } | undefined)?.full_access) : false}
               />
             )}
 

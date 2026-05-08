@@ -28,7 +28,7 @@ vi.mock('../../lib/api', () => ({
 
 import { agents as agentsApi, setup as setupApi, projects as projectsApi } from '../../lib/api';
 import { SetupWizard } from '../SetupWizard';
-import type { AgentDetection, SetupStatus, Project } from '../../types/generated';
+import type { AgentDetection, DetectedRepo, SetupStatus, Project } from '../../types/generated';
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -58,7 +58,7 @@ const makeStatus = (overrides: Partial<SetupStatus> = {}): SetupStatus => ({
   ...overrides,
 });
 
-const makeRepo = (overrides: Partial<import('../../types/generated').DetectedRepo> = {}): import('../../types/generated').DetectedRepo => ({
+const makeRepo = (overrides: Partial<DetectedRepo> = {}): DetectedRepo => ({
   name: 'my-repo',
   path: '/home/user/repos/my-repo',
   remote_url: null,

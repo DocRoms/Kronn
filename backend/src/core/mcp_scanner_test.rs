@@ -376,6 +376,104 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tpl);
     }
 
+    // ─── atomic_write_checked (TD-20260427-host-sync-flock) ───────────────
+
+    #[test]
+    fn atomic_write_checked_writes_when_no_prior_version() {
+        let tmp = setup_tmp("aw-checked-fresh");
+        let target = tmp.join("config.json");
+        // expected_mtime = None → first install path, write unconditionally.
+        let r = atomic_write_checked(&target, "{\"hello\":1}", None);
+        assert!(r.is_ok());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "{\"hello\":1}");
+        cleanup(&tmp);
+    }
+
+    #[test]
+    fn atomic_write_checked_writes_when_mtime_unchanged() {
+        let tmp = setup_tmp("aw-checked-stable");
+        let target = tmp.join("config.json");
+        std::fs::write(&target, "{\"old\":1}").unwrap();
+        let snapshot = read_target_mtime(&target);
+        assert!(snapshot.is_some());
+        let r = atomic_write_checked(&target, "{\"new\":1}", snapshot);
+        assert!(r.is_ok(), "should write when mtime did not move");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "{\"new\":1}");
+        cleanup(&tmp);
+    }
+
+    #[test]
+    fn atomic_write_checked_aborts_on_concurrent_write() {
+        let tmp = setup_tmp("aw-checked-race");
+        let target = tmp.join("config.json");
+        std::fs::write(&target, "{\"old\":1}").unwrap();
+        let snapshot = read_target_mtime(&target);
+        // Sleep long enough to be sure mtime moves on a 1-second-resolution
+        // filesystem (ext3 / SMB / etc.). 1.1s is the safe minimum.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        // Simulate a concurrent writer — Claude Code, say.
+        std::fs::write(&target, "{\"by-claude\":true}").unwrap();
+        // Kronn now tries to write its computed content.
+        let r = atomic_write_checked(&target, "{\"by-kronn\":true}", snapshot);
+        assert!(matches!(r, Err(AtomicWriteCheckedError::ConcurrentWrite)));
+        // Crucially, the concurrent write was preserved — Kronn did NOT clobber it.
+        let on_disk = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(on_disk, "{\"by-claude\":true}");
+        cleanup(&tmp);
+    }
+
+    #[test]
+    fn atomic_write_checked_aborts_when_target_disappeared() {
+        let tmp = setup_tmp("aw-checked-deleted");
+        let target = tmp.join("config.json");
+        std::fs::write(&target, "{\"old\":1}").unwrap();
+        let snapshot = read_target_mtime(&target);
+        std::fs::remove_file(&target).unwrap();
+        // Concurrent unlink is also a state change Kronn must not paper over.
+        let r = atomic_write_checked(&target, "{\"new\":1}", snapshot);
+        assert!(matches!(r, Err(AtomicWriteCheckedError::ConcurrentWrite)));
+        cleanup(&tmp);
+    }
+
+    // ─── write_host_config_checked (Phase 5 dedup helper) ─────────────────
+
+    #[test]
+    fn write_host_config_checked_returns_true_on_success() {
+        let tmp = setup_tmp("whcc-ok");
+        let target = tmp.join("config.json");
+        let ok = write_host_config_checked(
+            &target,
+            "{\"a\":1}",
+            None,
+            "TestAgent",
+            "Synced TestAgent (1 server)",
+        );
+        assert!(ok);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "{\"a\":1}");
+        cleanup(&tmp);
+    }
+
+    #[test]
+    fn write_host_config_checked_returns_false_on_concurrent_write() {
+        let tmp = setup_tmp("whcc-race");
+        let target = tmp.join("config.json");
+        std::fs::write(&target, "{\"old\":1}").unwrap();
+        let snapshot = read_target_mtime(&target);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(&target, "{\"by-other\":1}").unwrap();
+        let ok = write_host_config_checked(
+            &target,
+            "{\"by-kronn\":1}",
+            snapshot,
+            "TestAgent",
+            "Synced TestAgent (1 server)",
+        );
+        assert!(!ok, "concurrent write must surface as ok=false");
+        // Concurrent writer's content survived.
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "{\"by-other\":1}");
+        cleanup(&tmp);
+    }
+
     #[test]
     fn atomic_write_produces_valid_file() {
         let tmp = setup_tmp("atomic-write");
@@ -583,7 +681,9 @@ command = "npx"
 args = ["-y", "@modelcontextprotocol/server-github"]
 startup_timeout_sec = 60
 "#;
-        let parsed: toml::Value = input.parse().unwrap();
+        // toml 1.x: parse a TOML document into Table (Value is for
+        // primitives only since 1.0).
+        let parsed: toml::Table = input.parse().unwrap();
         let server = &parsed["mcp_servers"]["github"];
         assert_eq!(server["startup_timeout_sec"].as_integer(), Some(60),
             "startup_timeout_sec must survive TOML round-trip");
@@ -1537,5 +1637,194 @@ args = ["@example/old-mcp"]
         // section. We count occurrences to catch any accidental leak.
         assert_eq!(out.matches("valid-token").count(), 1,
             "valid-token should appear exactly once (under ok-plugin). Output:\n{}", out);
+    }
+
+    // ─── kronn-internal injection (project-local + global host configs) ───
+    //
+    // The introspection bridge must reach every Kronn-supported agent CLI.
+    // Phase A wired Claude Code's `.mcp.json`; the tests below pin the
+    // four agents that joined the family in the same sweep:
+    //
+    //   - Kiro (.kiro/settings/mcp.json + .ai/mcp/mcp.json)
+    //   - Gemini CLI (.gemini/settings.json — project-local)
+    //   - Codex (~/.codex/config.toml — global)
+    //   - Copilot CLI (~/.copilot/mcp-config.json — global)
+    //
+    // Vibe + Ollama don't speak MCP and stay on their own TDs.
+    //
+    // The bridge script must be findable on disk for any of these tests
+    // to pass. In dev mode it lives at
+    // `backend/scripts/disc-introspection-mcp.py`, which the dev-mode
+    // fallback in `disc_introspection_mcp_path` resolves via
+    // `CARGO_MANIFEST_DIR`. We assert that the helper actually finds
+    // *something* before each injection assertion — if the script ever
+    // gets renamed or relocated, these tests yell loudly instead of
+    // silently passing on an empty no-op.
+
+    #[test]
+    fn inject_kronn_internal_writes_python3_entry() {
+        // Sanity: the bridge script must resolve in dev mode. If this
+        // fires, the inject_kronn_internal helper has no path to ship,
+        // and every downstream test is meaningless.
+        assert!(
+            crate::agents::runner::disc_introspection_mcp_path().is_some(),
+            "disc-introspection-mcp.py not findable — dev fallback broken?"
+        );
+
+        let mut file = McpJsonFile { mcp_servers: HashMap::new() };
+        let injected = inject_kronn_internal(&mut file);
+        assert!(injected, "inject should succeed when the script is on disk");
+
+        let entry = file.mcp_servers.get("kronn-internal").expect("entry missing");
+        assert_eq!(entry.command.as_deref(), Some("python3"));
+        let args = entry.args.as_ref().expect("args missing");
+        assert_eq!(args.len(), 1);
+        assert!(args[0].ends_with("disc-introspection-mcp.py"),
+            "bridge path should point at the script, got {:?}", args[0]);
+        // env stays empty — KRONN_DISCUSSION_ID flows through the agent
+        // process env, not the MCP entry's env block.
+        assert!(entry.env.is_empty());
+    }
+
+    #[test]
+    fn inject_kronn_internal_is_idempotent() {
+        let mut file = McpJsonFile { mcp_servers: HashMap::new() };
+        inject_kronn_internal(&mut file);
+        inject_kronn_internal(&mut file);
+        // Two calls = one entry, not two.
+        assert_eq!(file.mcp_servers.len(), 1);
+        assert!(file.mcp_servers.contains_key("kronn-internal"));
+    }
+
+    #[test]
+    fn inject_kronn_internal_preserves_user_mcps() {
+        let mut file = make_test_data(); // 2 entries
+        let before = file.mcp_servers.len();
+        inject_kronn_internal(&mut file);
+        // User's github + context7 must still be there alongside the bridge.
+        assert_eq!(file.mcp_servers.len(), before + 1);
+        assert!(file.mcp_servers.contains_key("github"));
+        assert!(file.mcp_servers.contains_key("context7"));
+        assert!(file.mcp_servers.contains_key("kronn-internal"));
+    }
+
+    // ─── End-to-end: write_general_mcp_json must seed all 4 paths ────────
+    //
+    // Wiring `write_general_mcp_json` (the call path used for general /
+    // no-project discussions) is where most of the regression risk sits:
+    // it's the single place that fans out to Claude / Kiro / Gemini /
+    // Vibe writes. The test boots an empty in-memory DB, runs the
+    // function against a tmp dir, and asserts every produced file
+    // carries the kronn-internal entry except the Vibe TOML, which
+    // doesn't speak MCP.
+
+    // The Codex helper is pub(crate) — bring it into scope explicitly
+    // so we can drive it from this test module.
+    use crate::core::mcp_scanner::{CodexSync, CopilotSync, HostMcpSync};
+
+    #[test]
+    fn codex_global_sync_emits_kronn_internal_into_config_toml() {
+        // Redirect Codex's home-config lookup to a tmp dir via the
+        // KRONN_HOST_HOME hook. We don't share global env between tests
+        // (cargo runs them in parallel by default), so we use a unique
+        // sub-dir to avoid clobbering.
+        let tmp = setup_tmp("codex-global-inject");
+        let home = tmp.join("fake-home");
+        std::fs::create_dir_all(&home).unwrap();
+
+        // SAFETY: we restore-or-clear KRONN_HOST_HOME at the end of the
+        // test so we don't leak state to other tests in the same
+        // process. See feedback_windows_crossplatform.md re env-var
+        // testing.
+        let prev = std::env::var("KRONN_HOST_HOME").ok();
+        std::env::set_var("KRONN_HOST_HOME", home.to_string_lossy().to_string());
+
+        // Empty in-memory DB — no user MCPs configured. The kronn-
+        // internal injection should be the ONLY entry written.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+
+        let plan = CodexSync.prepare(&conn, "secret-irrelevant")
+            .expect("CodexSync should produce a plan even with no user MCPs (kronn-internal)");
+
+        assert!(plan.content.contains("kronn-internal"),
+            "Codex config.toml should carry [mcp_servers.kronn-internal]. Got:\n{}",
+            plan.content);
+        assert!(plan.content.contains("disc-introspection-mcp.py"),
+            "Codex entry should reference the bridge script. Got:\n{}",
+            plan.content);
+        // The summary line lives on every host_sync log — verify the
+        // count includes the bridge.
+        assert!(plan.summary.contains("MCP servers"));
+
+        // Restore env
+        match prev {
+            Some(v) => std::env::set_var("KRONN_HOST_HOME", v),
+            None => std::env::remove_var("KRONN_HOST_HOME"),
+        }
+        cleanup(&tmp);
+    }
+
+    #[test]
+    fn copilot_global_sync_emits_kronn_internal_into_mcp_config_json() {
+        let tmp = setup_tmp("copilot-global-inject");
+        let home = tmp.join("fake-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let prev = std::env::var("KRONN_HOST_HOME").ok();
+        std::env::set_var("KRONN_HOST_HOME", home.to_string_lossy().to_string());
+
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+
+        let plan = CopilotSync.prepare(&conn, "secret-irrelevant")
+            .expect("CopilotSync should produce a plan with kronn-internal even when no user MCPs");
+
+        assert!(plan.content.contains("kronn-internal"),
+            "Copilot mcp-config.json should carry the kronn-internal entry. Got:\n{}",
+            plan.content);
+        assert!(plan.content.contains("disc-introspection-mcp.py"),
+            "Copilot entry should reference the bridge script. Got:\n{}",
+            plan.content);
+
+        match prev {
+            Some(v) => std::env::set_var("KRONN_HOST_HOME", v),
+            None => std::env::remove_var("KRONN_HOST_HOME"),
+        }
+        cleanup(&tmp);
+    }
+
+    #[test]
+    fn write_general_mcp_json_seeds_all_agent_configs_with_kronn_internal() {
+        use rusqlite::Connection;
+        let tmp = setup_tmp("general-all-agents");
+        // In-memory DB with the schema applied — no user MCPs configured.
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+
+        write_general_mcp_json(&conn, "test-secret-irrelevant", &tmp.to_string_lossy()).unwrap();
+
+        for (path, label) in &[
+            (".mcp.json",                        "Claude Code"),
+            (".kiro/settings/mcp.json",          "Kiro (canonical)"),
+            (".ai/mcp/mcp.json",                 "Kiro (.ai variant)"),
+            (".gemini/settings.json",            "Gemini CLI"),
+        ] {
+            let file = tmp.join(path);
+            assert!(file.exists(),
+                "{}: {} not written by write_general_mcp_json",
+                label, path
+            );
+            let content = std::fs::read_to_string(&file).unwrap();
+            assert!(content.contains("kronn-internal"),
+                "{}: file at {} should carry the kronn-internal entry. Got:\n{}",
+                label, path, content
+            );
+            assert!(content.contains("disc-introspection-mcp.py"),
+                "{}: file at {} should reference the bridge script. Got:\n{}",
+                label, path, content
+            );
+        }
+
+        cleanup(&tmp);
     }
 }

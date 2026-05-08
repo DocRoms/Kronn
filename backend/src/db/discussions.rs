@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::models::{*, ModelTier};
 
@@ -158,7 +158,8 @@ pub fn list_discussions_paginated(conn: &Connection, limit: Option<u32>, offset:
                 d.pin_first_message,
                 d.shared_id, d.shared_with_json, d.workflow_run_id,
                 d.pinned,
-                d.test_mode_restore_branch, d.test_mode_stash_ref
+                d.test_mode_restore_branch, d.test_mode_stash_ref,
+                d.summary_strategy, d.introspection_call_count
          FROM discussions d ORDER BY d.updated_at DESC{}",
         match (limit, offset) {
             (Some(l), Some(o)) => format!(" LIMIT {} OFFSET {}", l, o),
@@ -201,6 +202,8 @@ pub fn list_discussions_paginated(conn: &Connection, limit: Option<u32>, offset:
             workflow_run_id: row.get::<_, Option<String>>(22).unwrap_or(None),
             test_mode_restore_branch: row.get::<_, Option<String>>(24).unwrap_or(None),
             test_mode_stash_ref: row.get::<_, Option<String>>(25).unwrap_or(None),
+            summary_strategy: parse_summary_strategy(row.get::<_, String>(26).unwrap_or_else(|_| "Auto".into()).as_str()),
+            introspection_call_count: row.get::<_, u32>(27).unwrap_or(0),
             created_at: parse_dt(row.get::<_, String>(6)?),
             updated_at: parse_dt(row.get::<_, String>(7)?),
         })
@@ -237,7 +240,8 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
                 workspace_mode, workspace_path, worktree_branch,
                 summary_cache, summary_up_to_msg_idx, model_tier, pin_first_message,
                 shared_id, shared_with_json, workflow_run_id, pinned,
-                test_mode_restore_branch, test_mode_stash_ref
+                test_mode_restore_branch, test_mode_stash_ref,
+                summary_strategy, introspection_call_count
          FROM discussions WHERE id = ?1"
     )?;
 
@@ -274,6 +278,8 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
             workflow_run_id: row.get::<_, Option<String>>(21).unwrap_or(None),
             test_mode_restore_branch: row.get::<_, Option<String>>(23).unwrap_or(None),
             test_mode_stash_ref: row.get::<_, Option<String>>(24).unwrap_or(None),
+            summary_strategy: parse_summary_strategy(row.get::<_, String>(25).unwrap_or_else(|_| "Auto".into()).as_str()),
+            introspection_call_count: row.get::<_, u32>(26).unwrap_or(0),
             created_at: parse_dt(row.get::<_, String>(6)?),
             updated_at: parse_dt(row.get::<_, String>(7)?),
         })
@@ -356,6 +362,14 @@ pub fn update_discussion_agent(conn: &Connection, id: &str, agent: &AgentType) -
 
 pub fn update_discussion_directive_ids(conn: &Connection, id: &str, directive_ids: &[String]) -> Result<bool> {
     update_discussion_fields(conn, id, None, None, None, None, None, Some(directive_ids), None)
+}
+
+pub fn update_discussion_summary_strategy(conn: &Connection, id: &str, strategy: crate::models::SummaryStrategy) -> Result<bool> {
+    let affected = conn.execute(
+        "UPDATE discussions SET summary_strategy = ?1, updated_at = ?2 WHERE id = ?3",
+        params![format_summary_strategy(strategy), Utc::now().to_rfc3339(), id],
+    )?;
+    Ok(affected > 0)
 }
 
 /// Update workspace_path and worktree_branch for a discussion (used after worktree creation).
@@ -628,6 +642,69 @@ pub fn invalidate_summary_cache(conn: &Connection, discussion_id: &str) -> Resul
         "UPDATE discussions SET summary_cache = NULL, summary_up_to_msg_idx = NULL WHERE id = ?1",
         params![discussion_id],
     )?;
+    // Also drop every ranged summary so the agent's next disc_summarize
+    // call doesn't hand back a now-stale slice.
+    conn.execute(
+        "DELETE FROM disc_summary_ranges WHERE discussion_id = ?1",
+        params![discussion_id],
+    )?;
+    Ok(())
+}
+
+/// Increment the per-disc tool-call counter. Called from each
+/// `disc_introspection` endpoint. Best-effort: a write error is logged
+/// but doesn't fail the user-facing tool call.
+pub fn bump_introspection_count(conn: &Connection, discussion_id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE discussions SET introspection_call_count = introspection_call_count + 1 WHERE id = ?1",
+        params![discussion_id],
+    )?;
+    Ok(())
+}
+
+/// Lookup a cached ranged summary for `(disc_id, from_idx, to_idx)`.
+/// Returns `(summary, tokens_used)` on hit, `None` on miss.
+pub fn get_ranged_summary(
+    conn: &Connection,
+    discussion_id: &str,
+    from_idx: u32,
+    to_idx: u32,
+) -> Result<Option<(String, u64)>> {
+    let row: Option<(String, i64)> = conn.query_row(
+        "SELECT summary, tokens_used FROM disc_summary_ranges
+         WHERE discussion_id = ?1 AND from_idx = ?2 AND to_idx = ?3",
+        params![discussion_id, from_idx, to_idx],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    ).optional()?;
+    Ok(row.map(|(s, t)| (s, t as u64)))
+}
+
+/// Persist a generated ranged summary. Replaces an existing entry for
+/// the same `(disc, from, to)` triple (UPSERT via REPLACE) so an explicit
+/// `force_refresh: true` overwrite works without an extra DELETE.
+pub fn upsert_ranged_summary(
+    conn: &Connection,
+    discussion_id: &str,
+    from_idx: u32,
+    to_idx: u32,
+    summary: &str,
+    tokens_used: u64,
+    model_name: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO disc_summary_ranges
+            (discussion_id, from_idx, to_idx, summary, tokens_used, model_name, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            discussion_id,
+            from_idx,
+            to_idx,
+            summary,
+            tokens_used as i64,
+            model_name,
+            chrono::Utc::now().to_rfc3339(),
+        ],
+    )?;
     Ok(())
 }
 
@@ -689,6 +766,24 @@ fn format_model_tier(t: &ModelTier) -> &'static str {
         ModelTier::Economy => "economy",
         ModelTier::Default => "default",
         ModelTier::Reasoning => "reasoning",
+    }
+}
+
+fn parse_summary_strategy(s: &str) -> crate::models::SummaryStrategy {
+    match s {
+        "OnDemand" => crate::models::SummaryStrategy::OnDemand,
+        "Off" => crate::models::SummaryStrategy::Off,
+        // Default + any unknown value (forward-compat for OLD rows or
+        // future variants that haven't shipped yet) → Auto.
+        _ => crate::models::SummaryStrategy::Auto,
+    }
+}
+
+fn format_summary_strategy(s: crate::models::SummaryStrategy) -> &'static str {
+    match s {
+        crate::models::SummaryStrategy::Auto => "Auto",
+        crate::models::SummaryStrategy::OnDemand => "OnDemand",
+        crate::models::SummaryStrategy::Off => "Off",
     }
 }
 

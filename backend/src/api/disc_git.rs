@@ -327,6 +327,15 @@ pub struct TestModeExitResponse {
     pub restored_branch: String,
     pub unstashed: bool,
     pub worktree_restored: bool,
+    /// Non-fatal warning surfaced to the UI when something post-checkout
+    /// went sideways (e.g. stash pop conflicted). The exit itself
+    /// succeeded — the user is back on `restored_branch`, test_mode
+    /// fields are cleared in the DB — but the operator may need to
+    /// `git stash list` / `git stash pop` manually. `None` on the
+    /// happy path. Pre-fix this travelled as `ApiResponse::err(...)`,
+    /// which made the frontend think the entire exit had failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -577,17 +586,24 @@ pub async fn test_mode_exit(
         disc.title, restore_branch, unstashed, worktree_restored
     );
 
-    if let Some(warn) = stash_warn {
-        return Json(ApiResponse::err(format!(
-            "Exited test mode (back on `{}`) but stash pop failed: {}. Your work is safe — run `git stash list` to find it.",
-            restore_branch, warn
-        )));
-    }
+    // Stash-pop failure is non-fatal here: we already cleared the
+    // test_mode fields in DB and switched the working tree back to
+    // `restore_branch`. Returning `Err` would make the UI think the
+    // exit failed, when really the user is back on their branch and
+    // just needs to recover the stash manually. Surface the issue as
+    // a `warning` field on the success envelope instead.
+    let warning = stash_warn.map(|w| {
+        format!(
+            "Stash pop failed: {}. Your work is safe — run `git stash list` to find it.",
+            w
+        )
+    });
 
     Json(ApiResponse::ok(TestModeExitResponse {
         restored_branch: restore_branch,
         unstashed,
         worktree_restored,
+        warning,
     }))
 }
 
@@ -757,7 +773,11 @@ pub(crate) fn format_tool_log(tool: &str, input_json: &str) -> String {
             }
             "Bash" => {
                 if let Some(cmd) = val.get("command").and_then(|v| v.as_str()) {
-                    let short = if cmd.len() > 80 { &cmd[..80] } else { cmd };
+                    // Truncate by char count, not byte count. `&s[..80]`
+                    // would panic if byte 80 falls in the middle of a UTF-8
+                    // sequence (very real on French "été", emoji, accented
+                    // package names like `pré-prod`).
+                    let short: String = cmd.chars().take(80).collect();
                     return format!("$ {}", short.replace('\n', " "));
                 }
             }
@@ -807,3 +827,106 @@ pub(crate) fn format_tool_log(tool: &str, input_json: &str) -> String {
     format!("Tool: {}", tool)
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_tool_log_read() {
+        let out = format_tool_log("Read", r#"{"file_path":"src/lib.rs"}"#);
+        assert_eq!(out, "Read src/lib.rs");
+    }
+
+    #[test]
+    fn format_tool_log_bash_short() {
+        let out = format_tool_log("Bash", r#"{"command":"ls -la"}"#);
+        assert_eq!(out, "$ ls -la");
+    }
+
+    #[test]
+    fn format_tool_log_bash_truncates_at_80_chars() {
+        // 100 ASCII chars → truncated to 80
+        let cmd = "x".repeat(100);
+        let json = format!(r#"{{"command":"{}"}}"#, cmd);
+        let out = format_tool_log("Bash", &json);
+        // "$ " prefix + 80 chars = 82 chars total
+        assert_eq!(out.len(), 82);
+    }
+
+    #[test]
+    fn format_tool_log_bash_replaces_newlines() {
+        let out = format_tool_log("Bash", r#"{"command":"echo a\nb"}"#);
+        assert_eq!(out, "$ echo a b");
+    }
+
+    #[test]
+    fn format_tool_log_bash_does_not_panic_on_utf8_at_byte_80() {
+        // Regression: pre-fix `&cmd[..80]` panicked when byte 80 fell in
+        // the middle of a UTF-8 sequence. Build a string where byte 80 is
+        // mid-sequence: 79 ASCII chars + an emoji (4 bytes) → byte 80 is
+        // inside the emoji. Char-based truncation keeps the emoji whole.
+        let cmd = format!("{}{}", "a".repeat(79), "😀");
+        let json = format!(r#"{{"command":"{}"}}"#, cmd);
+        let out = format_tool_log("Bash", &json);
+        // Should not panic. Output keeps the 79 a's + the emoji = 80 chars.
+        assert!(out.starts_with("$ "));
+        assert!(out.contains("😀"));
+    }
+
+    #[test]
+    fn format_tool_log_bash_truncates_french_chars_safely() {
+        // French accented characters are 2 bytes each in UTF-8. A long
+        // French-only string has byte length > char length and would
+        // historically slip past the byte-80 panic depending on alignment.
+        let cmd = "été ".repeat(40); // 160 chars, ~280 bytes
+        let json = format!(r#"{{"command":"{}"}}"#, cmd);
+        let out = format_tool_log("Bash", &json);
+        // 80 chars + "$ " prefix; assert no panic and length is correct.
+        assert!(out.starts_with("$ "));
+        assert_eq!(out.chars().count(), 82);
+    }
+
+    #[test]
+    fn format_tool_log_edit_write() {
+        assert_eq!(
+            format_tool_log("Edit", r#"{"file_path":"a.rs"}"#),
+            "Edit a.rs"
+        );
+        assert_eq!(
+            format_tool_log("Write", r#"{"file_path":"b.rs"}"#),
+            "Write b.rs"
+        );
+    }
+
+    #[test]
+    fn format_tool_log_grep_with_default_path() {
+        let out = format_tool_log("Grep", r#"{"pattern":"foo"}"#);
+        assert_eq!(out, "Grep 'foo' in .");
+    }
+
+    #[test]
+    fn format_tool_log_grep_with_path() {
+        let out = format_tool_log("Grep", r#"{"pattern":"foo","path":"src/"}"#);
+        assert_eq!(out, "Grep 'foo' in src/");
+    }
+
+    #[test]
+    fn format_tool_log_mcp_tool_format() {
+        let out = format_tool_log("mcp__github__create_pull_request", r#"{}"#);
+        assert_eq!(out, "MCP github/create_pull_request");
+    }
+
+    #[test]
+    fn format_tool_log_unknown_tool_falls_back() {
+        let out = format_tool_log("Unknown", r#"{}"#);
+        assert_eq!(out, "Tool: Unknown");
+    }
+
+    #[test]
+    fn format_tool_log_invalid_json_falls_back() {
+        // Non-JSON input shouldn't panic — falls through to the default.
+        let out = format_tool_log("Bash", "not json");
+        assert_eq!(out, "Tool: Bash");
+    }
+}

@@ -12,6 +12,14 @@ interface ToastOptions {
    *  monospace <pre> with a copy button. Text is selectable and scrollable.
    *  Pass `undefined` when the `message` is self-sufficient. */
   copyable?: string;
+  /** Override the dedup behaviour. By default identical (message, type)
+   *  toasts fired within `DEDUP_WINDOW_MS` collapse into the existing
+   *  one — protects against multi-agent / batch flows that broadcast
+   *  the same WS event N times in rapid succession (the user reported
+   *  N "discussion finished" toasts during a 4-agent compare-agents
+   *  run on 2026-05-10). Set `dedup: false` to opt out, e.g. when the
+   *  user genuinely just hit the same button twice on purpose. */
+  dedup?: boolean;
 }
 
 interface Toast {
@@ -158,15 +166,44 @@ function ToastItem({ toast, onDismiss }: ToastItemProps) {
   );
 }
 
+/** Coalesce window for identical (message, type) toasts. 1.5s is wider
+ *  than the typical WS broadcast burst from a multi-agent flow but
+ *  short enough that an intentional re-fire after a second action
+ *  shows up. */
+const DEDUP_WINDOW_MS = 1500;
+
 export function useToast() {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const idRef = useRef(0);
+  /** Last-seen-at map keyed by `${type}::${message}`. Persists for the
+   *  hook's lifetime — cleanup on unmount happens by closure GC. We
+   *  intentionally don't tie this to React state because the dedup
+   *  decision must be synchronous and not depend on a re-render. */
+  const lastSeenRef = useRef<Map<string, number>>(new Map());
 
   const dismiss = useCallback((id: number) => {
     setToasts(prev => prev.filter(t => t.id !== id));
   }, []);
 
   const toast: ToastFn = useCallback((message, type = 'info', options) => {
+    // Dedup-by-content: if the SAME (message, type) was fired in the
+    // last DEDUP_WINDOW_MS, drop the new fire. Pin: TD-20260510-multi-
+    // agent-disc-finished-toasts — multi-agent QP runs broadcast N
+    // identical "batch finished" events in rapid succession from
+    // multiple WS subscribers in the dashboard, each calling toast()
+    // separately. The cap-to-3 (`prev.slice(-2)` below) limited the
+    // visible damage but didn't fix the root cause. This dedup does.
+    const dedupEnabled = options?.dedup ?? true;
+    if (dedupEnabled) {
+      const key = `${type}::${message}`;
+      const now = Date.now();
+      const lastSeen = lastSeenRef.current.get(key);
+      if (lastSeen && now - lastSeen < DEDUP_WINDOW_MS) {
+        return;
+      }
+      lastSeenRef.current.set(key, now);
+    }
+
     const id = ++idRef.current;
     // Errors are persistent by default — they require user attention,
     // often need to be copied, and the user explicitly validated this

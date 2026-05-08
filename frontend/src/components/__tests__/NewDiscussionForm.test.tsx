@@ -123,3 +123,231 @@ describe('NewDiscussionForm — workspace toggle', () => {
     });
   });
 });
+
+describe('NewDiscussionForm — prefill profile auto-select', () => {
+  it('does NOT pre-select validation profiles for an unlocked prefill', async () => {
+    // Pre-fix: every prefill triggered the architect/tech-lead/qa-engineer
+    // auto-select, including the unlocked "New discussion" button and the
+    // "Discuss this file" CTA from the AI doc viewer. Users discovered
+    // their unrelated chats were silently using validator profiles. The
+    // submit payload is the cleanest observable — assert profileIds is
+    // empty for unlocked prefill.
+    const onSubmit = vi.fn();
+    render(
+      <NewDiscussionForm
+        projects={[PROJECT_WITH_REPO]}
+        agents={[AGENT]}
+        configLanguage="fr"
+        agentAccess={null}
+        prefill={{ projectId: PROJECT_WITH_REPO.id, title: 'Discuss file', prompt: 'go' }}
+        onSubmit={onSubmit}
+        onClose={vi.fn()}
+        onNavigate={vi.fn()}
+        onPrefillConsumed={vi.fn()}
+        t={(key: string) => key}
+      />,
+    );
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+    const createBtn = document.querySelector('.disc-create-btn') as HTMLButtonElement;
+    expect(createBtn).not.toBeNull();
+    await act(async () => { fireEvent.click(createBtn); });
+    await act(async () => { await Promise.resolve(); });
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit.mock.calls[0][0].profileIds).toEqual([]);
+  });
+
+  it('pre-selects the validation triplet when prefill is locked', async () => {
+    const onSubmit = vi.fn();
+    render(
+      <NewDiscussionForm
+        projects={[PROJECT_WITH_REPO]}
+        agents={[AGENT]}
+        configLanguage="fr"
+        agentAccess={null}
+        prefill={{ projectId: PROJECT_WITH_REPO.id, title: 'Validation', prompt: 'check', locked: true }}
+        onSubmit={onSubmit}
+        onClose={vi.fn()}
+        onNavigate={vi.fn()}
+        onPrefillConsumed={vi.fn()}
+        t={(key: string) => key}
+      />,
+    );
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+    const createBtn = document.querySelector('.disc-create-btn') as HTMLButtonElement;
+    expect(createBtn).not.toBeNull();
+    await act(async () => { fireEvent.click(createBtn); });
+    await act(async () => { await Promise.resolve(); });
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit.mock.calls[0][0].profileIds).toEqual(
+      ['architect', 'tech-lead', 'qa-engineer'],
+    );
+  });
+});
+
+describe('NewDiscussionForm — Ctrl+Enter submit', () => {
+  it('Ctrl+Enter on the prompt textarea submits without inserting a newline', async () => {
+    // Pre-fix: the card-level keyDown caught Ctrl+Enter and called
+    // `handleCreate()` but did NOT call `e.preventDefault()`, so the
+    // textarea also processed the keypress and inserted a literal "\n"
+    // into the prompt. The submitted message ended with a stray
+    // newline (visible as a blank line in agent transcripts).
+    const onSubmit = vi.fn();
+    render(
+      <NewDiscussionForm
+        projects={[PROJECT_WITHOUT_REPO]}
+        agents={[AGENT]}
+        configLanguage="fr"
+        agentAccess={null}
+        onSubmit={onSubmit}
+        onClose={vi.fn()}
+        onNavigate={vi.fn()}
+        t={(key: string) => key}
+      />,
+    );
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+    const promptInput = document.querySelector('textarea') as HTMLTextAreaElement;
+    expect(promptInput).not.toBeNull();
+    await act(async () => {
+      fireEvent.change(promptInput, { target: { value: 'Hello world' } });
+    });
+    const agentBtn = document.querySelector('.disc-agent-btn') as HTMLButtonElement | null;
+    if (agentBtn) await act(async () => { fireEvent.click(agentBtn); });
+
+    // Fire Ctrl+Enter on the wrapping card so the form-level handler
+    // catches it (matches what happens in the browser when the textarea
+    // is focused and the user presses Ctrl+Enter — bubbles up to the
+    // card). preventDefault must keep the textarea value clean.
+    const card = document.querySelector('.disc-new-card') as HTMLElement;
+    expect(card).not.toBeNull();
+    await act(async () => {
+      fireEvent.keyDown(card, { key: 'Enter', ctrlKey: true });
+      await Promise.resolve();
+    });
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit.mock.calls[0][0].prompt).toBe('Hello world');
+    // The submitted prompt must NOT end with a stray newline.
+    expect(onSubmit.mock.calls[0][0].prompt).not.toMatch(/\n$/);
+  });
+
+  it('Ctrl+Enter is ignored while an IME composition is active', async () => {
+    const onSubmit = vi.fn();
+    render(
+      <NewDiscussionForm
+        projects={[PROJECT_WITHOUT_REPO]}
+        agents={[AGENT]}
+        configLanguage="fr"
+        agentAccess={null}
+        onSubmit={onSubmit}
+        onClose={vi.fn()}
+        onNavigate={vi.fn()}
+        t={(key: string) => key}
+      />,
+    );
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+    const promptInput = document.querySelector('textarea') as HTMLTextAreaElement;
+    await act(async () => {
+      fireEvent.change(promptInput, { target: { value: '日本語' } });
+    });
+    const agentBtn = document.querySelector('.disc-agent-btn') as HTMLButtonElement | null;
+    if (agentBtn) await act(async () => { fireEvent.click(agentBtn); });
+
+    const card = document.querySelector('.disc-new-card') as HTMLElement;
+    // Simulate the IME composition state: the keydown event flags
+    // `nativeEvent.isComposing` while the IME is composing a candidate.
+    // React's SyntheticEvent forwards `isComposing` from the native
+    // KeyboardEvent.
+    await act(async () => {
+      const ev = new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true });
+      Object.defineProperty(ev, 'isComposing', { get: () => true });
+      card.dispatchEvent(ev);
+      await Promise.resolve();
+    });
+
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+});
+
+describe('NewDiscussionForm — re-entry guard', () => {
+  it('re-enables the Create button after onSubmit rejects (no permanent wedge)', async () => {
+    // Pre-fix the form set `creating=true` and never reset it because
+    // onSubmit was typed `=> void` and not awaited. If `discussions.create`
+    // failed (auth error, validation, network), the button stayed disabled
+    // forever and the user had to close+reopen the form to retry.
+    const onSubmit = vi.fn().mockRejectedValue(new Error('boom'));
+    render(
+      <NewDiscussionForm
+        projects={[PROJECT_WITHOUT_REPO]}
+        agents={[AGENT]}
+        configLanguage="fr"
+        agentAccess={null}
+        onSubmit={onSubmit}
+        onClose={vi.fn()}
+        onNavigate={vi.fn()}
+        t={(key: string) => key}
+      />,
+    );
+
+    // Fill the prompt textarea + pick the agent so handleCreate proceeds.
+    const promptInput = screen.getByPlaceholderText(/disc\.promptPlaceholder|Promptez/i)
+      ?? document.querySelector('textarea')!;
+    await act(async () => {
+      fireEvent.change(promptInput, { target: { value: 'Hello' } });
+    });
+    const agentBtn = document.querySelector('.disc-agent-btn') as HTMLButtonElement | null;
+    if (agentBtn) await act(async () => { fireEvent.click(agentBtn); });
+
+    const createBtn = document.querySelector('.disc-create-btn') as HTMLButtonElement;
+    expect(createBtn).not.toBeNull();
+    expect(createBtn.disabled).toBe(false);
+
+    await act(async () => { fireEvent.click(createBtn); });
+    // Allow the awaited rejection to flush.
+    await act(async () => { await Promise.resolve(); });
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    // After failure, button must be clickable again.
+    expect(createBtn.disabled).toBe(false);
+  });
+
+  it('does not call onSubmit twice on two synchronous clicks', async () => {
+    const onSubmit = vi.fn().mockImplementation(() => new Promise(() => { /* hold */ }));
+    render(
+      <NewDiscussionForm
+        projects={[PROJECT_WITHOUT_REPO]}
+        agents={[AGENT]}
+        configLanguage="fr"
+        agentAccess={null}
+        onSubmit={onSubmit}
+        onClose={vi.fn()}
+        onNavigate={vi.fn()}
+        t={(key: string) => key}
+      />,
+    );
+
+    const promptInput = document.querySelector('textarea')!;
+    await act(async () => {
+      fireEvent.change(promptInput, { target: { value: 'Hello' } });
+    });
+    const agentBtn = document.querySelector('.disc-agent-btn') as HTMLButtonElement | null;
+    if (agentBtn) await act(async () => { fireEvent.click(agentBtn); });
+
+    const createBtn = document.querySelector('.disc-create-btn') as HTMLButtonElement;
+    expect(createBtn).not.toBeNull();
+
+    await act(async () => {
+      fireEvent.click(createBtn);
+      fireEvent.click(createBtn);
+    });
+
+    // Ref-based guard inside handleCreate must short-circuit the second click
+    // synchronously, even before React re-renders the disabled state.
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+  });
+});

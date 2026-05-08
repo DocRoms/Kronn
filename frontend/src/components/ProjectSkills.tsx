@@ -1,3 +1,4 @@
+import { useRef } from 'react';
 import { projects as projectsApi } from '../lib/api';
 import type { Skill, SkillCategory } from '../types/generated';
 import { useT } from '../lib/I18nContext';
@@ -17,6 +18,9 @@ interface ProjectSkillsProps {
 
 export function ProjectSkills({ projectId, currentSkillIds, allSkills, onUpdate }: ProjectSkillsProps) {
   const { t } = useT();
+  // Hooks must run unconditionally on every render — declare the
+  // re-entry guard ref BEFORE any early-return branch.
+  const togglingRef = useRef(false);
 
   if (allSkills.length === 0) {
     return (
@@ -26,12 +30,23 @@ export function ProjectSkills({ projectId, currentSkillIds, allSkills, onUpdate 
     );
   }
 
+  // Synchronous re-entry guard. Two fast clicks on the same skill chip
+  // would both read `currentSkillIds` from a stale closure (React hasn't
+  // re-rendered between the two clicks), fire two
+  // `setDefaultSkills` POSTs and lose the optimistic toggle. The ref
+  // blocks the second invocation — the user has to wait one round-trip.
   const handleToggle = async (skillId: string) => {
-    const next = currentSkillIds.includes(skillId)
-      ? currentSkillIds.filter(id => id !== skillId)
-      : [...currentSkillIds, skillId];
-    await projectsApi.setDefaultSkills(projectId, next);
-    onUpdate();
+    if (togglingRef.current) return;
+    togglingRef.current = true;
+    try {
+      const next = currentSkillIds.includes(skillId)
+        ? currentSkillIds.filter(id => id !== skillId)
+        : [...currentSkillIds, skillId];
+      await projectsApi.setDefaultSkills(projectId, next);
+      onUpdate();
+    } finally {
+      togglingRef.current = false;
+    }
   };
 
   return (

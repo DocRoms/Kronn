@@ -98,6 +98,65 @@ pub fn write_mcp_json(project_path: &str, data: &McpJsonFile) -> Result<(), Stri
     write_mcp_json_to_subpath(project_path, ".mcp.json", data)
 }
 
+/// Inject the `kronn-internal` MCP server entry into an existing
+/// `McpJsonFile`. Idempotent: replaces an existing `kronn-internal`
+/// entry, leaves all other entries untouched. The actual disc id is
+/// passed via the agent process env (`KRONN_DISCUSSION_ID`) rather
+/// than the MCP entry's own env, so a single .mcp.json works across
+/// runs of different discussions in the same project workspace.
+///
+/// Returns `true` when an entry was injected (the caller can decide
+/// whether to re-write the file). When the bridge script can't be
+/// located at a path that's valid on **both sides** (Kronn-spawn
+/// in-container AND host-CLI), returns `false` and removes any
+/// previously-injected stale entry — better than leaving a broken
+/// command that breaks every host CLI invocation with `Broken pipe`.
+pub fn inject_kronn_internal(file: &mut McpJsonFile) -> bool {
+    let script = match crate::agents::runner::disc_introspection_mcp_path_for_shared_config() {
+        Some(p) => p,
+        None => {
+            // Stale entry from a previous Kronn build that wrote the
+            // container path? Clean it up so host CLIs stop choking.
+            file.mcp_servers.remove("kronn-internal");
+            return false;
+        }
+    };
+    let entry = McpServerEntry {
+        command: Some("python3".into()),
+        args: Some(vec![script]),
+        url: None,
+        env: HashMap::new(),
+    };
+    file.mcp_servers.insert("kronn-internal".into(), entry);
+    true
+}
+
+/// Codex variant of `inject_kronn_internal` — same script, same
+/// behaviour, but written into a `HashMap<String, CodexMcpEntry>`
+/// (the shape Codex's `~/.codex/config.toml` `[mcp_servers]` uses).
+///
+/// `~/.codex/config.toml` lives in the user's home and is read by
+/// **both** the Kronn-spawned-in-container Codex AND the user's
+/// host `codex` CLI — same shared-path constraint as
+/// [`inject_kronn_internal`].
+fn inject_kronn_internal_codex(entries: &mut HashMap<String, CodexMcpEntry>) -> bool {
+    let script = match crate::agents::runner::disc_introspection_mcp_path_for_shared_config() {
+        Some(p) => p,
+        None => {
+            entries.remove("kronn-internal");
+            return false;
+        }
+    };
+    entries.insert("kronn-internal".into(), CodexMcpEntry {
+        command: "python3".into(),
+        args: vec![script],
+        env: HashMap::new(),
+        enabled: true,
+        startup_timeout_sec: default_startup_timeout(),
+    });
+    true
+}
+
 /// Write a McpJsonFile to an arbitrary subpath within a project directory.
 /// Creates parent directories if needed. Used for Claude (.mcp.json),
 /// Kiro (.kiro/settings/mcp.json + .ai/mcp/mcp.json), and Gemini (.gemini/settings.json).
@@ -127,6 +186,235 @@ pub(crate) fn atomic_write(target: &Path, content: &str) -> Result<(), String> {
             let _ = std::fs::remove_file(&tmp);
             format!("Failed to rename {} → {}: {}", tmp.display(), target.display(), e)
         })
+}
+
+/// File mtime as of `read_target_mtime` invocation. Returned as
+/// `Option<SystemTime>` because the file may not exist yet (legitimate
+/// for a first-time sync) — `None` means "no prior version to defend
+/// against", and `atomic_write_checked` will not abort on absent files.
+pub(crate) fn read_target_mtime(target: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(target).ok().and_then(|m| m.modified().ok())
+}
+
+/// Why an `atomic_write_checked` call failed.
+#[derive(Debug)]
+pub enum AtomicWriteCheckedError {
+    /// Target was modified by a concurrent writer between the caller's
+    /// read and our pre-rename re-check. Caller should NOT clobber —
+    /// log a warning, drop the sync, and let the next tick retry.
+    /// Real-world trigger: Claude Code itself rewriting `~/.claude.json`
+    /// (cache, recents, mcpContextUris) while Kronn is mid-sync (cf.
+    /// TD-20260427-host-sync-flock).
+    ConcurrentWrite,
+    /// Standard IO failure (permission, disk full, …).
+    Io(String),
+}
+
+impl std::fmt::Display for AtomicWriteCheckedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AtomicWriteCheckedError::ConcurrentWrite => f.write_str(
+                "concurrent writer detected (mtime moved) — sync aborted to preserve external edits",
+            ),
+            AtomicWriteCheckedError::Io(s) => write!(f, "io: {}", s),
+        }
+    }
+}
+
+// ─── HostMcpSync trait (TD-20260427-host-sync-trait) ────────────────────────
+//
+// Each Kronn-supported host CLI (Claude Code, Codex, Copilot, Gemini)
+// has its own MCP config file with a different format and merge rule.
+// The 4 `sync_*_global_config` functions used to duplicate the common
+// orchestration (mtime snapshot, parent-dir creation, atomic write,
+// success log, post-write chmod). The trait below centralises that
+// orchestration so each CLI only owns its config-specific bits
+// (path resolution, format-specific build, optional post-write).
+//
+// Adding a 5th CLI = one struct + one trait impl + one call in
+// `sync_affected_projects`. No more 4× drift on cross-cutting
+// concerns (workflow-run gate, mtime guard, write helper, log shape).
+
+/// Plan returned by a `HostMcpSync::prepare` call. Carries everything
+/// the generic driver needs to commit the write.
+pub(crate) struct HostSyncPlan {
+    /// Absolute path of the host config file on disk.
+    pub path: PathBuf,
+    /// Serialised file content, ready for `atomic_write_checked`.
+    pub content: String,
+    /// One-shot success log line ("Synced Codex global config (3 MCP servers)").
+    pub summary: String,
+    /// Mtime captured BEFORE the impl read the existing file. Used by
+    /// the driver's `atomic_write_checked` to abort on concurrent edits.
+    pub pre_mtime: Option<std::time::SystemTime>,
+}
+
+/// A Kronn-managed outbound sync to a host CLI's global MCP config file.
+///
+/// Implementations encapsulate the format (TOML for Codex,
+/// scope-aware JSON for Claude, flat JSON for Copilot/Gemini) and any
+/// special handling of the "no Kronn entries" case (Codex clears
+/// `mcp_servers`; Copilot deletes the file; Claude/Gemini wipe Kronn
+/// entries and write the rest back). The driver `run_host_sync`
+/// handles the cross-cutting concerns.
+pub(crate) trait HostMcpSync: Sync {
+    /// Human-readable label for log lines and the workflow-run gate.
+    fn label(&self) -> &'static str;
+
+    /// Build the next file content from the current DB state and the
+    /// existing on-disk config (which the impl loads itself).
+    ///
+    /// Returns `Some(plan)` when there is something to write.
+    /// Returns `None` when:
+    /// - there's nothing to sync (empty Kronn state + file absent);
+    /// - the impl already handled the change itself (e.g. Copilot
+    ///   removes the file when no MCPs remain);
+    /// - the existing file is corrupt (already backed up + warn-logged
+    ///   by the impl's loader).
+    ///
+    /// Impls log their own warn / error lines for parsing / serialisation
+    /// failures — the driver doesn't try to second-guess them.
+    fn prepare(
+        &self,
+        conn: &rusqlite::Connection,
+        secret: &str,
+    ) -> Option<HostSyncPlan>;
+
+    /// Hook to run after a successful atomic write (e.g. `chmod 0600`).
+    /// Default: no-op.
+    fn post_write(&self, _path: &Path) {}
+}
+
+/// Generic orchestrator for `HostMcpSync` impls. Centralises:
+/// 1. parent-dir creation
+/// 2. mtime-checked atomic write (TD-host-sync-flock)
+/// 3. standardised log shape (helped by `write_host_config_checked`)
+/// 4. post-write hook on success
+///
+/// The workflow-run gate (TD-host-sync-workflow-race) is handled at
+/// `sync_affected_projects` entry, OUT of this loop, so all four CLIs
+/// back off in lockstep.
+pub(crate) fn run_host_sync(
+    t: &dyn HostMcpSync,
+    conn: &rusqlite::Connection,
+    secret: &str,
+) {
+    let label = t.label();
+    let plan = match t.prepare(conn, secret) {
+        Some(p) => p,
+        None => return,
+    };
+    if let Some(parent) = plan.path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::error!(
+                "{} sync: cannot create dir {}: {}",
+                label,
+                parent.display(),
+                e
+            );
+            return;
+        }
+    }
+    if write_host_config_checked(
+        &plan.path,
+        &plan.content,
+        plan.pre_mtime,
+        label,
+        &plan.summary,
+    ) {
+        t.post_write(&plan.path);
+    }
+}
+
+/// One-shot helper that wraps `atomic_write_checked` with the
+/// standardised log-line shape used by every host-sync function
+/// (`sync_codex_global_config`, `sync_copilot_global_config`,
+/// `sync_claude_global_config`, `sync_gemini_global_config`).
+///
+/// Centralising the post-write reporting means a future change (e.g.
+/// adding `flock`, swapping to a metric counter, etc.) lives in one
+/// place instead of four.
+///
+/// `success_msg` is logged at `info` on `Ok` — caller passes the
+/// already-formatted line ("Synced Codex global config (3 MCP servers)").
+/// `target_label` is used in the deferred / IO error lines so the
+/// operator can tell which sync is whining.
+///
+/// Returns `true` iff the write actually committed — callers that need
+/// to do post-success work (e.g. chmod 0600 the new file) can branch
+/// without re-stating the file. A `false` return doesn't differentiate
+/// concurrent-write from IO failure — the log line already did.
+pub(crate) fn write_host_config_checked(
+    target: &Path,
+    content: &str,
+    expected_mtime: Option<std::time::SystemTime>,
+    target_label: &str,
+    success_msg: &str,
+) -> bool {
+    match atomic_write_checked(target, content, expected_mtime) {
+        Ok(()) => {
+            tracing::info!("{}", success_msg);
+            true
+        }
+        Err(AtomicWriteCheckedError::ConcurrentWrite) => {
+            tracing::warn!(
+                "{} sync aborted: {} was modified concurrently. Skipping this tick.",
+                target_label,
+                target.display()
+            );
+            false
+        }
+        Err(AtomicWriteCheckedError::Io(e)) => {
+            tracing::error!(
+                "{} sync: atomic_write {}: {}",
+                target_label,
+                target.display(),
+                e
+            );
+            false
+        }
+    }
+}
+
+/// Atomic write with a CAS-style mtime guard.
+///
+/// `expected_mtime`:
+/// - `None`         → no prior version (first install) → write unconditionally.
+/// - `Some(stamp)`  → caller observed `stamp` BEFORE reading the file.
+///   We re-stat the target right before the rename; if its mtime moved
+///   past `stamp`, abort with `ConcurrentWrite`. The caller's pending
+///   content is dropped — we'd rather miss a sync tick than overwrite
+///   the user's running CLI state (cf. TD-20260427-host-sync-flock).
+///
+/// Pure mtime check (no `flock`): the documented threat is Claude Code /
+/// Gemini CLI racing Kronn over their own config files. Both write via
+/// rename, both bump mtime. mtime monotonicity is enough to catch the
+/// race; flock would only help against concurrent *Kronn* writers,
+/// which don't happen (sync is sequential).
+pub(crate) fn atomic_write_checked(
+    target: &Path,
+    content: &str,
+    expected_mtime: Option<std::time::SystemTime>,
+) -> Result<(), AtomicWriteCheckedError> {
+    if let Some(prev) = expected_mtime {
+        if let Some(curr) = read_target_mtime(target) {
+            // Strictly-greater on purpose: equality means "untouched";
+            // some filesystems clamp mtime resolution to 1 s, so the
+            // common "user touched it, then we read, then we'd rename
+            // 100 ms later" still catches because curr > prev when
+            // they actually edited.
+            if curr > prev {
+                return Err(AtomicWriteCheckedError::ConcurrentWrite);
+            }
+        }
+        // Target disappeared since the read → unusual but not a clobber.
+        // Treat as concurrent write: a deletion is also a state change
+        // we should not paper over.
+        else {
+            return Err(AtomicWriteCheckedError::ConcurrentWrite);
+        }
+    }
+    atomic_write(target, content).map_err(AtomicWriteCheckedError::Io)
 }
 
 /// Ensure Claude Code's settings.local.json has all MCP server names in enabledMcpjsonServers.
@@ -211,7 +499,11 @@ pub fn write_general_mcp_json(
 
     let configs = db::mcps::list_configs(conn).map_err(|e| e.to_string())?;
     let general_configs: Vec<_> = configs.into_iter().filter(|c| c.include_general).collect();
-    if general_configs.is_empty() { return Ok(()); }
+    // Don't early-return on empty: even when no user-configured MCPs are
+    // marked include_general, we still want to ship the kronn-internal
+    // introspection bridge into the workspace. Pre-fix the .mcp.json was
+    // never written for general discussions on a vanilla install, so the
+    // agent had no path to disc_meta / disc_get_message / disc_summarize.
 
     let servers = db::mcps::list_servers(conn).map_err(|e| e.to_string())?;
     let server_map: HashMap<String, &crate::models::McpServer> = servers.iter()
@@ -243,14 +535,26 @@ pub fn write_general_mcp_json(
         mcp_servers.insert(key, entry);
     }
 
-    if !mcp_servers.is_empty() {
+    // Always write `.mcp.json` for general discussions, even when the
+    // user has zero MCPs marked `include_general`. We still inject the
+    // kronn-internal introspection bridge so the agent has access to
+    // disc_meta / disc_get_message / disc_summarize.
+    {
         // ── Claude Code: .mcp.json (stdio only) ──
         let stdio_only: HashMap<String, McpServerEntry> = mcp_servers.iter()
             .filter(|(_, e)| e.command.is_some())
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        if !stdio_only.is_empty() {
-            let data = McpJsonFile { mcp_servers: stdio_only };
+        let mut data = McpJsonFile { mcp_servers: stdio_only };
+        // Inject the kronn-internal server alongside the user's MCPs.
+        // The disc id is forwarded via the agent process env, so a
+        // single .mcp.json works for every discussion sharing this
+        // workspace.
+        let injected = inject_kronn_internal(&mut data);
+        // Skip the file write only if we have *nothing* to write
+        // (no user MCPs AND the introspection script wasn't found on
+        // disk — happens on Docker images that don't ship the script).
+        if !data.mcp_servers.is_empty() || injected {
             write_mcp_json(target_dir, &data)?;
         }
 
@@ -265,12 +569,14 @@ pub fn write_general_mcp_json(
             })
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        let kiro_data = McpJsonFile { mcp_servers: kiro_servers };
+        let mut kiro_data = McpJsonFile { mcp_servers: kiro_servers };
+        inject_kronn_internal(&mut kiro_data);
         let _ = write_mcp_json_to_subpath(target_dir, ".kiro/settings/mcp.json", &kiro_data);
         let _ = write_mcp_json_to_subpath(target_dir, ".ai/mcp/mcp.json", &kiro_data);
 
         // ── Gemini: .gemini/settings.json (full, no localhost filter for desktop) ──
-        let full_data = McpJsonFile { mcp_servers: mcp_servers.clone() };
+        let mut full_data = McpJsonFile { mcp_servers: mcp_servers.clone() };
+        inject_kronn_internal(&mut full_data);
         let _ = write_mcp_json_to_subpath(target_dir, ".gemini/settings.json", &full_data);
 
         // ── Vibe: .vibe/config.toml ──
@@ -313,6 +619,17 @@ pub fn sync_project_mcps_to_disk(
     // Count configs per server to decide naming strategy:
     // - Single config for a server → use server.name (clean technical name)
     // - Multiple configs for same server → use config.label (to differentiate)
+    // Pre-compute the set of config ids that are "incomplete" (env_keys
+    // declared but values missing/empty, or cipher unreadable). We skip
+    // these at write time so the agent doesn't choke on a broken MCP at
+    // startup. The same list is exposed via `McpOverview` so the UI can
+    // surface it as a warning to the operator.
+    let incomplete_ids: std::collections::HashSet<String> =
+        find_incomplete_configs(&configs, &server_map, secret)
+            .into_iter()
+            .map(|i| i.config_id)
+            .collect();
+
     // Build the McpJsonFile
     let mut mcp_servers = HashMap::new();
     let mut synced_config_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -321,6 +638,14 @@ pub fn sync_project_mcps_to_disk(
             Some(s) => s,
             None => continue,
         };
+        if incomplete_ids.contains(&config.id) {
+            tracing::warn!(
+                "MCP '{}' (server: {}) has incomplete env config — skipping write to project-level files. \
+                 Operator can complete the values from the MCPs page.",
+                config.label, server.name
+            );
+            continue;
+        }
 
         // Decrypt env — skip MCP if decryption fails and keys are expected
         let env = match db::mcps::decrypt_env(&config.env_encrypted, secret) {
@@ -396,7 +721,11 @@ pub fn sync_project_mcps_to_disk(
             .filter(|(_, entry)| entry.command.is_some())
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        let claude_data = McpJsonFile { mcp_servers: stdio_only };
+        let mut claude_data = McpJsonFile { mcp_servers: stdio_only };
+        // Inject kronn-internal so introspection tools are available
+        // for project-bound discussions too. Disc id is forwarded via
+        // the agent process env (KRONN_DISCUSSION_ID) — see runner.rs.
+        inject_kronn_internal(&mut claude_data);
         write_mcp_json(&project.path, &claude_data)?;
         ensure_gitignore(&project.path, ".mcp.json");
         tracing::info!("Synced .mcp.json for {} ({} stdio MCPs)", project.path, claude_data.mcp_servers.len());
@@ -441,7 +770,11 @@ pub fn sync_project_mcps_to_disk(
             }
             filtered
         };
-        let kiro_data = McpJsonFile { mcp_servers: kiro_servers };
+        let mut kiro_data = McpJsonFile { mcp_servers: kiro_servers };
+        // Inject the introspection bridge so Kiro and the .ai/mcp variant
+        // get the same kronn-internal entry as Claude Code's .mcp.json.
+        let kiro_excluded_count = data.mcp_servers.len() - kiro_data.mcp_servers.len();
+        inject_kronn_internal(&mut kiro_data);
 
         // ── Kiro: .kiro/settings/mcp.json ──
         if let Err(e) = write_mcp_json_to_subpath(&project.path, ".kiro/settings/mcp.json", &kiro_data) {
@@ -450,11 +783,13 @@ pub fn sync_project_mcps_to_disk(
             ensure_gitignore(&project.path, ".kiro/settings/");
             tracing::info!("Synced .kiro/settings/mcp.json for {} ({} servers, {} excluded)",
                 project.path, kiro_data.mcp_servers.len(),
-                data.mcp_servers.len() - kiro_data.mcp_servers.len());
+                kiro_excluded_count);
         }
 
         // ── Gemini CLI: .gemini/settings.json (same JSON format as Claude) ──
-        if let Err(e) = write_mcp_json_to_subpath(&project.path, ".gemini/settings.json", &data) {
+        let mut gemini_data = data.clone();
+        inject_kronn_internal(&mut gemini_data);
+        if let Err(e) = write_mcp_json_to_subpath(&project.path, ".gemini/settings.json", &gemini_data) {
             tracing::warn!("Failed to sync Gemini MCP config: {}", e);
         } else {
             ensure_gitignore(&project.path, ".gemini/");
@@ -757,17 +1092,14 @@ pub(crate) fn load_codex_config_for_merge(codex_config: &Path) -> CodexLoadOutco
             return CodexLoadOutcome::Empty;
         }
     };
-    match content.parse::<toml::Value>() {
-        Ok(v) => match v.as_table() {
-            Some(t) => CodexLoadOutcome::Loaded(t.clone()),
-            None => {
-                tracing::error!(
-                    "Codex config {} is not a TOML table — aborting sync to avoid data loss",
-                    codex_config.display()
-                );
-                CodexLoadOutcome::Aborted
-            }
-        },
+    // toml 1.x: `parse::<toml::Value>` was the 0.x idiom; the 1.x doc-
+    // root is `toml::Table` which always represents a TOML document
+    // (which by spec is always a table at root). Parse straight into
+    // `Table` — equivalent to the old `Value::as_table().clone()` but
+    // without the spurious "not a table" branch (impossible since
+    // toml documents are tables by the TOML grammar).
+    match content.parse::<toml::Table>() {
+        Ok(t) => CodexLoadOutcome::Loaded(t),
         Err(e) => {
             let backup = rotate_backup(codex_config, BACKUP_ROTATION_SLOTS);
             tracing::error!(
@@ -781,270 +1113,364 @@ pub(crate) fn load_codex_config_for_merge(codex_config: &Path) -> CodexLoadOutco
     }
 }
 
-/// Rebuild ~/.codex/config.toml with ALL configured MCP servers.
-/// Codex uses a single global config file — no per-project support.
-/// We merge MCP entries into the existing config, preserving non-MCP settings.
-fn sync_codex_global_config(
-    conn: &rusqlite::Connection,
-    secret: &str,
-) {
-    use crate::db;
+/// HostMcpSync impl for OpenAI Codex CLI. TOML format, stdio-only,
+/// merges with the existing `[model_providers]` / `[profiles]` etc.
+/// `~/.codex/config.toml` (single global file — no per-project support).
+pub(crate) struct CodexSync;
 
-    // Gather ALL configs across all projects
-    let all_configs = match db::mcps::list_configs(conn) {
-        Ok(c) => c,
-        Err(e) => { tracing::warn!("Failed to list configs for Codex sync: {}", e); return; }
-    };
-    let servers = match db::mcps::list_servers(conn) {
-        Ok(s) => s,
-        Err(e) => { tracing::warn!("Failed to list servers for Codex sync: {}", e); return; }
-    };
-    let server_map: HashMap<String, &crate::models::McpServer> = servers.iter()
-        .map(|s| (s.id.clone(), s))
-        .collect();
+impl HostMcpSync for CodexSync {
+    fn label(&self) -> &'static str { "Codex" }
 
-    // Build MCP entries (Codex only supports stdio transport)
-    let mut mcp_entries: HashMap<String, CodexMcpEntry> = HashMap::new();
-    for config in &all_configs {
-        // Phase-3 host_sync filter: skip configs the user opted out of.
-        if !should_host_sync(config) { continue; }
-        let server = match server_map.get(&config.server_id) {
-            Some(s) => s,
-            None => continue,
+    fn prepare(
+        &self,
+        conn: &rusqlite::Connection,
+        secret: &str,
+    ) -> Option<HostSyncPlan> {
+        use crate::db;
+
+        let all_configs = match db::mcps::list_configs(conn) {
+            Ok(c) => c,
+            Err(e) => { tracing::warn!("Failed to list configs for Codex sync: {}", e); return None; }
+        };
+        let servers = match db::mcps::list_servers(conn) {
+            Ok(s) => s,
+            Err(e) => { tracing::warn!("Failed to list servers for Codex sync: {}", e); return None; }
+        };
+        let server_map: HashMap<String, &crate::models::McpServer> = servers.iter()
+            .map(|s| (s.id.clone(), s))
+            .collect();
+
+        // Build MCP entries (Codex only supports stdio transport)
+        let mut mcp_entries: HashMap<String, CodexMcpEntry> = HashMap::new();
+        for config in &all_configs {
+            if !should_host_sync(config) { continue; }
+            let server = match server_map.get(&config.server_id) {
+                Some(s) => s,
+                None => continue,
+            };
+            let (command, args) = match &server.transport {
+                McpTransport::Stdio { command, args } => {
+                    let final_args = config.args_override.clone()
+                        .unwrap_or_else(|| args.clone());
+                    (command.clone(), final_args)
+                }
+                _ => {
+                    tracing::debug!("Skipping non-stdio MCP '{}' for Codex (unsupported)", server.name);
+                    continue;
+                }
+            };
+            let env = db::mcps::decrypt_env(&config.env_encrypted, secret)
+                .unwrap_or_default();
+            // Codex requires names matching ^[a-zA-Z0-9_-]+$ — slugify
+            let raw_key = config.label.clone();
+            let key = slugify_label(&raw_key);
+            // npx/uvx MCPs need longer timeout for initial package download (cold start)
+            let timeout = if command == "npx" || command == "uvx" { 60 } else { 30 };
+            mcp_entries.insert(key, CodexMcpEntry {
+                command,
+                args,
+                env,
+                enabled: true,
+                startup_timeout_sec: timeout,
+            });
+        }
+
+        // Inject the kronn-internal introspection bridge into Codex's
+        // global config so every Codex spawn sees the disc_meta /
+        // disc_get_message / disc_summarize tools. Codex 0.121 only
+        // reads `~/.codex/config.toml` (not project-local .mcp.json),
+        // so the global path is the only way to wire it up. When the
+        // env var KRONN_DISCUSSION_ID isn't set (Codex run outside
+        // Kronn), the bridge returns a structured MCP error per call
+        // — graceful, no crash. The label is already a valid Codex
+        // identifier (^[a-zA-Z0-9_-]+$) so no slugification needed.
+        inject_kronn_internal_codex(&mut mcp_entries);
+
+        // Read existing config.toml and preserve non-MCP settings.
+        // Inside Docker the host home is mounted at /root, but we use KRONN_HOST_HOME
+        // to support native Linux/macOS execution where /root is not the user's home.
+        let codex_dir = if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {
+            PathBuf::from(format!("{}/.codex", host_home))
+        } else {
+            std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .map(|h| PathBuf::from(format!("{}/.codex", h)))
+                .unwrap_or_else(|_| directories::BaseDirs::new()
+                    .map(|d| d.home_dir().join(".codex"))
+                    .unwrap_or_else(|| {
+                        tracing::warn!("Cannot determine home directory for Codex config — using /tmp/.codex");
+                        PathBuf::from("/tmp/.codex")
+                    }))
+        };
+        let codex_config = codex_dir.join("config.toml");
+
+        // Drift detection: if both KRONN_HOST_HOME/.codex and the local user's
+        // ~/.codex exist *and* point at different filesystems, the user is likely
+        // alternating between Kronn (Docker / WSL) and a host-native Codex install.
+        detect_codex_config_drift(&codex_dir);
+
+        // Mtime snapshot BEFORE the read so atomic_write_checked can detect
+        // a concurrent writer and abort — see TD-host-sync-flock.
+        let pre_mtime = read_target_mtime(&codex_config);
+
+        let mut doc: toml::value::Table = match load_codex_config_for_merge(&codex_config) {
+            CodexLoadOutcome::Loaded(t) => t,
+            CodexLoadOutcome::Empty => toml::value::Table::new(),
+            CodexLoadOutcome::Aborted => return None,
         };
 
-        // Codex only supports stdio transport
-        let (command, args) = match &server.transport {
-            McpTransport::Stdio { command, args } => {
-                let final_args = config.args_override.clone()
-                    .unwrap_or_else(|| args.clone());
-                (command.clone(), final_args)
+        // Replace mcp_servers section
+        if mcp_entries.is_empty() {
+            doc.remove("mcp_servers");
+        } else {
+            let mut mcp_table = toml::value::Table::new();
+            for (key, entry) in &mcp_entries {
+                match toml::Value::try_from(entry) {
+                    Ok(v) => { mcp_table.insert(key.clone(), v); }
+                    Err(e) => tracing::warn!("Failed to serialize Codex MCP entry '{}': {}", key, e),
+                }
             }
-            _ => {
-                tracing::debug!("Skipping non-stdio MCP '{}' for Codex (unsupported)", server.name);
-                continue;
+            doc.insert("mcp_servers".into(), toml::Value::Table(mcp_table));
+        }
+
+        let summary = format!("Synced Codex global config ({} MCP servers)", mcp_entries.len());
+        let content = match toml::to_string_pretty(&doc) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("Failed to serialize Codex config: {}", e);
+                return None;
             }
         };
-
-        let env = db::mcps::decrypt_env(&config.env_encrypted, secret)
-            .unwrap_or_default();
-
-        // Codex requires names matching ^[a-zA-Z0-9_-]+$ — slugify
-        let raw_key = config.label.clone();
-        let key = slugify_label(&raw_key);
-
-        // npx/uvx MCPs need longer timeout for initial package download (cold start)
-        let timeout = if command == "npx" || command == "uvx" { 60 } else { 30 };
-
-        mcp_entries.insert(key, CodexMcpEntry {
-            command,
-            args,
-            env,
-            enabled: true,
-            startup_timeout_sec: timeout,
-        });
-    }
-
-    // Read existing config.toml and preserve non-MCP settings.
-    // Inside Docker the host home is mounted at /root, but we use KRONN_HOST_HOME
-    // to support native Linux/macOS execution where /root is not the user's home.
-    let codex_dir = if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {
-        PathBuf::from(format!("{}/.codex", host_home))
-    } else {
-        std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .map(|h| PathBuf::from(format!("{}/.codex", h)))
-            .unwrap_or_else(|_| directories::BaseDirs::new()
-                .map(|d| d.home_dir().join(".codex"))
-                .unwrap_or_else(|| {
-                    tracing::warn!("Cannot determine home directory for Codex config — using /tmp/.codex");
-                    PathBuf::from("/tmp/.codex")
-                }))
-    };
-    let codex_config = codex_dir.join("config.toml");
-
-    // Drift detection: if both KRONN_HOST_HOME/.codex and the local user's
-    // ~/.codex exist *and* point at different filesystems, the user is likely
-    // alternating between Kronn (Docker / WSL) and a host-native Codex install.
-    // The two configs will silently diverge as Kronn syncs only one of them.
-    // We can't pick a winner safely — just warn once so the user knows to
-    // pick a single source of truth.
-    detect_codex_config_drift(&codex_dir);
-
-    // Parse existing config as a TOML table to preserve other settings
-    // (e.g. [model_providers], [profiles], custom user keys).
-    //
-    // SAFETY: data preservation is delegated to load_codex_config_for_merge,
-    // which backs up corrupt files before signalling Aborted so we never
-    // silently overwrite the user's provider config.
-    let mut doc: toml::value::Table = match load_codex_config_for_merge(&codex_config) {
-        CodexLoadOutcome::Loaded(t) => t,
-        CodexLoadOutcome::Empty => toml::value::Table::new(),
-        CodexLoadOutcome::Aborted => return,
-    };
-
-    // Replace mcp_servers section
-    if mcp_entries.is_empty() {
-        doc.remove("mcp_servers");
-    } else {
-        let mut mcp_table = toml::value::Table::new();
-        for (key, entry) in &mcp_entries {
-            match toml::Value::try_from(entry) {
-                Ok(v) => { mcp_table.insert(key.clone(), v); }
-                Err(e) => tracing::warn!("Failed to serialize Codex MCP entry '{}': {}", key, e),
-            }
-        }
-        doc.insert("mcp_servers".into(), toml::Value::Table(mcp_table));
-    }
-
-    // Write back. create_dir_all can fail for surprising reasons on real
-    // user machines: ~/.codex moved to iCloud Drive (read-only sync), FileVault
-    // not yet unlocked, parent owned by another user, or a Linux mount point
-    // re-mounted read-only. Surface enough context that the user can act on
-    // the message instead of staring at "Failed to create Codex config dir".
-    if let Err(e) = std::fs::create_dir_all(&codex_dir) {
-        tracing::error!(
-            "Codex MCPs will NOT be synced — cannot create config dir {}: {} \
-             (kind: {:?}). Common causes: ~/.codex moved to iCloud Drive, FileVault locked, \
-             parent dir owned by another user, or read-only filesystem.",
-            codex_dir.display(),
-            e,
-            e.kind()
-        );
-        return;
-    }
-
-    match toml::to_string_pretty(&doc) {
-        Ok(content) => {
-            if let Err(e) = atomic_write(&codex_config, &content) {
-                tracing::error!(
-                    "Failed to write Codex config to {}: {} — \
-                     check disk space and that the path is writable.",
-                    codex_config.display(), e
-                );
-            } else {
-                tracing::info!("Synced Codex global config ({} MCP servers)", mcp_entries.len());
-            }
-        }
-        Err(e) => tracing::warn!("Failed to serialize Codex config: {}", e),
+        Some(HostSyncPlan { path: codex_config, content, summary, pre_mtime })
     }
 }
 
-/// Sync ~/.copilot/mcp-config.json — global config, same JSON format as Claude (.mcp.json).
-fn sync_copilot_global_config(
-    conn: &rusqlite::Connection,
-    secret: &str,
-) {
-    use crate::db;
+/// HostMcpSync impl for Copilot CLI (`~/.copilot/mcp-config.json`).
+/// Top-level JSON, stdio-only, removes the config file when no Kronn
+/// entries remain (special-case in `prepare`, returns None).
+pub(crate) struct CopilotSync;
 
-    let all_configs = match db::mcps::list_configs(conn) {
-        Ok(c) => c,
-        Err(e) => { tracing::warn!("Failed to list configs for Copilot sync: {}", e); return; }
-    };
-    let servers = match db::mcps::list_servers(conn) {
-        Ok(s) => s,
-        Err(e) => { tracing::warn!("Failed to list servers for Copilot sync: {}", e); return; }
-    };
-    let server_map: HashMap<String, &crate::models::McpServer> = servers.iter()
-        .map(|s| (s.id.clone(), s))
-        .collect();
+impl HostMcpSync for CopilotSync {
+    fn label(&self) -> &'static str { "Copilot" }
 
-    // Build mcpServers entries (stdio only — Copilot CLI doesn't support SSE)
-    let mut mcp_servers: HashMap<String, McpServerEntry> = HashMap::new();
-    for config in &all_configs {
-        // Phase-3 host_sync filter (same as Codex above).
-        if !should_host_sync(config) { continue; }
-        let server = match server_map.get(&config.server_id) {
-            Some(s) => s,
-            None => continue,
+    fn prepare(
+        &self,
+        conn: &rusqlite::Connection,
+        secret: &str,
+    ) -> Option<HostSyncPlan> {
+        use crate::db;
+
+        let all_configs = match db::mcps::list_configs(conn) {
+            Ok(c) => c,
+            Err(e) => { tracing::warn!("Failed to list configs for Copilot sync: {}", e); return None; }
         };
+        let servers = match db::mcps::list_servers(conn) {
+            Ok(s) => s,
+            Err(e) => { tracing::warn!("Failed to list servers for Copilot sync: {}", e); return None; }
+        };
+        let server_map: HashMap<String, &crate::models::McpServer> = servers.iter()
+            .map(|s| (s.id.clone(), s))
+            .collect();
 
-        let (command, args) = match &server.transport {
-            McpTransport::Stdio { command, args } => {
-                let final_args = config.args_override.clone()
-                    .unwrap_or_else(|| args.clone());
-                (command.clone(), final_args)
+        // Build mcpServers entries (stdio only — Copilot CLI doesn't support SSE)
+        let mut mcp_servers: HashMap<String, McpServerEntry> = HashMap::new();
+        for config in &all_configs {
+            // Phase-3 host_sync filter (same as Codex above).
+            if !should_host_sync(config) { continue; }
+            let server = match server_map.get(&config.server_id) {
+                Some(s) => s,
+                None => continue,
+            };
+
+            let (command, args) = match &server.transport {
+                McpTransport::Stdio { command, args } => {
+                    let final_args = config.args_override.clone()
+                        .unwrap_or_else(|| args.clone());
+                    (command.clone(), final_args)
+                }
+                _ => {
+                    tracing::debug!("Skipping non-stdio MCP '{}' for Copilot (unsupported)", server.name);
+                    continue;
+                }
+            };
+
+            let env = db::mcps::decrypt_env(&config.env_encrypted, secret)
+                .unwrap_or_default();
+
+            let key = config.label.clone();
+            mcp_servers.insert(key, McpServerEntry {
+                command: Some(command),
+                args: Some(args),
+                url: None,
+                env,
+            });
+        }
+
+        // Inject the kronn-internal introspection bridge into Copilot's
+        // global config (same rationale as the Codex global injection):
+        // Copilot CLI reads `~/.copilot/mcp-config.json`, never project-
+        // local. The bridge returns a structured MCP error when run
+        // outside Kronn (no KRONN_DISCUSSION_ID), so global injection
+        // is safe.
+        let mut copilot_file = McpJsonFile { mcp_servers };
+        inject_kronn_internal(&mut copilot_file);
+        let mcp_servers = copilot_file.mcp_servers;
+
+        let copilot_dir = if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {
+            PathBuf::from(format!("{}/.copilot", host_home))
+        } else {
+            std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .map(|h| PathBuf::from(format!("{}/.copilot", h)))
+                .unwrap_or_else(|_| directories::BaseDirs::new()
+                    .map(|d| d.home_dir().join(".copilot"))
+                    .unwrap_or_else(|| {
+                        tracing::warn!("Cannot determine home directory for Copilot config — using /tmp/.copilot");
+                        PathBuf::from("/tmp/.copilot")
+                    }))
+        };
+        let config_path = copilot_dir.join("mcp-config.json");
+
+        if mcp_servers.is_empty() {
+            // Remove config file if no MCPs — bypasses the standard
+            // write/atomic-write path because there's nothing to write.
+            if config_path.exists() {
+                let _ = std::fs::remove_file(&config_path);
+                tracing::info!("Removed empty Copilot MCP config");
             }
-            _ => {
-                tracing::debug!("Skipping non-stdio MCP '{}' for Copilot (unsupported)", server.name);
-                continue;
+            return None;
+        }
+
+        // Mtime snapshot for the concurrent-writer guard (TD-host-sync-flock).
+        let pre_mtime = read_target_mtime(&config_path);
+
+        let data = McpJsonFile { mcp_servers };
+        let summary = format!(
+            "Synced Copilot global config ({} MCP servers)",
+            data.mcp_servers.len()
+        );
+        let content = match serde_json::to_string_pretty(&data) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("Failed to serialize Copilot MCP config: {}", e);
+                return None;
             }
         };
-
-        let env = db::mcps::decrypt_env(&config.env_encrypted, secret)
-            .unwrap_or_default();
-
-        let key = config.label.clone();
-        mcp_servers.insert(key, McpServerEntry {
-            command: Some(command),
-            args: Some(args),
-            url: None,
-            env,
-        });
-    }
-
-    let copilot_dir = if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {
-        PathBuf::from(format!("{}/.copilot", host_home))
-    } else {
-        std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .map(|h| PathBuf::from(format!("{}/.copilot", h)))
-            .unwrap_or_else(|_| directories::BaseDirs::new()
-                .map(|d| d.home_dir().join(".copilot"))
-                .unwrap_or_else(|| {
-                    tracing::warn!("Cannot determine home directory for Copilot config — using /tmp/.copilot");
-                    PathBuf::from("/tmp/.copilot")
-                }))
-    };
-    let config_path = copilot_dir.join("mcp-config.json");
-
-    if mcp_servers.is_empty() {
-        // Remove config file if no MCPs
-        if config_path.exists() {
-            let _ = std::fs::remove_file(&config_path);
-            tracing::info!("Removed empty Copilot MCP config");
-        }
-        return;
-    }
-
-    if let Err(e) = std::fs::create_dir_all(&copilot_dir) {
-        tracing::warn!("Failed to create Copilot config dir: {}", e);
-        return;
-    }
-
-    let data = McpJsonFile { mcp_servers };
-    match serde_json::to_string_pretty(&data) {
-        Ok(content) => {
-            if let Err(e) = atomic_write(&config_path, &content) {
-                tracing::warn!("Failed to write Copilot MCP config: {}", e);
-            } else {
-                tracing::info!("Synced Copilot global config ({} MCP servers)", data.mcp_servers.len());
-            }
-        }
-        Err(e) => tracing::warn!("Failed to serialize Copilot MCP config: {}", e),
+        Some(HostSyncPlan { path: config_path, content, summary, pre_mtime })
     }
 }
 
 /// Sync .mcp.json for all projects that are affected by a config change.
 /// Pass the config to determine which projects need updating.
+///
+/// Workflow-run gate (TD-20260427-host-sync-workflow-race) : if any run
+/// is currently `Running` / `Pending`, we back off the host-config writes
+/// rather than risk an agent already mid-spawn reading an inconsistent
+/// `~/.claude.json` / `~/.gemini/settings.json`. The DB save still went
+/// through (the caller already wrote it); the operator's next save (or
+/// next sync trigger after the run completes) catches up the host side.
+///
+/// Test coverage: `db::workflows::has_running_run` is unit-tested (4
+/// status combinations). The gate itself is a single conditional —
+/// integration testing it would require standing up an `AppState`
+/// plus a tempdir HOME and a `workflow_runs` row, roughly 30 lines for
+/// one branch of behaviour. Skipped intentionally; code review owns the
+/// wiring.
 pub fn sync_affected_projects(
     conn: &rusqlite::Connection,
     project_ids: &[String],
     secret: &str,
 ) {
+    if let Ok(true) = crate::db::workflows::has_running_run(conn) {
+        tracing::warn!(
+            "MCP host sync deferred: a workflow run is currently active. \
+             DB state is up-to-date; host configs will be re-synced on the \
+             next change or after the run finishes (re-save to force)."
+        );
+        return;
+    }
     // Sync per-project configs (Claude Code .mcp.json + Vibe .vibe/config.toml)
     for pid in project_ids {
         if let Err(e) = sync_project_mcps_to_disk(conn, pid, secret) {
             tracing::warn!("Failed to sync MCP configs for project {}: {}", pid, e);
         }
     }
+    // One-shot host-binary check across all syncing configs. Surfaces
+    // "uvx not in PATH" / "glab missing" issues at sync time instead
+    // of "Failed to connect" at MCP-spawn time. See TD-20260429
+    // recommendation 5 + `kronn doctor` for the user-facing version.
+    warn_missing_host_binaries(conn);
+
     // Sync global host-CLI configs (once, not per-project). Each function
     // filters by `host_sync ∈ {GlobalOnly, MirrorAll}` and merges with
     // existing entries to preserve user-managed (non-Kronn) MCPs.
-    sync_codex_global_config(conn, secret);
-    sync_copilot_global_config(conn, secret);
-    sync_claude_global_config(conn, secret);
-    sync_gemini_global_config(conn, secret);
+    // Iterate through every registered HostMcpSync impl. Adding a 5th
+    // CLI = one more entry in this slice; everything else (mtime guard,
+    // workflow-run gate above, log shape) flows through `run_host_sync`.
+    let registry: &[&dyn HostMcpSync] = &[&CodexSync, &CopilotSync, &ClaudeSync, &GeminiSync];
+    for sync in registry {
+        run_host_sync(*sync, conn, secret);
+    }
+}
+
+/// Walk the host_sync-enabled configs and, for each Stdio command, check
+/// whether the binary is reachable on the host's PATH. Logs one warn per
+/// missing binary (deduped) so the operator sees "uvx not in host PATH"
+/// at config-save time instead of "Failed to connect" at agent-spawn
+/// time. Best-effort: a missing `find_binary` lookup is non-fatal.
+///
+/// Tracked under TD-20260429-uv-cache-uid-mismatch (item 5 of suggested
+/// directions). See also `kronn doctor` for the operator-side check.
+fn warn_missing_host_binaries(conn: &rusqlite::Connection) {
+    use crate::db;
+
+    let configs = match db::mcps::list_configs(conn) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let servers = match db::mcps::list_servers(conn) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let server_map: HashMap<String, &crate::models::McpServer> = servers
+        .iter()
+        .map(|s| (s.id.clone(), s))
+        .collect();
+
+    let mut commands_seen: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    for config in &configs {
+        if !should_host_sync(config) {
+            continue;
+        }
+        let server = match server_map.get(&config.server_id) {
+            Some(s) => *s,
+            None => continue,
+        };
+        let cmd = match &server.transport {
+            McpTransport::Stdio { command, .. } => command.clone(),
+            _ => continue, // SSE / Streamable / ApiOnly don't fork a host binary
+        };
+        // Skip absolute paths — operator owns the path, we trust it.
+        if cmd.starts_with('/') || cmd.starts_with('.') {
+            continue;
+        }
+        commands_seen.insert(cmd);
+    }
+
+    for cmd in commands_seen {
+        if crate::agents::find_binary(&cmd).is_none() {
+            tracing::warn!(
+                target: "kronn::host_sync",
+                "MCP host-sync writer: command `{}` not found on host PATH \
+                 (binary missing in /host-bin/{{global,local,npm}}). \
+                 The Kronn-managed entry will be written, but the host CLI \
+                 will fail to launch this MCP until `{0}` is installed. \
+                 Run `kronn doctor` for a complete check.",
+                cmd
+            );
+        }
+    }
 }
 
 // ─── Phase-3 host-sync helpers ───────────────────────────────────────────────
@@ -1289,132 +1715,134 @@ fn merge_kronn_entries(
     }
 }
 
-/// Sync `~/.claude.json` for configs with `host_sync ≠ None`.
-///
-/// Scope-aware (Phase-3 refactor) — respects the Kronn `is_global`
-/// + `project_ids` selection:
-///
-/// - `is_global = true` → top-level `mcpServers` (Claude scope `user`).
-/// - `is_global = false` + `project_ids = [..]` →
-///   `projects[<host-path>].mcpServers` for each project (Claude scope `local`).
-/// - `is_global = false` + `project_ids = []` → top-level fallback (nothing
-///   to scope to).
-///
-/// Always preserves user-managed entries (no `_kronn` marker) and the rest
-/// of the JSON tree (`numStartups`, `theme`, cache, etc.). Orphan cleanup
-/// is global-tree-wide: a config that moved scope (e.g. from top-level to
-/// per-project) gets cleaned at the old location and re-written at the new.
-fn sync_claude_global_config(
-    conn: &rusqlite::Connection,
-    secret: &str,
-) {
-    use crate::db;
+/// HostMcpSync impl for Claude Code. Scope-aware JSON: routes Kronn
+/// entries between top-level `mcpServers` (Claude `user` scope) and
+/// `projects[<host-path>].mcpServers` (`local` scope) based on each
+/// config's `is_global` / `project_ids`. Preserves user-managed
+/// entries (no `_kronn` marker) and unrelated keys (cache, recents,
+/// onboarding state).
+pub(crate) struct ClaudeSync;
 
-    let all_configs = match db::mcps::list_configs(conn) {
-        Ok(c) => c,
-        Err(e) => { tracing::warn!("Claude sync: list_configs failed: {}", e); return; }
-    };
-    let servers = match db::mcps::list_servers(conn) {
-        Ok(s) => s,
-        Err(e) => { tracing::warn!("Claude sync: list_servers failed: {}", e); return; }
-    };
-    let server_map: HashMap<String, &crate::models::McpServer> = servers.iter()
-        .map(|s| (s.id.clone(), s)).collect();
+impl HostMcpSync for ClaudeSync {
+    fn label(&self) -> &'static str { "Claude" }
 
-    let projects = match db::projects::list_projects(conn) {
-        Ok(p) => p,
-        Err(e) => { tracing::warn!("Claude sync: list_projects failed: {}", e); return; }
-    };
-    let project_path_by_id: HashMap<String, String> = projects.iter()
-        .map(|p| (p.id.clone(), p.path.clone())).collect();
+    fn prepare(
+        &self,
+        conn: &rusqlite::Connection,
+        secret: &str,
+    ) -> Option<HostSyncPlan> {
+        use crate::db;
 
-    // Bucket Kronn-managed entries by their target scope.
-    let mut top_level: HashMap<String, serde_json::Value> = HashMap::new();
-    let mut by_project: HashMap<String /* abs project path */, HashMap<String, serde_json::Value>> = HashMap::new();
-    let mut all_managed_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    for config in &all_configs {
-        if !should_host_sync(config) { continue; }
-        let server = match server_map.get(&config.server_id) { Some(s) => s, None => continue };
-        let entry = match build_kronn_managed_json_entry(config, server, secret, false) {
-            Some(e) => e,
-            None => continue, // ApiOnly skipped
+        let all_configs = match db::mcps::list_configs(conn) {
+            Ok(c) => c,
+            Err(e) => { tracing::warn!("Claude sync: list_configs failed: {}", e); return None; }
         };
-        all_managed_ids.insert(config.id.clone());
+        let servers = match db::mcps::list_servers(conn) {
+            Ok(s) => s,
+            Err(e) => { tracing::warn!("Claude sync: list_servers failed: {}", e); return None; }
+        };
+        let server_map: HashMap<String, &crate::models::McpServer> = servers.iter()
+            .map(|s| (s.id.clone(), s)).collect();
 
-        let goes_top_level = config.is_global || config.project_ids.is_empty();
-        if goes_top_level {
-            top_level.insert(config.label.clone(), entry);
-        } else {
-            for pid in &config.project_ids {
-                if let Some(path) = project_path_by_id.get(pid) {
-                    by_project.entry(path.clone())
-                        .or_default()
-                        .insert(config.label.clone(), entry.clone());
+        let projects = match db::projects::list_projects(conn) {
+            Ok(p) => p,
+            Err(e) => { tracing::warn!("Claude sync: list_projects failed: {}", e); return None; }
+        };
+        let project_path_by_id: HashMap<String, String> = projects.iter()
+            .map(|p| (p.id.clone(), p.path.clone())).collect();
+
+        // Bucket Kronn-managed entries by their target scope.
+        let mut top_level: HashMap<String, serde_json::Value> = HashMap::new();
+        let mut by_project: HashMap<String /* abs project path */, HashMap<String, serde_json::Value>> = HashMap::new();
+        let mut all_managed_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for config in &all_configs {
+            if !should_host_sync(config) { continue; }
+            let server = match server_map.get(&config.server_id) { Some(s) => s, None => continue };
+            let entry = match build_kronn_managed_json_entry(config, server, secret, false) {
+                Some(e) => e,
+                None => continue, // ApiOnly skipped
+            };
+            all_managed_ids.insert(config.id.clone());
+
+            let goes_top_level = config.is_global || config.project_ids.is_empty();
+            if goes_top_level {
+                top_level.insert(config.label.clone(), entry);
+            } else {
+                for pid in &config.project_ids {
+                    if let Some(path) = project_path_by_id.get(pid) {
+                        by_project.entry(path.clone())
+                            .or_default()
+                            .insert(config.label.clone(), entry.clone());
+                    }
                 }
             }
         }
-    }
 
-    let path = resolve_home_subpath(".claude.json");
+        let path = resolve_home_subpath(".claude.json");
 
-    if top_level.is_empty() && by_project.is_empty() && !path.exists() {
-        return;
-    }
-
-    let mut existing = match load_json_config_for_merge(&path) {
-        JsonLoadOutcome::Loaded(v) => v,
-        JsonLoadOutcome::Empty => serde_json::Value::Object(serde_json::Map::new()),
-        JsonLoadOutcome::Aborted => return,
-    };
-
-    if !existing.is_object() {
-        tracing::error!("Claude config at {} is not a JSON object — aborting sync", path.display());
-        return;
-    }
-
-    let prev_count = count_kronn_entries_recursive(&existing);
-
-    // Tree-wide cleanup of Kronn entries: top-level + every projects[*]
-    // map. Anything Kronn-managed (marker `_kronn.managed=true`) is removed
-    // before we re-insert at the correct current scope. This handles
-    // scope migration (top-level ↔ per-project) for free.
-    drop_all_kronn_entries(&mut existing);
-
-    // Re-insert at the correct scope.
-    if !top_level.is_empty() {
-        merge_into_mcp_servers(&mut existing, top_level, &all_managed_ids, /*track_scope=*/None);
-    }
-    for (project_path, entries) in by_project {
-        merge_into_project_mcp_servers(&mut existing, &project_path, entries, &all_managed_ids);
-    }
-
-    // Cleanup empty mcpServers maps left over from removed Kronn entries.
-    prune_empty_mcp_servers(&mut existing);
-
-    if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            tracing::error!("Claude sync: cannot create dir {}: {}", parent.display(), e);
-            return;
+        if top_level.is_empty() && by_project.is_empty() && !path.exists() {
+            return None;
         }
+
+        // Mtime snapshot — Claude Code rewrites this file (cache, recents,
+        // mcpContextUris, onboarding state) on every session. The guard
+        // prevents Kronn's read-modify-write from clobbering those edits.
+        let pre_mtime = read_target_mtime(&path);
+
+        let mut existing = match load_json_config_for_merge(&path) {
+            JsonLoadOutcome::Loaded(v) => v,
+            JsonLoadOutcome::Empty => serde_json::Value::Object(serde_json::Map::new()),
+            JsonLoadOutcome::Aborted => return None,
+        };
+
+        if !existing.is_object() {
+            tracing::error!("Claude config at {} is not a JSON object — aborting sync", path.display());
+            return None;
+        }
+
+        let prev_count = count_kronn_entries_recursive(&existing);
+
+        // Tree-wide cleanup of Kronn entries: top-level + every projects[*]
+        // map. Anything Kronn-managed (marker `_kronn.managed=true`) is removed
+        // before we re-insert at the correct current scope. This handles
+        // scope migration (top-level ↔ per-project) for free.
+        drop_all_kronn_entries(&mut existing);
+
+        // Re-insert at the correct scope.
+        if !top_level.is_empty() {
+            merge_into_mcp_servers(&mut existing, top_level, &all_managed_ids, /*track_scope=*/None);
+        }
+        for (project_path, entries) in by_project {
+            merge_into_project_mcp_servers(&mut existing, &project_path, entries, &all_managed_ids);
+        }
+
+        // Cleanup empty mcpServers maps left over from removed Kronn entries.
+        prune_empty_mcp_servers(&mut existing);
+
+        let new_count = count_kronn_entries_recursive(&existing);
+        let summary = format!(
+            "Synced Claude global config: {} Kronn entries (was {}) — top-level={}, per-project={} maps",
+            new_count,
+            prev_count,
+            count_at_top_level(&existing),
+            count_project_scopes(&existing)
+        );
+        let content = match serde_json::to_string_pretty(&existing) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("Claude sync: serialize: {}", e);
+                return None;
+            }
+        };
+        Some(HostSyncPlan { path, content, summary, pre_mtime })
     }
 
-    let content = match serde_json::to_string_pretty(&existing) {
-        Ok(s) => s,
-        Err(e) => { tracing::error!("Claude sync: serialize: {}", e); return; }
-    };
-
-    if let Err(e) = atomic_write(&path, &content) {
-        tracing::error!("Claude sync: atomic_write {}: {}", path.display(), e);
-        return;
+    fn post_write(&self, path: &Path) {
+        // chmod 0600 only on successful write — keep existing file's
+        // perms untouched on a concurrent-write abort.
+        ensure_user_only_perms(path);
     }
-    ensure_user_only_perms(&path);
-
-    let new_count = count_kronn_entries_recursive(&existing);
-    tracing::info!(
-        "Synced Claude global config: {} Kronn entries (was {}) — top-level={}, per-project={} maps",
-        new_count, prev_count, count_at_top_level(&existing), count_project_scopes(&existing)
-    );
 }
 
 /// Walk the entire JSON tree (top-level mcpServers + each projects[*]
@@ -1590,103 +2018,89 @@ fn count_project_scopes(existing: &serde_json::Value) -> usize {
         .unwrap_or(0)
 }
 
-/// Sync `~/.gemini/settings.json` global `mcpServers`. Same pattern as
-/// Claude, but uses `httpUrl` for Streamable HTTP (Gemini convention).
-fn sync_gemini_global_config(
-    conn: &rusqlite::Connection,
-    secret: &str,
-) {
-    sync_json_global_config(
-        conn, secret,
-        ".gemini/settings.json",
-        true,  // Gemini: httpUrl for Streamable
-        "Gemini",
-    );
-}
+/// HostMcpSync impl for Gemini CLI (`~/.gemini/settings.json`).
+/// Top-level JSON; uses `httpUrl` for Streamable HTTP transport
+/// (Gemini convention — Claude calls the same field `url`).
+pub(crate) struct GeminiSync;
 
-/// Shared implementation for the Claude + Gemini JSON sync. Refactor target
-/// for the future `HostAgentSync` trait (deferred — Tech Lead P2).
-fn sync_json_global_config(
-    conn: &rusqlite::Connection,
-    secret: &str,
-    relative_subpath: &str,
-    use_http_url_for_streamable: bool,
-    label: &'static str,
-) {
-    use crate::db;
+impl HostMcpSync for GeminiSync {
+    fn label(&self) -> &'static str { "Gemini" }
 
-    let all_configs = match db::mcps::list_configs(conn) {
-        Ok(c) => c,
-        Err(e) => { tracing::warn!("{} sync: list_configs failed: {}", label, e); return; }
-    };
-    let servers = match db::mcps::list_servers(conn) {
-        Ok(s) => s,
-        Err(e) => { tracing::warn!("{} sync: list_servers failed: {}", label, e); return; }
-    };
-    let server_map: HashMap<String, &crate::models::McpServer> = servers.iter()
-        .map(|s| (s.id.clone(), s)).collect();
+    fn prepare(
+        &self,
+        conn: &rusqlite::Connection,
+        secret: &str,
+    ) -> Option<HostSyncPlan> {
+        use crate::db;
 
-    // Build Kronn-managed entries (filtered by host_sync ≠ None, ApiOnly skipped)
-    let mut kronn_entries: HashMap<String, serde_json::Value> = HashMap::new();
-    let mut kronn_config_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for config in &all_configs {
-        if !should_host_sync(config) { continue; }
-        let server = match server_map.get(&config.server_id) { Some(s) => s, None => continue };
-        if let Some(entry) = build_kronn_managed_json_entry(config, server, secret, use_http_url_for_streamable) {
-            kronn_entries.insert(config.label.clone(), entry);
-            kronn_config_ids.insert(config.id.clone());
+        let all_configs = match db::mcps::list_configs(conn) {
+            Ok(c) => c,
+            Err(e) => { tracing::warn!("Gemini sync: list_configs failed: {}", e); return None; }
+        };
+        let servers = match db::mcps::list_servers(conn) {
+            Ok(s) => s,
+            Err(e) => { tracing::warn!("Gemini sync: list_servers failed: {}", e); return None; }
+        };
+        let server_map: HashMap<String, &crate::models::McpServer> = servers.iter()
+            .map(|s| (s.id.clone(), s)).collect();
+
+        // Build Kronn-managed entries (filtered by host_sync ≠ None, ApiOnly skipped)
+        let mut kronn_entries: HashMap<String, serde_json::Value> = HashMap::new();
+        let mut kronn_config_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for config in &all_configs {
+            if !should_host_sync(config) { continue; }
+            let server = match server_map.get(&config.server_id) { Some(s) => s, None => continue };
+            // Gemini: use `httpUrl` for Streamable HTTP.
+            if let Some(entry) = build_kronn_managed_json_entry(config, server, secret, true) {
+                kronn_entries.insert(config.label.clone(), entry);
+                kronn_config_ids.insert(config.id.clone());
+            }
         }
-    }
 
-    let path = resolve_home_subpath(relative_subpath);
+        let path = resolve_home_subpath(".gemini/settings.json");
 
-    // Empty case: if Kronn has nothing to sync AND the file doesn't exist, skip.
-    // If the file exists, we still want to walk it to remove orphan Kronn entries.
-    if kronn_entries.is_empty() && !path.exists() {
-        return;
-    }
-
-    // Load existing (with backup-on-parse-fail safety)
-    let mut existing = match load_json_config_for_merge(&path) {
-        JsonLoadOutcome::Loaded(v) => v,
-        JsonLoadOutcome::Empty => serde_json::Value::Object(serde_json::Map::new()),
-        JsonLoadOutcome::Aborted => return,
-    };
-
-    // Make sure existing is an object — if it's an array or scalar, abort
-    // (we don't want to clobber the user's file).
-    if !existing.is_object() {
-        tracing::error!("{} config at {} is not a JSON object — aborting sync", label, path.display());
-        return;
-    }
-
-    let prev_kronn_count = count_kronn_entries(&existing);
-    merge_kronn_entries(&mut existing, kronn_entries, &kronn_config_ids);
-    let new_kronn_count = count_kronn_entries(&existing);
-
-    // Ensure parent dir exists (Gemini lives at .gemini/settings.json).
-    if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            tracing::error!("{} sync: cannot create dir {}: {}", label, parent.display(), e);
-            return;
+        // Empty case: if Kronn has nothing to sync AND the file doesn't exist, skip.
+        // If the file exists, we still want to walk it to remove orphan Kronn entries.
+        if kronn_entries.is_empty() && !path.exists() {
+            return None;
         }
+
+        // Mtime snapshot for the concurrent-writer guard (TD-host-sync-flock).
+        let pre_mtime = read_target_mtime(&path);
+
+        // Load existing (with backup-on-parse-fail safety)
+        let mut existing = match load_json_config_for_merge(&path) {
+            JsonLoadOutcome::Loaded(v) => v,
+            JsonLoadOutcome::Empty => serde_json::Value::Object(serde_json::Map::new()),
+            JsonLoadOutcome::Aborted => return None,
+        };
+
+        if !existing.is_object() {
+            tracing::error!("Gemini config at {} is not a JSON object — aborting sync", path.display());
+            return None;
+        }
+
+        let prev_kronn_count = count_kronn_entries(&existing);
+        merge_kronn_entries(&mut existing, kronn_entries, &kronn_config_ids);
+        let new_kronn_count = count_kronn_entries(&existing);
+
+        let summary = format!(
+            "Synced Gemini global config: {} Kronn entries (was {})",
+            new_kronn_count, prev_kronn_count
+        );
+        let content = match serde_json::to_string_pretty(&existing) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("Gemini sync: serialize: {}", e);
+                return None;
+            }
+        };
+        Some(HostSyncPlan { path, content, summary, pre_mtime })
     }
 
-    let content = match serde_json::to_string_pretty(&existing) {
-        Ok(s) => s,
-        Err(e) => { tracing::error!("{} sync: serialize: {}", label, e); return; }
-    };
-
-    if let Err(e) = atomic_write(&path, &content) {
-        tracing::error!("{} sync: atomic_write {}: {}", label, path.display(), e);
-        return;
+    fn post_write(&self, path: &Path) {
+        ensure_user_only_perms(path);
     }
-    ensure_user_only_perms(&path);
-
-    tracing::info!(
-        "Synced {} global config: {} Kronn entries (was {})",
-        label, new_kronn_count, prev_kronn_count
-    );
 }
 
 /// Count entries that carry a `_kronn.managed = true` marker.
@@ -1760,7 +2174,22 @@ fn ensure_gitignore(project_path: &str, pattern: &str) {
 
 // ─── MCP context files ──────────────────────────────────────────────────────
 
-const MCP_CONTEXT_DIR: &str = "ai/operations/mcp-servers";
+/// Sub-path of the project's docs folder where per-MCP usage context lives.
+/// The leading folder (`docs`/`doc`/`ai`) is resolved at call time via
+/// `detect_docs_dir` — pre-fix this was hardcoded to `ai/...` which
+/// silently dropped files into a non-canonical `<project>/ai/` even on
+/// fresh post-0.7.1 projects whose docs live under `docs/`. Use
+/// `mcp_context_dir(project_path)` to get the resolved absolute path.
+const MCP_CONTEXT_SUBPATH: &str = "operations/mcp-servers";
+
+/// Resolve the MCP context directory for a project, respecting whichever
+/// docs convention (`docs/`/`doc/`/`ai/`) the project actually uses.
+/// `resolved_project_path` is a host-resolved string path (the local
+/// `resolve_host_path` returns String for legacy reasons).
+fn mcp_context_dir(resolved_project_path: &str) -> PathBuf {
+    crate::core::scanner::detect_docs_dir(Path::new(resolved_project_path))
+        .join(MCP_CONTEXT_SUBPATH)
+}
 
 /// Sanitize an MCP label into a filename-safe slug.
 pub fn slugify_label(label: &str) -> String {
@@ -1804,7 +2233,7 @@ pub fn sync_mcp_context_files(
     mcp_labels: &[(String, String)], // (label, server_description)
 ) {
     let resolved = resolve_host_path(project_path);
-    let ctx_dir = Path::new(&resolved).join(MCP_CONTEXT_DIR);
+    let ctx_dir = mcp_context_dir(&resolved);
 
     // Create directory structure if needed
     if let Err(e) = std::fs::create_dir_all(&ctx_dir) {
@@ -1862,7 +2291,7 @@ pub fn read_all_mcp_contexts(project_path: &str) -> String {
         .unwrap_or_default();
 
     // 2. Read custom context files (user-written instructions per MCP)
-    let ctx_dir = Path::new(&resolved).join(MCP_CONTEXT_DIR);
+    let ctx_dir = mcp_context_dir(&resolved);
     let mut contexts = Vec::new();
     if ctx_dir.is_dir() {
         if let Ok(entries) = std::fs::read_dir(&ctx_dir) {
@@ -2167,14 +2596,14 @@ pub fn collect_active_api_plugins(
 /// Read a single MCP context file content.
 pub fn read_mcp_context(project_path: &str, slug: &str) -> Option<String> {
     let resolved = resolve_host_path(project_path);
-    let file = Path::new(&resolved).join(MCP_CONTEXT_DIR).join(format!("{}.md", slug));
+    let file = mcp_context_dir(&resolved).join(format!("{}.md", slug));
     std::fs::read_to_string(&file).ok()
 }
 
 /// Write a single MCP context file.
 pub fn write_mcp_context(project_path: &str, slug: &str, content: &str) -> Result<(), String> {
     let resolved = resolve_host_path(project_path);
-    let ctx_dir = Path::new(&resolved).join(MCP_CONTEXT_DIR);
+    let ctx_dir = mcp_context_dir(&resolved);
     std::fs::create_dir_all(&ctx_dir)
         .map_err(|e| format!("Failed to create dir: {}", e))?;
     let file = ctx_dir.join(format!("{}.md", slug));
@@ -2186,7 +2615,7 @@ pub fn write_mcp_context(project_path: &str, slug: &str, content: &str) -> Resul
 /// Returns (slug, label_from_filename) pairs.
 pub fn list_mcp_context_files(project_path: &str) -> Vec<(String, String)> {
     let resolved = resolve_host_path(project_path);
-    let ctx_dir = Path::new(&resolved).join(MCP_CONTEXT_DIR);
+    let ctx_dir = mcp_context_dir(&resolved);
     if !ctx_dir.is_dir() {
         return Vec::new();
     }
@@ -2257,6 +2686,63 @@ fn is_localhost_remote(server: &crate::models::McpServer) -> bool {
 }
 
 /// Return all known incompatibilities for a set of servers.
+/// Walk all configs for a project (or global) and return the ones whose
+/// declared `env_keys` aren't all populated — those would fail handshake
+/// at agent boot and slow down the whole MCP startup. Used both at
+/// sync-to-disk time (skip writing them) and by the API (surface to UI).
+///
+/// Decryption errors are surfaced separately with `missing_keys=[]` and
+/// a "secrets unreadable" reason so the UI can suggest re-entering the
+/// values rather than guessing which keys broke.
+pub fn find_incomplete_configs(
+    configs: &[crate::models::McpConfig],
+    servers: &HashMap<String, &crate::models::McpServer>,
+    secret: &str,
+) -> Vec<crate::models::McpIncompleteConfig> {
+    let mut out = Vec::new();
+    for config in configs {
+        // Configs with no declared env_keys can't be incomplete.
+        if config.env_keys.is_empty() {
+            continue;
+        }
+        let server_name = servers.get(&config.server_id)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| "(unknown server)".to_string());
+
+        let env = match crate::db::mcps::decrypt_env(&config.env_encrypted, secret) {
+            Ok(e) => e,
+            Err(e) => {
+                // Cipher unreadable — likely a key rotation or DB
+                // corruption. Mark as incomplete with empty
+                // missing_keys so the UI shows the generic recovery
+                // hint.
+                out.push(crate::models::McpIncompleteConfig {
+                    config_id: config.id.clone(),
+                    label: config.label.clone(),
+                    server_name,
+                    missing_keys: Vec::new(),
+                    reason: format!("Secrets unreadable: {e}"),
+                });
+                continue;
+            }
+        };
+        let missing: Vec<String> = config.env_keys.iter()
+            .filter(|k| env.get(k.as_str()).map(|v| v.trim().is_empty()).unwrap_or(true))
+            .cloned()
+            .collect();
+        if !missing.is_empty() {
+            out.push(crate::models::McpIncompleteConfig {
+                config_id: config.id.clone(),
+                label: config.label.clone(),
+                server_name,
+                reason: format!("{} clé(s) requise(s) manquante(s) ou vide(s)", missing.len()),
+                missing_keys: missing,
+            });
+        }
+    }
+    out
+}
+
 /// Used by the API to display warnings in the UI.
 pub fn get_incompatibilities(servers: &[crate::models::McpServer]) -> Vec<McpIncompatibility> {
     let mut result = Vec::new();
@@ -2677,6 +3163,175 @@ mod host_sync_tests {
         })));
         // Non-object values
         assert!(!is_kronn_managed(&serde_json::json!("string")));
+    }
+
+    #[test]
+    fn inject_kronn_internal_path_resolution() {
+        // Pin the user-reported bug 2026-05-10: with KRONN_INTROSPECTION_PUBLIC_PATH
+        // unset AND running in Docker (= `/app/scripts/...` only), Kronn used to
+        // write a container-only path into project files. Host CLIs (kiro-cli,
+        // claude on host) couldn't reach it and threw `Broken pipe (os error 32)`.
+        //
+        // Combined into a single test to avoid env-var race conditions when
+        // cargo test runs unit tests in parallel.
+        //
+        // 1. Public-path env wins over Docker / dev fallbacks.
+        let tmp = std::env::temp_dir().join(format!("kronn-pub-{}.py", std::process::id()));
+        std::fs::write(&tmp, "#!/usr/bin/env python3\n").expect("write test fixture");
+        // SAFETY: the env-var set/remove pair brackets the inject call we
+        // care about; no other thread should see the set value because the
+        // following remove_var happens before the next test in this function
+        // observes it. Nested tests in the same suite are still in different
+        // threads — this is a known limitation of std::env, accepted because
+        // the alternative (serial_test crate) would balloon dev-only deps.
+        unsafe {
+            std::env::set_var("KRONN_INTROSPECTION_PUBLIC_PATH", &tmp);
+        }
+        let mut file = McpJsonFile { mcp_servers: HashMap::new() };
+        let injected = inject_kronn_internal(&mut file);
+        unsafe {
+            std::env::remove_var("KRONN_INTROSPECTION_PUBLIC_PATH");
+        }
+        let _ = std::fs::remove_file(&tmp);
+        assert!(injected, "injection must succeed when public env path exists");
+        let entry = file.mcp_servers.get("kronn-internal").expect("entry written");
+        let path = entry.args.as_ref().unwrap().first().unwrap();
+        assert_eq!(path, &tmp.to_string_lossy().to_string());
+
+        // 2. Stale entry removal — a prior Kronn build wrote `/app/scripts/...`.
+        // When the public env is unset AND we're not in Docker (`.dockerenv`
+        // absent on the test host), the native fallback returns the dev
+        // `CARGO_MANIFEST_DIR/scripts/...` path — which IS valid on this fs
+        // since cargo runs the suite from the source tree. Injection should
+        // succeed; the path must point at an existing file.
+        let mut file = McpJsonFile { mcp_servers: HashMap::new() };
+        file.mcp_servers.insert("kronn-internal".into(), McpServerEntry {
+            command: Some("python3".into()),
+            args: Some(vec!["/app/scripts/disc-introspection-mcp.py".into()]),
+            url: None,
+            env: HashMap::new(),
+        });
+        let injected = inject_kronn_internal(&mut file);
+        if injected {
+            // Native Kronn — script reachable on the host, entry rewritten.
+            let entry = file.mcp_servers.get("kronn-internal").expect("entry written");
+            let path = entry.args.as_ref().unwrap().first().expect("path arg");
+            assert!(std::path::Path::new(path).exists(), "written path must exist on this fs");
+            assert_ne!(path, "/app/scripts/disc-introspection-mcp.py",
+                "stale Docker-only path should have been replaced with a host-valid path");
+        } else {
+            // Docker-only Kronn (the user's bug case) — injection skipped,
+            // stale entry pruned so host CLIs stop choking on it.
+            assert!(!file.mcp_servers.contains_key("kronn-internal"),
+                "stale `kronn-internal` entry should be removed when no shared path resolves");
+        }
+    }
+
+    #[test]
+    fn find_incomplete_configs_flags_missing_keys() {
+        // Pin user-reported behaviour 2026-05-10: MCPs whose `env_keys`
+        // are declared but values are empty/missing should be flagged
+        // so the scanner can skip them at sync time and the UI can
+        // surface a warning. Without this, every Kronn-spawned agent
+        // tries to handshake with the broken MCP at boot, which slows
+        // down the whole startup (Connection closed, OAuth invalid_client).
+        use crate::models::{McpConfig, McpServer, McpSource, McpTransport, HostSyncMode};
+        // 32 bytes hex-encoded (64 hex chars) — what `crypto::parse_secret` expects.
+        let secret = &"a".repeat(64);
+        // Config A: declares one env key, value provided → complete.
+        let mut env_a = std::collections::HashMap::new();
+        env_a.insert("FOO_TOKEN".to_string(), "real-value".to_string());
+        let env_a_enc = crate::db::mcps::encrypt_env(&env_a, secret).unwrap();
+        let cfg_a = McpConfig {
+            id: "cfg-a".into(), server_id: "srv".into(), label: "Complete".into(),
+            env_keys: vec!["FOO_TOKEN".into()],
+            env_encrypted: env_a_enc,
+            args_override: None, is_global: false, include_general: true,
+            config_hash: String::new(), project_ids: vec![],
+            host_sync: HostSyncMode::None,
+        };
+        // Config B: declares one env key, value EMPTY → incomplete.
+        let mut env_b = std::collections::HashMap::new();
+        env_b.insert("BAR_TOKEN".to_string(), "".to_string());
+        let env_b_enc = crate::db::mcps::encrypt_env(&env_b, secret).unwrap();
+        let cfg_b = McpConfig {
+            id: "cfg-b".into(), server_id: "srv".into(), label: "Empty value".into(),
+            env_keys: vec!["BAR_TOKEN".into()],
+            env_encrypted: env_b_enc,
+            args_override: None, is_global: false, include_general: true,
+            config_hash: String::new(), project_ids: vec![],
+            host_sync: HostSyncMode::None,
+        };
+        // Config C: declares two keys, only ONE provided → incomplete (1 missing).
+        let mut env_c = std::collections::HashMap::new();
+        env_c.insert("KEY1".to_string(), "val".to_string());
+        let env_c_enc = crate::db::mcps::encrypt_env(&env_c, secret).unwrap();
+        let cfg_c = McpConfig {
+            id: "cfg-c".into(), server_id: "srv".into(), label: "Half".into(),
+            env_keys: vec!["KEY1".into(), "KEY2".into()],
+            env_encrypted: env_c_enc,
+            args_override: None, is_global: false, include_general: true,
+            config_hash: String::new(), project_ids: vec![],
+            host_sync: HostSyncMode::None,
+        };
+        // Config D: no env_keys declared → never incomplete.
+        let cfg_d = McpConfig {
+            id: "cfg-d".into(), server_id: "srv".into(), label: "Open".into(),
+            env_keys: vec![],
+            env_encrypted: String::new(),
+            args_override: None, is_global: false, include_general: true,
+            config_hash: String::new(), project_ids: vec![],
+            host_sync: HostSyncMode::None,
+        };
+        let server = McpServer {
+            id: "srv".into(), name: "TestServer".into(), description: String::new(),
+            transport: McpTransport::Stdio { command: "echo".into(), args: vec![] },
+            source: McpSource::Registry, api_spec: None,
+        };
+        let mut server_map: HashMap<String, &McpServer> = HashMap::new();
+        server_map.insert("srv".into(), &server);
+
+        let configs = vec![cfg_a, cfg_b, cfg_c, cfg_d];
+        let incomplete = find_incomplete_configs(&configs, &server_map, secret);
+
+        // Only cfg-b and cfg-c should be flagged.
+        assert_eq!(incomplete.len(), 2, "expected 2 incomplete configs, got: {:?}",
+            incomplete.iter().map(|i| &i.config_id).collect::<Vec<_>>());
+        let ids: HashSet<_> = incomplete.iter().map(|i| i.config_id.clone()).collect();
+        assert!(ids.contains("cfg-b"));
+        assert!(ids.contains("cfg-c"));
+        // cfg-c lists KEY2 specifically as missing (KEY1 is fine).
+        let cfg_c = incomplete.iter().find(|i| i.config_id == "cfg-c").unwrap();
+        assert_eq!(cfg_c.missing_keys, vec!["KEY2".to_string()]);
+        assert_eq!(cfg_c.server_name, "TestServer");
+    }
+
+    #[test]
+    fn find_incomplete_configs_flags_decrypt_failure() {
+        // Cipher unreadable (e.g. after key rotation) → flagged with
+        // empty missing_keys + a "secrets unreadable" reason. The UI
+        // should suggest re-entering values rather than guessing keys.
+        use crate::models::{McpConfig, McpServer, McpSource, McpTransport, HostSyncMode};
+        let cfg = McpConfig {
+            id: "broken".into(), server_id: "srv".into(), label: "Broken".into(),
+            env_keys: vec!["TOKEN".into()],
+            env_encrypted: "definitely-not-valid-base64-or-cipher".into(),
+            args_override: None, is_global: false, include_general: true,
+            config_hash: String::new(), project_ids: vec![],
+            host_sync: HostSyncMode::None,
+        };
+        let server = McpServer {
+            id: "srv".into(), name: "S".into(), description: String::new(),
+            transport: McpTransport::Stdio { command: "echo".into(), args: vec![] },
+            source: McpSource::Registry, api_spec: None,
+        };
+        let mut server_map: HashMap<String, &McpServer> = HashMap::new();
+        server_map.insert("srv".into(), &server);
+        let incomplete = find_incomplete_configs(&[cfg], &server_map, "any-secret");
+        assert_eq!(incomplete.len(), 1);
+        assert!(incomplete[0].missing_keys.is_empty());
+        assert!(incomplete[0].reason.starts_with("Secrets unreadable"),
+            "got: {}", incomplete[0].reason);
     }
 
     #[test]

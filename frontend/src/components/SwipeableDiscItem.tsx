@@ -1,14 +1,11 @@
 import { useState, useRef, memo } from 'react';
 import { ShieldCheck, Zap, Rocket, GitBranch, Loader2, Users, Users2, Square, Star } from 'lucide-react';
 import type { Discussion } from '../types/generated';
-import { isValidationDisc } from '../lib/constants';
+import { isValidationDisc, isBriefingDisc, isBootstrapDisc } from '../lib/constants';
 import { formatRelativeTime } from '../lib/relativeTime';
 import { useT } from '../lib/I18nContext';
 import { MatrixText } from './MatrixText';
 import '../pages/DiscussionsPage.css';
-
-const isBootstrapDisc = (title: string) => title.startsWith('Bootstrap: ');
-const isBriefingDisc = (title: string) => title.startsWith('Briefing');
 
 const SWIPE_THRESHOLD = 80;
 
@@ -24,7 +21,7 @@ export interface SwipeableDiscItemProps {
   onStop?: (discId: string) => void;
   /** Toggle pin/favorite on this discussion. */
   onTogglePin?: (discId: string, pinned: boolean) => void;
-  t: (key: string, ...args: any[]) => string;
+  t: (key: string, ...args: (string | number)[]) => string;
   archiveLabel?: string;
 }
 
@@ -90,6 +87,21 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
       <div
         className="disc-item"
         data-active={isActive}
+        // Accessibility: this row is interactive (click/Enter selects the
+        // discussion, swipe archives/deletes). Without role+tabIndex it's
+        // unreachable by keyboard. Pre-fix the JSX was a plain div with
+        // pointer handlers only — Alicia's audit (2026-05-09) flagged
+        // "no keyboard nav, no focus ring".
+        role="button"
+        tabIndex={0}
+        aria-current={isActive ? 'true' : undefined}
+        aria-label={`${disc.title} — ${disc.message_count ?? disc.messages.length} messages, ${disc.agent}`}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            onSelect(disc.id, disc.message_count ?? disc.messages.length);
+          }
+        }}
         style={{
           transform: `translateX(${offsetX}px)`,
           transition: swiping ? 'none' : 'transform 0.25s ease-out',

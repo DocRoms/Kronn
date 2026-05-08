@@ -86,7 +86,9 @@ pub struct UnlockResponse {
 fn hash_code(code: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(code.as_bytes());
-    format!("{:x}", hasher.finalize())
+    // sha2 0.11 dropped `LowerHex` on the new `hybrid_array::Array`
+    // return — manual hex encode (no extra dep).
+    hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 /// Collect EVERY built-in match for the given code (a bundle code

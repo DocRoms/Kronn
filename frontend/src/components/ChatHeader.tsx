@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import '../pages/DiscussionsPage.css';
 import { discussions as discussionsApi } from '../lib/api';
 import type { Project, AgentDetection, Discussion, AgentType, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact } from '../types/generated';
-import { agentColor, isHiddenPath, isUsable, isValidationDisc } from '../lib/constants';
+import { agentColor, isHiddenPath, isUsable, isValidationDisc, isBriefingDisc, isBootstrapDisc, agentSupportsIntrospection, AGENT_LABELS } from '../lib/constants';
 import type { ToastFn } from '../hooks/useToast';
 import {
   Cpu, GitBranch, Server,
@@ -13,9 +13,6 @@ import {
 } from 'lucide-react';
 import { MatrixText } from './MatrixText';
 import { ProfileTooltip } from './ProfileTooltip';
-
-const isBootstrapDisc = (title: string) => title.startsWith('Bootstrap: ');
-const isBriefingDisc = (title: string) => title.startsWith('Briefing');
 
 export interface ChatHeaderProps {
   discussion: Discussion;
@@ -44,7 +41,7 @@ export interface ChatHeaderProps {
   contacts: Contact[];
   onShare: (contactIds: string[]) => void;
   toast: ToastFn;
-  t: (key: string, ...args: any[]) => string;
+  t: (key: string, ...args: (string | number)[]) => string;
 }
 
 export function ChatHeader({
@@ -193,6 +190,21 @@ export function ChatHeader({
               title={(isValidationDisc(discussion.title) || isBootstrapDisc(discussion.title) || isBriefingDisc(discussion.title)) ? undefined : t('disc.editTitle')}
             >
               <MatrixText text={discussion.title} />
+            </span>
+          )}
+          {/* Introspection-tools call counter. Tracks `kronn-internal` MCP
+           *  activity (disc_meta / disc_get_message / disc_summarize). Lets
+           *  the user see at a glance when the agent has been digging in
+           *  the history — useful both as a "the agent is using its
+           *  context tools" reassurance and as an anomaly signal if the
+           *  number balloons unexpectedly. */}
+          {(discussion.introspection_call_count ?? 0) > 0 && (
+            <span
+              className="disc-introspection-pill"
+              title={t('disc.introspectionPillTooltip', discussion.introspection_call_count ?? 0, (discussion.introspection_call_count ?? 0) > 1 ? 's' : '')}
+              aria-label={t('disc.introspectionPillTooltip', discussion.introspection_call_count ?? 0, (discussion.introspection_call_count ?? 0) > 1 ? 's' : '')}
+            >
+              🔧 {discussion.introspection_call_count}
             </span>
           )}
           {!isValidationDisc(discussion.title) && !isBootstrapDisc(discussion.title) && !isBriefingDisc(discussion.title) && (
@@ -451,8 +463,9 @@ export function ChatHeader({
             <Server size={13} />
           </button>
           {showMcpPopover && (() => {
-            const discMcps = discussion.project_id
-              ? mcpConfigs.filter(c => c.is_global || c.project_ids.includes(discussion.project_id!))
+            const projectId = discussion.project_id;
+            const discMcps = projectId
+              ? mcpConfigs.filter(c => c.is_global || c.project_ids.includes(projectId))
               : mcpConfigs.filter(c => c.include_general);
             // Agents running via direct API (no CLI) cannot use MCP tools
             const apiOnlyAgents: AgentType[] = ['Vibe' as AgentType];
@@ -662,6 +675,53 @@ export function ChatHeader({
                     );
                   })}
                 </div>
+              </div>
+
+              {/* Auto-summary policy. Default `Auto` keeps the historical
+               *  per-agent threshold-based summarisation. `Off` saves the
+               *  recurring eco-tier summary call (~500-2000 tokens each)
+               *  on big-context models or short threads where the agent
+               *  already has full visibility. `OnDemand` is reserved for
+               *  the upcoming kronn-internal MCP tools and behaves like
+               *  `Off` until they ship. User feedback on 2026-05-09:
+               *  "on a une synthèse auto tous les <x> messages, mais dans
+               *   la majorité des cas c'est pas forcément utile". */}
+              <div className="disc-popover-section">
+                <div className="disc-popover-label">{t('disc.summaryStrategyLabel')}</div>
+                <div className="flex-row gap-2">
+                  {(['Auto', 'OnDemand', 'Off'] as const).map(strategy => {
+                    const active = (discussion.summary_strategy ?? 'Auto') === strategy;
+                    return (
+                      <button key={strategy}
+                        className="disc-toggle-pill"
+                        data-active={active}
+                        title={t(`disc.summaryStrategy.${strategy}.hint`)}
+                        onClick={async () => {
+                          await discussionsApi.update(discussion.id, { summary_strategy: strategy });
+                          onDiscussionUpdated();
+                        }}>
+                        {t(`disc.summaryStrategy.${strategy}.label`)}
+                      </button>
+                    );
+                  })}
+                </div>
+                {/* Surface the architectural limit: Vibe + Ollama don't read
+                 *  the MCP config files Kronn writes, so the kronn-internal
+                 *  introspection tools (disc_meta / disc_get_message /
+                 *  disc_summarize) never show up for them. Without this
+                 *  notice, picking `OnDemand` for a Vibe disc looks like a
+                 *  silent no-op — the agent just falls back to raw
+                 *  context. We tell the user up-front so they can either
+                 *  switch to a supporting agent or accept the fallback. */}
+                {!agentSupportsIntrospection(discussion.agent) && (
+                  <div
+                    className="disc-popover-note"
+                    role="note"
+                    data-testid="introspection-unsupported-note"
+                  >
+                    ⚠️ {t('disc.introspectionUnsupportedNote', AGENT_LABELS[discussion.agent] ?? discussion.agent)}
+                  </div>
+                )}
               </div>
 
               {/* Directives — same accordion pattern. */}

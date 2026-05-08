@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { setup as setupApi, agents as agentsApi, projects as projectsApi } from '../lib/api';
 import type { SetupStatus, AgentDetection, DetectedRepo } from '../types/generated';
 import { useT } from '../lib/I18nContext';
@@ -28,6 +28,7 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
   const [installing, setInstalling] = useState<string | null>(null);
   const [detecting, setDetecting] = useState(false);
   const [completing, setCompleting] = useState(false);
+  const completingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [showManualPath, setShowManualPath] = useState(false);
   const [showHidden, setShowHidden] = useState(false);
@@ -101,6 +102,12 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
   };
 
   const handleComplete = async () => {
+    // Race-free guard. The Complete button calls `projectsApi.create`
+    // for each detected repo — a fast double-click would fire the loop
+    // twice in parallel and create duplicate projects (the backend
+    // rejects only on the SAME path, but the request order matters).
+    if (completingRef.current) return;
+    completingRef.current = true;
     setCompleting(true);
     try {
       // Ensure scan paths are set so backend marks setup as Complete.
@@ -126,6 +133,7 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
     } catch {
       // Continue even if save fails
     }
+    completingRef.current = false;
     onComplete();
   };
 

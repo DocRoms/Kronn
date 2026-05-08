@@ -36,7 +36,26 @@ pub async fn overview(
         let customized_contexts = build_customized_contexts(&configs, &projects);
         let incompatibilities = mcp_scanner::get_incompatibilities(&servers);
 
-        Ok(McpOverview { servers, configs, customized_contexts, incompatibilities })
+        // Compute incomplete configs (env_keys declared but values missing
+        // or cipher unreadable). We do this against the FULL configs list
+        // — `list_configs_display` returns masked configs which won't
+        // decrypt; pull the raw configs separately.
+        let raw_configs = db::mcps::list_configs(conn)?;
+        let server_map: std::collections::HashMap<String, &crate::models::McpServer> =
+            servers.iter().map(|s| (s.id.clone(), s)).collect();
+        let incomplete_configs = if let Some(ref s) = secret {
+            mcp_scanner::find_incomplete_configs(&raw_configs, &server_map, s)
+        } else {
+            Vec::new()
+        };
+
+        Ok(McpOverview {
+            servers,
+            configs,
+            customized_contexts,
+            incompatibilities,
+            incomplete_configs,
+        })
     }).await {
         Ok(data) => Json(ApiResponse::ok(data)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -513,7 +532,19 @@ pub async fn refresh(
         let customized_contexts = build_customized_contexts(&configs, &projects);
         let incompatibilities = mcp_scanner::get_incompatibilities(&servers);
 
-        Ok(McpOverview { servers, configs, customized_contexts, incompatibilities })
+        let raw_configs = db::mcps::list_configs(conn)?;
+        let server_map: std::collections::HashMap<String, &crate::models::McpServer> =
+            servers.iter().map(|s| (s.id.clone(), s)).collect();
+        let incomplete_configs =
+            mcp_scanner::find_incomplete_configs(&raw_configs, &server_map, &secret);
+
+        Ok(McpOverview {
+            servers,
+            configs,
+            customized_contexts,
+            incompatibilities,
+            incomplete_configs,
+        })
     }).await;
 
     match result {
@@ -740,7 +771,8 @@ fn read_host_entry_env(
             extract_env_from_json(entry)
         }
         HostScope::Codex => {
-            let v: toml::Value = raw.parse()?;
+            // toml 1.x: parse Document into Table directly.
+            let v: toml::Table = raw.parse()?;
             let entry = v.get("mcp_servers").and_then(|o| o.get(name)).and_then(|v| v.as_table())
                 .ok_or_else(|| anyhow::anyhow!("Entry '{}' not found", name))?;
             let mut env = std::collections::HashMap::new();

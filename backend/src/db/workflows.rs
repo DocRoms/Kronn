@@ -297,13 +297,25 @@ pub fn delete_batch_run_with_discussions(
 
 // ─── Batch run creation (pure, reusable from HTTP + workflow runner) ───────
 
+/// One row of the batch input — title, fully-rendered prompt, and an
+/// optional per-item agent override. The override lets the caller
+/// fan out the SAME prompt across MULTIPLE agents (Compare-agents
+/// mode) — when `None`, the QP's default `agent` is used (the
+/// classic "vary input" mode).
+pub struct BatchItemInput {
+    pub title: String,
+    pub prompt: String,
+    pub agent_override: Option<crate::models::AgentType>,
+}
+
 /// Input for [`create_batch_run`]. Everything needed to build a batch
 /// workflow run plus its N child discussions in a single transaction.
 pub struct CreateBatchRunInput<'a> {
     pub quick_prompt: &'a QuickPrompt,
-    /// `(title, fully_rendered_prompt)` pairs — one per child discussion.
-    /// The caller is responsible for template substitution on the prompt.
-    pub items: Vec<(String, String)>,
+    /// One entry per child discussion. Title + rendered prompt +
+    /// optional per-item agent override (Compare-agents mode). The
+    /// caller is responsible for template substitution on the prompt.
+    pub items: Vec<BatchItemInput>,
     /// Display name of the batch group, e.g. "Cadrage to-Frame — 10 avr 14:00".
     pub batch_name: Option<String>,
     /// Optional project to attach all child discussions to. Overrides the QP's
@@ -393,12 +405,12 @@ pub fn create_batch_run(
         input.workspace_mode
     };
 
-    let discussions: Vec<(Discussion, DiscussionMessage)> = input.items.iter().map(|(title, prompt)| {
+    let discussions: Vec<(Discussion, DiscussionMessage)> = input.items.iter().map(|item| {
         let disc_id = Uuid::new_v4().to_string();
         let initial_message = DiscussionMessage {
             id: Uuid::new_v4().to_string(),
             role: MessageRole::User,
-            content: prompt.clone(),
+            content: item.prompt.clone(),
             agent_type: None,
             timestamp: now,
             tokens_used: 0,
@@ -408,13 +420,16 @@ pub fn create_batch_run(
             author_pseudo: input.author_pseudo.clone(),
             author_avatar_email: input.author_avatar_email.clone(),
         };
+        // Per-item agent override (Compare-agents mode) falls back
+        // to the QP's default agent when None.
+        let effective_agent = item.agent_override.clone().unwrap_or_else(|| qp.agent.clone());
         let discussion = Discussion {
             id: disc_id,
             project_id: effective_project_id.clone(),
-            title: title.clone(),
-            agent: qp.agent.clone(),
+            title: item.title.clone(),
+            agent: effective_agent.clone(),
             language: lang.clone(),
-            participants: vec![qp.agent.clone()],
+            participants: vec![effective_agent],
             messages: vec![initial_message.clone()],
             message_count: 1,
             skill_ids: qp.skill_ids.clone(),
@@ -429,6 +444,8 @@ pub fn create_batch_run(
             pin_first_message: false,
             summary_cache: None,
             summary_up_to_msg_idx: None,
+            summary_strategy: crate::models::SummaryStrategy::Auto,
+            introspection_call_count: 0,
             shared_id: None,
             shared_with: vec![],
             workflow_run_id: Some(run_id.clone()),
@@ -544,6 +561,23 @@ pub fn count_runs(conn: &Connection, workflow_id: &str) -> Result<u32> {
 
 pub fn list_runs(conn: &Connection, workflow_id: &str) -> Result<Vec<WorkflowRun>> {
     list_runs_paginated(conn, workflow_id, None, None)
+}
+
+/// True when at least one workflow run is currently `Running` or `Pending`.
+///
+/// Used by `mcp_scanner::sync_affected_projects` /
+/// `sync_global_configs` to back off host-config writes during a live
+/// workflow — see TD-20260427-host-sync-workflow-race. The point is to
+/// avoid clobbering `~/.claude.json` etc. while an agent we just spawned
+/// is reading those files at startup; the next save (or next sync trigger)
+/// will catch up once the run finishes.
+pub fn has_running_run(conn: &Connection) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM workflow_runs WHERE status IN ('Running', 'Pending')",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
 }
 
 pub fn list_runs_paginated(conn: &Connection, workflow_id: &str, limit: Option<u32>, offset: Option<u32>) -> Result<Vec<WorkflowRun>> {

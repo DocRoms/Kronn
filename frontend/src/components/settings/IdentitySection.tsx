@@ -216,7 +216,7 @@ export function IdentitySection({ toast, t }: IdentitySectionProps) {
           <div className="text-sm text-muted" style={{ lineHeight: 1.6 }}>
             <div className="mb-3">
               <span style={{ color: 'rgba(var(--kr-accent-rgb), 0.6)', fontWeight: 600 }}>1.</span> {t('contacts.guideStep1')}{' '}
-              <a href="https://tailscale.com" target="_blank" rel="noopener noreferrer" style={{ color: 'rgba(var(--kr-success-rgb), 0.7)', textDecoration: 'none' }}>tailscale.com</a>
+              <a href="https://tailscale.com" target="_blank" rel="noopener noreferrer" style={{ color: 'rgba(var(--kr-success-rgb), 0.7)', textDecoration: 'underline' }}>tailscale.com</a>
             </div>
             <div className="mb-3">
               <span style={{ color: 'rgba(var(--kr-accent-rgb), 0.6)', fontWeight: 600 }}>2.</span> {t('contacts.guideStep2')}

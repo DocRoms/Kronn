@@ -830,6 +830,97 @@ pub async fn db_info(
     }
 }
 
+/// Result of a `POST /api/db/backup` call. The frontend surfaces the
+/// `backup_path` so the user can copy it (or the absolute `.bak` ref
+/// if they want to script around it).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[ts(export)]
+pub struct DbBackupResponse {
+    /// Absolute path of the backup file written.
+    pub backup_path: String,
+    /// Size of the backup in bytes (sanity check + UI display).
+    pub size_bytes: u64,
+    /// Timestamp the backup was taken (ISO-8601 UTC).
+    pub taken_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// `POST /api/db/backup` — write a consistent snapshot of the live
+/// database to `<data_dir>/backups/kronn-YYYYMMDD-HHMM.db`.
+///
+/// Uses SQLite's online-backup API (via `rusqlite::backup::Backup`)
+/// so the snapshot is consistent even while the backend has the DB
+/// open. Equivalent to the runbook's manual
+/// `sqlite3 .backup '...'` command, but reachable from Settings →
+/// Server with one click.
+///
+/// Idempotent: re-running drops a new file with a fresh timestamp.
+/// Older backups stay — the operator decides retention.
+pub async fn db_backup(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<DbBackupResponse>> {
+    let source_path = state.db.path().clone();
+
+    // In-memory DB (test mode) → nothing meaningful to back up.
+    if source_path.to_string_lossy() == ":memory:" {
+        return Json(ApiResponse::err(
+            "Database is in-memory; backup is a no-op (check KRONN_DATA_DIR config)".to_string(),
+        ));
+    }
+
+    // Backup directory: sibling of the live DB. Self-contained, no
+    // env wrangling. Operator can move/copy the file afterwards.
+    let backup_dir = match source_path.parent() {
+        Some(p) => p.join("backups"),
+        None => return Json(ApiResponse::err(
+            "Cannot determine backup parent dir from DB path".to_string(),
+        )),
+    };
+    if let Err(e) = std::fs::create_dir_all(&backup_dir) {
+        return Json(ApiResponse::err(format!("Failed to create backup dir: {}", e)));
+    }
+
+    let now = chrono::Utc::now();
+    let backup_filename = format!("kronn-{}.db", now.format("%Y%m%d-%H%M%S"));
+    let backup_path = backup_dir.join(&backup_filename);
+
+    // Run the SQLite online-backup inside the DB executor so the
+    // source connection's mutex is held for the duration. This
+    // mirrors how `with_conn` runs every other query — the operator
+    // doesn't need a quiet window, the API holds the mutex while it
+    // copies pages.
+    let backup_path_owned = backup_path.clone();
+    let result = state.db.with_conn(move |conn| {
+        let mut dst = rusqlite::Connection::open(&backup_path_owned)?;
+        let backup = rusqlite::backup::Backup::new(conn, &mut dst)?;
+        // `step(-1)` runs the backup to completion in one call. For
+        // very large DBs (>500MB) we'd want to step in pages with a
+        // sleep between to keep the mutex contention down, but
+        // Kronn's DBs are typically <100MB.
+        backup.run_to_completion(5, std::time::Duration::from_millis(50), None)?;
+        Ok(())
+    }).await;
+
+    match result {
+        Ok(()) => {
+            let size_bytes = std::fs::metadata(&backup_path).map(|m| m.len()).unwrap_or(0);
+            tracing::info!(
+                "DB backup written: {} ({} bytes)",
+                backup_path.display(), size_bytes
+            );
+            Json(ApiResponse::ok(DbBackupResponse {
+                backup_path: backup_path.to_string_lossy().to_string(),
+                size_bytes,
+                taken_at: now,
+            }))
+        }
+        Err(e) => {
+            // Clean up the partial file if the backup failed mid-flight.
+            let _ = std::fs::remove_file(&backup_path);
+            Json(ApiResponse::err(format!("Backup failed: {}", e)))
+        }
+    }
+}
+
 /// Build the DbExport from current state
 async fn build_export(state: &AppState) -> Result<DbExport, String> {
     let projects = state.db.with_conn(crate::db::projects::list_projects).await

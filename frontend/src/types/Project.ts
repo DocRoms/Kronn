@@ -3,4 +3,11 @@ import type { AiAuditStatus } from "./AiAuditStatus";
 import type { AiConfigStatus } from "./AiConfigStatus";
 import type { TokenOverride } from "./TokenOverride";
 
-export type Project = { id: string, name: string, path: string, repo_url: string | null, token_override: TokenOverride | null, ai_config: AiConfigStatus, audit_status: AiAuditStatus, ai_todo_count: number, default_skill_ids: Array<string>, default_profile_id: string | null, briefing_notes: string | null, created_at: string, updated_at: string, };
+export type Project = { id: string, name: string, path: string, repo_url: string | null, token_override: TokenOverride | null, ai_config: AiConfigStatus, audit_status: AiAuditStatus, ai_todo_count: number,
+/**
+ * True when the project still uses the legacy `ai/index.md` layout
+ * and no migrated `docs/AGENTS.md` exists. Computed by
+ * `enrich_audit_status` — drives the migration banner on
+ * `ProjectCard`. Not persisted in DB.
+ */
+needs_docs_migration: boolean, default_skill_ids: Array<string>, default_profile_id: string | null, briefing_notes: string | null, created_at: string, updated_at: string, };

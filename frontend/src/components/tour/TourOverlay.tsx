@@ -27,13 +27,16 @@ export function TourOverlay() {
 
   return createPortal(
     <>
-      {/* Click-catcher for the dark area.
-          data-dimmed: full dark for centered steps (no spotlight shadow). */}
+      {/* Dark area backdrop. The earlier behaviour was `onClick={skip}` —
+          which marked the tour permanently completed if a user clicked
+          off the tooltip by accident. UX feedback: a tooltip overlay
+          should not be dismissed by a stray click on the dim area. The
+          explicit "Passer" / "Finir" buttons + the Escape shortcut cover
+          intentional dismissals. */}
       <div
         className="tour-backdrop"
         data-dimmed={isCentered}
         data-passthrough={waitingForClick}
-        onClick={waitingForClick ? undefined : skip}
       />
 
       {/* Spotlight hole (only for steps with a target) */}
@@ -78,24 +81,26 @@ export function TourOverlay() {
           </div>
         )}
 
-        {/* Navigation */}
+        {/* Navigation. Prev/Next stay visible during `waitingForClick` so
+            the user always has a way out — pre-fix they were hidden,
+            which forced operators to either click the spotlighted target
+            or skip the whole tour. The provider's `next`/`prev` now
+            cancel the pending click listener instead of bailing out. */}
         <div className="tour-nav">
           <button className="tour-btn-skip" onClick={skip}>
             {t('tour.skip')}
           </button>
 
-          {!isFirst && !waitingForClick && (
+          {!isFirst && (
             <button className="tour-btn-prev" onClick={prev}>
               <ChevronLeft size={12} /> {t('tour.prev')}
             </button>
           )}
 
-          {!waitingForClick && (
-            <button className="tour-btn-next" onClick={isLast ? skip : next}>
-              {isLast ? t('tour.finish') : t('tour.next')}
-              {!isLast && <ChevronRight size={12} />}
-            </button>
-          )}
+          <button className="tour-btn-next" onClick={isLast ? skip : next}>
+            {isLast ? t('tour.finish') : t('tour.next')}
+            {!isLast && <ChevronRight size={12} />}
+          </button>
         </div>
       </div>
     </>,

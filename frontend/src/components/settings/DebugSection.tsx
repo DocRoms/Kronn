@@ -15,7 +15,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { agents as agentsApi, config as configApi, debugApi, fetchHealth } from '../../lib/api';
 import { buildIssueUrl, KRONN_REPO_URL } from '../../lib/bug-report';
-import { AlertTriangle, Bug, Copy, Github, Pause, Play, RefreshCw, Trash2 } from 'lucide-react';
+// Note: lucide-react 1.x removed brand icons (Github, Gitlab, …) — use
+// `ExternalLink` for the GitHub-issue CTA. Brand icons live in
+// `simple-icons` if we ever want to re-add them.
+import { AlertTriangle, Bug, Copy, ExternalLink, Pause, Play, RefreshCw, Trash2 } from 'lucide-react';
 import '../../pages/SettingsPage.css';
 
 export interface DebugSectionProps {
@@ -172,7 +175,7 @@ export function DebugSection({
                   const next = e.target.checked;
                   setServerDebugMode(next);
                   setDebugModeNeedsRestart(true);
-                  try { await configApi.setServerConfig({ debug_mode: next }); } catch {}
+                  try { await configApi.setServerConfig({ debug_mode: next }); } catch { /* network blip — toggle reverts on next refetch */ }
                 }}
               />
               <span className="text-sm">{serverDebugMode ? t('common.on') : t('common.off')}</span>
@@ -274,7 +277,7 @@ export function DebugSection({
               disabled={reporting}
               title={t('settings.debugReportHint')}
             >
-              <Github size={13} />
+              <ExternalLink size={13} />
               <span>{t('settings.debugReportCta')}</span>
             </button>
             <span className="set-hint-xs" style={{ flex: 1 }}>

@@ -257,7 +257,7 @@ mod tests {
         let path_clone = received_path.clone();
 
         let app = axum::Router::new()
-            .route("/hook/:stage", axum::routing::post(
+            .route("/hook/{stage}", axum::routing::post(
                 move |axum::extract::Path(stage): axum::extract::Path<String>, body: String| {
                     let body_store = body_clone.clone();
                     let path_store = path_clone.clone();

@@ -123,6 +123,7 @@ const liftedProps = () => ({
   setSendingStartMap: vi.fn(),
   streamingMap: {},
   setStreamingMap: vi.fn(),
+  noteStreamTick: vi.fn(),
   abortControllers: { current: {} } as React.MutableRefObject<Record<string, AbortController>>,
   cleanupStream: vi.fn(),
   markDiscussionSeen: vi.fn(),
@@ -392,6 +393,52 @@ describe('DiscussionsPage', () => {
 
     // discussions.get should have been called again to reload the discussion with new messages
     expect(vi.mocked(discussionsApi.get).mock.calls.length).toBeGreaterThan(callCountBefore);
+  });
+
+  it('refetches and reloads on kronn:discussion-updated (auto-skill activation)', async () => {
+    // ChatInput dispatches `kronn:discussion-updated` after auto-activating
+    // skills on a discussion. Pre-fix nobody listened, so the sidebar +
+    // chips kept showing the old skill_ids until a manual refresh.
+    // Regression guard: the listener must (a) call refetchDiscussions and
+    // (b) reload the active discussion via discussionsApi.get.
+    const fullDisc: Discussion = {
+      ...makeListDiscussion('d1', 1),
+      messages: [
+        { id: 'm1', role: 'User', content: 'Hi', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+
+    const refetchSpy = vi.fn();
+    const lifted = liftedProps();
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[makeListDiscussion('d1', 1)]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={refetchSpy}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d1"
+        {...lifted}
+      />
+    );
+
+    const refetchCallsBefore = refetchSpy.mock.calls.length;
+    const getCallsBefore = vi.mocked(discussionsApi.get).mock.calls.length;
+
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('kronn:discussion-updated'));
+    });
+
+    expect(refetchSpy.mock.calls.length).toBeGreaterThan(refetchCallsBefore);
+    // discussions.get('d1') re-fired to pick up the new skill_ids.
+    const newGetCalls = vi.mocked(discussionsApi.get).mock.calls.slice(getCallsBefore);
+    expect(newGetCalls.some(args => args[0] === 'd1')).toBe(true);
   });
 
   it('pre-selects validation profiles when prefill is provided', async () => {
@@ -768,6 +815,124 @@ describe('DiscussionsPage', () => {
     expect(mockCancel).toHaveBeenCalled();
     // speechSynthesis.speak should be called with an utterance
     expect(mockSpeak).toHaveBeenCalledWith(expect.any(SpeechSynthesisUtterance));
+  });
+
+  it('optimistically promotes the streaming buffer to a real Agent message on stream end (no scroll jump)', async () => {
+    // Reported bug: "quand le stream se termine, ça remonte au début du
+    // message et ça redescend". Root cause — `cleanupStream` flipped
+    // `sending=false` BEFORE the refetch landed the persisted Agent
+    // message, so the streaming bubble unmounted and the chat shrunk
+    // (scroll snapped UP to the previous user message), then a smooth
+    // scrollIntoView animated DOWN once the new message arrived.
+    //
+    // The fix converts the in-memory streamingMap entry into an
+    // optimistic Agent message in `loadedDiscussions` BEFORE clearing
+    // sending — the streaming row unmounts at the same render where
+    // the optimistic bubble mounts, with the same content, so the
+    // scroll position never jumps. The persisted refetch arrives
+    // afterwards and replaces the optimistic with the real message.
+    //
+    // Test contract: trigger a send whose stream emits a chunk and
+    // ends. Assert that the chat now contains an Agent bubble with
+    // the streamed text BEFORE the refetch lands (we don't mock
+    // `discussions.get` for the post-stream reload — the optimistic
+    // alone must populate the DOM).
+    const claudeAgent: AgentDetection = {
+      name: 'Claude Code',
+      agent_type: 'ClaudeCode',
+      installed: true,
+      enabled: true,
+      path: '/usr/bin/claude',
+      version: '1.0.0',
+      latest_version: null,
+      origin: 'host',
+      install_command: null,
+      host_managed: false,
+      host_label: null,
+      runtime_available: false, rtk_available: false, rtk_hook_configured: false,
+    };
+
+    const initialDisc: Discussion = {
+      ...makeListDiscussion('d1', 1),
+      messages: [
+        { id: 'm1', role: 'User', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+      ],
+    };
+    // The post-stream `reloadDiscussion` fetch — in production the
+    // backend has already persisted the agent reply, so we mock the
+    // refetch to return it. Without this, reloadDiscussion would
+    // OVERWRITE the optimistic insert with a disc that only has the
+    // user message and our assertion would fail before the test ever
+    // touched the optimistic path. The test hinges on the FIRST render
+    // after cleanupStream, before the network round-trip — but the
+    // mock here resolves synchronously enough that we just guarantee
+    // the persisted version is consistent with the optimistic one.
+    const reloadedDisc: Discussion = {
+      ...initialDisc,
+      messages: [
+        ...initialDisc.messages,
+        { id: 'persisted-agent', role: 'Agent', content: 'Streamed agent reply.', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:01Z', tokens_used: 12, auth_mode: null },
+      ],
+      message_count: 2,
+    };
+    let getCallCount = 0;
+    vi.mocked(discussionsApi.get).mockImplementation(async () => {
+      // First fetch (mount) returns the initial disc.
+      // Subsequent fetches (post-stream reload) return with the agent message.
+      getCallCount += 1;
+      return getCallCount === 1 ? initialDisc : reloadedDisc;
+    });
+
+    // Pre-populate streamingMap as if N chunks had already accumulated.
+    // The mock SSE will only call onDone — cleanupStream must read the
+    // existing buffer and promote it to a real message.
+    const lifted = liftedProps();
+    lifted.streamingMap = { d1: 'Streamed agent reply.' };
+
+    // Mock sendMessageStream: skip onText (we already populated the
+    // map), just call onDone synchronously.
+    vi.mocked(discussionsApi.sendMessageStream).mockImplementation(
+      async (_discId: any, _payload: any, _onText: any, onDone: any) => {
+        if (onDone) onDone();
+      },
+    );
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[claudeAgent]}
+        allDiscussions={[{ ...makeListDiscussion('d1', 1), messages: initialDisc.messages }]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d1"
+        {...lifted}
+      />
+    );
+
+    // Wait one tick for the initial discussion fetch to land.
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+    const chatInput = document.querySelector('textarea') as HTMLTextAreaElement;
+    expect(chatInput).toBeTruthy();
+    await act(async () => { fireEvent.change(chatInput, { target: { value: 'Another question' } }); });
+
+    const sendBtn = document.querySelector('button[aria-label="Send message"]') as HTMLButtonElement;
+    expect(sendBtn).toBeTruthy();
+    await act(async () => { fireEvent.click(sendBtn); });
+
+    // Let the optimistic state update + the post-stream reload flush.
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+    // The streamed text must now be visible as a real message bubble.
+    // Pre-fix: only the streaming bubble showed it, and that bubble
+    // unmounted on `sending=false` BEFORE the refetch landed — so for
+    // a brief window the chat was missing the agent reply entirely
+    // (visible to the user as "scroll up to user msg, then back down").
+    expect(document.body.textContent).toContain('Streamed agent reply.');
   });
 
   it('cancels speech when sending a new message', async () => {

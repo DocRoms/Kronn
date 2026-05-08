@@ -58,4 +58,8 @@ export interface TestModeExitResponse {
   restored_branch: string;
   unstashed: boolean;
   worktree_restored: boolean;
+  /** Non-fatal warning surfaced when something post-checkout went
+   *  sideways (e.g. stash pop conflicted). The exit itself succeeded —
+   *  user is back on `restored_branch`. `null`/absent on happy path. */
+  warning?: string | null;
 }

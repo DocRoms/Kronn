@@ -7,6 +7,741 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [Unreleased]
+
+## [0.8.0] - 2026-05-11
+
+**Stabilisation tier 1 + 2 — fin des chantiers legacy**.
+Grosse passe d'audit : bug RTK Gemini fixé, pastilles « update available »
+pour RTK + tous les agents, sweep a11y form-labels, 3 chantiers à 80%
+poussés à 100% (Ollama default-model picker, QP chain DnD reorder +
+`{{previous_qp.output}}` template var, bootstrap dev-kickoff CTA). Inclut
+aussi le compare-agents shippé en cours de cycle + le gros nettoyage MCP
+cross-agent. 2 entrées TD fermées (`rtk-last-agent-button`,
+`multi-agent-disc-finished-toasts`).
+
+### Added — Tier 2 (boucle des chantiers à 80%)
+
+- **Ollama default model picker** — la liste des modèles installés
+  dans `OllamaCard` est maintenant cliquable (radio-style). Clic →
+  POST `/api/config/model-tiers` immédiat avec
+  `ollama.default = <name>`. Pastille « défaut » sur le modèle actif,
+  rollback optimiste sur erreur réseau. Backend : nouveau champ
+  `ModelTierConfig.default` (`Option<String>`, serde-skipped si
+  `None` → backcompat parfaite), lu par `resolve_model_flag` pour
+  le tier `Default` avant le built-in `llama3.2`. +1 unit test
+  (`resolve_model_flag_default_tier_honors_user_override`).
+- **QP chain — DnD reorder (Phase 3)** — les pills de chaîne dans
+  `WorkflowWizard BatchQuickPrompt step` sont draggables (HTML5 natif,
+  pas de nouvelle lib) + boutons `↑`/`↓` pour clavier/a11y. Drop sur
+  une pill réorganise via `splice`/`splice`. Boutons grisés en bout
+  de chaîne. Pas de touch support pour le moment — desktop-first.
+- **QP chain — `{{previous_qp.output}}` (Phase 4)** — chaque QP
+  chaîné peut consommer la réponse de l'agent précédent via cette
+  variable dans son template. Use case killer : « brief → plan →
+  tickets ». Substitution faite dans
+  `spawn_agent_run_with_chain` avant insertion du message User. Pure
+  helper `render_chain_qp_prompt` extrait + 6 unit tests (substitution
+  vide quand pas de previous, regression guard contre smuggling via
+  `batch_item`, etc.). Hint i18n enrichi sur les 3 locales.
+- **Bootstrap dev-kickoff CTA** — nouvelle action « 🚀 Start dev on
+  issue #1 » sur le banner `KRONN:ISSUES_READY/CREATED`. Plombé via
+  `onSetDiscPrefill` (symétrie Projects → Discussion existant). Prompt
+  prefillé en FR/EN/ES qui demande à l'agent d'ouvrir l'issue #1,
+  lire la description, implémenter pas à pas, mettre à jour le
+  tracker MCP + commit logiquement. Unlocked → l'utilisateur peut
+  tweaker avant d'envoyer.
+
+### Added — Tier 1 (stabilisation)
+
+- **Pastilles « update available » pour RTK + agents** — backend :
+  nouveau module `core/versions.rs` avec table `LATEST_RTK_VERSION` +
+  `latest_known_agent_version(AgentType)`, comparateur semver souple
+  (strip `v`, ignore pre-release/build, zero-pad). Endpoint
+  `GET /api/rtk/version`. `AgentDetection.latest_version` populée à
+  la détection. Frontend : mirror TS dans `lib/version.ts` (même 8
+  cases de tests qu'en Rust). Pastille cliquable dans
+  `CompressionSection` (RTK) et sur chaque ligne `AgentsSection`
+  (agents) → modal avec commande update copy-pasteable. Versions
+  captées 2026-05-11 dans la table : RTK 0.37.2, claude-code 2.0.51,
+  codex 0.62.0, gemini-cli 0.18.0, vibe 0.0.16, copilot 0.0.346,
+  ollama 0.4.7. À bumper à chaque release Kronn.
+- **A11y form-labels sweep** — 12 `aria-label` ajoutés sur les
+  formulaires les plus traffickés : `SettingsPage` ×7 (scan-path,
+  scan-ignore, skill form ×4, directive form ×6, domain),
+  `NewDiscussionForm` ×5 (title, prompt, branch-name, base-branch,
+  file-attach), `WorkflowWizard` ×4 (name, project, agent, prompt
+  textarea sur Step 0+1). 1668 clés i18n triple-localisées.
+
+### Fixed — Tier 1
+
+- **RTK Gemini hook « Enable on the 1 remaining » fix** — deux bugs
+  combinés faisaient que cliquer le bouton retournait `success: true`
+  sans changer l'état de l'agent. (1) Matrice backend pour Gemini
+  manquait `--auto-patch` → RTK demandait `Patch settings.json? [y/N]`
+  sans stdin → défaut N → `~/.gemini/settings.json` jamais patché.
+  (2) Détection scannait `~/.bashrc/.zshrc` mais RTK 0.37 n'écrit
+  jamais dans le shell rc pour Gemini → toujours `false`. Fix :
+  matrice = `["init","-g","--gemini","--auto-patch"]`, détection
+  check `~/.gemini/hooks/rtk-hook-gemini.sh` (primaire) + `GEMINI.md`
+  + `settings.json`. Uninstall matrice mirroir avec `--auto-patch`.
+- **OllamaCard `canirun.ai` placement** — le lien sizing-hardware
+  était sous l'indication « comment démarrer Ollama », souvent skippé
+  par les users qui pensent que leur machine est trop faible (alors
+  que canirun.ai existe exactement pour répondre à ça). Déplacé dans
+  une box info juste sous le titre « Ollama », visible dans tous les
+  états (y compris `not_installed`). Doublon en bas supprimé.
+- **Lien compte Vibe** — `console.mistral.ai/usage` (404) →
+  `admin.mistral.ai/organization/workspaces` (la vraie page workspace
+  admin où voir la conso + plan).
+
+### Tests
+
+- **E2E `batch_quick_prompt` avec WS mocké** — 2 nouveaux tests dans
+  `workflows/batch_step.rs` couvrant le pipeline complet :
+  `_fire_and_forget_full_pipeline` (template render → QP load →
+  `create_batch_run` → fan-out spawn → output PENDING) et
+  `_wait_for_completion_with_mocked_ws` (watchdog tokio qui scrute la
+  DB pour le child run id puis émet un `BatchRunFinished` synthétique →
+  step retourne avec output OK). Ferme le dernier TODO du
+  `project_batch_workflows`.
+- Backend : **1787 tests** pass (1781 → +6 chain render Phase 4).
+- Frontend : 1110 tests pass (no regression).
+
+### Internal
+
+- **2 entrées TD fermées** : `TD-20260510-rtk-last-agent-button`
+  (résolu par le fix Gemini ci-dessus), `TD-20260510-multi-agent-disc-finished-toasts`
+  (résolu par useToast dedup window 1.5s en début de cycle). Détail
+  files supprimés.
+
+---
+
+### (Suite — Compare-agents (🤝) + per-agent MCP hardening, shipped en cours de cycle 0.8.0)
+
+Suite de l'audit. Nouvelle feature « comparer un QP sur N agents » +
+gros nettoyage de la couche MCP cross-agent — paths cross-container,
+config Gemini, hint d'erreur agent-aware, et **détection +
+masquage** des MCPs dont la config est incomplète pour qu'ils ne
+cassent plus le boot des agents.
+
+### Added — Compare-agents (🤝)
+
+- **`POST /api/quick-prompts/:id/compare-agents`** — fan-out d'un
+  QP sur une sélection d'agents installés (1 prompt × N agents).
+  Réutilise `create_batch_run` avec `agent_override` par item.
+  Cap à 50 agents max, dedup côté backend.
+- **`WorkflowsPage` chip selector** — bouton 🤝 ouvre le formulaire
+  avec une liste de chips pré-cochées (1 par agent installé). Clic
+  toggle, lien Tout/Aucun. Le CTA `🤝 Comparer (N)` se met à jour
+  dynamiquement et désactive si N=0. Pour les QPs sans variable, le
+  formulaire s'ouvre quand même pour permettre la sélection.
+- **Fan-out runs** — chaque disc enfant reçoit son propre `POST
+  /run` (même pattern que `handleBatchLaunch`). Pre-fix seul le
+  premier disc auto-runait via `onNavigateDiscussion`, les autres
+  restaient dormants. `onBatchLaunched(discIds, runId)` route
+  ensuite vers Discussions + `setFocusBatchId` pour auto-expand le
+  📦 dans la sidebar.
+- **Auto-expand du dossier batch en sidebar** — `DiscussionSidebar`
+  force-déplie le project folder ET le batch folder qui contient le
+  disc actif. Pre-fix l'utilisateur landait sur `disc1` mais voyait
+  un `📦` collapsed cachant les frères → assumait « 1 seul agent a
+  tourné ».
+
+### Fixed — MCP cross-agent
+
+- **`kronn-internal` MCP path cassait les CLI host** — Kronn écrivait
+  `/app/scripts/disc-introspection-mcp.py` (chemin container-only)
+  dans `.mcp.json` / `.kiro/settings/mcp.json` / `.gemini/settings.json`
+  / `~/.codex/config.toml`. Sur le host, `kiro-cli` (et autres CLIs
+  lancés directement) plantait avec `Broken pipe (os error 32)` sur
+  chaque init MCP. Fix : `disc_introspection_mcp_path_for_shared_config()`
+  qui lit l'env `KRONN_INTROSPECTION_PUBLIC_PATH` (auto-set par
+  `docker-compose.yml` via self-mount `./backend/scripts:${PWD}/backend/scripts:ro`)
+  → le path résout des deux côtés au même string absolu. Si pas de
+  path partagé, on **skip** + clean les entrées stale plutôt que
+  d'écrire un command cassé.
+- **Gemini CLI 0.32 ignore `apiKey` dans `~/.gemini/settings.json`**
+  — exige `GEMINI_API_KEY` env var. Quand l'utilisateur s'était auth
+  via `gemini auth login` (qui écrit settings.json) sans définir l'env,
+  Kronn ne propageait pas la clé → Gemini répondait
+  `MCP issues detected. Run /mcp list for status. ⚠ Network error.
+  Unable to reach the API.`. Fix : `read_gemini_settings_api_key()`
+  fallback dans `get_api_key`, lit le champ `apiKey` du settings.json
+  quand env + token store sont vides.
+- **Préfixe `MCP issues detected.` pollue le transcript Gemini** —
+  Gemini préfixe sa réponse de cette ligne dès qu'UN MCP rate son
+  handshake (auth périmée, network bloqué, etc.) même quand la
+  réponse réelle est OK. `parse_token_usage(GeminiCli)` strip
+  désormais le marker (newline OU inline) + les lignes
+  `Server '…' supports tool updates`, `[MCP error]`,
+  `[WARN] Skipping unreadable…`. Les sauts de paragraphe du vrai
+  contenu sont préservés.
+- **Tous les error hints pointaient vers `status.anthropic.com`** —
+  même quand l'agent qui plantait était Gemini (status Google),
+  Codex (status OpenAI), Copilot (status GitHub). Fix :
+  `detect_agent_error_hint(output, agent_type)` route maintenant
+  vers la bonne page de status par provider :
+  - ClaudeCode → status.anthropic.com
+  - Codex → status.openai.com
+  - GeminiCli → status.cloud.google.com/products/google-ai-studio
+  - CopilotCli → www.githubstatus.com
+  - Vibe → status.mistral.ai
+  - Kiro → kiro.dev
+  - Ollama → hint local "check `ollama serve`"
+
+### Added — MCPs incomplets : détection + skip + UI
+
+- **`McpIncompleteConfig`** — nouveau modèle exposé via
+  `McpOverview.incomplete_configs`. Liste les MCPs dont les
+  `env_keys` déclarés sont vides ou non-décryptables (clé du cipher
+  changée). `find_incomplete_configs(configs, servers, secret)`
+  walk les configs, décrypte, retourne la liste.
+- **Skip à la sync** — `sync_project_mcps_to_disk` ne **n'écrit
+  plus** les MCPs incomplets dans les fichiers project-level. Les
+  agents au boot ne tentent plus de handshake avec un MCP cassé →
+  plus de `Connection closed`, plus de stall de 5 min sur un OAuth
+  invalid_client.
+- **Banner UI dans la page Plugins** — `mcp-warning-banner` liste
+  les MCPs non-opérationnels avec leurs clés manquantes et un
+  raccourci pour ouvrir leur config. i18n FR/EN/ES.
+
+### Added — Tests
+
+- **`per-agent-mcp-introspection.spec.ts`** — PW E2E réel pour
+  chaque agent introspection-capable (Claude, Kiro, Gemini, Copilot).
+  Crée un disc avec un fact unique, prompt l'agent à appeler
+  `mcp__kronn-internal__disc_get_message(0)`, vérifie que le
+  counter SQL bump + le badge se rend dans le transcript + la
+  réponse contient le fact verbatim. Skip-if-not-installed +
+  skip-if-bailout (subscription / rate limit upstream → pas un bug
+  Kronn).
+- **Régressions backend** —
+  `find_incomplete_configs_flags_missing_keys`,
+  `find_incomplete_configs_flags_decrypt_failure`,
+  `inject_kronn_internal_path_resolution`,
+  `gemini_strips_mcp_issues_prefix` (×3 cas),
+  `rate_limit_for_gemini_points_at_google_status` (+ Codex / Claude
+  / Copilot / Ollama variants).
+
+### Fixed
+
+- **Race conditions « double-clic » sur les boutons asynchrones**
+  — `disabled={busy}` est closure-stale entre deux clics
+  synchrones avant que React n'ait re-rendu. Patch consistant à
+  base de `useRef` synchrone sur 9 sites :
+  - `WorkflowsPage` : `handleLaunchQP`, `handleLaunchQA`,
+    `handleBatchLaunch`, `handleBatchLaunchQA`, `handleTrigger`
+  - `ProjectCard` : briefing button, `handleFullAudit`,
+    `startPartialAudit`
+  - `NewDiscussionForm` : `handleCreate`
+  - `ApiCallAiHelper` : `sendMessage`
+  - `DiscussionsPage` : `handleEditMessage`
+  - `QuickPromptForm` / `QuickApiForm` / `WorkflowWizard` :
+    `handleSave`
+  - `SetupWizard` : `handleComplete` (premier lancement —
+    double-clic créait des projets dupliqués)
+- **Tour guidé étapes 11/12 (`waitForClick`)** — les boutons
+  Précédent/Suivant étaient cachés ET les helpers `next`/`prev`
+  bailaient sur `waitingForClick`. Conséquence : impossible de
+  revenir en arrière, lag perçu de 400 ms après le clic, skip qui
+  laissait `kronn:tour-step` dirty parce que `setTimeout` n'était
+  jamais annulé. Fix : Prev/Next visibles + fonctionnels en
+  `waitForClick`, délai post-clic 400 → 150 ms, `pendingAdvanceRef`
+  annulé proprement par `cleanupClickListener`, `start` initialise
+  directement à `resumeStep` (plus de flash de l'étape 0).
+- **Popover `:emoji` — seuls les 2 premiers items sélectionnables
+  au clavier** — `onKeyUp` rappelait `refreshEmojiQuery` qui
+  terminait par `setEmojiIndex(0)`. Conséquence pour ArrowDown :
+  keydown → 1, keyup → 0. L'item 1 atteignable le temps d'un
+  microflash, items 2+ jamais. Fix : `onKeyUp` skip Up/Down quand
+  la popover est ouverte (Left/Right/Home/End restent actifs car
+  ils déplacent vraiment le caret).
+- **Saut de scroll à la fin du stream** — `cleanupStream` flippait
+  `sending=false` AVANT que `reloadDiscussion` n'ait rapatrié le
+  message persisté. Le DOM perdait la hauteur de la bulle de
+  streaming, le navigateur clampait `scrollTop` UP au dernier
+  message utilisateur, puis l'auto-scroll smooth animait DOWN au
+  bas du nouveau message. Fix : promotion optimiste du buffer
+  `streamingMap[discId]` en message Agent dans `loadedDiscussions`
+  AVANT le flip de `sending`. La bulle de streaming démonte au
+  même render où la bulle persistée monte — pas de gap.
+- **Bootstrap MCP override du choix utilisateur** — l'effet
+  d'auto-pick listait `bootstrapRepoMcp` dans ses deps, donc
+  choisir « pas de repo » (value=`""`) re-fire l'effet, le guard
+  `!bootstrapRepoMcp` repassait, et le dropdown re-snappait sur le
+  premier MCP. Fix : `useRef` one-shot par modal-open.
+- **`NewDiscussionForm` Ctrl+Enter** — insérait un `\n` dans le
+  textarea ET soumettait le formulaire, parce que le `onKeyDown`
+  card-level n'appelait pas `e.preventDefault()`. Le prompt
+  envoyé contenait un retour-ligne parasite.
+- **`NewDiscussionForm` profils auto-sélectionnés** — l'effet
+  `prefill` faisait `setNewDiscProfileIds(['architect',
+  'tech-lead', 'qa-engineer'])` pour TOUT prefill, pas seulement
+  les audits de validation. Les utilisateurs partaient en chat
+  unrelated avec les 3 profils validateurs sélectionnés. Fix :
+  bound to `prefill.locked === true`.
+- **`NewDiscussionForm` wedge après échec submit** — `onSubmit`
+  typé `=> void` non await, `setCreating(true)` jamais reset,
+  bouton Create disabled à vie. Fix : `await Promise.resolve(onSubmit())`
+  + `try/catch/finally` + `creatingRef`.
+- **`ChatInput` hauteur du textarea** — `updateChatInput('')` à
+  l'envoi vidait la valeur mais laissait `style.height = '120px'`,
+  composer restait à 4-5 lignes vides après chaque message.
+  `updateChatInput` re-snappe désormais la hauteur via le même
+  calcul que `onChange`.
+- **IME composition non gardé sur les 4 textareas de discussion**
+  — Enter pressé pour valider une candidature IME envoyait le
+  message à mi-mot. Fix : `!e.nativeEvent.isComposing` sur
+  `ChatInput`, `NewDiscussionForm`, `MessageBubble` edit,
+  `ApiCallAiHelper`.
+- **Tour backdrop click marquait le tour terminé** — un clic à
+  côté du tooltip persistait `kronn:tour-completed = "true"` pour
+  toujours. Backdrop devient passif ; seuls les boutons explicites
+  + Escape comptent comme dismissals.
+- **MCP delete config sans confirmation** — `mcp-btn-action` rouge
+  appelait `deleteConfig` sur le clic, sans `confirm()` ni toast.
+  Une mauvaise click détruisait clés env + projets liés +
+  contextes custom sans signal. Fix : confirm natif + toast
+  succès/erreur.
+- **`AgentsSection` model_tiers init incomplet** — la boucle
+  d'initialisation listait 5 agents sur 7 (`copilot_cli` et
+  `ollama` absents). Leurs dropdowns restaient vides même quand le
+  backend avait des valeurs sauvegardées, et le prochain save
+  écrasait l'autre tier. Fix : 7 agents.
+- **Workflow trigger race** — `disabled={triggering === wf.id}`
+  closure-stale, double-click → 2 `triggerStream` en parallèle
+  (donc 2 runs du même workflow). Ajout `triggeringRef`.
+- **Voice countdown setInterval leak** —
+  `ChatInput.tsx` ouvrait un timer 1 Hz sans return cleanup.
+  Quitter mid-countdown laissait l'interval tourner et `setState`
+  sur un composant démonté. Cleanup ajouté.
+
+### Added
+
+- **Confirmations de suppression manquantes** — workflows
+  (carte + delete-all-runs + run individuel), contacts. Ajout des
+  i18n keys `wf.deleteWorkflowConfirm`, `wf.deleteRunConfirm`,
+  `wf.deleteAllRunsConfirm`, `contacts.deleteConfirm` en FR/EN/ES.
+- **E2E spec pour le tour guidé** — `e2e/specs/guided-tour.spec.ts`
+  couvre auto-launch, skip persistance, navigation, Escape,
+  replay via le bouton « ? », resume mid-flow.
+- **Tests de régression** — 12 nouveaux specs unit dont
+  `WorkflowsPage.qp-launch.test.tsx` (race + multi-var batch),
+  `Dashboard.bootstrap-mcp.test.tsx` (override MCP),
+  `ProjectCard.briefing-race.test.tsx` (double-click briefing),
+  delete-workflow-confirm dans `WorkflowsPage.test.tsx`.
+
+### Internal
+
+- `vitest.config.ts` exclut désormais `node_modules_old/**`
+  (cache pnpm renommé manuellement par certains devs en local).
+  `pnpm test` reste vert même quand ce dossier de 100+ MB existe.
+- **Lint baseline level-up** — passé de `57 errors / 125 warnings`
+  à `0 errors / 102 warnings`. Les corrections clés :
+  - `eqeqeq: ['error', 'always', { null: 'ignore' }]` — autorise
+    le `== null` idiomatique pour le check null-or-undefined sans
+    relâcher `===` ailleurs.
+  - 6 `consistent-type-imports` — `import('../types/...').X` →
+    imports nommés depuis le bundle généré (`api.ts`,
+    `WorkflowDetail`, `DiscussionsPage`, `McpPage`,
+    `SetupWizard.test`).
+  - 6 `no-empty` catch — commentaires explicites sur ce que le
+    catch silencieux protège (incognito storage, blip réseau, …).
+  - 4 `no-unused-expressions` — ternaires conditionnels qui
+    renvoyaient une valeur jetée → `if/else` propres.
+  - 8 `no-non-null-assertion` dans `ProjectCard` (drift status) +
+    6 dans `GitPanel` (projectId optional) → narrowing via
+    `&& condition && (...)` ou `if (!x) return`.
+  - 16 `no-explicit-any` dans `MessageBubble.mdComponents` →
+    interface `MdProps` typée (children/href/className).
+  - 6 `no-explicit-any` sur les signatures `t: (...args: any[])` →
+    `t: (...args: (string | number)[])` partout.
+  - Règles strictes React 19/20 (`react-hooks/purity`,
+    `immutability`, `refs`, `set-state-in-effect`,
+    `preserve-manual-memoization`) demoted `error → warn` le
+    temps de la migration. À traiter par dossier dans
+    `docs/tech-debt/`.
+- **Backend `cargo clippy` filtré** — nouveau target
+  `make lint-backend-local` qui pipe `cargo clippy --all-targets`
+  à travers awk pour masquer les 270 warnings ts-rs « failed to
+  parse serde attribute » (upstream issue, ts-rs 9.x ignore les
+  combinaisons d'attributs comme `skip_serializing_if =`,
+  `deserialize_with =` qu'il ne sait pas parser — ne change rien
+  à la TS générée). Le target Docker `make lint-backend` reste
+  intact pour CI.
+- **Mise à jour packages + audit sécurité** :
+  - Frontend : `pnpm update` sur les patch/minor sûrs — vitest
+    4.1.4 → 4.1.5, react/react-dom 19.2.5 → 19.2.6, eslint
+    10.2 → 10.3, typescript-eslint 8.58 → 8.59,
+    eslint-plugin-react-hooks 7.0 → 7.1.
+  - **Tous les majors aussi appliqués** dans cette même passe :
+    - **`typescript` 5.9 → 6.0** — TS 6 active strict-mode sur
+      les side-effect imports (`import './foo.css'`). Ajouté
+      `src/vite-env.d.ts` avec `declare module '*.css'` (+ `*.svg`,
+      `*.png`, etc.) pour réintégrer ces imports proprement.
+      Aucune erreur d'inférence introduite par le bump.
+    - **`lucide-react` 0.441 → 1.14** — la 1.x supprime les
+      brand icons (`Github`, `Gitlab`, …). Remplacé l'unique
+      usage (`<Github />` dans le bouton "Report Bug" de
+      `DebugSection`) par `<ExternalLink />`, qui est plus
+      sémantiquement correct pour une CTA qui ouvre une URL.
+    - **`vite` 6.4 → 8.0** + **`@vitejs/plugin-react` 5 → 6** —
+      vite 8 utilise rolldown au lieu de rollup. La forme objet
+      `manualChunks: { name: [...] }` n'est plus supportée ;
+      converti en form fonction qui regarde l'`id` du module.
+      Build temps : 7.9s → **1s** (-87 %), gros gain en local.
+      Le warning « chunk > 500 KB » est conservé sur le Dashboard
+      mais c'est cosmétique — `rolldown` recommande
+      `build.rolldownOptions.output.codeSplitting` pour aller plus
+      loin (à faire dans une passe dédiée).
+    - **`react-router-dom` 6.30 → 7.15** — découvert via grep que
+      la lib n'est utilisée nulle part dans `src/`. Dead dep
+      retirée du `package.json` (et du `manualChunks`
+      `vendor-react`).
+    - **`@huggingface/transformers` 3.8 → 4.2** — affecte
+      uniquement `lib/stt-worker.ts` (Whisper STT). Les types
+      `pipeline`, `AutomaticSpeechRecognitionPipeline`,
+      `AutomaticSpeechRecognitionOutput` sont conservés à
+      l'identique. Tests pass, type-check propre.
+  - **0 package outdated** maintenant. Tout au dernier semver.
+  - `pnpm overrides` ajoutées pour 4 vulnérabilités transitives :
+    `postcss >=8.5.10` (XSS via vite), `flatted >=3.4.2`
+    (proto-pollution via eslint), `brace-expansion >=5.0.5`
+    (DoS via eslint), `protobufjs >=7.5.5` (RCE critique via
+    `@diffusionstudio/vits-web → onnxruntime-web`). Chaque entry
+    est commentée avec son GHSA pour qu'on sache quand la
+    retirer (= quand l'upstream direct accepte la version
+    patchée). `pnpm audit` est désormais clean.
+  - Backend : `cargo update` sur les semver-compat — tokio 1.50
+    → 1.52, rustls 0.23.37 → 0.23.40, tower-http 0.6.8 →
+    0.6.10, plus 35 autres patches.
+  - Desktop tauri : `cargo update` aligné sur le même cycle.
+  - 1850 tests Rust verts, 1070 tests vitest verts, 35 tests
+    Playwright E2E verts, build vite OK (Dashboard chunk
+    949 → 77 KB après code-split par tab).
+  - **Code-split du Dashboard (vite 8 rolldown)** — `Dashboard.tsx`
+    importait directement `McpPage`, `WorkflowsPage`, `SettingsPage`,
+    `DiscussionsPage`, ce qui empilait 949 KB dans le chunk d'entrée.
+    Converti en `React.lazy()` + `<Suspense>` autour de chaque tab.
+    Résultat : Dashboard 77 KB, McpPage 32 KB, WorkflowsPage 234 KB,
+    SettingsPage 113 KB, DiscussionsPage 480 KB. Plus aucun chunk
+    au-dessus du seuil 500 KB de rolldown. Premier switch d'onglet =
+    fetch ~100 ms du chunk concerné, ensuite caché par le nav.
+  - **`useAsyncGuard` hook** — extraction du pattern `useRef` +
+    `try/finally` partagé par 13 sites de garde de re-entrée. Hook
+    `useAsyncGuard(asyncFn)` retourne un callback qui short-circuite
+    la 2e invocation tant que la 1re est in-flight. 4 tests verts.
+    Pattern documenté dans `feedback_race_guards` memory et utilisé
+    dans `DiscussionSidebar.handleContactAdd`,
+    `AgentsSection.handleInstallAgent`, `ProjectSkills.handleToggle`.
+  - **3 nouvelles gardes de re-entrée** (en plus des 9 déjà
+    fixées) :
+    - `DiscussionSidebar.handleContactAdd` — Enter rapide ou
+      double-clic sur Add créait des contacts dupliqués (POST
+      `/api/contacts` non-idempotent).
+    - `AgentsSection.handleInstallAgent` — `disabled` lit
+      `installing !== null` qui est closure-stale ; deux clics
+      rapides lançaient deux installs en parallèle.
+    - `ProjectSkills.handleToggle` — toggle d'un skill à un
+      double-clic sur la même chip envoyait deux POST
+      `setDefaultSkills` avec un état incohérent.
+  - **Bug HTML : `<button>` imbriqué dans `<button>`** — la carte
+    projet (`ProjectCard.tsx`) avait `dash-card-header` (un
+    `<button>` qui toggle l'expand) qui contenait
+    `dash-drift-update-btn` (un autre `<button>` pour relancer un
+    audit partiel). Invalid HTML, warning React en dev, et le clic
+    sur l'inner button bubblait au header sur certains navigateurs.
+    Fix : header converti en `<div role="button" tabIndex={0}>`
+    avec `onKeyDown` Enter/Space explicites. 5 tests d'accessibility
+    pinnent le contrat (focus, Enter, Space, autres touches no-op).
+  - **4 bugs UTF-8 « slice par byte index »** — pattern
+    `&s[..N]` qui panique si l'octet N tombe au milieu d'une
+    séquence UTF-8 (très réel sur du français « été », emoji,
+    noms de fichiers accentués). Sites identifiés et fixés :
+    - `api/disc_git.rs::format_tool_log` → tronquait les commandes
+      Bash longues à 80 octets ; agent qui logguait
+      `git commit -m "feat: été pré-prod 🚀…"` panique.
+    - `workflows/steps.rs:159` → tronquait l'output d'un step à
+      2000 octets pour le repair-prompt si validation foirait.
+    - `api/workflows.rs:1051` → tronquait `rendered` à 200 octets
+      pour le message d'erreur "items_from resolved to empty".
+    - `api/discussions/streaming.rs:696,1083` → tronquait
+      `stderr_text` agent à 500 octets dans les logs d'erreur.
+    Fix uniforme : `s.chars().take(N).collect::<String>()`.
+    12 tests dont une regression spécifique pour byte 80 = milieu
+    d'emoji et 280 octets / 160 chars de français. Pattern
+    documenté dans `feedback_rust_str_slicing` memory.
+  - **Tests E2E Playwright stabilisés** — 4 tests
+    `guided-tour.spec.ts` flakaient à cause de :
+    1. Le `TourProvider` est mounté DANS le Dashboard, donc
+       l'auto-launch (timer 800 ms) part seulement après le
+       render du Dashboard, qui peut prendre 2-5 s avec >1000
+       discussions en DB. Timeout test 2.8 s → trop court.
+       Fix : `waitForDashboardMounted()` puis timeout 4.8 s.
+    2. Le `addInitScript` du `beforeEach` re-supprimait le flag
+       `kronn:tour-completed` à CHAQUE navigation, donc après un
+       Skip + reload le tour réapparaissait. Fix : `freshTourState()`
+       qui fait `goto('/') + evaluate(removeItem) + reload()`
+       — un seul nettoyage avant le test, pas un init script qui
+       re-tourne.
+  - **E2E QP launch double-click** — nouveau spec
+    `qp-launch-double-click.spec.ts` : navigue Workflows → Quick
+    Prompts, intercepte `POST /api/discussions` (résolu
+    manuellement), dispatch deux `MouseEvent('click')` synchrones
+    sur le bouton Launch via `page.evaluate` (les browsers ne
+    dispatchent pas le click sur `<button disabled>`, mais on
+    veut tester le pattern bug pré-fix où la 2e click arrive
+    avant le re-render du disabled). Assert exactly 1 hit. Skip
+    si la dev DB n'a aucun QP.
+  - **Backend majors aussi appliqués dans cette passe** (15
+    crates) :
+    - **`ts-rs` 9 → 12** — fix ~270 warnings « failed to parse
+      serde attribute » qui empoisonnaient `cargo build`. Reste
+      1 warning isolé sur `deserialize_with` (combo non supportée
+      upstream, pas bloquant).
+    - **`thiserror` 1 → 2**, **`directories` 5 → 6**, **`which`
+      6 → 8**, **`cron` 0.12 → 0.16**, **`governor` 0.8 → 0.10**,
+      **`tokio-tungstenite` 0.26 → 0.29** — bumps semver propres,
+      0 changement requis dans le code.
+    - **`sha2` 0.10 → 0.11** — `Digest::finalize()` retourne
+      désormais un `hybrid_array::Array<u8>` qui n'implémente
+      plus `LowerHex`. Patch sur 2 sites (`core/checksums.rs`,
+      `api/themes.rs`) : encodage manuel via
+      `result.iter().map(|b| format!("{:02x}", b)).collect()`.
+    - **`reqwest` 0.12 → 0.13** — la feature `rustls-tls` est
+      renommée `rustls`, et `form` est désormais une feature à
+      part. Ajusté dans `Cargo.toml`.
+    - **`toml` 0.8 → 1.1** — gros breaking : `parse::<toml::Value>()`
+      ne marche plus pour parser un document complet (Value est
+      réservé aux primitives). Migré 4 sites
+      (`core/mcp_scanner.rs`, `core/host_mcp_discovery.rs`,
+      `api/mcps.rs`, `core/mcp_scanner_test.rs`) vers
+      `parse::<toml::Table>()`.
+    - **`tower-http` 0.5 → 0.6** — déjà appliqué via cargo
+      update, aucune incompat.
+    - **`axum` 0.7 → 0.8** — 3 breaking changes traités :
+      - **Path param syntax** : `:id` → `{id}`, `:run_id` →
+        `{run_id}`, etc. 84 routes converties dans `lib.rs` +
+        1 dans `workflows/notify_step.rs` (test).
+      - **`Message::Text` wraps `Utf8Bytes`** au lieu de
+        `String`. Patch dans `api/ws.rs` :
+        `Message::Text(json.into())`.
+      - **`Option<T>` en extractor exige
+        `OptionalFromRequest{Parts}`**. axum 0.8 ne l'implémente
+        plus pour `Query` ni `ConnectInfo`. Fixes :
+        - `discussions::list` : remplacé
+          `Option<Query<PaginationQuery>>` par
+          `Query<PaginationQuery>` avec `page=0` comme sentinelle
+          « pas de pagination » (cf. doc-comment de
+          `PaginationQuery`).
+        - `ws::ws_handler` : remplacé `Option<ConnectInfo<…>>`
+          par `Option<Extension<ConnectInfo<…>>>` (Extension
+          implémente `OptionalFromRequestParts`).
+    - **`calamine` 0.26 → 0.34**, **`pdf-extract` 0.7 → 0.10** —
+      bumps propres, pas de changement de code.
+    - **`rusqlite` 0.31 → 0.39** — drop le support de `u64` dans
+      `ToSql`/`FromSql` (SQLite stocke en i64 de toute façon).
+      Patch sur `db/quick_apis.rs` (3 sites
+      `qa.api_timeout_ms` : cast `Option<u64>` ↔ `Option<i64>`
+      à la frontière SQL).
+    - **`zip` 2 → 8** : skip — la 9 est encore en pre-release et
+      la 2.4.2 est la dernière stable. On reste sur 2.
+  - **Desktop tauri** également bumpé sur axum 0.8 +
+    tower-http 0.6 pour matcher le backend.
+  - **1838 tests Rust verts** après chaque bump (test runs
+    intermédiaires entre chaque crate). 0 régression.
+
+---
+
+## [0.7.1] - 2026-05-07
+
+**Convention pivot, host-sync resilience, install fixes** — la 0.7.1
+boucle ce qui restait de 0.7.0 (jamais livrée) et y ajoute la pivot
+de la convention de doc agent (`ai/` → `docs/AGENTS.md`), un cycle
+complet de durcissement du host-sync MCP (race condition, concurrent
+writes, gate workflow-run) et la fermeture des bugs d'install bloquants
+remontés par les premiers utilisateurs macOS / WSL2.
+
+### Added
+
+- **Pivot `ai/` → `docs/AGENTS.md`** — la convention multi-agent
+  `AGENTS.md` à la racine devient la norme : `ai/index.md` est
+  renommé `docs/AGENTS.md`, `ai/templates/` → `docs/templates/`, le
+  loader Tier 1/2/3 est préservé exactement (token economy
+  intacte). Les redirecteurs racine (`CLAUDE.md`, `GEMINI.md`,
+  `.cursorrules`, `.windsurfrules`, `.clinerules`,
+  `.kiro/steering/instructions.md`, `.vibe/instructions.md`,
+  `.github/copilot-instructions.md`, `.cursor/rules/repo-instructions.mdc`)
+  sont raccourcis à des stubs qui pointent tous vers
+  `docs/AGENTS.md`. Helpers `core::scanner::detect_docs_dir` /
+  `detect_docs_entry` rendent tout le backend path-agnostique
+  (`docs/` > `doc/` > legacy `ai/`).
+- **Migration `ai/ → docs/`** — `POST /api/projects/:id/migrate-docs`
+  exécute un `git mv` propre (préserve l'historique), renomme
+  `index.md` → `AGENTS.md`, réécrit les liens internes et les
+  redirecteurs racine, et option de symlink `ai → docs` pour la
+  rétro-compat. Détecte automatiquement les conflits de fusion
+  (même nom de fichier, contenu différent) et abort avec une liste
+  précise. Bouton "Migrer vers docs/" sur `ProjectCard` quand le
+  projet est encore sur `ai/`.
+- **`docs/index.md` humain** — landing page lisible pour les humains
+  qui ouvrent `docs/` sur GitHub, à côté de l'AGENTS.md destiné aux
+  LLM. Auto-générée par `core::docs_migration::ensure_docs_index`
+  en fonction des sous-dossiers réellement présents
+  (`conventions/`, `gotchas/`, `people/`, `architecture/`,
+  `operations/`, `tech-debt/`, `decisions/`, `templates/`). Backfill
+  silencieux pour les projets migrés AVANT cette feature.
+- **Cross-project user context (`~/.kronn/user-context/*.md`)** —
+  fichiers markdown auto-injectés dans le system prompt de TOUS les
+  agents, peu importe le CLI ou le projet. Pont sur les gaps des
+  conventions per-tool (`~/.claude/CLAUDE.md`, `~/.codex/...`).
+  Auto-bootstrap d'un README au premier lancement. Éditeur inline
+  dans la page Settings ("Mes contextes") — CRUD complet sans
+  ouvrir un terminal.
+- **Anti-secret filter sur les écritures `docs/`** — `core::docs_write_filter`
+  passe chaque écriture d'agent dans `docs/` à travers une combo
+  (denylist regex + détecteur d'entropie + Bloom-style sensitive-substring
+  filter contre `~/.env`, `*.pem`, `*.key`, etc.). Les écritures
+  rejetées sont auto-revertées via `git checkout` ou supprimées si
+  untracked. Audit post-step automatique dans `workflows/runner`.
+- **`HostMcpSync` trait + `run_host_sync` driver** — le boilerplate
+  de sync vers les configs MCP des CLIs (Codex `config.toml`,
+  Copilot `mcp-config.json`, Claude `~/.claude.json` scope-aware,
+  Gemini `~/.gemini/settings.json`) est maintenant centralisé. Une
+  5ème CLI = un struct + une ligne dans le slice. Code :
+  `backend/src/core/mcp_scanner.rs::HostMcpSync`.
+- **Watchdog stale-stream (TD-20260504)** — `Dashboard.tsx` détecte
+  via `lib/stream-watchdog.ts::detectStaleStreams` (helper pur,
+  unit-testé) les discussions dont le spinner spinne plus de 5 min
+  sans nouvel chunk. Auto-recovery : clear spinner + refetch des
+  messages persistés + toast warning. Plus jamais de F5 obligatoire
+  après un `docker compose restart`.
+- **Auto-resync MCP host-config gated par les workflow runs**
+  (TD-host-sync-workflow-race) — `db::workflows::has_running_run`
+  bloque l'écriture des configs `~/.claude.json` / `~/.gemini/settings.json`
+  pendant qu'un agent est mid-spawn. Évite les race entre Kronn qui
+  réécrit la config et l'agent qui la lit au démarrage.
+- **Concurrent-writer guard sur les host syncs** (TD-host-sync-flock)
+  — `atomic_write_checked` snapshote la mtime avant la lecture et
+  abort le rename si un tiers (Claude Code lui-même, Gemini CLI, …)
+  l'a touché entre-temps. Préserve les edits concurrents au lieu de
+  les clobber.
+- **`kronn doctor`** — commande de diagnostic CLI : détecte les
+  fichiers root-owned uid-0 sous `~/.cache` et `~/.local/share`
+  (héritage pré-`APP_UID`, source silencieuse de `uvx Permission
+  denied` côté hôte), valide `uvx` / `glab ≥ 1.59` / `npx` dans le
+  PATH, vérifie que Docker tourne. Exit non-zéro sur souci. Doc :
+  `docs/operations/host-mcp-runtime.md`.
+- **Warning sync-time sur binaires hôte manquants** —
+  `mcp_scanner::warn_missing_host_binaries` scanne les configs en
+  cours de sync et log un warn par command stdio (`uvx`, `glab`,
+  `npx`, …) absent de `/host-bin/*`. Surface "uvx pas dans le PATH"
+  au moment où l'opérateur sauve la config, pas au moment où l'agent
+  hôte essaie de spawn le MCP six heures plus tard.
+- **Tooling restant accumulé depuis 0.6.0** : workflow Loop / Exec /
+  Rollback, RTK gain analytics, sélecteur de thème
+  (light/dark/system), intégration Ollama locale,
+  génération de fichiers (PDF/DOCX/XLSX/CSV/PPTX) via sidecar
+  Python, step `ApiCall` qui remplace les MCPs read-only,
+  template AutoPilot, tour guidé d'onboarding, batch quick-prompts,
+  data profiles, glossaire global, OAuth2 Tauri, export/import ZIP
+  cross-OS, helpers Chartbeat API, favoris discussions, fix scan
+  path Windows WSL depuis Tauri.
+
+### Fixed
+
+- **Install macOS premier lancement** (issue #84, paul-horcholle) :
+  RTK pin `0.37.1 → 0.39.0` (release supprimée upstream),
+  arm64 target `aarch64-unknown-linux-musl → -gnu` (variant musl
+  plus shipée), Makefile refuse explicitement quand Kronn est
+  cloné directement sous `$HOME` (collision avec le mount RO
+  `/host-home`), backend healthcheck `start_period 5s → 60s`
+  (cold start ~30 s avec migrations + sidecars + tool installs).
+- **Install WSL2 + agents** (issue #81, smarguin) : self-mount
+  `${HOME}/.local/share` au même chemin host pour résoudre les
+  symlinks absolus d'installeurs (Claude / Vibe), volume nommé
+  `claude-sessions` pour isoler les PIDs du daemon hôte (silent
+  hang fixé), `ws.onopen` envoie maintenant `Presence` immédiatement
+  (le backend reste plus tolérant aux Pings pré-Presence en plus,
+  pour les reconnects post-suspend).
+- **HOME override pour les agents CLI** : `agents/runner.rs`
+  n'écrase plus `HOME` pour Claude / Codex / Vibe / Gemini /
+  Kiro-CLI / Copilot. Leurs configs sont montées à
+  `/home/kronn/<agent>` et l'override les renvoyait vers
+  `/home/<host-user>/<agent>` qui n'existe pas dans le container —
+  silent hang en attendant un token d'auth jamais trouvé. Les
+  binaires inconnus gardent l'override (besoin éventuel d'un HOME
+  host-rooted).
+- **Tech-debt fermées au passage** :
+  `TD-20260427-host-sync-trait` (trait `HostMcpSync`),
+  `TD-20260427-host-sync-flock` (mtime CAS guard),
+  `TD-20260427-host-sync-workflow-race` (gate via
+  `has_running_run`), `TD-20260504-ws-reconnect-stale-ui` (watchdog
+  + handshake tolérant), `TD-20260427-host-sync-backup-rotation`
+  (rotation `.1`→`.5` automatique).
+
+### Changed
+
+- **Path-agnostique partout** dans le backend : `count_ai_todos`,
+  `core::checksums` (read/write `checksums.json`), `core::mcp_scanner`
+  (`ensure_redirectors`), `api::projects::resolve_briefing_notes`,
+  `api::discussions` (briefing read), `api::mcps` (checksum
+  invalidation), `api::workflows` (mcp hints), `api::ai_docs`
+  (list/search/read), `api::audit` (compute_audit_info_sync,
+  cleanup), `inject_bootstrap_prompt`, `install_template`. Plus
+  aucun `ai/` hardcodé en code de production.
+- **Templates restructurés** : `templates/ai/` → `templates/docs/`
+  (git mv préserve l'historique), `templates/docs/AGENTS.md` au
+  lieu de `index.md`, tous les redirecteurs racine raccourcis à
+  ~3 lignes pointant sur `docs/AGENTS.md`. `templates/.env.mcp.example`
+  référence `docs/operations/...`.
+- **Auto-bootstrap subfolders** : `docs/conventions/`,
+  `docs/gotchas/`, `docs/people/` créés au bootstrap avec un
+  README explicatif, agent-writable.
+- **Project model** : nouveau champ `needs_docs_migration: bool`
+  (calculé par `enrich_audit_status`, non persisté en DB). Drive
+  l'apparition du banner de migration sur `ProjectCard`.
+- **`backend/src/models/mod.rs` éclaté** (TD-20260417-models-monolith,
+  ✅ FIXED) : 3272 L → 151 L. 12 sous-modules par domaine
+  (`agents`, `db`, `discussions`, `git`, `mcp`, `multiuser`,
+  `ollama`, `projects`, `quick`, `setup`, `stats`, `workflows`)
+  re-exportés via `pub use sub::*`. Aucun call site touché —
+  `use crate::models::Foo` continue de résoudre. Bindings ts-rs
+  identiques à l'octet près sauf `Project.ts` (champ
+  `needs_docs_migration` qui attendait juste un `make typegen`).
+- **`backend/src/api/projects.rs` éclaté** (TD-20260417-projects-monolith,
+  ✅ FIXED) : 2038 L → 7 fichiers (`mod.rs`, `crud.rs`, `bootstrap.rs`,
+  `clone.rs`, `template.rs`, `git.rs`, `migrate.rs`). Les 4 helpers
+  `pub(crate)` réutilisés par `api::audit` (template install /
+  bootstrap prompt) restent re-exportés via `pub use template::*`.
+  Aucune route à toucher dans `lib.rs`, surface externe identique.
+- **`backend/src/api/audit.rs` éclaté** (TD-20260417-audit-monolith,
+  ✅ FIXED) : 1988 L → 8 fichiers (`mod.rs` avec les constantes
+  `PROMPT_PREAMBLE`/`ANALYSIS_STEPS`/`AUDIT_REDIRECTOR_FILES` +
+  `helpers.rs`, `run.rs`, `info.rs`, `drift.rs`, `validate.rs`,
+  `full.rs`, `briefing.rs`). Hypothèse initiale d'une abstraction
+  `AuditEngine` requise avant split a été levée — le couplage est
+  via `AppState.audit_tracker`, chaque handler est self-contained.
+  `pub(crate) use helpers::{check_ai_dir_permissions, detect_project_skills}`
+  pour les 2 helpers consommés par `api::projects::*`.
+- **`backend/src/api/discussions.rs` éclaté** (TD-20260328-discussions-backend,
+  ✅ FIXED) : 3222 L → 7 fichiers (`mod.rs` avec constantes
+  + `TERMINAL_SIGNALS` + `detect_terminal_signal` /
+  `truncate_after_signal` / `message_matches_silent_crash` +
+  `AgentStreamEvent` enum + tests, puis `crud.rs`, `messaging.rs`,
+  `runtime.rs`, `streaming.rs`, `orchestration.rs`, `context.rs`).
+  Le couplage SSE/streaming/cancel évoqué dans le TD original
+  (« separate session needed ») se résout par une visibilité
+  `pub(super)` propre — `make_agent_stream`, `run_agent_streaming`,
+  `run_agent_collect`, `AgentStreamMeta`, `AgentRunResult`,
+  `maybe_generate_summary` sont consommés par les modules siblings
+  via `super::streaming::*` / `super::orchestration::*`. Aucune
+  signature publique modifiée, callers (`workflows::batch_step`,
+  `src/api_tests.rs`) intacts.
+
+---
+
 ## [0.6.0] - 2026-05-03
 
 **Modularité unitaire des workflows** — trois briques pour factoriser :

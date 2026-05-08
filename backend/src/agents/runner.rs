@@ -204,6 +204,13 @@ pub struct AgentStartConfig<'a> {
     pub model_tiers: Option<&'a ModelTiersConfig>,
     /// Pre-built context files prompt (uploaded file contents for this discussion).
     pub context_files_prompt: &'a str,
+    /// Discussion id this run targets, when known. Forwarded to the
+    /// agent process as `KRONN_DISCUSSION_ID` so the in-process
+    /// `kronn-internal` MCP bridge knows which discussion to introspect.
+    /// `None` for one-off runs (e.g. workflow Agent steps that don't
+    /// belong to a persistent discussion thread, or the auto-summary
+    /// path itself).
+    pub discussion_id: Option<&'a str>,
 }
 
 /// Resolve a ModelTier to a concrete --model flag value for a given agent.
@@ -224,7 +231,12 @@ pub(crate) fn resolve_model_flag(agent_type: &AgentType, tier: ModelTier, overri
         let override_val = match tier {
             ModelTier::Economy => &agent_cfg.economy,
             ModelTier::Reasoning => &agent_cfg.reasoning,
-            ModelTier::Default => &None, // Default uses built-in below
+            // `Default` tier now honors a user override too — primarily
+            // for Ollama, where the OllamaCard picker writes here so the
+            // user's preferred model wins over the built-in `llama3.2`
+            // fallback below. Backward compatible: `None` (the common
+            // case) falls through to the built-in match.
+            ModelTier::Default => &agent_cfg.default,
         };
         if let Some(ref val) = override_val {
             if !val.is_empty() {
@@ -272,6 +284,7 @@ pub async fn start_agent(
         tier: ModelTier::Default,
         model_tiers: None,
         context_files_prompt: "",
+        discussion_id: None,
     }).await
 }
 
@@ -507,12 +520,12 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     };
 
     // Try direct binary first, then npx fallback
-    let mut child = match try_spawn(binary, None, &args, &work_dir, env_key, api_key.as_deref(), stdin_prompt.as_deref()) {
+    let mut child = match try_spawn(binary, None, &args, &work_dir, env_key, api_key.as_deref(), stdin_prompt.as_deref(), config.discussion_id) {
         Ok(c) => c,
         Err(e) => {
             tracing::info!("Direct binary '{}' failed ({}), trying npx...", binary, e);
             if let Some(pkg) = npx_pkg {
-                try_spawn("npx", Some(pkg), &args, &work_dir, env_key, api_key.as_deref(), stdin_prompt.as_deref())?
+                try_spawn("npx", Some(pkg), &args, &work_dir, env_key, api_key.as_deref(), stdin_prompt.as_deref(), config.discussion_id)?
             } else {
                 return Err(e);
             }
@@ -644,6 +657,88 @@ fn vibe_runner_path() -> String {
     // 3. Dev mode: relative to cargo manifest
     let dev_path = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/vibe-runner.py");
     dev_path.to_string()
+}
+
+/// Resolve `disc-introspection-mcp.py` using the same lookup chain as
+/// `vibe_runner_path`. Returns `None` if the script can't be located —
+/// the caller should skip the kronn-internal MCP entry rather than
+/// inject a broken path that the agent will choke on.
+///
+/// **Container vs host path** — when Kronn runs in Docker, the script
+/// lives at `/app/scripts/...` (built into the image). The user's host
+/// CLI (`kiro-cli`, `claude`, …) cannot reach that path, so injecting it
+/// into project-level config files (`.mcp.json`, `.kiro/settings/…`)
+/// breaks the host CLI with `Broken pipe (os error 32)` on every
+/// invocation. Use [`disc_introspection_mcp_path_for_shared_config`] in
+/// any code path that writes to a file the host CLI may read.
+pub(crate) fn disc_introspection_mcp_path() -> Option<String> {
+    if let Ok(custom) = std::env::var("KRONN_DISC_INTROSPECTION_MCP") {
+        if std::path::Path::new(&custom).exists() {
+            return Some(custom);
+        }
+    }
+    let docker_path = "/app/scripts/disc-introspection-mcp.py";
+    if std::path::Path::new(docker_path).exists() {
+        return Some(docker_path.to_string());
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidates = [
+                dir.join("scripts").join("disc-introspection-mcp.py"),
+                dir.join("..").join("scripts").join("disc-introspection-mcp.py"),
+                dir.join("..").join("Resources").join("scripts").join("disc-introspection-mcp.py"),
+                dir.join("disc-introspection-mcp.py"),
+            ];
+            for c in &candidates {
+                if c.exists() {
+                    return Some(c.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+    let dev_path = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/disc-introspection-mcp.py");
+    if std::path::Path::new(dev_path).exists() {
+        return Some(dev_path.to_string());
+    }
+    None
+}
+
+/// Resolve a path to `disc-introspection-mcp.py` that's valid for **both**
+/// Kronn-spawned (in-container) agents AND the user's host CLI sessions
+/// (`kiro-cli`, `claude`, `gemini` run directly from the shell).
+///
+/// Used when writing entries to project-level config files (`.mcp.json`,
+/// `.kiro/settings/mcp.json`, `.gemini/settings.json`, `~/.codex/config.toml`)
+/// — those are read by every CLI the user has installed, not just the
+/// container.
+///
+/// **Lookup order**:
+///   1. `KRONN_INTROSPECTION_PUBLIC_PATH` env (set by `docker-compose.yml`
+///      to the host path that's also self-mounted at the same absolute
+///      path inside the container — same string resolves both sides).
+///   2. The plain [`disc_introspection_mcp_path`] **if and only if**
+///      we're not in Docker (= path is already host-valid).
+///
+/// Returns `None` when no shared path is reachable — in that case the
+/// caller skips the `kronn-internal` injection. Kronn-spawned agents
+/// then lose MCP-based introspection but still have the slash-marker
+/// fallback (`KRONN:DISC_*` lines parsed in `slash_markers.rs`); the
+/// trade-off keeps host CLIs working cleanly. See user report
+/// 2026-05-10 (`kronn-internal Broken pipe (os error 32)` from
+/// `kiro-cli` on the host).
+pub(crate) fn disc_introspection_mcp_path_for_shared_config() -> Option<String> {
+    if let Ok(public) = std::env::var("KRONN_INTROSPECTION_PUBLIC_PATH") {
+        if std::path::Path::new(&public).exists() {
+            return Some(public);
+        }
+    }
+    // Native (non-Docker) Kronn — `disc_introspection_mcp_path()` already
+    // returns a host-valid path. Detect Docker via the canonical
+    // `/.dockerenv` marker file.
+    if !std::path::Path::new("/.dockerenv").exists() {
+        return disc_introspection_mcp_path();
+    }
+    None
 }
 
 /// Start Ollama via HTTP API streaming (/api/chat) instead of CLI.
@@ -988,12 +1083,52 @@ fn agent_command(agent_type: &AgentType, prompt: &str, full_access: bool, mcp_co
 /// pushed past the limit, spawn_failed with `os error 7`.
 pub(crate) const MAX_SINGLE_ARG_BYTES: usize = 100 * 1024;
 
+/// True iff the agent's `HOME` should NOT be overridden to
+/// `KRONN_HOST_HOME` before spawn. Pure decision so we can test the
+/// policy table without mounting filesystem state.
+///
+/// Rationale: every Kronn-managed CLI agent has its config dir
+/// mounted at `/home/kronn/<agent>` by docker-compose, so `HOME` is
+/// already correct as-is in the container. The override would
+/// misdirect them to `/home/<host-user>/<agent>` which doesn't exist
+/// in the container — silent hang waiting for a missing token
+/// (cf. TD-20260507-home-override-breaks-claude-creds; reported on
+/// WSL2 + Claude in issue #81 bug 5, generalised to all CLI agents
+/// after code-level audit).
+///
+/// Unknown binaries keep the override — they may legitimately need
+/// a host-rooted HOME (arbitrary user-installed tools).
+pub(crate) fn should_skip_home_override(
+    binary: &str,
+    npx_package: Option<&str>,
+) -> bool {
+    matches!(
+        binary,
+        "claude" | "codex" | "vibe" | "gemini" | "kiro-cli" | "copilot"
+    ) || matches!(
+        npx_package,
+        Some("@anthropic-ai/claude-code")
+            | Some("@openai/codex")
+            | Some("@google/gemini-cli")
+            | Some("@github/copilot"),
+    )
+}
+
 /// Spawn an agent process. If npx_package is Some, uses npx to run.
 ///
 /// `stdin_payload`: when present, the string is written to the child's stdin
 /// and stdin is then closed (EOF). Used for agents that accept their prompt
 /// via stdin (currently: Claude Code with `--print` and no positional prompt
 /// arg), letting us side-step the kernel's per-argv size cap.
+///
+/// 8 args: each is genuinely independent — bundling them into a config
+/// struct would just shuffle the verbosity from the call sites
+/// (already only 2) into the struct definition + builder. The
+/// arguments map 1:1 to the spawn primitives the OS expects (binary,
+/// args, env, cwd, stdin) plus three Kronn-specific feed-throughs
+/// (npx_package, api_key, discussion_id). Allow-listed rather than
+/// refactored.
+#[allow(clippy::too_many_arguments)]
 fn try_spawn(
     binary: &str,
     npx_package: Option<&str>,
@@ -1002,6 +1137,7 @@ fn try_spawn(
     env_key: &str,
     api_key: Option<&str>,
     stdin_payload: Option<&str>,
+    discussion_id: Option<&str>,
 ) -> Result<tokio::process::Child, String> {
     // Resolve the final command. We also remember whether the resolved binary
     // lives inside WSL (`via_wsl`) so we can pick the right exec strategy
@@ -1117,10 +1253,40 @@ fn try_spawn(
     cmd.env("TEMP", &agent_tmpdir);
     cmd.env("TMP", &agent_tmpdir);
 
-    // In Docker, HOME is /home/kronn (the container user), but agents store their
-    // auth and config in the real user's home (KRONN_HOST_HOME). Override HOME so
-    // all agents (Claude, Codex, Copilot, Kiro, etc.) find their config files.
-    // On native (Tauri desktop, direct binary), HOME is already correct.
+    // In Docker, HOME=/home/kronn (the container user) and EVERY agent's auth
+    // dir is mounted there by docker-compose: `${HOME}/.claude → /home/kronn/.claude`,
+    // `${HOME}/.codex → /home/kronn/.codex`, `${HOME}/.vibe → /home/kronn/.vibe`,
+    // `${HOME}/.gemini → /home/kronn/.gemini`, `${HOME}/.kiro → /home/kronn/.kiro`,
+    // `${HOME}/.local/share/kiro-cli → /home/kronn/.local/share/kiro-cli`.
+    // The pre-2026-05-07 code overrode HOME=KRONN_HOST_HOME for all agents
+    // — agents would then look for `$HOME/.<agent>` at the host path
+    // (e.g. `/home/<user>/.claude`) which doesn't exist inside the
+    // container, and hang silently waiting for an auth token
+    // (TD-20260507-home-override-breaks-claude-creds, reported in issue
+    // #81 bug 5 on WSL2 for Claude — every other CLI agent had the same
+    // shape and was likely silently broken too).
+    //
+    // Current policy: skip the override for ALL Kronn-managed CLI
+    // agents whose config is mounted at /home/kronn/<dir>. Copilot is
+    // fine either way because it has an explicit COPILOT_HOME override
+    // a few lines down. Ollama doesn't read $HOME (uses HTTP API).
+    // Unknown binaries keep the override — they may legitimately need
+    // a host-rooted HOME (e.g. arbitrary user-installed tools).
+    // Forward the discussion id to the agent process so the
+    // `kronn-internal` MCP bridge (auto-injected into .mcp.json by the
+    // disc setup paths) can call back into Kronn's introspection
+    // endpoints with the right disc context. Set unconditionally when
+    // we have one — non-MCP-aware agents simply ignore the env var.
+    if let Some(disc_id) = discussion_id {
+        cmd.env("KRONN_DISCUSSION_ID", disc_id);
+        // Backend URL: the agent process runs on the same host as the
+        // Kronn backend (Docker bridge or native), default 127.0.0.1
+        // unless an operator override is set in the system env.
+        let backend_url = std::env::var("KRONN_BACKEND_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:3140".to_string());
+        cmd.env("KRONN_BACKEND_URL", backend_url);
+    }
+
     let real_home = std::env::var("KRONN_HOST_HOME").ok().filter(|rh| {
         let exists = std::path::Path::new(rh).is_dir();
         if !exists {
@@ -1128,9 +1294,12 @@ fn try_spawn(
         }
         exists
     });
+    let skip_home_override = should_skip_home_override(binary, npx_package);
     if let Some(ref rh) = real_home {
-        cmd.env("HOME", rh);
-        cmd.env("USERPROFILE", rh); // Windows agents use USERPROFILE
+        if !skip_home_override {
+            cmd.env("HOME", rh);
+            cmd.env("USERPROFILE", rh); // Windows agents use USERPROFILE
+        }
     }
 
     // Resolve the effective home for agent config lookups (cross-platform).
@@ -1470,8 +1639,43 @@ pub fn parse_token_usage(agent_type: &AgentType, response: &str, stderr_lines: &
             }
             (response.to_string(), 0)
         }
+        AgentType::GeminiCli => {
+            // Gemini CLI prepends `MCP issues detected. Run /mcp list for status.`
+            // to its reply whenever ANY MCP server fails handshake (auth gone
+            // stale, network blocked, etc.) — even when the reply is otherwise
+            // fine. Surfacing the prefix in the saved transcript pollutes the
+            // disc title generator and confuses the user (they assume Gemini
+            // failed when it didn't). Strip it. Also drop the noisy
+            // `Server 'X' supports tool updates...` and `[MCP error] ... ` debug
+            // lines that occasionally leak into stdout. The MCP failure itself
+            // is still logged via stderr_capture for debugging.
+            //
+            // Token usage isn't available on Gemini CLI 0.32 stdout (no
+            // `tokens used` marker) — return 0, the auth_mode field still
+            // disambiguates `override` vs `local auth` in the UI.
+            const MCP_ISSUES_MARKER: &str = "MCP issues detected. Run /mcp list for status.";
+            // Step 1 — drop debug noise lines. We keep blank lines so paragraph
+            // breaks in the agent's actual reply survive intact.
+            let filtered: Vec<&str> = response
+                .lines()
+                .filter(|line| {
+                    let t = line.trim_start();
+                    !t.starts_with("Server '")
+                        && !t.starts_with("[MCP error]")
+                        && !t.starts_with("[WARN] Skipping unreadable")
+                })
+                .collect();
+            let cleaned = filtered.join("\n");
+            // Step 2 — strip the `MCP issues detected.` marker once, wherever
+            // it lands. Gemini sometimes emits it on its own line (filtered
+            // here as a leading-prefix replacement), sometimes glued inline
+            // to the next chunk (handled by the same `replacen` since the
+            // marker is unique).
+            let cleaned = cleaned.replacen(MCP_ISSUES_MARKER, "", 1);
+            (cleaned.trim_start().to_string(), 0)
+        }
         // Claude Code: tokens parsed inline via parse_claude_stream_line() in discussions.rs
-        // TODO: Gemini CLI, Vibe — not yet supported
+        // TODO: Vibe — not yet supported
         _ => (response.to_string(), 0),
     }
 }
@@ -1490,13 +1694,45 @@ fn get_api_key(env_key: &str, tokens: &TokensConfig) -> Option<String> {
         _ => return None,
     };
 
-    // If override is disabled for this provider, fall back to env var
+    // If override is disabled for this provider, fall back to env var.
     if tokens.disabled_overrides.iter().any(|d| d == provider) {
-        return std::env::var(env_key).ok();
+        // For Google specifically, also try the gemini-cli settings.json
+        // fallback before giving up — see comment in the main return below.
+        return std::env::var(env_key).ok().or_else(|| {
+            if provider == "google" { read_gemini_settings_api_key() } else { None }
+        });
     }
 
-    // Use active key from multi-key system
+    // Use active key from multi-key system, then env var, then a final
+    // Gemini-specific settings.json fallback. Why the last one:
+    // gemini-cli 0.32.x does NOT honour the `apiKey` field in
+    // `~/.gemini/settings.json` despite documenting it — it requires
+    // `GEMINI_API_KEY` set in the process env. Without this fallback,
+    // users who configured the key via `gemini auth login` (which writes
+    // settings.json) hit `"You must specify the GEMINI_API_KEY
+    // environment variable."` on every Kronn-spawned run, even though
+    // the CLI works fine when invoked from the user's shell where the
+    // env IS set. User report 2026-05-10 — the agent surfaced the
+    // confusing fallback message `MCP issues detected. Run /mcp list
+    // for status.` followed by the real `Network error. Unable to reach
+    // the API.` because no API key meant no API call.
     tokens.active_key_for(provider)
         .map(|s| s.to_string())
         .or_else(|| std::env::var(env_key).ok())
+        .or_else(|| {
+            if provider == "google" { read_gemini_settings_api_key() } else { None }
+        })
+}
+
+/// Read `apiKey` from `~/.gemini/settings.json` as a last-resort fallback
+/// for `GEMINI_API_KEY`. Returns `None` on missing file, parse error, or
+/// missing/empty `apiKey` field — caller handles None as "no key
+/// available" the same way as before this fallback existed.
+fn read_gemini_settings_api_key() -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    let path = std::path::Path::new(&home).join(".gemini").join("settings.json");
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let val: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let key = val.get("apiKey")?.as_str()?.trim();
+    if key.is_empty() { None } else { Some(key.to_string()) }
 }

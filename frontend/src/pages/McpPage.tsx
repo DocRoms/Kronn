@@ -1,8 +1,10 @@
 import { useState, useRef, useEffect } from 'react';
 import { mcps as mcpsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
+import { useToast } from '../hooks/useToast';
+import { userError } from '../lib/userError';
 import { isHiddenPath } from '../lib/constants';
-import type { Project, McpConfigDisplay, McpDefinition, McpOverview, HostSyncMode } from '../types/generated';
+import type { Project, McpConfigDisplay, McpDefinition, McpOverview, HostSyncMode, ApiSpec } from '../types/generated';
 import {
   Puzzle, Plus, Trash2, Eye, Check, RefreshCw, Square, CheckSquare,
   X, Key, Pencil, FileText, ExternalLink, Save, Search, ArrowDownAZ, ArrowDownZA,
@@ -13,7 +15,7 @@ import { HostSyncPreview } from '../components/HostSyncPreview';
 
 /** Derive plugin kind from transport + api_spec presence. */
 type PluginKind = 'mcp' | 'api' | 'hybrid';
-function pluginKind(m: { transport: McpDefinition['transport']; api_spec?: import('../types/generated').ApiSpec | null }): PluginKind {
+function pluginKind(m: { transport: McpDefinition['transport']; api_spec?: ApiSpec | null }): PluginKind {
   const hasApi = !!m.api_spec;
   // McpTransport is a discriminated union; the API-only sentinel is the
   // string literal "ApiOnly" (not a { tag: ... } object).
@@ -145,6 +147,7 @@ interface McpPageProps {
 
 export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initialSelectedConfigId }: McpPageProps) {
   const { t } = useT();
+  const { toast } = useToast();
   const detailRef = useRef<HTMLDivElement>(null);
   const [editingLabelId, setEditingLabelId] = useState<string | null>(null);
   const [editingLabelText, setEditingLabelText] = useState('');
@@ -180,7 +183,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
     } catch { return 'az'; }
   });
   useEffect(() => {
-    try { localStorage.setItem('kronn:mcpSort', mcpSort); } catch {}
+    try { localStorage.setItem('kronn:mcpSort', mcpSort); } catch { /* localStorage disabled (incognito / quota) — sort defaults to az on next load */ }
   }, [mcpSort]);
   const [selectedConfigId, setSelectedConfigId] = useState<string | null>(initialSelectedConfigId ?? null);
 
@@ -238,11 +241,22 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
   };
 
   const handleDeleteMcpConfig = async (configId: string) => {
+    // Pre-fix: this fired on click with no confirm and no toast — operators
+    // accidentally clicked the red Delete button (in a row of 3 actions on
+    // the detail header) and lost their MCP config + linked projects +
+    // env keys with no signal it had happened. Now an explicit native
+    // confirm is required (mirrors the QP / project / skill delete flow)
+    // and the result is toasted so success/failure is visible.
+    const cfg = mcpOverview.configs.find(c => c.id === configId);
+    const label = cfg?.label ?? configId;
+    if (!confirm(t('mcp.deleteConfigConfirm', label))) return;
     try {
       await mcpsApi.deleteConfig(configId);
       refetchMcps();
+      toast(t('mcp.deleteConfigSuccess', label), 'success');
     } catch (e) {
       console.warn('Failed to delete MCP config:', e);
+      toast(t('mcp.deleteConfigError', userError(e)), 'error');
     }
   };
 
@@ -412,6 +426,39 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
         </div>
       </div>
 
+      {/* Incomplete-config warning banner. Lists the MCPs whose env_keys
+          are declared but values are missing/empty — those would fail
+          handshake at agent boot and slow down every Kronn-spawned run.
+          The scanner already SKIPS them in project-level config files;
+          this banner tells the operator which plugins to fix. Click on
+          a row to jump to the config detail. */}
+      {(mcpOverview.incomplete_configs?.length ?? 0) > 0 && (
+        <div className="mcp-warning-banner" data-testid="mcp-incomplete-banner">
+          <div className="mcp-warning-banner-title">
+            ⚠ {t('mcp.incomplete.title', mcpOverview.incomplete_configs!.length)}
+          </div>
+          <p className="mcp-warning-banner-hint">{t('mcp.incomplete.hint')}</p>
+          <ul className="mcp-warning-banner-list">
+            {mcpOverview.incomplete_configs!.map(ic => (
+              <li key={ic.config_id}>
+                <button
+                  type="button"
+                  className="mcp-warning-banner-item"
+                  onClick={() => setSelectedConfigId(ic.config_id)}
+                >
+                  <strong>{ic.label}</strong>
+                  <span className="mcp-warning-banner-server"> · {ic.server_name}</span>
+                  <span className="mcp-warning-banner-reason"> — {ic.reason}</span>
+                  {ic.missing_keys.length > 0 && (
+                    <code className="mcp-warning-banner-keys">{ic.missing_keys.join(', ')}</code>
+                  )}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {/* ── Add MCP from registry ── */}
       {showAddMcp && (
         <div ref={addMcpRef} className="mcp-card mcp-add-panel">
@@ -454,8 +501,12 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                 const grouped = new Map<string, typeof availableRegistry>();
                 for (const m of availableRegistry) {
                   const cat = getCategory(m.tags);
-                  if (!grouped.has(cat)) grouped.set(cat, []);
-                  grouped.get(cat)!.push(m);
+                  let bucket = grouped.get(cat);
+                  if (!bucket) {
+                    bucket = [];
+                    grouped.set(cat, bucket);
+                  }
+                  bucket.push(m);
                 }
                 const catsWithItems = categoryOrder.filter(cat => grouped.has(cat));
                 return (
@@ -495,13 +546,13 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                           className={`mcp-cat-pill${selectedCategory === cat ? ' mcp-cat-pill-active' : ''}`}
                           onClick={() => setSelectedCategory(selectedCategory === cat ? null : cat)}
                         >
-                          {cat} <span className="mcp-cat-pill-count">{grouped.get(cat)!.length}</span>
+                          {cat} <span className="mcp-cat-pill-count">{grouped.get(cat)?.length ?? 0}</span>
                         </button>
                       ))}
                     </div>
                     <div className="mcp-registry-grid">
                       {catsWithItems.flatMap(cat =>
-                        grouped.get(cat)!
+                        (grouped.get(cat) ?? [])
                           .filter(m => {
                             // Category filter
                             if (selectedCategory && selectedCategory !== cat) return false;
@@ -642,7 +693,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                                 className="mcp-eye-btn"
                                 onClick={() => setAddVisibleFields(prev => {
                                   const next = new Set(prev);
-                                  next.has(k) ? next.delete(k) : next.add(k);
+                                  if (next.has(k)) next.delete(k); else next.add(k);
                                   return next;
                                 })}
                                 tabIndex={-1}
@@ -1005,7 +1056,7 @@ function PorteeCliCoachMark() {
   if (dismissed) return null;
 
   const dismiss = () => {
-    try { localStorage.setItem(PORTEE_CLI_COACH_KEY, '1'); } catch {}
+    try { localStorage.setItem(PORTEE_CLI_COACH_KEY, '1'); } catch { /* incognito / quota — coach reappears on next session */ }
     setDismissed(true);
   };
 
@@ -1065,7 +1116,7 @@ function CliExposureHint({ configs, onJumpToConfig }: { configs: McpConfigDispla
   if (dismissed || !noneExposed) return null;
 
   const dismiss = () => {
-    try { localStorage.setItem(CLI_EXPOSURE_HINT_DISMISS_KEY, '1'); } catch {}
+    try { localStorage.setItem(CLI_EXPOSURE_HINT_DISMISS_KEY, '1'); } catch { /* incognito / quota — hint reappears on next session */ }
     setDismissed(true);
   };
 

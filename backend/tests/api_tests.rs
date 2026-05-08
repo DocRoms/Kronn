@@ -1908,7 +1908,7 @@ fn template_glossary_has_todo_marker_guidance() {
 #[test]
 fn analysis_steps_glossary_mentions_todo_markers() {
     // The glossary step prompt should instruct the agent to add TODO markers for unknown terms
-    let prompt_preamble = include_str!("../src/api/audit.rs");
+    let prompt_preamble = include_str!("../src/api/audit/mod.rs");
     // Find the glossary step prompt
     assert!(
         prompt_preamble.contains("TODO: ask user"),
@@ -1918,7 +1918,7 @@ fn analysis_steps_glossary_mentions_todo_markers() {
 
 #[test]
 fn analysis_steps_tech_debt_creates_detail_files() {
-    let source = include_str!("../src/api/audit.rs");
+    let source = include_str!("../src/api/audit/mod.rs");
     // 0.7.1 pivot — prompts now reference `docs/tech-debt/` (post-pivot
     // convention). Legacy `ai/tech-debt/` projects keep working through
     // `detect_docs_dir`, but the bootstrap prompt instructs agents on
@@ -1931,7 +1931,7 @@ fn analysis_steps_tech_debt_creates_detail_files() {
 
 #[test]
 fn analysis_steps_tech_debt_checks_outdated_prerequisites() {
-    let source = include_str!("../src/api/audit.rs");
+    let source = include_str!("../src/api/audit/mod.rs");
     // The tech debt step should mention checking for outdated prerequisites
     assert!(
         source.contains("deprecated") || source.contains("EOL") || source.contains("outdated"),
@@ -1941,7 +1941,7 @@ fn analysis_steps_tech_debt_checks_outdated_prerequisites() {
 
 #[test]
 fn analysis_steps_review_checks_tech_debt_files() {
-    let source = include_str!("../src/api/audit.rs");
+    let source = include_str!("../src/api/audit/mod.rs");
     assert!(
         source.contains("Tech debt files") || source.contains("tech-debt/"),
         "Review step should verify tech-debt detail files exist"
@@ -1950,7 +1950,7 @@ fn analysis_steps_review_checks_tech_debt_files() {
 
 #[test]
 fn analysis_steps_review_checks_glossary_todos() {
-    let source = include_str!("../src/api/audit.rs");
+    let source = include_str!("../src/api/audit/mod.rs");
     assert!(
         source.contains("Glossary TODO") || source.contains("TODO: ask user"),
         "Review step should check glossary TODO markers"
@@ -2192,7 +2192,7 @@ async fn server_config_returns_defaults() {
 
 #[test]
 fn bootstrap_prompt_contains_project_name() {
-    let source = include_str!("../src/api/projects.rs");
+    let source = include_str!("../src/api/projects/bootstrap.rs");
     // The bootstrap prompt function should include the project name
     assert!(source.contains("build_bootstrap_prompt"), "build_bootstrap_prompt function should exist");
     // Should support multiple languages
@@ -2202,7 +2202,7 @@ fn bootstrap_prompt_contains_project_name() {
 
 #[test]
 fn detect_project_skills_function_exists() {
-    let source = include_str!("../src/api/audit.rs");
+    let source = include_str!("../src/api/audit/helpers.rs");
     assert!(source.contains("detect_project_skills"), "detect_project_skills function should exist");
     // Should check common project files
     assert!(source.contains("Cargo.toml"), "Should detect Rust projects");
@@ -2751,6 +2751,161 @@ async fn agents_detect_returns_list() {
     assert!(agents.len() >= 6, "Expected at least 6 agents, got {}", agents.len());
 }
 
+// ─── Compare-agents mode (POST /api/quick-prompts/:id/compare-agents) ───
+//
+// Pinned regression for the new fan-out-across-agents endpoint. We
+// don't drive a real agent run here (that's covered by
+// `codex-real-introspection.spec.ts`); we assert the endpoint
+// validates inputs (empty agents, missing prompt) and creates the
+// right number of child discussions when given a valid payload.
+//
+// The actual disc creation needs a real QP in the DB, which the
+// existing test_app() spins up in-memory. Each child disc carries
+// the per-item agent_override, mirroring the Compare-agents UX
+// (1 prompt × N agents).
+
+#[tokio::test]
+async fn compare_agents_rejects_empty_agents() {
+    let app = test_app();
+    let body = serde_json::json!({
+        "prompt": "test prompt",
+        "batch_name": "test-batch",
+        "agents": [],
+    });
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/quick-prompts/missing-id/compare-agents")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(body.to_string()))
+        .unwrap();
+    let resp = tower::ServiceExt::oneshot(app, req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 65536).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], false);
+    let err = json["error"].as_str().unwrap_or("");
+    assert!(err.contains("at least 1 agent"), "expected agents-empty error, got: {}", err);
+}
+
+#[tokio::test]
+async fn compare_agents_rejects_empty_prompt() {
+    let app = test_app();
+    let body = serde_json::json!({
+        "prompt": "   ",
+        "batch_name": "test-batch",
+        "agents": ["ClaudeCode"],
+    });
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/quick-prompts/missing-id/compare-agents")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(body.to_string()))
+        .unwrap();
+    let resp = tower::ServiceExt::oneshot(app, req).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), 65536).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["success"], false);
+    assert!(json["error"].as_str().unwrap_or("").contains("Prompt is required"));
+}
+
+#[tokio::test]
+async fn compare_agents_rejects_missing_qp() {
+    // QP doesn't exist → "not found" error, not a server crash.
+    let app = test_app();
+    let body = serde_json::json!({
+        "prompt": "real prompt",
+        "batch_name": "test-batch",
+        "agents": ["ClaudeCode", "Codex"],
+    });
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/quick-prompts/does-not-exist/compare-agents")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(body.to_string()))
+        .unwrap();
+    let resp = tower::ServiceExt::oneshot(app, req).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), 65536).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["success"], false);
+    assert!(json["error"].as_str().unwrap_or("").contains("not found"));
+}
+
+// ─── Version check (auto-update banner) ─────────────────────────────────
+//
+// Pinned regression for `GET /api/version/check`. The endpoint feeds
+// `frontend/src/components/UpdateBanner.tsx` — a 200-with-success-true
+// envelope is the contract the banner relies on for "we know we're
+// up-to-date" vs "show the upgrade pill".
+//
+// We don't validate the GitHub fetch (the test runs offline; the
+// fetch-latest helper times out and returns None). What matters is:
+//   1. Endpoint reachable + valid envelope.
+//   2. `current` field stamped from CARGO_PKG_VERSION at boot, not
+//      a hard-coded literal that drifts on every release.
+//   3. `up_to_date: true` when `latest` is None (offline path) — the
+//      banner stays hidden, no false-positive nag.
+
+// ─── DB backup endpoint (POST /api/db/backup) ───────────────────────────
+//
+// Pinned regression: the in-memory test DB returns an explicit error
+// rather than a phantom backup file. Real-DB writes are exercised by
+// the runbook + production `kronn-test` env; here we lock the
+// "no-op" behaviour so a future refactor doesn't accidentally
+// produce a `:memory:.bak` placeholder file.
+
+#[tokio::test]
+async fn db_backup_in_memory_db_returns_error() {
+    let app = test_app();
+    let body = serde_json::Value::Null;
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/db/backup")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(body.to_string()))
+        .unwrap();
+    let resp = tower::ServiceExt::oneshot(app, req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 65536).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], false, "in-memory DB should not silently 'succeed' a backup");
+    let err = json["error"].as_str().unwrap_or("");
+    assert!(err.contains("memory"), "error should mention the in-memory DB; got: {}", err);
+}
+
+#[tokio::test]
+async fn version_check_returns_current_version_envelope() {
+    let app = test_app();
+    let (status, json) = get_json(app, "/api/version/check").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+    let data = &json["data"];
+    // current must match the running package version (CARGO_PKG_VERSION)
+    let current = data["current"].as_str().expect("current field present");
+    assert_eq!(current, env!("CARGO_PKG_VERSION"));
+}
+
+#[tokio::test]
+async fn version_check_offline_assumes_up_to_date() {
+    // The fetch-latest helper hits api.github.com with a 5s timeout;
+    // inside the test runner there's no outbound network, so it times
+    // out and the cache stays at `latest = None`. The banner contract
+    // is `up_to_date: true` in that case so the user isn't nagged
+    // because of a transient GitHub blip.
+    let app = test_app();
+    let (status, json) = get_json(app, "/api/version/check").await;
+    assert_eq!(status, StatusCode::OK);
+    let data = &json["data"];
+    // `latest` may be either null (first call) or a cached string
+    // from a previous run; in both cases up_to_date should be truthy
+    // when we don't have a strictly-greater latest.
+    if data["latest"].is_null() {
+        assert_eq!(data["up_to_date"], true,
+            "with latest=null the banner contract is up_to_date=true (offline = no false alarm)");
+    }
+}
+
 #[tokio::test]
 async fn quick_prompts_crud() {
     let state = test_state();
@@ -2951,6 +3106,111 @@ async fn ws_ping_pong() {
         }
     }
     assert!(pong_found, "Expected Pong but never received it");
+}
+
+/// TD-20260504 — Ping is accepted as the FIRST frame before Presence.
+/// Pre-fix this would close the channel ("first message must be Presence,
+/// got Ping"). Post-fix the heartbeat is benign and the channel stays
+/// alive long enough for Presence to follow on a paused-Docker reconnect.
+#[tokio::test]
+async fn ws_accepts_ping_before_presence() {
+    let state = test_state();
+    let addr = start_test_server(state.clone()).await;
+
+    let mut broadcast_rx = state.ws_broadcast.subscribe();
+
+    let url = format!("ws://{}/api/ws", addr);
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("WS connect failed");
+    let (mut sender, _receiver) = StreamExt::split(ws_stream);
+
+    // Send Ping FIRST (no Presence yet) — racing-heartbeat scenario.
+    let ping = WsMessage::Ping { timestamp: 1711100000 };
+    sender
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            serde_json::to_string(&ping).unwrap().into(),
+        ))
+        .await
+        .unwrap();
+
+    // The server must answer with Pong, channel stays alive.
+    let mut pong_found = false;
+    for _ in 0..5 {
+        let recv = tokio::time::timeout(std::time::Duration::from_secs(2), broadcast_rx.recv())
+            .await
+            .expect("timeout waiting for Pong")
+            .expect("recv error");
+        if let WsMessage::Pong { timestamp } = recv {
+            assert_eq!(timestamp, 1711100000);
+            pong_found = true;
+            break;
+        }
+    }
+    assert!(pong_found, "Pong must follow a pre-Presence Ping");
+
+    // Now Presence arrives — channel should now accept ChatMessage etc.
+    ws_send_presence(&mut sender).await;
+    // Tiny grace period for the verification path.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // No assertion needed — the security tests below cover post-Presence.
+}
+
+/// TD-20260504 — non-Presence non-Ping frames are silently DROPPED
+/// pre-Presence (no channel kill). Critical so a reconnecting peer
+/// doesn't get the channel torn down because of a stale buffered frame.
+#[tokio::test]
+async fn ws_drops_pre_presence_garbage_silently() {
+    let state = test_state();
+    let addr = start_test_server(state.clone()).await;
+
+    let mut broadcast_rx = state.ws_broadcast.subscribe();
+
+    let url = format!("ws://{}/api/ws", addr);
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("WS connect failed");
+    let (mut sender, _receiver) = StreamExt::split(ws_stream);
+
+    // Send a ChatMessage (NOT Presence, NOT Ping) — should be dropped.
+    let chat = WsMessage::ChatMessage {
+        shared_discussion_id: "d".into(),
+        message_id: "m".into(),
+        from_pseudo: "Attacker".into(),
+        from_avatar_email: None,
+        from_invite_code: "kronn:Attacker@evil:1".into(),
+        content: "hi".into(),
+        timestamp: 0,
+    };
+    sender
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            serde_json::to_string(&chat).unwrap().into(),
+        ))
+        .await
+        .unwrap();
+
+    // Now Ping — must still get a Pong (channel still alive).
+    let ping = WsMessage::Ping { timestamp: 1711200000 };
+    sender
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            serde_json::to_string(&ping).unwrap().into(),
+        ))
+        .await
+        .unwrap();
+
+    let mut pong_found = false;
+    for _ in 0..5 {
+        let recv = tokio::time::timeout(std::time::Duration::from_secs(2), broadcast_rx.recv())
+            .await
+            .expect("timeout — channel was torn down by the garbage frame")
+            .expect("recv error");
+        if let WsMessage::Pong { timestamp } = recv {
+            assert_eq!(timestamp, 1711200000);
+            pong_found = true;
+            break;
+        }
+    }
+    assert!(pong_found, "Channel must survive a pre-Presence garbage frame");
 }
 
 /// WS auto-adds unknown but valid invite code as pending contact and relays the message.
@@ -3293,6 +3553,7 @@ async fn ws_chat_message_inserts_into_shared_discussion() {
         pin_first_message: false,
         summary_cache: None,
         summary_up_to_msg_idx: None,
+        summary_strategy: kronn::models::SummaryStrategy::Auto, introspection_call_count: 0,
         shared_id: Some("shared-abc-123".into()),
         shared_with: vec![],
         workflow_run_id: None,
@@ -3409,6 +3670,7 @@ async fn ws_chat_message_idempotent() {
         pin_first_message: false,
         summary_cache: None,
         summary_up_to_msg_idx: None,
+        summary_strategy: kronn::models::SummaryStrategy::Auto, introspection_call_count: 0,
         shared_id: Some("shared-idem-001".into()),
         shared_with: vec![],
         workflow_run_id: None,
@@ -4246,6 +4508,7 @@ async fn insert_test_mode_discussion(
         pin_first_message: false,
         summary_cache: None,
         summary_up_to_msg_idx: None,
+        summary_strategy: kronn::models::SummaryStrategy::Auto, introspection_call_count: 0,
         shared_id: None,
         shared_with: vec![],
         workflow_run_id: None,

@@ -12,7 +12,7 @@
 
 Self-hosted control plane for AI coding agents. One local backend orchestrates Claude Code, Codex, Vibe, Gemini CLI, Kiro, GitHub Copilot, and Ollama across your repos — chat, multi-step workflows, MCP (Model Context Protocol — the plugin standard agents use) configs, secrets, and tokens, in one place. Built for developers who automate their work with AI assistants and want a single dashboard instead of seven CLIs and seven MCP configs.
 
-> Status: **0.6.0** — functional but pre-1.0. Breaking changes happen.
+> Status: **0.8.0** — functional but pre-1.0. Breaking changes happen.
 > License: AGPL-3.0.
 
 ---

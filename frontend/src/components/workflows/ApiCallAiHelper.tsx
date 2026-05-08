@@ -275,6 +275,13 @@ export function ApiCallAiHelper({
   const [discussionId, setDiscussionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [streaming, setStreaming] = useState(false);
+  // Race-free re-entry guard. Two fast Enter presses on the input
+  // textarea both read `streaming === false` from the same closure
+  // (state hasn't re-rendered yet) and fire `sendMessageStream` twice
+  // in parallel — duplicate user bubble in the chat + 2 agent runs on
+  // the same ephemeral discussion. The ref reads/writes synchronously
+  // so the second invocation bails out.
+  const streamingRef = useRef(false);
   const [input, setInput] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [minimized, setMinimized] = useState(false);
@@ -390,7 +397,8 @@ export function ApiCallAiHelper({
 
   const sendMessage = useCallback(async () => {
     const userText = input.trim();
-    if (!userText || !discussionId || streaming) return;
+    if (!userText || !discussionId || streamingRef.current) return;
+    streamingRef.current = true;
     setInput('');
     setError(null);
     // What we display in the chat = what the user actually typed. What we
@@ -419,21 +427,23 @@ export function ApiCallAiHelper({
           return [...prev.slice(0, -1), { ...last, text: last.text + chunk }];
         });
       },
-      () => setStreaming(false),
+      () => { streamingRef.current = false; setStreaming(false); },
       err => {
         console.error('[ApiCallAiHelper] sendMessageStream error:', err);
         setError(err);
+        streamingRef.current = false;
         setStreaming(false);
       },
       controller.signal,
     );
-  }, [input, discussionId, streaming, selectedServer, step, lastTestResponse, lastTestError, agentT]);
+  }, [input, discussionId, selectedServer, step, lastTestResponse, lastTestError, agentT]);
 
   const stopStream = useCallback(() => {
     abortRef.current?.abort();
     if (discussionId) {
       discussionsApi.stop(discussionId).catch(() => {});
     }
+    streamingRef.current = false;
     setStreaming(false);
   }, [discussionId]);
 
@@ -600,7 +610,12 @@ export function ApiCallAiHelper({
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={e => {
-                if (e.key === 'Enter' && !e.shiftKey) {
+                // `nativeEvent.isComposing` skips the IME-confirmation
+                // Enter that fires while a CJK input method is composing
+                // a candidate — pressing Enter to validate the
+                // composition would otherwise send a half-finished
+                // message.
+                if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                   e.preventDefault();
                   void sendMessage();
                 }

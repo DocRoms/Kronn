@@ -291,7 +291,10 @@ fn scan_codex(home: &Path, index: &OwnershipIndex) -> Vec<DiscoveredHostMcp> {
         Ok(c) => c,
         Err(_) => return Vec::new(),
     };
-    let value: toml::Value = match raw.parse() {
+    // toml 1.x: parse into Table directly (parse::<toml::Value> no
+    // longer accepts a full TOML document — it's only for primitive
+    // values now).
+    let value: toml::Table = match raw.parse() {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!("host_mcp_discovery: cannot parse {}: {}", path.display(), e);

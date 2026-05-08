@@ -156,7 +156,16 @@ pub async fn execute_step(
                             "missing envelope".into()
                         };
                         tracing::info!("Step '{}': output {}, attempting repair", step.name, reason);
-                        let truncated = if final_output.len() > 2000 { &final_output[..2000] } else { &final_output };
+                        // Truncate by char count — `&s[..2000]` panics if
+                        // byte 2000 falls inside a UTF-8 sequence (emoji,
+                        // accented chars in the LLM output).
+                        let truncated_owned: String;
+                        let truncated: &str = if final_output.chars().count() > 2000 {
+                            truncated_owned = final_output.chars().take(2000).collect();
+                            &truncated_owned
+                        } else {
+                            &final_output
+                        };
                         let repair_prompt = crate::workflows::template::build_repair_prompt(
                             truncated,
                             &step.output_format,
@@ -329,6 +338,7 @@ async fn run_agent_with_timeout(
             .unwrap_or_default(),
         model_tiers: None,
         context_files_prompt: "",
+        discussion_id: None,
     }).await.map_err(|e| anyhow::anyhow!(e))?;
 
     let mut output = String::new();

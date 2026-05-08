@@ -154,6 +154,95 @@ describe('ChatInput draft persistence', () => {
     expect(loadDraft('d-1')).toBeNull();
   });
 
+  it('Enter pressed during IME composition does NOT send the message', () => {
+    // Pre-fix: the textarea's keyDown handler sent on `Enter && !shiftKey`
+    // unconditionally. CJK / dead-key composition uses Enter to confirm
+    // the candidate — pressing it during composition would send a
+    // half-finished message. The fix gates on `nativeEvent.isComposing`.
+    saveDraft('d-1', '日本語');
+    const onSend = vi.fn();
+    render(
+      <ChatInput
+        discussion={baseDiscussion}
+        agents={[]}
+        sending={false}
+        disabled={false}
+        ttsEnabled={false}
+        ttsState="idle"
+        worktreeError={null}
+        availableSkills={[]}
+        availableDirectives={[]}
+        onSend={onSend}
+        onStop={vi.fn()}
+        onOrchestrate={vi.fn()}
+        onTtsToggle={vi.fn()}
+        onWorktreeErrorDismiss={vi.fn()}
+        onWorktreeRetry={vi.fn()}
+        isAgentRestricted={() => false}
+        contextFiles={[]}
+        uploadingFiles={false}
+        toast={vi.fn() as never}
+        t={(k: string) => k}
+      />,
+    );
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
+
+    // Press Enter while the IME flag is on — fireEvent.keyDown lets us
+    // pass the `isComposing` flag straight onto the synthetic event.
+    fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false, isComposing: true });
+    expect(onSend).not.toHaveBeenCalled();
+
+    // Now press Enter normally — composition is over, the send fires.
+    fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false, isComposing: false });
+    expect(onSend).toHaveBeenCalledTimes(1);
+  });
+
+  it('arrow-key navigation in the :emoji popover reaches items beyond index 1', () => {
+    // Reported bug ("seuls les 2 premiers emojis sont sélectionnables"):
+    // pressing ArrowDown set emojiIndex synchronously in the keydown
+    // handler, but the keyup handler unconditionally called
+    // `refreshEmojiQuery` which ended with `setEmojiIndex(0)`. Each
+    // ArrowDown therefore went 0 → 1 → 0 between keydown and keyup, so
+    // the user could ever only confirm item 0 (or item 1 during the
+    // brief flash). Items 2+ were unreachable via keyboard.
+    //
+    // The fix gates the keyup refresh on Up/Down while the popover is
+    // open — keydown navigation is now authoritative. This test asserts
+    // that 3 ArrowDown presses leave the popover with item index 3
+    // highlighted, which would have been impossible pre-fix.
+    renderChatInput(baseDiscussion);
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
+
+    // Type a query that returns ≥4 results so we can reach index 3.
+    // `:smi` matches smile, smiley, smirk, smile_cat, smiling_face, ...
+    fireEvent.change(textarea, { target: { value: ':smi' } });
+
+    // Popover must be open (assertion that the test actually exercises
+    // the bug path; without the popover, the keyboard handler never
+    // touches emojiIndex).
+    const popover = document.querySelector('.disc-emoji-popover');
+    expect(popover).not.toBeNull();
+    const items = popover!.querySelectorAll<HTMLButtonElement>('.disc-emoji-item');
+    expect(items.length).toBeGreaterThanOrEqual(4);
+    // Initial highlight is on index 0.
+    expect(items[0]!.dataset.highlighted).toBe('true');
+
+    // Three ArrowDown presses — each is a keydown followed by a keyup.
+    // fireEvent.keyDown / keyUp dispatches both phases.
+    for (let i = 0; i < 3; i++) {
+      fireEvent.keyDown(textarea, { key: 'ArrowDown' });
+      fireEvent.keyUp(textarea, { key: 'ArrowDown' });
+    }
+
+    // After 3 ArrowDown presses the highlighted item must be index 3,
+    // not index 0 (which was the pre-fix steady state).
+    const highlightedAfter = popover!.querySelectorAll<HTMLButtonElement>(
+      '.disc-emoji-item[data-highlighted="true"]',
+    );
+    expect(highlightedAfter.length).toBe(1);
+    expect(Array.from(items).indexOf(highlightedAfter[0])).toBe(3);
+  });
+
   it('keeps drafts isolated between discussions', () => {
     saveDraft('d-1', 'text for one');
     saveDraft('d-2', 'text for two');

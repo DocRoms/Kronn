@@ -1,10 +1,11 @@
 import './Dashboard.css';
-import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo, lazy, Suspense } from 'react';
 import { projects as projectsApi, mcps as mcpsApi, agents as agentsApi, discussions as discussionsApi, workflows as workflowsApi, config as configApi, skills as skillsApi } from '../lib/api';
 import { useApi } from '../hooks/useApi';
 import { useToast } from '../hooks/useToast';
 import type { RemoteRepo, RepoSource, DriftCheckResponse } from '../types/generated';
 import { useT } from '../lib/I18nContext';
+import { detectStaleStreams } from '../lib/stream-watchdog';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { isUsable } from '../lib/constants';
 import { hydrateTtsVoicesFromBackend } from '../lib/tts-models';
@@ -14,11 +15,15 @@ import { TourOverlay } from '../components/tour/TourOverlay';
 import { TourHelpButton } from '../components/tour/TourHelpButton';
 import { fetchSttModelId } from '../lib/stt-models';
 import { ErrorBoundary } from '../components/ErrorBoundary';
-import { McpPage } from './McpPage';
-import { WorkflowsPage } from './WorkflowsPage';
+// Heavy page components lazy-loaded so the initial Dashboard chunk stays
+// under 500 KB. Each one is its own chunk and only fetched when the user
+// switches to that tab. Dropped Dashboard chunk from 949 KB → ~430 KB,
+// at the cost of a one-time ~100 ms fetch on first tab switch.
+const McpPage = lazy(() => import('./McpPage').then(m => ({ default: m.McpPage })));
+const WorkflowsPage = lazy(() => import('./WorkflowsPage').then(m => ({ default: m.WorkflowsPage })));
+const SettingsPage = lazy(() => import('./SettingsPage').then(m => ({ default: m.SettingsPage })));
+const DiscussionsPage = lazy(() => import('./DiscussionsPage').then(m => ({ default: m.DiscussionsPage })));
 import { ActiveRunsPopover } from '../components/workflows/ActiveRunsPopover';
-import { SettingsPage } from './SettingsPage';
-import { DiscussionsPage } from './DiscussionsPage';
 import { ProjectList } from '../components/ProjectList';
 import {
   Folder, FolderOpen, Puzzle,
@@ -37,7 +42,12 @@ interface DashboardProps {
 /** Agents that can run audits/briefings (need filesystem access + CLI mode). Excludes Vibe (API-only). */
 const canAudit = (a: { installed: boolean; runtime_available: boolean; enabled: boolean; agent_type: string }) => isUsable(a) && a.agent_type !== 'Vibe';
 
-
+// Suspense fallback for the lazy-loaded page chunks. Lightweight on purpose
+// — anything richer (skeleton, spinner) would itself need to be fetched
+// from the page chunk, which defeats the whole point.
+function PageFallback() {
+  return <div style={{ padding: 24, opacity: 0.6, fontSize: 13 }}>Chargement…</div>;
+}
 
 // Sort score for project readiness
 export function Dashboard({ onReset }: DashboardProps) {
@@ -76,11 +86,22 @@ export function Dashboard({ onReset }: DashboardProps) {
   const [sendingStartMap, setSendingStartMap] = useState<Record<string, number>>({});
   const [streamingMap, setStreamingMap] = useState<Record<string, string>>({});
   const abortControllers = useRef<Record<string, AbortController>>({});
+  // ─── Stale-stream watchdog (TD-20260504) ──────────────────────────────────
+  // Tracks the last time we observed activity on a streaming discussion
+  // (initial start OR an incoming chunk). When a backend/Docker restart
+  // kills the WS channel mid-stream, the spinner used to spin forever —
+  // F5 was the only recovery. The watchdog clears the spinner after
+  // STALE_MS without progress and refetches the persisted messages.
+  const streamingLastTickRef = useRef<Record<string, number>>({});
+  const noteStreamTick = useCallback((discId: string) => {
+    streamingLastTickRef.current[discId] = Date.now();
+  }, []);
 
   const cleanupStream = useCallback((discId: string) => {
     setSendingMap(prev => ({ ...prev, [discId]: false }));
     setSendingStartMap(prev => { const n = { ...prev }; delete n[discId]; return n; });
     setStreamingMap(prev => { const n = { ...prev }; delete n[discId]; return n; });
+    delete streamingLastTickRef.current[discId];
     delete abortControllers.current[discId];
   }, []);
 
@@ -127,7 +148,7 @@ export function Dashboard({ onReset }: DashboardProps) {
     if (window.history.replaceState) {
       window.history.replaceState(null, '', window.location.pathname);
     }
-  }, [projectList]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [projectList]);  
 
   const { data: registry } = useApi(() => mcpsApi.registry(), []);
   const { data: mcpOverviewData, refetch: refetchMcps } = useApi(() => mcpsApi.overview(), []);
@@ -157,6 +178,32 @@ export function Dashboard({ onReset }: DashboardProps) {
     document.addEventListener('visibilitychange', onVisibilityChange);
     return () => { clearInterval(interval); document.removeEventListener('visibilitychange', onVisibilityChange); };
   }, [refetchDiscussions, page]);
+
+  // ─── Stale-stream watchdog (TD-20260504) ──────────────────────────────
+  // Every 30 s, scan `sendingMap` for in-flight streams that haven't
+  // received a chunk in STALE_MS. Recover by clearing the spinner +
+  // refetching the latest discussion state. Visible on laptop suspend
+  // / Docker restart / network blip — without this, the spinner could
+  // spin "forever" until a manual F5. Decision logic lives in the
+  // pure helper `detectStaleStreams` (unit-tested separately).
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const stale = detectStaleStreams({
+        sendingMap,
+        lastTickMap: streamingLastTickRef.current,
+        sendingStartMap,
+        now: Date.now(),
+      });
+      if (stale.length === 0) return;
+      for (const discId of stale) {
+        cleanupStream(discId);
+        try { abortControllers.current[discId]?.abort(); } catch { /* noop */ }
+      }
+      toast(t('discussions.streamRecovered'), 'warning');
+      refetchDiscussions();
+    }, 30_000);
+    return () => clearInterval(interval);
+  }, [cleanupStream, refetchDiscussions, toast, t, sendingMap, sendingStartMap]);
 
   // Poll workflows — fast when running, slow otherwise
   const runningWorkflows = useMemo(() =>
@@ -246,23 +293,32 @@ export function Dashboard({ onReset }: DashboardProps) {
 
   // When the bootstrap modal opens, pre-select the first available repo MCP
   // and tracker MCP so the user doesn't have to remember to pick them. They
-  // can still opt out via the empty option in each dropdown. Only fires when
-  // the field is empty so we don't override an explicit user choice.
+  // can still opt out via the empty option in each dropdown.
+  //
+  // The one-shot ref guards against a regression where the user's explicit
+  // choice of "no repo creation" (value="") was silently overridden: the
+  // effect's deps included `bootstrapRepoMcp`, so picking the empty option
+  // re-fired the effect, the `!bootstrapRepoMcp` check passed again, and
+  // the dropdown snapped back to the first MCP. Now the auto-pick only
+  // fires once per modal-open, on the false→true transition of `showBootstrap`.
+  const autoPickedBootstrapMcps = useRef(false);
   useEffect(() => {
-    if (!showBootstrap) return;
+    if (!showBootstrap) {
+      autoPickedBootstrapMcps.current = false;
+      return;
+    }
+    if (autoPickedBootstrapMcps.current) return;
+    if (mcpOverview.configs.length === 0) return; // wait for configs to load
+    autoPickedBootstrapMcps.current = true;
     const repoMcps = mcpOverview.configs.filter(c =>
       c.server_id === 'mcp-github' || c.server_id === 'mcp-gitlab'
     );
     const trackerMcps = mcpOverview.configs.filter(c =>
       c.server_id === 'mcp-github' || c.server_id === 'mcp-atlassian' || c.server_id === 'mcp-linear'
     );
-    if (!bootstrapRepoMcp && repoMcps.length > 0) {
-      setBootstrapRepoMcp(repoMcps[0].id);
-    }
-    if (!bootstrapTrackerMcp && trackerMcps.length > 0) {
-      setBootstrapTrackerMcp(trackerMcps[0].id);
-    }
-  }, [showBootstrap, mcpOverview.configs, bootstrapRepoMcp, bootstrapTrackerMcp]);
+    if (repoMcps.length > 0) setBootstrapRepoMcp(repoMcps[0].id);
+    if (trackerMcps.length > 0) setBootstrapTrackerMcp(trackerMcps[0].id);
+  }, [showBootstrap, mcpOverview.configs]);
   const [newProjectMode, setNewProjectMode] = useState<'bootstrap' | 'clone' | 'folder'>('bootstrap');
   const [folderPath, setFolderPath] = useState('');
   const [folderName, setFolderName] = useState('');
@@ -441,6 +497,13 @@ export function Dashboard({ onReset }: DashboardProps) {
               data-active={page === id}
               data-mobile={isMobile}
               data-tour-id={`nav-${id}`}
+              // a11y: `aria-current="page"` is the canonical
+              // marker for "this nav item points at the current
+              // page" and lets screen readers announce the
+              // active tab. Pairs with the `data-active` styling
+              // hook for sighted users.
+              aria-current={page === id ? 'page' : undefined}
+              aria-label={isMobile ? label : undefined}
               // Stop the mousedown so the popover's outside-click handler
               // doesn't fire when the user re-clicks the nav button to toggle
               // it closed — without this the outside-close + onClick-toggle
@@ -466,10 +529,27 @@ export function Dashboard({ onReset }: DashboardProps) {
               }
               {!isMobile && <>{' '}{label}</>}
               {id === 'discussions' && totalUnseen > 0 && (
-                <span className="dash-nav-badge">{totalUnseen}</span>
+                /* Tooltip + aria-label pin the meaning so the badge isn't
+                 * misread as the discussion count (Alicia's audit on
+                 * 2026-05-09 noted "badge says 42 but sidebar 'Général'
+                 * says 78 — counts disagree"; they're different metrics:
+                 * unread messages vs total discs). */
+                <span
+                  className="dash-nav-badge"
+                  title={t('disc.unseenMessagesTooltip', totalUnseen, totalUnseen > 1 ? 's' : '')}
+                  aria-label={t('disc.unseenMessagesTooltip', totalUnseen, totalUnseen > 1 ? 's' : '')}
+                >
+                  {totalUnseen}
+                </span>
               )}
               {id === 'workflows' && runningWorkflows > 0 && (
-                <span className="dash-nav-badge">{runningWorkflows}</span>
+                <span
+                  className="dash-nav-badge"
+                  title={t('workflows.runningTooltip', runningWorkflows, runningWorkflows > 1 ? 's' : '')}
+                  aria-label={t('workflows.runningTooltip', runningWorkflows, runningWorkflows > 1 ? 's' : '')}
+                >
+                  {runningWorkflows}
+                </span>
               )}
             </button>
           );
@@ -633,7 +713,8 @@ export function Dashboard({ onReset }: DashboardProps) {
                       input.multiple = true;
                       input.accept = '.md,.txt,.pdf,.json,.yaml,.yml,.toml,.csv,.docx,.pptx';
                       input.onchange = () => {
-                        if (input.files) setBootstrapFiles(prev => [...prev, ...Array.from(input.files!)]);
+                        const files = input.files;
+                        if (files) setBootstrapFiles(prev => [...prev, ...Array.from(files)]);
                       };
                       input.click();
                     }}
@@ -936,13 +1017,16 @@ export function Dashboard({ onReset }: DashboardProps) {
         {/* ════════ Plugins ════════ */}
         {page === 'mcps' && (
           <ErrorBoundary mode="zone" label="Plugins">
-            <McpPage projects={projects} mcpOverview={mcpOverview} mcpRegistry={mcpRegistry} refetchMcps={refetchMcps} initialSelectedConfigId={mcpSelectedConfigId} />
+            <Suspense fallback={<PageFallback />}>
+              <McpPage projects={projects} mcpOverview={mcpOverview} mcpRegistry={mcpRegistry} refetchMcps={refetchMcps} initialSelectedConfigId={mcpSelectedConfigId} />
+            </Suspense>
           </ErrorBoundary>
         )}
 
         {/* ════════ WORKFLOWS ════════ */}
         {page === 'workflows' && (
           <ErrorBoundary mode="zone" label="Workflows">
+            <Suspense fallback={<PageFallback />}>
             <WorkflowsPage
               projects={projects}
               installedAgentTypes={agents.filter(isUsable).map(a => a.agent_type)}
@@ -987,12 +1071,14 @@ export function Dashboard({ onReset }: DashboardProps) {
                 refetchDiscussions?.();
               }}
             />
+            </Suspense>
           </ErrorBoundary>
         )}
 
         {/* ════════ DISCUSSIONS ════════ */}
         {page === 'discussions' && (
           <ErrorBoundary mode="zone" label="Discussions">
+          <Suspense fallback={<PageFallback />}>
           <DiscussionsPage
             projects={projects}
             agents={agents}
@@ -1010,8 +1096,9 @@ export function Dashboard({ onReset }: DashboardProps) {
                 }, 100);
               }
               if (opts?.scrollTo) {
+                const target = opts.scrollTo;
                 setTimeout(() => {
-                  document.getElementById(opts.scrollTo!)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                  document.getElementById(target)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
                 }, 200);
               }
               // Sidebar batch pastille → workflows tab + pre-open the parent workflow's detail.
@@ -1021,6 +1108,7 @@ export function Dashboard({ onReset }: DashboardProps) {
             }}
             prefill={discPrefill}
             onPrefillConsumed={handlePrefillConsumed}
+            onSetDiscPrefill={setDiscPrefill}
             autoRunDiscussionId={autoRunDiscussionId}
             onAutoRunConsumed={handleAutoRunConsumed}
             openDiscussionId={openDiscussionId}
@@ -1034,6 +1122,7 @@ export function Dashboard({ onReset }: DashboardProps) {
             setSendingStartMap={setSendingStartMap}
             streamingMap={streamingMap}
             setStreamingMap={setStreamingMap}
+            noteStreamTick={noteStreamTick}
             abortControllers={abortControllers}
             cleanupStream={cleanupStream}
             markDiscussionSeen={markDiscussionSeen}
@@ -1043,12 +1132,14 @@ export function Dashboard({ onReset }: DashboardProps) {
             mcpConfigs={mcpOverview.configs}
             mcpIncompatibilities={mcpOverview.incompatibilities}
           />
+          </Suspense>
           </ErrorBoundary>
         )}
 
         {/* ════════ CONFIG ════════ */}
         {page === 'settings' && (
           <ErrorBoundary mode="zone" label="Settings">
+          <Suspense fallback={<PageFallback />}>
           <SettingsPage
             agents={agents}
             agentAccess={agentAccess ?? null}
@@ -1063,6 +1154,7 @@ export function Dashboard({ onReset }: DashboardProps) {
             onNavigateDiscussion={(id) => { setOpenDiscussionId(id); setPage('discussions'); }}
             toast={toast}
           />
+          </Suspense>
           </ErrorBoundary>
         )}
       </main>

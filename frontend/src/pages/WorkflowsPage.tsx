@@ -23,6 +23,7 @@ import { QuickApiForm } from '../components/workflows/QuickApiForm';
 import { parseBatchQAItems } from '../components/workflows/parseBatchQAItems';
 import { ImportDropzone } from '../components/workflows/ImportDropzone';
 import { triggerDownload } from '../lib/downloadBlob';
+import { AGENT_LABELS, agentColor } from '../lib/constants';
 import { MatrixText } from '../components/MatrixText';
 import './WorkflowsPage.css';
 
@@ -95,12 +96,23 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const [launchingQP, setLaunchingQP] = useState<QuickPrompt | null>(null);
   const [launchVars, setLaunchVars] = useState<Record<string, string>>({});
   const [launching, setLaunching] = useState(false);
+  // Race-free re-entry guard for handleLaunchQP. Two fast Enter presses on the
+  // variable input (or two fast clicks on the inner Launch button) fire two
+  // `discussions.create` calls before React re-renders the disabled state.
+  // The ref reads/writes synchronously, so the second invocation bails out.
+  const launchingRef = useRef(false);
+  // Compare-agents selection. `null` = "use all installed", any explicit
+  // array = subset chosen by the user via the chip selector. We start at
+  // `null` (default = all) and reset on every QP open so each launch
+  // begins with a clean slate.
+  const [compareAgents, setCompareAgents] = useState<AgentType[] | null>(null);
   // Batch launch state — when the user clicks "Batch" on a QP, we show a
   // modal that asks for one value of the first variable per line, then
   // fans out N discussions via POST /api/quick-prompts/:id/batch.
   const [batchingQP, setBatchingQP] = useState<QuickPrompt | null>(null);
   const [batchInputLines, setBatchInputLines] = useState('');
   const [batchLaunching, setBatchLaunching] = useState(false);
+  const batchLaunchingRef = useRef(false); // Race-free guard, cf launchingRef.
   const [batchIsolated, setBatchIsolated] = useState(false);
   // Quick APIs state (mirrors QP). Run drawer is deferred to v3 — for v2,
   // editing + saving + ApiCallStepCard's built-in "Test the call" cover
@@ -113,6 +125,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const [launchingQA, setLaunchingQA] = useState<QuickApi | null>(null);
   const [launchVarsQA, setLaunchVarsQA] = useState<Record<string, string>>({});
   const [launchingQARun, setLaunchingQARun] = useState(false);
+  const launchingQARunRef = useRef(false); // Race-free guard, cf launchingRef.
   const [launchQAResult, setLaunchQAResult] = useState<{ ok: boolean; payload: unknown; error: string | null } | null>(null);
   // Batch state — same pattern as `batchingQP` but for QAs. Items is a
   // newline/comma/semicolon-separated string the user pastes; we parse
@@ -122,6 +135,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const [batchQAInput, setBatchQAInput] = useState('');
   const [batchQAConcurrentLimit, setBatchQAConcurrentLimit] = useState(5);
   const [batchQARunning, setBatchQARunning] = useState(false);
+  const batchQARunningRef = useRef(false); // Race-free guard, cf launchingRef.
   const [batchQAResult, setBatchQAResult] = useState<{ status: string; items: Array<{ input: unknown; status: string; response?: unknown; error?: string; http_status?: number }>; total: number; succeeded: number; failed: number } | null>(null);
   // Lignes du tableau de résultats batch dépliées (Set d'index). On garde
   // un Set plutôt qu'un single index pour permettre la comparaison de
@@ -156,6 +170,12 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const [detailRuns, setDetailRuns] = useState<WorkflowRun[]>([]);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [triggering, setTriggering] = useState<string | null>(null);
+  // Race-free guard for handleTrigger / fireTrigger — `disabled={triggering===wf.id}`
+  // is closure-stale between two synchronous clicks (the button re-render
+  // hasn't happened yet), so a fast double-click on "Lancer" can call
+  // workflowsApi.triggerStream twice in parallel and produce two runs of
+  // the same workflow.
+  const triggeringRef = useRef(false);
   const [cancellingRunIds, setCancellingRunIds] = useState<Set<string>>(new Set());
 
   // Live run state for SSE streaming
@@ -341,6 +361,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
         pendingChunks = '';
         setLiveRun(prev => prev ? { ...prev, finished: true, status: data.status, currentStep: null } : prev);
+        triggeringRef.current = false;
         setTriggering(null);
         refetch();
         if (selectedId === id) openDetail(id);
@@ -349,6 +370,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
         console.warn('Workflow trigger error:', error);
         setLiveRun(prev => prev ? { ...prev, finished: true, status: 'Failed', currentStep: null } : prev);
+        triggeringRef.current = false;
         setTriggering(null);
       },
       abort.signal,
@@ -376,6 +398,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
    *  declared variables ; if non-empty, shows the launch form first.
    *  Otherwise delegates straight to fireTrigger (legacy behavior). */
   const handleTrigger = async (id: string) => {
+    if (triggeringRef.current) return;
+    triggeringRef.current = true;
     let wf: Workflow;
     try {
       wf = await workflowsApi.get(id);
@@ -383,6 +407,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       console.warn('Failed to fetch workflow before trigger:', e);
       // Fallback: launch without variables — backend rejects loudly if required vars missing.
       await fireTrigger(id);
+      // `fireTrigger` clears the ref in its own finally branch.
       return;
     }
     const vars = wf.variables ?? [];
@@ -390,6 +415,9 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       await fireTrigger(id);
       return;
     }
+    // Variables modal opens — release the guard so the user can cancel
+    // and try again. The launch modal has its own `submitting` flag.
+    triggeringRef.current = false;
     // Open the launch modal with empty values; user fills + submits.
     setLaunchingWorkflow({
       workflow: wf,
@@ -426,6 +454,10 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   };
 
   const handleDelete = async (id: string) => {
+    // Pre-fix the workflow card's red trash button fired delete with no
+    // confirmation — one mis-click destroyed the workflow + every run +
+    // every child discussion. Now an explicit confirm is required.
+    if (!confirm(t('wf.deleteWorkflowConfirm'))) return;
     try {
       await workflowsApi.delete(id);
       if (selectedId === id) {
@@ -465,6 +497,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   // QA config + variables and calls the same executor a workflow uses.
   // Result panel shows envelope.data on success, the error string on fail.
   const handleLaunchQA = async (qa: QuickApi) => {
+    if (launchingQARunRef.current) return;
+    launchingQARunRef.current = true;
     setLaunchingQARun(true);
     setLaunchQAResult(null);
     try {
@@ -478,11 +512,13 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     } catch (e) {
       setLaunchQAResult({ ok: false, payload: null, error: String(e) });
     } finally {
+      launchingQARunRef.current = false;
       setLaunchingQARun(false);
     }
   };
 
   const handleBatchLaunchQA = async (qa: QuickApi) => {
+    if (batchQARunningRef.current) return;
     const parsed = parseBatchQAItems({ varCount: qa.variables.length }, batchQAInput);
     if ('errorKey' in parsed) {
       const errorMsg = parsed.errorArg
@@ -491,6 +527,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       setBatchQAResult({ status: 'ERROR', items: [{ input: '', status: 'ERROR', error: errorMsg }], total: 0, succeeded: 0, failed: 1 });
       return;
     }
+    batchQARunningRef.current = true;
     setBatchQARunning(true);
     setBatchQAResult(null);
     setExpandedQARows(new Set());
@@ -512,6 +549,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       setBatchQAResult({ status: 'ERROR', items: [], total: parsed.items.length, succeeded: 0, failed: parsed.items.length });
       console.error('[QA batch] launch failed:', e);
     } finally {
+      batchQARunningRef.current = false;
       setBatchQARunning(false);
     }
   };
@@ -549,6 +587,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   };
 
   const handleLaunchQP = async (qp: QuickPrompt) => {
+    if (launchingRef.current) return;
+    launchingRef.current = true;
     setLaunching(true);
     try {
       const rendered = renderTemplate(qp.prompt_template, launchVars);
@@ -570,6 +610,74 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     } catch (e) {
       console.warn('Launch failed:', e);
     } finally {
+      launchingRef.current = false;
+      setLaunching(false);
+    }
+  };
+
+  /**
+   * Compare-agents launch — fans the same rendered prompt across all
+   * installed RTK-applicable agents in parallel. Reuses
+   * `quickPromptsApi.compareAgents` which delegates to the
+   * backend's `create_batch_run` with per-item `agent_override`.
+   *
+   * Side effect: the user lands on the FIRST child discussion (the
+   * sidebar batch group expands automatically). They can click
+   * between siblings to read the responses side-by-side as they
+   * stream in.
+   */
+  const handleCompareAgents = async (qp: QuickPrompt) => {
+    if (launchingRef.current) return;
+    // `compareAgents` is null when the user hasn't touched the chip
+    // selector yet — fall back to "all installed" in that case so the
+    // 🤝 button on a freshly opened form still does the right thing.
+    const targetAgents = compareAgents ?? installedAgentTypes ?? [];
+    if (targetAgents.length === 0) {
+      console.warn('Compare-agents needs at least 1 selected agent');
+      return;
+    }
+    launchingRef.current = true;
+    setLaunching(true);
+    try {
+      const rendered = renderTemplate(qp.prompt_template, launchVars);
+      const firstVal = qp.variables.map(v => launchVars[v.name]).find(v => v?.trim());
+      const stamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const batchName = firstVal
+        ? `🤝 ${qp.name} — ${firstVal} — ${stamp}`
+        : `🤝 ${qp.name} — ${stamp}`;
+      const result = await quickPromptsApi.compareAgents(qp.id, {
+        prompt: rendered,
+        batch_name: batchName,
+        agents: targetAgents,
+        tier: qp.tier !== 'default' ? qp.tier : undefined,
+        project_id: qp.project_id ?? undefined,
+      });
+      setLaunchingQP(null);
+      setLaunchVars({});
+      setCompareAgents(null);
+      // Kick off each child discussion's agent run in parallel — same
+      // pattern as `handleBatchLaunch` (cf. comments there for the
+      // connection-pool + tokio detached-task gotchas). Without this
+      // fan-out, only the navigated disc auto-runs and the siblings
+      // sit dormant forever — the user-reported bug "only the first
+      // agent works" surfaces here.
+      result.discussion_ids.forEach(discId => {
+        const controller = new AbortController();
+        fetch(`/api/discussions/${discId}/run`, {
+          method: 'POST',
+          signal: controller.signal,
+          keepalive: true,
+        }).catch(() => { /* aborted or net blip — backend run is detached */ });
+        setTimeout(() => controller.abort(), 500);
+      });
+      // Use `onBatchLaunched` (NOT `onNavigateDiscussion`) so the
+      // sibling spinners light up in the sidebar AND we don't re-fire
+      // a second `/run` on top of the fan-out we just dispatched.
+      onBatchLaunched?.(result.discussion_ids, result.run_id);
+    } catch (e) {
+      console.warn('Compare-agents launch failed:', e);
+    } finally {
+      launchingRef.current = false;
       setLaunching(false);
     }
   };
@@ -581,6 +689,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
    * agent runs in parallel (backend semaphore limits concurrency to 5).
    */
   const handleBatchLaunch = async (qp: QuickPrompt) => {
+    if (batchLaunchingRef.current) return;
     // Accept newline, comma AND semicolon as separators — users often paste
     // a comma-separated list from Jira/GitHub search results on a single line
     // (real-world bug report from the first batch run that shipped a single
@@ -598,7 +707,11 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         lines.push(item);
       }
     }
-    const notify = toastProp ?? ((msg: string) => alert(msg));
+    // Fallback when `toast` prop isn't supplied (e.g. tests rendering this
+     // page in isolation). `alert()` blocks the main thread, breaks E2E
+     // runs, and surfaces a native modal that isn't styled — `console.warn`
+     // is enough for the rare path where the parent forgot to wire the toast.
+    const notify = toastProp ?? ((msg: string) => { console.warn('[Workflows]', msg); });
     if (lines.length === 0) {
       notify(t('qp.batch.emptyInput'), 'error');
       return;
@@ -619,6 +732,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     const estimateMsg = t('qp.batch.confirm', lines.length, qp.name);
     if (!confirm(estimateMsg)) return;
 
+    batchLaunchingRef.current = true;
     setBatchLaunching(true);
     try {
       const items = lines.map(line => {
@@ -683,6 +797,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       console.warn('Batch launch failed:', e);
       notify(t('qp.batch.failed', userError(e)), 'error');
     } finally {
+      batchLaunchingRef.current = false;
       setBatchLaunching(false);
     }
   };
@@ -919,12 +1034,18 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                             spinner with no Stop affordance for the first ~5-10s
                             after they click "Lancer". */}
                         {(() => {
+                          // Hoist into locals so TS narrowing from the
+                          // outer `wf.last_run && (...)` carries into the
+                          // IIFE — avoids the `wf.last_run!` and the
+                          // React-19 strict non-null-assertion warning.
+                          const lastRun = wf.last_run;
+                          if (!lastRun) return null;
                           const live = liveRun && liveRun.workflowId === wf.id && !liveRun.finished ? liveRun : null;
-                          const runStatus = wf.last_run.status;
+                          const runStatus = lastRun.status;
                           const isLive = !!live;
                           const isStored = runStatus === 'Running' || runStatus === 'Pending';
                           if (!isLive && !isStored) return null;
-                          const runIdToCancel = live?.runId ?? wf.last_run!.id;
+                          const runIdToCancel = live?.runId ?? lastRun.id;
                           const cancelling = cancellingRunIds.has(runIdToCancel);
                           return (
                             <button
@@ -995,11 +1116,13 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 onRefresh={() => openDetail(detailWorkflow.id)}
                 onEdit={() => setEditingWorkflow(detailWorkflow)}
                 onDeleteRun={async (runId) => {
+                  if (!confirm(t('wf.deleteRunConfirm'))) return;
                   await workflowsApi.deleteRun(detailWorkflow.id, runId);
                   openDetail(detailWorkflow.id);
                   refetch();
                 }}
                 onDeleteAllRuns={async () => {
+                  if (!confirm(t('wf.deleteAllRunsConfirm', detailRuns.length))) return;
                   await workflowsApi.deleteAllRuns(detailWorkflow.id);
                   openDetail(detailWorkflow.id);
                   refetch();
@@ -1059,6 +1182,20 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                       <div className="qp-card-header">
                         <span className="qp-card-icon">{qp.icon}</span>
                         <span className="qp-card-name">{qp.name}</span>
+                        {/* Agent badge — pre-2026-05-10 the QP list
+                         *  showed `qp.agent` nowhere; users had to open
+                         *  the editor to discover which agent ran. The
+                         *  agent is the most-used identity signal of a
+                         *  QP (a "Code review with Claude" reads
+                         *  differently from "Code review with Codex"),
+                         *  so we surface it inline next to the name. */}
+                        <span
+                          className="qp-card-agent-badge"
+                          style={{ color: agentColor(qp.agent), borderColor: agentColor(qp.agent) }}
+                          title={t('qp.agentBadgeTooltip', AGENT_LABELS[qp.agent] ?? qp.agent)}
+                        >
+                          {AGENT_LABELS[qp.agent] ?? qp.agent}
+                        </span>
                         {qp.variables.length > 0 && (
                           <span className="qp-card-vars">{t('qp.vars', qp.variables.length)}</span>
                         )}
@@ -1100,20 +1237,48 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                               <Layers size={12} />
                             </button>
                           )}
+                          {/* Compare-agents button — opens the launch form
+                              regardless of whether the QP has variables, so
+                              the user can pick which subset of agents to
+                              compare against (chip selector inside the form).
+                              `installedAgentTypes` may be empty during boot
+                              detection — disable in that case. */}
+                          <button
+                            className="wf-icon-btn"
+                            data-testid="qp-compare-agents-btn"
+                            disabled={!installedAgentTypes || installedAgentTypes.length === 0}
+                            onClick={() => {
+                              setLaunchingQP(launchingQP?.id === qp.id ? null : qp);
+                              setLaunchVars({});
+                              setCompareAgents(null);
+                            }}
+                            title={t('qp.compareAgents.button', installedAgentTypes?.length ?? 0)}
+                          >
+                            🤝
+                          </button>
                           <button
                             className="qp-launch-btn"
                             onClick={() => {
+                              // Guard against double / triple click on
+                              // no-variable QPs — `handleLaunchQP` creates
+                              // a discussion via `discussions.create`,
+                              // which is not idempotent. Pre-fix a fast
+                              // operator click ended up with 2-3 discussions
+                              // launched in parallel for the same prompt.
+                              // For QPs with variables this branch only
+                              // toggles the launch form open/close so the
+                              // disabled state isn't needed.
                               if (qp.variables.length === 0) {
-                                // No variables — launch directly
+                                if (launching) return;
                                 setLaunchingQP(qp);
                                 setLaunchVars({});
-                                // Immediate launch
                                 handleLaunchQP(qp);
                               } else {
                                 setLaunchingQP(launchingQP?.id === qp.id ? null : qp);
                                 setLaunchVars({});
                               }
                             }}
+                            disabled={launching && qp.variables.length === 0}
                           >
                             <Play size={12} /> {t('qp.launch')}
                           </button>
@@ -1185,8 +1350,12 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                         </div>
                       )}
 
-                      {/* Launch form with variable inputs */}
-                      {launchingQP?.id === qp.id && qp.variables.length > 0 && (
+                      {/* Launch form — variables (if any) + agent chip
+                          selector + the two action buttons. Opens for both
+                          variable-bearing QPs (regular Launch flow) and
+                          no-var QPs (so the user can pick a compare-agents
+                          subset before firing). */}
+                      {launchingQP?.id === qp.id && (
                         <div className="qp-launch-form">
                           {qp.variables.map(v => (
                             <div key={v.name} className="qp-launch-field">
@@ -1201,14 +1370,88 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                               />
                             </div>
                           ))}
-                          <button
-                            className="qp-launch-go-btn"
-                            onClick={() => handleLaunchQP(qp)}
-                            disabled={launching}
-                          >
-                            {launching ? <Loader2 size={14} className="spin" /> : <Play size={14} />}
-                            {launching ? '...' : t('qp.launch')}
-                          </button>
+                          {/* Compare-agents chip selector. `compareAgents`
+                              null = "all installed" (default). Clicking a
+                              chip toggles it in/out of the explicit subset.
+                              All/None links flip the entire selection in
+                              one click. The shape is shared with the 🤝
+                              CTA below so the count stays in sync. */}
+                          {installedAgentTypes && installedAgentTypes.length > 0 && (() => {
+                            const activeSet = new Set<AgentType>(compareAgents ?? installedAgentTypes);
+                            const toggle = (a: AgentType) => {
+                              const next = new Set(activeSet);
+                              if (next.has(a)) next.delete(a);
+                              else next.add(a);
+                              // Preserve the canonical agent order from
+                              // `installedAgentTypes` so chips don't reshuffle.
+                              setCompareAgents(installedAgentTypes.filter(x => next.has(x)));
+                            };
+                            return (
+                              <div className="qp-compare-selector">
+                                <span className="qp-compare-selector-label">
+                                  🤝 {t('qp.compareAgents.selectorLabel')}
+                                </span>
+                                {installedAgentTypes.map(a => {
+                                  const active = activeSet.has(a);
+                                  return (
+                                    <button
+                                      key={a}
+                                      type="button"
+                                      data-testid={`qp-compare-chip-${a}`}
+                                      className={`qp-compare-chip ${active ? 'qp-compare-chip--active' : 'qp-compare-chip--inactive'}`}
+                                      style={active ? { color: agentColor(a), borderColor: agentColor(a) } : undefined}
+                                      onClick={() => toggle(a)}
+                                      aria-pressed={active}
+                                    >
+                                      {AGENT_LABELS[a] ?? a}
+                                    </button>
+                                  );
+                                })}
+                                <button
+                                  type="button"
+                                  className="qp-compare-toggle-all"
+                                  onClick={() =>
+                                    setCompareAgents(activeSet.size === installedAgentTypes.length ? [] : null)
+                                  }
+                                >
+                                  {activeSet.size === installedAgentTypes.length
+                                    ? t('qp.compareAgents.selectNone')
+                                    : t('qp.compareAgents.selectAll')}
+                                </button>
+                              </div>
+                            );
+                          })()}
+                          <div className="flex-row gap-3">
+                            {qp.variables.length > 0 && (
+                              <button
+                                className="qp-launch-go-btn"
+                                onClick={() => handleLaunchQP(qp)}
+                                disabled={launching}
+                              >
+                                {launching ? <Loader2 size={14} className="spin" /> : <Play size={14} />}
+                                {launching ? '...' : t('qp.launch')}
+                              </button>
+                            )}
+                            {/* Compare-agents CTA — fires the rendered prompt
+                             *  across the selected agents only. Disabled when
+                             *  the chip selector reaches 0 selected (the
+                             *  user actively chose nothing — fail loud
+                             *  rather than silently fan-out across all). */}
+                            {(() => {
+                              const selectedCount = (compareAgents ?? installedAgentTypes ?? []).length;
+                              return (
+                                <button
+                                  className="qp-launch-compare-btn"
+                                  data-testid="qp-compare-agents-launch"
+                                  onClick={() => handleCompareAgents(qp)}
+                                  disabled={launching || selectedCount === 0}
+                                  title={t('qp.compareAgents.tooltip', selectedCount)}
+                                >
+                                  🤝 {t('qp.compareAgents.cta', selectedCount)}
+                                </button>
+                              );
+                            })()}
+                          </div>
                         </div>
                       )}
                     </div>

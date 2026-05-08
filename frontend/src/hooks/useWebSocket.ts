@@ -32,6 +32,23 @@ export function useWebSocket(onMessage: WsEventHandler): { connected: boolean } 
     ws.onopen = () => {
       setConnected(true);
       backoff.current = 1000;
+      // Send Presence as the very first frame so the backend's recv-task
+      // verifies the connection (cf. ws.rs handshake). Local connections
+      // pass an empty invite_code — accepted on the loopback path. Without
+      // this, the backend stays `verified=false` for the lifetime of the
+      // local connection (mitigated for heartbeats by Phase 2 of 2026-05-07,
+      // but still required for any future local→server broadcast).
+      // TD-20260507-ws-no-presence-on-open.
+      try {
+        ws.send(JSON.stringify({
+          type: 'presence',
+          from_pseudo: 'local',
+          from_invite_code: '',
+          online: true,
+        }));
+      } catch {
+        // ignore — onclose will retry
+      }
     };
 
     ws.onmessage = (event) => {

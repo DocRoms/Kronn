@@ -4159,6 +4159,23 @@
   border-radius: var(--kr-r-sm);
   background: rgba(var(--kr-accent-rgb), 0.08);
 }
+
+/* Agent identity badge in the QP card header. Color comes from
+ * `agentColor()` so a Codex QP is visually distinguishable from a
+ * Claude Code QP at a glance. Discreet outline-style — doesn't
+ * compete with the variable count or the launch CTA. */
+.qp-card-agent-badge {
+  font-size: var(--kr-fs-2xs);
+  font-weight: 600;
+  font-family: var(--kr-font-mono);
+  padding: 1px var(--kr-sp-3);
+  border-radius: var(--kr-r-sm);
+  border: 1px solid currentColor;
+  background: transparent;
+  white-space: nowrap;
+  /* `color` and `borderColor` are set inline via `agentColor()` so
+   * each agent's brand colour reads through. */
+}
 .qp-card-actions {
   display: flex;
   align-items: center;
@@ -4232,7 +4249,12 @@
   color: var(--kr-accent);
   font-size: var(--kr-fs-xs);
   font-weight: 600;
+  /* Visual cue for the drag affordance — `grab` when idle, the browser
+   * switches to `grabbing` while a drag is active. The native DnD
+   * handler still allows clicking the children (arrows, X). */
+  cursor: grab;
 }
+.wf-chain-pill:active { cursor: grabbing; }
 .wf-chain-pos {
   color: var(--kr-text-faint);
   font-weight: 500;
@@ -4253,4 +4275,113 @@
 .wf-chain-pill-remove:hover {
   opacity: 1;
   color: var(--kr-error-soft);
+}
+
+/* Up/down arrow buttons — keyboard-accessible fallback for the native
+ * HTML5 drag-and-drop. Sit between the position number and the X. */
+.wf-chain-pill-arrow {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  background: transparent;
+  border: none;
+  border-radius: var(--kr-r-sm);
+  color: inherit;
+  cursor: pointer;
+  opacity: 0.6;
+  transition: opacity 0.15s;
+}
+.wf-chain-pill-arrow:hover:not(:disabled),
+.wf-chain-pill-arrow:focus-visible:not(:disabled) {
+  opacity: 1;
+  outline: none;
+}
+.wf-chain-pill-arrow:disabled {
+  opacity: 0.2;
+  cursor: not-allowed;
+}
+
+/* Compare-agents CTA — sits next to the regular Launch button in the
+ * QP launch form. Slightly different styling so the user reads it as
+ * "alternate launch mode" rather than a destructive secondary action. */
+.qp-launch-compare-btn {
+  font-size: var(--kr-fs-sm);
+  font-weight: 600;
+  padding: var(--kr-sp-2) var(--kr-sp-5);
+  border-radius: var(--kr-r-md);
+  border: 1px solid rgba(var(--kr-info-rgb), 0.3);
+  background: rgba(var(--kr-info-rgb), 0.08);
+  color: var(--kr-info);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.qp-launch-compare-btn:hover:not(:disabled) {
+  background: rgba(var(--kr-info-rgb), 0.16);
+  border-color: rgba(var(--kr-info-rgb), 0.5);
+}
+
+.qp-launch-compare-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Compare-agents chip selector — picks the subset of installed agents
+ * that 🤝 Compare will fan out across. Inactive chips are dimmed; active
+ * chips wear the agent's brand colour via inline `color`/`borderColor`. */
+.qp-compare-selector {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  padding: var(--kr-sp-2) 0;
+}
+.qp-compare-selector-label {
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  color: var(--kr-text-secondary);
+  margin-right: var(--kr-sp-1);
+}
+.qp-compare-chip {
+  font-size: var(--kr-fs-2xs);
+  font-weight: 600;
+  font-family: var(--kr-font-mono);
+  padding: 2px var(--kr-sp-3);
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: opacity 0.15s, background 0.15s;
+}
+.qp-compare-chip--active {
+  border: 1px solid currentColor;
+  opacity: 1;
+}
+.qp-compare-chip--active:hover {
+  background: rgba(var(--kr-accent-rgb), 0.06);
+}
+.qp-compare-chip--inactive {
+  border: 1px dashed var(--kr-border, rgba(255, 255, 255, 0.18));
+  color: var(--kr-text-tertiary);
+  opacity: 0.55;
+}
+.qp-compare-chip--inactive:hover {
+  opacity: 0.85;
+}
+.qp-compare-toggle-all {
+  font-size: var(--kr-fs-2xs);
+  background: transparent;
+  border: none;
+  color: var(--kr-info);
+  cursor: pointer;
+  padding: 2px var(--kr-sp-2);
+  margin-left: auto;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+.qp-compare-toggle-all:hover {
+  color: var(--kr-text-primary);
 }

@@ -230,6 +230,7 @@ mod tests {
             domain: domain.map(String::from),
             auth_token: None,
             auth_enabled: false,
+            auth_strict_localhost: false,
             max_concurrent_agents: 5,
             agent_stall_timeout_min: 5,
             pseudo: None,

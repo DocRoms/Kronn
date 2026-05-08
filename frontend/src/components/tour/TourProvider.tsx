@@ -58,6 +58,12 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
   const [waitingForClick, setWaitingForClick] = useState(false);
   const navigatingRef = useRef(false);
   const clickListenerRef = useRef<(() => void) | null>(null);
+  // Pending setTimeout id from a waitForClick advance — must be cleared
+  // when the user skips, presses Prev/Next, or goes back. Pre-fix,
+  // skipping during the 150 ms post-click delay left a dangling timer
+  // that re-armed `setStepIndex` after `complete()` had already reset
+  // state, dirtying `kronn:tour-step` localStorage.
+  const pendingAdvanceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Use a ref to always have fresh stepIndex in async callbacks
   const stepIndexRef = useRef(stepIndex);
   stepIndexRef.current = stepIndex;
@@ -68,6 +74,10 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
     if (clickListenerRef.current) {
       clickListenerRef.current();
       clickListenerRef.current = null;
+    }
+    if (pendingAdvanceRef.current !== null) {
+      clearTimeout(pendingAdvanceRef.current);
+      pendingAdvanceRef.current = null;
     }
     setWaitingForClick(false);
   }, []);
@@ -122,19 +132,30 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
           el.removeEventListener('click', onUserClick);
           clickListenerRef.current = null;
           setWaitingForClick(false);
-          // Let the click's side effect happen (modal opens, etc.)
-          // then advance to next step
-          setTimeout(() => {
+          // Let the click's side effect happen (modal opens, accordion
+          // expands, etc.) then advance. Pre-fix this used a 400 ms
+          // timeout — perceptibly laggy after a fast click. 150 ms is
+          // enough for the React re-render that opens the accordion to
+          // commit, while staying snappy enough that the spotlight
+          // motion feels responsive. Track the timer in a ref so a
+          // skip / Prev / Next during the wait can cancel it.
+          pendingAdvanceRef.current = setTimeout(() => {
+            pendingAdvanceRef.current = null;
             const nextIdx = targetIndex + 1;
             if (nextIdx < TOUR_STEPS.length) {
               navigateToStep(nextIdx);
             } else {
               complete();
             }
-          }, 400);
+          }, 150);
         };
 
         el.addEventListener('click', onUserClick);
+        // Also accept a click on any descendant of the spotlight target
+        // if `el` is a wrapper (e.g. the chip-list container) — captures
+        // the case where the visible click target is the inner span/icon
+        // and the bubble path doesn't reach `el`'s `click` handler if the
+        // descendant called preventDefault. Safety net.
         clickListenerRef.current = () => el.removeEventListener('click', onUserClick);
         return; // Don't fall through to the final setStepIndex/unlock below
       }
@@ -145,21 +166,29 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
     navigatingRef.current = false;
   }, [setPage, cleanupClickListener, complete]);
 
+  // Pre-fix: `next` and `prev` bailed out when `waitingForClick === true`,
+  // and the TourOverlay also hid the buttons in that state. Effect: on
+  // steps 11/12 (waitForClick on profile toggle + first chip), the user
+  // had no escape — they were forced to click the spotlighted target,
+  // could not back out to the previous step, and could not skip ahead
+  // to the next without using "Passer" (which marks the tour complete).
+  // Now both helpers clean up the wait state first, so the manual
+  // navigation works regardless of whether a click was awaited.
   const next = useCallback(() => {
-    if (waitingForClick) return;
+    cleanupClickListener();
     const nextIdx = stepIndexRef.current + 1;
     if (nextIdx >= TOUR_STEPS.length) {
       complete();
     } else {
       navigateToStep(nextIdx);
     }
-  }, [navigateToStep, complete, waitingForClick]);
+  }, [navigateToStep, complete, cleanupClickListener]);
 
   const prev = useCallback(() => {
-    if (waitingForClick) return;
+    cleanupClickListener();
     const prevIdx = stepIndexRef.current - 1;
     if (prevIdx >= 0) navigateToStep(prevIdx);
-  }, [navigateToStep, waitingForClick]);
+  }, [navigateToStep, cleanupClickListener]);
 
   const start = useCallback((force = false) => {
     if (!force && localStorage.getItem(STORAGE_KEY)) return;
@@ -169,10 +198,13 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
     // restarts at step 0 — the user asked for a fresh run. An auto-
     // resume after a refresh picks up where the user left off.
     const resumeStep = force ? 0 : loadResumeStep();
-    setStepIndex(0);
+    // Initialize at the resume step directly. Pre-fix this set
+    // `stepIndex(0)` first and bumped to the resume step 50 ms later,
+    // which produced a visible flash of step 1 before jumping ahead.
+    setStepIndex(resumeStep);
     saveResumeStep(resumeStep);
     setActive(true);
-    setPage(TOUR_STEPS[0].page);
+    setPage(TOUR_STEPS[resumeStep]?.page ?? TOUR_STEPS[0].page);
     // If resuming mid-tour, drive the full navigation pipeline so the
     // target step's `beforeStep` hook (and any page switch) runs —
     // otherwise a refresh inside the profiles sub-flow would land on
@@ -190,17 +222,20 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
     return () => clearTimeout(timer);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Keyboard navigation
+  // Keyboard navigation. Arrow keys also work during `waitingForClick`
+  // now — same rationale as the visible Prev/Next buttons: the user
+  // needs an escape hatch when their click on the spotlighted target
+  // didn't register (covered descendant, custom event handler, etc.).
   useEffect(() => {
     if (!active) return;
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') { complete(); e.preventDefault(); }
-      if (e.key === 'ArrowRight' && !waitingForClick) { next(); e.preventDefault(); }
-      if (e.key === 'ArrowLeft' && !waitingForClick) { prev(); e.preventDefault(); }
+      if (e.key === 'ArrowRight') { next(); e.preventDefault(); }
+      if (e.key === 'ArrowLeft') { prev(); e.preventDefault(); }
     };
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
-  }, [active, next, prev, complete, waitingForClick]);
+  }, [active, next, prev, complete]);
 
   useEffect(() => cleanupClickListener, [cleanupClickListener]);
 

@@ -79,8 +79,11 @@ jobs:
         with:
           node-version: 24
 
-      - name: Install pnpm
-        run: npm install -g pnpm
+      - name: Enable corepack (provides pnpm pinned by package.json)
+        # See `ci-test.yml`. Corepack reads `packageManager` from
+        # `frontend/package.json` (pnpm@11.0.9) — single source of truth
+        # for the pnpm version across local dev, CI, and Docker builds.
+        run: corepack enable
 
       - name: Install frontend dependencies
         working-directory: frontend

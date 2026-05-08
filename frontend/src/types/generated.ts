@@ -76,6 +76,13 @@ export type ModelTier = "economy" | "default" | "reasoning";
 
 export interface ModelTierConfig {
   economy: string | null;
+  /** Default-tier override (0.7.1) — when set, wins over the built-in
+   *  fallback in `backend/agents/runner.rs:resolve_model_flag`. Surfaced
+   *  by the OllamaCard picker (others use the existing tier rows).
+   *  Optional in TS so legacy fixtures `{economy,reasoning}` still
+   *  type-check; the serde attribute `skip_serializing_if = none`
+   *  ensures the wire payload stays clean. */
+  default?: string | null;
   reasoning: string | null;
 }
 
@@ -152,6 +159,34 @@ export interface AgentDetection {
   rtk_available: boolean;
   /** Agent's config file declares an RTK hook. Always false for API-only (Vibe) or hookless (Ollama) agents. */
   rtk_hook_configured: boolean;
+  /** Optional i18n key for a runtime-degradation warning the frontend should
+   *  surface inline (e.g. "vibe.sdk_fallback" when Vibe runs through the
+   *  direct Mistral API instead of the SDK with local tools). */
+  runtime_warning?: string;
+}
+
+/** Result of `POST /api/db/backup` — feeds the Settings UI toast. */
+export interface DbBackupResponse {
+  /** Absolute path of the backup file written. */
+  backup_path: string;
+  /** Size of the backup in bytes. */
+  size_bytes: number;
+  /** ISO-8601 UTC timestamp when the backup was taken. */
+  taken_at: string;
+}
+
+/** Result of `GET /api/version/check` — feeds the auto-update banner. */
+export interface VersionCheck {
+  /** Currently-running Kronn version (from CARGO_PKG_VERSION). */
+  current: string;
+  /** Latest GitHub release tag (without `v` prefix). `null` when offline
+   *  or GitHub is unreachable; the banner stays hidden in that case. */
+  latest: string | null;
+  /** Direct link to the GitHub release page for the user to download. */
+  release_url: string | null;
+  /** True when `current >= latest` (or `latest === null`). When false,
+   *  the banner shows a "new version available" pill. */
+  up_to_date: boolean;
 }
 
 export type AgentType = "ClaudeCode" | "Codex" | "Vibe" | "GeminiCli" | "Kiro" | "CopilotCli" | "Ollama" | "Custom";
@@ -424,11 +459,22 @@ export interface McpOverview {
   configs: McpConfigDisplay[];
   customized_contexts: string[];
   incompatibilities: McpIncompatibility[];
+  // Optional in TS to keep existing test fixtures source-compatible.
+  // Backend always emits the field (#[serde(default)]).
+  incomplete_configs?: McpIncompleteConfig[];
 }
 
 export interface McpIncompatibility {
   server_id: string;
   agent: AgentType;
+  reason: string;
+}
+
+export interface McpIncompleteConfig {
+  config_id: string;
+  label: string;
+  server_name: string;
+  missing_keys: string[];
   reason: string;
 }
 
@@ -1118,6 +1164,15 @@ export interface Discussion {
   worktree_branch?: string | null;
   summary_cache?: string | null;
   summary_up_to_msg_idx?: number | null;
+  /** Auto-summary policy. `Auto` keeps the historical threshold-based fire,
+   *  `OnDemand` waits for the agent to ask via the kronn-internal MCP tools,
+   *  `Off` disables summarisation entirely. Per-disc override of the global
+   *  per-agent default. Backward-compatible — pre-existing rows default to Auto. */
+  summary_strategy?: 'Auto' | 'OnDemand' | 'Off';
+  /** Cumulative count of `kronn-internal` MCP tool calls made by the agent
+   *  on this discussion (disc_meta + disc_get_message + disc_summarize).
+   *  Surfaces as a small "🔧 N" pill on the ChatHeader. */
+  introspection_call_count?: number;
   shared_id?: string | null;
   shared_with?: string[];
   /** If set, this disc was spawned by a batch WorkflowRun — used for sidebar grouping */

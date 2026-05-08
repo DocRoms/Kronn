@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Leaf, ExternalLink, Loader2, Info, X, Square, ChevronDown, ChevronUp, HelpCircle } from 'lucide-react';
+import { Leaf, ExternalLink, Loader2, Info, X, Square, ChevronDown, ChevronUp, HelpCircle, ArrowUpCircle, Copy } from 'lucide-react';
 import { rtk as rtkApi } from '../../lib/api';
 import type { AgentDetection, AgentType } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
@@ -47,6 +47,17 @@ export function CompressionSection({ agents, onActivated, toast, t }: Compressio
     samples: number;
     available: boolean;
   } | null>(null);
+  // Freshness pill — only renders when the backend has both an installed
+  // and a latest-known version AND the comparator (in Rust) says the
+  // installed is older. We don't recompute it client-side to keep the
+  // single source of truth on the backend (see `core::versions`).
+  const [versionInfo, setVersionInfo] = useState<{
+    installed: string | null;
+    latest: string;
+    updateAvailable: boolean;
+    updateCommand: string;
+  } | null>(null);
+  const [showUpdateModal, setShowUpdateModal] = useState(false);
 
   // Any installed RTK-applicable agent => binary either detected or not.
   // We only trust `rtk_available` from an installed agent because the flag
@@ -72,6 +83,7 @@ export function CompressionSection({ agents, onActivated, toast, t }: Compressio
     let cancelled = false;
     if (!rtkBinaryAvailable) {
       setSavings(null);
+      setVersionInfo(null);
       return;
     }
     rtkApi.savings().then(s => {
@@ -84,20 +96,43 @@ export function CompressionSection({ agents, onActivated, toast, t }: Compressio
     }).catch(() => {
       if (!cancelled) setSavings({ total: 0, ratio: 0, samples: 0, available: false });
     });
+    rtkApi.version().then(v => {
+      if (!cancelled) setVersionInfo({
+        installed: v.installed,
+        latest: v.latest_known,
+        updateAvailable: v.update_available,
+        updateCommand: v.update_command,
+      });
+    }).catch(() => {
+      if (!cancelled) setVersionInfo(null);
+    });
     return () => { cancelled = true; };
   }, [rtkBinaryAvailable, configured]);
 
   const handleActivate = async () => {
     setActivating(true);
     try {
-      // Send the filtered list of RTK-applicable agents — backend uses
-      // this as the source of truth rather than re-detecting, which keeps
-      // the "who do we wire" decision in one place (the frontend already
-      // knows, since it renders the badges).
-      const applicableAgents = agents
-        .filter(a => RTK_APPLICABLE.has(a.agent_type) && (a.installed || a.runtime_available))
+      // Target ONLY the agents that aren't already wired. Pre-fix the
+      // button always sent the full applicable list, including the
+      // already-configured ones — `rtk init -g` is a no-op for them
+      // but the backend's success aggregation hid per-agent failures
+      // for the ONE agent the user actually expected to flip. User
+      // report 2026-05-10: clicking "Enable on the 1 remaining" did
+      // strictly nothing (TD-20260510-rtk-last-agent-button). Now we
+      // send the unconfigured agents only AND surface per-agent
+      // results so a silent-no-op becomes visible.
+      const targetAgents = agents
+        .filter(a =>
+          RTK_APPLICABLE.has(a.agent_type)
+          && (a.installed || a.runtime_available)
+          && !a.rtk_hook_configured,
+        )
         .map(a => a.agent_type);
-      const res = await rtkApi.activate(applicableAgents);
+      if (targetAgents.length === 0) {
+        toast?.(t('config.rtk.activateNoTarget'), 'info');
+        return;
+      }
+      const res = await rtkApi.activate(targetAgents);
       // Backend returns `success: false` when `rtk init -g` exits non-zero.
       // The human-facing title stays short; full stderr ships in `copyable`
       // so the user can paste it to their tech colleague without screen-
@@ -109,7 +144,24 @@ export function CompressionSection({ agents, onActivated, toast, t }: Compressio
         });
         console.warn('RTK activate non-zero exit:', res);
       } else {
-        toast?.(t('config.rtk.activateSuccess'), 'success');
+        // Per-agent breakdown — surface partial failures even when the
+        // aggregate `success: true`. Pre-fix, a single agent failing
+        // silently inside an otherwise-OK call showed a green toast and
+        // the user didn't know why their CTA "did nothing".
+        // Defensive `?? []` for older backends that don't yet return
+        // the per_agent array (and for unit-test mocks that omit it).
+        const failed = (res.per_agent ?? []).filter(a => !a.success);
+        if (failed.length > 0) {
+          const detail = failed
+            .map(a => `${a.agent_type}: ${(a.stderr || a.stdout || '').trim() || '(no output)'}`)
+            .join('\n\n');
+          toast?.(t('config.rtk.activatePartial', failed.length, targetAgents.length), 'warning', {
+            copyable: detail,
+          });
+          console.warn('RTK activate per-agent failures:', failed);
+        } else {
+          toast?.(t('config.rtk.activateSuccess'), 'success');
+        }
       }
     } catch (e) {
       toast?.(t('config.rtk.activateError'), 'error', {
@@ -188,6 +240,22 @@ export function CompressionSection({ agents, onActivated, toast, t }: Compressio
               >
                 <HelpCircle size={12} />
               </button>
+              {/* Freshness pill — only shown when the backend confirms
+               *  installed < latest_known under lenient semver. Click
+               *  opens a small modal with a copyable upgrade command
+               *  (RTK install.sh is idempotent — re-runs upgrade). */}
+              {versionInfo?.updateAvailable && versionInfo.installed && (
+                <button
+                  type="button"
+                  className="set-compression-update-pill"
+                  onClick={() => setShowUpdateModal(true)}
+                  aria-label={t('config.rtk.updateAvailableAria', versionInfo.installed, versionInfo.latest)}
+                  title={t('config.rtk.updateAvailableTitle', versionInfo.installed, versionInfo.latest)}
+                >
+                  <ArrowUpCircle size={10} />
+                  <span>{t('config.rtk.updateAvailable', versionInfo.latest)}</span>
+                </button>
+              )}
             </div>
             <p className="set-compression-explainer">{t('config.rtk.explainer')}</p>
             {showSobriety && (
@@ -309,6 +377,49 @@ export function CompressionSection({ agents, onActivated, toast, t }: Compressio
           </span>
         </div>
       </div>
+
+      {showUpdateModal && versionInfo && (
+        <div className="dash-modal-overlay" onClick={() => setShowUpdateModal(false)}>
+          <div
+            className="dash-modal set-compression-modal"
+            onClick={e => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="rtk-update-title"
+            onKeyDown={e => { if (e.key === 'Escape') setShowUpdateModal(false); }}
+          >
+            <div className="dash-modal-header">
+              <h3 id="rtk-update-title" className="dash-modal-title">
+                {t('config.rtk.updateModalTitle')}
+              </h3>
+              <button
+                onClick={() => setShowUpdateModal(false)}
+                className="dash-modal-close"
+                aria-label="Close"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="set-compression-modal-body">
+              <p>
+                {t('config.rtk.updateModalBody',
+                  versionInfo.installed ?? '?',
+                  versionInfo.latest)}
+              </p>
+              <div className="set-compression-install-label">{t('config.rtk.installCommand')}</div>
+              <pre className="set-compression-install-cmd">{versionInfo.updateCommand}</pre>
+              <button
+                type="button"
+                className="set-compression-copy-btn"
+                onClick={() => navigator.clipboard.writeText(versionInfo.updateCommand).catch(() => {})}
+                aria-label={t('common.copy')}
+              >
+                <Copy size={12} /> {t('common.copy')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showInstallModal && (
         <div className="dash-modal-overlay" onClick={() => setShowInstallModal(false)}>

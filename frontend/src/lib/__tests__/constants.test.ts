@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES, agentColor, getProjectGroup, isHiddenPath, isUsable, isValidationDisc } from '../constants';
+import { AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES, agentColor, getProjectGroup, isHiddenPath, isUsable, isValidationDisc, isBriefingDisc, isBootstrapDisc, agentSupportsIntrospection } from '../constants';
 
 describe('constants', () => {
   describe('AGENT_COLORS', () => {
@@ -152,6 +152,39 @@ describe('constants', () => {
     });
   });
 
+  describe('isBriefingDisc()', () => {
+    // Pre-fix this used `startsWith('Briefing')`, which mismatched the
+    // English title `Project Briefing` (en) — English users got none of
+    // the briefing-specific UI (Zap icon, completion CTA, refetch effect).
+    // Regression guard: must accept all three localized titles emitted by
+    // the backend's `start_briefing` handler.
+    it('detects all three locale-specific briefing titles', () => {
+      expect(isBriefingDisc('Project Briefing')).toBe(true);     // en
+      expect(isBriefingDisc('Briefing del proyecto')).toBe(true); // es
+      expect(isBriefingDisc('Briefing projet')).toBe(true);       // fr
+    });
+
+    it('rejects unrelated titles', () => {
+      expect(isBriefingDisc('Validation audit AI')).toBe(false);
+      expect(isBriefingDisc('Bootstrap: my-app')).toBe(false);
+      expect(isBriefingDisc('Refactor the API')).toBe(false);
+      expect(isBriefingDisc('')).toBe(false);
+    });
+  });
+
+  describe('isBootstrapDisc()', () => {
+    it('detects bootstrap titles regardless of project name', () => {
+      expect(isBootstrapDisc('Bootstrap: my-app')).toBe(true);
+      expect(isBootstrapDisc('Bootstrap: TestProject')).toBe(true);
+    });
+
+    it('rejects user-named discs that mention "bootstrap"', () => {
+      expect(isBootstrapDisc('About bootstrap testing')).toBe(false);
+      expect(isBootstrapDisc('bootstrap: lowercase')).toBe(false);
+      expect(isBootstrapDisc('Validation audit AI')).toBe(false);
+    });
+  });
+
   // ── Cross-agent regression (auto-extends) ──────────────────────────
   describe('cross-agent consistency', () => {
     it('ALL_AGENT_TYPES matches the generated AgentType union (minus Custom)', () => {
@@ -172,6 +205,53 @@ describe('constants', () => {
 
     it('has at least 6 agent types (grows when new agents are added)', () => {
       expect(ALL_AGENT_TYPES.length).toBeGreaterThanOrEqual(7);
+    });
+  });
+
+  // The introspection predicate gates a UI warning ("the kronn-internal
+  // history tools won't fire for this agent") in ChatHeader's
+  // summary-strategy popover. Test pins the agents we know don't speak
+  // MCP and lets the rest pass through. The backend mirror lives in
+  // `backend/src/api/disc_prompts.rs` (`agent_speaks_mcp`) — keep them
+  // in sync; divergence shows up here as a test that suddenly disagrees
+  // with the backend's prompt-injection gate.
+  describe('agentSupportsIntrospection', () => {
+    it('includes Vibe + Ollama via slash-marker fallback (multi-turn)', () => {
+      // Vibe + Ollama don't speak MCP, but the post-stream parser in
+      // backend/src/api/discussions/slash_markers.rs picks up
+      // KRONN:DISC_* markers from their reply and resolves them into
+      // System messages on the next turn. The UX is multi-turn but
+      // functional, so the warning popover doesn't show.
+      expect(agentSupportsIntrospection('Vibe')).toBe(true);
+      expect(agentSupportsIntrospection('Ollama')).toBe(true);
+    });
+
+    it('excludes Codex temporarily (sandbox blocks tool call — TD-20260510)', () => {
+      // Codex 0.121 sees the kronn-internal MCP entry and attempts
+      // the call, but the exec-mode sandbox cancels the spawn before
+      // the bridge runs. Treated as unsupported in the UX surface
+      // until the upstream blocker is resolved.
+      expect(agentSupportsIntrospection('Codex')).toBe(false);
+    });
+
+    it('includes every other concrete agent type', () => {
+      const supported = ALL_AGENT_TYPES.filter(t => t !== 'Codex');
+      // ClaudeCode, GeminiCli, Kiro, CopilotCli read an MCP config
+      // and successfully invoke the tools (proven E2E with
+      // ClaudeCode in `codex-real-introspection.spec.ts`). Vibe +
+      // Ollama use the slash-marker fallback.
+      expect(supported.length).toBeGreaterThan(0);
+      for (const t of supported) {
+        expect(agentSupportsIntrospection(t), `${t} should support introspection`).toBe(true);
+      }
+    });
+
+    it('treats Custom as supporting (user owns their config)', () => {
+      // Custom isn't in ALL_AGENT_TYPES but is a valid AgentType — we
+      // err on the side of "show the tools" rather than hide them, so
+      // a user who wires their own Custom agent to read .mcp.json gets
+      // the introspection bridge without us needing to know about it.
+      expect(agentSupportsIntrospection('Custom')).toBe(true);
     });
   });
 });
