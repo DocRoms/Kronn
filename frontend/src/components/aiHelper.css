@@ -1,0 +1,519 @@
+/* AI helper chat bubble — shared between:
+ *   - ApiCallAiHelper (workflow step config helper)
+ *   - CustomApiAiHelper (custom API plugin form helper)
+ *
+ * Extracted from WorkflowsPage.css in 0.8.1: the same chat-bubble UI now
+ * renders on McpPage too, so the CSS can't live in a page-specific file
+ * (page CSS is only loaded when that page mounts).
+ *
+ * The `wf-apicall-ai-*` class prefix is kept for backwards compat with
+ * the existing markup and for the workflow-page rules below; it's no
+ * longer literally "workflow-only" but renaming everything would be
+ * churn without semantic gain. */
+
+/* ── AI helper bubble shared shell ─────────────────────────── */
+
+.wf-apicall-ai-trigger {
+  margin-left: var(--kr-sp-3);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.35);
+  background: rgba(var(--kr-accent-rgb), 0.08);
+  color: var(--kr-accent);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.wf-apicall-ai-trigger:hover:not(:disabled) {
+  background: rgba(var(--kr-accent-rgb), 0.15);
+  border-color: rgba(var(--kr-accent-rgb), 0.55);
+}
+
+.wf-apicall-ai-trigger:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.wf-apicall-ai-trigger-active {
+  background: rgba(var(--kr-accent-rgb), 0.18);
+  border-color: var(--kr-accent);
+}
+
+.wf-apicall-ai-inline-error {
+  margin-left: var(--kr-sp-2);
+  padding: 2px 8px;
+  border-radius: var(--kr-r-sm);
+  background: rgba(var(--kr-error-rgb), 0.1);
+  color: rgba(var(--kr-error-rgb), 0.9);
+  font-size: var(--kr-fs-2xs);
+}
+
+.wf-apicall-ai-agent-popover {
+  position: absolute;
+  z-index: 60;
+  margin-top: var(--kr-sp-2);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--kr-sp-3);
+  border-radius: var(--kr-r-md);
+  border: 1px solid var(--kr-border-strong);
+  background: var(--kr-bg-elevated);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.25);
+  min-width: 220px;
+}
+
+.wf-apicall-ai-popover-header {
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-ghost);
+  margin-bottom: 4px;
+  padding: 0 4px;
+}
+
+.wf-apicall-ai-agent-option {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  padding: 6px 10px;
+  border-radius: var(--kr-r-sm);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--kr-text-primary);
+  cursor: pointer;
+  font-size: var(--kr-fs-sm);
+  text-align: left;
+}
+
+.wf-apicall-ai-agent-option:hover {
+  background: var(--kr-bg-hover);
+  border-color: var(--kr-border-soft);
+}
+
+.wf-apicall-ai-agent-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.wf-apicall-ai-agent-cancel {
+  margin-top: 4px;
+  padding: 4px 10px;
+  border-radius: var(--kr-r-sm);
+  border: 1px solid var(--kr-border-soft);
+  background: transparent;
+  color: var(--kr-text-ghost);
+  font-size: var(--kr-fs-2xs);
+  cursor: pointer;
+}
+
+.wf-apicall-ai-bubble {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 70;
+  width: 380px;
+  max-width: calc(100vw - 32px);
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--kr-r-lg);
+  border: 1px solid var(--kr-border-strong);
+  background: var(--kr-bg-elevated);
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.3);
+  overflow: hidden;
+}
+
+.wf-apicall-ai-bubble-header {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  border-bottom: 1px solid var(--kr-border-soft);
+  background: rgba(var(--kr-accent-rgb), 0.06);
+  font-size: var(--kr-fs-sm);
+}
+
+.wf-apicall-ai-bubble-eph {
+  margin-left: 4px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(var(--kr-warning-rgb), 0.15);
+  color: rgba(var(--kr-warning-rgb), 0.9);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 600;
+}
+
+.wf-apicall-ai-icon-btn {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--kr-r-sm);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--kr-text-ghost);
+  cursor: pointer;
+}
+
+.wf-apicall-ai-icon-btn + .wf-apicall-ai-icon-btn {
+  margin-left: 0;
+}
+
+.wf-apicall-ai-icon-btn:hover {
+  background: var(--kr-bg-hover);
+  border-color: var(--kr-border-soft);
+  color: var(--kr-text-primary);
+}
+
+.wf-apicall-ai-bubble-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-3);
+  font-size: var(--kr-fs-sm);
+}
+
+.wf-apicall-ai-msg {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 92%;
+}
+
+.wf-apicall-ai-msg-user {
+  align-self: flex-end;
+  align-items: flex-end;
+}
+
+.wf-apicall-ai-msg-assistant {
+  align-self: flex-start;
+}
+
+.wf-apicall-ai-msg-text {
+  padding: 6px 10px;
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-subtle);
+  color: var(--kr-text-primary);
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  line-height: 1.4;
+}
+
+.wf-apicall-ai-msg-user .wf-apicall-ai-msg-text {
+  background: rgba(var(--kr-accent-rgb), 0.12);
+  color: var(--kr-text-primary);
+}
+
+.wf-apicall-ai-typing {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-ghost);
+}
+
+.wf-apicall-ai-suggestion {
+  margin-top: 4px;
+  padding: var(--kr-sp-3);
+  border-radius: var(--kr-r-md);
+  border: 1px dashed rgba(var(--kr-accent-rgb), 0.4);
+  background: rgba(var(--kr-accent-rgb), 0.04);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.wf-apicall-ai-suggestion-applied {
+  border-style: solid;
+  border-color: rgba(var(--kr-success-rgb), 0.4);
+  background: rgba(var(--kr-success-rgb), 0.06);
+}
+
+.wf-apicall-ai-suggestion-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--kr-fs-2xs);
+  font-weight: 600;
+  color: var(--kr-text-ghost);
+}
+
+.wf-apicall-ai-suggestion-list {
+  margin: 0;
+  padding-left: 14px;
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-secondary);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.wf-apicall-ai-suggestion-list code {
+  font-family: var(--kr-font-mono, monospace);
+  background: rgba(0, 0, 0, 0.2);
+  padding: 0 4px;
+  border-radius: 3px;
+}
+
+.wf-apicall-ai-apply-btn {
+  align-self: flex-start;
+  padding: 4px 12px;
+  border-radius: var(--kr-r-sm);
+  border: 1px solid var(--kr-accent);
+  background: var(--kr-accent);
+  color: var(--kr-text-on-accent, #fff);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.wf-apicall-ai-apply-btn:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+.wf-apicall-ai-apply-btn:disabled {
+  opacity: 0.7;
+  cursor: default;
+}
+
+.wf-apicall-ai-error {
+  margin: 0 var(--kr-sp-4);
+  padding: 4px 10px;
+  border-radius: var(--kr-r-sm);
+  background: rgba(var(--kr-error-rgb), 0.1);
+  color: rgba(var(--kr-error-rgb), 0.9);
+  font-size: var(--kr-fs-2xs);
+}
+
+.wf-apicall-ai-context-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px var(--kr-sp-4);
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-ghost);
+  background: rgba(var(--kr-accent-rgb), 0.04);
+  border-top: 1px dashed var(--kr-border-soft);
+}
+
+/* 0.8.1 UX: when rendered at the top of the bubble (between header and
+   messages) the chip needs a bottom border (instead of top) so it visually
+   separates from the chat area below it. */
+.wf-apicall-ai-context-chip-top {
+  border-top: none;
+  border-bottom: 1px dashed var(--kr-border-soft);
+}
+
+.wf-apicall-ai-context-chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Agent selector dropdown in bubble header (0.8.1 UX) ─────────────── */
+
+.wf-apicall-ai-agent-selector {
+  position: relative;
+  flex: 1;
+}
+
+.wf-apicall-ai-agent-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-sm);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s;
+}
+
+.wf-apicall-ai-agent-trigger:hover:not(:disabled) {
+  background: var(--kr-bg-hover);
+  border-color: var(--kr-border-soft);
+}
+
+.wf-apicall-ai-agent-trigger:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.wf-apicall-ai-agent-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 10;
+  min-width: 180px;
+  padding: 4px;
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-base);
+  border: 1px solid var(--kr-border-light);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.wf-apicall-ai-agent-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: none;
+  background: transparent;
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-sm);
+  text-align: left;
+  cursor: pointer;
+  border-radius: var(--kr-r-sm);
+  transition: background 0.1s;
+}
+
+.wf-apicall-ai-agent-option:hover {
+  background: var(--kr-bg-hover);
+}
+
+.wf-apicall-ai-agent-option-active {
+  background: rgba(var(--kr-accent-rgb), 0.12);
+  color: var(--kr-accent-ink);
+}
+
+.wf-apicall-ai-agent-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* ── Welcome state with starter chips (0.8.1 UX) ─────────────────────── */
+
+.wf-apicall-ai-welcome {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-4);
+  padding: var(--kr-sp-5);
+  color: var(--kr-text-primary);
+}
+
+.wf-apicall-ai-welcome-title {
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-secondary);
+}
+
+.wf-apicall-ai-welcome-chips {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.wf-apicall-ai-starter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.wf-apicall-ai-starter-chip:hover {
+  border-color: var(--kr-accent-border);
+  background: rgba(var(--kr-accent-rgb), 0.08);
+}
+
+.wf-apicall-ai-bubble-input {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  border-top: 1px solid var(--kr-border-soft);
+  background: var(--kr-bg-base);
+}
+
+.wf-apicall-ai-bubble-input textarea {
+  flex: 1;
+  padding: 6px 10px;
+  border-radius: var(--kr-r-sm);
+  border: 1px solid var(--kr-border-soft);
+  background: var(--kr-bg-input, var(--kr-bg-base));
+  color: var(--kr-text-primary);
+  font-family: inherit;
+  font-size: var(--kr-fs-sm);
+  resize: none;
+  line-height: 1.3;
+}
+
+.wf-apicall-ai-bubble-input textarea:focus {
+  outline: 1px solid var(--kr-accent);
+  outline-offset: -1px;
+}
+
+.wf-apicall-ai-send-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--kr-r-sm);
+  border: 1px solid var(--kr-accent);
+  background: var(--kr-accent);
+  color: var(--kr-text-on-accent, #fff);
+  cursor: pointer;
+}
+
+.wf-apicall-ai-send-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.wf-apicall-ai-stop-btn {
+  border-color: rgba(var(--kr-warning-rgb), 0.4);
+  background: rgba(var(--kr-warning-rgb), 0.15);
+  color: rgba(var(--kr-warning-rgb), 0.95);
+}
+
+.wf-apicall-ai-restore {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 70;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 1px solid var(--kr-accent);
+  background: var(--kr-accent);
+  color: var(--kr-text-on-accent, #fff);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.3);
+}
+
+@media (max-width: 700px) {
+  .wf-apicall-ai-bubble {
+    bottom: 12px;
+    right: 12px;
+    left: 12px;
+    width: auto;
+  }
+}

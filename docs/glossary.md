@@ -104,9 +104,9 @@ Project-specific terms. For deep dives, follow the linked `docs/architecture/` f
 
 **AiAuditStatus** — Enum: `NoTemplate`, `TemplateInstalled`, `Audited`, `Validated`. Computed from filesystem state (not stored in DB). Detected by `scanner::detect_audit_status()`.
 
-**ai_todo_count** — Number of `<!-- TODO -->` markers remaining in `ai/*.md` files. Computed on-the-fly by `scanner::count_ai_todos()`, exposed on `Project` struct.
+**ai_todo_count** — Number of `<!-- TODO -->` markers remaining in `docs/*.md` files. Computed on-the-fly by `scanner::count_ai_todos()`, exposed on `Project` struct.
 
-**Bootstrap prompt** — Block injected into `docs/AGENTS.md` between `KRONN:BOOTSTRAP:START` and `KRONN:BOOTSTRAP:END` markers. Instructs AI agents to analyze the repo and fill the `ai/` skeleton. Removed before running the automated audit.
+**Bootstrap prompt** — Block injected into `docs/AGENTS.md` between `KRONN:BOOTSTRAP:START` and `KRONN:BOOTSTRAP:END` markers. Instructs AI agents to analyze the repo and fill the `docs/` skeleton. Removed before running the automated audit.
 
 **Project Bootstrap** — Feature to create a new project from scratch via `POST /api/projects/bootstrap`. Creates directory, runs `git init`, installs AI template, and creates a bootstrap discussion with architect + product-owner profiles. The bootstrap prompt guides through Vision → Architecture → Structure → MVP → Action Plan. Parent directory resolved from existing projects' common parent path or `KRONN_REPOS_DIR` env var.
 
@@ -118,7 +118,7 @@ Project-specific terms. For deep dives, follow the linked `docs/architecture/` f
 
 **Skill auto-detection** — During AI audit (between Phase 2 and Phase 3), `detect_project_skills()` scans project filesystem for config files (Cargo.toml → rust, tsconfig.json → typescript, go.mod → go, etc.) and saves detected skills to DB. Covers languages (rust, typescript, python, go, php), domain (devops, database, security), and business (web-performance, seo).
 
-**Validation discussion** — Discussion with title "Validation audit AI" created from the project page. Uses a locked (read-only) prompt. The AI asks questions about ambiguities, updates `ai/` files after each answer. Detected by matching `title === 'Validation audit AI'` + `project_id`.
+**Validation discussion** — Discussion with title "Validation audit AI" created from the project page. Uses a locked (read-only) prompt. The AI asks questions about ambiguities, updates `docs/` files after each answer. Detected by matching `title === 'Validation audit AI'` + `project_id`.
 
 **KRONN:VALIDATED marker** — HTML comment `<!-- KRONN:VALIDATED:YYYY-MM-DD -->` injected at the end of `docs/AGENTS.md` when audit is marked as validated.
 
@@ -253,7 +253,7 @@ Project-specific terms. For deep dives, follow the linked `docs/architecture/` f
 
 **DriftCheckResponse** — Response from `GET /api/projects/:id/drift`. Contains `up_to_date: bool` and `stale_sections: Vec<DriftSection>`. Used by frontend to show amber badge on stale projects.
 
-**DriftSection** — A section of AI documentation that has drifted from the source code. Contains section name, file path, and staleness indicator.
+**DriftSection** — A section of project documentation that has drifted from the source code. Contains section name, file path, and staleness indicator.
 
 **PartialAudit** — Re-audit of only stale sections detected by drift check. Triggered via `POST /api/projects/:id/partial-audit` with a `PartialAuditRequest` specifying which sections to re-run. Costs ~3-5K tokens vs ~20K for a full audit.
 

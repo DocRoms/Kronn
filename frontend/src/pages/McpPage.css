@@ -222,6 +222,27 @@
   opacity: 1;
 }
 
+.mcp-registry-card-custom {
+  border-color: var(--kr-accent-border);
+  background: linear-gradient(140deg, var(--kr-bg-hover) 0%, var(--kr-bg-accent-soft, var(--kr-bg-hover)) 100%);
+  box-shadow: inset 0 0 0 1px var(--kr-accent-border);
+}
+
+.mcp-registry-card-custom:hover {
+  border-color: var(--kr-accent-ink);
+}
+
+.mcp-registry-card-custom .mcp-registry-card-icon {
+  color: var(--kr-accent-ink);
+}
+
+.mcp-custom-field-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: var(--kr-sp-3);
+  align-items: center;
+}
+
 .mcp-registry-card-top {
   display: flex;
   align-items: center;

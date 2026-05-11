@@ -27,6 +27,14 @@ pub struct Project {
     pub audit_status: AiAuditStatus,
     #[serde(default)]
     pub ai_todo_count: u32,
+    /// Total tech-debt entries detected in the project's docs tree:
+    /// one count per file under `docs/tech-debt/` plus one count per
+    /// table row in `docs/inconsistencies-tech-debt.md`. Computed by
+    /// `scanner::count_tech_debt` and surfaced as a badge on the
+    /// project card so users see at a glance how many TD items remain
+    /// to address. Not persisted in DB.
+    #[serde(default)]
+    pub tech_debt_count: u32,
     /// True when the project still uses the legacy `ai/index.md` layout
     /// and no migrated `docs/AGENTS.md` exists. Computed by
     /// `enrich_audit_status` — drives the migration banner on

@@ -338,7 +338,11 @@ describe('ApiCallAiHelper — UI rendering', () => {
     expect(btn).toBeTruthy();
   });
 
-  it('opens agent picker when multiple agents installed', () => {
+  it('opens chat directly with the first installed agent, picker available via header dropdown', () => {
+    // 0.8.1 UX: no separate picking-agent phase. Clicking the trigger
+    // opens the chat bubble straight away with the first installed agent.
+    // Switching to another agent happens via the header dropdown.
+    createMock.mockResolvedValue({ id: 'disc-1', title: 'helper' });
     render(
       <ApiCallAiHelper
         step={mkStep()}
@@ -350,10 +354,11 @@ describe('ApiCallAiHelper — UI rendering', () => {
       />,
     );
     fireEvent.click(screen.getByRole('button', { name: /wf.apicall.helper.trigger/ }));
-    expect(screen.getByRole('dialog', { name: /wf.apicall.helper.pickAgent/ })).toBeTruthy();
+    // Discussion is created with the first agent (ClaudeCode).
+    expect(createMock).toHaveBeenCalledTimes(1);
+    expect(createMock.mock.calls[0][0].agent).toBe('ClaudeCode');
+    // The header dropdown trigger surfaces the active agent's label.
     expect(screen.getByText('Claude Code')).toBeTruthy();
-    expect(screen.getByText('Codex')).toBeTruthy();
-    expect(screen.getByText('Gemini CLI')).toBeTruthy();
   });
 
   it('skips the picker when only one agent is installed', () => {

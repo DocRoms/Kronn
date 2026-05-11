@@ -1,4 +1,4 @@
-# Architecture (AI context)
+# Architecture
 
 > Folder structure: `docs/repo-map.md`.
 
@@ -172,7 +172,7 @@ All three axes are available in:
 - Sync: additive per discussion (no cleanup), full cleanup at startup + project config change
 - Module: `core/native_files.rs`
 
-### Workflows (implemented — replaces scheduled tasks)
+### Workflow engine
 
 Unified automation system: `Trigger → Steps`. Superset of OpenAI Symphony's WORKFLOW.md format. Post-step operations (create PR, comment on issue, etc.) are handled directly by agents using MCP tools within steps, not as a separate "actions" phase.
 
@@ -263,6 +263,10 @@ Sync triggers: toggle project, toggle global, toggle host_sync, create/update/de
 
 **Secret editing** — Inline editing of encrypted env vars directly in the MCP page. Per-field visibility toggle (eye icon) to show/hide individual values. On save, secrets are re-encrypted, config hash recomputed, and `.mcp.json` re-synced to all linked projects.
 
+**Custom API plugins (0.8.1)** — Sentinel `api-custom` server id in the registry surfaces a "Custom API" tile pinned at the top of the Add-plugin drawer. Picking it swaps the panel to a freeform editor (name, base URL, free-form description, optional docs URL, N {label, value} fields). On submit, the backend materializes a fresh `McpServer` with `source = McpSource::Manual`, transport `ApiOnly`, id `custom-{slug}-{nano}`, and an `ApiSpec` whose `config_keys` are derived by uppercasing/snake-casing the field labels (helper `slug_env_key` in `backend/src/api/mcps.rs`). Auth is always `ApiAuthKind::None` for custom plugins; the agent reads the description + docs URL + fields and figures out auth from there. A second-stage chat helper (`CustomApiAiHelper`, see § AI helper bubble below) can pre-fill the form from a curl example or a docs URL via the same `KRONN:APPLY` block protocol used by the workflow-step helper.
+
+**AI helper bubble (shared, 0.8.1 UX refactor)** — Single-phase chat used by both `ApiCallAiHelper` (workflow steps) and `CustomApiAiHelper` (custom API form). Phase `picking-agent` removed; agent selection is a dropdown in the bubble header. Welcome state with 3 starter chips (curl / docs link / freeform) when no message has been sent yet — avoids auto-firing the agent for a generic intro. CSS lives in `frontend/src/components/aiHelper.css` (extracted from `WorkflowsPage.css` so styles load on McpPage too). Both helpers share `parseApplyBlocks` from `ApiCallAiHelper.tsx` (the `KRONN:APPLY` wire contract). TD-helpers-unify: a future refactor should extract a shared `<AiChatHelperShell>` so the two helpers stop duplicating ~60% of lifecycle code.
+
 **API endpoints:**
 - `GET /api/mcps` — overview (servers + configs with masked secrets + customized_contexts)
 - `GET /api/mcps/registry` — built-in registry (searchable, includes token_url/token_help)
@@ -285,10 +289,10 @@ NoTemplate → TemplateInstalled → Audited → Validated
 ```
 
 - **Detection**: `scanner::detect_audit_status()` checks `docs/AGENTS.md` existence, `KRONN:BOOTSTRAP`/`{{` markers, and `KRONN:VALIDATED` marker.
-- **TODO counting**: `scanner::count_ai_todos()` walks `ai/*.md` files and counts `<!-- TODO` occurrences. Exposed as `Project.ai_todo_count` (computed on-the-fly by `enrich_audit_status()`).
-- **Template install** (`POST /api/projects/:id/install-template`): copies `ai/` skeleton + redirectors (CLAUDE.md, .cursorrules, etc.) non-destructively, injects bootstrap prompt block (`KRONN:BOOTSTRAP:START` to `KRONN:BOOTSTRAP:END`).
+- **TODO counting**: `scanner::count_ai_todos()` walks `docs/*.md` files and counts `<!-- TODO` occurrences. Exposed as `Project.ai_todo_count` (computed on-the-fly by `enrich_audit_status()`).
+- **Template install** (`POST /api/projects/:id/install-template`): copies `docs/` skeleton + redirectors (CLAUDE.md, .cursorrules, etc.) non-destructively, injects bootstrap prompt block (`KRONN:BOOTSTRAP:START` to `KRONN:BOOTSTRAP:END`).
 - **AI audit** (`POST /api/projects/:id/ai-audit`): SSE-streamed 10-step analysis. Each step runs an agent call with `full_access: true` and default profiles (Architect + Tech Lead + Mentor) for multi-perspective analysis. Bootstrap block removed before audit starts. Steps defined in `ANALYSIS_STEPS` constant.
-- **Validation**: creates a Discussion with title "Validation audit AI" and a locked prompt. The AI asks questions about ambiguities/TODOs, updates `ai/` files after each answer. Frontend detects validation-in-progress by matching discussion title + project_id. Project page only shows "validation en cours" + link (no validate button).
+- **Validation**: creates a Discussion with title "Validation audit AI" and a locked prompt. The AI asks questions about ambiguities/TODOs, updates `docs/` files after each answer. Frontend detects validation-in-progress by matching discussion title + project_id. Project page only shows "validation en cours" + link (no validate button).
 - **Completion detection**: the prompt instructs the AI to include `KRONN:VALIDATION_COMPLETE` in its final message. Frontend detects this in the last agent message and shows a green banner with "Marquer l'audit comme valide" button — only in the discussion view.
 - **Mark validated** (`POST /api/projects/:id/validate-audit`): injects `<!-- KRONN:VALIDATED:YYYY-MM-DD -->` at end of `docs/AGENTS.md`.
 

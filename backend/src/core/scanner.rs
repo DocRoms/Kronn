@@ -524,6 +524,76 @@ pub fn count_ai_todos(project_path: &str) -> u32 {
     count
 }
 
+/// Count tech-debt entries in a project's documentation, deduplicated
+/// by ID. Sources:
+///   - `.md` file names directly under `docs/tech-debt/` (id = stem,
+///     e.g. `TD-20260314-openapi-coverage`).
+///   - Table rows in `docs/inconsistencies-tech-debt.md` that start
+///     with `| TD-` (id = the first `TD-...` token in the row).
+///
+/// An entry counted from both sources counts once. This matches user
+/// expectation: the badge "<N> TD" should equal the unique tech-debt
+/// items the user can actually open, not 2×N when both the index row
+/// and the detail file exist (the common case for well-documented
+/// projects). Path-agnostic like `count_ai_todos`.
+pub fn count_tech_debt(project_path: &str) -> u32 {
+    let path = resolve_host_path(project_path);
+    let docs_dir = detect_docs_dir(&path);
+    if !docs_dir.is_dir() {
+        return 0;
+    }
+
+    let mut ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Detail files under tech-debt/
+    let td_dir = docs_dir.join("tech-debt");
+    if td_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&td_dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                // Only count top-level .md files; a README/TEMPLATE.md
+                // in the same folder is excluded so it doesn't inflate
+                // the badge.
+                if p.is_file()
+                    && p.extension().is_some_and(|ext| ext == "md")
+                    && p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| !matches!(n, "README.md" | "TEMPLATE.md" | "_template.md"))
+                {
+                    if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                        ids.insert(stem.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // Index file table rows
+    let index_path = docs_dir.join("inconsistencies-tech-debt.md");
+    if let Ok(content) = std::fs::read_to_string(&index_path) {
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            // Markdown table rows starting with `| TD-`. We extract the
+            // ID (everything up to the next space, pipe, or end) so a
+            // row that mirrors an existing detail file is deduped.
+            if let Some(rest) = trimmed.strip_prefix('|') {
+                let cell = rest.trim_start();
+                if cell.starts_with("TD-") {
+                    let id: String = cell
+                        .chars()
+                        .take_while(|c| !c.is_whitespace() && *c != '|')
+                        .collect();
+                    if !id.is_empty() {
+                        ids.insert(id);
+                    }
+                }
+            }
+        }
+    }
+
+    ids.len() as u32
+}
+
 /// Expand ~ in paths
 fn shellexpand(path: &str) -> String {
     // Handle both Unix (~/) and Windows (~\) tilde expansion

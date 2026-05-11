@@ -212,24 +212,41 @@ Systematically audit across these dimensions:\n\
 - Code quality: functions >50 lines, god classes, SRP violations, dead code, error swallowing (empty catch/let _ =)\n\
 - Scalability: N+1 queries, unbounded loops, missing pagination, memory leaks, missing indexes\n\
 - Maintainability: tight coupling, circular dependencies, missing tests for critical paths, unclear naming\n\
+- Accessibility (a11y): unlabelled form inputs, low color contrast (< 4.5:1), missing ARIA on custom widgets, \
+keyboard-inaccessible interactive elements, missing focus traps in modals, non-semantic HTML on landmark regions\n\
+- Observability: missing logging in hot paths (auth, payment, write endpoints), no error tracker (Sentry/Glitchtip/equivalent), \
+no health/readiness endpoints, no metrics on critical SLI (latency, error rate, queue depth)\n\
 - Compliance: GDPR issues (external resources, data retention), license incompatibilities\n\
-- Infrastructure: Docker misconfigs (root user, no resource limits), CI gaps, missing health checks\n\n\
+- Infrastructure: Docker misconfigs (root user, no resource limits), CI gaps, missing health checks\n\
+- Documentation drift: cross-check the docs/ files you just wrote (steps 1-8) against the source code. \
+Flag concrete contradictions (e.g. `coding-rules.md` says X is enforced but no linter rule exists, \
+`testing-quality.md` claims N tests but actual count differs, `mcp-servers.md` lists a server not in `.mcp.json`)\n\n\
 Fill docs/inconsistencies-tech-debt.md — replace ALL {{PLACEHOLDERS}} and <!-- ... --> comments:\n\
 1. Outdated prerequisites table: flag EOL/deprecated/behind-stable runtimes, frameworks, packages\n\
 2. For each issue found: (a) create `docs/tech-debt/TD-YYYYMMDD-slug.md` (YYYYMMDD=today) first, \
 then (b) add the one-line entry to the Current list table. Do both or neither.\n\
-   Severity: Critical=security/data loss, High=blocks prod, Medium=dev friction/perf, Low=cosmetic. Cite file paths.\n\
-3. Limit to 15-20 most impactful findings. Prioritize Critical and High.\n\
-4. No issues found → single row: 'None identified during initial audit'\n\n\
+3. Severity calibration (use concrete examples to avoid over-classification as Medium):\n\
+   - **Critical**: production down, data leak, exploitable flaw — e.g. hardcoded prod API key in repo, SQL injection in a public endpoint, secret in a logged response\n\
+   - **High**: blocks release or a supported environment — e.g. test suite red on main, build fails on the documented Node version, auth bypass under specific conditions\n\
+   - **Medium**: daily dev friction or measurable perf hit — e.g. test suite >30s, N+1 in the dashboard page, manual repetitive setup, broken hot reload\n\
+   - **Low**: cosmetic or minor improvement — e.g. inconsistent variable naming in one module, missing JSDoc, an unused dependency\n\
+4. Limit to 15-20 most impactful findings. Prioritize Critical and High.\n\
+5. If a ticket tracker MCP is configured (Jira/Linear/GitHub Issues), before creating a TD-* file, \
+do a read-only search for an existing open ticket with a matching title fragment. \
+If found: set `Next step: link existing ticket <URL>` instead of `create ticket`, and skip the \"create\" suggestion entirely. Avoid duplicating tracked work.\n\
+6. No issues found → single row: 'None identified during initial audit'\n\n\
 Detail file format:\n\
 - **ID**: TD-YYYYMMDD-slug\n\
-- **Area**: Backend | Frontend | CI | Infra | Security | Docs\n\
+- **Area**: Backend | Frontend | CI | Infra | Security | A11y | Observability | Docs\n\
 - **Severity**: Critical | High | Medium | Low\n\
+- **Status**: Draft | In progress | Blocked upstream | Mitigated (start at Draft)\n\
+- **Effort**: S (< 1h) | M (1-4h) | L (1+ day) | XL (multi-day / cross-team)\n\
+- **Blast radius**: local (1 file) | module (5-10 files) | cross-cutting (50+ files or new pattern)\n\
 - **Problem (fact)**: one-line description\n\
 - **Impact**: what goes wrong if not fixed\n\
 - **Where (pointers)**: file paths with line numbers\n\
 - **Suggested direction**: non-binding fix suggestion\n\
-- **Next step**: create ticket\n\n\
+- **Next step**: `create ticket` OR `link existing ticket <URL>` (see point 5)\n\n\
 Also fill `docs/decisions.md` with intentional architectural choices observed in the code that might look unusual \
 to a newcomer (e.g., why a certain pattern was chosen over a simpler one).",
         sources: &["__GIT_HEAD__"],

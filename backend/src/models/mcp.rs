@@ -307,6 +307,39 @@ pub struct CreateMcpConfigRequest {
     pub args_override: Option<Vec<String>>,
     pub is_global: bool,
     pub project_ids: Vec<String>,
+    /// Custom API plugin payload. Only honoured when `server_id == "api-custom"`.
+    /// The backend materializes a new `McpServer` (API-only, `source = Manual`)
+    /// from these fields, then proceeds with the normal config-creation path.
+    /// Auth type is always `None` for custom plugins; the agent reads the
+    /// description + docs_url + fields and figures out auth itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_spec: Option<CustomApiPayload>,
+}
+
+/// Free-form spec for a user-defined API plugin (the "Custom API" flow).
+/// Captured from the frontend form; the backend turns it into an
+/// `ApiSpec` + `McpServer` pair on submit.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CustomApiPayload {
+    pub name: String,
+    pub base_url: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docs_url: Option<String>,
+    /// List of `{label, value}` pairs. The backend slugifies each label
+    /// into an `env_key` (UPPER_SNAKE_CASE) and stores the value in the
+    /// encrypted env blob alongside the rest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<CustomApiField>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CustomApiField {
+    pub label: String,
+    pub value: String,
 }
 
 #[derive(Debug, Deserialize, TS)]

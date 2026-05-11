@@ -70,9 +70,16 @@ pub async fn migrate_docs(
                 reason: None,
             }
         }
-        MigrationOutcome::AlreadyMigrated => MigrateDocsResponse {
+        MigrationOutcome::AlreadyMigrated { refs_rewritten } => MigrateDocsResponse {
+            // 0.8.1: even when the folder migration is already done, we
+            // re-run the ref-rewrite pass and surface the count so the
+            // operator can re-trigger the action to clean stale `ai/`
+            // refs without scaring them off with a "not_applicable".
             status: "already_migrated",
-            files_moved: None, refs_rewritten: None, symlink_created: None, reason: None,
+            files_moved: None,
+            refs_rewritten: Some(refs_rewritten),
+            symlink_created: None,
+            reason: None,
         },
         MigrationOutcome::NotApplicable => MigrateDocsResponse {
             status: "not_applicable",

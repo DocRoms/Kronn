@@ -1018,7 +1018,7 @@ export function Dashboard({ onReset }: DashboardProps) {
         {page === 'mcps' && (
           <ErrorBoundary mode="zone" label="Plugins">
             <Suspense fallback={<PageFallback />}>
-              <McpPage projects={projects} mcpOverview={mcpOverview} mcpRegistry={mcpRegistry} refetchMcps={refetchMcps} initialSelectedConfigId={mcpSelectedConfigId} />
+              <McpPage projects={projects} mcpOverview={mcpOverview} mcpRegistry={mcpRegistry} refetchMcps={refetchMcps} initialSelectedConfigId={mcpSelectedConfigId} installedAgentTypes={agents.filter(isUsable).map(a => a.agent_type)} configLanguage={configLanguage ?? undefined} />
             </Suspense>
           </ErrorBoundary>
         )}

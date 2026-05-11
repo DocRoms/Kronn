@@ -50,7 +50,7 @@
 - **Guess languages or frameworks** — check § 6 Stack. Do not assume Express, Django, or Next.js.
 - **Edit auto-generated files** — if a file is marked as generated (e.g., types exported from another language), never edit it by hand.
 - **Load all Tier 2 files at once** — max 3, pick what you need.
-- **Modify business code** when the task is only about AI context — edit `docs/` only.
+- **Modify business code** when the task is only about project documentation — edit `docs/` only.
 - **Skip tests** — every code change requires tests. See § 4.
 
 ---
@@ -78,7 +78,7 @@
 
 | What | File(s) |
 |------|---------|
-| AI context | `docs/` |
+| Project documentation | `docs/` |
 <!-- Fill after audit: data models, API routes, DB schema, config files -->
 {{SOURCES}}
 
@@ -118,4 +118,4 @@ Redirectors at the project root: `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.kiro/s
 
 ## 10. Last updated
 
-AI context last reviewed: **{{DATE}}**.
+Project documentation last reviewed: **{{DATE}}**.

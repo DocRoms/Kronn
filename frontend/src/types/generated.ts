@@ -292,6 +292,12 @@ export interface Project {
   ai_config: AiConfigStatus;
   audit_status: AiAuditStatus;
   ai_todo_count: number;
+  /** Total tech-debt entries detected in the project's docs tree:
+   *  one per `.md` file under `docs/tech-debt/` plus one per row in
+   *  `docs/inconsistencies-tech-debt.md`. Surfaced as a badge on the
+   *  ProjectCard. Computed by the API layer from the filesystem; not
+   *  persisted in DB. */
+  tech_debt_count?: number;
   /** True when the project still uses the legacy `ai/index.md` layout
    *  and no migrated `docs/AGENTS.md` exists. Drives the migration
    *  banner on `ProjectCard`. Computed by the API layer from the
@@ -1225,6 +1231,28 @@ export interface CreateMcpConfigRequest {
   args_override: string[] | null;
   is_global: boolean;
   project_ids: string[];
+  /**
+   * Custom API plugin payload. Only honoured when `server_id == "api-custom"`.
+   * The backend materializes a new `McpServer` (API-only, `source = Manual`)
+   * from these fields, then proceeds with the normal config-creation path.
+   * Auth type is always `None` for custom plugins; the agent reads the
+   * description + docs_url + fields and figures out auth itself.
+   */
+  custom_spec?: CustomApiPayload | null;
+}
+
+export interface CustomApiPayload {
+  name: string;
+  base_url: string;
+  description?: string;
+  docs_url?: string | null;
+  /** List of {label, value} pairs. Backend slugifies label → env_key. */
+  fields?: CustomApiField[];
+}
+
+export interface CustomApiField {
+  label: string;
+  value: string;
 }
 
 export interface UpdateMcpConfigRequest {

@@ -23,6 +23,7 @@ import { QuickApiForm } from '../components/workflows/QuickApiForm';
 import { parseBatchQAItems } from '../components/workflows/parseBatchQAItems';
 import { ImportDropzone } from '../components/workflows/ImportDropzone';
 import { triggerDownload } from '../lib/downloadBlob';
+import { mergeDeclaredAndDetected } from '../lib/workflowVariables';
 import { AGENT_LABELS, agentColor } from '../lib/constants';
 import { MatrixText } from '../components/MatrixText';
 import './WorkflowsPage.css';
@@ -394,9 +395,12 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     );
   };
 
-  /** 0.6.0 UX pass — entry point for "Lancer". Inspects the workflow's
-   *  declared variables ; if non-empty, shows the launch form first.
-   *  Otherwise delegates straight to fireTrigger (legacy behavior). */
+  /** 0.6.0 UX pass — entry point for "Lancer". 0.8.1: also auto-detects
+   *  unbound `{{var}}` references in step templates (`mergeDeclaredAndDetected`)
+   *  so a workflow with `{{issue}}` in its prompt but no `variables[]`
+   *  declared still gets the launch modal — closes the "autoBot
+   *  {{issue}} unset" bug. Declared variables (with descriptions,
+   *  defaults, kinds) win over auto-detected synthetics. */
   const handleTrigger = async (id: string) => {
     if (triggeringRef.current) return;
     triggeringRef.current = true;
@@ -410,7 +414,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       // `fireTrigger` clears the ref in its own finally branch.
       return;
     }
-    const vars = wf.variables ?? [];
+    const vars = mergeDeclaredAndDetected(wf);
     if (vars.length === 0) {
       await fireTrigger(id);
       return;
@@ -419,8 +423,11 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     // and try again. The launch modal has its own `submitting` flag.
     triggeringRef.current = false;
     // Open the launch modal with empty values; user fills + submits.
+    // The synthetic workflow object carries the merged variables list
+    // (declared + auto-detected) so the existing modal JSX picks them
+    // up without any per-variable special-casing.
     setLaunchingWorkflow({
-      workflow: wf,
+      workflow: { ...wf, variables: vars },
       values: Object.fromEntries(vars.map(v => [v.name, ''])),
       submitting: false,
       error: null,

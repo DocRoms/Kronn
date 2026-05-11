@@ -84,6 +84,14 @@ export function ProjectCard({
   const toggleSection = (section: string) => {
     setExpandedTab(prev => (prev === section ? '' : section));
   };
+  // When the user clicks the TD badge on the header, we deep-link the
+  // docs viewer to expand the `docs/tech-debt/` folder and preselect the
+  // first item inside it. The state is consumed by the `AiDocViewer`
+  // `initialExpandFolder` prop; we clear it after one render via a
+  // useEffect-less pattern (the prop only matters at mount time of the
+  // viewer because of the dep on `projectId, initialExpandFolder` in
+  // the load effect — see AiDocViewer L37).
+  const [docDeepLink, setDocDeepLink] = useState<string | undefined>(undefined);
 
   // ── Audit state ──
   const [auditActive, setAuditActive] = useState(false);
@@ -475,11 +483,11 @@ export function ProjectCard({
         <div className="flex-1">
           <div className="flex-row gap-3 flex-wrap">
             <span className="dash-proj-name">{proj.name}</span>
-            {/* AI context badge */}
+            {/* Project docs badge */}
             {proj.audit_status === 'NoTemplate' ? (
-              <span className="dash-badge-gray"><FileCode size={9} /> AI context</span>
+              <span className="dash-badge-gray"><FileCode size={9} /> Project docs</span>
             ) : (
-              <span className="dash-badge-green"><FileCode size={9} /> AI context</span>
+              <span className="dash-badge-green"><FileCode size={9} /> Project docs</span>
             )}
             {/* AI audit badge */}
             {auditActive ? (
@@ -503,6 +511,33 @@ export function ProjectCard({
             ) : (proj.audit_status === 'Audited' || proj.audit_status === 'TemplateInstalled') ? (
               <span className="dash-badge-gray"><ShieldCheck size={9} /> Validated</span>
             ) : null}
+            {/* Tech-debt count badge. 0.8.1: surfaced so users can spot
+                projects with known issues at a glance. Counts both
+                detail files under `docs/tech-debt/` and table rows
+                in `docs/inconsistencies-tech-debt.md`. Click jumps to
+                the docs viewer with the tech-debt section open. */}
+            {(proj.tech_debt_count ?? 0) > 0 && (
+              <span
+                className="dash-badge-tech-debt"
+                title={t('projects.techDebtBadge', proj.tech_debt_count!)}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  // 0.8.1 UX fix: also expand the card itself if it's
+                  // collapsed. Without this, the badge sets the docAi
+                  // tab but the user sees nothing because the card body
+                  // is gated on `isOpen` — looked like a broken button.
+                  if (!isOpen) onToggleOpen();
+                  // Open the docs section and deep-link the viewer to the
+                  // tech-debt folder so the user lands one click away from
+                  // the items. The viewer auto-selects the first file
+                  // under `docs/tech-debt/` on mount.
+                  setExpandedTab('docAi');
+                  setDocDeepLink('docs/tech-debt');
+                }}
+              >
+                <AlertTriangle size={9} /> {proj.tech_debt_count} TD
+              </span>
+            )}
             {/* Drift badge */}
             {driftStatus && driftStatus.stale_sections.length > 0 && (
               <>
@@ -649,28 +684,75 @@ export function ProjectCard({
             )}
           </div>
 
-          {/* -- 2. Documentation AI -- */}
-          {proj.audit_status === 'Validated' && (
-            <div className="dash-section">
-              <button className="dash-collapsible-header" onClick={() => toggleSection('docAi')} aria-expanded={isSectionOpen('docAi')}>
-                {isSectionOpen('docAi') ? <ChevronDown size={12} className="flex-shrink-0" /> : <ChevronRight size={12} className="flex-shrink-0" />}
-                <BookOpen size={14} /> <span className="dash-section-title">{t('projects.docAi')}</span>
-              </button>
-              {isSectionOpen('docAi') && (
-                <AiDocViewer
-                  projectId={proj.id}
-                  onDiscussFile={(filePath) => {
+          {/* -- 2. Project documentation --
+              0.8.1 UX: shown at every audit_status (not just Validated)
+              so users can browse the partial doc, get oriented, and see
+              the next step via the contextual banner below. Empty
+              projects (NoTemplate) show just the banner with a CTA. */}
+          {(() => {
+            // Build the state-aware banner. Drives the user from the
+            // current audit_status to the next action without leaving
+            // the docs context.
+            let banner: React.ReactNode = null;
+            const status = proj.audit_status;
+            if (status === 'NoTemplate' || status === 'TemplateInstalled') {
+              banner = (
+                <div className="dash-doc-banner dash-doc-banner-info">
+                  <Cpu size={11} />
+                  <span>{t('projects.docAi.banner.runAudit')}</span>
+                </div>
+              );
+            } else if (status === 'Bootstrapped') {
+              banner = (
+                <div className="dash-doc-banner dash-doc-banner-info">
+                  <Cpu size={11} />
+                  <span>{t('projects.docAi.banner.bootstrapDone')}</span>
+                </div>
+              );
+            } else if (status === 'Audited') {
+              banner = (
+                <div className="dash-doc-banner dash-doc-banner-warn">
+                  <ShieldCheck size={11} />
+                  <span>{t('projects.docAi.banner.validate')}</span>
+                </div>
+              );
+            }
+            return (
+              <div className="dash-section">
+                <button className="dash-collapsible-header" onClick={() => toggleSection('docAi')} aria-expanded={isSectionOpen('docAi')}>
+                  {isSectionOpen('docAi') ? <ChevronDown size={12} className="flex-shrink-0" /> : <ChevronRight size={12} className="flex-shrink-0" />}
+                  <BookOpen size={14} /> <span className="dash-section-title">{t('projects.docAi')}</span>
+                </button>
+                {isSectionOpen('docAi') && (
+                  <AiDocViewer
+                    projectId={proj.id}
+                    initialExpandFolder={docDeepLink}
+                    banner={banner}
+                    onDiscussFile={(filePath) => {
+                    // Tech-debt files get a resolution-oriented prompt
+                    // (asks the agent to plan + execute the fix + update
+                    // the TD entry) instead of the generic discuss
+                    // template. Keeps both paths in one handler so the
+                    // viewer doesn't need to know about the conditional.
+                    const isTechDebt =
+                      /\/tech-debt\//.test(filePath) &&
+                      /\/TD-[^/]+\.md$/.test(filePath);
                     onSetDiscPrefill({
                       projectId: proj.id,
-                      title: `Doc: ${filePath.replace('ai/', '')}`,
-                      prompt: t('projects.docAi.discussPrompt', filePath),
+                      title: isTechDebt
+                        ? `Fix: ${filePath.split('/').pop()?.replace('.md', '') ?? filePath}`
+                        : `Doc: ${filePath.replace('docs/', '').replace('ai/', '')}`,
+                      prompt: isTechDebt
+                        ? t('projects.docAi.fixThisPrompt', filePath)
+                        : t('projects.docAi.discussPrompt', filePath),
                     });
                     onNavigate('discussions');
                   }}
                 />
               )}
-            </div>
-          )}
+              </div>
+            );
+          })()}
 
           {/* -- 3. MCPs -- */}
           <div className="dash-section">

@@ -1,4 +1,4 @@
-# Architecture (AI context)
+# Architecture
 
 > **TEMPLATE FILE.** If sections below contain `{{...}}`, say `NOT_FOUND` — never invent services, ports, or patterns.
 

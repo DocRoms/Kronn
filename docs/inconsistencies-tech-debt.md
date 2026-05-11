@@ -36,4 +36,5 @@
 | TD-20260510-codex-mcp-sandbox-block | Codex 0.121 sees `kronn-internal` MCP and attempts the call but its exec-mode sandbox cancels the spawn (`user cancelled MCP tool call`) — wiring is correct, blocker is upstream. | Backend / agents | Medium |
 | TD-20260510-codex-upstream-issue-draft | Draft of the upstream codex-cli issue ready to paste; needs to be filed once. | External | Low |
 | TD-20260510-a11y-form-labels | Partial — ~6 inputs labelled (Settings password, Sidebar search, nav tabs, 1 skill input). ~16 more in SettingsPage forms + NewDiscussionForm + WorkflowWizard. Per-form sweep planned. | Frontend | Low |
+| TD-20260512-exec-step-worktree-discoverability | Workflow Exec step runs on main tree by default. Worktree mode (`workspace_mode`) buried in Advanced wizard → users running autoBot-style flows get contaminated test results when they have local in-flight work on main. Fix: info banner in wizard when Agent + Exec coexist without worktree. | Frontend | Medium |
 
