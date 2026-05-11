@@ -1,5 +1,12 @@
 /* AiDocViewer — component-specific styles (aidoc- prefix) */
 
+/* State banner rendered above the viewer when audit_status isn't yet
+   Validated. Wrapper just provides bottom spacing — the banner div
+   itself carries the visual style (dash-doc-banner-* in Dashboard.css). */
+.aidoc-banner-wrap {
+  margin-bottom: var(--kr-sp-4);
+}
+
 /* ── Root container ──────────────────────────────────── */
 .aidoc-root {
   display: flex;
@@ -220,6 +227,21 @@
   background: rgba(var(--kr-accent-rgb), 0.06);
   border: 1px solid rgba(var(--kr-accent-rgb), 0.15);
   color: var(--kr-accent);
+}
+
+/* Tech-debt variant (0.8.1): when viewing a `TD-*.md` file under
+   `tech-debt/`, the button is reframed as a resolution CTA. Warning-
+   toned + bolder to read as "actionable now" vs. the neutral discuss
+   variant. */
+.aidoc-discuss-btn-fix {
+  background: rgba(var(--kr-warning-rgb), 0.14);
+  border-color: rgba(var(--kr-warning-rgb), 0.35);
+  color: var(--kr-warning-soft);
+  font-weight: 600;
+}
+
+.aidoc-discuss-btn-fix:hover {
+  background: rgba(var(--kr-warning-rgb), 0.22);
 }
 
 .aidoc-content-area {

@@ -4,7 +4,8 @@ import { useT } from '../lib/I18nContext';
 import { useToast } from '../hooks/useToast';
 import { userError } from '../lib/userError';
 import { isHiddenPath } from '../lib/constants';
-import type { Project, McpConfigDisplay, McpDefinition, McpOverview, HostSyncMode, ApiSpec } from '../types/generated';
+import type { AgentType, Project, McpConfigDisplay, McpDefinition, McpOverview, HostSyncMode, ApiSpec, CustomApiPayload } from '../types/generated';
+import { CustomApiAiHelper } from '../components/CustomApiAiHelper';
 import {
   Puzzle, Plus, Trash2, Eye, Check, RefreshCw, Square, CheckSquare,
   X, Key, Pencil, FileText, ExternalLink, Save, Search, ArrowDownAZ, ArrowDownZA,
@@ -143,9 +144,18 @@ interface McpPageProps {
   mcpRegistry: McpDefinition[];
   refetchMcps: () => void;
   initialSelectedConfigId?: string | null;
+  /** Installed agent types — threaded through to the Custom API AI
+   *  helper bubble so the user can pick which local agent runs the
+   *  helper conversation. Optional: when empty, the helper trigger
+   *  surfaces a "no agents installed" message instead of opening. */
+  installedAgentTypes?: AgentType[];
+  /** Backend output language (Settings → Output language) — used as the
+   *  agent's reply language inside the helper. Falls back to 'fr' when
+   *  missing, mirroring the Dashboard-level default. */
+  configLanguage?: string;
 }
 
-export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initialSelectedConfigId }: McpPageProps) {
+export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initialSelectedConfigId, installedAgentTypes, configLanguage }: McpPageProps) {
   const { t } = useT();
   const { toast } = useToast();
   const detailRef = useRef<HTMLDivElement>(null);
@@ -164,6 +174,16 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
   const [addMcpGlobal, setAddMcpGlobal] = useState(false);
   const [addVisibleFields, setAddVisibleFields] = useState<Set<string>>(new Set());
   const addMcpRef = useRef<HTMLDivElement>(null);
+  // Custom API form state. Only meaningful when addMcpSelected === 'api-custom'.
+  // The shape mirrors `CustomApiPayload` in generated.ts so submit can
+  // forward it as-is via `custom_spec`.
+  const [customName, setCustomName] = useState('');
+  const [customBaseUrl, setCustomBaseUrl] = useState('');
+  const [customDescription, setCustomDescription] = useState('');
+  const [customDocsUrl, setCustomDocsUrl] = useState('');
+  const [customFields, setCustomFields] = useState<Array<{ label: string; value: string }>>([
+    { label: '', value: '' },
+  ]);
   // Edit secrets
   const [editingEnvId, setEditingEnvId] = useState<string | null>(null);
   const [editingEnv, setEditingEnv] = useState<Record<string, string>>({});
@@ -217,8 +237,59 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
     }
   };
 
+  const resetAddMcp = () => {
+    setShowAddMcp(false);
+    setAddMcpSelected(null);
+    setAddMcpLabel('');
+    setAddMcpEnv({});
+    setAddMcpGlobal(false);
+    setAddMcpSearch('');
+    setCustomName('');
+    setCustomBaseUrl('');
+    setCustomDescription('');
+    setCustomDocsUrl('');
+    setCustomFields([{ label: '', value: '' }]);
+  };
+
   const handleAddMcpFromRegistry = async () => {
     if (!addMcpSelected) return;
+    // Custom API branch: forward the freeform form as `custom_spec` instead
+    // of env-keys. Validation mirrors the backend (name + base_url required)
+    // so the user sees the error before the round-trip.
+    if (addMcpSelected === 'api-custom') {
+      if (!customName.trim()) {
+        toast(t('mcp.custom.errorName'), 'error');
+        return;
+      }
+      if (!customBaseUrl.trim()) {
+        toast(t('mcp.custom.errorBaseUrl'), 'error');
+        return;
+      }
+      try {
+        await mcpsApi.createConfig({
+          server_id: 'api-custom',
+          label: addMcpLabel || customName,
+          env: {},
+          args_override: null,
+          is_global: addMcpGlobal,
+          project_ids: [],
+          custom_spec: {
+            name: customName.trim(),
+            base_url: customBaseUrl.trim(),
+            description: customDescription.trim(),
+            docs_url: customDocsUrl.trim() || null,
+            fields: customFields.filter(f => f.label.trim() !== ''),
+          },
+        });
+        resetAddMcp();
+        refetchMcps();
+        toast(t('mcp.custom.created', customName.trim()), 'success');
+      } catch (e) {
+        console.warn('Failed to add Custom API:', e);
+        toast(t('mcp.custom.error', userError(e)), 'error');
+      }
+      return;
+    }
     try {
       await mcpsApi.createConfig({
         server_id: addMcpSelected,
@@ -228,12 +299,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
         is_global: addMcpGlobal,
         project_ids: [],
       });
-      setShowAddMcp(false);
-      setAddMcpSelected(null);
-      setAddMcpLabel('');
-      setAddMcpEnv({});
-      setAddMcpGlobal(false);
-      setAddMcpSearch('');
+      resetAddMcp();
       refetchMcps();
     } catch (e) {
       console.warn('Failed to add MCP config:', e);
@@ -384,9 +450,20 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
 
   const configuredServerIds = new Set(configs.map(c => c.server_id));
   const availableRegistry = mcpRegistry.filter(m =>
+    // Pinned separately at the top of the grid — keep it out of the
+    // categorized list to avoid duplicating it under "Other".
+    m.id !== 'api-custom' &&
     (!addMcpSearch || m.name.toLowerCase().includes(addMcpSearch.toLowerCase()) || m.tags.some(tag => tag.toLowerCase().includes(addMcpSearch.toLowerCase())))
   );
   const selectedDef = mcpRegistry.find(m => m.id === addMcpSelected);
+  // Whether the pinned Custom API tile should be visible. Hide it when the
+  // user searches for something that doesn't match "custom" / "api" so the
+  // tile doesn't fight for attention when they're clearly looking for
+  // GitHub etc.
+  const customApiVisible = !addMcpSearch
+    || 'custom api'.includes(addMcpSearch.toLowerCase())
+    || addMcpSearch.toLowerCase().includes('custom')
+    || addMcpSearch.toLowerCase().includes('api');
 
   // Filter configs by search
   const searchLower = mcpSearch.toLowerCase();
@@ -551,6 +628,36 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                       ))}
                     </div>
                     <div className="mcp-registry-grid">
+                      {customApiVisible && (!kindFilter || kindFilter === 'api') && !selectedCategory ? (
+                        <div
+                          key="custom-api"
+                          className="mcp-registry-card mcp-registry-card-custom"
+                          onClick={() => {
+                            setAddMcpSelected('api-custom');
+                            setAddMcpLabel('');
+                          }}
+                          data-tour-id="custom-api-tile"
+                        >
+                          <div className="mcp-registry-card-top">
+                            <div className="mcp-registry-card-icon">
+                              <Plus size={16} />
+                            </div>
+                            <div className="flex-1">
+                              <div className="mcp-registry-card-name">{t('mcp.custom.tileTitle')}</div>
+                              <div className="mcp-registry-card-cat">{t('mcp.custom.tileCat')}</div>
+                            </div>
+                          </div>
+                          <div className="mcp-registry-card-desc">{t('mcp.custom.tileDesc')}</div>
+                          <div className="mcp-registry-card-meta">
+                            <span className="mcp-kind-badge mcp-kind-badge-api" title={t('mcp.kind.apiTooltip')}>
+                              <Globe size={9} /> {t('mcp.kind.api')}
+                            </span>
+                            <span className="mcp-origin-badge mcp-origin-community">
+                              {t('mcp.custom.tileBadge')}
+                            </span>
+                          </div>
+                        </div>
+                      ) : null}
                       {catsWithItems.flatMap(cat =>
                         (grouped.get(cat) ?? [])
                           .filter(m => {
@@ -625,6 +732,146 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                   </>
                 );
               })()}
+            </>
+          ) : addMcpSelected === 'api-custom' ? (
+            <>
+              {/* Custom API freeform editor. Mirrors `CustomApiPayload`:
+                  name + base URL are required; description + docs link +
+                  fields are optional. The backend slugifies each field
+                  label into an env key. */}
+              <div className="mb-5">
+                <label className="mcp-field-label">{t('mcp.custom.name')} *</label>
+                <input
+                  className="input"
+                  value={customName}
+                  onChange={(e) => setCustomName(e.target.value)}
+                  placeholder={t('mcp.custom.namePlaceholder')}
+                  autoFocus
+                />
+              </div>
+              <div className="mb-5">
+                <label className="mcp-field-label">{t('mcp.custom.baseUrl')} *</label>
+                <input
+                  className="input mcp-input-mono"
+                  value={customBaseUrl}
+                  onChange={(e) => setCustomBaseUrl(e.target.value)}
+                  placeholder={t('mcp.custom.baseUrlPlaceholder')}
+                />
+              </div>
+              <div className="mb-5">
+                <label className="mcp-field-label">{t('mcp.custom.description')}</label>
+                <textarea
+                  className="input"
+                  rows={3}
+                  value={customDescription}
+                  onChange={(e) => setCustomDescription(e.target.value)}
+                  placeholder={t('mcp.custom.descriptionPlaceholder')}
+                />
+              </div>
+              <div className="mb-5">
+                <label className="mcp-field-label">{t('mcp.custom.docsUrl')}</label>
+                <input
+                  className="input mcp-input-mono"
+                  value={customDocsUrl}
+                  onChange={(e) => setCustomDocsUrl(e.target.value)}
+                  placeholder="https://docs.example.com/api"
+                />
+              </div>
+              <div className="mb-5">
+                <label className="mcp-field-label">{t('mcp.custom.fields')}</label>
+                <p className="mcp-env-key-desc mb-3">{t('mcp.custom.fieldsHint')}</p>
+                {customFields.map((f, idx) => (
+                  <div key={idx} className="mcp-custom-field-row mb-2">
+                    <input
+                      className="input mcp-custom-field-label"
+                      value={f.label}
+                      onChange={(e) => setCustomFields(prev => prev.map((row, i) => i === idx ? { ...row, label: e.target.value } : row))}
+                      placeholder={t('mcp.custom.fieldLabel')}
+                    />
+                    <input
+                      className="input mcp-input-mono"
+                      type="text"
+                      value={f.value}
+                      onChange={(e) => setCustomFields(prev => prev.map((row, i) => i === idx ? { ...row, value: e.target.value } : row))}
+                      placeholder={t('mcp.custom.fieldValue')}
+                    />
+                    <button
+                      type="button"
+                      className="mcp-icon-btn"
+                      onClick={() => setCustomFields(prev => prev.filter((_, i) => i !== idx))}
+                      disabled={customFields.length === 1}
+                      aria-label={t('mcp.custom.fieldRemove')}
+                      title={t('mcp.custom.fieldRemove')}
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  className="mcp-btn-action"
+                  onClick={() => setCustomFields(prev => [...prev, { label: '', value: '' }])}
+                >
+                  <Plus size={12} /> {t('mcp.custom.fieldAdd')}
+                </button>
+              </div>
+              <div className="flex-row gap-4 mb-6">
+                <button className={`mcp-project-toggle ${addMcpGlobal ? 'mcp-project-toggle-on' : 'mcp-project-toggle-off'}`} onClick={() => setAddMcpGlobal(!addMcpGlobal)}>
+                  {addMcpGlobal ? <CheckSquare size={11} className="text-accent" /> : <Square size={11} />}
+                  {t('mcp.globalAll')}
+                </button>
+              </div>
+              <div className="flex-row gap-4">
+                <button
+                  className="mcp-btn-action mcp-btn-action-primary"
+                  onClick={handleAddMcpFromRegistry}
+                  disabled={!customName.trim() || !customBaseUrl.trim()}
+                >
+                  <Check size={14} /> {t('mcp.custom.save')}
+                </button>
+                <button className="mcp-btn-action" onClick={() => setAddMcpSelected(null)}>
+                  {t('mcp.back')}
+                </button>
+                {/* AI helper bubble: pre-fills the form from a curl, a docs link
+                    or a freeform description. Same UX as the workflow ApiCall
+                    helper (header agent dropdown, top context chip, welcome
+                    starters). */}
+                {installedAgentTypes && installedAgentTypes.length > 0 && (
+                  <CustomApiAiHelper
+                    formSnapshot={{
+                      name: customName,
+                      base_url: customBaseUrl,
+                      description: customDescription,
+                      docs_url: customDocsUrl,
+                      fields: customFields,
+                    }}
+                    onApply={(updates: Partial<CustomApiPayload>) => {
+                      if (typeof updates.name === 'string') setCustomName(updates.name);
+                      if (typeof updates.base_url === 'string') setCustomBaseUrl(updates.base_url);
+                      if (typeof updates.description === 'string') setCustomDescription(updates.description);
+                      if (typeof updates.docs_url === 'string') setCustomDocsUrl(updates.docs_url);
+                      if (Array.isArray(updates.fields) && updates.fields.length > 0) {
+                        // Merge: keep user-typed values for fields that already
+                        // have content, accept agent-proposed labels/empties for
+                        // the rest. Avoids the agent wiping a token the user
+                        // already pasted while still letting it add new fields.
+                        const existing = customFields.filter(f => f.label.trim() || f.value.trim());
+                        const proposedLabels = new Set(updates.fields.map(f => f.label));
+                        const merged = [
+                          ...existing.filter(f => !proposedLabels.has(f.label) || f.value.trim()),
+                          ...updates.fields.filter(f =>
+                            !existing.some(e => e.label === f.label && e.value.trim()),
+                          ),
+                        ];
+                        setCustomFields(merged.length > 0 ? merged : [{ label: '', value: '' }]);
+                      }
+                    }}
+                    installedAgents={installedAgentTypes}
+                    configLanguage={configLanguage}
+                    t={t}
+                  />
+                )}
+              </div>
             </>
           ) : (
             <>

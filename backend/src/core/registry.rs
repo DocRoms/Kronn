@@ -3,9 +3,42 @@ use crate::models::{
     OAuth2ExtraHeader,
 };
 
+/// Sentinel id surfaced at the top of the registry. Picking it in the UI
+/// drawer switches the right panel to the Custom API form. On submit, the
+/// backend ignores the sentinel and materializes a fresh `McpServer` from
+/// the user-provided `CustomApiPayload`. Prefixed `api-` to conform to the
+/// registry-id naming convention (enforced by `registry_test`).
+pub const CUSTOM_API_SERVER_ID: &str = "api-custom";
+
 /// Return the built-in MCP registry — official servers only
 pub fn builtin_registry() -> Vec<McpDefinition> {
     vec![
+        // ── Custom API: sentinel for the "describe your own API" flow ──
+        // Pinned first so users with an unsupported vendor find it immediately
+        // in the drawer. On submit the backend swaps this id for a generated
+        // `custom-{slug}-{nano}` server id sourced from the form payload.
+        McpDefinition {
+            id: CUSTOM_API_SERVER_ID.into(),
+            name: "Custom API".into(),
+            description: "Define your own REST API: name, base URL, free-form description, optional docs link, and any fields the agent needs (tokens, IDs, headers).".into(),
+            transport: McpTransport::ApiOnly,
+            env_keys: vec![],
+            tags: vec!["custom".into(), "freeform".into(), "user-defined".into(), "api".into()],
+            token_url: None,
+            token_help: None,
+            publisher: "You".into(),
+            official: false,
+            alt_packages: vec![],
+            default_context: None,
+            api_spec: Some(ApiSpec {
+                base_url: "{BASE_URL}".into(),
+                auth: ApiAuthKind::None,
+                endpoints: vec![],
+                docs_url: None,
+                config_keys: vec![],
+            }),
+        },
+
         // ── Git & Code ──────────────────────────────────────────────────────
         // ── GitHub: hybrid MCP (Stdio agent calls) + REST API (ApiCall steps) ──
         // Both layers share the same `GITHUB_PERSONAL_ACCESS_TOKEN`, encrypted

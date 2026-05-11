@@ -9,10 +9,29 @@
 // adding a new runtime namespace.
 import type { WorkflowStep } from '../../types/generated';
 
-const RUNTIME_NAMESPACES = ['steps', 'previous_step', 'state', 'batch', 'issue', 'artifacts'];
+// Multi-segment template namespaces resolved by the workflow runner at
+// run-time. A bare identifier (no dot) is NEVER considered runtime — the
+// user is expected to provide it via the trigger payload's `variables`
+// field or the launch modal (0.8.1). The old behavior treated bare
+// `{{batch}}` / `{{issue}}` as runtime, which silently swallowed real
+// user-facing variables and broke the "autoBot {{issue}}" workflow.
+const RUNTIME_NAMESPACES = [
+  'steps',
+  'previous_step',
+  'previous_qp',
+  'state',
+  'batch',
+  'issue',
+  'artifacts',
+  'iter',
+  'failed_step',
+  'env',
+  'trigger',
+];
 
 export function isRuntimeToken(name: string): boolean {
-  return RUNTIME_NAMESPACES.some(ns => name === ns || name.startsWith(`${ns}.`));
+  // Multi-segment only: `steps.audit.output` ✓ runtime, `steps` ✗ user-var.
+  return RUNTIME_NAMESPACES.some(ns => name.startsWith(`${ns}.`));
 }
 
 /** Collect every `{{var}}` token in the step's request shape that is NOT a

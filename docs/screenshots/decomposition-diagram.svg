@@ -1,0 +1,108 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 460"
+     role="img" aria-labelledby="decomp-title decomp-desc"
+     font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <!-- Decomposition diagram — illustrates "The Kronn way" philosophy.
+       Dark-only palette to match the always-dark Kronn_Hero banner.
+       AI/N-token color (#fbbf24) matches the logo's lightning yellow. -->
+  <title id="decomp-title">Mega-prompt vs Kronn workflow — same outcome, 5× cheaper</title>
+  <desc id="decomp-desc">
+    Diagram with two rows. Top row: the usual mega-prompt anti-pattern — one large red prompt asking an agent to do twelve things at once, producing roughly twelve thousand tokens, flaky output, and an opaque debugging path. Bottom row: the Kronn approach — five sequential green and yellow steps (ApiCall fetch zero tokens, Agent draft N tokens, Exec test zero tokens, Agent review N tokens, Notify webhook zero tokens). Same outcome with three deterministic zero-token steps and two bounded AI steps, five times cheaper, predictable output, debuggable when it breaks.
+  </desc>
+
+  <!-- Dark backdrop -->
+  <rect x="0" y="0" width="1000" height="460" fill="#0d1117"/>
+
+  <style>
+    .subtitle { font-size: 13px; font-weight: 600; fill: #9ca3af; letter-spacing: 0.08em; text-transform: uppercase; }
+    .label    { font-size: 14px; font-weight: 600; fill: #f9fafb; }
+    .small    { font-size: 12px; fill: #d1d5db; }
+    .cost     { font-size: 12px; font-weight: 700; }
+    .cost-good { fill: #34d399; }
+    .cost-bad  { fill: #f87171; }
+    .cost-ai   { fill: #fbbf24; }
+  </style>
+
+  <!-- Top row : MEGA-PROMPT anti-pattern (red) -->
+  <text x="60" y="38" class="subtitle">The usual way — one mega-prompt</text>
+
+  <g role="group" aria-label="Anti-pattern: one mega-prompt does everything">
+    <rect x="60" y="58" width="360" height="92" rx="8"
+          fill="#f87171" fill-opacity="0.12" stroke="#f87171" stroke-width="1.5"/>
+    <text x="240" y="92" text-anchor="middle" class="label">"Do all 12 things"</text>
+    <text x="240" y="113" text-anchor="middle" class="small">fetch + analyse + write + test + review + commit + notify…</text>
+    <text x="240" y="135" text-anchor="middle" class="cost cost-bad">💸 ~12k tokens · flaky · opaque · non-deterministic</text>
+
+    <path d="M 425 104 L 525 104" stroke="#f87171" stroke-width="1.8" fill="none" aria-hidden="true"/>
+    <polygon points="525,104 515,99 515,109" fill="#f87171" aria-hidden="true"/>
+
+    <rect x="530" y="58" width="180" height="92" rx="8"
+          fill="#f87171" fill-opacity="0.12" stroke="#f87171" stroke-width="1.5"/>
+    <text x="620" y="92" text-anchor="middle" class="label">Big AI black box</text>
+    <text x="620" y="113" text-anchor="middle" class="small">12 concerns in 1 call</text>
+    <text x="620" y="135" text-anchor="middle" class="cost cost-bad">❌ debug = impossible</text>
+
+    <path d="M 715 104 L 815 104" stroke="#f87171" stroke-width="1.8" fill="none" aria-hidden="true"/>
+    <polygon points="815,104 805,99 805,109" fill="#f87171" aria-hidden="true"/>
+    <text x="868" y="100" text-anchor="middle" class="label">Output</text>
+    <text x="868" y="118" text-anchor="middle" class="small">hopefully?</text>
+  </g>
+
+  <line x1="60" y1="200" x2="940" y2="200" stroke="#374151" stroke-width="1.5" stroke-dasharray="6 4" aria-hidden="true"/>
+
+  <!-- Bottom row : KRONN WAY decomposed -->
+  <text x="60" y="232" class="subtitle">The Kronn way — decompose, code where you can, AI where you must</text>
+
+  <g role="group" aria-label="Kronn workflow: five sequential steps with annotated token cost">
+    <rect x="60" y="258" width="140" height="88" rx="8"
+          fill="#34d399" fill-opacity="0.12" stroke="#34d399" stroke-width="1.5"/>
+    <text x="130" y="284" text-anchor="middle" class="label">ApiCall</text>
+    <text x="130" y="304" text-anchor="middle" class="small">fetch ticket</text>
+    <text x="130" y="327" text-anchor="middle" class="cost cost-good">0 token</text>
+
+    <rect x="218" y="258" width="140" height="88" rx="8"
+          fill="#fbbf24" fill-opacity="0.14" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="288" y="284" text-anchor="middle" class="label">Agent</text>
+    <text x="288" y="304" text-anchor="middle" class="small">draft impl</text>
+    <text x="288" y="327" text-anchor="middle" class="cost cost-ai">N tokens</text>
+
+    <rect x="376" y="258" width="140" height="88" rx="8"
+          fill="#34d399" fill-opacity="0.12" stroke="#34d399" stroke-width="1.5"/>
+    <text x="446" y="284" text-anchor="middle" class="label">Exec</text>
+    <text x="446" y="304" text-anchor="middle" class="small">cargo test</text>
+    <text x="446" y="327" text-anchor="middle" class="cost cost-good">0 token</text>
+
+    <rect x="534" y="258" width="140" height="88" rx="8"
+          fill="#fbbf24" fill-opacity="0.14" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="604" y="284" text-anchor="middle" class="label">Agent</text>
+    <text x="604" y="304" text-anchor="middle" class="small">review diff</text>
+    <text x="604" y="327" text-anchor="middle" class="cost cost-ai">N tokens</text>
+
+    <rect x="692" y="258" width="140" height="88" rx="8"
+          fill="#34d399" fill-opacity="0.12" stroke="#34d399" stroke-width="1.5"/>
+    <text x="762" y="284" text-anchor="middle" class="label">Notify</text>
+    <text x="762" y="304" text-anchor="middle" class="small">webhook</text>
+    <text x="762" y="327" text-anchor="middle" class="cost cost-good">0 token</text>
+
+    <path d="M 200 302 L 218 302" stroke="#34d399" stroke-width="2" fill="none" aria-hidden="true"/>
+    <polygon points="218,302 210,298 210,306" fill="#34d399" aria-hidden="true"/>
+    <path d="M 358 302 L 376 302" stroke="#34d399" stroke-width="2" fill="none" aria-hidden="true"/>
+    <polygon points="376,302 368,298 368,306" fill="#34d399" aria-hidden="true"/>
+    <path d="M 516 302 L 534 302" stroke="#34d399" stroke-width="2" fill="none" aria-hidden="true"/>
+    <polygon points="534,302 526,298 526,306" fill="#34d399" aria-hidden="true"/>
+    <path d="M 674 302 L 692 302" stroke="#34d399" stroke-width="2" fill="none" aria-hidden="true"/>
+    <polygon points="692,302 684,298 684,306" fill="#34d399" aria-hidden="true"/>
+
+    <path d="M 832 302 L 850 302" stroke="#34d399" stroke-width="2" fill="none" aria-hidden="true"/>
+    <polygon points="850,302 842,298 842,306" fill="#34d399" aria-hidden="true"/>
+    <text x="900" y="288" text-anchor="middle" class="label">Same</text>
+    <text x="900" y="306" text-anchor="middle" class="label">outcome</text>
+    <text x="900" y="324" text-anchor="middle" class="cost cost-good">5× cheaper</text>
+  </g>
+
+  <text x="500" y="395" text-anchor="middle" class="small">
+    5 steps · 3 deterministic (zero-token) · AI only fires on the 2 reasoning steps · each prompt is small, bounded, and previously validated via compare-agents
+  </text>
+  <text x="500" y="425" text-anchor="middle" class="cost cost-good">
+    → predictable cost · predictable output · debuggable when it breaks
+  </text>
+</svg>

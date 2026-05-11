@@ -176,6 +176,7 @@ pub async fn clone_project(
         },
         audit_status: crate::models::AiAuditStatus::default(),
         ai_todo_count: 0,
+            tech_debt_count: 0,
         needs_docs_migration: false,
         default_skill_ids: vec![],
         default_profile_id: None,

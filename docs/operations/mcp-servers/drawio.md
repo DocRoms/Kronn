@@ -17,6 +17,6 @@ Creates and edits draw.io diagrams programmatically: flowcharts, UML, architectu
 
 ## Common use cases in Kronn
 
-- Architecture diagrams for audited projects (`ai/` context enrichment).
+- Architecture diagrams for audited projects (`docs/` context enrichment).
 - Workflow visualization (multi-step pipelines).
 - Data flow diagrams for discussions.

@@ -124,6 +124,91 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    // ─── count_tech_debt ──────────────────────────────────────────────────
+
+    #[test]
+    fn count_tech_debt_no_docs() {
+        // No docs/ → 0 (graceful empty).
+        let tmp = std::env::temp_dir().join("kronn-test-td-none");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::create_dir_all(&tmp);
+        assert_eq!(count_tech_debt(&tmp.to_string_lossy()), 0);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn count_tech_debt_files_and_index_rows() {
+        // 3 TD detail files. The index has 4 TD rows; 2 of them
+        // mirror existing detail files (`one`, `two`), 2 are
+        // file-less entries (`extra-1`, `extra-2`). Deduped count:
+        //   {one, two, three} ∪ {one, two, extra-1, extra-2}
+        //   = {one, two, three, extra-1, extra-2} = 5
+        // The README.md and TEMPLATE.md in the same folder must NOT
+        // be counted (they're scaffolding, not actual debt items).
+        let tmp = std::env::temp_dir().join("kronn-test-td-mix");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let docs = tmp.join("docs");
+        let td = docs.join("tech-debt");
+        std::fs::create_dir_all(&td).unwrap();
+        std::fs::write(td.join("TD-20260101-one.md"), "# one\n").unwrap();
+        std::fs::write(td.join("TD-20260102-two.md"), "# two\n").unwrap();
+        std::fs::write(td.join("TD-20260103-three.md"), "# three\n").unwrap();
+        std::fs::write(td.join("README.md"), "# folder readme\n").unwrap();
+        std::fs::write(td.join("TEMPLATE.md"), "# template\n").unwrap();
+        std::fs::write(
+            docs.join("inconsistencies-tech-debt.md"),
+            "# Index\n\n| ID | Problem | Area | Severity |\n|---|---|---|---|\n\
+             | TD-20260101-one | mirrors a detail file | Backend | medium |\n\
+             | TD-20260102-two | also a mirror | Frontend | low |\n\
+             | TD-20260104-extra-1 | index-only entry | Other | low |\n\
+             | TD-20260105-extra-2 | index-only entry | Other | low |\n\
+             | Not a TD row | ignored | - | - |\n",
+        ).unwrap();
+        // 3 unique file IDs + 2 index-only IDs = 5 (the 2 mirrored
+        // rows collapse onto their detail files).
+        assert_eq!(count_tech_debt(&tmp.to_string_lossy()), 5);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn count_tech_debt_dedupes_file_and_index_pair() {
+        // Sanity: when every detail file ALSO has a matching index
+        // row (the well-documented common case), the count is the
+        // number of files, NOT files + rows. This catches the 0.8.1
+        // double-counting regression flagged by the user.
+        let tmp = std::env::temp_dir().join("kronn-test-td-dedupe");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let docs = tmp.join("docs");
+        let td = docs.join("tech-debt");
+        std::fs::create_dir_all(&td).unwrap();
+        std::fs::write(td.join("TD-20260201-alpha.md"), "# alpha\n").unwrap();
+        std::fs::write(td.join("TD-20260202-beta.md"), "# beta\n").unwrap();
+        std::fs::write(
+            docs.join("inconsistencies-tech-debt.md"),
+            "| TD-20260201-alpha | a | A | low |\n\
+             | TD-20260202-beta  | b | B | low |\n",
+        ).unwrap();
+        assert_eq!(count_tech_debt(&tmp.to_string_lossy()), 2);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn count_tech_debt_legacy_ai_folder() {
+        // Path-agnostic: a project still on the pre-0.7.1 layout
+        // (legacy `ai/` directory) should still get its TDs counted.
+        let tmp = std::env::temp_dir().join("kronn-test-td-legacy");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let docs = tmp.join("ai"); // legacy layout
+        let td = docs.join("tech-debt");
+        std::fs::create_dir_all(&td).unwrap();
+        std::fs::write(td.join("TD-20260101-legacy.md"), "# legacy\n").unwrap();
+        // Make it look like an audited project so detect_docs_dir returns
+        // the `ai/` directory (otherwise it falls back to `docs/`).
+        std::fs::write(docs.join("index.md"), "# legacy index\n").unwrap();
+        assert_eq!(count_tech_debt(&tmp.to_string_lossy()), 1);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     // ─── scan_paths_with_depth: ignore list ────────────────────────────────────
 
     #[tokio::test]

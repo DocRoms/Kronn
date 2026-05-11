@@ -145,6 +145,7 @@ pub async fn bootstrap(
         },
         audit_status: AiAuditStatus::NoTemplate,
         ai_todo_count: 0,
+            tech_debt_count: 0,
         needs_docs_migration: false,
         default_skill_ids: vec![],
         default_profile_id: None,

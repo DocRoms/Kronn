@@ -1,0 +1,114 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 480"
+     role="img" aria-labelledby="dataflow-title dataflow-desc"
+     font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <!-- Diagramme de flux de données / frontière de confiance — palette
+       dark-only pour matcher le banner Kronn_Hero (toujours sombre).
+       Le jaune (#fbbf24) de la zone agent CLI reprend l'éclair du logo. -->
+  <title id="dataflow-title">Où vont tes données — trois zones de confiance autour de Kronn</title>
+  <desc id="dataflow-desc">
+    Diagramme de frontières de confiance avec trois zones de gauche à droite. Zone 1, ta machine en vert : backend Kronn en Rust avec axum et SQLite, vault chiffré au repos en AES-256-GCM, tes discussions et projets et configs MCP dans SQLite, et optionnellement Ollama comme LLM local. Zone 2, processus agent CLI en jaune pointillé : un sous-processus que tu contrôles, où Kronn lance des binaires comme claude, codex, gemini avec le prompt et le contexte MCP, avec la sortie standard streamée et persistée localement. Zone 3, vendeur LLM en rouge pointillé : uniquement si tu as choisi un agent cloud — Anthropic, OpenAI, Google, Mistral ou GitHub reçoivent tes prompts et extraits de code. Si tu choisis Ollama comme agent par défaut, le flux se termine dans la zone verte et les zones jaune et rouge disparaissent entièrement.
+  </desc>
+
+  <rect x="0" y="0" width="1000" height="480" fill="#0d1117"/>
+
+  <style>
+    .title    { font-size: 22px; font-weight: 700; fill: #f9fafb; }
+    .zone-h   { font-size: 14px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
+    .label    { font-size: 14px; font-weight: 600; fill: #f9fafb; }
+    .small    { font-size: 12px; fill: #d1d5db; }
+    .tiny     { font-size: 11px; fill: #9ca3af; font-style: italic; }
+    .zone-local-h   { fill: #34d399; }
+    .zone-cli-h     { fill: #fbbf24; }
+    .zone-vendor-h  { fill: #f87171; }
+  </style>
+
+  <text x="500" y="34" text-anchor="middle" class="title">Où vont tes données</text>
+
+  <g role="group" aria-label="Zone 1 : ta machine — backend Kronn, vault, discussions locales, Ollama optionnel">
+    <rect x="30" y="60" width="380" height="380" rx="14"
+          fill="#34d399" fill-opacity="0.08" stroke="#34d399" stroke-width="2"/>
+    <text x="220" y="92" text-anchor="middle" class="zone-h zone-local-h">Ta machine</text>
+    <text x="220" y="112" text-anchor="middle" class="tiny">frontière de confiance que tu possèdes</text>
+
+    <rect x="60" y="138" width="320" height="56" rx="8"
+          fill="#0d1117" stroke="#34d399" stroke-width="1.2" stroke-opacity="0.6"/>
+    <text x="80" y="165" class="label">Backend Kronn</text>
+    <text x="80" y="184" class="small">Rust + axum + SQLite · tout l'état en local</text>
+
+    <rect x="60" y="208" width="320" height="56" rx="8"
+          fill="#0d1117" stroke="#34d399" stroke-width="1.2" stroke-opacity="0.6"/>
+    <text x="80" y="235" class="label">Vault chiffré</text>
+    <text x="80" y="254" class="small">AES-256-GCM · ~/.config/kronn/config.toml · 0600</text>
+
+    <rect x="60" y="278" width="320" height="56" rx="8"
+          fill="#0d1117" stroke="#34d399" stroke-width="1.2" stroke-opacity="0.6"/>
+    <text x="80" y="305" class="label">Discussions, projets, configs MCP</text>
+    <text x="80" y="324" class="small">SQLite · mode WAL · ne quitte jamais le disque</text>
+
+    <rect x="60" y="348" width="320" height="64" rx="8"
+          fill="#34d399" fill-opacity="0.18" stroke="#34d399" stroke-width="1.5"/>
+    <text x="80" y="375" class="label">🦙 Ollama (optionnel)</text>
+    <text x="80" y="394" class="small">LLM local via localhost:11434</text>
+    <text x="80" y="408" class="tiny">Si tu choisis cet agent → le flux s'arrête dans cette zone.</text>
+  </g>
+
+  <g role="group" aria-label="Zone 2 : processus agent CLI — un sous-processus que Kronn lance, optionnel">
+    <rect x="440" y="60" width="240" height="260" rx="14"
+          fill="#fbbf24" fill-opacity="0.08" stroke="#fbbf24" stroke-width="2" stroke-dasharray="6 4"/>
+    <text x="560" y="92" text-anchor="middle" class="zone-h zone-cli-h">Processus agent CLI</text>
+    <text x="560" y="112" text-anchor="middle" class="tiny">sous-processus que tu contrôles (optionnel)</text>
+
+    <rect x="460" y="138" width="200" height="44" rx="6"
+          fill="#0d1117" stroke="#fbbf24" stroke-width="1.2" stroke-opacity="0.6"/>
+    <text x="560" y="165" text-anchor="middle" class="label">claude / codex / gemini …</text>
+
+    <text x="560" y="206" text-anchor="middle" class="small">Kronn lance ce sous-processus</text>
+    <text x="560" y="224" text-anchor="middle" class="small">avec le prompt + le contexte MCP</text>
+    <text x="560" y="248" text-anchor="middle" class="tiny">Logs + stdout streamés en retour</text>
+    <text x="560" y="264" text-anchor="middle" class="tiny">→ persistés dans ton SQLite local</text>
+    <text x="560" y="296" text-anchor="middle" class="tiny">Sortant : API vendeur uniquement (zone suivante)</text>
+  </g>
+
+  <g role="group" aria-label="Zone 3 : vendeur LLM — hors de ton contrôle, atteint uniquement si tu choisis un agent cloud">
+    <rect x="710" y="60" width="260" height="260" rx="14"
+          fill="#f87171" fill-opacity="0.08" stroke="#f87171" stroke-width="2" stroke-dasharray="6 4"/>
+    <text x="840" y="92" text-anchor="middle" class="zone-h zone-vendor-h">Vendeur LLM</text>
+    <text x="840" y="112" text-anchor="middle" class="tiny">hors de ton contrôle</text>
+
+    <rect x="730" y="138" width="220" height="40" rx="6"
+          fill="#0d1117" stroke="#f87171" stroke-width="1.2" stroke-opacity="0.6"/>
+    <text x="840" y="163" text-anchor="middle" class="label">Anthropic</text>
+
+    <rect x="730" y="184" width="220" height="40" rx="6"
+          fill="#0d1117" stroke="#f87171" stroke-width="1.2" stroke-opacity="0.6"/>
+    <text x="840" y="209" text-anchor="middle" class="label">OpenAI</text>
+
+    <rect x="730" y="230" width="220" height="40" rx="6"
+          fill="#0d1117" stroke="#f87171" stroke-width="1.2" stroke-opacity="0.6"/>
+    <text x="840" y="255" text-anchor="middle" class="label">Google · Mistral · GitHub</text>
+
+    <text x="840" y="296" text-anchor="middle" class="tiny">Tes prompts + extraits de code partent ici</text>
+    <text x="840" y="310" text-anchor="middle" class="tiny">(c'est ce qu'Ollama te permet d'éviter)</text>
+  </g>
+
+  <path d="M 410 200 L 440 200" stroke="#fbbf24" stroke-width="2" fill="none" aria-hidden="true"/>
+  <polygon points="440,200 432,196 432,204" fill="#fbbf24" aria-hidden="true"/>
+  <text x="425" y="190" text-anchor="middle" class="tiny">spawn</text>
+
+  <path d="M 680 200 L 710 200" stroke="#f87171" stroke-width="2" fill="none" stroke-dasharray="4 3" aria-hidden="true"/>
+  <polygon points="710,200 702,196 702,204" fill="#f87171" aria-hidden="true"/>
+  <text x="695" y="190" text-anchor="middle" class="tiny">HTTPS</text>
+
+  <path d="M 710 230 L 680 230" stroke="#f87171" stroke-width="2" fill="none" stroke-dasharray="4 3" aria-hidden="true"/>
+  <polygon points="680,230 688,226 688,234" fill="#f87171" aria-hidden="true"/>
+
+  <path d="M 440 230 L 410 230" stroke="#fbbf24" stroke-width="2" fill="none" aria-hidden="true"/>
+  <polygon points="410,230 418,226 418,234" fill="#fbbf24" aria-hidden="true"/>
+
+  <text x="500" y="455" text-anchor="middle" class="small">
+    Kronn lui-même ne communique jamais avec un serveur tiers. Telemetry, vérification de version, partage P2P — tout est opt-in ou absent.
+  </text>
+  <text x="500" y="473" text-anchor="middle" class="tiny">
+    Rester 100 % dans la zone verte ? Choisis Ollama comme agent par défaut. Plus de jaune, plus de rouge.
+  </text>
+</svg>

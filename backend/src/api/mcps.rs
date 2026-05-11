@@ -66,7 +66,7 @@ pub async fn overview(
 /// server_id can be an existing DB server ID or a registry ID (auto-creates server)
 pub async fn create_config(
     State(state): State<AppState>,
-    Json(req): Json<CreateMcpConfigRequest>,
+    Json(mut req): Json<CreateMcpConfigRequest>,
 ) -> Json<ApiResponse<McpConfigDisplay>> {
     let config_read = state.config.read().await;
     let secret = match &config_read.encryption_secret {
@@ -77,10 +77,48 @@ pub async fn create_config(
 
     let reg = registry::builtin_registry();
 
+    // Custom API: materialize a fresh McpServer from the user-provided
+    // payload, then rewrite the request so the normal config-creation path
+    // sees a regular per-instance server id. The sentinel `"api-custom"`
+    // id is never persisted; each Custom plugin gets a unique
+    // `custom-{slug}-{nano}` server id so two instances of e.g. "Salesforce"
+    // can coexist with different credentials.
+    let custom_server = if req.server_id == registry::CUSTOM_API_SERVER_ID {
+        let payload = match req.custom_spec.take() {
+            Some(p) => p,
+            None => return Json(ApiResponse::err(
+                "custom_spec is required when server_id is 'api-custom'",
+            )),
+        };
+        if payload.name.trim().is_empty() {
+            return Json(ApiResponse::err("Custom API requires a name"));
+        }
+        if payload.base_url.trim().is_empty() {
+            return Json(ApiResponse::err("Custom API requires a base URL"));
+        }
+        let server = materialize_custom_server(&payload);
+        // Merge derived env (from form fields) on top of any existing env
+        // entries in the request — form fields win.
+        for f in &payload.fields {
+            if f.label.trim().is_empty() {
+                continue;
+            }
+            let key = slug_env_key(&f.label);
+            req.env.insert(key, f.value.clone());
+        }
+        req.server_id = server.id.clone();
+        Some(server)
+    } else {
+        None
+    };
+
     let result = state.db.with_conn(move |conn| {
-        // Find server in DB, or create from registry
+        // Find server in DB, or create from registry, or materialize Custom
         let servers = db::mcps::list_servers(conn)?;
-        let server = if let Some(s) = servers.iter().find(|s| s.id == req.server_id) {
+        let server = if let Some(custom) = custom_server.as_ref() {
+            db::mcps::upsert_server(conn, custom)?;
+            custom.clone()
+        } else if let Some(s) = servers.iter().find(|s| s.id == req.server_id) {
             s.clone()
         } else if let Some(def) = reg.iter().find(|d| d.id == req.server_id) {
             // Auto-create server from registry
@@ -170,6 +208,96 @@ pub async fn create_config(
         }
         Err(e) => Json(ApiResponse::err(format!("{}", e))),
     }
+}
+
+/// Slugify a user-typed label into an `UPPER_SNAKE_CASE` env key.
+/// Examples: "Bearer Token" → "BEARER_TOKEN", "Org ID" → "ORG_ID",
+/// "x-api-key (header)" → "X_API_KEY_HEADER".
+pub(crate) fn slug_env_key(label: &str) -> String {
+    let mut out = String::with_capacity(label.len());
+    let mut prev_underscore = true; // skip leading underscores
+    for ch in label.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_uppercase());
+            prev_underscore = false;
+        } else if !prev_underscore {
+            out.push('_');
+            prev_underscore = true;
+        }
+    }
+    while out.ends_with('_') {
+        out.pop();
+    }
+    if out.is_empty() {
+        out.push_str("FIELD");
+    }
+    out
+}
+
+/// Build an `McpServer` from the freeform `CustomApiPayload`. The id is a
+/// unique `custom-{slug}-{nano}` so two instances of the same vendor with
+/// different credentials don't collide. `source = Manual` to distinguish
+/// from registry-sourced entries in the UI and analytics.
+pub(crate) fn materialize_custom_server(payload: &CustomApiPayload) -> McpServer {
+    let slug = name_slug(&payload.name);
+    let nano: String = Uuid::new_v4().simple().to_string()[..8].to_string();
+    let id = format!("custom-{}-{}", slug, nano);
+
+    let config_keys: Vec<ApiConfigKey> = payload
+        .fields
+        .iter()
+        .filter(|f| !f.label.trim().is_empty())
+        .map(|f| ApiConfigKey {
+            env_key: slug_env_key(&f.label),
+            label: f.label.clone(),
+            placeholder: String::new(),
+            description: String::new(),
+        })
+        .collect();
+
+    let api_spec = ApiSpec {
+        base_url: payload.base_url.clone(),
+        auth: ApiAuthKind::None,
+        endpoints: vec![],
+        docs_url: payload
+            .docs_url
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        config_keys,
+    };
+
+    McpServer {
+        id,
+        name: payload.name.clone(),
+        description: payload.description.clone(),
+        transport: McpTransport::ApiOnly,
+        source: McpSource::Manual,
+        api_spec: Some(api_spec),
+    }
+}
+
+/// Lower-snake-case slug for server-id construction. Mirrors the env-key
+/// slugifier but keeps lowercase: "Salesforce Sales API" → "salesforce-sales-api".
+fn name_slug(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut prev_dash = true;
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.is_empty() {
+        out.push_str("api");
+    }
+    out
 }
 
 /// Helper: get all project IDs (for global MCP changes)
@@ -1456,5 +1584,93 @@ mod tests {
         assert_eq!(strip_version("@upstash/context7-mcp@latest"), "@upstash/context7-mcp");
         assert_eq!(strip_version("fastly-mcp-server@1.0.4"), "fastly-mcp-server");
         assert_eq!(strip_version("@modelcontextprotocol/server-gitlab"), "@modelcontextprotocol/server-gitlab");
+    }
+
+    // ── Custom API plugin slugifier + materializer ───────────────────────
+
+    #[test]
+    fn slug_env_key_handles_common_cases() {
+        assert_eq!(slug_env_key("Bearer Token"), "BEARER_TOKEN");
+        assert_eq!(slug_env_key("Org ID"), "ORG_ID");
+        assert_eq!(slug_env_key("x-api-key"), "X_API_KEY");
+        assert_eq!(slug_env_key("My__Custom Field 2"), "MY_CUSTOM_FIELD_2");
+        // Leading non-alphanumeric: trimmed
+        assert_eq!(slug_env_key("  trim me  "), "TRIM_ME");
+        // Empty / pure-punctuation: fallback
+        assert_eq!(slug_env_key(""), "FIELD");
+        assert_eq!(slug_env_key("---"), "FIELD");
+    }
+
+    #[test]
+    fn materialize_custom_server_builds_unique_id_and_api_spec() {
+        let payload = CustomApiPayload {
+            name: "Salesforce Sales API".into(),
+            base_url: "https://my-org.salesforce.com".into(),
+            description: "Sales org REST API".into(),
+            docs_url: Some("https://developer.salesforce.com".into()),
+            fields: vec![
+                CustomApiField { label: "Bearer Token".into(), value: "secret".into() },
+                CustomApiField { label: "Org ID".into(), value: "00D5g".into() },
+            ],
+        };
+
+        let server = materialize_custom_server(&payload);
+        // id starts with "custom-{slug}-" and ends with a hex suffix
+        assert!(server.id.starts_with("custom-salesforce-sales-api-"));
+        assert_eq!(server.name, "Salesforce Sales API");
+        assert_eq!(server.description, "Sales org REST API");
+        assert_eq!(server.source, McpSource::Manual);
+        assert!(matches!(server.transport, McpTransport::ApiOnly));
+
+        let spec = server.api_spec.expect("api_spec set");
+        assert_eq!(spec.base_url, "https://my-org.salesforce.com");
+        assert!(matches!(spec.auth, ApiAuthKind::None));
+        assert_eq!(spec.docs_url.as_deref(), Some("https://developer.salesforce.com"));
+        assert!(spec.endpoints.is_empty());
+        // Empty-label fields are filtered, two real fields → two config keys.
+        assert_eq!(spec.config_keys.len(), 2);
+        assert_eq!(spec.config_keys[0].env_key, "BEARER_TOKEN");
+        assert_eq!(spec.config_keys[0].label, "Bearer Token");
+        assert_eq!(spec.config_keys[1].env_key, "ORG_ID");
+    }
+
+    #[test]
+    fn materialize_custom_server_filters_blank_fields() {
+        let payload = CustomApiPayload {
+            name: "X".into(),
+            base_url: "http://x".into(),
+            description: String::new(),
+            docs_url: None,
+            fields: vec![
+                CustomApiField { label: "Real".into(), value: "v".into() },
+                CustomApiField { label: "   ".into(), value: "ignored".into() },
+                CustomApiField { label: "".into(), value: "".into() },
+            ],
+        };
+        let server = materialize_custom_server(&payload);
+        let spec = server.api_spec.unwrap();
+        assert_eq!(spec.config_keys.len(), 1);
+        assert_eq!(spec.config_keys[0].env_key, "REAL");
+        assert!(spec.docs_url.is_none());
+    }
+
+    #[test]
+    fn materialize_custom_server_normalizes_blank_docs_url() {
+        let payload = CustomApiPayload {
+            name: "X".into(),
+            base_url: "http://x".into(),
+            description: String::new(),
+            docs_url: Some("   ".into()),
+            fields: vec![],
+        };
+        let spec = materialize_custom_server(&payload).api_spec.unwrap();
+        assert!(spec.docs_url.is_none(), "blank docs_url should be None, got {:?}", spec.docs_url);
+    }
+
+    #[test]
+    fn name_slug_lowercase_alphanumeric_only() {
+        assert_eq!(name_slug("Salesforce Sales API"), "salesforce-sales-api");
+        assert_eq!(name_slug("3rd-party CRM!!"), "3rd-party-crm");
+        assert_eq!(name_slug(""), "api");
     }
 }

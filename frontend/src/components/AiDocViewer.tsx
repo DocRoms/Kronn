@@ -7,22 +7,46 @@ import { useT } from '../lib/I18nContext';
 import './AiDocViewer.css';
 import {
   ChevronRight, ChevronDown, ChevronUp,
-  FileText, Folder, Loader2, Search, MessageSquare, X,
+  FileText, Folder, Loader2, Search, MessageSquare, X, AlertTriangle,
 } from 'lucide-react';
 
 interface AiDocViewerProps {
   projectId: string;
   onDiscussFile?: (filePath: string) => void;
+  /** Optional folder prefix to auto-expand on mount, e.g. `docs/tech-debt`.
+   *  Used when the user clicks the TD badge on the ProjectCard — the
+   *  viewer opens with the tech-debt folder unfolded so the user lands
+   *  one click away from the items. Path may include or omit the
+   *  trailing slash. */
+  initialExpandFolder?: string;
+  /** Optional banner rendered above the toolbar. Used to surface state-
+   *  aware guidance ("run the audit", "validate to finalize", etc.).
+   *  Free-form so the caller controls icon + tone. */
+  banner?: React.ReactNode;
 }
 
-export function AiDocViewer({ projectId, onDiscussFile }: AiDocViewerProps) {
+export function AiDocViewer({ projectId, onDiscussFile, initialExpandFolder, banner }: AiDocViewerProps) {
   const { t } = useT();
   const [tree, setTree] = useState<AiFileNode[]>([]);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [treeLoading, setTreeLoading] = useState(true);
-  const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set(['ai']));
+  // Seed the expanded-dirs set so the legacy `ai/` root opens by default
+  // (back-compat with pre-0.7.1 projects). When `initialExpandFolder` is
+  // passed, we add every prefix path of that folder (`docs`, `docs/tech-debt`,
+  // etc.) so the path is visibly unfolded in the tree even if the user
+  // hasn't clicked any folder yet.
+  const [expandedDirs, setExpandedDirs] = useState<Set<string>>(() => {
+    const seed = new Set<string>(['ai']);
+    if (initialExpandFolder) {
+      const parts = initialExpandFolder.replace(/\/$/, '').split('/');
+      for (let i = 1; i <= parts.length; i++) {
+        seed.add(parts.slice(0, i).join('/'));
+      }
+    }
+    return seed;
+  });
 
   // Search state
   const [searchQuery, setSearchQuery] = useState('');
@@ -39,6 +63,17 @@ export function AiDocViewer({ projectId, onDiscussFile }: AiDocViewerProps) {
     projectsApi.listAiFiles(projectId).then(files => {
       setTree(files);
       setTreeLoading(false);
+      // When the caller deep-linked to a folder (e.g. `docs/tech-debt`
+      // via the TD badge), preselect the first file inside it so the
+      // user lands on actual content instead of an empty pane. Falls
+      // through to the canonical entry-file logic when no match.
+      if (initialExpandFolder) {
+        const firstInFolder = findFirstFileUnder(files, initialExpandFolder);
+        if (firstInFolder) {
+          setSelectedPath(firstInFolder.path);
+          return;
+        }
+      }
       // Pick the canonical entry file. Path-agnostic — backend's
       // `listAiFiles` returns either `docs/AGENTS.md` (post-pivot),
       // `doc/AGENTS.md`, or `ai/index.md` (legacy) depending on the
@@ -49,7 +84,7 @@ export function AiDocViewer({ projectId, onDiscussFile }: AiDocViewerProps) {
         ?? findFile(files, 'ai/index.md');
       if (entry) setSelectedPath(entry.path);
     }).catch(() => setTreeLoading(false));
-  }, [projectId]);
+  }, [projectId, initialExpandFolder]);
 
   // ─── Load file content ─────────────────────────────────────────────────
   useEffect(() => {
@@ -185,25 +220,36 @@ export function AiDocViewer({ projectId, onDiscussFile }: AiDocViewerProps) {
 
   if (treeLoading) {
     return (
-      <div className="aidoc-loading">
-        <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> {t('projects.docAi.loading')}
-      </div>
+      <>
+        {banner}
+        <div className="aidoc-loading">
+          <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> {t('projects.docAi.loading')}
+        </div>
+      </>
     );
   }
 
   if (tree.length === 0) {
+    // Empty tree: typically a `NoTemplate` project. The state banner
+    // above the empty state is what tells the user how to bootstrap;
+    // we don't want to suppress it when there's "no doc yet".
     return (
-      <div className="aidoc-empty">
-        {t('projects.docAi.empty')}
-      </div>
+      <>
+        {banner}
+        <div className="aidoc-empty">
+          {t('projects.docAi.empty')}
+        </div>
+      </>
     );
   }
 
   const isSearching = searchQuery.trim().length > 0;
 
   return (
-    <div className="aidoc-root">
-      {/* File tree */}
+    <>
+      {banner && <div className="aidoc-banner-wrap">{banner}</div>}
+      <div className="aidoc-root">
+        {/* File tree */}
       <div className="aidoc-tree-panel">
         {/* Search bar */}
         <div className="aidoc-search-wrap">
@@ -276,14 +322,34 @@ export function AiDocViewer({ projectId, onDiscussFile }: AiDocViewerProps) {
             <span className="aidoc-toolbar-path">
               {selectedPath}
             </span>
-            {onDiscussFile && (
-              <button
-                onClick={() => onDiscussFile(selectedPath)}
-                className="aidoc-discuss-btn"
-              >
-                <MessageSquare size={10} /> {t('projects.docAi.discuss')}
-              </button>
-            )}
+            {onDiscussFile && (() => {
+              // Tech-debt files (`docs/tech-debt/TD-*.md`) get a stronger
+              // CTA reframed as "fix this issue" — same underlying action
+              // (launch a discussion bound to the file) but the verb is
+              // resolution-oriented. The detection is intentionally
+              // permissive: any path that contains `/tech-debt/` and
+              // points to a `TD-*` file qualifies. Stays in sync with
+              // backend `count_tech_debt` (same filename pattern).
+              const isTechDebt =
+                /\/tech-debt\//.test(selectedPath) &&
+                /\/TD-[^/]+\.md$/.test(selectedPath);
+              return (
+                <button
+                  onClick={() => onDiscussFile(selectedPath)}
+                  className={`aidoc-discuss-btn${isTechDebt ? ' aidoc-discuss-btn-fix' : ''}`}
+                >
+                  {isTechDebt ? (
+                    <>
+                      <AlertTriangle size={10} /> {t('projects.docAi.fixThis')}
+                    </>
+                  ) : (
+                    <>
+                      <MessageSquare size={10} /> {t('projects.docAi.discuss')}
+                    </>
+                  )}
+                </button>
+              );
+            })()}
           </div>
         )}
         {/* Content area */}
@@ -301,7 +367,8 @@ export function AiDocViewer({ projectId, onDiscussFile }: AiDocViewerProps) {
           )}
         </div>
       </div>
-    </div>
+      </div>
+    </>
   );
 }
 
@@ -451,6 +518,23 @@ function findFile(nodes: AiFileNode[], path: string): AiFileNode | null {
     if (node.path === path) return node;
     if (node.is_dir && node.children) {
       const found = findFile(node.children, path);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+/** Find the first leaf file whose path starts with the given folder
+ *  prefix. Used by the TD-badge deep-link: clicking "<N> TD" opens the
+ *  viewer pre-selecting the first file in `docs/tech-debt/`. */
+function findFirstFileUnder(nodes: AiFileNode[], folder: string): AiFileNode | null {
+  const prefix = folder.replace(/\/$/, '') + '/';
+  for (const node of nodes) {
+    if (!node.is_dir && (node.path === folder || node.path.startsWith(prefix))) {
+      return node;
+    }
+    if (node.is_dir && node.children) {
+      const found = findFirstFileUnder(node.children, folder);
       if (found) return found;
     }
   }

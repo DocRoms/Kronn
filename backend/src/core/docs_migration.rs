@@ -27,8 +27,13 @@ use std::path::Path;
 pub enum MigrationOutcome {
     /// `ai/` doesn't exist OR project never had a Kronn audit. No-op.
     NotApplicable,
-    /// `docs/AGENTS.md` already exists — migration already happened.
-    AlreadyMigrated,
+    /// `docs/AGENTS.md` already exists — folder migration already
+    /// happened. Carries the count of residual `ai/` refs we still
+    /// cleaned in markdown / root redirectors when re-runs the rewrite
+    /// pass over an already-migrated project (0.8.1: closes the gap
+    /// where pre-0.8.1 migrations left stale `ai/...` refs inside
+    /// already-moved `docs/` files). 0 when nothing to clean.
+    AlreadyMigrated { refs_rewritten: usize },
     /// Migration succeeded. Caller can `git status` to inspect, commit
     /// when ready.
     Migrated {
@@ -65,13 +70,21 @@ pub async fn migrate_project(
     // 1. Pre-flight checks.
     let ai_dir = project_path.join("ai");
     let docs_dir = project_path.join("docs");
+    if docs_dir.join("AGENTS.md").is_file() {
+        // Folder migration already done. 0.8.1: we still re-run the
+        // ref-rewrite pass because pre-0.8.1 migrations could leave
+        // stale `ai/...` references inside the already-moved `docs/`
+        // files (user-reported on 2026-05-12). Both rewriters are
+        // idempotent — calling them on a clean tree is a no-op that
+        // reports `refs_rewritten = 0`. We don't touch `ai/` here:
+        // if it lingers as a leftover, the operator can rm it after
+        // verifying the rewrite landed.
+        let mut refs_rewritten = rewrite_internal_refs(&docs_dir);
+        refs_rewritten += rewrite_root_redirectors(project_path);
+        return MigrationOutcome::AlreadyMigrated { refs_rewritten };
+    }
     if !ai_dir.is_dir() {
         return MigrationOutcome::NotApplicable;
-    }
-    if docs_dir.join("AGENTS.md").is_file() {
-        // Migration already done (or partially done — this exact entry
-        // file existing is the canonical signal).
-        return MigrationOutcome::AlreadyMigrated;
     }
 
     // 2. If `docs/` already exists with content, we can't `git mv ai docs`
@@ -911,14 +924,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn already_migrated_returns_early() {
+    async fn already_migrated_returns_early_no_stale_refs() {
+        // Clean already-migrated tree → AlreadyMigrated with 0 refs rewritten.
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path();
         std::fs::create_dir_all(root.join("docs")).unwrap();
-        std::fs::write(root.join("docs/AGENTS.md"), "# already there").unwrap();
+        std::fs::write(root.join("docs/AGENTS.md"), "# already there\nSee `docs/glossary.md`.").unwrap();
         std::fs::create_dir_all(root.join("ai")).unwrap();
         let outcome = migrate_project(root, false).await;
-        assert_eq!(outcome, MigrationOutcome::AlreadyMigrated);
+        assert_eq!(outcome, MigrationOutcome::AlreadyMigrated { refs_rewritten: 0 });
+    }
+
+    #[tokio::test]
+    async fn already_migrated_cleans_stale_ai_refs() {
+        // 0.8.1 fix: a project already at `docs/` layout but with
+        // residual `ai/...` refs inside its markdown gets those refs
+        // rewritten when the migration endpoint is re-triggered.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(
+            root.join("docs/AGENTS.md"),
+            "# Index\nSee `ai/glossary.md` for terms and `ai/repo-map.md` for layout.\n",
+        ).unwrap();
+        std::fs::write(
+            root.join("docs/glossary.md"),
+            "Refer back to `ai/AGENTS.md` for context.\n",
+        ).unwrap();
+        let outcome = migrate_project(root, false).await;
+        match outcome {
+            MigrationOutcome::AlreadyMigrated { refs_rewritten } => {
+                // 2 files touched (AGENTS.md + glossary.md). The counter
+                // is "files changed", not "individual refs rewritten",
+                // mirroring how migrate-from-scratch counts.
+                assert_eq!(refs_rewritten, 2, "expected 2 files cleaned, got {refs_rewritten}");
+            }
+            other => panic!("expected AlreadyMigrated, got {other:?}"),
+        }
+        // Verify the rewrite actually happened on disk.
+        let agents = std::fs::read_to_string(root.join("docs/AGENTS.md")).unwrap();
+        assert!(agents.contains("docs/glossary.md"), "ref not rewritten: {agents}");
+        assert!(!agents.contains("ai/glossary.md"), "stale ref leaked: {agents}");
+        let glossary = std::fs::read_to_string(root.join("docs/glossary.md")).unwrap();
+        assert!(glossary.contains("docs/AGENTS.md"));
+        assert!(!glossary.contains("ai/AGENTS.md"));
     }
 
     #[tokio::test]

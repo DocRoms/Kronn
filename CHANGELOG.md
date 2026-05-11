@@ -9,6 +9,235 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-05-12
+
+**Custom API plugin + AI helpers UX refactor + tech-debt prominence + doc rebrand.**
+Release de "vraies features qui débloquent du monde" : N'importe quelle
+API REST peut maintenant être pilotée par Kronn (plus uniquement
+Chartbeat/Adobe/Jira), les helpers IA ouvrent direct sur le chat (plus
+de modal séparé pour choisir l'agent), la dette technique est visible
+en un coup d'œil sur chaque projet, et toute la terminologie
+"AI documentation" passe en "project documentation" (le pivot
+`ai/` → `docs/` du 0.7.1 est désormais complet jusque dans les UI strings
+et les agent prompts).
+
+### Added
+
+- **Custom API plugin** — sentinel `api-custom` dans `core/registry.rs`,
+  pinnée en tête du drawer "Add plugin". Picking it swap le panneau de
+  droite vers un éditeur freeform (Name + Base URL + Describe + Docs
+  link + N {Label, Value} fields). Le backend matérialise un fresh
+  `McpServer` (id `custom-{slug}-{nano}`, source = `Manual`, transport
+  `ApiOnly`) avec `ApiSpec` construite depuis le payload. Auth = `None`
+  par design : l'agent lit la description + docs URL + fields et figure
+  out l'auth lui-même. Helpers `slug_env_key` (slugifier
+  `Bearer Token` → `BEARER_TOKEN`) + `materialize_custom_server` +
+  `name_slug`. 5 tests Rust + 2 tests vitest. Couvre tous les use cases
+  "j'ai une API interne / Salesforce / Stripe / autre vendeur non listé".
+- **Custom API AI helper bubble (`CustomApiAiHelper.tsx`)** — chat
+  éphémère qui pré-remplit le formulaire Custom API depuis un curl, un
+  lien doc ou une description libre. Mirror du pattern
+  `ApiCallAiHelper` (KRONN:APPLY blocks, ephemeral discussion,
+  agent dropdown). System prompt dédié qui extrait
+  `{name, base_url, description, docs_url, fields[]}`. Apply merge
+  intelligent : préserve les valeurs utilisateur déjà saisies, accepte
+  les nouveaux labels de l'agent. 16 unit tests pinent le wire
+  contract + le rendu.
+- **AI helper UX refactor (option B)** — passe `ApiCallAiHelper` de 3
+  phases (closed/picking-agent/chatting) à 2 (closed/chatting). Click
+  trigger → bulle ouverte direct avec le 1er agent installé. Header de
+  bulle accueille un dropdown agent (avatar + nom + chevron) qui
+  permet de switcher au milieu d'une conversation (reset le chat, prime
+  une nouvelle discussion avec le même system prompt). Context chip
+  remonté en haut de la bulle (sous le header) pour qu'on voie ce que
+  l'agent sait avant le scroll. Welcome state avec 3 starter chips
+  cliquables (pré-remplissent l'input avec un template) à la place de
+  l'agent qui s'auto-fire à l'ouverture — économise ~200 tokens par
+  helper-open. Tests mis à jour. CSS extraite dans
+  `frontend/src/components/aiHelper.css` pour que les styles chargent
+  aussi sur McpPage (le bug qui rendait la bulle non-stylée sur
+  d'autres pages).
+- **Tech-debt count badge on ProjectCard** — nouvelle field
+  `Project.tech_debt_count: u32` peuplée par `scanner::count_tech_debt`
+  qui compte les TD-* uniques (union dédupliquée des fichiers sous
+  `docs/tech-debt/` + des lignes `| TD-` dans
+  `docs/inconsistencies-tech-debt.md`). Affichée comme badge orange
+  `⚠ N TD` sur la ligne du titre du projet. Click → ouvre la card si
+  elle est fermée + déplie la section docs + deep-link
+  `initialExpandFolder='docs/tech-debt'` qui auto-sélectionne le
+  premier TD-*.md. README/TEMPLATE.md exclus du compte (scaffolding).
+  4 tests Rust dont un dédié à la régression de double-comptage.
+- **"Régler ce problème" CTA on TD files** — quand l'AiDocViewer
+  affiche un fichier `docs/tech-debt/TD-*.md`, le bouton
+  "Discuss this file" devient "Régler ce problème" (warning-tone,
+  bouton bold). Même action sous-jacente (lance une discussion avec le
+  fichier en contexte) mais le prompt est résolution-oriented : ask
+  l'agent un plan court, exécuter les modifs, mettre à jour le
+  TD-*.md (statut résolu) et la ligne d'index. Détection via regex
+  permissive `/tech-debt/.*TD-*.md` — symétrique avec
+  `count_tech_debt` côté backend.
+- **Docs viewer always-visible + state banners** — la section
+  "Project documentation" sur la ProjectCard n'est plus gatée sur
+  `audit_status === 'Validated'`. Elle s'ouvre quel que soit l'état
+  d'audit. Une bannière contextuelle dans le viewer guide vers la
+  prochaine étape :
+  - `NoTemplate` / `TemplateInstalled` : "Lance un audit IA pour
+    (re)documenter intégralement le projet…"
+  - `Bootstrapped` : "Bootstrap terminé. Lance l'audit complet…"
+  - `Audited` : "Valide l'audit pour avoir une documentation à jour…"
+  - `Validated` : pas de banner (état "propre")
+  Auto-fix : quand on clique le badge TD sur une card fermée, la card
+  s'ouvre + déplie la section docs (avant on cliquait dans le vide).
+- **AI audit Step 9 (tech-debt) enrichi** — `ANALYSIS_STEPS[8]` dans
+  `backend/src/api/audit/mod.rs` passe de 7 dimensions à **10** :
+  ajout d'**Accessibility** (form labels, contrast 4.5:1, ARIA,
+  keyboard-nav, focus traps, semantic HTML), **Observability**
+  (logging hot paths, error tracker, health endpoints, SLI metrics),
+  **Documentation drift** (cross-check des 8 fichiers `docs/` que
+  l'agent vient d'écrire contre le code source — détecte
+  contradictions type "coding-rules.md dit X mais aucun linter ne
+  l'enforce"). Le detail file gagne 3 champs : **Status**
+  (Draft / In progress / Blocked upstream / Mitigated),
+  **Effort** (S/M/L/XL), **Blast radius**
+  (local / module / cross-cutting). Calibration de la severity
+  avec exemples concrets (Critical = data leak / SQL injection,
+  High = test suite red / build broken, Medium = test suite >30s
+  / N+1, Low = cosmetic) pour limiter la sur-classification en
+  Medium. Nouvelle règle "tickets dedup" : si un MCP tracker
+  (Jira/Linear/GitHub) est configuré, l'agent fait une recherche
+  read-only avant de créer un TD pour éviter de dupliquer un ticket
+  existant. Tests audit (13) toujours verts. Compatible 100% backwards :
+  les TDs déjà créés avec l'ancien format restent valides.
+- **Persistent AI audit section dans le README** — nouveau §5 dans
+  "What you can do" qui détaille les 8 fichiers générés
+  (`docs/AGENTS.md`, `glossary.md`, `repo-map.md`, `coding-rules.md`,
+  `testing-quality.md`, `architecture/overview.md`,
+  `operations/debug-operations.md`, `operations/mcp-servers.md`) +
+  le status flow `NoTemplate → TemplateInstalled → Bootstrapped →
+  Audited → Validated` + le drift detection granulaire par section.
+  Sells "Kronn = knowledge persistence layer, not just a prompt
+  launcher".
+- **`AiDocViewer` props `initialExpandFolder` + `banner`** — slots
+  optionnels qui ne cassent aucun consumer (props
+  `?`). `initialExpandFolder` déplie tous les prefixes du folder en une
+  seule passe + pre-sélectionne le premier fichier qui matche.
+  `banner` est un React node libre, le caller contrôle icône + ton.
+  Helper `findFirstFileUnder` ajouté.
+- **Custom API helper E2E spec** (`custom-api-helper-bubble.spec.ts`) —
+  smoke Playwright qui couvre les ouverture de la bulle, les starter
+  chips, l'agent dropdown, et la fermeture. Vérifie
+  `getComputedStyle(bubble).position === 'fixed'` comme proxy pour la
+  régression CSS qui avait initialement motivé l'extraction
+  `aiHelper.css`.
+- **README + dark screenshots EN/FR** — 8 PNG en thème sombre (4 ×
+  EN + 4 × FR) pour le dashboard, Quick Prompts, QP launch
+  (compare-agents avec 7 chips), workflow wizard. Banner
+  `Kronn_Hero.png` + 4 SVG diagrammes (decomposition + data-flow, FR/EN)
+  dark-only pour cohérence visuelle avec le logo. Script
+  `scripts/seed-demo-fixtures.sh` reproductible + page
+  `docs/operations/screenshot-sandbox.md` qui documente le workflow.
+  Section "Any REST API works" ajoutée pour expliquer le Custom API
+  flow.
+
+### Changed
+
+- **Doc rebrand `ai/` → `docs/` complet** — passe sur tous les
+  `.md` du repo Kronn lui-même (~30 refs dans `docs/AGENTS.md`,
+  `glossary.md`, `decisions.md`, `repo-map.md`,
+  `architecture/overview.md`, `operations/mcp-servers/drawio.md`).
+  Tooling ne lit plus jamais `ai/` (la migration shippée en 0.7.1 est
+  désormais complète en surface ET en profondeur). Les refs
+  historiques type "legacy `ai/` directory was migrated to `docs/` in
+  0.7.1" sont gardées comme notes historiques.
+- **Terminology "AI documentation" → "project documentation"** —
+  13 strings i18n × 3 langues (FR/EN/ES) plus les hardcoded JSX
+  badges sur `ProjectCard.tsx`. Le badge "AI context" devient
+  "Project docs". Les agent prompts (`audit.validationPrompt` ×3,
+  ~1k tokens chacun) sont récrits pour pointer vers `docs/` (au lieu
+  de `ai/`) — l'agent va donc maintenant écrire dans le bon dossier
+  après le pivot.
+- **Templates de bootstrap** — `templates/docs/AGENTS.md` :
+  "Modify business code when the task is only about AI context" devient
+  "...only about project documentation". `templates/docs/architecture/
+  overview.md` : "Architecture (AI context)" → "Architecture". Tout
+  nouveau projet bootstrappé naît avec la nouvelle terminologie.
+- **Sandbox screenshot pipeline** — em-dashes nettoyés du
+  `scripts/seed-demo-fixtures.sh` (préférence user : "we never do that"),
+  3 phrases bancales (après suppression em-dash) rephrasées pour rester
+  grammaticales. CSS shared move vers `frontend/src/components/aiHelper.css`
+  (avant : `WorkflowsPage.css`) — corrige le bug qui rendait la bulle
+  helper non-stylée sur McpPage.
+
+### Fixed
+
+- **Workflow trigger: variables non-déclarées auto-détectées** —
+  user-reported sur "autoBot" workflow : step 1 utilise `{{issue}}`
+  dans le prompt mais `Workflow.variables` était vide → le launch
+  modal était skippé → step fire avec literal `{{issue}}`. Fix :
+  nouveau helper `lib/workflowVariables.ts` qui scanne TOUS les
+  champs templated d'un workflow (`prompt_template`, `api_endpoint_path`,
+  `api_query`/`api_headers`/`api_body`, `notify_config.url`/
+  `body_template`/`headers`, `exec_args`, `batch_items_from`) +
+  retourne les `{{var}}` non-runtime. `handleTrigger` merge
+  declared + auto-detected, ouvre le modal s'il y a quelque chose à
+  saisir. Change connexe : `isRuntimeToken` (apiCallPlaceholders.ts)
+  filtre désormais UNIQUEMENT les `ns.X` multi-segments — un
+  `{{batch}}` bare est maintenant traité comme user-var (avant : eaten
+  silently). 12 tests neufs dans `lib/__tests__/workflowVariables.test.ts`
+  dont une régression dédiée `autoBot {{issue}} regression`.
+- **`docs_migration` re-runs rewrite pass sur AlreadyMigrated** —
+  user-reported : projets déjà migrés vers `docs/` gardaient des refs
+  `ai/...` stales dans le contenu de leurs `.md` parce que le early
+  return `AlreadyMigrated` skippait `rewrite_internal_refs` +
+  `rewrite_root_redirectors`. Fix : variant devient
+  `AlreadyMigrated { refs_rewritten: usize }`, les deux rewriters
+  (idempotents) sont appelés systématiquement, le compteur retourné
+  dans la réponse HTTP pour que l'opérateur voit "12 refs cleaned"
+  quand il re-clique sur "Migrer". `MigrateDocsResponse.refs_rewritten`
+  désormais peuplé même pour `status: "already_migrated"`. 1 test neuf
+  `already_migrated_cleans_stale_ai_refs` qui prouve qu'un repo déjà
+  à `docs/` avec des `ai/X` refs résiduelles sort propre après
+  re-trigger.
+- **`count_tech_debt` double-counting (régression flaggée user)** —
+  avant : 5 fichiers + 7 lignes index = 12 sur le badge alors que
+  l'utilisateur ne voit que ~7 unique TDs dans la doc. Maintenant
+  dédupliqué par ID (extrait du `file_stem` côté fichiers + du
+  premier token `TD-...` côté lignes). Sur Kronn lui-même : 12 → 7
+  (cohérent). Test dédié `count_tech_debt_dedupes_file_and_index_pair`
+  pin la régression.
+- **E2E `custom-api-helper-bubble.spec.ts` count-before-visible** — le
+  test échouait en CI parce que `expect(toBeVisible)` s'exécutait
+  avant le check `skip if no agents installed`. Ordre inversé + tick
+  de settle DOM ajouté. Skip cleanly maintenant quand le sandbox CI
+  n'a pas d'agents installés.
+- **TD badge click + card fermée** — avant : clic sur `⚠ 12 TD`
+  appelait `setExpandedTab('docAi')` mais la card étant fermée, le
+  body n'était pas rendu → l'utilisateur cliquait dans le vide.
+  Maintenant : `if (!isOpen) onToggleOpen()` ajouté avant le
+  setExpanded. Un seul click suffit pour passer de "card fermée" à
+  "viewer ouvert sur le premier TD".
+- **`docs/architecture/overview.md` heading `(AI context)`** —
+  cohérence avec le rebrand global, ce reliquat se balladait.
+
+### Tests
+
+- Backend : **1614 tests** (1613 + 1 nouveau test `count_tech_debt`
+  pour la régression dédup). `cargo clippy --lib -- -D warnings` clean.
+- Frontend : **1128 tests** (1112 + 16 nouveaux `CustomApiAiHelper`).
+  `pnpm tsc --noEmit` clean. `pnpm lint` : 0 errors, 100 warnings
+  (toutes pré-existantes).
+- E2E : nouveau spec `custom-api-helper-bubble.spec.ts`.
+
+### Docs
+
+- `docs/architecture/overview.md` : nouveaux paragraphes
+  Custom API plugins + AI helper bubble (UX 0.8.1, shared CSS,
+  TD-helpers-unify noté).
+- `docs/operations/screenshot-sandbox.md` : nouveau, ~45 lignes,
+  documenté + référencé depuis `CONTRIBUTING.md`.
+- README.md + README.fr.md : new section "Any REST API works", new §5
+  Persistent AI audit, 0 em-dashes (préférence user).
+
 ## [0.8.0] - 2026-05-11
 
 **Stabilisation tier 1 + 2 — fin des chantiers legacy**.

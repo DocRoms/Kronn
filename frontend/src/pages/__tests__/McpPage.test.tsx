@@ -532,4 +532,89 @@ describe('McpPage', () => {
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
     expect(screen.queryByTestId('mcp-incomplete-banner')).toBeNull();
   });
+
+  // ── Custom API flow ────────────────────────────────────────────────
+  // The Custom API plugin lets users define their own REST endpoint with
+  // a freeform Name/Base URL/Description + arbitrary fields. These tests
+  // pin the submit shape (must include `custom_spec`) and the field
+  // slugifier on the client side so the wire payload matches the backend
+  // contract (see `materialize_custom_server` in backend/src/api/mcps.rs).
+
+  it('Custom API: clicking the pinned tile opens the freeform form', async () => {
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [] };
+    const customApi: McpDefinition = {
+      id: 'api-custom',
+      name: 'Custom API',
+      description: 'Define your own API.',
+      transport: 'ApiOnly',
+      env_keys: [],
+      tags: ['custom', 'api'],
+      token_url: null,
+      token_help: null,
+      publisher: 'You',
+      official: false,
+    };
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[customApi]} refetchMcps={noop} />);
+
+    // Open the drawer
+    const addBtn = screen.getByText(/Ajouter$/);
+    fireEvent.click(addBtn);
+
+    // Pinned Custom API tile should be present in the registry grid
+    const tile = document.querySelector('[data-tour-id="custom-api-tile"]') as HTMLElement | null;
+    expect(tile).toBeTruthy();
+    fireEvent.click(tile!);
+
+    // The freeform form is visible (Name + Base URL labels, asterisks for required)
+    expect(screen.getByPlaceholderText(/Salesforce Sales API/)).toBeTruthy();
+    expect(screen.getByPlaceholderText(/my-org\.salesforce\.com/)).toBeTruthy();
+  });
+
+  it('Custom API: submit posts custom_spec with the form payload', async () => {
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [] };
+    const customApi: McpDefinition = {
+      id: 'api-custom',
+      name: 'Custom API',
+      description: 'Define your own API.',
+      transport: 'ApiOnly',
+      env_keys: [],
+      tags: ['custom', 'api'],
+      token_url: null,
+      token_help: null,
+      publisher: 'You',
+      official: false,
+    };
+    (mcpsApi.createConfig as ReturnType<typeof vi.fn>).mockClear();
+    (mcpsApi.createConfig as ReturnType<typeof vi.fn>).mockResolvedValue({});
+
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[customApi]} refetchMcps={noop} />);
+
+    fireEvent.click(screen.getByText(/Ajouter$/));
+    const tile = document.querySelector('[data-tour-id="custom-api-tile"]') as HTMLElement;
+    fireEvent.click(tile);
+
+    // Fill required fields
+    fireEvent.change(screen.getByPlaceholderText(/Salesforce Sales API/), { target: { value: 'MyAPI' } });
+    fireEvent.change(screen.getByPlaceholderText(/my-org\.salesforce\.com/), { target: { value: 'https://my.example.com' } });
+
+    // Fill the first (default) field row
+    const labelInputs = screen.getAllByPlaceholderText(/Bearer Token/);
+    fireEvent.change(labelInputs[0], { target: { value: 'My Token' } });
+    const valueInputs = screen.getAllByPlaceholderText(/Valeur/);
+    fireEvent.change(valueInputs[0], { target: { value: 'secret123' } });
+
+    // Submit — the Save button reads "Enregistrer" in FR
+    const saveBtn = screen.getByText('Enregistrer');
+    fireEvent.click(saveBtn);
+
+    await act(async () => { await Promise.resolve(); });
+
+    expect(mcpsApi.createConfig).toHaveBeenCalledTimes(1);
+    const payload = (mcpsApi.createConfig as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(payload.server_id).toBe('api-custom');
+    expect(payload.custom_spec).toBeDefined();
+    expect(payload.custom_spec.name).toBe('MyAPI');
+    expect(payload.custom_spec.base_url).toBe('https://my.example.com');
+    expect(payload.custom_spec.fields).toEqual([{ label: 'My Token', value: 'secret123' }]);
+  });
 });

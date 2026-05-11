@@ -417,6 +417,54 @@
   cursor: pointer;
 }
 
+/* Tech-debt badge (0.8.1): warning-toned chip on the project card.
+   Same warning palette as the drift badge so visually they read as
+   "things to look at" — distinct from the green/gray "ok" badges.
+   Click handler opens the project docs viewer in ProjectCard. */
+.dash-badge-tech-debt {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 7px;
+  border-radius: var(--kr-r-sm);
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  background: rgba(var(--kr-warning-rgb), 0.12);
+  color: var(--kr-warning-soft);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.25);
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.dash-badge-tech-debt:hover {
+  background: rgba(var(--kr-warning-rgb), 0.2);
+}
+
+/* Docs section state banners (0.8.1): shown inside the AiDocViewer
+   when audit_status isn't yet Validated. Tone matches the message
+   urgency — info for "you can audit", warn for "validate to finalize". */
+.dash-doc-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-3) var(--kr-sp-5);
+  border-radius: var(--kr-r-md);
+  font-size: var(--kr-fs-xs);
+  line-height: 1.4;
+}
+
+.dash-doc-banner-info {
+  background: rgba(var(--kr-accent-rgb), 0.08);
+  color: var(--kr-accent-ink);
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.2);
+}
+
+.dash-doc-banner-warn {
+  background: rgba(var(--kr-warning-rgb), 0.1);
+  color: var(--kr-warning-soft);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.25);
+}
+
 .dash-drift-update-btn {
   padding: 2px var(--kr-sp-4);
   border-radius: var(--kr-r-sm);

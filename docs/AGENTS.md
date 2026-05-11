@@ -1,17 +1,17 @@
-# AI context index — Single entry point
+# Project documentation index — Single entry point
 
 **Project:** Kronn — Self-hosted CLI + web UI for managing AI coding agents (Claude Code, Codex, Vibe, Gemini CLI, Kiro) across git repositories. Unified workflow engine for cron, multi-step pipelines, tracker-driven automation, and manual triggers.
 
-> **All files under `ai/` are in English by default.** AI context documentation must be written in English.
+> **All files under `docs/` are in English by default.** Project documentation must be written in English.
 > **ATTENTION — This is the reference file for all AI agents.**
 > Read this file first, then follow the context loading strategy below.
 > Do not read the other config files (.cursorrules, copilot-instructions, etc.) — they redirect here.
 
 > **CRITICAL — Never hallucinate.**
 > - **Never invent information** (tech stack, conventions, architecture, file paths...).
-> - If you are unsure about something: **check the `ai/` documentation first**.
+> - If you are unsure about something: **check the `docs/` documentation first**.
 > - If you still don't find the answer: **ask the user** rather than guessing.
-> - After getting the answer: **update the relevant `ai/` file** so the knowledge is captured.
+> - After getting the answer: **update the relevant `docs/` file** so the knowledge is captured.
 > - Getting it right matters more than answering fast — hallucinations waste everyone's time.
 
 > **CRITICAL — MCP tool usage.**
@@ -21,7 +21,7 @@
 
 **Unknown term?** → `docs/glossary.md` first.
 
-This folder (`ai/`) contains AI-optimized project context (not human docs). Use paths relative to repo root.
+This folder (`docs/`) contains structured project context (for both humans and AI agents). Use paths relative to repo root.
 
 ---
 
@@ -84,7 +84,7 @@ Never load everything "just in case".
 
 - Do **not** guess when information is missing — ask the user.
 - Do **not** load all Tier 2 files at once — pick up to 3 max.
-- Do **not** modify business code when the task is only about AI context — edit `ai/` only.
+- Do **not** modify business code when the task is only about project documentation — edit `docs/` only.
 - Do **not** edit `frontend/src/types/generated.ts` by hand — run `make typegen`.
 - Do **not** register two `.route()` calls with the same path in axum — chain methods: `.route("/path", get(h1).post(h2))`.
 - Do **not** forget `#[derive(PartialEq)]` on enums used in comparisons (`AgentType`, `MessageRole`).
@@ -130,7 +130,7 @@ Never load everything "just in case".
 
 ## 5. Source of truth
 
-- AI context: `docs/AGENTS.md` (this file) + `~/.kronn/user-context/` for personal/role-specific overrides. The legacy `ai/` directory has been migrated to `docs/` (0.7.1).
+- Project documentation: `docs/AGENTS.md` (this file) + `~/.kronn/user-context/` for personal/role-specific overrides. The legacy `ai/` directory was migrated to `docs/` in 0.7.1 (kept here as historical note; tooling no longer reads from `ai/`).
 - Rust data models: `backend/src/models/mod.rs`.
 - TypeScript types: `frontend/src/types/generated.ts` (auto-generated from Rust).
 - API routes: `backend/src/lib.rs` (router definition in `build_router()`).
@@ -159,8 +159,8 @@ Use `docs/repo-map.md` to decide.
 - If a "logical fix" requires a large/risky refactor: add an entry to `docs/inconsistencies-tech-debt.md`.
 - **Write tests for every change** — see § 4 Testing rule. No exceptions.
 
-### AI context maintenance rule
-After completing a task: if you discovered something non-obvious (a gotcha, a missing pattern, an outdated doc), update the relevant `ai/` file before closing. Keep entries factual and concise.
+### Project documentation maintenance rule
+After completing a task: if you discovered something non-obvious (a gotcha, a missing pattern, an outdated doc), update the relevant `docs/` file before closing. Keep entries factual and concise.
 
 ---
 
@@ -223,18 +223,18 @@ GitHub Actions workflow (`.github/workflows/ci-test.yml`) triggered on push to `
 
 ### AI audit pipeline (4-state badge system)
 
-Projects display 3 badges next to the title: `[FileCode] AI context`, `[Cpu] AI audit`, `[ShieldCheck] Validated`.
+Projects display 3 badges next to the title: `[FileCode] Project docs`, `[Cpu] AI audit`, `[ShieldCheck] Validated`.
 
-| State | AI context | AI audit | Validated | Meaning |
-|-------|-----------|----------|-----------|---------|
-| NoTemplate | gray | gray | hidden | No `ai/` directory |
+| State | Project docs | AI audit | Validated | Meaning |
+|-------|-------------|----------|-----------|---------|
+| NoTemplate | gray | gray | hidden | No `docs/` directory |
 | TemplateInstalled | green | orange | gray | Template copied, audit pending |
 | Audited | green | green | gray | 10-step audit completed |
 | Validated | green | green | green | Validation discussion resolved all TODOs |
 
-- **Template install**: copies `ai/` skeleton + redirector files (CLAUDE.md, .cursorrules, etc.) + injects bootstrap prompt
-- **AI audit**: 10-step SSE streaming, ~20 min. **Token cost: ~50K–150K tokens per audit** (depends on project size and agent model). With Claude Sonnet API pricing, expect ~$0.50–$2.00 per audit. Fills all `ai/` files.
-- **Validation**: opens a prefilled discussion (locked title/prompt) where the AI asks questions about ambiguities. AI updates `ai/` files after each answer. Project page shows "validation en cours" + link to discussion (no validate button on project page).
+- **Template install**: copies `docs/` skeleton + redirector files (CLAUDE.md, .cursorrules, etc.) + injects bootstrap prompt
+- **AI audit**: 10-step SSE streaming, ~20 min. **Token cost: ~50K–150K tokens per audit** (depends on project size and agent model). With Claude Sonnet API pricing, expect ~$0.50–$2.00 per audit. Fills all `docs/` files.
+- **Validation**: opens a prefilled discussion (locked title/prompt) where the AI asks questions about ambiguities. AI updates `docs/` files after each answer. Project page shows "validation en cours" + link to discussion (no validate button on project page).
 - When the AI finishes all questions, it includes `KRONN:VALIDATION_COMPLETE` in its last message. This triggers a green banner in the discussion with a "Marquer l'audit comme valide" button. Similarly, `KRONN:BRIEFING_COMPLETE` signals the end of a pre-audit briefing discussion. `KRONN:WORKFLOW_READY` signals the AI Architect has produced a deployable workflow JSON (extracted from ```json block → one-click creation). **Bootstrap++ signals**: `KRONN:ARCHITECTURE_READY` → validate architecture, `KRONN:PLAN_READY` → validate plan, `KRONN:ISSUES_CREATED` → view project. Each gate sends a user message to continue the agent.
 - **Mark as validated**: injects `<!-- KRONN:VALIDATED:date -->` marker into `docs/AGENTS.md`.
 - AI config file badges (CLAUDE.md, .cursorrules, etc.) shown on a second line below the status badges.
@@ -515,10 +515,10 @@ Regression tests in `backend/src/core/rtk_detect.rs::tests` and `backend/src/api
 
 Redirectors to this file: `CLAUDE.md`, `GEMINI.md`, `AGENTS.md`, `.kiro/steering/instructions.md`, `.vibe/instructions.md`, `.cursorrules`, `.cursor/rules/repo-instructions.mdc`, `.github/copilot-instructions.md`, `.windsurfrules`, `.clinerules`.
 
-**Maintenance rule**: all content lives in `ai/`. Redirectors contain a summary of critical rules + pointer to `docs/AGENTS.md` as source of truth.
+**Maintenance rule**: all content lives in `docs/`. Redirectors contain a summary of critical rules + pointer to `docs/AGENTS.md` as source of truth.
 
 ---
 
 ## 12. Last updated
 
-AI context last reviewed: **2026-05-03** (v0.6.0 final — **Modularité unitaire des workflows** ajoutée à la 0.6.0 : 3 nouvelles briques pour factoriser : `quick_api_id` étendu à `StepType::ApiCall` single (était batch-only initialement), nouveau `quick_prompt_id` sur `StepType::Agent` (helper `quick_prompt_hydrate.rs`, charge `prompt_template`/`tier`/`skill_ids` du QP au run-time, per-field override), nouveau `StepType::JsonData` (zéro token / zéro réseau, payload JSON littéral validé ≤ 1 MiB, valide pour alimenter un Batch sur liste figée ou comme fixture de dev), nouveau préset `daily-host-audit` (JsonData → BatchQuickPrompt → Notify). Refactor : helper partagé `quick_api_hydrate.rs` factorisé depuis `batch_apicall_step.rs`. Pas de migration SQL (steps en JSON, `serde(default)` sur les nouveaux fields). Tests : 1369 backend / 934 frontend. v0.6.0 also includes — bidirectional host MCP sync, **Workflow Engine 0.7.x features**: `WorkflowGuards` with `RunStatus::StoppedByGuard` (migration 039), `StepOutputFormat::TypedSchema` JSON-schema-validated step outputs, `Workflow.artifacts` + `---ARTIFACT:name---` envelope persisted to workspace (migration 040), `StepType::Gate` human-in-the-loop with `RunStatus::WaitingApproval` + `POST /api/workflows/.../decide` + optional `gate_notify_url` webhook, `StepType::Exec` direct binary execution gated by `Workflow.exec_allowlist` (no `sh -c`, argv literal, migration 043), `ConditionAction::Goto { max_iterations }` loops + `WorkflowRun.state` durable scratchpad with `---STATE:k=v---` agent emit + `{{iter.<step>}}` / `{{state.<key>}}` template vars (migration 042), `Workflow.on_failure` rollback-only-on-Failed with `{{failed_step.*}}` templates (migration 041), self-contained per-item Export/Import for Workflows + Quick Prompts with bundled QP references and per-user-field stripping. Wizard adds 3 non-trivial presets (`v07-presets.ts`: AUTO_DEV / PR_GATE / DEPLOY_ROLLBACK), STATE pedagogy chips on Agent steps when `Goto` detected, RunDetail "À VALIDER" badge + "en pause depuis Xh" counter on `WaitingApproval` runs, rollback wizard accepts Notify+Agent+ApiCall (rejects Gate). Tests: 1490 backend + 908 frontend. **Previous v0.6.0 highlights** (kept for context): bidirectional host MCP sync (Phase 1 inbound discovery + Phase 2 adopt + Phase 3 outbound write to `~/.claude.json` & friends), scope-aware Claude routing, `_kronn` marker + tree-wide orphan cleanup, `HostSyncMode` model + migrations 036/037/038, `McpSource::HostImported`, `HostSyncChip` + `HostSyncPreview`, single-source-of-edit pattern (Plugins drawer canonical). v0.5.1 baseline kept for context: Kronn Docs sidecar, RTK integration, `StepType::ApiCall`, ActiveRunsPopover + inline Stop, secret themes.
+Project documentation last reviewed: **2026-05-03** (v0.6.0 final — **Modularité unitaire des workflows** ajoutée à la 0.6.0 : 3 nouvelles briques pour factoriser : `quick_api_id` étendu à `StepType::ApiCall` single (était batch-only initialement), nouveau `quick_prompt_id` sur `StepType::Agent` (helper `quick_prompt_hydrate.rs`, charge `prompt_template`/`tier`/`skill_ids` du QP au run-time, per-field override), nouveau `StepType::JsonData` (zéro token / zéro réseau, payload JSON littéral validé ≤ 1 MiB, valide pour alimenter un Batch sur liste figée ou comme fixture de dev), nouveau préset `daily-host-audit` (JsonData → BatchQuickPrompt → Notify). Refactor : helper partagé `quick_api_hydrate.rs` factorisé depuis `batch_apicall_step.rs`. Pas de migration SQL (steps en JSON, `serde(default)` sur les nouveaux fields). Tests : 1369 backend / 934 frontend. v0.6.0 also includes — bidirectional host MCP sync, **Workflow Engine 0.7.x features**: `WorkflowGuards` with `RunStatus::StoppedByGuard` (migration 039), `StepOutputFormat::TypedSchema` JSON-schema-validated step outputs, `Workflow.artifacts` + `---ARTIFACT:name---` envelope persisted to workspace (migration 040), `StepType::Gate` human-in-the-loop with `RunStatus::WaitingApproval` + `POST /api/workflows/.../decide` + optional `gate_notify_url` webhook, `StepType::Exec` direct binary execution gated by `Workflow.exec_allowlist` (no `sh -c`, argv literal, migration 043), `ConditionAction::Goto { max_iterations }` loops + `WorkflowRun.state` durable scratchpad with `---STATE:k=v---` agent emit + `{{iter.<step>}}` / `{{state.<key>}}` template vars (migration 042), `Workflow.on_failure` rollback-only-on-Failed with `{{failed_step.*}}` templates (migration 041), self-contained per-item Export/Import for Workflows + Quick Prompts with bundled QP references and per-user-field stripping. Wizard adds 3 non-trivial presets (`v07-presets.ts`: AUTO_DEV / PR_GATE / DEPLOY_ROLLBACK), STATE pedagogy chips on Agent steps when `Goto` detected, RunDetail "À VALIDER" badge + "en pause depuis Xh" counter on `WaitingApproval` runs, rollback wizard accepts Notify+Agent+ApiCall (rejects Gate). Tests: 1490 backend + 908 frontend. **Previous v0.6.0 highlights** (kept for context): bidirectional host MCP sync (Phase 1 inbound discovery + Phase 2 adopt + Phase 3 outbound write to `~/.claude.json` & friends), scope-aware Claude routing, `_kronn` marker + tree-wide orphan cleanup, `HostSyncMode` model + migrations 036/037/038, `McpSource::HostImported`, `HostSyncChip` + `HostSyncPreview`, single-source-of-edit pattern (Plugins drawer canonical). v0.5.1 baseline kept for context: Kronn Docs sidecar, RTK integration, `StepType::ApiCall`, ActiveRunsPopover + inline Stop, secret themes.

@@ -33,6 +33,12 @@ make dev-frontend
 
 Run `make typegen` after modifying any Rust model to regenerate `frontend/src/types/generated.ts`.
 
+## Refreshing README screenshots
+
+If your change touches the UI shown in the README (Projects dashboard, Quick Prompts tab, QP launch form, workflow wizard), reshoot the affected screenshots from the screenshot sandbox so the maintainer's real data never leaks into docs.
+
+See [`docs/operations/screenshot-sandbox.md`](docs/operations/screenshot-sandbox.md) for the workflow.
+
 ## Developer Certificate of Origin (DCO)
 
 This project uses the [DCO](DCO). Every commit **must** be signed off to certify that you have the right to submit it under the AGPL-3.0 license.

@@ -23,7 +23,7 @@ Kronn/
 │       │   ├── setup.rs        # Setup wizard + config endpoints (tokens, language, agents, server config, auth token, ui_language/stt_model/tts_voices for Tauri persistence)
 │       │   ├── projects.rs     # Project CRUD (~1396L) + scan + bootstrap + clone + template install + git ops + defaults
 │       │   ├── audit.rs        # AI audit pipeline (~1848L) — SSE audit, full_audit, drift, validation, briefing, cancel, skill detection
-│       │   ├── ai_docs.rs      # AI doc file browser (~184L) — list/search/read ai/ files
+│       │   ├── ai_docs.rs      # Project doc file browser (~184L) — list/search/read docs/ files
 │       │   ├── discover.rs     # Remote repo discovery (~426L) — GitHub/GitLab multi-source with token from MCPs
 │       │   ├── discussions.rs  # Discussion CRUD + SSE streaming + orchestration (~2880L). make_agent_stream checkpoints partial_response every 30s/100 chunks. /stop cancels via cancel_registry. /dismiss-partial force-recovers (shared path with boot recovery)
 │       │   ├── disc_helpers.rs # Pure agent/text helpers (~320L, 15 tests): agent_prompt_budget, auth_mode_for, agent_display_name, smart_truncate, summary_threshold/cooldown, is_compact_agent, language_instruction, estimate_extra_context_len
@@ -223,10 +223,10 @@ Kronn/
 │       ├── lib/__tests__/      # Lib tests (i18n, api, constants, types, regression, access-warnings)
 │       └── pages/__tests__/    # Page component tests (WorkflowsPage, DiscussionsPage, SettingsPage, McpPage)
 │
-├── ai/                         # AI context documentation (for this repo)
-├── templates/                  # AI context templates (for projects managed by Kronn)
+├── docs/                       # Project documentation (for this repo)
+├── templates/                  # Project documentation templates (installed in projects managed by Kronn)
 │   ├── CLAUDE.md
-│   └── ai/                     # Template files
+│   └── docs/                   # Template files
 │
 ├── lib/                        # CLI shell libraries (Bash 3.2+ compatible — macOS, Linux, WSL)
 │   ├── ui.sh                   # Terminal UI helpers (colors, prompts, banners). Interactive menu with fallback to numbered input on Bash < 4
@@ -275,4 +275,4 @@ Kronn/
 - Frontend tests in `__tests__/` directories alongside source (51 suites, 629 tests as of 2026-04-17). See `docs/testing-quality.md`.
 - Shell tests in `tests/bats/` (8 suites, 186 tests via bats-core). See `docs/testing-quality.md`.
 - CI pipeline: `.github/workflows/ci-test.yml` triggered on push to main + all PRs (backend clippy/test + frontend tsc/test + shell bats + security scan). Desktop build: `.github/workflows/desktop-build.yml`.
-- `templates/` directory contains the AI context template files (ai/ skeleton, CLAUDE.md, .cursorrules, etc.) mounted at `/app/templates:ro` in Docker.
+- `templates/` directory contains the project documentation template files (docs/ skeleton, CLAUDE.md, .cursorrules, etc.) mounted at `/app/templates:ro` in Docker.

@@ -47,6 +47,7 @@ pub(crate) fn resolve_briefing_notes(
 pub(crate) fn enrich_audit_status(project: &mut Project) {
     project.audit_status = scanner::detect_audit_status(&project.path);
     project.ai_todo_count = scanner::count_ai_todos(&project.path);
+    project.tech_debt_count = scanner::count_tech_debt(&project.path);
     let resolved = scanner::resolve_host_path(&project.path);
     project.needs_docs_migration = scanner::needs_docs_migration(&resolved);
     crate::core::docs_migration::backfill_docs_index(&resolved);

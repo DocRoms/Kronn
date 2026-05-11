@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, X, Send, Sparkles, Loader2, Minus, Maximize2 } from 'lucide-react';
+import { Bot, X, Send, Sparkles, Loader2, Minus, Maximize2, ChevronDown, ClipboardPaste, Link2, MessageSquareText } from 'lucide-react';
+import '../aiHelper.css';
 import { discussions as discussionsApi } from '../../lib/api';
 import { AGENT_LABELS, agentColor } from '../../lib/constants';
 import { t as translate, type UILocale } from '../../lib/i18n';
@@ -47,7 +48,12 @@ export interface ApiCallAiHelperProps {
   t: (key: string, ...args: (string | number)[]) => string;
 }
 
-type Phase = 'closed' | 'picking-agent' | 'chatting';
+// 0.8.1 UX redesign: collapsed from 3 phases (closed / picking-agent /
+// chatting) to 2. The agent picker is no longer a separate modal phase:
+// the chat opens immediately on the first installed agent, and the
+// header dropdown lets the user switch on the fly. Reduces friction:
+// "click trigger → see chat" instead of "click → pick → see chat".
+type Phase = 'closed' | 'chatting';
 
 interface ChatMessage {
   role: 'user' | 'assistant';
@@ -272,6 +278,11 @@ export function ApiCallAiHelper({
     [configLanguage],
   );
   const [phase, setPhase] = useState<Phase>('closed');
+  // Active agent for the current chat. Defaults to the first installed
+  // agent and is mutable mid-conversation via the header dropdown (when
+  // the user switches, the discussion resets — see `switchAgent` below).
+  const [activeAgent, setActiveAgent] = useState<AgentType | null>(null);
+  const [agentMenuOpen, setAgentMenuOpen] = useState(false);
   const [discussionId, setDiscussionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [streaming, setStreaming] = useState(false);
@@ -303,6 +314,22 @@ export function ApiCallAiHelper({
     }
   }, [phase, minimized, streaming]);
 
+  // Close the agent menu when clicking outside. The menu is a small
+  // floating list under the chevron; without this it stays open after
+  // selecting and the next click anywhere just dismisses it instead of
+  // performing the user's actual intent.
+  useEffect(() => {
+    if (!agentMenuOpen) return;
+    const handler = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest('.wf-apicall-ai-agent-selector')) {
+        setAgentMenuOpen(false);
+      }
+    };
+    window.addEventListener('mousedown', handler);
+    return () => window.removeEventListener('mousedown', handler);
+  }, [agentMenuOpen]);
+
   // Auto-scroll to the bottom on new content. Use `behavior: 'auto'` (jump,
   // not smooth) so streaming feels instantaneous and doesn't fight against
   // chunks landing back-to-back.
@@ -333,19 +360,52 @@ export function ApiCallAiHelper({
     setAppliedSignatures(new Set());
     setStreaming(false);
     setMinimized(false);
+    setAgentMenuOpen(false);
+    setActiveAgent(null);
     setPhase('closed');
   }, [discussionId]);
 
+  // We forward-declare the switchAgent ref because startWithAgent is
+  // defined just below and we need to call it from switchAgent without a
+  // circular dep in useCallback. Set after startWithAgent is defined.
+  const startWithAgentRef = useRef<((agent: AgentType) => Promise<void>) | null>(null);
+
+  // Triggered by the agent dropdown in the bubble header. Replaces the
+  // standalone 'picking-agent' phase from 0.8.0: the user always sees the
+  // chat, and switching agents is one click in the header rather than a
+  // full modality change. Reset is brutal (kill old discussion, start a
+  // new one with the same system prompt) because partial migration of an
+  // in-flight conversation across agents is messy and not what users want
+  // when they switch — they're saying "this agent isn't getting it, let
+  // me try another from scratch".
+  const switchAgent = useCallback((agent: AgentType) => {
+    setAgentMenuOpen(false);
+    if (agent === activeAgent || streaming) return;
+    abortRef.current?.abort();
+    if (discussionId) {
+      discussionsApi.delete(discussionId).catch(() => {});
+    }
+    setDiscussionId(null);
+    setMessages([]);
+    setInput('');
+    setError(null);
+    setAppliedSignatures(new Set());
+    // Prime a fresh discussion for the new agent. Phase stays 'chatting'
+    // because the bubble is already open; only the contents reset.
+    void startWithAgentRef.current?.(agent);
+  }, [activeAgent, streaming, discussionId]);
+
   const startWithAgent = useCallback(async (agent: AgentType) => {
-    // Transition to the chat phase first so the user gets immediate visual
-    // feedback — without this the picker silently stayed open while the
-    // discussion was being created (or while we surfaced an error), making
-    // it look like the click did nothing.
+    // 0.8.1 UX: open the bubble and prime an ephemeral discussion with
+    // the system prompt baked in, but DON'T fire the agent right away.
+    // The user sees the welcome state (starter chips) and only spends
+    // tokens once they pick a chip or type their first question. Saves
+    // ~200 tokens per helper-open + removes the "thinking…" spinner
+    // on a chat the user hasn't even read yet.
     setPhase('chatting');
+    setActiveAgent(agent);
     setMessages([]);
     setError(null);
-    setStreaming(true);
-    setMessages([{ role: 'assistant', text: '' }]);
     try {
       // `project_id: null` is accepted — this is an ephemeral, one-shot
       // helper conversation. The real context the agent needs is the API
@@ -362,38 +422,18 @@ export function ApiCallAiHelper({
         initial_prompt: buildSystemPrompt(selectedServer, step, lastTestResponse, lastTestError, agentT),
       });
       setDiscussionId(disc.id);
-
-      const controller = new AbortController();
-      abortRef.current = controller;
-
-      await discussionsApi.runAgent(
-        disc.id,
-        chunk => {
-          setMessages(prev => {
-            if (prev.length === 0) return [{ role: 'assistant', text: chunk }];
-            const last = prev[prev.length - 1];
-            if (last.role !== 'assistant') {
-              return [...prev, { role: 'assistant', text: chunk }];
-            }
-            return [...prev.slice(0, -1), { ...last, text: last.text + chunk }];
-          });
-        },
-        () => setStreaming(false),
-        err => {
-          // Surface the error in the bubble; also log so a power user can
-          // inspect it in DevTools without re-running.
-          console.error('[ApiCallAiHelper] runAgent error:', err);
-          setError(err);
-          setStreaming(false);
-        },
-        controller.signal,
-      );
     } catch (e) {
       console.error('[ApiCallAiHelper] startWithAgent failed:', e);
       setError(String(e));
-      setStreaming(false);
     }
   }, [projectId, selectedServer, step, lastTestResponse, lastTestError, t, configLanguage, agentT]);
+
+  // Re-bind the ref every time startWithAgent's identity changes (when
+  // any of its deps change). switchAgent reads this ref so it can call
+  // the freshest version without listing all deps and re-creating itself.
+  useEffect(() => {
+    startWithAgentRef.current = startWithAgent;
+  }, [startWithAgent]);
 
   const sendMessage = useCallback(async () => {
     const userText = input.trim();
@@ -477,11 +517,10 @@ export function ApiCallAiHelper({
               setError(t('wf.apicall.helper.noAgents'));
               return;
             }
-            if (installedAgents.length === 1) {
-              void startWithAgent(installedAgents[0]);
-              return;
-            }
-            setPhase('picking-agent');
+            // 0.8.1 UX: skip the standalone picker. Open the chat
+            // directly with the first installed agent. The user can
+            // switch via the header dropdown once the bubble is open.
+            void startWithAgent(installedAgents[0]);
           }}
           title={triggerHint}
         >
@@ -492,42 +531,6 @@ export function ApiCallAiHelper({
             {error}
           </span>
         )}
-      </>
-    );
-  }
-
-  // ─── Phase: picking-agent (popover) ─────────────────────────────────
-  if (phase === 'picking-agent') {
-    return (
-      <>
-        <button
-          type="button"
-          className="wf-apicall-ai-trigger wf-apicall-ai-trigger-active"
-          onClick={() => setPhase('closed')}
-        >
-          <Sparkles size={11} /> {t('wf.apicall.helper.trigger')}
-        </button>
-        <div className="wf-apicall-ai-agent-popover" role="dialog" aria-label={t('wf.apicall.helper.pickAgent')}>
-          <div className="wf-apicall-ai-popover-header">{t('wf.apicall.helper.pickAgent')}</div>
-          {installedAgents.map(agent => (
-            <button
-              key={agent}
-              type="button"
-              className="wf-apicall-ai-agent-option"
-              onClick={() => void startWithAgent(agent)}
-            >
-              <span className="wf-apicall-ai-agent-dot" style={{ background: agentColor(agent) }} />
-              {AGENT_LABELS[agent] ?? agent}
-            </button>
-          ))}
-          <button
-            type="button"
-            className="wf-apicall-ai-agent-cancel"
-            onClick={() => setPhase('closed')}
-          >
-            {t('wf.apicall.helper.cancel')}
-          </button>
-        </div>
       </>
     );
   }
@@ -546,7 +549,45 @@ export function ApiCallAiHelper({
         <div className="wf-apicall-ai-bubble" role="dialog" aria-label={t('wf.apicall.helper.bubbleTitle')}>
           <div className="wf-apicall-ai-bubble-header">
             <Bot size={13} />
-            <strong>{t('wf.apicall.helper.bubbleTitle')}</strong>
+            {/* 0.8.1 UX: agent selector lives directly in the header, replacing
+                the standalone picking-agent phase. The chevron toggles a small
+                dropdown with all installed agents; click switches and resets
+                the conversation. */}
+            <div className="wf-apicall-ai-agent-selector">
+              <button
+                type="button"
+                className="wf-apicall-ai-agent-trigger"
+                onClick={() => setAgentMenuOpen(o => !o)}
+                disabled={streaming}
+                aria-haspopup="listbox"
+                aria-expanded={agentMenuOpen}
+                title={t('wf.apicall.helper.switchAgent')}
+              >
+                <span
+                  className="wf-apicall-ai-agent-dot"
+                  style={{ background: activeAgent ? agentColor(activeAgent) : 'var(--kr-text-ghost)' }}
+                />
+                <span>{activeAgent ? (AGENT_LABELS[activeAgent] ?? activeAgent) : t('wf.apicall.helper.bubbleTitle')}</span>
+                <ChevronDown size={11} />
+              </button>
+              {agentMenuOpen && (
+                <div className="wf-apicall-ai-agent-menu" role="listbox">
+                  {installedAgents.map(agent => (
+                    <button
+                      key={agent}
+                      type="button"
+                      role="option"
+                      aria-selected={agent === activeAgent}
+                      className={`wf-apicall-ai-agent-option${agent === activeAgent ? ' wf-apicall-ai-agent-option-active' : ''}`}
+                      onClick={() => switchAgent(agent)}
+                    >
+                      <span className="wf-apicall-ai-agent-dot" style={{ background: agentColor(agent) }} />
+                      {AGENT_LABELS[agent] ?? agent}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
             <span className="wf-apicall-ai-bubble-eph">{t('wf.apicall.helper.ephemeral')}</span>
             <button
               type="button"
@@ -568,7 +609,66 @@ export function ApiCallAiHelper({
             </button>
           </div>
 
+          {/* 0.8.1 UX: context chip moved to top so users see what the agent
+              already knows BEFORE the chat content scrolls into view. */}
+          <div className="wf-apicall-ai-context-chip wf-apicall-ai-context-chip-top" title={t('wf.apicall.helper.contextHint')}>
+            <span>📎</span>
+            <span className="wf-apicall-ai-context-chip-label">
+              {selectedServer?.name ?? t('wf.apicall.helper.contextNoApi')}
+              {step.api_endpoint_path ? ` · ${step.api_endpoint_path}` : ''}
+              {lastTestError ? ` · ${t('wf.apicall.helper.contextLastErr')}` : ''}
+              {!lastTestError && lastTestResponse !== undefined && lastTestResponse !== null
+                ? ` · ${t('wf.apicall.helper.contextLastOk')}`
+                : ''}
+            </span>
+          </div>
+
           <div className="wf-apicall-ai-bubble-messages">
+            {/* Welcome state: when no user message has been sent yet, show a
+                short intro + 3 clickable starter chips. Clicking a chip
+                fills the input with a template so the user can adjust and
+                send. Cleaner than auto-firing the agent on open (which
+                burns tokens for a generic "how can I help" reply nobody
+                reads). */}
+            {messages.length === 0 && !streaming && (
+              <div className="wf-apicall-ai-welcome">
+                <div className="wf-apicall-ai-welcome-title">
+                  {t('wf.apicall.helper.welcome')}
+                </div>
+                <div className="wf-apicall-ai-welcome-chips">
+                  <button
+                    type="button"
+                    className="wf-apicall-ai-starter-chip"
+                    onClick={() => {
+                      setInput(t('wf.apicall.helper.starter.buildPrompt'));
+                      inputRef.current?.focus();
+                    }}
+                  >
+                    <MessageSquareText size={11} /> {t('wf.apicall.helper.starter.build')}
+                  </button>
+                  <button
+                    type="button"
+                    className="wf-apicall-ai-starter-chip"
+                    onClick={() => {
+                      setInput(t('wf.apicall.helper.starter.endpointPrompt'));
+                      inputRef.current?.focus();
+                    }}
+                  >
+                    <Link2 size={11} /> {t('wf.apicall.helper.starter.endpoint')}
+                  </button>
+                  <button
+                    type="button"
+                    className="wf-apicall-ai-starter-chip"
+                    onClick={() => {
+                      setInput(t('wf.apicall.helper.starter.bodyPrompt'));
+                      inputRef.current?.focus();
+                    }}
+                  >
+                    <ClipboardPaste size={11} /> {t('wf.apicall.helper.starter.body')}
+                  </button>
+                </div>
+              </div>
+            )}
             {messages.map((msg, idx) => (
               <ChatMessageView
                 key={idx}
@@ -591,18 +691,6 @@ export function ApiCallAiHelper({
               {error}
             </div>
           )}
-
-          <div className="wf-apicall-ai-context-chip" title={t('wf.apicall.helper.contextHint')}>
-            <span>📎</span>
-            <span className="wf-apicall-ai-context-chip-label">
-              {selectedServer?.name ?? t('wf.apicall.helper.contextNoApi')}
-              {step.api_endpoint_path ? ` · ${step.api_endpoint_path}` : ''}
-              {lastTestError ? ` · ${t('wf.apicall.helper.contextLastErr')}` : ''}
-              {!lastTestError && lastTestResponse !== undefined && lastTestResponse !== null
-                ? ` · ${t('wf.apicall.helper.contextLastOk')}`
-                : ''}
-            </span>
-          </div>
 
           <div className="wf-apicall-ai-bubble-input">
             <textarea
