@@ -3,4 +3,25 @@
 /**
  * Real-time message exchanged between Kronn instances via WebSocket.
  */
-export type WsMessage = { "type": "presence", from_pseudo: string, from_invite_code: string, online: boolean, } | { "type": "ping", timestamp: bigint, } | { "type": "pong", timestamp: bigint, } | { "type": "chat_message", shared_discussion_id: string, message_id: string, from_pseudo: string, from_avatar_email: string | null, from_invite_code: string, content: string, timestamp: bigint, } | { "type": "discussion_invite", shared_discussion_id: string, title: string, from_pseudo: string, from_invite_code: string, };
+export type WsMessage = { "type": "presence", from_pseudo: string, from_invite_code: string, online: boolean, } | { "type": "ping", timestamp: bigint, } | { "type": "pong", timestamp: bigint, } | { "type": "chat_message", shared_discussion_id: string, message_id: string, from_pseudo: string, from_avatar_email: string | null, from_invite_code: string, content: string, timestamp: bigint, } | { "type": "discussion_invite", shared_discussion_id: string, title: string, from_pseudo: string, from_invite_code: string, } | { "type": "batch_run_finished", run_id: string, 
+/**
+ * Id of the child discussion whose completion triggered the final tick.
+ * The frontend uses it to clear its per-disc `sendingMap` spinner, since
+ * batch children are fire-and-forget (no SSE stream consumer on the client
+ * to drive the usual cleanup path).
+ */
+discussion_id: string, batch_name: string | null, batch_total: number, batch_completed: number, batch_failed: number, } | { "type": "batch_run_progress", run_id: string, 
+/**
+ * Id of the child discussion that just completed — frontend uses it to
+ * clear the per-disc sendingMap indicator.
+ */
+discussion_id: string, batch_total: number, batch_completed: number, batch_failed: number, } | { "type": "workflow_run_updated", run_id: string, workflow_id: string, status: string, 
+/**
+ * Index of the currently-running (or just-completed) step. -1 when
+ * the run starts and no step is in flight yet.
+ */
+step_index: number, total_steps: number, 
+/**
+ * Step name at `step_index`, or null when between steps.
+ */
+current_step: string | null, } | { "type": "partial_response_recovered", discussion_ids: Array<string>, };

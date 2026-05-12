@@ -16,6 +16,7 @@ import {
   ToggleLeft, ToggleRight,
   Upload, Download, AlertTriangle,
 } from 'lucide-react';
+import { useWebSocket } from '../hooks/useWebSocket';
 import { WorkflowDetail } from '../components/workflows/WorkflowDetail';
 import { WorkflowWizard } from '../components/workflows/WorkflowWizard';
 import { QuickPromptForm } from '../components/workflows/QuickPromptForm';
@@ -51,6 +52,11 @@ interface WorkflowsPageProps {
    * jump to the discussions tab and focus that batch group. */
   onNavigateToBatch?: (batchRunId: string) => void;
   toast?: (msg: string, type?: 'success' | 'error' | 'info') => void;
+  /** 0.8.2 — Deep-link from the audit-validation CTA: opens the create
+   * wizard with a preset pre-applied (e.g. `ticket-to-pr` for AutoPilot)
+   * and the project pre-selected. Ack via `onPendingPresetConsumed`. */
+  pendingPreset?: { presetId: string; projectId: string } | null;
+  onPendingPresetConsumed?: () => void;
 }
 
 const TRIGGER_LABELS: Record<string, string> = {
@@ -84,7 +90,7 @@ const STATUS_COLORS: Record<string, string> = {
   StoppedByGuard: 'var(--kr-warning)',
 };
 
-export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, configLanguage, onNavigateDiscussion, onBatchLaunched, initialSelectedWorkflowId, onInitialSelectionConsumed, onNavigateToBatch, toast: toastProp }: WorkflowsPageProps) {
+export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, configLanguage, onNavigateDiscussion, onBatchLaunched, initialSelectedWorkflowId, onInitialSelectionConsumed, onNavigateToBatch, toast: toastProp, pendingPreset, onPendingPresetConsumed }: WorkflowsPageProps) {
   const { t } = useT();
   const isMobile = useIsMobile();
   const [tab, setTab] = useState<'workflows' | 'quickPrompts' | 'quickApis'>('workflows');
@@ -147,6 +153,18 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   // lazily on tab open since not every user wires API plugins.
   const [availableApiPlugins, setAvailableApiPlugins] = useState<ApiPluginOption[]>([]);
   const [showCreate, setShowCreate] = useState(false);
+  // 0.8.2 — Local snapshot of the pending preset, captured at the moment
+  // `pendingPreset` arrives. We can't pass `pendingPreset` directly to
+  // WorkflowWizard because Dashboard clears it on consume (causing the
+  // wizard to remount without the preset). Snapshot survives the ack.
+  const [pendingPresetLocal, setPendingPresetLocal] = useState<{ presetId: string; projectId: string } | null>(null);
+  useEffect(() => {
+    if (!pendingPreset) return;
+    setPendingPresetLocal(pendingPreset);
+    setShowCreate(true);
+    onPendingPresetConsumed?.();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingPreset]);
   const [editingWorkflow, setEditingWorkflow] = useState<Workflow | null>(null);
   // 0.7.0 UX pass — import drawer state. Set when the user clicks the
   // "Importer" button on either tab. Carries the parsed JSON content +
@@ -273,6 +291,22 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     onInitialSelectionConsumed?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialSelectedWorkflowId]);
+
+  // 0.8.2 — Live workflow-run updates. The SSE stream is tab-local: if the
+  // user opens the workflow detail in a *different* tab while a run is in
+  // flight (or after a hard refresh on a paused Gate), liveRun is null and
+  // the page never updates. WorkflowRunUpdated is broadcast on every
+  // status flip + step transition; we mirror it into detailRuns so the
+  // Gate appears live without the user having to F5.
+  useWebSocket((msg) => {
+    if (msg.type !== 'workflow_run_updated') return;
+    if (!detailWorkflow || msg.workflow_id !== detailWorkflow.id) return;
+    // Skip when our own SSE driver is already feeding live state — it has
+    // richer chunked output the WS event can't reproduce, and a re-fetch
+    // mid-stream would flicker the run list.
+    if (liveRun && liveRun.workflowId === detailWorkflow.id && !liveRun.finished) return;
+    workflowsApi.listRuns(detailWorkflow.id).then(setDetailRuns).catch(() => {});
+  });
 
   /** 0.6.0 UX pass — actually fire the trigger (with optional variables).
    *  Split out so handleTrigger can intercept and show the launch modal
@@ -919,8 +953,10 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
           installedAgentTypes={installedAgentTypes}
           agentAccess={agentAccess}
           configLanguage={configLanguage}
-          onDone={() => { setShowCreate(false); refetch(); }}
-          onCancel={() => setShowCreate(false)}
+          initialPresetId={pendingPresetLocal?.presetId}
+          initialProjectId={pendingPresetLocal?.projectId}
+          onDone={() => { setShowCreate(false); setPendingPresetLocal(null); refetch(); }}
+          onCancel={() => { setShowCreate(false); setPendingPresetLocal(null); }}
         />
       )}
 

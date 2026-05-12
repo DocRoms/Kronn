@@ -3,7 +3,7 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { projects as projectsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { useIsMobile } from '../hooks/useMediaQuery';
-import { isValidationDisc, isBriefingDisc, isBootstrapDisc, isUsable } from '../lib/constants';
+import { isValidationDisc, isBriefingDisc, isBootstrapDisc, isUsable, isTrackerMcp } from '../lib/constants';
 import { AiDocViewer } from './AiDocViewer';
 import { ProjectSkills } from './ProjectSkills';
 import {
@@ -17,13 +17,19 @@ import {
   Loader2,
   MessageSquare, AlertTriangle,
   Play, FileCode, ShieldCheck, StopCircle, BookOpen, Rocket, Check, RefreshCw, Puzzle,
-  FolderInput,
+  FolderInput, Plug, X,
 } from 'lucide-react';
 
 const STATUS_COLORS: Record<string, string> = {
   Pending: 'var(--kr-warning)', Running: 'var(--kr-cyan)', Success: 'var(--kr-success)',
   Failed: 'var(--kr-error)', Cancelled: 'var(--kr-cancelled)', WaitingApproval: 'var(--kr-accent-ink)',
 };
+
+/** Format a millisecond duration as `Xs` under 60s, `MmSSs` past 60s. */
+function formatElapsedShort(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return s >= 60 ? `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s` : `${s}s`;
+}
 
 /** Agents that can run audits/briefings (need filesystem access + CLI mode). Excludes Vibe (API-only). */
 const canAudit = (a: AgentDetection) => isUsable(a) && a.agent_type !== 'Vibe';
@@ -98,6 +104,12 @@ export function ProjectCard({
   const [auditStep, setAuditStep] = useState(0);
   const [auditTotalSteps, setAuditTotalSteps] = useState(0);
   const [auditCurrentFile, setAuditCurrentFile] = useState('');
+  // 0.8.2 TD #233 — wall-clock elapsed for the live audit. The server-side
+  // `AuditProgress` carries `started_at`; we just hold it in state and
+  // drive a per-second re-render via `auditTick` so the displayed value
+  // updates without re-polling the network. Cleared when the audit ends.
+  const [auditStartedAt, setAuditStartedAt] = useState<number | null>(null);
+  const [, setAuditTick] = useState(0);
   const [auditAbortController, setAuditAbortController] = useState<AbortController | null>(null);
   const [auditAgentChoice, setAuditAgentChoice] = useState<AgentType | undefined>(undefined);
   /// Briefing-start in flight — pre-fix the button was only disabled when
@@ -156,6 +168,32 @@ export function ProjectCard({
   // actively suggests adding some before either flow is launched.
   const shouldPulseMcpHint = projMcps.length === 0
     && (proj.audit_status === 'NoTemplate' || proj.audit_status === 'TemplateInstalled' || proj.audit_status === 'Bootstrapped');
+
+  // 0.8.2 — Tracker-MCP hint. The audit Phase 3 + AutoPilot workflow get
+  // dramatically more useful when a GitHub/GitLab/Jira/Linear MCP is
+  // wired (real ticket creation, real issue context, "fetch_issue" step
+  // pointing at a real plugin). `isTrackerMcp` mirrors the backend's
+  // detection (`detect_issue_tracker_mcp` in helpers.rs:325).
+  const trackerMcps = projMcps.filter(c =>
+    isTrackerMcp(c.server_name) || isTrackerMcp(c.server_id ?? ''),
+  );
+  // Dismissible per project so users who genuinely don't want a tracker
+  // (perso projects with no issue queue) can hide the hint forever.
+  const trackerHintDismissKey = `kronn:trackerHintDismissed:${proj.id}`;
+  const [trackerHintDismissed, setTrackerHintDismissed] = useState<boolean>(() => {
+    try { return localStorage.getItem(trackerHintDismissKey) === '1'; } catch { return false; }
+  });
+  const dismissTrackerHint = () => {
+    try { localStorage.setItem(trackerHintDismissKey, '1'); } catch { /* swallow quota / private-mode */ }
+    setTrackerHintDismissed(true);
+  };
+  // Show the hint when:
+  //   - audit hasn't run yet (NoTemplate / TemplateInstalled / Bootstrapped), OR
+  //   - audit already ran (Audited / Validated) — pre-AutoPilot suggestion
+  //   AND no tracker MCP is wired AND user hasn't dismissed.
+  const shouldShowTrackerHint = !trackerHintDismissed
+    && trackerMcps.length === 0
+    && proj.audit_status !== 'NoTemplate'; // hide on truly fresh project — the empty-MCP pulse already nudges
 
   const handleDeleteProject = async (id: string, hard: boolean) => {
     await projectsApi.delete(id, hard);
@@ -396,6 +434,12 @@ export function ProjectCard({
           setAuditStep(p.step_index);
           setAuditTotalSteps(p.total_steps);
           setAuditCurrentFile(p.current_file ?? '');
+          // 0.8.2 TD #233 — surface elapsed for the live counter. Parse
+          // once per poll; the per-second tick effect drives re-render.
+          const startedMs = Date.parse(p.started_at);
+          if (!Number.isNaN(startedMs)) {
+            setAuditStartedAt(prev => (prev === startedMs ? prev : startedMs));
+          }
           // Refresh the checkpoint so its age stays within the 1 h TTL.
           saveAuditCheckpoint({
             projectId: p.project_id,
@@ -414,6 +458,7 @@ export function ProjectCard({
           clearAuditCheckpoint(proj.id);
           auditActiveRef.current = false;
           setAuditActive(false);
+          setAuditStartedAt(null);
           if (auditPollRef.current) {
             clearInterval(auditPollRef.current);
             auditPollRef.current = null;
@@ -458,6 +503,17 @@ export function ProjectCard({
       }
     };
   }, []);
+
+  // 0.8.2 TD #233 — drive the elapsed counter. Only ticks while the audit
+  // is active to avoid a useless 1s re-render loop on idle cards. The
+  // interval triggers re-renders; the displayed value is computed inline
+  // from `auditStartedAt` so the counter stays a real wall-clock value
+  // (no skew if the tick misses by a few ms).
+  useEffect(() => {
+    if (!auditActive || auditStartedAt === null) return;
+    const id = setInterval(() => setAuditTick(t => t + 1), 1000);
+    return () => clearInterval(id);
+  }, [auditActive, auditStartedAt]);
 
   return (
     <div id={`project-${proj.id}`} className="dash-card" data-active={isOpen || auditActive}>
@@ -943,6 +999,25 @@ export function ProjectCard({
                     <p className="dash-audit-desc">
                       {t('audit.fullAuditDesc')}
                     </p>
+                    {shouldShowTrackerHint && (
+                      <div className="dash-tracker-hint">
+                        <span className="dash-tracker-hint-text">
+                          💡 {t('audit.trackerHint')}
+                        </span>
+                        <div className="dash-tracker-hint-actions">
+                          <button className="dash-icon-btn" onClick={() => onNavigate('mcps')}>
+                            <Plug size={12} /> {t('audit.trackerHintConfigure')}
+                          </button>
+                          <button
+                            className="dash-icon-btn dash-tracker-hint-dismiss"
+                            onClick={dismissTrackerHint}
+                            title={t('audit.trackerHintDismiss')}
+                          >
+                            <X size={12} />
+                          </button>
+                        </div>
+                      </div>
+                    )}
                     <div className="flex-row gap-4">
                       <select
                         className="dash-audit-select"
@@ -974,6 +1049,11 @@ export function ProjectCard({
                       <span className="dash-audit-step">
                         {t('audit.step', auditStep, auditTotalSteps, auditCurrentFile)}
                       </span>
+                      {auditStartedAt !== null && (
+                        <span className="text-2xs text-ghost" title={t('audit.elapsedTooltip')}>
+                          {t('audit.elapsed', formatElapsedShort(Date.now() - auditStartedAt))}
+                        </span>
+                      )}
                       <button
                         className="dash-icon-btn dash-btn-cancel"
                         onClick={handleCancelAudit}

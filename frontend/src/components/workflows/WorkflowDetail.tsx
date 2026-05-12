@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import { useT } from '../../lib/I18nContext';
 import { workflows as workflowsApi, quickPrompts as quickPromptsApi } from '../../lib/api';
 import type { BatchPreview } from '../../lib/api';
@@ -1038,17 +1038,84 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
   // as the live run finishes (cleared by the !active branch in the
   // effect's deps).
   const [, tickElapsed] = useState(0);
+  // 1Hz tick to refresh elapsed badges. Runs whenever this detail page is
+  // mounted — cost is one re-render per second of a single component,
+  // cheap. The render itself short-circuits to nothing when no live view
+  // is active (the live block is gated on `effectiveLiveRun`).
   useEffect(() => {
-    if (!liveRun || liveRun.finished) return;
     const id = setInterval(() => tickElapsed(t => t + 1), 1000);
     return () => clearInterval(id);
-  }, [liveRun?.finished, liveRun?.workflowId]);
+  }, []);
 
   /** Format a millisecond duration as `Xs` for short, `MmSSs` past 60s. */
   const fmtDuration = (ms: number): string => {
     const s = Math.max(0, Math.floor(ms / 1000));
     return s >= 60 ? `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s` : `${s}s`;
   };
+
+  // 0.8.2 — When the user navigates away then back to a workflow that's
+  // still running (or paused on a Gate), the SSE-fed `liveRun` is null
+  // because the stream was tied to the original tab. Pre-fix, the page
+  // collapsed to the static step-config view — no progress bar, no live
+  // counter — and the user thought it was "stuck/blocked". Derive a
+  // pseudo-live view from the latest non-finished run in `runs[]` so the
+  // progress UI persists across page navigations. Streaming text
+  // (`currentStepText`) stays empty — that's still SSE-only — but the
+  // step list, durations, and current-step indicator come back.
+  const effectiveLiveRun: LiveRunState | null = useMemo(() => {
+    if (liveRun && liveRun.workflowId === workflow.id && !liveRun.finished) return liveRun;
+    const activeRun = runs.find(r => r.status === 'Running' || r.status === 'WaitingApproval');
+    if (!activeRun) return null;
+    const completed = activeRun.step_results;
+    // Current step = the next step in the workflow that hasn't been
+    // recorded yet. If the trailing step_result is WaitingApproval, that
+    // gate IS the "current" step. Otherwise, jump to the next.
+    const last = completed[completed.length - 1];
+    let currentStepName: string | null = null;
+    if (last && last.status === 'WaitingApproval') {
+      currentStepName = last.step_name;
+    } else {
+      const nextIdx = completed.length; // # of finished step_results
+      currentStepName = workflow.steps[nextIdx]?.name ?? null;
+    }
+    return {
+      workflowId: workflow.id,
+      runId: activeRun.id,
+      currentStep: currentStepName,
+      stepIndex: completed.length,
+      totalSteps: workflow.steps.length,
+      // Only count fully-finished steps (Success/Failed) into completedSteps
+      // so the trailing WaitingApproval row renders as "current" not "done".
+      completedSteps: completed.filter(s => s.status === 'Success' || s.status === 'Failed'),
+      currentStepText: '',
+      startedAt: new Date(activeRun.started_at).getTime(),
+      // currentStepStartedAt: prefer the running step's authoritative
+      // started_at (stamped by the runner). If the step has no result yet
+      // (very brief window between dispatch and the first persist), fall
+      // back to the legacy estimate `runStart + sum of completed durations`.
+      // Reading `last.started_at` (the gate's start) was wrong — it
+      // produced a counter that included the gate pause in the next
+      // step's elapsed.
+      currentStepStartedAt: (() => {
+        // If trailing step_result is WaitingApproval, `last` IS the
+        // current step (the gate) — use its started_at directly.
+        if (last && last.status === 'WaitingApproval' && last.started_at) {
+          return new Date(last.started_at).getTime();
+        }
+        // Otherwise, look up the currently-running step's result.
+        const runningResult = completed.find(s => s.step_name === currentStepName && s.status === 'Running');
+        if (runningResult?.started_at) return new Date(runningResult.started_at).getTime();
+        // Legacy fallback: estimate from completed durations. Correct as
+        // long as the runner doesn't lag between steps (it usually doesn't).
+        const sumCompleted = completed
+          .filter(s => s.status === 'Success' || s.status === 'Failed')
+          .reduce((acc, s) => acc + (s.duration_ms || 0), 0);
+        return new Date(activeRun.started_at).getTime() + sumCompleted;
+      })(),
+      finished: false,
+      status: activeRun.status,
+    };
+  }, [liveRun, runs, workflow.id, workflow.steps]);
 
   // Resolve Quick Prompts referenced by BatchQuickPrompt steps so the step card
   // can show the QP name/icon/description instead of just an opaque id. One
@@ -1139,17 +1206,21 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
         <StepCard key={i} step={step} index={i} agentAccess={agentAccess} projectId={workflow.project_id} t={t} quickPromptsById={quickPromptsById} workflowId={workflow.id} allSteps={workflow.steps} />
       ))}
 
-      {/* Live run progress */}
-      {liveRun && liveRun.workflowId === workflow.id && !liveRun.finished && (
-        <div className="wf-live-run">
+      {/* Live run progress — driven by SSE when active in the current tab,
+          or synthesized from `runs[]` when the user navigated away and
+          back (cf. `effectiveLiveRun` useMemo above). The IIFE aliases
+          `effectiveLiveRun` back to `liveRun` so the existing JSX (≈ 14
+          references) doesn't need a sweep. */}
+      {effectiveLiveRun && (() => { const liveRun = effectiveLiveRun; return (
+        <div className="wf-live-run">{/* live block — */}
           <div className="flex-row gap-4 mb-5" style={{ alignItems: 'center' }}>
             <Loader2 size={12} className="wf-spin" style={{ color: 'var(--kr-cyan)' }} />
             <span className="text-base font-bold" style={{ color: 'var(--kr-cyan)' }}>
               {t('wf.running')}
             </span>
-            {liveRun.totalSteps > 0 && (
+            {effectiveLiveRun.totalSteps > 0 && (
               <span className="text-xs text-muted">
-                ({liveRun.completedSteps.length}/{liveRun.totalSteps} steps)
+                ({effectiveLiveRun.completedSteps.length}/{effectiveLiveRun.totalSteps} steps)
               </span>
             )}
             {/* Total = sum of completed step durations + elapsed on the
@@ -1261,6 +1332,21 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
                     </span>
                   )}
 
+                  {/* 0.8.2 — Per-step token badge. Mirrors RunDetail. Helps
+                      spot which steps burn the most tokens (analyze /
+                      implement / review are usually the heavies; the
+                      "désagentification" pattern moves the cheap mechanical
+                      ones to ApiCall / Exec / Notify). */}
+                  {completed && completed.tokens_used > 0 && (
+                    <span
+                      className="text-2xs text-ghost"
+                      title={t('wf.stepTokensHint')}
+                      style={{ color: 'var(--kr-accent-ink)' }}
+                    >
+                      {completed.tokens_used.toLocaleString()} {t('wf.stepTokensSuffix')}
+                    </span>
+                  )}
+
                   {/* Current step indicator + live elapsed */}
                   {isCurrent && (
                     <>
@@ -1329,7 +1415,7 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
             );
           })}
         </div>
-      )}
+      ); })()}
 
       {/* Live run finished banner. Extracted to <LiveFinishedBanner> so its
           three-state colour mapping (success/waiting/failed) can be unit

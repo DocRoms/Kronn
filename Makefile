@@ -72,6 +72,22 @@ RESET  := \033[0m
 			echo "$(CYAN)  Docker socket GID: $$docker_gid$(RESET)"; \
 		fi; \
 	fi
+	@# 0.8.2 — Auto-detect version-manager bin paths so workflow Exec
+	@# steps can call `cargo`, `bun`, etc. without manual config. Each
+	@# path is written ONLY if the directory exists; missing → silent skip
+	@# so users without rustup/Bun aren't penalized.
+	@if [ -d "$$HOME/.cargo/bin" ]; then \
+		echo "KRONN_CARGO_BIN=$$HOME/.cargo/bin" >> .env; \
+		echo "$(CYAN)  Cargo bin: $$HOME/.cargo/bin$(RESET)"; \
+	fi
+	@if [ -d "$$HOME/.rustup" ]; then \
+		echo "KRONN_RUSTUP_HOME=$$HOME/.rustup" >> .env; \
+		echo "$(CYAN)  Rustup home: $$HOME/.rustup$(RESET)"; \
+	fi
+	@if [ -d "$$HOME/.bun/bin" ]; then \
+		echo "KRONN_BUN_BIN=$$HOME/.bun/bin" >> .env; \
+		echo "$(CYAN)  Bun bin: $$HOME/.bun/bin$(RESET)"; \
+	fi
 	@# Auto-detect host system binary paths for terminal access
 	@sysbin=""; \
 	for dir in /usr/bin /usr/sbin /snap/bin; do \

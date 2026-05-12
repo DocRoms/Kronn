@@ -84,6 +84,26 @@ pub async fn execute_run(
         }
     };
 
+    // 0.8.2 — Broadcast the run state to ALL connected WS clients so
+    // WorkflowDetail pages opened in another tab pick up step transitions
+    // (especially the Running → WaitingApproval flip) without a refresh.
+    // The SSE channel (`emit` above) only feeds the tab that triggered
+    // the run; cross-tab updates need WS. Best-effort: ignore send errors
+    // when no client is connected.
+    let workflow_id_for_ws = workflow.id.clone();
+    let run_id_for_ws = run.id.clone();
+    let total_steps_for_ws = workflow.steps.len() as u32;
+    let broadcast_run_state = |status: &crate::models::RunStatus, step_index: i32, current_step: Option<String>| {
+        let _ = state.ws_broadcast.send(crate::models::WsMessage::WorkflowRunUpdated {
+            run_id: run_id_for_ws.clone(),
+            workflow_id: workflow_id_for_ws.clone(),
+            status: format!("{:?}", status),
+            step_index,
+            total_steps: total_steps_for_ws,
+            current_step,
+        });
+    };
+
     let db = state.db.clone();
 
     // Register a cancellation token keyed by the run id. The "⏹ Arrêter" UI
@@ -246,7 +266,8 @@ pub async fn execute_run(
                     output: msg.clone(),
                     tokens_used: 0,
                     duration_ms: 0,
-                    condition_result: None,
+                    started_at: None,
+            condition_result: None,
                     envelope_detected: None,
                     step_kind: Some("Preflight".into()),
                     step_api_plugin_slug: None,
@@ -302,7 +323,8 @@ pub async fn execute_run(
                 output: "Workflow run cancelled by user".to_string(),
                 tokens_used: 0,
                 duration_ms: 0,
-                condition_result: None,
+                started_at: None,
+            condition_result: None,
                 envelope_detected: None,
                 step_kind: None,
                 step_agent: None,
@@ -322,7 +344,8 @@ pub async fn execute_run(
                 output: format!("Workflow aborted: exceeded {} total step iterations (possible infinite Goto loop)", max_total_iterations),
                 tokens_used: 0,
                 duration_ms: 0,
-                condition_result: None,
+                started_at: None,
+            condition_result: None,
                 envelope_detected: None,
                 step_kind: None,
                 step_agent: None,
@@ -356,7 +379,8 @@ pub async fn execute_run(
                 output: format!("Stopped by Timeout guard: {}s elapsed (limit {}s)", elapsed_secs, resolved_guards.timeout_seconds),
                 tokens_used: 0,
                 duration_ms: 0,
-                condition_result: None,
+                started_at: None,
+            condition_result: None,
                 envelope_detected: None,
                 step_kind: None,
                 step_agent: None,
@@ -388,7 +412,8 @@ pub async fn execute_run(
                 output: format!("Stopped by MaxLlmCalls guard: {} LLM calls (limit {})", llm_calls_count, resolved_guards.max_llm_calls),
                 tokens_used: 0,
                 duration_ms: 0,
-                condition_result: None,
+                started_at: None,
+            condition_result: None,
                 envelope_detected: None,
                 step_kind: None,
                 step_agent: None,
@@ -434,7 +459,8 @@ pub async fn execute_run(
                 output: format!("Stopped by LoopDetection guard: step '{}' visited {} times (limit {})", step_name, visit_count, resolved_guards.loop_detection_max_revisits),
                 tokens_used: 0,
                 duration_ms: 0,
-                condition_result: None,
+                started_at: None,
+            condition_result: None,
                 envelope_detected: None,
                 step_kind: None,
                 step_agent: None,
@@ -453,6 +479,8 @@ pub async fn execute_run(
             step_index: step_idx,
             total_steps,
         }).await;
+        // 0.8.2 — cross-tab live update
+        broadcast_run_state(&run.status, step_idx as i32, Some(step.name.clone()));
 
         // Build the step's executor as a single future, then race it
         // against `cancel_token.cancelled()`. When the user clicks Stop
@@ -518,7 +546,8 @@ pub async fn execute_run(
                                 output: e,
                                 tokens_used: 0,
                                 duration_ms: step_start.elapsed().as_millis() as u64,
-                                condition_result: None,
+                                started_at: None,
+            condition_result: None,
                                 envelope_detected: None,
                                 step_kind: None,
                                 step_agent: None,
@@ -547,6 +576,15 @@ pub async fn execute_run(
                             }
                         }
                     });
+                    // 0.8.2 — Stamp the wall-clock step start so the
+                    // frontend's live-elapsed counter reads an authoritative
+                    // value instead of estimating via `runStart + sum of
+                    // prior durations`. The estimate diverges from reality
+                    // after Goto loops (re-runs of the same step), agent
+                    // retries, and any scheduling gap between steps —
+                    // and the WorkflowDetail live-mini-dashboard then
+                    // disagrees with RunDetail's `LiveStepStatus`.
+                    let step_started_at = Utc::now();
                     let outcome = execute_step(
                         step,
                         &project_path,
@@ -556,6 +594,10 @@ pub async fn execute_run(
                         &ctx,
                         Some(progress_tx),
                     ).await;
+                    let mut outcome = outcome;
+                    if outcome.result.started_at.is_none() {
+                        outcome.result.started_at = Some(step_started_at);
+                    }
                     // execute_step took ownership of progress_tx and dropped
                     // it on return → the forwarder's recv() now yields None
                     // and the loop exits naturally. AWAIT it (don't abort —
@@ -649,7 +691,8 @@ pub async fn execute_run(
                         output: format!("Step '{}' cancelled by user mid-flight.", step.name),
                         tokens_used: 0,
                         duration_ms: step_start.elapsed().as_millis() as u64,
-                        condition_result: None,
+                        started_at: None,
+            condition_result: None,
                         envelope_detected: None,
                         step_kind: None,
                         step_agent: None,
@@ -735,6 +778,15 @@ pub async fn execute_run(
 
         // Emit step done event
         emit(RunEvent::StepDone { step_result: outcome.result.clone() }).await;
+        // 0.8.2 — cross-tab live update. status reflects the new state
+        // (WaitingApproval if the step was a Gate, else still Running).
+        // The current_step is cleared since this step is now finished.
+        let post_step_status = if outcome.result.status == RunStatus::WaitingApproval {
+            RunStatus::WaitingApproval
+        } else {
+            run.status.clone()
+        };
+        broadcast_run_state(&post_step_status, step_idx as i32, None);
 
         run.step_results.push(outcome.result);
 
@@ -1078,6 +1130,9 @@ pub async fn execute_run(
 
     // Emit run done
     emit(RunEvent::RunDone { status: run.status.clone() }).await;
+    // 0.8.2 — cross-tab final state flip so any open WorkflowDetail can
+    // clear its live indicator without polling.
+    broadcast_run_state(&run.status, run.step_results.len() as i32 - 1, None);
 
     // Cleanup workspace — but NOT if we just paused: the worktree
     // (with its uncommitted artifacts and hooks) must persist until
@@ -1185,6 +1240,18 @@ pub async fn resume_run(
                 run.id, last.status
             ));
         }
+        // 0.8.2 — Rewrite the gate's `duration_ms` to reflect the actual
+        // pause time (now - started_at) instead of the ~0ms executor
+        // render time it held until approval. Without this, the front-end
+        // live-elapsed counter on the next step inflated to include the
+        // whole pause (`runStart + sum of completed durations` estimate
+        // ignored the invisible gate pause). Falls back to the original
+        // value when `started_at` is missing — old gate rows pre-dating
+        // this field stay readable.
+        if let Some(started_at) = last.started_at {
+            let elapsed_ms = (Utc::now() - started_at).num_milliseconds().max(0) as u64;
+            last.duration_ms = elapsed_ms;
+        }
         match &decision {
             GateDecision::Approve { comment } => {
                 last.status = RunStatus::Success;
@@ -1210,6 +1277,17 @@ pub async fn resume_run(
         let db = state.db.clone();
         db.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap))
             .await?;
+        // 0.8.2 — cross-tab WS broadcast: a Reject is terminal, so
+        // execute_run won't re-emit. Without this, other tabs viewing
+        // the same run stay stuck on "WaitingApproval" until refresh.
+        let _ = state.ws_broadcast.send(crate::models::WsMessage::WorkflowRunUpdated {
+            run_id: run.id.clone(),
+            workflow_id: workflow.id.clone(),
+            status: format!("{:?}", run.status),
+            step_index: gate_step_idx as i32,
+            total_steps: workflow.steps.len() as u32,
+            current_step: None,
+        });
         // Cleanup workspace if it exists.
         if let Some(ws_path) = run.workspace_path.as_ref().map(std::path::PathBuf::from) {
             if ws_path.exists() {
@@ -1489,6 +1567,8 @@ mod tests {
             exec_command: None,
             exec_args: vec![],
             exec_timeout_secs: None,
+            exec_setup_command: None,
+            exec_setup_args: vec![],
             quick_prompt_id: None,
             json_data_payload: None,
         }
@@ -1500,6 +1580,7 @@ mod tests {
             output: String::new(),
             tokens_used: 0,
             duration_ms: 0,
+            started_at: None,
             condition_result: None,
             envelope_detected: None,
             step_kind: None,
@@ -1720,6 +1801,8 @@ mod tests {
             exec_command: None,
             exec_args: vec![],
             exec_timeout_secs: None,
+            exec_setup_command: None,
+            exec_setup_args: vec![],
             quick_prompt_id: None,
             json_data_payload: None,
         }
@@ -1732,6 +1815,7 @@ mod tests {
             output: String::new(),
             tokens_used: 0,
             duration_ms: 0,
+            started_at: None,
             condition_result: None,
             envelope_detected: None,
             step_kind: None,
@@ -1806,6 +1890,7 @@ mod tests {
             output: output.into(),
             tokens_used: 0,
             duration_ms: 0,
+            started_at: None,
             condition_result: None,
             envelope_detected: None,
             step_kind: None,

@@ -1403,7 +1403,7 @@ dependencies = [
 
 [[package]]
 name = "kronn"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1421,6 +1421,7 @@ dependencies = [
  "http-body-util",
  "open",
  "pdf-extract",
+ "proc-macro2",
  "regex-lite",
  "reqwest",
  "rusqlite",
@@ -1430,6 +1431,7 @@ dependencies = [
  "serde_json_path",
  "serial_test",
  "sha2 0.11.0",
+ "syn",
  "tempfile",
  "thiserror",
  "tokio",

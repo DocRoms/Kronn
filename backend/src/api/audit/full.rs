@@ -56,6 +56,24 @@ pub async fn full_audit(
     let project_default_skill_ids = project.default_skill_ids.clone();
     let briefing_notes = crate::api::projects::resolve_briefing_notes(&project_path, &project.briefing_notes);
     let agent_type = req.agent;
+    let agent_label = format!("{:?}", agent_type);
+
+    // 0.8.2 — Resolve specialized audit kind. `Full` is the default
+    // (backwards-compat for clients that don't send `kind`). `Custom`
+    // requires a body that S2.D3-D5 still need to design — for now
+    // surface a clean error rather than silently running an empty loop.
+    let kind = req.kind.unwrap_or_default();
+    let kind_label = kind.as_label();
+    if matches!(kind, crate::models::AuditKind::Custom) {
+        let stream: SseStream = Box::pin(futures::stream::once(async {
+            Ok::<_, Infallible>(
+                Event::default().event("error")
+                    .data("{\"error\":\"AuditKind::Custom is not yet wired (S2.D3-D5)\"}")
+            )
+        }));
+        return Sse::new(stream);
+    }
+    let steps = super::kind_to_steps(kind);
 
     let tokens = {
         let config = state.config.read().await;
@@ -67,13 +85,30 @@ pub async fn full_audit(
         config.language.clone()
     };
 
-    let total_steps = ANALYSIS_STEPS.len();
+    let total_steps = steps.len();
     let db = state.db.clone();
     let audit_tracker = state.audit_tracker.clone();
 
     // Clear any stale cancellation flag for this project
     if let Ok(mut tracker) = audit_tracker.lock() {
         tracker.cancelled.remove(&project_id);
+    }
+
+    // 0.8.2 — record this audit invocation in the `audit_runs` table.
+    // Inserted with status='Running' here, completed at the end of the
+    // pipeline (or marked Failed/Cancelled on abnormal exit). The row
+    // powers the health-badge sparkline + audit-history doc.
+    let audit_run_id = Uuid::new_v4().to_string();
+    let audit_started_at = Utc::now();
+    {
+        let run_id = audit_run_id.clone();
+        let pid = project_id.clone();
+        let agent_name = agent_label.clone();
+        let _ = db.with_conn(move |conn| {
+            crate::db::audit_runs::insert_running(
+                conn, &run_id, &pid, kind_label, &agent_name, audit_started_at,
+            )
+        }).await;
     }
 
     let stream: SseStream = Box::pin(async_stream::try_stream! {
@@ -90,8 +125,14 @@ pub async fn full_audit(
         }
 
         // ── Phase 1: Install template if needed ──
+        // 0.8.2 — Specialized audit kinds (non-Full) skip template
+        // installation. They are focused re-scans that assume Full has
+        // already laid down `docs/` for the project. Running them on a
+        // bare project would produce findings against a non-existent
+        // baseline, which is rarely what the user wants.
+        let is_full = matches!(kind, crate::models::AuditKind::Full);
         let status = scanner::detect_audit_status(&project_path_str);
-        let template_installed = matches!(status, AiAuditStatus::NoTemplate);
+        let template_installed = is_full && matches!(status, AiAuditStatus::NoTemplate);
 
         if template_installed {
             let pp = project_path_str.clone();
@@ -165,13 +206,30 @@ pub async fn full_audit(
             remove_bootstrap_block(&index_file);
         }
 
+        // 0.8.2 — Snapshot the existing `docs/tech-debt/` directory BEFORE
+        // Step 9 has a chance to touch it. Used by the reconciliation
+        // pass (after the loop) to classify TDs that the agent did NOT
+        // re-emit (Fixed / Stale / Missed / Uncertain). Cheap operation
+        // — content-hashes a handful of small markdown files. Survives
+        // a fresh project (empty Vec).
+        let pre_audit_td_snapshot = super::reconciliation::snapshot_tech_debt_dir(
+            &project_path.join("docs"),
+        );
+
         let start = serde_json::json!({ "total_steps": total_steps });
         yield Event::default().event("start").data(start.to_string());
 
-        for (step_num, analysis_step) in ANALYSIS_STEPS.iter().enumerate() {
+        for (step_num, analysis_step) in steps.iter().enumerate() {
             // Check for cancellation before each step
             if audit_tracker.lock().map(|t| t.cancelled.contains(&project_id)).unwrap_or(false) {
                 if let Ok(mut t) = audit_tracker.lock() { t.clear_progress(&project_id); }
+                let run_id = audit_run_id.clone();
+                let db_for_cancel = db.clone();
+                tokio::spawn(async move {
+                    let _ = db_for_cancel.with_conn(move |conn| {
+                        crate::db::audit_runs::mark_cancelled(conn, &run_id)
+                    }).await;
+                });
                 let cancelled = serde_json::json!({ "status": "cancelled" });
                 yield Event::default().event("cancelled").data(cancelled.to_string());
                 return;
@@ -272,7 +330,78 @@ pub async fn full_audit(
             detected_skill_ids
         };
 
+        // ── Phase 2.5: Reconciliation pass (0.8.2) ──
+        // Only runs for Full audits — specialized kinds emit findings
+        // into their own `inconsistencies-<kind>.md` file and would
+        // produce a misleading "all TDs missed" report against the
+        // canonical Full TD snapshot.
+        // Compute the delta between the pre-audit TD snapshot and the
+        // current on-disk state. Classify the TDs that weren't re-emitted
+        // (Fixed / Stale / Missed / Uncertain) and write
+        // `docs/tech-debt/_reconciliation-<date>.md`. The report keeps
+        // the user informed across audits — without this, dropped TDs
+        // would vanish silently and the user couldn't tell "fixed" from
+        // "missed" between audit runs.
+        if is_full && !pre_audit_td_snapshot.is_empty() {
+            let project_path_for_recon = project_path.clone();
+            let snapshot = pre_audit_td_snapshot.clone();
+            let recon_outcome = tokio::task::spawn_blocking(move || {
+                use super::reconciliation::{
+                    check_signature_in_source, classify, compute_delta, render_report,
+                };
+                let deltas = compute_delta(&snapshot);
+                let project_path_for_check = project_path_for_recon.clone();
+                let entries = classify(
+                    &deltas,
+                    Utc::now(),
+                    90,
+                    |snap| check_signature_in_source(snap, &project_path_for_check),
+                );
+                let today = Utc::now().format("%Y-%m-%d").to_string();
+                let report = render_report(&entries, &today, "Full");
+                let report_path = project_path_for_recon
+                    .join("docs/tech-debt")
+                    .join(format!("_reconciliation-{}.md", today));
+                let candidates = entries
+                    .iter()
+                    .filter(|e| e.delta != super::reconciliation::DeltaKind::Updated)
+                    .count();
+                let updated = entries.len() - candidates;
+                (report_path, report, candidates, updated)
+            })
+            .await;
+
+            if let Ok((report_path, report, candidates, updated)) = recon_outcome {
+                if let Some(parent) = report_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                match std::fs::write(&report_path, &report) {
+                    Ok(()) => {
+                        tracing::info!(
+                            "Reconciliation report: {} candidates, {} updated. Written to {}",
+                            candidates, updated, report_path.display()
+                        );
+                        let ev = serde_json::json!({
+                            "candidates": candidates,
+                            "updated": updated,
+                            "report_path": format!("docs/tech-debt/{}",
+                                report_path.file_name().and_then(|n| n.to_str()).unwrap_or("")),
+                        });
+                        yield Event::default().event("reconciliation").data(ev.to_string());
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to write reconciliation report: {} — audit continues", e);
+                    }
+                }
+            }
+        }
+
         // ── Phase 3: Create validation discussion ──
+        // 0.8.2 — Specialized kinds (non-Full) skip the validation
+        // discussion: they emit findings into their own index file and
+        // the user reviews them directly. The 4-phase validation flow
+        // only makes sense after a complete docs/ regeneration.
+        let disc_id: Option<String> = if is_full {
         if let Ok(mut t) = audit_tracker.lock() { t.mark_validating(&project_id); }
 
         let pp = project_path_str.clone();
@@ -357,7 +486,8 @@ pub async fn full_audit(
             }
         };
 
-        // Generate checksums for drift detection
+        // Generate checksums for drift detection — Full-audit only;
+        // specialized kinds don't regenerate the docs/ baseline.
         {
             let pp = project_path.clone();
             let _ = tokio::task::spawn_blocking(move || {
@@ -381,6 +511,55 @@ pub async fn full_audit(
                 }
             }).await;
         }
+        disc_id
+        } else {
+            None
+        };
+
+        // 0.8.2 — record the audit completion in `audit_runs`. The
+        // severity distribution is counted by scanning the freshly-
+        // produced TD detail files (cheap: 18-25 small markdown files
+        // for a typical project). The reconciliation counts come from
+        // the pre-audit snapshot we took earlier.
+        let project_path_for_count = project_path.clone();
+        let run_id_for_complete = audit_run_id.clone();
+        let snapshot_for_count = pre_audit_td_snapshot.clone();
+        let db_for_complete = db.clone();
+        let ended_at = Utc::now();
+        let _ = tokio::task::spawn_blocking(move || {
+            let td_dir = project_path_for_count.join("docs/tech-debt");
+            let counts = count_td_severities(&td_dir);
+            let (resolved, new, carried) = compute_reconciliation_counts(
+                &snapshot_for_count, &td_dir,
+            );
+            let score = crate::models::compute_health_score(
+                counts.critical, counts.high, counts.medium, counts.low,
+            );
+            // 0.8.2 — Step 10 cluster detector. Surfaces "you have 4
+            // docker findings, consider a focused Docker audit" cards
+            // on the dashboard. Empty Vec is fine — UI hides the card.
+            let recs = compute_cluster_recommendations(&td_dir);
+            let recs_json = if recs.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&recs).ok()
+            };
+            (counts, resolved, new, carried, score, recs_json)
+        })
+        .await
+        .map(|(counts, resolved, new, carried, score, recs_json)| {
+            let run_id = run_id_for_complete.clone();
+            tokio::spawn(async move {
+                let _ = db_for_complete.with_conn(move |conn| {
+                    crate::db::audit_runs::complete(
+                        conn, &run_id, ended_at, "Completed",
+                        counts.critical, counts.high, counts.medium, counts.low,
+                        resolved, new, carried,
+                        score, None, recs_json.as_deref(),
+                    )
+                }).await;
+            });
+        });
 
         // Audit fully complete — drop progress so UI polling can stop and
         // `GET /audit-status` reports `None`.
@@ -390,7 +569,8 @@ pub async fn full_audit(
             "status": "complete",
             "total_steps": total_steps,
             "discussion_id": disc_id,
-            "template_was_installed": template_installed
+            "template_was_installed": template_installed,
+            "audit_run_id": audit_run_id,
         });
         yield Event::default().event("done").data(done.to_string());
     });
@@ -517,4 +697,413 @@ pub async fn cancel_audit(
     // Return updated status (should be NoTemplate now)
     let status = scanner::detect_audit_status(&project.path);
     Json(ApiResponse::ok(status))
+}
+
+// ─── 0.8.2 helpers for `audit_runs` completion ─────────────────────────
+
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct SeverityCounts {
+    pub critical: u32,
+    pub high: u32,
+    pub medium: u32,
+    pub low: u32,
+}
+
+/// Scan every `TD-*.md` file in the tech-debt directory (skipping
+/// scaffolding/reconciliation reports) and tally findings by severity.
+///
+/// The severity is matched from the line shape:
+///   `- **Severity**: Critical | High | Medium | Low`
+/// We accept variations in casing/spacing but only on the canonical
+/// four values — anything else (e.g. an agent-emitted `Severe`) doesn't
+/// count. Better to under-count than mis-categorize.
+pub(crate) fn count_td_severities(td_dir: &std::path::Path) -> SeverityCounts {
+    let mut counts = SeverityCounts::default();
+    let Ok(entries) = std::fs::read_dir(td_dir) else { return counts };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+        // Skip scaffolding + reconciliation reports — same filter as
+        // `count_tech_debt` in scanner.rs to stay consistent.
+        if !name.ends_with(".md")
+            || name.starts_with('_')
+            || matches!(name, "README.md" | "TEMPLATE.md" | "_template.md")
+        {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else { continue };
+        // Pick the FIRST Severity line — multiple lines in the same
+        // file would be a malformed TD anyway.
+        let Some(sev_line) = content.lines().find(|l| {
+            let lc = l.to_ascii_lowercase();
+            lc.contains("**severity**:") || lc.starts_with("severity:")
+        }) else { continue };
+        let sev = sev_line
+            .split(':')
+            .nth(1)
+            .map(|s| s.trim().trim_start_matches('*').trim().to_ascii_lowercase())
+            .unwrap_or_default();
+        match sev.as_str() {
+            s if s.starts_with("critical") => counts.critical += 1,
+            s if s.starts_with("high")     => counts.high     += 1,
+            s if s.starts_with("medium")   => counts.medium   += 1,
+            s if s.starts_with("low")      => counts.low      += 1,
+            _ => {} // unknown — skip silently
+        }
+    }
+    counts
+}
+
+/// Reconciliation counters fed into `audit_runs`:
+///   - `td_resolved_since_last` = TDs that existed before and were
+///     deleted or whose source signature is gone (we approximate with
+///     "file gone" — the full classification lives in the reconciliation
+///     module and may bucket some Unchanged-with-signature-gone as
+///     Fixed too, but the cheap proxy is good enough for the badge).
+///   - `td_new_since_last` = TD files that exist now but weren't in
+///     the pre-audit snapshot.
+///   - `td_carried_over` = TDs present in both (Unchanged or Updated).
+pub(crate) fn compute_reconciliation_counts(
+    snapshot: &[super::reconciliation::TdSnapshot],
+    td_dir: &std::path::Path,
+) -> (u32, u32, u32) {
+    use std::collections::HashSet;
+    let snap_ids: HashSet<&str> = snapshot.iter().map(|s| s.id.as_str()).collect();
+
+    let mut current_ids: HashSet<String> = HashSet::new();
+    if let Ok(entries) = std::fs::read_dir(td_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+            if !name.ends_with(".md")
+                || name.starts_with('_')
+                || matches!(name, "README.md" | "TEMPLATE.md" | "_template.md")
+            {
+                continue;
+            }
+            current_ids.insert(name.trim_end_matches(".md").to_string());
+        }
+    }
+
+    let resolved = snap_ids
+        .iter()
+        .filter(|id| !current_ids.contains(**id))
+        .count() as u32;
+    let new = current_ids
+        .iter()
+        .filter(|id| !snap_ids.contains(id.as_str()))
+        .count() as u32;
+    let carried = current_ids
+        .iter()
+        .filter(|id| snap_ids.contains(id.as_str()))
+        .count() as u32;
+    (resolved, new, carried)
+}
+
+/// Bucket a TD into a specialized audit kind based on (1) an explicit
+/// `**Category**: <kind>` line in the file body (written by S2.D3-D4
+/// specialized audits) and (2) heuristic slug-matching on the filename
+/// as a fallback for TDs produced by the Full audit (which doesn't
+/// write a Category line).
+///
+/// Returns `None` when nothing matches — those TDs don't drive
+/// progressive-disclosure recommendations.
+pub(crate) fn classify_td_cluster(filename: &str, body: &str) -> Option<&'static str> {
+    // 1) Explicit category line wins. Format: `- **Category**: docker`
+    let lower_body = body.to_ascii_lowercase();
+    for line in lower_body.lines() {
+        let trimmed = line.trim().trim_start_matches('-').trim();
+        if let Some(rest) = trimmed.strip_prefix("**category**:") {
+            let cat = rest.trim().to_string();
+            return match cat.as_str() {
+                "docker"        => Some("Docker"),
+                "security"      => Some("Security"),
+                "performance"   => Some("Performance"),
+                "accessibility" => Some("Accessibility"),
+                "database"      => Some("Database"),
+                "api"           => Some("ApiDesign"),
+                _               => None,
+            };
+        }
+    }
+    // 2) Slug heuristics on the filename (post `TD-YYYYMMDD-`).
+    let slug = filename.to_ascii_lowercase();
+    let m = |needles: &[&str]| needles.iter().any(|n| slug.contains(n));
+    // Note: "compose-" (hyphen suffix) on purpose — bare "compose" would
+    // false-match "composer-install-no-checksum" (a supply-chain finding
+    // that happens to live in a Dockerfile but isn't a Docker-class TD).
+    if m(&["docker", "dockerfile", "compose-", "image-tag", "layer"]) {
+        return Some("Docker");
+    }
+    // Pull "composer-install" / "supply-chain" / "unverified-download"
+    // into Security since the impact (silently swapping the installer
+    // binary) is a supply-chain risk, not an image-config issue.
+    if m(&["composer-install", "supply-chain", "unverified-download"]) {
+        return Some("Security");
+    }
+    if m(&["secret", "credential", "auth", "csrf", "xss", "sql-injection",
+           "cors", "csp", "jwt", "rce", "host-key", "strict-host",
+           "apikey", "api-key", "hardcoded-key", "leaked-key"]) {
+        return Some("Security");
+    }
+    if m(&["perf", "n-plus-one", "n+1", "missing-index", "cache-",
+           "bundle-size", "slow-query", "memory-leak"]) {
+        return Some("Performance");
+    }
+    if m(&["a11y", "accessibility", "aria", "contrast",
+           "keyboard", "alt-attr", "missing-alt", "wcag"]) {
+        return Some("Accessibility");
+    }
+    if m(&["migration", "schema", "orm", "foreign-key", "missing-fk"]) {
+        return Some("Database");
+    }
+    if m(&["api-design", "openapi", "swagger", "endpoint-shape",
+           "rest-", "pagination"]) {
+        return Some("ApiDesign");
+    }
+    None
+}
+
+/// Threshold above which a cluster of TDs in the same dimension
+/// triggers a progressive-disclosure recommendation card on the
+/// project dashboard. 3 is the minimum that signals \"pattern\" vs
+/// \"one-off\" (a single docker finding doesn't justify launching a
+/// focused Docker audit; three or more does).
+pub(crate) const CLUSTER_RECOMMENDATION_THRESHOLD: u32 = 3;
+
+/// Scan the TD directory and return per-kind cluster recommendations
+/// for the audit_runs row. The JSON shape is `[{\"kind\":..., \"reason\":..., \"cluster_size\":N}]`
+/// matching the `AuditRecommendation` struct in `models/projects.rs`.
+pub(crate) fn compute_cluster_recommendations(td_dir: &std::path::Path) -> Vec<crate::models::AuditRecommendation> {
+    use std::collections::HashMap;
+    let mut counts: HashMap<&'static str, u32> = HashMap::new();
+    let Ok(entries) = std::fs::read_dir(td_dir) else { return Vec::new() };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+        if !name.ends_with(".md")
+            || name.starts_with('_')
+            || matches!(name, "README.md" | "TEMPLATE.md" | "_template.md")
+        {
+            continue;
+        }
+        let body = std::fs::read_to_string(&path).unwrap_or_default();
+        if let Some(kind) = classify_td_cluster(name, &body) {
+            *counts.entry(kind).or_insert(0) += 1;
+        }
+    }
+    let mut recs: Vec<crate::models::AuditRecommendation> = counts
+        .into_iter()
+        .filter(|(_, n)| *n >= CLUSTER_RECOMMENDATION_THRESHOLD)
+        .map(|(kind, n)| crate::models::AuditRecommendation {
+            kind: kind.to_string(),
+            reason: format!(
+                "{} {}-related findings detected — a focused audit will catch siblings the Full pass missed.",
+                n, kind.to_lowercase()
+            ),
+            // u32 → u8 safe: clusters that big are absurd; saturate to 255.
+            cluster_size: n.min(u8::MAX as u32) as u8,
+        })
+        .collect();
+    // Stable order: largest cluster first so the UI surfaces the most
+    // impactful recommendation at the top of the card.
+    recs.sort_by(|a, b| b.cluster_size.cmp(&a.cluster_size).then_with(|| a.kind.cmp(&b.kind)));
+    recs
+}
+
+#[cfg(test)]
+mod cluster_tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn classify_uses_explicit_category_line_first() {
+        // Even if the filename SAYS "docker", an explicit Category: security wins.
+        let kind = classify_td_cluster(
+            "TD-20260512-docker-base-image.md",
+            "# Foo\n- **Category**: security\n- **Severity**: High\n",
+        );
+        assert_eq!(kind, Some("Security"));
+    }
+
+    #[test]
+    fn classify_falls_back_to_slug_when_no_category_line() {
+        assert_eq!(classify_td_cluster("TD-20260512-docker-no-user.md", ""), Some("Docker"));
+        assert_eq!(classify_td_cluster("TD-20260512-cors-wildcard.md", ""), Some("Security"));
+        assert_eq!(classify_td_cluster("TD-20260512-n-plus-one-orders.md", ""), Some("Performance"));
+        assert_eq!(classify_td_cluster("TD-20260512-missing-alt-attr.md", ""), Some("Accessibility"));
+    }
+
+    #[test]
+    fn apikey_in_template_classifies_as_security() {
+        // Real DOCROMS_WEB TD: TD-20260512-here-maps-apikey-in-template.
+        // Before the fix, "apikey" wasn't in the Security heuristic, so
+        // the cluster detector ignored a legit secret-leak finding.
+        assert_eq!(
+            classify_td_cluster("TD-20260512-here-maps-apikey-in-template.md", ""),
+            Some("Security"),
+        );
+        assert_eq!(
+            classify_td_cluster("TD-20260512-aws-hardcoded-key.md", ""),
+            Some("Security"),
+        );
+    }
+
+    #[test]
+    fn composer_install_is_security_not_docker() {
+        // Regression: bare "compose" substring matched "composer-install-no-checksum"
+        // on DOCROMS_WEB 2026-05-12 audit (false-positive Docker cluster of 5).
+        // The fix uses "compose-" with hyphen suffix + a dedicated supply-chain
+        // bucket. composer-install belongs to Security (supply-chain).
+        assert_eq!(
+            classify_td_cluster("TD-20260512-composer-install-no-checksum.md", ""),
+            Some("Security"),
+        );
+        // Real compose findings still match Docker.
+        assert_eq!(
+            classify_td_cluster("TD-20260512-compose-no-resource-limits.md", ""),
+            Some("Docker"),
+        );
+    }
+
+    #[test]
+    fn classify_returns_none_for_unmatched() {
+        assert_eq!(classify_td_cluster("TD-20260512-misc-bug.md", ""), None);
+        assert_eq!(classify_td_cluster("TD-20260512-spelling-mistake.md", ""), None);
+    }
+
+    #[test]
+    fn cluster_below_threshold_yields_no_recommendation() {
+        let dir = tempdir().unwrap();
+        // 2 docker TDs — under the threshold of 3.
+        fs::write(dir.path().join("TD-20260512-docker-1.md"), "x").unwrap();
+        fs::write(dir.path().join("TD-20260512-docker-2.md"), "x").unwrap();
+        let recs = compute_cluster_recommendations(dir.path());
+        assert!(recs.is_empty(), "2 hits is below the 3-cluster threshold");
+    }
+
+    #[test]
+    fn cluster_at_threshold_surfaces_recommendation() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("TD-20260512-docker-1.md"), "x").unwrap();
+        fs::write(dir.path().join("TD-20260512-docker-2.md"), "x").unwrap();
+        fs::write(dir.path().join("TD-20260512-docker-no-user.md"), "x").unwrap();
+        let recs = compute_cluster_recommendations(dir.path());
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].kind, "Docker");
+        assert_eq!(recs[0].cluster_size, 3);
+    }
+
+    #[test]
+    fn multiple_clusters_sorted_by_size_descending() {
+        let dir = tempdir().unwrap();
+        // 5 security, 3 docker, 1 perf
+        for i in 0..5 { fs::write(dir.path().join(format!("TD-20260512-jwt-{i}.md")), "x").unwrap(); }
+        for i in 0..3 { fs::write(dir.path().join(format!("TD-20260512-docker-{i}.md")), "x").unwrap(); }
+        fs::write(dir.path().join("TD-20260512-perf-single.md"), "x").unwrap();
+
+        let recs = compute_cluster_recommendations(dir.path());
+        let kinds: Vec<&str> = recs.iter().map(|r| r.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["Security", "Docker"],
+            "perf cluster of 1 is below threshold; security (5) should outrank docker (3)");
+    }
+
+    #[test]
+    fn underscore_and_readme_files_are_skipped() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("_reconciliation-20260512.md"), "x").unwrap();
+        fs::write(dir.path().join("README.md"), "x").unwrap();
+        fs::write(dir.path().join("TEMPLATE.md"), "x").unwrap();
+        fs::write(dir.path().join("TD-20260512-docker-1.md"), "x").unwrap();
+        let recs = compute_cluster_recommendations(dir.path());
+        assert!(recs.is_empty(),
+            "only 1 real docker TD after filter, below threshold");
+    }
+}
+
+#[cfg(test)]
+mod severity_tests {
+    use super::*;
+
+    #[test]
+    fn count_td_severities_tallies_canonical_values() {
+        let tmp = std::env::temp_dir().join("kronn-test-sev-count");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join("TD-001.md"),
+            "# X\n- **Severity**: Critical\n",
+        ).unwrap();
+        std::fs::write(
+            tmp.join("TD-002.md"),
+            "# Y\n- **Severity**: High\n",
+        ).unwrap();
+        std::fs::write(
+            tmp.join("TD-003.md"),
+            "# Z\n- **Severity**: high\n", // lowercase still counts
+        ).unwrap();
+        std::fs::write(
+            tmp.join("TD-004.md"),
+            "# W\n- **Severity**:    Medium\n",
+        ).unwrap();
+        std::fs::write(
+            tmp.join("TD-005.md"),
+            "# V\n- **Severity**: Low\n",
+        ).unwrap();
+        std::fs::write(
+            tmp.join("TD-bad.md"),
+            "# Bad\n- **Severity**: Severe\n", // unknown — must NOT count
+        ).unwrap();
+        std::fs::write(tmp.join("README.md"), "scaffolding").unwrap();
+        std::fs::write(tmp.join("_reconciliation-2026-01-01.md"), "skip me").unwrap();
+
+        let counts = count_td_severities(&tmp);
+        assert_eq!(counts.critical, 1);
+        assert_eq!(counts.high, 2);
+        assert_eq!(counts.medium, 1);
+        assert_eq!(counts.low, 1);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn count_td_severities_zero_on_missing_dir() {
+        let counts = count_td_severities(std::path::Path::new("/does/not/exist"));
+        assert_eq!(counts.critical, 0);
+        assert_eq!(counts.high, 0);
+        assert_eq!(counts.medium, 0);
+        assert_eq!(counts.low, 0);
+    }
+
+    #[test]
+    fn reconciliation_counts_compute_resolved_new_carried() {
+        use super::super::reconciliation::TdSnapshot;
+        use std::path::PathBuf;
+
+        let tmp = std::env::temp_dir().join("kronn-test-recon-counts");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // Pre-audit snapshot: 3 TDs (A, B, C).
+        let snapshot = vec![
+            TdSnapshot { path: PathBuf::from("/x/TD-A.md"), id: "TD-A".into(), content_hash: "h".into(), mtime: chrono::Utc::now() },
+            TdSnapshot { path: PathBuf::from("/x/TD-B.md"), id: "TD-B".into(), content_hash: "h".into(), mtime: chrono::Utc::now() },
+            TdSnapshot { path: PathBuf::from("/x/TD-C.md"), id: "TD-C".into(), content_hash: "h".into(), mtime: chrono::Utc::now() },
+        ];
+        // Post-audit state: A is gone (resolved), B is kept (carried),
+        // C is kept (carried), D is brand new (new), E too (new).
+        std::fs::write(tmp.join("TD-B.md"), "x").unwrap();
+        std::fs::write(tmp.join("TD-C.md"), "x").unwrap();
+        std::fs::write(tmp.join("TD-D.md"), "x").unwrap();
+        std::fs::write(tmp.join("TD-E.md"), "x").unwrap();
+        // Scaffolding must not count anywhere.
+        std::fs::write(tmp.join("README.md"), "x").unwrap();
+        std::fs::write(tmp.join("_reconciliation-2026-05-13.md"), "x").unwrap();
+
+        let (resolved, new, carried) = compute_reconciliation_counts(&snapshot, &tmp);
+        assert_eq!(resolved, 1, "A is gone");
+        assert_eq!(new, 2, "D + E are new");
+        assert_eq!(carried, 2, "B + C carry over");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

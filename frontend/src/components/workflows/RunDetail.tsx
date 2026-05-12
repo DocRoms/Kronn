@@ -53,11 +53,20 @@ function LiveStepStatus({
     return () => window.clearInterval(id);
   }, []);
 
+  // 0.8.2 — Prefer the step's authoritative `started_at` (stamped by the
+  // runner before each executor fires) over the legacy `runStart + sum of
+  // prior durations` estimate. The estimate drifts after Goto loops or any
+  // scheduling gap between steps, which produced visible disagreement
+  // between this view and WorkflowDetail's live-mini-dashboard. Old runs
+  // pre-dating the field stay readable via the estimate fallback.
+  const currentStepResult = run.step_results[stepIndex];
   const runStart = new Date(run.started_at).getTime();
   const completedDurationMs = run.step_results
     .slice(0, stepIndex)
     .reduce((acc, sr) => acc + (sr.duration_ms || 0), 0);
-  const stepStart = runStart + completedDurationMs;
+  const stepStart = currentStepResult?.started_at
+    ? new Date(currentStepResult.started_at).getTime()
+    : runStart + completedDurationMs;
   const elapsedSec = Math.max(0, Math.floor((now - stepStart) / 1000));
 
   // Step-type-aware activity hint. Generic "running..." was a black
@@ -407,7 +416,18 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onDecide }: 
           )}
         </span>
         {run.tokens_used > 0 && (
-          <span className="text-xs text-muted">{run.tokens_used} tokens</span>
+          // 0.8.2 — Explicit "total" scope. Pre-fix this badge sat next to
+          // the gate's `0 tokens consumed` and read as a contradiction
+          // ("you said 0, then 3579?"). The two numbers are legitimate:
+          // gate-step = 0 (correct, gates burn no LLM), run-total = sum
+          // across all completed steps. Adding `(total)` + a tooltip
+          // disambiguates without dropping the run-cost-to-date info.
+          <span
+            className="text-xs text-muted"
+            title={t('wf.tokensTotalHint')}
+          >
+            {run.tokens_used} {t('wf.tokensTotal')}
+          </span>
         )}
         {run.status === 'Running' && onCancel && (
           <button
@@ -511,6 +531,21 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onDecide }: 
                 )}
                 {completed && completed.duration_ms > 0 && (
                   <span className="text-ghost text-xs">{(completed.duration_ms / 1000).toFixed(1)}s</span>
+                )}
+                {/* 0.8.2 — Per-step token badge. Surfaces "which step burns
+                    the most tokens" at a glance so the operator can spot
+                    candidates for desagentification (swap Agent → Exec /
+                    ApiCall on the hot steps). Zero-token steps (Gate, Exec,
+                    Notify, ApiCall, JsonData) stay clean — only steps that
+                    actually consumed LLM tokens show the badge. */}
+                {completed && completed.tokens_used > 0 && (
+                  <span
+                    className="text-ghost text-xs"
+                    title={t('wf.stepTokensHint')}
+                    style={{ color: 'var(--kr-accent-ink)' }}
+                  >
+                    {completed.tokens_used.toLocaleString()} {t('wf.stepTokensSuffix')}
+                  </span>
                 )}
                 {isNext && (
                   <LiveStepStatus run={run} step={ws_step} stepIndex={i} t={t} />

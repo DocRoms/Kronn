@@ -4,6 +4,7 @@ import { workflows as workflowsApi, skills as skillsApi, profiles as profilesApi
 import { ApiCallStepCard, type ApiPluginOption } from './ApiCallStepCard';
 import { STARTER_TEMPLATES, cloneTemplateSteps } from '../../lib/workflow-templates/chartbeat-top5';
 import { buildV07Presets } from '../../lib/workflow-templates/v07-presets';
+import { parseRepoUrl, buildOldestIssueRequest, inferTrackerSlugFromRepoUrl } from '../../lib/constants';
 import { AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES, isAgentRestricted } from '../../lib/constants';
 import type {
   Project, Workflow, WorkflowTrigger,
@@ -81,9 +82,15 @@ export interface WorkflowWizardProps {
    *  but agents reply in this language. Used by the ApiCall AI helper to pick
    *  both the system-prompt translation and the discussion's `language` param. */
   configLanguage?: string;
+  /** 0.8.2 — Deep-link from the audit-validation CTA: pre-select a preset
+   *  (e.g. `ticket-to-pr` for AutoPilot) and a project so the wizard opens
+   *  ready-to-save. Both are best-effort: if the preset id is unknown or
+   *  the project no longer exists, the wizard falls back to its blank state. */
+  initialPresetId?: string;
+  initialProjectId?: string;
 }
 
-export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAgentTypes, agentAccess, configLanguage }: WorkflowWizardProps) {
+export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAgentTypes, agentAccess, configLanguage, initialPresetId, initialProjectId }: WorkflowWizardProps) {
   const { t } = useT();
   const availableAgents = (installedAgentTypes && installedAgentTypes.length > 0
     ? installedAgentTypes
@@ -211,6 +218,120 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   // When the user clicks "Lancer" with trigger=Manual + non-empty list,
   // a form asks for one value per variable before the run starts.
   const [wfVariables, setWfVariables] = useState<PromptVariable[]>(editWorkflow?.variables ?? []);
+
+  // 0.8.2 — Deep-link from the audit-validation CTA: if `initialPresetId`
+  // is supplied (and we're not editing an existing workflow), apply the
+  // matching preset on mount so the user lands on a ready-to-save wizard
+  // instead of an empty form. We also:
+  //   1. Force `wizardMode='advanced'` + jump to the Steps page (step 2):
+  //      simple mode hides multi-step pipelines, defeating the purpose of
+  //      a 9-step AutoPilot deep-link.
+  //   2. Suppress the auto-shown "Suggestions for this project" panel —
+  //      the user came here for THIS preset, not for orthogonal MCP-aware
+  //      suggestions.
+  //   3. Transform the preset's first step from JsonData fixture to a real
+  //      ApiCall when a tracker MCP (GitHub / GitLab / Jira) is wired,
+  //      pointing at the oldest open issue so the user can test
+  //      immediately. Mirrors the same heuristic as `isTrackerMcp` in
+  //      `lib/constants.ts`.
+  const presetAppliedRef = useRef(false);
+  const [pluginsLoaded, setPluginsLoaded] = useState(false);
+  useEffect(() => {
+    if (presetAppliedRef.current || editWorkflow || !initialPresetId) return;
+    // Wait for the plugins fetch to settle (one tick after mcpsApi.overview
+    // resolves) so the tracker-MCP lookup is deterministic. Without this
+    // guard, applying on mount races the plugins promise and the fetch_issue
+    // transform silently no-ops on first render.
+    if (!pluginsLoaded) return;
+
+    const preset = buildV07Presets(t).find(p => p.id === initialPresetId);
+    if (!preset) return;
+    presetAppliedRef.current = true;
+
+    // Pre-fill fetch_issue with the project's tracker MCP if available.
+    // Precedence (most specific → most generic):
+    //   1. `repo_url` hint  — github.com → mcp-github, gitlab.com → mcp-gitlab.
+    //      This is the strongest signal: the user's project ACTUALLY lives
+    //      on this host, so we pick the matching tracker even if Jira is
+    //      also wired globally.
+    //   2. Project-scoped plugin attachment (`!is_global` and project_ids
+    //      includes this project).
+    //   3. Global plugin (matches any project).
+    // Without (1), a globally-wired Jira shadows a project-specific
+    // GitHub config because both match the "actively wired" filter.
+    const TRACKER_PLUGINS = ['mcp-github', 'mcp-gitlab', 'mcp-jira', 'mcp-atlassian'];
+    const linkedProjectRepoUrl = initialProjectId
+      ? projects.find(p => p.id === initialProjectId)?.repo_url ?? null
+      : null;
+    const repoHintedSlug = inferTrackerSlugFromRepoUrl(linkedProjectRepoUrl);
+
+    const candidatePlugins = preset.id === 'ticket-to-pr'
+      ? availableApiPlugins.filter(p =>
+          TRACKER_PLUGINS.includes(p.server.id)
+          && (!initialProjectId
+              || p.config.is_global
+              || p.config.project_ids.includes(initialProjectId)),
+        )
+      : [];
+
+    // Rank: (a) repo-hint match wins outright; otherwise prefer
+    // project-scoped over global; ties broken by TRACKER_PLUGINS order.
+    const trackerPlugin = candidatePlugins.length === 0 ? undefined :
+      [...candidatePlugins].sort((a, b) => {
+        const aHint = a.server.id === repoHintedSlug ? -100 : 0;
+        const bHint = b.server.id === repoHintedSlug ? -100 : 0;
+        if (aHint !== bHint) return aHint - bHint;
+        const aScope = (initialProjectId && a.config.project_ids.includes(initialProjectId)) ? -10 : 0;
+        const bScope = (initialProjectId && b.config.project_ids.includes(initialProjectId)) ? -10 : 0;
+        if (aScope !== bScope) return aScope - bScope;
+        return TRACKER_PLUGINS.indexOf(a.server.id) - TRACKER_PLUGINS.indexOf(b.server.id);
+      })[0];
+
+    const transformedSteps = preset.steps.map((s, idx) => {
+      if (idx !== 0 || !trackerPlugin || s.name !== 'fetch_issue') return s;
+      const slug = trackerPlugin.server.id;
+      const linkedProject = initialProjectId
+        ? projects.find(p => p.id === initialProjectId)
+        : undefined;
+      const parsed = parseRepoUrl(linkedProject?.repo_url);
+      const req = buildOldestIssueRequest(slug, parsed);
+      if (!req) return s;
+      return {
+        ...s,
+        step_type: { type: 'ApiCall' } as WorkflowStep['step_type'],
+        api_plugin_slug: slug,
+        api_config_id: trackerPlugin.config.id,
+        api_endpoint_path: req.endpoint,
+        api_method: 'GET',
+        api_query: req.query,
+        api_path_params: req.path_params,
+        api_extract: {
+          path: req.extract_path,
+          fallback: null,
+          fail_on_empty: false,
+        },
+        // Drop the JsonData fixture body — leaving it around is harmless
+        // (the executor ignores it for ApiCall steps) but confuses the UI.
+        json_data_payload: null,
+      };
+    });
+
+    setSteps(transformedSteps);
+    if (preset.onFailure) setOnFailureSteps(preset.onFailure);
+    if (preset.execAllowlist) setExecAllowlist(preset.execAllowlist);
+    if (preset.variables) setWfVariables(preset.variables);
+    if (initialProjectId && projects.some(p => p.id === initialProjectId)) {
+      setProjectId(initialProjectId);
+    }
+    if (!name) setName(t(preset.titleKey));
+
+    // Land the user on the Steps page in Advanced mode so the full
+    // pipeline is visible.
+    setWizardMode('advanced');
+    setWizardStep(2);
+    setShowSuggestions(false);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialPresetId, initialProjectId, pluginsLoaded]);
   // 0.7.0 Phase 5b — ref so the Exec form's "Configure now" button can
   // jump to the Config tab AND focus the allowlist input. Without focus
   // the user lands on a tab full of forms and has to hunt for "Allowlist
@@ -311,7 +432,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
         }
         setAvailableApiPlugins(options);
       })
-      .catch(e => console.warn('Failed to load API plugins:', e));
+      .catch(e => console.warn('Failed to load API plugins:', e))
+      .finally(() => setPluginsLoaded(true));
     window.addEventListener('kronn:profiles-changed', refetchProfiles);
     return () => window.removeEventListener('kronn:profiles-changed', refetchProfiles);
   }, []);
@@ -321,10 +443,16 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     if (!projectId) { setSuggestions([]); return; }
     setSuggestionsLoading(true);
     workflowsApi.suggestions(projectId)
-      .then(s => { setSuggestions(s); if (s.length > 0 && !isEdit) setShowSuggestions(true); })
+      .then(s => {
+        setSuggestions(s);
+        // Auto-show suggestions UNLESS we're applying a deep-linked preset
+        // — in that case the user came here for a specific preset, not for
+        // orthogonal MCP-aware suggestions. Showing both clutters the view.
+        if (s.length > 0 && !isEdit && !initialPresetId) setShowSuggestions(true);
+      })
       .catch(() => setSuggestions([]))
       .finally(() => setSuggestionsLoading(false));
-  }, [projectId, isEdit]);
+  }, [projectId, isEdit, initialPresetId]);
 
   const applySuggestion = (s: WorkflowSuggestion) => {
     setName(s.title);
@@ -1869,14 +1997,24 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                     </div>
                     {/* Worktree affordance — surface here because "is this exec
                         seeing what the previous Agent step wrote?" is the most
-                        common UX worry on the Exec step. Only show when there's
-                        actually a previous step to be impacted by. */}
-                    {i > 0 && projectId && (
+                        common UX worry on the Exec step. 0.8.2 TD #232 — show
+                        for ALL exec steps (not just `i > 0`): the first step
+                        case needs a different message ("fresh worktree, no
+                        prior changes") so users on a single-step workflow
+                        also see where their command runs. When no project is
+                        bound at all, warn that the command runs in Kronn's
+                        CWD (no worktree, no isolation) — common foot-gun. */}
+                    {projectId ? (
                       <div className="wf-worktree-hint mb-3">
                         <span title={t('wiz.worktreeIconTooltip')} className="flex-row" style={{ cursor: 'help' }}>
                           <GitBranch size={11} />
                         </span>
-                        <span>{t('wiz.execWorktreeHint')}</span>
+                        <span>{i > 0 ? t('wiz.execWorktreeHint') : t('wiz.execWorktreeHintFirst')}</span>
+                      </div>
+                    ) : (
+                      <div className="wf-restricted-warning mb-3">
+                        <AlertTriangle size={12} />
+                        <span className="flex-1">{t('wiz.execNoProjectWarn')}</span>
                       </div>
                     )}
                     {execAllowlist.length === 0 ? (
@@ -1893,6 +2031,90 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       </div>
                     ) : (
                       <>
+                        {/* 0.8.2 — Setup phase (worktree dep install). Hidden
+                            behind a checkbox to keep the simple case clean.
+                            Toggling ON enables the setup-command picker + a
+                            preset dropdown for the common install commands.
+                            See backend `exec_setup_command` / `exec_setup_args`
+                            and `execute_exec_step` for the runtime contract. */}
+                        <div className="mb-3" style={{ borderLeft: '2px solid var(--kr-border-soft)', paddingLeft: 8 }}>
+                          <label className="text-xs flex-row gap-1" style={{ cursor: 'pointer', alignItems: 'flex-start' }}>
+                            <input
+                              type="checkbox"
+                              checked={!!step.exec_setup_command}
+                              onChange={e => {
+                                if (e.target.checked) {
+                                  // Default to composer install — the most
+                                  // common case for the AutoPilot preset on
+                                  // PHP projects. User can swap via the
+                                  // preset dropdown below.
+                                  updateStep(i, {
+                                    exec_setup_command: 'composer',
+                                    exec_setup_args: ['install', '--no-interaction', '--prefer-dist'],
+                                  });
+                                } else {
+                                  updateStep(i, { exec_setup_command: null, exec_setup_args: [] });
+                                }
+                              }}
+                              style={{ marginTop: 2 }}
+                            />
+                            <span style={{ flex: 1 }}>
+                              <strong>{t('wiz.execSetupToggle')}</strong>
+                              <br />
+                              <span className="text-ghost">{t('wiz.execSetupHint')}</span>
+                            </span>
+                          </label>
+                          {step.exec_setup_command && (
+                            <div className="mt-2 ml-5">
+                              <label className="text-xs text-muted mb-1">{t('wiz.execSetupPreset')}</label>
+                              <select
+                                className="wf-select text-sm mb-2"
+                                value=""
+                                onChange={e => {
+                                  const v = e.target.value;
+                                  if (!v) return;
+                                  const presets: Record<string, { cmd: string; args: string[] }> = {
+                                    composer:  { cmd: 'composer', args: ['install', '--no-interaction', '--prefer-dist'] },
+                                    'npm-ci':  { cmd: 'npm',      args: ['ci'] },
+                                    pnpm:      { cmd: 'pnpm',     args: ['install', '--frozen-lockfile'] },
+                                    yarn:      { cmd: 'yarn',     args: ['install', '--frozen-lockfile'] },
+                                    poetry:    { cmd: 'poetry',   args: ['install', '--no-interaction'] },
+                                    pip:       { cmd: 'pip',      args: ['install', '-r', 'requirements.txt'] },
+                                  };
+                                  const p = presets[v];
+                                  if (p) updateStep(i, { exec_setup_command: p.cmd, exec_setup_args: p.args });
+                                }}
+                              >
+                                <option value="">— {t('wiz.execSetupPresetPick')} —</option>
+                                <option value="composer">composer install (PHP)</option>
+                                <option value="npm-ci">npm ci (Node + package-lock.json)</option>
+                                <option value="pnpm">pnpm install (Node + pnpm-lock.yaml)</option>
+                                <option value="yarn">yarn install (Node + yarn.lock)</option>
+                                <option value="poetry">poetry install (Python + poetry.lock)</option>
+                                <option value="pip">pip install -r requirements.txt (Python)</option>
+                              </select>
+                              <label className="text-xs text-muted mb-1">{t('wiz.execSetupCommand')}</label>
+                              <select
+                                className="wf-select text-sm mb-2"
+                                value={step.exec_setup_command ?? ''}
+                                onChange={e => updateStep(i, { exec_setup_command: e.target.value || null })}
+                              >
+                                <option value="">—</option>
+                                {execAllowlist.map(bin => (
+                                  <option key={bin} value={bin}>{bin}</option>
+                                ))}
+                              </select>
+                              <label className="text-xs text-muted mb-1">{t('wiz.execSetupArgs')}</label>
+                              <textarea
+                                className="wf-textarea text-sm"
+                                rows={2}
+                                value={(step.exec_setup_args ?? []).join('\n')}
+                                onChange={e => updateStep(i, { exec_setup_args: e.target.value.split('\n').filter(s => s.length > 0) })}
+                                placeholder="install&#10;--no-interaction&#10;--prefer-dist"
+                              />
+                            </div>
+                          )}
+                        </div>
                         <label className="text-xs text-muted mb-1">{t('wiz.execCommand')} <span className="wf-required">*</span></label>
                         <select
                           className="wf-select text-sm mb-2"

@@ -709,6 +709,39 @@
   margin: 0 0 var(--kr-sp-4);
 }
 
+/* 0.8.2 — Tracker-MCP hint banner. Shown above the audit launcher when
+   the project has no GitHub/GitLab/Jira/Linear MCP wired. Encouraging
+   tone (not warning): subtle border, no red, dismissible per project. */
+.dash-tracker-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  margin: 0 0 var(--kr-sp-4);
+  background: rgba(var(--kr-accent-rgb), 0.06);
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.25);
+  border-radius: var(--kr-radius-sm);
+  font-size: var(--kr-fs-xs);
+  line-height: 1.4;
+}
+.dash-tracker-hint-text {
+  flex: 1;
+  color: var(--kr-text-secondary);
+}
+.dash-tracker-hint-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  flex-shrink: 0;
+}
+.dash-tracker-hint-dismiss {
+  opacity: 0.6;
+  padding: 2px 6px;
+}
+.dash-tracker-hint-dismiss:hover {
+  opacity: 1;
+}
+
 .dash-audit-step {
   font-size: var(--kr-fs-base);
   color: var(--kr-text-secondary);

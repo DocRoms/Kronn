@@ -134,10 +134,192 @@ pub struct AuditProgress {
     pub kind: String,
 }
 
+/// One row in the `audit_runs` table — one record per audit invocation.
+///
+/// Inserted at audit start with `status = Running` and zeroed counts;
+/// updated to a terminal status with populated counts when the pipeline
+/// finishes. The frontend health badge reads the latest N rows for a
+/// project to render the sparkline + delta chip.
+///
+/// 0.8.2 — see migration 050 for schema. The `kind` field is forward-
+/// compatible: we ship with `Full` only and extend to `Security`,
+/// `Docker`, etc. in S2 without touching this struct.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AuditRun {
+    pub id: String,
+    pub project_id: String,
+    /// `Full` | `Drift` | `Security` | `Docker` | `Performance` |
+    /// `Accessibility` | `Database` | `ApiDesign` | `Custom`.
+    /// Kept as String for forward-compat (new variants don't break
+    /// rows already on disk).
+    pub kind: String,
+    pub agent_type: String,
+    pub started_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u32>,
+    /// `Running` while in flight; `Completed` / `Failed` / `Cancelled`
+    /// once terminal.
+    pub status: String,
+    #[serde(default)]
+    pub td_critical: u32,
+    #[serde(default)]
+    pub td_high: u32,
+    #[serde(default)]
+    pub td_medium: u32,
+    #[serde(default)]
+    pub td_low: u32,
+    #[serde(default)]
+    pub td_total: u32,
+    #[serde(default)]
+    pub td_resolved_since_last: u32,
+    #[serde(default)]
+    pub td_new_since_last: u32,
+    #[serde(default)]
+    pub td_carried_over: u32,
+    /// 0-100 health score computed by `compute_health_score` at the
+    /// moment of completion. `None` while `status == Running`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_score: Option<u8>,
+    /// Relative path under the project root, e.g.
+    /// `docs/tech-debt/_reconciliation-2026-05-13.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_path: Option<String>,
+    /// Raw JSON string of `Vec<AuditRecommendation>`, populated by the
+    /// cluster detector in Step 10 (Full audits only). Kept as String
+    /// in the model to avoid forcing schema migrations on every
+    /// recommendation-shape tweak.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommendations_json: Option<String>,
+}
+
+/// Recommendation emitted by the Step 10 cluster detector. Lives in
+/// `AuditRun.recommendations_json` as a JSON-encoded list.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AuditRecommendation {
+    /// The specialized audit kind to suggest.
+    pub kind: String,
+    /// Why this kind is recommended — surfaced in the UI tooltip.
+    pub reason: String,
+    /// Number of TDs that drove the recommendation (the cluster size).
+    /// Used to rank multiple recommendations.
+    pub cluster_size: u8,
+}
+
+/// Compute the 0-100 health score from the severity distribution.
+///
+/// Calibration: a fresh green-field repo with 0 TDs scores 100. The
+/// penalty per severity is biased so a single Critical (12 points) bites
+/// harder than 8 Low (2.4 points). Tuned against DOCROMS_WEB's May
+/// audit (1C / 6H / 6M / 5L → score 53 = "significant debt, plan a
+/// pass"). Clamped to [0, 100].
+pub fn compute_health_score(critical: u32, high: u32, medium: u32, low: u32) -> u8 {
+    let raw = 100.0
+        - (critical as f64 * 12.0)
+        - (high     as f64 *  4.0)
+        - (medium   as f64 *  1.5)
+        - (low      as f64 *  0.3);
+    raw.clamp(0.0, 100.0) as u8
+}
+
+#[cfg(test)]
+mod health_score_tests {
+    use super::compute_health_score;
+
+    #[test]
+    fn clean_repo_scores_100() {
+        assert_eq!(compute_health_score(0, 0, 0, 0), 100);
+    }
+
+    #[test]
+    fn one_critical_drops_to_88() {
+        assert_eq!(compute_health_score(1, 0, 0, 0), 88);
+    }
+
+    #[test]
+    fn docroms_may_audit_scores_53() {
+        // 1 Critical + 6 High + 6 Medium + 5 Low (real distribution
+        // from the 2026-05-12 DOCROMS_WEB audit). 100 - 12 - 24 - 9 -
+        // 1.5 = 53.5 → 53 after truncation.
+        assert_eq!(compute_health_score(1, 6, 6, 5), 53);
+    }
+
+    #[test]
+    fn catastrophic_clamps_to_zero() {
+        assert_eq!(compute_health_score(20, 20, 20, 20), 0);
+    }
+
+    #[test]
+    fn medium_only_pattern_is_amber() {
+        // 10 Medium = 100 - 15 = 85. Healthy yellow zone.
+        assert_eq!(compute_health_score(0, 0, 10, 0), 85);
+    }
+
+    #[test]
+    fn low_only_pattern_stays_green() {
+        // 30 Low = 100 - 9 = 91. Still green.
+        assert_eq!(compute_health_score(0, 0, 0, 30), 91);
+    }
+}
+
+/// 0.8.2 — Specialized audit types ("Design C").
+///
+/// `Full` runs the canonical 10-step pipeline. The other variants run
+/// a focused subset that only re-audits one dimension. They share the
+/// reconciliation + audit_runs row machinery; only the step list differs.
+///
+/// `Custom` is the escape hatch: the caller supplies a free-form prompt
+/// (single step). All variants are wired through `kind_to_steps()` in
+/// `api::audit`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "PascalCase")]
+pub enum AuditKind {
+    #[default]
+    Full,
+    Drift,
+    Security,
+    Docker,
+    Performance,
+    Accessibility,
+    Database,
+    ApiDesign,
+    Custom,
+}
+
+impl AuditKind {
+    /// Snake-case label persisted in `audit_runs.kind` and used for
+    /// progress / SSE event names so the UI can filter by audit type.
+    pub fn as_label(&self) -> &'static str {
+        match self {
+            AuditKind::Full          => "Full",
+            AuditKind::Drift         => "Drift",
+            AuditKind::Security      => "Security",
+            AuditKind::Docker        => "Docker",
+            AuditKind::Performance   => "Performance",
+            AuditKind::Accessibility => "Accessibility",
+            AuditKind::Database      => "Database",
+            AuditKind::ApiDesign     => "ApiDesign",
+            AuditKind::Custom        => "Custom",
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, TS)]
 #[ts(export)]
 pub struct LaunchAuditRequest {
     pub agent: AgentType,
+    /// 0.8.2 — Specialized audit type. Omitted/null defaults to `Full`
+    /// for backwards-compat (the only kind the UI knows about pre-0.8.2).
+    #[serde(default)]
+    pub kind: Option<AuditKind>,
+    /// 0.8.2 — Caller-provided free-form prompt; only honored when
+    /// `kind == AuditKind::Custom`. Ignored otherwise.
+    #[serde(default)]
+    pub custom_prompt: Option<String>,
 }
 
 #[derive(Debug, Deserialize, TS)]

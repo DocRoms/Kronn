@@ -18,12 +18,39 @@ services:
       - kronn-data:/data
       - ${HOME}:/host-home:ro
       - ${KRONN_REPOS_DIR:-${HOME}/Repositories}:/host-home/${KRONN_REPOS_REL:-Repositories}:rw  # rw for agent writes
+      # 0.8.3 — Self-mount Repositories at the SAME absolute host path inside
+      # the container. Required for docker-in-docker workflows (Exec steps
+      # that shell out to `docker compose run/exec` from a worktree). Without
+      # this, the cwd seen by Kronn is `/host-home/Repositories/...`, but the
+      # host docker daemon receives that same string as the volume source —
+      # which doesn't exist on the host (only `${HOME}/Repositories/...` does).
+      # Self-mounting makes the path resolve to the same bind on both sides,
+      # so `docker compose` volume specs like `./:/app` mount the right files.
+      # Mirrors the pattern at L36 for ~/.local/share (TD-20260513-docker-in-docker-volume).
+      - ${KRONN_REPOS_DIR:-${HOME}/Repositories}:${KRONN_REPOS_DIR:-${HOME}/Repositories}:rw
       - ${KRONN_GLOBAL_BIN:-/usr/local/bin}:/host-bin/global:ro
       - ${KRONN_GLOBAL_LIB:-/usr/local/lib}:/host-bin/lib:ro  # npm global node_modules (sibling of /host-bin/global so `../lib/node_modules/...` relative symlinks resolve — fixes Fastly CLI which ships as a JS wrapper when installed via `npm -g`)
       - ${HOME}/.local/bin:/host-bin/local:ro
       - ${KRONN_NPM_BIN:-/dev/null}:/host-bin/npm:ro  # npm global bin (macOS: ~/.npm/bin or /opt/homebrew/bin)
       - /usr/bin:/host-bin/sysbin:ro              # Host system binaries (make, php, etc.)
       - /usr/sbin:/host-bin/syssbin:ro            # Host system admin binaries
+      # 0.8.2 — Common version-manager paths so workflow Exec steps can
+      # run `cargo` / `bun` / etc. without the user symlinking each tool
+      # into ~/.local/bin. Each path goes through env-var indirection with
+      # `/dev/null` fallback so Kronn STARTS even when the user doesn't
+      # have rustup / bun installed. To enable a path, set the env var
+      # in your shell or a `.env` file alongside `docker-compose.yml`:
+      #   KRONN_CARGO_BIN=$HOME/.cargo/bin   (rustup default)
+      #   KRONN_BUN_BIN=$HOME/.bun/bin
+      #   KRONN_EXTRA_BIN=$HOME/.pyenv/shims (or any other path you need)
+      - ${KRONN_CARGO_BIN:-/dev/null}:/host-bin/cargo:ro        # rustup Rust toolchain (cargo, rustc, clippy, fmt)
+      # rustup's `cargo` and `rustc` are SHIMS — they need `~/.rustup` to
+      # find the actual toolchain. Self-mount at the same absolute path
+      # so the shim's hardcoded `$HOME/.rustup` lookup works inside the
+      # container. Set KRONN_RUSTUP_HOME to enable; falls back to /dev/null.
+      - ${KRONN_RUSTUP_HOME:-/dev/null}:${KRONN_RUSTUP_HOME:-/dev/null/rustup_disabled}:ro
+      - ${KRONN_BUN_BIN:-/dev/null}:/host-bin/bun:ro            # Bun runtime + installer
+      - ${KRONN_EXTRA_BIN:-/dev/null}:/host-bin/extra:ro        # Escape hatch — anything else (asdf shims, pyenv, custom paths)
       - /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro  # Docker compose plugin
       - /var/run/docker.sock:/var/run/docker.sock  # Docker socket for docker compose
       - ${HOME}/.local/share:/host-home/.local/share:ro  # Symlink targets (claude, vibe)
@@ -85,8 +112,15 @@ services:
       # `kronn-internal` MCP entry. Must resolve identically inside the
       # container and on the host — the self-mount above makes that work.
       - KRONN_INTROSPECTION_PUBLIC_PATH=${PWD}/backend/scripts/disc-introspection-mcp.py
-      - KRONN_HOST_BIN=/host-bin/local:/host-bin/global:/host-bin/npm
-      - PATH=/home/kronn/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/host-bin/local:/host-bin/global:/host-bin/npm:/host-bin/sysbin:/host-bin/syssbin
+      - KRONN_HOST_BIN=/host-bin/local:/host-bin/global:/host-bin/npm:/host-bin/cargo:/host-bin/bun:/host-bin/extra
+      # 0.8.2 — Propagate the user's rustup home so the `cargo` / `rustc`
+      # shims can locate the active toolchain. The shims read this env
+      # var BEFORE falling back to `$HOME/.rustup`, and the container's
+      # `HOME` is `/home/kronn` (not the host user's home). Empty when
+      # KRONN_RUSTUP_HOME isn't set in .env — cargo will then error out
+      # cleanly at first invocation rather than silently fail.
+      - RUSTUP_HOME=${KRONN_RUSTUP_HOME:-}
+      - PATH=/home/kronn/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/host-bin/local:/host-bin/global:/host-bin/npm:/host-bin/cargo:/host-bin/bun:/host-bin/extra:/host-bin/sysbin:/host-bin/syssbin
       - KRONN_HOST_OS=${KRONN_HOST_OS:-Linux}
       - KRONN_HOST_UID=${KRONN_HOST_UID:-1000}
       - KRONN_HOST_GID=${KRONN_HOST_GID:-1000}

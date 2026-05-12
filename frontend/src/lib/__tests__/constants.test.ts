@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES, agentColor, getProjectGroup, isHiddenPath, isUsable, isValidationDisc, isBriefingDisc, isBootstrapDisc, agentSupportsIntrospection } from '../constants';
+import { AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES, agentColor, getProjectGroup, isHiddenPath, isUsable, isValidationDisc, isBriefingDisc, isBootstrapDisc, agentSupportsIntrospection, isTrackerMcp, TRACKER_MCP_NEEDLES, parseRepoUrl, buildOldestIssueRequest, inferTrackerSlugFromRepoUrl } from '../constants';
 
 describe('constants', () => {
   describe('AGENT_COLORS', () => {
@@ -252,6 +252,169 @@ describe('constants', () => {
       // a user who wires their own Custom agent to read .mcp.json gets
       // the introspection bridge without us needing to know about it.
       expect(agentSupportsIntrospection('Custom')).toBe(true);
+    });
+  });
+
+  describe('isTrackerMcp', () => {
+    it('matches the 6 canonical tracker names case-insensitively', () => {
+      // Real server names observed in the wild — must all match.
+      const positives = [
+        'github', 'GitHub', 'github-mcp',
+        'gitlab', 'GitLab',
+        'jira', 'Jira',
+        'atlassian', 'Atlassian',
+        'linear', 'Linear',
+        'youtrack', 'YouTrack',
+        '@modelcontextprotocol/server-github',
+        'mcp-server-jira',
+      ];
+      for (const name of positives) {
+        expect(isTrackerMcp(name), `${name} should match a tracker`).toBe(true);
+      }
+    });
+
+    it('does not false-match unrelated MCP servers', () => {
+      const negatives = [
+        'chartbeat', 'fastly', 'aws-cloudwatch',
+        'docker', 'memory', 'context7',
+        'kronn-internal', 'playwright', 'sequential-thinking',
+        'resend',
+      ];
+      for (const name of negatives) {
+        expect(isTrackerMcp(name), `${name} should NOT match a tracker`).toBe(false);
+      }
+    });
+
+    it('keeps the canonical needle list in sync with the backend', () => {
+      // Backend source of truth: api/audit/helpers.rs:325-333. If the
+      // backend list grows (e.g. + bitbucket / azure-devops), update
+      // both sides simultaneously so the ProjectCard tracker-hint
+      // banner stays accurate.
+      expect([...TRACKER_MCP_NEEDLES].sort()).toEqual(
+        ['atlassian', 'github', 'gitlab', 'jira', 'linear', 'youtrack'],
+      );
+    });
+  });
+
+  describe('parseRepoUrl', () => {
+    it('parses SSH GitHub URLs (.git suffix)', () => {
+      expect(parseRepoUrl('git@github.com:DocRoms/DOCROMS_WEB.git'))
+        .toEqual({ owner: 'DocRoms', repo: 'DOCROMS_WEB' });
+    });
+
+    it('parses HTTPS GitHub URLs (.git suffix)', () => {
+      expect(parseRepoUrl('https://github.com/DocRoms/RustCrawler.git'))
+        .toEqual({ owner: 'DocRoms', repo: 'RustCrawler' });
+    });
+
+    it('parses HTTPS GitHub URLs without .git suffix', () => {
+      expect(parseRepoUrl('https://github.com/DocRoms/RustCrawler'))
+        .toEqual({ owner: 'DocRoms', repo: 'RustCrawler' });
+    });
+
+    it('parses HTTPS GitHub URLs with trailing slash', () => {
+      expect(parseRepoUrl('https://github.com/DocRoms/RustCrawler/'))
+        .toEqual({ owner: 'DocRoms', repo: 'RustCrawler' });
+    });
+
+    it('handles org accounts (multi-word owner)', () => {
+      expect(parseRepoUrl('git@github.com:Euronews-tech/front_euronews.git'))
+        .toEqual({ owner: 'Euronews-tech', repo: 'front_euronews' });
+    });
+
+    it('parses GitLab URLs in both SSH and HTTPS shapes', () => {
+      expect(parseRepoUrl('git@gitlab.com:acme/billing.git'))
+        .toEqual({ owner: 'acme', repo: 'billing' });
+      expect(parseRepoUrl('https://gitlab.com/acme/billing'))
+        .toEqual({ owner: 'acme', repo: 'billing' });
+    });
+
+    it('parses Codeberg URLs', () => {
+      expect(parseRepoUrl('https://codeberg.org/forgejo/forgejo.git'))
+        .toEqual({ owner: 'forgejo', repo: 'forgejo' });
+    });
+
+    it('returns null for non-GitHub/GitLab hosts', () => {
+      expect(parseRepoUrl('https://bitbucket.org/foo/bar')).toBeNull();
+      expect(parseRepoUrl('https://git.example.com/foo/bar')).toBeNull();
+    });
+
+    it('returns null for null/empty/malformed inputs', () => {
+      expect(parseRepoUrl(null)).toBeNull();
+      expect(parseRepoUrl(undefined)).toBeNull();
+      expect(parseRepoUrl('')).toBeNull();
+      expect(parseRepoUrl('not a url')).toBeNull();
+      expect(parseRepoUrl('github.com')).toBeNull();
+    });
+  });
+
+  describe('buildOldestIssueRequest', () => {
+    const repo = { owner: 'DocRoms', repo: 'DOCROMS_WEB' };
+
+    it('GitHub uses REST v3 issues endpoint + path placeholders', () => {
+      const r = buildOldestIssueRequest('mcp-github', repo);
+      expect(r).toEqual({
+        endpoint: '/repos/{owner}/{repo}/issues',
+        query: { state: 'open', sort: 'created', direction: 'asc', per_page: '1' },
+        path_params: { owner: 'DocRoms', repo: 'DOCROMS_WEB' },
+        extract_path: '$[0]',
+      });
+    });
+
+    it('GitLab uses API v4 + project_id as owner/repo (resolver percent-encodes the slash)', () => {
+      const r = buildOldestIssueRequest('mcp-gitlab', repo);
+      expect(r).toEqual({
+        endpoint: '/api/v4/projects/{project_id}/issues',
+        query: { state: 'opened', order_by: 'created_at', sort: 'asc', per_page: '1' },
+        path_params: { project_id: 'DocRoms/DOCROMS_WEB' },
+        extract_path: '$[0]',
+      });
+    });
+
+    it('Jira / Atlassian use JQL search (no owner/repo concept)', () => {
+      for (const slug of ['mcp-jira', 'mcp-atlassian']) {
+        const r = buildOldestIssueRequest(slug, repo);
+        expect(r?.endpoint).toBe('/rest/api/3/search/jql');
+        expect(r?.query.jql).toContain('ORDER BY created ASC');
+        expect(r?.path_params).toBeUndefined();
+        expect(r?.extract_path).toBe('$.issues[0]');
+      }
+    });
+
+    it('falls back to empty owner/repo placeholders when repo is unparseable', () => {
+      const r = buildOldestIssueRequest('mcp-github', null);
+      expect(r?.path_params).toEqual({ owner: '', repo: '' });
+    });
+
+    it('returns null for unknown tracker slugs', () => {
+      expect(buildOldestIssueRequest('mcp-linear', repo)).toBeNull();
+      expect(buildOldestIssueRequest('mcp-chartbeat', repo)).toBeNull();
+      expect(buildOldestIssueRequest('', repo)).toBeNull();
+    });
+  });
+
+  describe('inferTrackerSlugFromRepoUrl', () => {
+    it('maps github.com URLs to mcp-github', () => {
+      expect(inferTrackerSlugFromRepoUrl('git@github.com:DocRoms/DOCROMS_WEB.git')).toBe('mcp-github');
+      expect(inferTrackerSlugFromRepoUrl('https://github.com/DocRoms/Kronn')).toBe('mcp-github');
+    });
+
+    it('maps gitlab.com / self-hosted gitlab URLs to mcp-gitlab', () => {
+      expect(inferTrackerSlugFromRepoUrl('git@gitlab.com:acme/billing.git')).toBe('mcp-gitlab');
+      expect(inferTrackerSlugFromRepoUrl('https://gitlab.acme.io/team/repo')).toBe('mcp-gitlab');
+    });
+
+    it('returns null for non-github/gitlab hosts and empty inputs', () => {
+      // Regression: pre-fix, the AutoPilot deep-link picked the FIRST
+      // matching tracker MCP (often a globally-wired Jira) even when the
+      // project lived on GitHub. With this helper, the repo_url is the
+      // tie-breaker and Jira/Atlassian are ignored when github.com is
+      // detected — see WorkflowWizard.tsx deep-link block.
+      expect(inferTrackerSlugFromRepoUrl(null)).toBeNull();
+      expect(inferTrackerSlugFromRepoUrl(undefined)).toBeNull();
+      expect(inferTrackerSlugFromRepoUrl('')).toBeNull();
+      expect(inferTrackerSlugFromRepoUrl('https://bitbucket.org/foo/bar')).toBeNull();
+      expect(inferTrackerSlugFromRepoUrl('https://codeberg.org/forgejo/forgejo')).toBeNull();
     });
   });
 });

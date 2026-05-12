@@ -225,6 +225,63 @@ fn validate_exec_steps(steps: &[WorkflowStep], allowlist: &[String]) -> Result<(
                 s.name, s.exec_args.len(), MAX_ARGS
             ));
         }
+        // 0.8.2 — Catch the "bash + multi-word arg" foot-gun. A user who
+        // sets `exec_command=bash, exec_args=["make test"]` thinks they're
+        // running `make test`, but bash treats the first positional arg
+        // as a SCRIPT FILE → exit 127 "No such file or directory". The
+        // right shapes are `make ["test"]` or `bash ["-c", "make test"]`.
+        // Catch both common variants (bash + sh + zsh + dash) and reject
+        // at save time with an actionable message.
+        let is_shell = matches!(cmd, "bash" | "sh" | "zsh" | "dash" | "fish");
+        if is_shell && !s.exec_args.is_empty() {
+            let first = &s.exec_args[0];
+            let looks_like_oneliner = first.contains(' ') || first.contains(';') || first.contains('|');
+            if looks_like_oneliner && first != "-c" {
+                return Err(format!(
+                    "Step Exec « {step} » : commande `{shell}` avec un argument multi-mots `{arg}` — \
+                     `{shell}` interprète le premier arg comme un nom de FICHIER, pas comme une commande. \
+                     Choisis l'une des deux formes :\n\
+                     - Pour un binaire simple : `exec_command=<binaire>`, `exec_args=[<args…>]` \
+                     (ex. `make` + `[\"test\"]` au lieu de `bash` + `[\"make test\"]`).\n\
+                     - Pour une ligne shell : `exec_command=bash`, `exec_args=[\"-c\", \"<ta-commande>\"]` \
+                     (ex. `bash` + `[\"-c\", \"make test\"]`).",
+                    step = s.name,
+                    shell = cmd,
+                    arg = first,
+                ));
+            }
+        }
+        // 0.8.2 — Validate `exec_setup_command` (worktree dep install)
+        // through the same gate as the main command: allowlist + path
+        // separator + shell-multi-word.
+        if let Some(setup_cmd) = s.exec_setup_command.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+            if let Err(e) = validate_exec_allowlist(&[setup_cmd.to_string()]) {
+                return Err(format!("Step Exec « {} » setup : {}", s.name, e));
+            }
+            if !allowlist.iter().any(|a| a == setup_cmd) {
+                return Err(format!(
+                    "Step Exec « {} » setup : binaire `{}` absent de l'allowlist. Allowlist : [{}].",
+                    s.name, setup_cmd, allowlist.join(", ")
+                ));
+            }
+            if s.exec_setup_args.len() > MAX_ARGS {
+                return Err(format!(
+                    "Step Exec « {} » setup : trop d'arguments ({}, max {}).",
+                    s.name, s.exec_setup_args.len(), MAX_ARGS
+                ));
+            }
+            let setup_is_shell = matches!(setup_cmd, "bash" | "sh" | "zsh" | "dash" | "fish");
+            if setup_is_shell && !s.exec_setup_args.is_empty() {
+                let first = &s.exec_setup_args[0];
+                let looks_like_oneliner = first.contains(' ') || first.contains(';') || first.contains('|');
+                if looks_like_oneliner && first != "-c" {
+                    return Err(format!(
+                        "Step Exec « {} » setup : `{}` avec argument multi-mots `{}` — utilise `bash` + `[\"-c\", \"<commande>\"]`.",
+                        s.name, setup_cmd, first
+                    ));
+                }
+            }
+        }
         if let Some(t) = s.exec_timeout_secs {
             if t == 0 || t > MAX_TIMEOUT_SECS {
                 return Err(format!(
@@ -2109,6 +2166,8 @@ pub async fn suggestions(
                 exec_command: None,
                 exec_args: vec![],
                 exec_timeout_secs: None,
+                exec_setup_command: None,
+                exec_setup_args: vec![],
                 quick_prompt_id: None,
                 json_data_payload: None,
             }).collect(),
@@ -2389,6 +2448,8 @@ mod tests {
             exec_command: None,
             exec_args: vec![],
             exec_timeout_secs: None,
+            exec_setup_command: None,
+            exec_setup_args: vec![],
             quick_prompt_id: None,
             json_data_payload: None,
         }
@@ -2541,6 +2602,89 @@ mod tests {
     fn validate_exec_step_accepts_valid_config() {
         let chain = vec![mk_exec_step("test", Some("cargo"), vec!["test", "--", "{{steps.x.summary}}"], Some(120))];
         assert!(validate_exec_steps(&chain, &["cargo".into()]).is_ok());
+    }
+
+    #[test]
+    fn validate_exec_step_rejects_bash_with_oneliner_arg() {
+        // Regression: a user's saved AutoPilot workflow had
+        // `exec_command="bash", exec_args=["make test"]` — bash treats
+        // "make test" as a SCRIPT FILE name, exit 127. The validator
+        // catches this at save time with an actionable message that
+        // suggests the two correct shapes (bare binary OR `bash -c`).
+        let chain = vec![mk_exec_step("run_tests", Some("bash"), vec!["make test"], None)];
+        let err = validate_exec_steps(&chain, &["bash".into(), "make".into()]).unwrap_err();
+        assert!(err.contains("run_tests"), "got: {}", err);
+        assert!(err.contains("multi-mots"), "must explain the multi-word issue: {}", err);
+        assert!(err.contains("-c"), "must suggest the `bash -c` form: {}", err);
+    }
+
+    #[test]
+    fn validate_exec_step_accepts_bash_with_dash_c() {
+        // The correct shape for a shell one-liner: bash -c "the command".
+        let chain = vec![mk_exec_step("run_tests", Some("bash"), vec!["-c", "make test && echo ok"], None)];
+        assert!(validate_exec_steps(&chain, &["bash".into()]).is_ok());
+    }
+
+    #[test]
+    fn validate_exec_step_accepts_bash_with_single_word_arg() {
+        // bash with a single-word arg (script path) is still legitimate —
+        // don't reject `bash script.sh`. The trap is specifically the
+        // multi-word arg shape.
+        let chain = vec![mk_exec_step("run", Some("bash"), vec!["script.sh"], None)];
+        assert!(validate_exec_steps(&chain, &["bash".into()]).is_ok());
+    }
+
+    #[test]
+    fn validate_exec_step_catches_other_shells_too() {
+        // Same trap exists for sh, zsh, dash, fish — anything that takes
+        // a script-file-name as positional arg.
+        for shell in &["sh", "zsh", "dash", "fish"] {
+            let chain = vec![mk_exec_step("run", Some(shell), vec!["foo bar"], None)];
+            let err = validate_exec_steps(&chain, &[shell.to_string()]).unwrap_err();
+            assert!(err.contains("multi-mots"),
+                "{} should be caught by the multi-word guard, got: {}", shell, err);
+        }
+    }
+
+    // ─── 0.8.2 — exec_setup_command validation ────────────────────────────
+
+    #[test]
+    fn validate_setup_command_must_be_in_allowlist() {
+        // Setup binary not in allowlist → reject at save time with a
+        // setup-scoped message (so the user knows WHICH command is wrong).
+        let mut step = mk_exec_step("run", Some("make"), vec!["test"], None);
+        step.exec_setup_command = Some("rm".into());
+        step.exec_setup_args = vec!["-rf".into(), "vendor".into()];
+        let err = validate_exec_steps(&[step], &["make".into()]).unwrap_err();
+        assert!(err.contains("setup"), "must mention setup: {}", err);
+        assert!(err.contains("rm"), "must name the rejected binary: {}", err);
+    }
+
+    #[test]
+    fn validate_setup_command_accepts_composer_install_pattern() {
+        // The canonical use case: `composer install` setup before `make test`.
+        let mut step = mk_exec_step("run_tests", Some("make"), vec!["test"], None);
+        step.exec_setup_command = Some("composer".into());
+        step.exec_setup_args = vec!["install".into(), "--no-interaction".into(), "--prefer-dist".into()];
+        assert!(validate_exec_steps(&[step], &["make".into(), "composer".into()]).is_ok());
+    }
+
+    #[test]
+    fn validate_setup_command_catches_bash_multiword_trap_too() {
+        // Same `bash + "foo bar"` foot-gun applies to setup commands.
+        let mut step = mk_exec_step("run", Some("make"), vec!["test"], None);
+        step.exec_setup_command = Some("bash".into());
+        step.exec_setup_args = vec!["composer install".into()];
+        let err = validate_exec_steps(&[step], &["make".into(), "bash".into()]).unwrap_err();
+        assert!(err.contains("setup"), "must mention setup: {}", err);
+        assert!(err.contains("multi-mots"), "must explain the multi-word issue: {}", err);
+    }
+
+    #[test]
+    fn validate_setup_command_none_is_legacy_compatible() {
+        // No setup → same as before this feature.
+        let step = mk_exec_step("run", Some("make"), vec!["test"], None);
+        assert!(validate_exec_steps(&[step], &["make".into()]).is_ok());
     }
 
     #[test]

@@ -115,33 +115,16 @@ jobs:
           # On Windows every Command::new flashes a console window. Production
           # code must use crate::core::cmd::{sync_cmd, async_cmd}.
           #
-          # Strategy: for each .rs file (excluding cmd.rs and *_test.rs),
-          # find the first #[cfg(test)] line. Any Command::new BEFORE that
-          # line is production code → violation. Lines AFTER it are test
-          # helpers and are exempt.
+          # Pre-0.8.2 this was a `grep 'Command::new'` bash loop that
+          # false-positived on string literals — the Security audit prompt
+          # mentions the pattern as something to look for in user code, and
+          # the grep saw the literal substring and failed CI.
           #
-          # Comment lines (//, //!, ///) are skipped: a doc comment that
-          # mentions `Command::new` for context isn't a real call site
-          # and shouldn't break the build.
-          #
-          # Note: we use LINE_NUM instead of LINENO because LINENO is a
-          # bash builtin (current script line number).
-          FAIL=0
-          for file in $(grep -rl 'Command::new' src/ --include='*.rs' \
-                        | grep -v 'src/core/cmd.rs' \
-                        | grep -v '_test.rs'); do
-            TEST_LINE=$(grep -n '#\[cfg(test)\]' "$file" | head -1 | cut -d: -f1)
-            TEST_LINE=${TEST_LINE:-999999}
-            while IFS=: read -r LINE_NUM rest; do
-              if [ "$LINE_NUM" -lt "$TEST_LINE" ]; then
-                echo "::error file=$file,line=$LINE_NUM::Raw Command::new in prod code (use cmd::sync_cmd/async_cmd)"
-                echo "  $file:$LINE_NUM:$rest"
-                FAIL=1
-              fi
-            done < <(grep -n 'Command::new' "$file" | grep -vE '^[0-9]+:[[:space:]]*//')
-          done
-          if [ "$FAIL" -eq 1 ]; then exit 1; fi
-          echo "✓ No raw Command::new in production code"
+          # The check is now an AST-aware Rust binary (syn-based) — see
+          # examples/lint-no-raw-command.rs. Strings/comments are invisible
+          # to the AST, so the whole class of false positives is gone.
+          # cfg(test) modules / fns are skipped recursively.
+          cargo run --example lint-no-raw-command --quiet
 
       - name: Lint — no silent TOML unwrap_or_default
         run: |

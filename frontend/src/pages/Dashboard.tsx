@@ -77,6 +77,12 @@ export function Dashboard({ onReset }: DashboardProps) {
   // is clicked, we hand the batch run id to DiscussionsPage so the sidebar
   // expands the matching batch group + scrolls to it.
   const [focusBatchId, setFocusBatchId] = useState<string | null>(null);
+  // 0.8.2 — Deep-link from the validation-discussion CTA: opens the
+  // workflow wizard pre-loaded with a preset (e.g. `ticket-to-pr` for
+  // AutoPilot) bound to the project of the audit that just completed.
+  // Cleared by WorkflowsPage's onPendingPresetConsumed after the wizard
+  // captures it locally.
+  const [pendingWorkflowPreset, setPendingWorkflowPreset] = useState<{ presetId: string; projectId: string } | null>(null);
 
   // ─── Drift detection state ──────────
   const [driftByProject, setDriftByProject] = useState<Record<string, DriftCheckResponse>>({});
@@ -1035,6 +1041,8 @@ export function Dashboard({ onReset }: DashboardProps) {
               toast={toast}
               initialSelectedWorkflowId={openWorkflowId}
               onInitialSelectionConsumed={() => setOpenWorkflowId(null)}
+              pendingPreset={pendingWorkflowPreset}
+              onPendingPresetConsumed={() => setPendingWorkflowPreset(null)}
               onNavigateToBatch={(batchRunId) => {
                 setFocusBatchId(batchRunId);
                 setPage('discussions');
@@ -1111,6 +1119,10 @@ export function Dashboard({ onReset }: DashboardProps) {
             onSetDiscPrefill={setDiscPrefill}
             autoRunDiscussionId={autoRunDiscussionId}
             onAutoRunConsumed={handleAutoRunConsumed}
+            onLaunchWorkflowFromPreset={(presetId, projectId) => {
+              setPendingWorkflowPreset({ presetId, projectId });
+              setPage('workflows');
+            }}
             openDiscussionId={openDiscussionId}
             onOpenDiscConsumed={handleOpenDiscConsumed}
             focusBatchId={focusBatchId}

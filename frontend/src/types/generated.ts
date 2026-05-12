@@ -654,6 +654,14 @@ export interface WorkflowStep {
   exec_args?: string[];
   /** Per-step timeout in seconds. Default 300, capped at 1800. */
   exec_timeout_secs?: number | null;
+  /** 0.8.2 — Optional setup command that runs IMMEDIATELY BEFORE the main
+   *  `exec_command`. Same allowlist + path-separator + multi-word-shell
+   *  validation as `exec_command`. Designed for the worktree-dep-install
+   *  pattern (composer install / npm ci / pnpm install). If setup fails,
+   *  the step fails immediately without running the main command. */
+  exec_setup_command?: string | null;
+  /** Argv for `exec_setup_command`. Same literal semantics as `exec_args`. */
+  exec_setup_args?: string[];
 
   // ─── JsonData fields (0.7+ — déterministe data source) ───────────────
   /** Payload JSON émis par le step. Validé au save (parse JSON valide,
@@ -804,6 +812,11 @@ export interface StepResult {
   output: string;
   tokens_used: number;
   duration_ms: number;
+  /** 0.8.2 — Wall-clock timestamp at which the step started executing.
+   *  Optional for backward compatibility with runs predating the field.
+   *  Drives the WorkflowDetail page's "live progress" view after navigation
+   *  (synthesized liveRun) and the gate's actual pause duration. */
+  started_at?: string | null;
   condition_result?: string | null;
   /**
    * For output_format=Structured only: did the agent produce the
@@ -1329,6 +1342,7 @@ export type WsMessage =
   | { type: 'discussion_invite'; shared_discussion_id: string; title: string; from_pseudo: string; from_invite_code: string }
   | { type: 'batch_run_finished'; run_id: string; discussion_id: string; batch_name: string | null; batch_total: number; batch_completed: number; batch_failed: number }
   | { type: 'batch_run_progress'; run_id: string; discussion_id: string; batch_total: number; batch_completed: number; batch_failed: number }
+  | { type: 'workflow_run_updated'; run_id: string; workflow_id: string; status: string; step_index: number; total_steps: number; current_step: string | null }
   | { type: 'partial_response_recovered'; discussion_ids: string[] };
 
 export interface DetectedIp {

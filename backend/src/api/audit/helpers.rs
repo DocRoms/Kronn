@@ -58,6 +58,7 @@ pub(super) fn compute_audit_info_sync(project_path_str: &str) -> AuditInfo {
     // Parse tech-debt items from the "Current list" table in inconsistencies-tech-debt.md
     let mut tech_debt_items = Vec::new();
     let tech_debt_file = docs_dir.join("inconsistencies-tech-debt.md");
+    let tech_debt_dir = docs_dir.join("tech-debt");
     if let Ok(content) = std::fs::read_to_string(&tech_debt_file) {
         // Parse markdown table rows: | ID | Problem | Area | Severity |
         for line in content.lines() {
@@ -68,6 +69,16 @@ pub(super) fn compute_audit_info_sync(project_path_str: &str) -> AuditInfo {
             let cols: Vec<&str> = trimmed.split('|').map(|c| c.trim()).collect();
             // cols[0] is empty (before first |), cols[1]=ID, cols[2]=Problem, cols[3]=Area, cols[4]=Severity
             if cols.len() >= 5 && cols[1].starts_with("TD-") {
+                // 0.8.2 — only surface a TD if its detail file actually
+                // exists on disk. Without this, a stale row in the
+                // index table makes the validation discussion's Phase 3
+                // ask questions about phantom TDs (the agent tries to
+                // `Read docs/tech-debt/<id>.md` and the tool returns
+                // empty, leading to a zero-length reply).
+                let detail_path = tech_debt_dir.join(format!("{}.md", cols[1]));
+                if !detail_path.is_file() {
+                    continue;
+                }
                 tech_debt_items.push(TechDebtItem {
                     id: cols[1].to_string(),
                     problem: cols[2].to_string(),
@@ -107,7 +118,15 @@ pub(crate) fn build_validation_prompt(language: &str, info: &AuditInfo, has_issu
                 "3. Present to user one by one (or grouped by area if >10). Ask: confirm/reject? correct severity? priority?\n",
             ));
             if has_issue_tracker_mcp {
-                s.push_str("Also ask: create a ticket? (issue tracker available via MCP)\n");
+                s.push_str(concat!(
+                    "Also ask: create a ticket? (issue tracker available via MCP)\n",
+                    "**Before creating tickets**: check `.github/ISSUE_TEMPLATE/` (or GitLab equivalent `.gitlab/issue_templates/`). ",
+                    "If empty AND the project shows OSS intent (LICENSE present OR remote points at github.com / gitlab.com / codeberg.org), ",
+                    "propose in ONE question:\n",
+                    "> \"No issue template detected. I can create 3 minimal templates (`bug.md`, `feature.md`, `td-from-audit.md`) in `.github/ISSUE_TEMPLATE/` before pushing the tickets — they'll follow the `td-from-audit` format. Approve?\"\n",
+                    "If yes: write the 3 files (YAML frontmatter + Description / Reproduction / Impact / Acceptance sections), commit them WITHOUT pushing (the user pushes), then create the tickets filling in the `td-from-audit` structure.\n",
+                    "If no: create the tickets free-form, leave the repo untouched.\n",
+                ));
             }
             s.push_str(concat!(
                 "Do not batch-confirm. Update/remove `docs/` entries per feedback. Do NOT fix code — only update documentation.\n",
@@ -142,7 +161,15 @@ pub(crate) fn build_validation_prompt(language: &str, info: &AuditInfo, has_issu
                 "3. Presenta al usuario una por una (o agrupadas por area si >10). Pregunta: ¿confirmar/rechazar? ¿severidad? ¿prioridad?\n",
             ));
             if has_issue_tracker_mcp {
-                s.push_str("Tambien: ¿crear ticket? (gestor de issues disponible via MCP)\n");
+                s.push_str(concat!(
+                    "Tambien: ¿crear ticket? (gestor de issues disponible via MCP)\n",
+                    "**Antes de crear los tickets**: verifica `.github/ISSUE_TEMPLATE/` (o equivalente GitLab `.gitlab/issue_templates/`). ",
+                    "Si esta vacio Y el proyecto muestra intent OSS (LICENSE presente O remote apunta a github.com / gitlab.com / codeberg.org), ",
+                    "propone en UNA pregunta:\n",
+                    "> \"No hay template de issue. Puedo crear 3 templates minimos (`bug.md`, `feature.md`, `td-from-audit.md`) en `.github/ISSUE_TEMPLATE/` antes de pushear los tickets — seguiran el formato `td-from-audit`. ¿Apruebas?\"\n",
+                    "Si si: escribe los 3 archivos (frontmatter YAML + secciones Descripcion / Reproduccion / Impacto / Aceptacion), commit-los SIN push (el usuario hace push), luego crea los tickets siguiendo la estructura `td-from-audit`.\n",
+                    "Si no: crea los tickets en formato libre, no toques el repo.\n",
+                ));
             }
             s.push_str(concat!(
                 "No confirmar en lote. Actualiza/elimina entradas `docs/` segun feedback. NO corrijas codigo — solo documenta.\n",
@@ -176,7 +203,15 @@ pub(crate) fn build_validation_prompt(language: &str, info: &AuditInfo, has_issu
                 "3. Presente a l'utilisateur un par un (ou par domaine si >10). Demande : confirmer/rejeter ? severite ? priorite ?\n",
             ));
             if has_issue_tracker_mcp {
-                s.push_str("Aussi : creer un ticket ? (gestionnaire d'issues dispo via MCP)\n");
+                s.push_str(concat!(
+                    "Aussi : creer un ticket ? (gestionnaire d'issues dispo via MCP)\n",
+                    "**Avant de creer les tickets** : verifie `.github/ISSUE_TEMPLATE/` (ou equivalent GitLab `.gitlab/issue_templates/`). ",
+                    "Si vide ET que le projet a un repo OSS-intent (LICENSE present OU remote vers github.com / gitlab.com / codeberg.org), ",
+                    "propose en UNE question :\n",
+                    "> \"Pas de template d'issue detecte. Je peux creer 3 templates minimaux (`bug.md`, `feature.md`, `td-from-audit.md`) dans `.github/ISSUE_TEMPLATE/` avant de pousser les tickets — ils suivront le format `td-from-audit`. Tu valides ?\"\n",
+                    "Si oui : ecris les 3 fichiers (frontmatter YAML + sections Description / Reproduction / Impact / Acceptance), commit-les SANS push (le user pushera), puis cree les tickets en remplissant la structure `td-from-audit`.\n",
+                    "Si non : cree les tickets en free-form, sans toucher au repo.\n",
+                ));
             }
             s.push_str(concat!(
                 "Pas de confirmation en lot. Mets a jour/supprime les entrees `docs/` selon feedback. NE corrige PAS le code — documente seulement.\n",
@@ -466,5 +501,59 @@ pub(crate) fn build_briefing_prompt(language: &str) -> String {
             "Ne modifie AUCUN autre fichier.\n\n",
             "ETAPE 3 — Apres avoir ecrit le fichier, termine ton dernier message par : KRONN:BRIEFING_COMPLETE",
         ).to_string(),
+    }
+}
+
+#[cfg(test)]
+mod compute_audit_info_tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    fn write_index_with_two_tds(docs: &std::path::Path) {
+        fs::write(
+            docs.join("inconsistencies-tech-debt.md"),
+            "# Tech Debt\n\n\
+             ## Current list\n\n\
+             | ID | Problem | Area | Severity |\n\
+             |----|---------|------|----------|\n\
+             | TD-20260512-keeper | Real issue | docker | High |\n\
+             | TD-20260512-phantom | Removed but still in table | docker | High |\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn skips_td_rows_whose_detail_file_was_removed() {
+        let dir = tempdir().unwrap();
+        let docs = dir.path().join("docs");
+        let tech_debt = docs.join("tech-debt");
+        fs::create_dir_all(&tech_debt).unwrap();
+        write_index_with_two_tds(&docs);
+        // Only the "keeper" detail file exists on disk.
+        fs::write(
+            tech_debt.join("TD-20260512-keeper.md"),
+            "# Keeper\n- **Severity**: High\n",
+        )
+        .unwrap();
+
+        let info = compute_audit_info_sync(dir.path().to_str().unwrap());
+        let ids: Vec<&str> = info.tech_debt_items.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["TD-20260512-keeper"],
+            "phantom TD whose detail file was removed must not leak into validation prompt");
+    }
+
+    #[test]
+    fn surfaces_tds_when_both_index_and_detail_exist() {
+        let dir = tempdir().unwrap();
+        let docs = dir.path().join("docs");
+        let tech_debt = docs.join("tech-debt");
+        fs::create_dir_all(&tech_debt).unwrap();
+        write_index_with_two_tds(&docs);
+        fs::write(tech_debt.join("TD-20260512-keeper.md"), "x").unwrap();
+        fs::write(tech_debt.join("TD-20260512-phantom.md"), "x").unwrap();
+
+        let info = compute_audit_info_sync(dir.path().to_str().unwrap());
+        assert_eq!(info.tech_debt_items.len(), 2);
     }
 }

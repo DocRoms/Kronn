@@ -35,6 +35,12 @@ pub fn execute_gate_step(
     ctx: &TemplateContext,
 ) -> StepOutcome {
     let start = Instant::now();
+    // 0.8.2 — Capture the wall-clock start so the resume handler can
+    // compute the actual pause duration once a human approves the gate.
+    // Without this, `duration_ms` only carried the executor render time
+    // (~0ms) and the elapsed counter on the NEXT step appeared to
+    // include the whole pause.
+    let started_at = chrono::Utc::now();
 
     let raw_message = step
         .gate_message
@@ -51,6 +57,7 @@ pub fn execute_gate_step(
                     output: format!("Gate template render error: {}", e),
                     tokens_used: 0,
                     duration_ms: start.elapsed().as_millis() as u64,
+                    started_at: Some(started_at),
                     condition_result: None,
                     envelope_detected: None,
                     step_kind: None,
@@ -70,6 +77,7 @@ pub fn execute_gate_step(
             output: rendered,
             tokens_used: 0,
             duration_ms: start.elapsed().as_millis() as u64,
+            started_at: Some(started_at),
             condition_result: None,
             envelope_detected: None,
             step_kind: None,
@@ -131,9 +139,29 @@ mod tests {
             exec_command: None,
             exec_args: vec![],
             exec_timeout_secs: None,
+            exec_setup_command: None,
+            exec_setup_args: vec![],
             quick_prompt_id: None,
             json_data_payload: None,
         }
+    }
+
+    #[test]
+    fn gate_outcome_carries_started_at_for_pause_duration_tracking() {
+        // 0.8.2 — Regression: pre-fix, the gate's `duration_ms` only
+        // counted executor render time (~0ms), making the live-elapsed
+        // counter on the NEXT step appear to include the full pause.
+        // The fix wires `started_at` so `resume_run_from_gate` (in
+        // runner.rs) can compute the actual pause duration on approval.
+        let step = gate_step("approve_plan", Some("Approve?"));
+        let ctx = TemplateContext::new();
+        let before = chrono::Utc::now();
+        let outcome = execute_gate_step(&step, &ctx);
+        let after = chrono::Utc::now();
+        let started_at = outcome.result.started_at
+            .expect("gate must carry a started_at so resume can compute pause duration");
+        assert!(started_at >= before && started_at <= after,
+            "started_at must be set at executor time, got {started_at} outside [{before}, {after}]");
     }
 
     #[test]

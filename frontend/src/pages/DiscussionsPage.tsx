@@ -79,6 +79,10 @@ export interface DiscussionsPageProps {
   lastSeenMsgCount: Record<string, number>;
   mcpConfigs?: McpConfigDisplay[];
   mcpIncompatibilities?: McpIncompatibility[];
+  /** 0.8.2 — Bubbles up "open the workflow wizard with this preset
+   *  pre-applied" from the validation-complete CTA. Dashboard sets the
+   *  pending preset state + flips the page to Workflows. */
+  onLaunchWorkflowFromPreset?: (presetId: string, projectId: string) => void;
 }
 
 // ─── TTS imports ──
@@ -129,6 +133,7 @@ export function DiscussionsPage({
   initialActiveDiscussionId,
   mcpConfigs = [],
   mcpIncompatibilities = [],
+  onLaunchWorkflowFromPreset,
 }: DiscussionsPageProps) {
   const { t } = useT();
   const isMobile = useIsMobile();
@@ -1837,6 +1842,39 @@ export function DiscussionsPage({
                     </p>
                     <button className="disc-cta-btn" data-variant="accent" onClick={async () => { await projectsApi.validateAudit(proj.id); refetchProjects(); refetchDiscussions(); }}>
                       <Check size={12} /> {t('audit.markValid')}
+                    </button>
+                  </div>
+                );
+              })()}
+
+              {/* 0.8.2 — AutoPilot CTA. Surfaces after VALIDATION_COMPLETE
+                  regardless of audit_status: the user may not have hit
+                  "Mark valid" yet, but the agent's already done the work.
+                  Closes the loop: audit → questions → tickets → AutoPilot.
+                  Always offered (no team-size gate) — solo devs are the
+                  biggest beneficiaries of mobile-issue → AutoPilot. */}
+              {(() => {
+                if (activeDiscussion.title !== 'Validation audit AI' || !activeDiscussion.project_id) return null;
+                const valAgentMsgs = activeDiscussion.messages.filter((m, idx) => m.role === 'Agent' && idx > 0);
+                const lastAgentMsg = valAgentMsgs.length > 0 ? valAgentMsgs[valAgentMsgs.length - 1] : null;
+                const isComplete = lastAgentMsg && lastAgentMsg.content.toUpperCase().includes('KRONN:VALIDATION_COMPLETE');
+                if (!isComplete) return null;
+                if (!onLaunchWorkflowFromPreset) return null;
+                const projectId = activeDiscussion.project_id;
+                return (
+                  <div className="disc-cta-banner" data-variant="accent">
+                    <p className="disc-cta-text" data-variant="accent">
+                      <Zap size={14} /> {t('audit.autopilotCtaText')}
+                    </p>
+                    <button
+                      className="disc-cta-btn"
+                      data-variant="accent"
+                      onClick={() => {
+                        onLaunchWorkflowFromPreset('ticket-to-pr', projectId);
+                        onNavigate('workflows');
+                      }}
+                    >
+                      <Rocket size={12} /> {t('audit.autopilotCtaBtn')}
                     </button>
                   </div>
                 );

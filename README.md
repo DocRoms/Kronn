@@ -25,7 +25,7 @@
 
 **Smaller prompts, more code where code is enough: fewer hallucinations, lower token bill, eco-design by default.**
 
-> **Status: 0.8.1.** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
+> **Status: 0.8.2.** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
 > **License: AGPL-3.0.** Using Kronn locally to build *your own* product is fine; the copyleft only kicks in if you distribute a modified Kronn to others. See [License notes](#license-notes-agpl-3-0).
 
 ## Contents
@@ -141,7 +141,6 @@ If they all converge on the same answer → your prompt is solid, ship it into a
 
 Run Llama 3, Gemma, Qwen, Codestral on your machine via Ollama as a first-class agent. Same Discussions / Quick Prompts / Workflows surface, Kronn just routes the calls to `http://localhost:11434/v1/` instead of the cloud. Pick your default model right from Settings. **Zero token bill, zero code leaving your laptop.**
 
-<!-- TODO 0.8.1: ollama-card.png, settings card with model picker -->
 
 ### 4. Burn tokens only where they earn their cost
 
@@ -163,7 +162,7 @@ Workflow engine supports **8 step types** total: `Agent`, `ApiCall`, `BatchApiCa
   <img src="docs/screenshots/kronn-workflow-wizard.en.png" alt="Workflow wizard, Advanced mode, Infos/Task/Summary tabs, name + project picker. Drag-drop step types in next steps; no DSL to learn." />
 </p>
 
-### 5. Keep a structured AI audit of your codebase
+### 5. Audit your codebase with an AI that doesn't forget
 
 Most "ask an AI about my repo" flows restart cold every conversation. Kronn flips that: the first time you onboard a project, an audit pass reads your source + configs and writes a structured `docs/` tree that lives in the repo.
 
@@ -175,6 +174,7 @@ Most "ask an AI about my repo" flows restart cold every conversation. Kronn flip
 - `docs/operations/debug-operations.md`: commands + troubleshooting
 - `docs/operations/mcp-servers.md`: per-MCP capabilities discovered via introspection
 - `docs/glossary.md`: domain glossary built from your actual code
+- `docs/tech-debt/*.md` + `docs/inconsistencies-tech-debt.md`: one detail file per finding, severity-tagged, all linked from a single index table.
 
 Unknowns get marked `<!-- TODO: verify -->` or `<!-- TODO: ask user -->`. A validate phase walks you through them interactively, project status moving `NoTemplate → TemplateInstalled → Bootstrapped → Audited → Validated`.
 
@@ -182,7 +182,49 @@ The whole tree is injected as project context into every Discussion, Quick Promp
 
 **Drift detection is granular**: each section tracks its source files (e.g. `coding-rules.md` watches `package.json` + `tsconfig.json` + `rustfmt.toml`). When those drift, the section is flagged as stale and you can re-audit just that step. No re-running the whole audit when one config changed.
 
-This is what makes Kronn a **knowledge-persistence layer**, not just a prompt launcher.
+**What 0.8.2 hardens (from real-world misses)**
+
+- **Mandatory baseline checklist**: Step 9 now ALWAYS scans 5 categories that are too common to skip (Dockerfile USER / display_errors / opcache / HEALTHCHECK, compose resource limits, CI quality gate + `StrictHostKeyChecking`, `.env*` secrets, web a11y/CSP). Each item produces an explicit "verified present / verified absent / TD" line so you trust the audit didn't just look the other way.
+- **Anti-repetition memory**: each audit reads existing TDs as priors and REUSES their IDs instead of churning slugs. An `audit_history` YAML block on each TD detail file tracks every pass. A reconciliation report (`_reconciliation-<date>.md`) classifies dropped TDs as `Fixed / Stale / Missed / Uncertain` so nothing silently vanishes between audits.
+- **Two-tier Status**: `Verified in source` (the agent opened the file and confirmed) vs `Inferred` (pattern-matched only). Phase 3 validation skips Verified ones to save your time.
+- **Specialized audit kinds**: alongside the canonical 10-step Full audit, Kronn ships focused passes — `Drift`, `Security`, `Docker`, `Performance`, `Accessibility`, `Database`, `ApiDesign`, plus a `Custom` escape hatch. Each one writes to its own index file so it doesn't clobber the Full audit's TDs.
+- **Health badge with cluster recommendations**: every run is persisted in `audit_runs` with duration, severity counts (Critical × 12 + High × 4 + Medium × 1.5 + Low × 0.3 = score 0–100) and a `recommendations_json` list. When ≥3 findings cluster in one dimension (e.g. 5 Docker TDs), the dashboard surfaces "Run a focused Docker audit" inline.
+- **Community-standards gate**: if your project shows OSS intent (LICENSE present OR remote on github/gitlab/codeberg OR README mentions "contribute"), Step 9 also flags missing `LICENSE`, `SECURITY.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, issue/PR templates. Private projects skip this block entirely.
+
+This is what makes Kronn a **knowledge-persistence layer with strict baselines**, not just a prompt launcher.
+
+### 6. Close the loop: audit → tickets → AutoPilot → PR
+
+The audit isn't a doc that sits in a folder. **0.8.2 wires it into action.**
+
+When the AI confirms `KRONN:VALIDATION_COMPLETE` on the validation discussion, the page surfaces two CTAs:
+
+1. **"Mark audit as validated"** — flips the project's status, freezes the TD baseline.
+2. **"Setup AutoPilot"** — opens the workflow wizard with the `ticket-to-pr` preset already applied AND configured for your project:
+   - Tracker auto-detected from your `repo_url` (github.com → mcp-github, gitlab.com → mcp-gitlab, …)
+   - `{owner}/{repo}` path params filled in from the parsed remote
+   - First step (`fetch_issue`) switched from JSON fixture → real `ApiCall` against your tracker
+   - Land on the **Steps page in Advanced mode** so you see the full 9-step pipeline (`fetch_issue → analyze → plan_gate → implement → run_tests → review → create_pr → ready_gate → notify_done`).
+
+The 9-step preset uses Kronn's `désagentification` discipline: only `analyze`, `implement` and `review` burn agent tokens. The rest is mechanical (`ApiCall`, `Exec`, `Gate`, `Notify`).
+
+**The killer pattern this unlocks**: create a GitHub issue from your phone → AutoPilot's Tracker trigger picks it up → the workflow drafts the PR while you're away from the keyboard, pausing at `plan_gate` for your approval and at `ready_gate` before the PR is merged. *Real autonomy with two human checkpoints.*
+
+#### Exec steps now survive worktree-only environments
+
+The `run_tests` step is typically `npm test`, `cargo test`, `composer test`, `pytest`, … — all of which need vendored deps that **don't exist in a fresh git worktree** (no `node_modules`, no `vendor`, no `target`). Each `Exec` step now has an optional **Setup phase** that fires *immediately before* the main command:
+
+```
+☑ This step runs in a git worktree — install dependencies first
+    Setup command: composer install --no-interaction --prefer-dist
+                   (auto-detected from composer.json — edit if needed)
+
+Main command:     bin/phpunit -c phpunit.xml.dist
+```
+
+Same allowlist + same timeout. Setup fails → main is NOT executed and you see the install logs. Setup succeeds → main runs in the prepared worktree. Common patterns are pre-listed (composer, npm ci, pnpm, yarn, poetry, pip) — pick one, override if needed.
+
+For dockerized projects, the `docker-in-docker` volume mismatch is solved at the infra layer (self-mount + host-path translation), so `docker compose run --rm svc <cmd>` works from a worktree without any extra config.
 
 ---
 
