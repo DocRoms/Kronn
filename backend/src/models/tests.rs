@@ -385,6 +385,55 @@ fn ws_message_presence_offline() {
     }
 }
 
+#[test]
+fn ws_message_workflow_run_updated_round_trip() {
+    // 0.8.2 — TD #247 — guard the wire shape so the frontend WS handler
+    // in WorkflowsPage stays in sync with the backend broadcast.
+    let msg = WsMessage::WorkflowRunUpdated {
+        run_id: "run_test_001".into(),
+        workflow_id: "wf_test_001".into(),
+        status: "WaitingApproval".into(),
+        step_index: 2,
+        total_steps: 5,
+        current_step: Some("gate_review".into()),
+    };
+    let json = serde_json::to_string(&msg).unwrap();
+    assert!(json.contains(r#""type":"workflow_run_updated""#));
+    assert!(json.contains(r#""status":"WaitingApproval""#));
+    assert!(json.contains(r#""step_index":2"#));
+    let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+    match parsed {
+        WsMessage::WorkflowRunUpdated { run_id, workflow_id, status, step_index, total_steps, current_step } => {
+            assert_eq!(run_id, "run_test_001");
+            assert_eq!(workflow_id, "wf_test_001");
+            assert_eq!(status, "WaitingApproval");
+            assert_eq!(step_index, 2);
+            assert_eq!(total_steps, 5);
+            assert_eq!(current_step.as_deref(), Some("gate_review"));
+        }
+        _ => panic!("Expected WorkflowRunUpdated variant"),
+    }
+}
+
+#[test]
+fn ws_message_workflow_run_updated_between_steps() {
+    // current_step=None mirrors the "between steps" StepDone broadcast.
+    let msg = WsMessage::WorkflowRunUpdated {
+        run_id: "run_test_002".into(),
+        workflow_id: "wf_test_002".into(),
+        status: "Running".into(),
+        step_index: 0,
+        total_steps: 3,
+        current_step: None,
+    };
+    let json = serde_json::to_string(&msg).unwrap();
+    let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+    match parsed {
+        WsMessage::WorkflowRunUpdated { current_step, .. } => assert!(current_step.is_none()),
+        _ => panic!("Expected WorkflowRunUpdated variant"),
+    }
+}
+
 // ─── ApiCall step models (désagentification) ─────────────────────────────
 //
 // Guards the serde contract — a drift here cascades into every workflow
@@ -548,6 +597,8 @@ fn workflow_step_api_call_roundtrip() {
         exec_command: None,
         exec_args: vec![],
         exec_timeout_secs: None,
+            exec_setup_command: None,
+            exec_setup_args: vec![],
         quick_prompt_id: None,
         json_data_payload: None,
     };

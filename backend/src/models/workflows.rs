@@ -492,6 +492,28 @@ pub struct WorkflowStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec_timeout_secs: Option<u32>,
 
+    /// 0.8.2 — Optional setup command that runs IMMEDIATELY BEFORE the
+    /// main `exec_command`. Designed for the worktree-dependency-install
+    /// pattern: `composer install` / `pnpm install` / etc., so the main
+    /// command (e.g. `make test`) has the artifacts it needs even though
+    /// the worktree starts with only git-tracked files (no `vendor/`,
+    /// no `node_modules/`, no `target/`).
+    ///
+    /// Same allowlist + char-validation + timeout rules as `exec_command`.
+    /// Templates `{{steps.X}}` resolve normally. If the setup fails
+    /// (non-zero exit), the step fails IMMEDIATELY without running the
+    /// main command — the user sees the setup's stderr.
+    ///
+    /// When `None`, the executor skips straight to `exec_command` (no
+    /// extra subprocess overhead). Backward-compatible default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec_setup_command: Option<String>,
+    /// Argv for `exec_setup_command`. Same literal-argv semantics as
+    /// `exec_args` (no shell, no metachar interpretation). Use
+    /// `[\"-c\", \"<oneliner>\"]` if you need to wrap a shell line.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exec_setup_args: Vec<String>,
+
     // ─── JsonData fields (0.7+ — déterministe data source) ───────────────
     // Only meaningful when `step_type == JsonData`. Zéro token, zéro
     // réseau. Le runner sérialise `json_data_payload` dans une envelope
@@ -872,6 +894,19 @@ pub struct StepResult {
     pub output: String,
     pub tokens_used: u64,
     pub duration_ms: u64,
+    /// 0.8.2 — Wall-clock timestamp at which the step started executing.
+    /// Optional for backward compatibility with runs written before this
+    /// field existed (front-end falls back to the legacy `runStart + sum
+    /// of prior durations` estimate when missing). The primary driver for
+    /// adding this was the Gate step's `duration_ms`: it used to record
+    /// only the executor render time (~0ms), so the time spent paused on
+    /// WaitingApproval was invisible to the live-elapsed counter for the
+    /// NEXT step (which then showed `now - runStart - 0ms` ≈ the full
+    /// pause duration). With `started_at`, the resume handler can compute
+    /// `duration_ms = now - started_at` on approval and surface the real
+    /// pause.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
     /// What happened after this step: null = continued normally, or the condition action triggered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condition_result: Option<String>,

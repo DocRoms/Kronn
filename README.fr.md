@@ -25,7 +25,7 @@
 
 **Prompts plus petits, code déterministe quand c'est possible : moins d'hallucinations, facture tokens divisée, écoconception par conception.**
 
-> **Statut : 0.8.1.** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.
+> **Statut : 0.8.2.** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.
 > **Licence : AGPL-3.0.** Utiliser Kronn localement pour développer *ton propre* produit ne déclenche pas le copyleft ; il ne s'applique que si tu redistribues une version modifiée à d'autres. Voir [Notes sur la licence](#notes-sur-la-licence-agpl-3-0).
 
 ## Sommaire
@@ -141,7 +141,6 @@ S'ils convergent tous sur la même réponse → ton prompt est solide, déploie-
 
 Lance Llama 3, Gemma, Qwen, Codestral sur ta machine via Ollama, traité comme un agent à part entière. Mêmes Discussions / Quick Prompts / Workflows, Kronn route juste les appels vers `http://localhost:11434/v1/` au lieu du cloud. Choisis ton modèle par défaut depuis Settings. **0 € de tokens, 0 ligne de code qui quitte ton laptop.**
 
-<!-- TODO 0.8.1 : ollama-card.png, la card settings avec le model picker -->
 
 ### 4. Ne brûle des tokens QUE là où ils méritent leur coût
 
@@ -163,7 +162,7 @@ Le moteur de workflow supporte **8 types de steps** au total : `Agent`, `ApiCall
   <img src="docs/screenshots/kronn-workflow-wizard.png" alt="Wizard workflow, mode Avancé, onglets Infos/Tâche/Résumé, nom + sélecteur de projet. Drag-drop des types de step dans les étapes suivantes ; aucun DSL à apprendre." />
 </p>
 
-### 5. Garder un audit IA structuré de ta codebase
+### 5. Audite ta codebase avec une IA qui n'oublie pas
 
 La plupart des « demande à l'IA ce qu'elle pense de mon repo » repartent de zéro à chaque conversation. Kronn inverse ça : la première fois que tu onboardes un projet, une passe d'audit lit ton code + tes configs et écrit une arborescence `docs/` structurée qui vit dans le repo.
 
@@ -175,6 +174,7 @@ La plupart des « demande à l'IA ce qu'elle pense de mon repo » repartent de z
 - `docs/operations/debug-operations.md` : commandes + troubleshooting
 - `docs/operations/mcp-servers.md` : capabilities par MCP découvertes via introspection
 - `docs/glossary.md` : glossaire domaine construit depuis ton code
+- `docs/tech-debt/*.md` + `docs/inconsistencies-tech-debt.md` : un fichier de détail par finding, taggé par sévérité, tous liés depuis une table d'index unique.
 
 Les inconnus sont marqués `<!-- TODO: verify -->` ou `<!-- TODO: ask user -->`. Une phase de validation te les fait parcourir interactivement, le statut projet passe `NoTemplate → TemplateInstalled → Bootstrapped → Audited → Validated`.
 
@@ -182,7 +182,49 @@ L'arborescence entière est injectée comme contexte projet dans chaque Discussi
 
 **Le drift detection est granulaire** : chaque section traque ses fichiers sources (ex. `coding-rules.md` surveille `package.json` + `tsconfig.json` + `rustfmt.toml`). Quand ces fichiers changent, la section est marquée stale et tu peux ré-auditer juste ce step. Pas besoin de relancer tout l'audit pour une seule config modifiée.
 
-C'est ce qui fait de Kronn une **couche de persistance de connaissance**, pas juste un lanceur de prompts.
+**Ce que 0.8.2 durcit (à partir d'oublis réels constatés)**
+
+- **Checklist baseline obligatoire** : le Step 9 scanne TOUJOURS 5 catégories trop souvent oubliées (Dockerfile USER / display_errors / opcache / HEALTHCHECK, compose resource limits, CI quality gate + `StrictHostKeyChecking`, secrets dans `.env*`, a11y/CSP web). Chaque item produit une ligne explicite « verified present / verified absent / TD » — tu peux faire confiance à l'audit pour ne pas avoir détourné le regard.
+- **Mémoire anti-répétition** : chaque audit lit les TDs existants comme priors et RÉUTILISE leurs IDs au lieu de churner les slugs. Un bloc YAML `audit_history` sur chaque fichier détail trace chaque passe. Un rapport de réconciliation (`_reconciliation-<date>.md`) classifie les TDs disparus en `Fixed / Stale / Missed / Uncertain` — plus rien ne disparaît silencieusement entre audits.
+- **Statut à deux niveaux** : `Verified in source` (l'agent a ouvert le fichier et confirmé) vs `Inferred` (pattern match seulement). La Phase 3 de validation skip les Verified pour t'épargner le temps.
+- **Types d'audit spécialisés** : à côté du Full audit canonique en 10 steps, Kronn ship des passes focalisées — `Drift`, `Security`, `Docker`, `Performance`, `Accessibility`, `Database`, `ApiDesign`, plus une escape hatch `Custom`. Chacune écrit dans son propre fichier d'index pour ne pas écraser les TDs du Full.
+- **Health badge avec cluster recommendations** : chaque run est persisté dans `audit_runs` avec durée, comptage par sévérité (Critical × 12 + High × 4 + Medium × 1.5 + Low × 0.3 = score 0–100) et une liste `recommendations_json`. Quand ≥3 findings clusterisent sur une dimension (ex. 5 TDs Docker), le dashboard surface inline « Lance un audit Docker focus ».
+- **Gate community standards** : si ton projet a une intent OSS (LICENSE présent OU remote sur github/gitlab/codeberg OU README mentionne « contribute »), le Step 9 flag aussi les `LICENSE`, `SECURITY.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, templates issue/PR manquants. Les projets privés skip ce bloc entièrement.
+
+C'est ce qui fait de Kronn une **couche de persistance de connaissance avec baselines strictes**, pas juste un lanceur de prompts.
+
+### 6. Boucle la boucle : audit → tickets → AutoPilot → PR
+
+L'audit n'est pas un doc qui dort dans un coin. **0.8.2 le branche à l'action.**
+
+Quand l'IA confirme `KRONN:VALIDATION_COMPLETE` sur la discussion de validation, la page surface deux CTAs :
+
+1. **« Marquer l'audit comme valide »** — flip le statut projet, gèle la baseline TD.
+2. **« Configurer AutoPilot »** — ouvre le wizard de workflow avec le préset `ticket-to-pr` déjà appliqué ET configuré pour ton projet :
+   - Tracker auto-détecté depuis ton `repo_url` (github.com → mcp-github, gitlab.com → mcp-gitlab, …)
+   - Path params `{owner}/{repo}` remplis depuis le remote parsé
+   - Premier step (`fetch_issue`) basculé de fixture JSON → vrai `ApiCall` sur ton tracker
+   - Landing sur la **page Steps en mode Advanced** pour que tu voies la pipeline complète en 9 steps (`fetch_issue → analyze → plan_gate → implement → run_tests → review → create_pr → ready_gate → notify_done`).
+
+Le préset 9 steps suit la discipline « désagentification » de Kronn : seuls `analyze`, `implement` et `review` brûlent des tokens agent. Le reste est mécanique (`ApiCall`, `Exec`, `Gate`, `Notify`).
+
+**Le pattern killer que ça débloque** : tu crées une issue GitHub depuis ton mobile → le trigger Tracker d'AutoPilot la chope → le workflow rédige la PR pendant que t'es loin du clavier, en pausant sur `plan_gate` pour ton approbation et sur `ready_gate` avant le merge. *Vraie autonomie avec deux checkpoints humains.*
+
+#### Les steps Exec survivent dans un worktree
+
+Le step `run_tests` c'est typiquement `npm test`, `cargo test`, `composer test`, `pytest`, … — tous ont besoin des deps vendorisées qui **n'existent pas dans un worktree git frais** (pas de `node_modules`, pas de `vendor`, pas de `target`). Chaque step `Exec` a maintenant une **phase Setup** optionnelle qui tire *juste avant* la commande principale :
+
+```
+☑ Ce step tourne dans un worktree git — installer les dépendances avant
+    Setup command: composer install --no-interaction --prefer-dist
+                   (auto-détecté depuis composer.json — éditable)
+
+Main command:     bin/phpunit -c phpunit.xml.dist
+```
+
+Même allowlist + même timeout. Setup échoue → main n'est PAS exécuté et tu vois les logs d'install. Setup réussit → main tourne dans le worktree préparé. Patterns courants pré-listés (composer, npm ci, pnpm, yarn, poetry, pip) — t'en choisis un, tu override si besoin.
+
+Pour les projets dockerisés, le mismatch volume `docker-in-docker` est réglé au niveau infra (self-mount + traduction de chemins host), donc `docker compose run --rm svc <cmd>` marche depuis un worktree sans config supplémentaire.
 
 ---
 

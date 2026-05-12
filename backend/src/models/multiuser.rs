@@ -107,6 +107,23 @@ pub enum WsMessage {
         batch_completed: u32,
         batch_failed: u32,
     },
+    /// 0.8.2 — Linear workflow run state change. Fires on each step
+    /// transition (StepStart, StepDone) AND every status flip (Running
+    /// → WaitingApproval, → Success, → Failed, → Cancelled). Open
+    /// WorkflowDetail panels listen and refetch the run so the user
+    /// sees the live gate appear without refreshing the page.
+    /// Different from `BatchRunProgress` which is fan-out specific.
+    WorkflowRunUpdated {
+        run_id: String,
+        workflow_id: String,
+        status: String,
+        /// Index of the currently-running (or just-completed) step. -1 when
+        /// the run starts and no step is in flight yet.
+        step_index: i32,
+        total_steps: u32,
+        /// Step name at `step_index`, or null when between steps.
+        current_step: Option<String>,
+    },
     /// Broadcast once at backend boot when `recover_partial_responses`
     /// resurrected in-flight agent responses that were cut short by a
     /// restart. Each id in the list got a new Agent message with an

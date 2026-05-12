@@ -1,6 +1,6 @@
 [package]
 name = "kronn"
-version = "0.8.1"
+version = "0.8.2"
 edition = "2021"
 description = "Self-hosted AI dev workflow control plane"
 license = "AGPL-3.0-only"
@@ -97,6 +97,12 @@ tempfile = "3"
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 futures = "0.3"
 wiremock = "0.6"          # HTTP mock server for ApiCall step tests
+# AST-aware lint: detect raw `Command::new` calls in prod code. The bash
+# grep variant the CI used pre-0.8.2 false-positived on string literals
+# inside audit prompts. See examples/lint-no-raw-command.rs.
+syn = { version = "2", features = ["full", "visit", "extra-traits"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
+walkdir = "2"
 
 # ── Build profiles ───────────────────────────────────────────────────────────
 

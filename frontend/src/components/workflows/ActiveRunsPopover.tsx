@@ -3,6 +3,7 @@ import { Loader2, Square, X, ChevronRight } from 'lucide-react';
 import type { WorkflowSummary } from '../../types/generated';
 import { workflows as workflowsApi } from '../../lib/api';
 import { useT } from '../../lib/I18nContext';
+import './ActiveRunsPopover.css';
 
 export interface ActiveRunsPopoverProps {
   workflows: WorkflowSummary[];

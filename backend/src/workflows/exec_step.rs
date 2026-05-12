@@ -93,6 +93,29 @@ pub async fn execute_exec_step(
     // (the binary lookup never happened — chdir failed first).
     // Surface a clear diagnostic instead, naming the actual root cause
     // and what to do (attach a project to the workflow).
+    // 0.8.2 — Translate the workspace path from container-view
+    // (`/host-home/...`) to host-view (`${KRONN_HOST_HOME}/...`) when both
+    // exist. Required for docker-in-docker workflows: when the Exec step
+    // shells out to `docker compose run/exec`, the host docker daemon
+    // resolves volume sources against its OWN filesystem, where only the
+    // host path exists. Self-mount at the docker-compose.yml level makes
+    // both paths point to the same bind, so either chdir works inside the
+    // container — but only the host-view path makes downstream docker
+    // calls resolve volumes correctly. Falls through to the original path
+    // when the env var is unset (non-Docker dev setups) or the host path
+    // isn't reachable (self-mount not configured).
+    let host_workdir: String = match std::env::var("KRONN_HOST_HOME") {
+        Ok(host_home) if work_dir.starts_with("/host-home") && !host_home.is_empty() => {
+            let candidate = work_dir.replacen("/host-home", host_home.trim_end_matches('/'), 1);
+            if std::path::Path::new(&candidate).exists() {
+                candidate
+            } else {
+                work_dir.to_string()
+            }
+        }
+        _ => work_dir.to_string(),
+    };
+    let work_dir = host_workdir.as_str();
     let trimmed_workdir = work_dir.trim();
     if trimmed_workdir.is_empty() {
         return fail(step, start, format!(
@@ -126,6 +149,95 @@ pub async fn execute_exec_step(
     let timeout_secs = step.exec_timeout_secs
         .map(u64::from)
         .unwrap_or(DEFAULT_TIMEOUT_SECS);
+
+    // ── 0.8.2 — Setup phase (worktree dep install) ──
+    // When `exec_setup_command` is set, run it FIRST. Same allowlist +
+    // path-validation rules. Same workdir. If it fails (non-zero exit
+    // or timeout), the step fails immediately with a setup-scoped error
+    // message so the operator can fix the install without thinking it's
+    // the main command's fault. Output is prepended to the main command's
+    // output for traceability.
+    let mut setup_output_prefix = String::new();
+    if let Some(setup_cmd) = step.exec_setup_command.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+        // Allowlist + path-separator check, same as the main command.
+        if !workflow_allowlist.iter().any(|a| a == setup_cmd) {
+            return fail(step, start, format!(
+                "Exec step `{}`: setup binary `{}` not in allowlist [{}].",
+                step.name, setup_cmd, workflow_allowlist.join(", ")
+            ));
+        }
+        if setup_cmd.contains('/') || setup_cmd.contains('\\') {
+            return fail(step, start, format!(
+                "Exec step `{}`: setup binary `{}` contains path separator (rejected).",
+                step.name, setup_cmd
+            ));
+        }
+        // Render setup args.
+        let mut setup_args: Vec<String> = Vec::with_capacity(step.exec_setup_args.len());
+        for (i, arg_template) in step.exec_setup_args.iter().enumerate() {
+            match ctx.render(arg_template) {
+                Ok(rendered) => setup_args.push(rendered),
+                Err(e) => return fail(step, start, format!(
+                    "Exec step `{}`: setup template render error on arg #{}: {}",
+                    step.name, i, e
+                )),
+            }
+        }
+        tracing::info!(
+            target: "kronn::workflow_exec",
+            step = %step.name,
+            setup_command = %setup_cmd,
+            setup_argc = setup_args.len(),
+            "executing setup phase"
+        );
+        let mut sc = async_cmd(setup_cmd);
+        sc.args(&setup_args)
+            .current_dir(work_dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        let setup_output = match tokio::time::timeout(
+            Duration::from_secs(timeout_secs),
+            sc.output(),
+        ).await {
+            Ok(Ok(out)) => out,
+            Ok(Err(e)) => return fail(step, start, format!(
+                "Exec step `{}`: failed to spawn setup `{}`: {}",
+                step.name, setup_cmd, e
+            )),
+            Err(_) => return fail(step, start, format!(
+                "Exec step `{}`: setup `{}` timed out after {}s.",
+                step.name, setup_cmd, timeout_secs
+            )),
+        };
+        let setup_stdout = String::from_utf8_lossy(&setup_output.stdout).into_owned();
+        let setup_stderr = String::from_utf8_lossy(&setup_output.stderr).into_owned();
+        // Surface the setup head so the operator can scroll through it
+        // in the run-detail panel — useful when install logs reveal a
+        // missing tool or auth issue.
+        setup_output_prefix = format!(
+            "── Setup: `{} {}` ──\n{}{}\n",
+            setup_cmd,
+            setup_args.join(" "),
+            setup_stdout,
+            if setup_stderr.is_empty() { String::new() } else { format!("\n[stderr]\n{}", setup_stderr) },
+        );
+        if !setup_output.status.success() {
+            let code = setup_output.status.code().map(|c| c.to_string()).unwrap_or_else(|| "killed".into());
+            return fail(step, start, format!(
+                "Exec step `{}`: setup `{} {}` failed (exit {}). \
+                 stderr (tail):\n{}\n\n— le main `{}` n'a PAS été exécuté. \
+                 Vérifie que les dépendances peuvent s'installer dans le worktree (réseau, lockfile présent, scopes d'auth).",
+                step.name,
+                setup_cmd,
+                setup_args.join(" "),
+                code,
+                truncate_to_limit(setup_stderr),
+                raw_command,
+            ));
+        }
+    }
 
     // ── Spawn — args passed as separate argv, NEVER through a shell ──
     tracing::info!(
@@ -210,7 +322,11 @@ pub async fn execute_exec_step(
         .map(|c| format!("[SIGNAL: exit_{}]", c))
         .unwrap_or_else(|| "[SIGNAL: killed]".to_string());
     let envelope_str = format!(
-        "{}\n\n---STEP_OUTPUT---\n{}\n---END_STEP_OUTPUT---\n{}\n{}",
+        "{}{}\n\n---STEP_OUTPUT---\n{}\n---END_STEP_OUTPUT---\n{}\n{}",
+        // 0.8.2 — Setup output (if any) lands ABOVE the main summary so
+        // operators inspecting the step see the install logs first when
+        // expanding the row. Empty string when no setup ran.
+        setup_output_prefix,
         summary,
         serde_json::to_string(&envelope).unwrap_or_default(),
         signal_generic,
@@ -236,6 +352,7 @@ pub async fn execute_exec_step(
             output: envelope_str,
             tokens_used: 0,
             duration_ms,
+            started_at: None,
             condition_result,
             envelope_detected: Some(true),
             step_kind: None,
@@ -261,6 +378,7 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
             output: msg,
             tokens_used: 0,
             duration_ms: start.elapsed().as_millis() as u64,
+            started_at: None,
             condition_result: None,
             envelope_detected: None,
             step_kind: None,
@@ -345,6 +463,8 @@ mod tests {
             exec_command: command.map(String::from),
             exec_args: args.into_iter().map(String::from).collect(),
             exec_timeout_secs: timeout_secs,
+            exec_setup_command: None,
+            exec_setup_args: vec![],
             quick_prompt_id: None,
             json_data_payload: None,
         }
@@ -625,5 +745,67 @@ mod tests {
             "select drop should kill the child fast — took {:?}",
             elapsed
         );
+    }
+
+    // ─── 0.8.2 — Setup-phase tests ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn setup_phase_runs_before_main_command_on_success() {
+        // Setup `true` (always exits 0) → main `echo` should run.
+        let mut step = exec_step("run", Some("echo"), vec!["main-output"], None);
+        step.exec_setup_command = Some("true".into());
+        step.exec_setup_args = vec![];
+        let ctx = TemplateContext::new();
+        let outcome = execute_exec_step(&step, &["echo".into(), "true".into()], "/tmp", &ctx).await;
+        assert_eq!(outcome.result.status, RunStatus::Success,
+            "setup `true` should succeed and main `echo` should run; got: {}", outcome.result.output);
+        // Setup output prefix lands BEFORE the main summary.
+        assert!(outcome.result.output.contains("── Setup: `true"),
+            "setup header missing from output: {}", outcome.result.output);
+        assert!(outcome.result.output.contains("main-output"),
+            "main `echo` output missing: {}", outcome.result.output);
+    }
+
+    #[tokio::test]
+    async fn setup_phase_failure_short_circuits_main_command() {
+        // Setup `false` (always exits 1) → main MUST NOT RUN, step fails.
+        // This is THE killer feature: if the dep install fails, we don't
+        // run tests against a broken worktree and produce confusing output.
+        let mut step = exec_step("run", Some("echo"), vec!["main-NEVER-printed"], None);
+        step.exec_setup_command = Some("false".into());
+        step.exec_setup_args = vec![];
+        let ctx = TemplateContext::new();
+        let outcome = execute_exec_step(&step, &["echo".into(), "false".into()], "/tmp", &ctx).await;
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        assert!(outcome.result.output.contains("setup"),
+            "failure message must mention setup: {}", outcome.result.output);
+        assert!(!outcome.result.output.contains("main-NEVER-printed"),
+            "main echo must NOT have run after setup failure: {}", outcome.result.output);
+    }
+
+    #[tokio::test]
+    async fn setup_binary_not_in_allowlist_rejects_before_main() {
+        // Setup uses a binary NOT in the allowlist → reject. Main shouldn't
+        // even be attempted. Mirrors the same check as `exec_command`.
+        let mut step = exec_step("run", Some("echo"), vec!["main"], None);
+        step.exec_setup_command = Some("rm".into());
+        step.exec_setup_args = vec![];
+        let ctx = TemplateContext::new();
+        let outcome = execute_exec_step(&step, &["echo".into()], "/tmp", &ctx).await;
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        assert!(outcome.result.output.contains("setup binary"),
+            "should name the setup binary as the culprit: {}", outcome.result.output);
+    }
+
+    #[tokio::test]
+    async fn setup_optional_when_none_keeps_legacy_behavior() {
+        // No setup → behaves like the pre-0.8.2 executor (just runs main).
+        let step = exec_step("run", Some("echo"), vec!["only-main"], None);
+        let ctx = TemplateContext::new();
+        let outcome = execute_exec_step(&step, &["echo".into()], "/tmp", &ctx).await;
+        assert_eq!(outcome.result.status, RunStatus::Success);
+        assert!(outcome.result.output.contains("only-main"));
+        assert!(!outcome.result.output.contains("── Setup"),
+            "no setup → no setup header: {}", outcome.result.output);
     }
 }

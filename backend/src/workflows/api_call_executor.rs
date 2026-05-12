@@ -248,6 +248,7 @@ pub async fn execute_api_call_step_core(
             output,
             tokens_used: 0,
             duration_ms: start.elapsed().as_millis() as u64,
+            started_at: None,
             condition_result,
             envelope_detected: None,
             step_kind: None,
@@ -943,8 +944,16 @@ async fn send_with_retry(
     timeout: Duration,
     max_retries: u8,
 ) -> Result<Value, String> {
+    // 0.8.2 — Explicit User-Agent. GitHub REQUIRES one (returns 403
+    // "Request forbidden by administrative rules" without it — see
+    // https://docs.github.com/en/rest/overview/resources-in-the-rest-api#user-agent-required).
+    // reqwest's default is to send NO User-Agent header, which is fine
+    // for most APIs but breaks GitHub. Setting a generic one is also
+    // useful for ops: backends log it so you can identify Kronn traffic
+    // in tracker access logs.
     let client = reqwest::Client::builder()
         .timeout(timeout)
+        .user_agent(concat!("Kronn/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| format!("HTTP client build failed: {e}"))?;
 
@@ -1060,6 +1069,7 @@ fn fail(step: &WorkflowStep, start: Instant, msg: String) -> StepOutcome {
             output,
             tokens_used: 0,
             duration_ms: start.elapsed().as_millis() as u64,
+            started_at: None,
             condition_result,
             envelope_detected: None,
             step_kind: None,
@@ -1151,6 +1161,8 @@ mod tests {
             exec_command: None,
             exec_args: vec![],
             exec_timeout_secs: None,
+            exec_setup_command: None,
+            exec_setup_args: vec![],
             quick_prompt_id: None,
             json_data_payload: None,
         }
@@ -1466,6 +1478,37 @@ mod tests {
             "summary should count array length, got {}",
             envelope["summary"],
         );
+    }
+
+    #[tokio::test]
+    async fn execute_attaches_kronn_user_agent_header() {
+        // Regression: pre-0.8.2, reqwest sent NO User-Agent header by
+        // default. GitHub returns 403 "Request forbidden by administrative
+        // rules" without one — the AutoPilot fetch_issue step failed in
+        // the wild because of this. Lock down a User-Agent that starts
+        // with "Kronn/" so the wire format stays stable across version bumps.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/ua-check"))
+            .and(wiremock::matchers::header_regex("user-agent", "^Kronn/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ok": true })))
+            .mount(&server)
+            .await;
+
+        let plugin = mk_plugin(
+            &server.uri(),
+            ApiAuthKind::None,
+            vec![mk_endpoint("GET", "/ua-check")],
+        );
+        let env = HashMap::new();
+        let step = mk_step("/ua-check");
+        let outcome = execute_api_call_step_core(
+            &step, &plugin, &env,
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        ).await;
+        assert_eq!(outcome.result.status, RunStatus::Success,
+            "expected Kronn/X.Y.Z User-Agent, got: {}", outcome.result.output);
     }
 
     #[tokio::test]

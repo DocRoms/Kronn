@@ -9,6 +9,186 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-05-13
+
+**Audit drastique + boucle audit → AutoPilot + worktree discoverability.**
+Release centrée sur la qualité de l'audit IA et la fermeture de la
+boucle "audit → tickets → AutoPilot → PR". L'audit ne se contente plus
+de produire des constats : il a une baseline mandatory non-skippable,
+une anti-répétition (slug-matching + reconciliation pass + two-tier
+Status), un dispatch par kind (Security / Docker / Performance / A11y /
+Database / ApiDesign / Custom) avec cluster detector qui recommande la
+prochaine spécialisation, et une table `audit_runs` qui donne au badge
+santé sa sparkline + delta. Côté workflow : un bouton "Continuer avec
+l'AutoPilot" apparaît après la validation, qui pré-remplit le wizard
+sur le ticket le plus ancien du tracker (GitHub / GitLab / Jira) avec
+detection du repo. Côté Exec : nouveau `exec_setup_command` (composer
+install / npm ci / etc.) avec preset dropdown, plus le fix du
+docker-in-docker volume mismatch (self-mount + cwd translation pour les
+worktrees), plus un meilleur signaling de "ta commande tourne dans un
+worktree git". WebSocket `WorkflowRunUpdated` ajouté pour que la
+transition vers un Gate s'affiche live sans refresh quand on arrive
+d'un autre onglet.
+
+### Added
+
+- **Audit baseline mandatory checklist (Step 9)** — 4 checks
+  non-skippables (auth, persistence, external input, secrets) qui
+  émettent une TD baseline même quand le scan dimensionnel n'a rien
+  trouvé. Les audits ne reviennent plus "vides" sur du code qui mérite
+  au moins un signalement.
+- **Audit cap relaxation** — 15-20 → 30 TDs max par run, Critical/High
+  exempts (jamais omis). Sur les gros repos l'audit ne s'arrête plus
+  artificiellement après Medium 15 en ignorant des Highs.
+- **Audit anti-repetition** — trois protections : (1) slug-matching sur
+  TDs existantes (un nouveau scan ne crée plus de doublon avec un slug
+  légèrement différent), (2) reconciliation pass qui marque les TDs
+  obsolètes comme `Resolved` au lieu de les laisser orphelines, (3)
+  two-tier Status (`Active` / `Reopened`) pour distinguer une vraie
+  régression d'un faux positif. Le slug-churn (le pire anti-pattern
+  d'audit) est désormais bloqué par construction.
+- **AuditKind enum + per-kind dispatch** — `Full` reste la base, plus
+  `Security`, `Docker`, `Performance`, `Accessibility`, `Database`,
+  `ApiDesign`, `Custom`. Chaque kind a son prompt système dédié et son
+  set de checks baseline. Un audit Security n'est plus un audit Full
+  avec un peu de focus sécu.
+- **Cluster detector + AuditRecommendation** — Step 10 du Full audit
+  inspecte la distribution des TDs et recommande la prochaine
+  spécialisation à lancer (ex : 4+ TDs Security → "lance un audit
+  Security"). Surfaceé en chip cluster dans le health badge.
+- **`audit_runs` table + health badge cluster** — chaque audit crée une
+  row avec `started_at`, `ended_at`, `duration_ms`, `td_critical/high/
+  medium/low/total`, `td_resolved_since_last`, `td_new_since_last`,
+  `td_carried_over`, `health_score` (0-100). Source de vérité pour le
+  badge santé du dashboard.
+- **AutoPilot CTA after audit validation** — bouton "Continuer avec
+  l'AutoPilot" qui apparaît sur la discussion de validation une fois
+  l'audit clôturé. Pré-remplit le wizard de workflow sur le ticket le
+  plus ancien du tracker du projet (GitHub / GitLab / Jira), avec
+  detection automatique du repo (`parseRepoUrl` +
+  `inferTrackerSlugFromRepoUrl`). En un clic : audit → TDs → ticket →
+  AutoPilot prêt à tirer.
+- **Exec `exec_setup_command` + `exec_setup_args`** — phase setup avant
+  la commande principale d'un step Exec, avec preset dropdown
+  (`composer install`, `npm ci`, `pnpm install --frozen-lockfile`,
+  `yarn install`, `poetry install`, `pip install -r requirements.txt`).
+  Indispensable pour que la commande principale (tests / build) trouve
+  ses dépendances dans un worktree fraîchement créé.
+- **WS `WorkflowRunUpdated` event** — broadcast à chaque transition
+  d'étape + flip de status du run. Le frontend rafraîchit la liste des
+  runs quand on ouvre la page d'un workflow en cours depuis un autre
+  onglet, sans devoir F5. La transition vers un Gate apparaît live.
+- **Per-step token badge in WorkflowDetail** — le compteur de tokens
+  n'est plus seulement au niveau du run, il est aussi affiché par
+  step. Plus de surprise sur quelle étape consomme.
+- **Authoritative `step.started_at` timestamp** — chaque `StepResult`
+  capture l'heure wall-clock de démarrage côté backend (plus d'estimate
+  côté frontend basé sur la somme des durées précédentes). La durée
+  vraie d'un step est désormais persistée et survit aux reloads.
+- **Gate pause duration tracking** — le `duration_ms` d'un step Gate
+  reflète maintenant la vraie durée de la pause (now - started_at)
+  quand l'opérateur valide. Avant : ~0ms (temps de rendu), maintenant :
+  le temps que l'humain a mis à décider.
+- **`effectiveLiveRun` cross-tab persistence** — quand on navigue vers
+  un workflow en cours depuis un autre onglet, on synthétise un état
+  "pseudo-live" à partir du dernier run non-fini de la liste. Plus de
+  "page collapsée vide" qui fait croire que le run est bloqué.
+- **Tracker hint banner on ProjectCard** — surface l'URL du tracker
+  détectée (`parseRepoUrl(project.repo_url)`) avec un dismissible
+  localStorage flag, pour amorcer la conversion repo → AutoPilot.
+- **`buildOldestIssueRequest` helpers** — switch par tracker
+  (`github` / `gitlab` / `jira`) qui produit la bonne requête HTTP pour
+  récupérer le ticket ouvert le plus ancien. 9 tests unitaires.
+- **Exec step worktree discoverability hints** — hint dédié pour Exec
+  step au premier rang (fresh worktree) vs steps suivants (sees
+  previous changes), plus warning visible quand `project_id` est null
+  (commande tourne dans le CWD de Kronn, pas de worktree).
+- **Audit elapsed time counter** — ticker côté client (1s) qui affiche
+  le temps écoulé depuis le démarrage de l'audit en cours, calé sur le
+  `started_at` du serveur. Plus d'incertitude pendant les 10-20 min
+  d'un audit Full.
+- **Volume mounts for non-standard CLI paths in Docker** — `cargo`,
+  `bun`, `~/.rustup`, plus un `/host-bin/extra` escape hatch. Auto-
+  detection dans le `Makefile` qui écrit `.env` si les répertoires
+  existent. Couvre les ~20% d'users qui n'ont pas leurs outils dans
+  `/usr/bin` ou `~/.local/bin`.
+- **GitHub Community Standards files** — `CODE_OF_CONDUCT.md`
+  (Contributor Covenant 2.1), `SECURITY.md` (private advisory route,
+  SLA, scope), `.github/ISSUE_TEMPLATE/{bug_report,feature_request,
+  config}.{md,yml}`, `.github/pull_request_template.md`.
+- **README EN + FR section 5 & 6 rewrites** — la section "Audit your
+  codebase with an AI that doesn't forget" reformulée pour couvrir les
+  6 hardenings 0.8.2 (Mandatory baseline, Anti-repetition, Two-tier
+  Status, Specialized kinds, Health badge cluster, Community-standards
+  gate). Nouvelle section "Close the loop: audit → tickets →
+  AutoPilot → PR".
+
+### Changed
+
+- **CSS extraction for `ActiveRunsPopover`** — déplacé hors de
+  `pages/WorkflowsPage.css` vers un fichier co-located
+  `components/workflows/ActiveRunsPopover.css`. Avant : le popover des
+  runs actifs (rendu depuis Dashboard, donc visible sur tous les
+  onglets) apparaissait unstyled quand on cliquait dessus depuis
+  Discussions tant que WorkflowsPage n'avait pas été monté au moins
+  une fois.
+- **Docker volume mounting strategy** — self-mount + cwd translation
+  `/host-home/` → `${KRONN_HOST_HOME}/` pour les worktrees git
+  créés sur le host et lus depuis le container. Le path parity est
+  désormais préservé inside/outside container, prérequis pour les
+  steps Exec qui touchent des worktrees.
+- **`RUSTUP_HOME` propagation** — le container reçoit la même valeur
+  que le host pour que les shims `cargo` / `rustc` trouvent leur
+  toolchain. Mount du dossier `~/.rustup` au même chemin absolu.
+- **Tracker MCP detection precedence** — `repo_url > project-scope >
+  global` au lieu de `is_global > everything else`. Empêche un Jira
+  global de masquer un GitHub spécifique au repo.
+
+### Fixed
+
+- **CSS missing on live-WF box when arriving from another tab**
+  (TD #248) — le popover des runs actifs apparaissait sans style sur
+  les onglets Discussions/Projects/Settings tant que WorkflowsPage
+  n'avait pas été mounté.
+- **Live Gate transition without page refresh** (TD #247) — la
+  transition d'un run vers un Gate (status `Running` → `WaitingApproval`)
+  ne se voyait pas live quand le panel était ouvert depuis un autre
+  onglet : la SSE est tab-local, l'autre tab ne recevait rien. Le WS
+  `WorkflowRunUpdated` mirror les transitions sur tous les clients.
+- **Docker-in-docker volume mismatch for worktree Exec steps**
+  (TD #249) — un step Exec qui tournait sur un worktree créé côté host
+  voyait un `work_dir` invalide à l'intérieur du container (le path
+  host n'existait pas), faisant échouer toute commande qui faisait du
+  `find` ou de l'IO. Self-mount + traduction de chemin garantissent
+  que le `cwd` est valide des deux côtés.
+- **GitHub API 422 on `buildOldestIssueRequest`** — User-Agent manquant
+  sur le reqwest builder. Ajout de `.user_agent(concat!("Kronn/",
+  env!("CARGO_PKG_VERSION")))`.
+- **bash + `["make test"]` foot-gun** — validator catché à la
+  sauvegarde du workflow, avec message actionnable qui explique de
+  splitter `["-c", "make test"]` ou d'utiliser directement `make`
+  comme binaire.
+- **Per-disc sendingMap leak on batch fan-out** — `BatchRunProgress`
+  inclut maintenant le `discussion_id` de l'enfant qui vient de
+  terminer pour que le frontend puisse clear son indicateur local
+  (les enfants de batch n'ont pas de consommateur SSE).
+- **Cargo `rustup` shim toolchain lookup** — les shims ne trouvaient
+  pas la toolchain dans le container parce que `~/.rustup` n'était pas
+  monté au même chemin absolu. Mount + `RUSTUP_HOME` env propagation.
+
+### Tests
+
+- 2 round-trip serde tests pour `WsMessage::WorkflowRunUpdated`
+  (variant complète + variant `current_step=None`).
+- 8 validator tests pour `validate_exec_steps`
+  (`bash`-multi-word foot-gun + `exec_setup_command` allowlist +
+  path-separator + shell-vs-bin distinction).
+- 9 tests `buildOldestIssueRequest` (GitHub / GitLab / Jira shapes).
+- Mock `useWebSocket` ajouté à `WorkflowsPage.test.tsx` +
+  `WorkflowsPage.qp-launch.test.tsx` (le hook réel essayait d'ouvrir
+  une WS dans jsdom).
+- Suite complète au vert : 1870 tests backend, 1161 tests frontend.
+
 ## [0.8.1] - 2026-05-12
 
 **Custom API plugin + AI helpers UX refactor + tech-debt prominence + doc rebrand.**

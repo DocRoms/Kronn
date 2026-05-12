@@ -225,6 +225,15 @@ Unified automation system: `Trigger → Steps`. Superset of OpenAI Symphony's WO
 - `Workflow.on_failure` rollback steps (only on `Failed`, not on `Cancelled`/`StoppedByGuard`/Gate-reject).
 - Per-item Export/Import for Workflows + Quick Prompts (workflow export bundles referenced QPs).
 
+**0.8.2 engine extensions:**
+
+- **`WsMessage::WorkflowRunUpdated`** (`models::multiuser.rs`) — broadcast à chaque flip de status + chaque transition d'étape (`StepStart`, `StepDone`, `RunDone`, terminal `Reject` dans `resume_run`). Payload : `{run_id, workflow_id, status, step_index: i32 (-1 avant le premier step), total_steps, current_step: Option<String>}`. La SSE reste tab-local (chunk streaming par `RunEvent::StepProgress`) ; le WS sert au cross-tab : la transition vers un Gate devient visible live sur tous les onglets. Frontend handler dans `pages/WorkflowsPage.tsx` : refetch `detailRuns` quand le `workflow_id` match, skip quand un `liveRun` local non-fini est déjà driver autoritaire.
+- **`exec_setup_command` + `exec_setup_args`** (`models::workflows::WorkflowStep`) — phase setup avant la commande principale d'un step `Exec`. Mêmes contraintes que `exec_command` (allowlist, pas de shell, argv literal). Échec du setup short-circuit la commande principale et marque le step `Failed`. Preset dropdown dans le wizard pour `composer install` / `npm ci` / `pnpm install --frozen-lockfile` / `yarn install` / `poetry install` / `pip install -r requirements.txt`. Indispensable pour qu'un step `make test` trouve ses deps dans un worktree fraîchement créé.
+- **`StepResult.started_at: Option<DateTime<Utc>>`** — wall-clock authoritative capturé par le runner avant `execute_step`. Remplace l'estimate frontend (`runStart + sum(completed_durations)`) qui inflait quand un Gate restait pendant longtemps. Pour les Gates, `resume_run_from_gate` réécrit `duration_ms = now - started_at` pour refléter la vraie durée de la pause humaine (avant : ~0ms = temps de rendu).
+- **Per-step token badge** — `StepResult.tokens_used` rendu en chip à côté du nom de step dans `WorkflowDetail` + `RunDetail`. Le compteur run-level reste affiché séparément (badge `wf.tokensTotal`).
+- **`effectiveLiveRun` cross-tab synthesis** (`WorkflowDetail.tsx`) — quand `liveRun` est null (autre onglet, ou reload sur un run Gate-paused), synthétise un état pseudo-live à partir du dernier `WorkflowRun` non-fini dans `runs[]`. Sans ça la page collapsait à la vue config statique → l'user pensait que le run était bloqué.
+- **Worktree volume parity in Docker** — `docker-compose.yml` ajoute un self-mount `${KRONN_REPOS_DIR}:${KRONN_REPOS_DIR}:rw` pour que les paths host (`/home/<user>/Repositories/...`) restent valides dans le container. `exec_step.rs` traduit `/host-home/` → `${KRONN_HOST_HOME}/` quand le `work_dir` cible un worktree créé côté host. Plus un mount `${KRONN_RUSTUP_HOME}` + `RUSTUP_HOME` env propagation pour que les shims cargo trouvent leur toolchain. `Makefile` auto-détecte `~/.cargo/bin`, `~/.rustup`, `~/.bun/bin` et écrit dans `.env`.
+
 ### MCP system (3-tier architecture)
 
 Kronn manages MCPs with a 3-tier model:
@@ -303,6 +312,16 @@ NoTemplate → TemplateInstalled → Audited → Validated
 - `POST /api/projects/:id/install-template` — copy template, inject bootstrap
 - `POST /api/projects/:id/ai-audit` — SSE streaming 10-step audit
 - `POST /api/projects/:id/validate-audit` — mark audit as validated
+
+**0.8.2 hardenings (`AuditKind` + anti-repetition + `audit_runs`):**
+
+- **`AuditKind` enum** (`models::projects::AuditKind`) — `Full` reste la base (10 steps), plus `Security`, `Docker`, `Performance`, `Accessibility`, `Database`, `ApiDesign`, `Custom`. Chaque kind dispatche son prompt système dédié dans `api/audit/mod.rs`, avec son set de baseline checks. Un audit Security n'est plus un audit Full avec du focus sécu en plus.
+- **Mandatory baseline checklist (Step 9)** — 4 checks non-skippables (auth, data persistence, external input handling, secrets in source) qui émettent une TD baseline même quand le scan dimensionnel n'a rien trouvé. Empêche les audits "vides" sur du code qui mérite au moins un signalement. Le cap par run est passé à 30 TDs (avant : 15–20), avec Critical/High exempts du cap.
+- **Anti-repetition triplet** — (1) slug-matching sur les TDs existantes : un nouveau scan qui trouve une TD avec un slug légèrement différent REUSE l'ID existant et APPEND une entrée `audit_history` au lieu de créer un doublon ; (2) reconciliation pass : les TDs disparues entre deux audits sont marquées `Resolved` (pas orphelines) ; (3) two-tier `Status` (`Active`/`Reopened`) pour distinguer une vraie régression d'un faux positif. Le slug-churn (le pire anti-pattern d'audit) est désormais bloqué par construction. Le format `audit_history` YAML est documenté dans le prompt audit (`api/audit/mod.rs:283-308`).
+- **`audit_runs` table** (migration 050) — une row par invocation : `id, project_id, kind, agent_type, started_at, ended_at, duration_ms, status, td_critical/high/medium/low/total, td_resolved_since_last, td_new_since_last, td_carried_over, health_score, report_path, recommendations_json`. Source de vérité pour la sparkline du badge santé et la chip "delta depuis dernier audit". Accessible via `db::audit_runs::{list_recent, latest_completed}`.
+- **Health score** — `compute_health_score(critical, high, medium, low) -> u8` (0–100). Calibration : Critical 12 pts, High 4 pts, Medium 1.5 pt, Low 0.3 pt. Calé sur l'audit DOCROMS_WEB de mai (1C/6H/6M/5L → 53 = "significant debt"). Clampé `[0, 100]`.
+- **Cluster detector + recommendations** — Step 10 du Full audit inspecte la distribution des TDs et émet des `AuditRecommendation` (kind à recommander, raison textuelle, cluster_size). Persisté dans `audit_runs.recommendations_json`. Surface en chip cluster dans le health badge ("4+ TDs Security → lance un audit Security"). Cap : top 3 recos par run.
+- **Audit elapsed counter** — frontend lit `AuditProgress.started_at` (RFC3339), parse en `auditStartedAt: number | null`, et drive un ticker `setInterval(1s)` qui re-render uniquement quand `auditActive`. Aucun nouvel event SSE — purement client-side.
 
 ### Token usage & cost tracking
 

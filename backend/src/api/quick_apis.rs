@@ -305,6 +305,8 @@ pub async fn run_qa(
         exec_command: None,
         exec_args: vec![],
         exec_timeout_secs: None,
+        exec_setup_command: None,
+        exec_setup_args: vec![],
         quick_prompt_id: None,
         json_data_payload: None,
     };
@@ -421,6 +423,7 @@ pub async fn batch_run_qa(
         api_timeout_ms: None, api_max_retries: None, api_output_var: None,
         gate_message: None, gate_request_changes_target: None, gate_notify_url: None,
         exec_command: None, exec_args: vec![], exec_timeout_secs: None,
+        exec_setup_command: None, exec_setup_args: vec![],
         quick_prompt_id: None,
         json_data_payload: None,
     };

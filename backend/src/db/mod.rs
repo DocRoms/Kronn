@@ -1,11 +1,12 @@
-pub mod migrations;
-pub mod projects;
+pub mod audit_runs;
 pub mod contacts;
 pub mod discussions;
 pub mod mcps;
-pub mod workflows;
-pub mod quick_prompts;
+pub mod migrations;
+pub mod projects;
 pub mod quick_apis;
+pub mod quick_prompts;
+pub mod workflows;
 
 #[cfg(test)]
 #[path = "tests.rs"]

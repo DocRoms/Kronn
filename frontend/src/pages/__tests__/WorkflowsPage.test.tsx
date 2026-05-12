@@ -19,6 +19,13 @@ const mockWorkflowsApi = vi.hoisted(() => ({
   triggerStream: vi.fn(),
 }));
 
+// 0.8.2 — WorkflowsPage now uses useWebSocket() to listen for live
+// WorkflowRunUpdated events. Stub it to a no-op so the test runtime
+// doesn't try to open a real WebSocket inside jsdom.
+vi.mock('../../hooks/useWebSocket', () => ({
+  useWebSocket: () => ({ connected: false }),
+}));
+
 // Mock API — WorkflowsPage calls workflowsApi.list() and skillsApi.list() on mount
 vi.mock('../../lib/api', () => ({
   workflows: mockWorkflowsApi,

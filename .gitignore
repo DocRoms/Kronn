@@ -60,3 +60,4 @@ docker-compose.override.yml
 # accidentally absorbed by the wip commit at 18:36 on 2026-05-09).
 # Never commit; clean up uncommitted with `git rm --cached -r .playwright-mcp/`.
 .playwright-mcp/
+.kronn/tmp/
