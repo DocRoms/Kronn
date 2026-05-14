@@ -10,7 +10,7 @@ pub fn list_projects(conn: &Connection) -> Result<Vec<Project>> {
     let mut stmt = conn.prepare(
         "SELECT id, name, path, repo_url, token_override_json, ai_config_json,
                 created_at, updated_at, default_skill_ids_json, default_profile_id,
-                briefing_notes
+                briefing_notes, linked_repos_json
          FROM projects ORDER BY name"
     )?;
 
@@ -19,6 +19,7 @@ pub fn list_projects(conn: &Connection) -> Result<Vec<Project>> {
         let token_override_str: Option<String> = row.get(4)?;
         let ai_config_str: String = row.get(5)?;
         let skill_ids_str: String = row.get(8)?;
+        let linked_repos_str: String = row.get(11).unwrap_or_else(|_| "[]".into());
 
         Ok((id.clone(), Project {
             id,
@@ -36,6 +37,7 @@ pub fn list_projects(conn: &Connection) -> Result<Vec<Project>> {
             default_skill_ids: serde_json::from_str(&skill_ids_str).unwrap_or_default(),
             default_profile_id: row.get(9)?,
             briefing_notes: row.get(10)?,
+            linked_repos: serde_json::from_str(&linked_repos_str).unwrap_or_default(),
             created_at: parse_dt(row.get::<_, String>(6)?),
             updated_at: parse_dt(row.get::<_, String>(7)?),
         }))
@@ -50,7 +52,7 @@ pub fn get_project(conn: &Connection, id: &str) -> Result<Option<Project>> {
     let mut stmt = conn.prepare(
         "SELECT id, name, path, repo_url, token_override_json, ai_config_json,
                 created_at, updated_at, default_skill_ids_json, default_profile_id,
-                briefing_notes
+                briefing_notes, linked_repos_json
          FROM projects WHERE id = ?1"
     )?;
 
@@ -58,6 +60,7 @@ pub fn get_project(conn: &Connection, id: &str) -> Result<Option<Project>> {
         let token_override_str: Option<String> = row.get(4)?;
         let ai_config_str: String = row.get(5)?;
         let skill_ids_str: String = row.get(8)?;
+        let linked_repos_str: String = row.get(11).unwrap_or_else(|_| "[]".into());
 
         Ok(Project {
             id: row.get(0)?,
@@ -75,6 +78,7 @@ pub fn get_project(conn: &Connection, id: &str) -> Result<Option<Project>> {
             default_skill_ids: serde_json::from_str(&skill_ids_str).unwrap_or_default(),
             default_profile_id: row.get(9)?,
             briefing_notes: row.get(10)?,
+            linked_repos: serde_json::from_str(&linked_repos_str).unwrap_or_default(),
             created_at: parse_dt(row.get::<_, String>(6)?),
             updated_at: parse_dt(row.get::<_, String>(7)?),
         })
@@ -98,8 +102,8 @@ pub fn get_project_names(conn: &Connection) -> Result<std::collections::HashMap<
 
 pub fn insert_project(conn: &Connection, project: &Project) -> Result<()> {
     conn.execute(
-        "INSERT INTO projects (id, name, path, repo_url, token_override_json, ai_config_json, created_at, updated_at, default_skill_ids_json, briefing_notes)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "INSERT INTO projects (id, name, path, repo_url, token_override_json, ai_config_json, created_at, updated_at, default_skill_ids_json, briefing_notes, linked_repos_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             project.id,
             project.name,
@@ -111,6 +115,7 @@ pub fn insert_project(conn: &Connection, project: &Project) -> Result<()> {
             project.updated_at.to_rfc3339(),
             serde_json::to_string(&project.default_skill_ids)?,
             project.briefing_notes,
+            serde_json::to_string(&project.linked_repos)?,
         ],
     )?;
     Ok(())
@@ -120,6 +125,16 @@ pub fn update_project_briefing_notes(conn: &Connection, id: &str, notes: Option<
     let affected = conn.execute(
         "UPDATE projects SET briefing_notes = ?1, updated_at = ?2 WHERE id = ?3",
         params![notes, Utc::now().to_rfc3339(), id],
+    )?;
+    Ok(affected > 0)
+}
+
+/// 0.8.3 — Replace the linked_repos list for a project.
+pub fn update_project_linked_repos(conn: &Connection, id: &str, linked_repos: &[LinkedRepo]) -> Result<bool> {
+    let json = serde_json::to_string(linked_repos)?;
+    let affected = conn.execute(
+        "UPDATE projects SET linked_repos_json = ?1, updated_at = ?2 WHERE id = ?3",
+        params![json, Utc::now().to_rfc3339(), id],
     )?;
     Ok(affected > 0)
 }

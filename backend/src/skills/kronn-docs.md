@@ -1,6 +1,6 @@
 ---
 name: Kronn Docs
-description: Generate PDF / DOCX / XLSX / CSV / PPTX files directly from the conversation. Kronn ships a Python sidecar with WeasyPrint, python-docx, XlsxWriter and python-pptx — no external install or dependency juggling needed.
+description: Generate downloadable documents (PDF / DOCX / XLSX / CSV / PPTX) directly from a Kronn conversation. Use whenever the user asks for an exportable report, a formatted summary, a spreadsheet/table they'd open in Excel, a Word doc, slides, an invoice — or anything they describe with phrasings like "export to PDF", "make me a Word version", "give me an Excel of…", "build a deck" — even if the file format isn't named explicitly. Kronn ships a Python sidecar with WeasyPrint, python-docx, XlsxWriter and python-pptx; no external install needed. (Note: this skill is about document export — for navigating Kronn's `docs/AGENTS.md` project-context system, that's the bootstrap-architect / workflow-architect skills instead.)
 icon: 📄
 category: domain
 auto_triggers:
@@ -60,7 +60,7 @@ and click **📄 PDF** to export when it looks right.
   <h2>Top 5 epics</h2>
   <table>
     <tr><th>Epic</th><th>Tickets</th><th>Status</th></tr>
-    <tr><td>EW-1234 Dashboard rewrite</td><td>87</td><td>Done</td></tr>
+    <tr><td>PRJ-1234 Dashboard rewrite</td><td>87</td><td>Done</td></tr>
     <!-- ... -->
   </table>
 </body>
@@ -88,8 +88,8 @@ a single export button.
   "format": "csv",
   "rows": [
     ["Epic", "Tickets", "Status"],
-    ["EW-1234 Dashboard rewrite", 87, "Done"],
-    ["EW-2210 Search v2", 42, "In progress"]
+    ["PRJ-1234 Dashboard rewrite", 87, "Done"],
+    ["PRJ-2210 Search v2", 42, "In progress"]
   ]
 }
 ```
@@ -109,7 +109,7 @@ convention — nothing enforces it, but users expect it.
       "name": "Q1 2026",
       "rows": [
         ["Epic", "Tickets", "Status"],
-        ["EW-1234", 87, "Done"]
+        ["PRJ-1234", 87, "Done"]
       ]
     },
     { "name": "Q2 2026", "rows": [["..."]] }

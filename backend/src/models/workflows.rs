@@ -217,13 +217,39 @@ pub enum StepOutputFormat {
     /// The schema is serialised into the prompt and validated post-extract.
     /// Mismatches trigger a single repair prompt (same pattern as the
     /// vanilla `Structured` envelope flow).
+    ///
+    /// 0.8.3 — `on_invalid` controls what happens after repair × 1 still
+    /// fails validation. Default (`Continue`) keeps the pre-0.8.3
+    /// behavior: warn + use raw output, downstream steps deal with the
+    /// garbage. `Fail` fails the step (and the run, unless guarded) with
+    /// the validation error as `output`. Use `Fail` for high-stakes
+    /// steps like Feasibility-Gated triage where downstream steps
+    /// depend on the structured contract holding.
     TypedSchema {
         /// JSON Schema (subset). Stored verbatim; the runner serialises
         /// it into the prompt as-is so the LLM sees the exact shape it
         /// must produce.
         #[ts(type = "any")]
         schema: serde_json::Value,
+        #[serde(default)]
+        on_invalid: OnInvalid,
     },
+}
+
+/// What happens when `TypedSchema` validation still fails after a
+/// single repair attempt. `Continue` = 0.7.0 behavior (warn + raw),
+/// `Fail` = 0.8.3 strict mode for contract steps.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub enum OnInvalid {
+    /// Warn, keep the raw output, let downstream steps deal with it.
+    /// Non-breaking default — every existing workflow keeps working.
+    #[default]
+    Continue,
+    /// Mark the step `Failed` with the validation error as `output`.
+    /// Used by Feasibility-Gated triage so the implement step never
+    /// sees an invalid manifest.
+    Fail,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -949,7 +975,7 @@ pub struct StepResult {
 
 // ─── Workflow API requests ────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, TS)]
+#[derive(Debug, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct CreateWorkflowRequest {
     pub name: String,

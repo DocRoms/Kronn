@@ -170,6 +170,18 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       exportZip: resolve(new Blob()),
       importZip: resolve({ imported: 0 }),
       auditStream: vi.fn(),
+      // 0.8.3 — ProjectCard polls this at mount to detect if an audit
+      // is running on the project (independent of localStorage
+      // checkpoint). Default `null` = no audit; tests override per-case
+      // to simulate "audit running on this project".
+      auditStatus: resolve(null),
+      // 0.8.3 (#311) — ProjectCard polls this at mount. Default `null`
+      // = no resumable interrupted run, so the button stays "Lancer".
+      // Tests can override per-case to simulate an interrupted audit.
+      auditResumable: resolve(null),
+      auditStatusAll: resolve([]),
+      fullAuditStream: vi.fn(),
+      partialAuditStream: vi.fn(),
     },
 
     agents: {

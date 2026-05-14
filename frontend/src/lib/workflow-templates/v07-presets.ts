@@ -17,7 +17,7 @@ import type { WorkflowStep, PromptVariable } from '../../types/generated';
 
 export interface WorkflowPreset {
   /** Stable id for keying & i18n */
-  id: 'auto-dev' | 'pr-gate' | 'deploy-rollback' | 'feature-planner' | 'daily-host-audit' | 'ticket-to-pr';
+  id: 'auto-dev' | 'pr-gate' | 'deploy-rollback' | 'feature-planner' | 'daily-host-audit' | 'ticket-to-pr' | 'feasibility-autopilot';
   /** Icon emoji shown on the card */
   icon: string;
   /** i18n key for the card title */
@@ -698,5 +698,174 @@ export function buildV07Presets(t: Translator): WorkflowPreset[] {
     ],
   };
 
-  return [AUTO_DEV, PR_GATE, DEPLOY_ROLLBACK, FEATURE_PLANNER, DAILY_HOST_AUDIT, TICKET_TO_PR];
+  // 0.8.3 — Feasibility-Gated AutoPilot. 7-step mixed-primitives
+  // pattern for big tickets. Designed against EW-7247 (Africanews→
+  // Euronews migration Epic) — see [[project_feasibility_gated_
+  // implementation]] memory. Every "freedom" the agent takes is traced
+  // via a manifest (decided / mocked / blocked categories) AND a
+  // KRONN-(ASSUMED|MOCKED|TODO) marker in the code. Production
+  // path: AutoPilot CTA on validation discussion → this preset.
+  //
+  // Token-cost discipline: only triage / implement / pr_draft are
+  // Agent. fetch_issue (JsonData → ApiCall via wizard transform),
+  // review_triage (Gate), run_tests + drift_check (Exec) are all
+  // 0-token. See [[feedback_kronn_deagentify_first]].
+  const FEASIBILITY_AUTOPILOT: WorkflowPreset = {
+    id: 'feasibility-autopilot',
+    icon: '🎯',
+    titleKey: 'wiz.preset.feasibilityAutopilot.title',
+    descKey: 'wiz.preset.feasibilityAutopilot.desc',
+    primitives: ['JsonData', 'Agent', 'Gate', 'Exec'],
+    execAllowlist: ['bash', 'cargo', 'pnpm', 'npm', 'yarn', 'pytest', 'make', 'composer', 'grep'],
+    steps: [
+      // Étape 1 — Source du ticket. Comme `ticket-to-pr`, démarre en
+      // JsonData fixture, swap en ApiCall par le wizard quand un
+      // plugin tracker est actif (voir WorkflowWizard.tsx transform).
+      step({
+        name: 'fetch_issue',
+        step_type: { type: 'JsonData' },
+        output_format: { type: 'Structured' },
+        description: t('wiz.preset.feasibilityAutopilot.fetchIssueDesc'),
+        json_data_payload: {
+          key: 'DEMO-1',
+          body: 'Exemple : refactor le bouton de connexion en composant brand-aware. Le composant doit lire BrandContext.getBrand() au runtime et appliquer la classe `btn-{{brand}}-primary`. Touche le header + le footer.',
+        },
+      }),
+      // Étape 2 — Triage. Agent + TypedSchema(manifest). Le marker
+      // `[TRIAGE]` dans description déclenche l'addendum "audit,
+      // don't code" côté runner (cf. triage::is_triage_step).
+      step({
+        name: 'triage',
+        step_type: { type: 'Agent' },
+        description: t('wiz.preset.feasibilityAutopilot.triageDesc'),
+        prompt_template: t('wiz.preset.feasibilityAutopilot.triagePrompt'),
+        // Schema validation is `Fail` strict — an invalid manifest
+        // never reaches `implement`. Frontend doesn't see the
+        // `on_invalid` enum directly; the runner reads it from the
+        // backend default. Triage schema lives in
+        // backend/src/workflows/triage.rs::triage_manifest_schema.
+        output_format: {
+          type: 'TypedSchema',
+          on_invalid: 'Fail',
+          schema: {
+            type: 'object',
+            required: ['clear', 'decided', 'mocked', 'blocked', 'files_touched'],
+            properties: {
+              clear: { type: 'array' },
+              decided: { type: 'array' },
+              mocked: { type: 'array' },
+              blocked: { type: 'array' },
+              files_touched: { type: 'array' },
+            },
+          },
+        },
+        stall_timeout_secs: 900,
+      }),
+      // Étape 3 — Gate humain. Le manifest s'affiche dans
+      // gate_message via {{steps.triage.data}}. Sur RequestChanges,
+      // boucle vers triage (request_changes_target).
+      step({
+        name: 'review_triage',
+        step_type: { type: 'Gate' },
+        description: t('wiz.preset.feasibilityAutopilot.gateDesc'),
+        gate_message: t('wiz.preset.feasibilityAutopilot.gateMessage'),
+        gate_request_changes_target: 'triage',
+      }),
+      // Étape 4 — Implémentation. Contraint par le manifest validé.
+      // [SIGNAL: BLOCKED <id>] → Goto(triage) si l'agent découvre
+      // une impossibilité en cours (cap 3 itérations).
+      step({
+        name: 'implement',
+        step_type: { type: 'Agent' },
+        description: t('wiz.preset.feasibilityAutopilot.implementDesc'),
+        prompt_template: t('wiz.preset.feasibilityAutopilot.implementPrompt'),
+        stall_timeout_secs: 1800,
+        on_result: [
+          { contains: 'BLOCKED', action: { type: 'Goto', step_name: 'triage', max_iterations: 3 } },
+        ],
+      }),
+      // Étape 5 — run_tests Exec. Réutilise le pattern auto-detect
+      // de ticket-to-pr. 0 token, vrai verdict. ERROR → Goto
+      // implement (cap 2 itérations).
+      step({
+        name: 'run_tests',
+        step_type: { type: 'Exec' },
+        description: t('wiz.preset.shared.runTestsDesc'),
+        exec_command: 'bash',
+        exec_args: [
+          '-c',
+          [
+            'set -e',
+            "if [ -f Makefile ] && grep -qE '^test:' Makefile; then echo '→ make test'; exec make test; fi",
+            "if [ -f Cargo.toml ]; then echo '→ cargo test --lib'; exec cargo test --lib; fi",
+            'if [ -f package.json ] && grep -q \'"test"\' package.json; then',
+            '  if [ ! -d node_modules ]; then echo "⚠ node_modules absent — skip"; echo "[SIGNAL: SKIPPED]"; exit 0; fi',
+            "  if [ -f pnpm-lock.yaml ]; then echo '→ pnpm test'; exec pnpm test",
+            "  elif [ -f yarn.lock ]; then echo '→ yarn test'; exec yarn test",
+            "  else echo '→ npm test'; exec npm test; fi",
+            'fi',
+            'if [ -f composer.json ]; then',
+            '  if [ ! -d vendor ]; then echo "⚠ vendor/ absent — skip"; echo "[SIGNAL: SKIPPED]"; exit 0; fi',
+            '  if grep -q \'"test"\' composer.json; then echo "→ composer test"; exec composer test',
+            "  elif [ -x vendor/bin/phpunit ]; then echo '→ vendor/bin/phpunit'; exec vendor/bin/phpunit",
+            "  else echo 'no PHP test runner'; echo '[SIGNAL: SKIPPED]'; exit 0; fi",
+            'fi',
+            "if [ -f pyproject.toml ] || [ -f setup.py ]; then echo '→ pytest'; exec pytest; fi",
+            "echo '→ aucun framework de tests détecté — skip'",
+            "echo '[SIGNAL: SKIPPED]'",
+            'exit 0',
+          ].join('\n'),
+        ],
+        exec_timeout_secs: 900,
+        on_result: [
+          { contains: 'ERROR', action: { type: 'Goto', step_name: 'implement', max_iterations: 2 } },
+        ],
+      }),
+      // Étape 6 — drift_check Exec. Grep des markers KRONN-* sur le
+      // worktree. 0 token. Sortie embarquée verbatim dans la PR
+      // par pr_draft via {{steps.drift_check.output}}.
+      step({
+        name: 'drift_check',
+        step_type: { type: 'Exec' },
+        description: t('wiz.preset.feasibilityAutopilot.driftCheckDesc'),
+        exec_command: 'bash',
+        exec_args: [
+          '-c',
+          [
+            'set -e',
+            "echo '=== KRONN markers in worktree ==='",
+            'echo',
+            "if grep -rEn 'KRONN-(ASSUMED|MOCKED|TODO)\\([^)]+\\):' \\",
+            "  --include='*.php' --include='*.ts' --include='*.tsx' \\",
+            "  --include='*.js' --include='*.jsx' --include='*.rs' \\",
+            "  --include='*.py' --include='*.go' --include='*.rb' \\",
+            "  --include='*.scss' --include='*.css' --include='*.twig' \\",
+            "  --include='*.yaml' --include='*.yml' --include='*.json' \\",
+            '  --exclude-dir=node_modules --exclude-dir=vendor \\',
+            '  --exclude-dir=target --exclude-dir=.git --exclude-dir=dist \\',
+            '  . 2>/dev/null; then',
+            '  echo',
+            "  echo '(markers above — each one should match a decision_id in the triage manifest)'",
+            'else',
+            "  echo '(no KRONN-* markers found — implementation is fully clear-category)'",
+            'fi',
+            'echo',
+            'exit 0',
+          ].join('\n'),
+        ],
+        exec_timeout_secs: 60,
+      }),
+      // Étape 7 — pr_draft. Génère la PR body en agrégeant manifest +
+      // run_tests + drift_check.
+      step({
+        name: 'pr_draft',
+        step_type: { type: 'Agent' },
+        description: t('wiz.preset.feasibilityAutopilot.prDraftDesc'),
+        prompt_template: t('wiz.preset.feasibilityAutopilot.prDraftPrompt'),
+        stall_timeout_secs: 600,
+      }),
+    ],
+  };
+
+  return [AUTO_DEV, PR_GATE, DEPLOY_ROLLBACK, FEATURE_PLANNER, DAILY_HOST_AUDIT, TICKET_TO_PR, FEASIBILITY_AUTOPILOT];
 }

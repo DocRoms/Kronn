@@ -181,6 +181,7 @@ pub async fn clone_project(
         default_skill_ids: vec![],
         default_profile_id: None,
         briefing_notes: None,
+        linked_repos: vec![],
         created_at: now,
         updated_at: now,
     };

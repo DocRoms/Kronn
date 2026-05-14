@@ -144,18 +144,42 @@ pub(super) async fn make_agent_stream(
         // Without this, MCPs toggled/added after the last startup sync
         // (or a batch discussion spawned right after a new MCP config)
         // would have a stale or empty .mcp.json on disk.
-        if let Some(ref pid) = disc.project_id {
-            let secret = {
-                let cfg = state.config.read().await;
-                cfg.encryption_secret.clone()
-            };
-            if let Some(secret) = secret {
-                let pid = pid.clone();
-                let _ = state.db.with_conn(move |conn| {
-                    let _ = crate::core::mcp_scanner::sync_project_mcps_to_disk(conn, &pid, &secret);
-                    Ok::<_, anyhow::Error>(())
-                }).await;
+        //
+        // 0.8.3 (#280) — SKIP the sync when an audit is currently
+        // running on this project. The audit pipeline has installed
+        // an `AuditMcpSwap` that filtered `.mcp.json` to the audit
+        // allowlist; re-writing the file here would clobber the swap
+        // and silently break the audit (the agent's next step would
+        // see all 15 MCPs again, losing the perf optimization). The
+        // user's discussion still sees the filtered subset until the
+        // audit finishes — the frontend banner explains why (see
+        // ProjectCard / DiscussionsPage).
+        let audit_running = state
+            .audit_tracker
+            .lock()
+            .ok()
+            .and_then(|t| disc.project_id.as_ref().map(|pid| t.progress.contains_key(pid)))
+            .unwrap_or(false);
+        if !audit_running {
+            if let Some(ref pid) = disc.project_id {
+                let secret = {
+                    let cfg = state.config.read().await;
+                    cfg.encryption_secret.clone()
+                };
+                if let Some(secret) = secret {
+                    let pid = pid.clone();
+                    let _ = state.db.with_conn(move |conn| {
+                        let _ = crate::core::mcp_scanner::sync_project_mcps_to_disk(conn, &pid, &secret);
+                        Ok::<_, anyhow::Error>(())
+                    }).await;
+                }
             }
+        } else {
+            tracing::debug!(
+                target: "kronn::mcp",
+                disc_id = %discussion_id,
+                "audit in progress on project — skipping `.mcp.json` sync to preserve the audit-mode filter"
+            );
         }
 
         // Log what the agent will see so debug-mode users can verify
@@ -315,6 +339,24 @@ pub(super) async fn make_agent_stream(
             preamble.push_str(&format!("--- Global context ---\n{}\n\n", gc));
         }
         format!("{}{}", preamble, context_files_prompt)
+    };
+
+    // 0.8.3 (TD-265) — companion-repo context (linked_repos + Kronn
+    // projects universe). Same blocks the audit pipeline and workflow
+    // runner already inject. Without this, an agent chatting in a
+    // discussion can't see what companion repos the user has wired —
+    // it would re-ask "do you have a frontend repo for this?" every
+    // turn even though the user has `front_api` registered as a
+    // linked_repo on the project. Empty string for general (no-project)
+    // discussions; cheap (2 DB reads) on project discussions.
+    let companion_context = crate::api::projects::compute_companion_context(
+        &state,
+        disc.project_id.as_deref(),
+    ).await;
+    let context_files_prompt = if companion_context.is_empty() {
+        context_files_prompt
+    } else {
+        format!("{}{}", context_files_prompt, companion_context)
     };
 
     // Estimate extra_context size so build_agent_prompt can respect the agent's budget.

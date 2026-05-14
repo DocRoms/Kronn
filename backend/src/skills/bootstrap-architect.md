@@ -1,6 +1,6 @@
 ---
 name: bootstrap-architect
-description: Enhanced project bootstrap — sets up the repo, optionally wires a GitHub Project board, reads architecture docs, generates a project plan, and creates tracker issues. Uses gated validation signals at each step.
+description: Kronn bootstrap architect for fresh or unfamiliar repos. Takes a project from "empty directory" or "I just inherited this codebase" to a canonical `docs/AGENTS.md` (the project context entry point every Kronn agent reads first), a structured plan, and trackable epics on GitHub / GitLab / Gitea. Trigger on "bootstrap a project", "set up Kronn on a new repo", "generate AGENTS.md", "scaffold a fresh codebase", "kickoff a new project", "onboard this repo", "audit a new codebase", or any first-contact with an unknown repository. Works in 4 gated stages; uses structured-questions (`{{var}}: question` syntax) when the user input is missing fields.
 license: AGPL-3.0
 category: domain
 icon: 🏗️
@@ -125,7 +125,17 @@ Read ALL uploaded context files (documents, specs, PRDs). Then produce a structu
 6. **Non-functional requirements** — performance, security, scalability
 7. **Questions / ambiguities** — anything unclear in the docs
 
-If anything is unclear, ASK clarifying questions before producing the summary. Do not guess.
+**Write the result to `docs/AGENTS.md`** (Kronn's canonical project context entry point since 0.7.1 — every agent reads this first). Use the 7 headings above as `##` sections. If the tech-stack analysis is dense enough to warrant its own file, also create `docs/architecture.md` and link to it from `docs/AGENTS.md`. **Never write to legacy `ai/`** — that path was deprecated in 0.7.1.
+
+If a private overlay exists at `~/.kronn/user-context/<project-name>.md`, treat it as the **highest-priority context** when building the summary (the user's personal preferences override repo defaults).
+
+If anything is unclear, ASK clarifying questions **using the `{{var}}: question` syntax** from the `structured-questions` skill — answers come back machine-parseable in a single line, and the frontend renders them as an inline form (`AgentQuestionForm`). Example:
+```
+{{target_stack}}: Which language/framework should we standardize on?
+{{deadline}}: Hard deadline for V1 (or "none")?
+{{team_size}}: How many devs will work on this in the first month?
+```
+Do not guess on missing answers.
 
 **Multi-profile discussion is ENCOURAGED in Stage 1** if profiles are active — different perspectives on architecture add value.
 
@@ -213,6 +223,8 @@ Created N issues out of M planned:
 **GitHub Project board:** <board_url from Stage 0, or "non configuré — créer manuellement si souhaité">
 
 **Next step:** start on issue #4 (Infrastructure & Docker).
+
+**Continue with workflow automation?** If the user wants to turn these epics into a deployable pipeline (one epic → one PR through triage → implement → tests → drift_check → PR), invoke the **`workflow-architect`** skill — it will hand-craft a workflow or reuse the `feasibility-autopilot` preset that's tuned exactly for ticket-to-PR flows on big epics.
 ```
 
 If a board URL was provided in Stage 0 or Stage 1, include it here. If not, mention briefly that the board can be created manually later.

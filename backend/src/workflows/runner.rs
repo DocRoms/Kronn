@@ -119,15 +119,26 @@ pub async fn execute_run(
     let db2 = db.clone();
     db2.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap)).await?;
 
-    // Resolve project path
+    // Resolve project + companion-repo context. Same pattern as the
+    // audit pipeline (api/audit/full.rs:58-74): pre-format the
+    // linked_repos + Kronn-projects-universe blocks ONCE here so every
+    // Agent step in this run pays for the DB hit exactly once instead
+    // of N times. The helper returns an empty string when there's
+    // nothing to inject (no project bound, no companions registered).
     let project_path = if let Some(ref pid) = workflow.project_id {
-        let pid = pid.clone();
+        let pid_clone = pid.clone();
         let db3 = db.clone();
-        let project = db3.with_conn(move |conn| crate::db::projects::get_project(conn, &pid)).await?;
-        project.map(|p| p.path).unwrap_or_default()
+        let project_opt = db3
+            .with_conn(move |conn| crate::db::projects::get_project(conn, &pid_clone))
+            .await?;
+        project_opt.map(|p| p.path).unwrap_or_default()
     } else {
         String::new()
     };
+    let agent_extra_context = crate::api::projects::compute_companion_context(
+        &state,
+        workflow.project_id.as_deref(),
+    ).await;
 
     // 0.7.0 Phase 4 — detect resume: a non-empty step_results means
     // this is a continuation from a Gate pause (or a future restart-
@@ -592,6 +603,7 @@ pub async fn execute_run(
                         tokens_config,
                         full_access,
                         &ctx,
+                        &agent_extra_context,
                         Some(progress_tx),
                     ).await;
                     let mut outcome = outcome;
@@ -787,6 +799,68 @@ pub async fn execute_run(
             run.status.clone()
         };
         broadcast_run_state(&post_step_status, step_idx as i32, None);
+
+        // 0.8.3 — Feasibility-Gated triage ingest. When the step that
+        // just finished is a triage step (description marker OR schema
+        // shape match) AND it succeeded with a valid envelope, parse
+        // the manifest's decided/mocked/blocked lists and upsert one
+        // row per entry into `agent_decisions`. Idempotent on
+        // (run_id, decision_id) — a Goto retriage just rewrites the
+        // same rows. Failures here log but never abort the run; the
+        // manifest itself is the source of truth in StepResult.output.
+        if outcome.result.status == RunStatus::Success
+            && crate::workflows::triage::is_triage_step(
+                step.description.as_deref(),
+                &step.output_format,
+            )
+        {
+            if let Some(env) = crate::workflows::template::extract_step_envelope(&outcome.result.output) {
+                if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&env.data_json) {
+                    let ticket_ref = run
+                        .trigger_context
+                        .as_ref()
+                        .and_then(|tc| {
+                            tc.get("issue")
+                                .and_then(|i| i.get("key").or_else(|| i.get("number")))
+                                .and_then(|v| v.as_str().map(String::from).or_else(|| v.as_i64().map(|n| n.to_string())))
+                        });
+                    let project_id = workflow.project_id.clone();
+                    let decisions = crate::workflows::triage::manifest_to_decisions(
+                        &manifest,
+                        &run.id,
+                        &workflow.id,
+                        &step.name,
+                        project_id.as_deref(),
+                        ticket_ref.as_deref(),
+                    );
+                    let dec_count = decisions.len();
+                    let db_ingest = db.clone();
+                    let ingest_result = db_ingest
+                        .with_conn(move |conn| {
+                            for d in &decisions {
+                                crate::db::agent_decisions::upsert(conn, d)?;
+                            }
+                            Ok::<_, anyhow::Error>(())
+                        })
+                        .await;
+                    match ingest_result {
+                        Ok(()) => tracing::info!(
+                            "Triage ingest: {} decision row(s) persisted for run {}",
+                            dec_count, run.id
+                        ),
+                        Err(e) => tracing::warn!(
+                            "Triage ingest failed for run {}: {} — manifest stays in StepResult.output",
+                            run.id, e
+                        ),
+                    }
+                } else {
+                    tracing::warn!(
+                        "Triage step '{}' produced an envelope but data_json is not JSON; skipping ingest",
+                        step.name
+                    );
+                }
+            }
+        }
 
         run.step_results.push(outcome.result);
 
@@ -1058,7 +1132,7 @@ pub async fn execute_run(
                     let full_access = agents_config.full_access_for(&rb_step.agent);
                     execute_step(
                         rb_step, &project_path, &work_dir, tokens_config,
-                        full_access, &ctx, None,
+                        full_access, &ctx, &agent_extra_context, None,
                     ).await
                 }
                 StepType::Gate => {

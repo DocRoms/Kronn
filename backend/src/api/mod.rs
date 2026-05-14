@@ -1,3 +1,4 @@
+pub mod bundle;
 pub mod setup;
 pub mod projects;
 pub mod audit;

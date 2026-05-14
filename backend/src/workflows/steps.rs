@@ -28,11 +28,80 @@ struct AgentOutput {
 /// Optional sender for streaming partial agent output during step execution.
 pub type ProgressSender = tokio::sync::mpsc::Sender<String>;
 
+/// Build the full agent-ready prompt for a step: template render +
+/// `extra_context` append + output-format addendum + triage addendum.
+/// Does NOT append the signal-protocol instructions — those depend on
+/// runtime `on_result` rules and are still added by [`execute_step`]
+/// after this helper returns.
+///
+/// Extracted from [`execute_step`] in 0.8.3 (TD-265) so the prompt
+/// assembly is unit-testable independently from the agent spawn path.
+/// Returns `Err(String)` only when `ctx.render` fails on the template —
+/// the caller maps that into a `Failed` StepOutcome.
+pub(crate) fn build_step_prompt(
+    step: &WorkflowStep,
+    ctx: &TemplateContext,
+    extra_context: &str,
+) -> Result<String, String> {
+    let mut prompt = ctx
+        .render(&step.prompt_template)
+        .map_err(|e| format!("Template render error: {}", e))?;
+
+    // 0.8.3 — audit-pipeline symmetry: append the pre-computed
+    // linked_repos + Kronn-projects-universe blocks to every Agent
+    // step's prompt. Empty when the workflow has no project binding
+    // or the project has no companions registered. Inserted BEFORE
+    // the output_format / triage / signal addenda so those still
+    // anchor the END of the prompt (LLMs follow trailing instructions
+    // more reliably than leading ones).
+    if !extra_context.is_empty() {
+        prompt.push_str(extra_context);
+    }
+
+    // Auto-inject structured output format instructions when output_format
+    // is `Structured` or `TypedSchema`. The TypedSchema variant adds the
+    // schema constraint to the same envelope shape so downstream
+    // `{{previous_step.data.X}}` resolution stays uniform.
+    match &step.output_format {
+        crate::models::StepOutputFormat::Structured => {
+            prompt.push_str(crate::workflows::template::STRUCTURED_OUTPUT_INSTRUCTIONS);
+        }
+        crate::models::StepOutputFormat::TypedSchema { schema, .. } => {
+            prompt.push_str(&crate::workflows::template::build_typed_schema_instruction(schema));
+        }
+        crate::models::StepOutputFormat::FreeText => {}
+    }
+
+    // 0.8.3 — Feasibility-Gated triage: when the step is identified as
+    // a triage step (description marker OR schema shape match), append
+    // the "audit, don't code" addendum. Keeps the regular TypedSchema
+    // path generic; the addendum is only for steps that explicitly
+    // declare themselves as triage.
+    if crate::workflows::triage::is_triage_step(step.description.as_deref(), &step.output_format) {
+        prompt.push_str(crate::workflows::triage::TRIAGE_PROMPT_ADDENDUM);
+    }
+
+    Ok(prompt)
+}
+
 /// Execute a single workflow step.
 ///
 /// - `project_path`: original project path for MCP context resolution
 /// - `work_dir`: agent's working directory (may be a worktree)
+/// - `extra_context`: pre-formatted companion-repo + Kronn-projects-
+///   universe blocks (linked_repos + universe). Computed ONCE at run
+///   start by [`crate::workflows::runner::execute_run`] and passed in
+///   here so every Agent step in the run shares the same audit-pipeline
+///   symmetric context without re-querying the DB. Pass `""` for runs
+///   without a project binding (Notify-only / ApiCall-only).
 /// - `progress_tx`: if Some, partial output text is streamed as it arrives
+///
+/// 0.8.3 — 8 args (was 7) after adding `extra_context` for cross-repo
+/// companion injection. Bundling them into a struct would force every
+/// caller (runner, test-step endpoint, api/workflows/test-step) to
+/// build the struct vs. passing positional args inline, with no
+/// real readability win at the call site. Allow the lint locally.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_step(
     step: &WorkflowStep,
     project_path: &str,
@@ -40,23 +109,25 @@ pub async fn execute_step(
     tokens_config: &TokensConfig,
     full_access: bool,
     ctx: &TemplateContext,
+    extra_context: &str,
     progress_tx: Option<ProgressSender>,
 ) -> StepOutcome {
     let start = Instant::now();
 
-    // Render the prompt template
-    let mut prompt = match ctx.render(&step.prompt_template) {
+    // Build prompt (template render + extra_context + output-format
+    // addendum + triage addendum). Errors map to a Failed StepOutcome.
+    let mut prompt = match build_step_prompt(step, ctx, extra_context) {
         Ok(p) => p,
         Err(e) => {
             return StepOutcome {
                 result: StepResult {
                     step_name: step.name.clone(),
                     status: RunStatus::Failed,
-                    output: format!("Template render error: {}", e),
+                    output: e,
                     tokens_used: 0,
                     duration_ms: start.elapsed().as_millis() as u64,
                     started_at: None,
-            condition_result: None,
+                    condition_result: None,
                     envelope_detected: None,
                     step_kind: None,
                     step_agent: None,
@@ -76,20 +147,6 @@ pub async fn execute_step(
     // better to abort here with a message the user can act on.
     if let Some(outcome) = fail_fast_on_unresolved(&step.name, &prompt, start.elapsed().as_millis() as u64) {
         return outcome;
-    }
-
-    // Auto-inject structured output format instructions when output_format
-    // is `Structured` or `TypedSchema`. The TypedSchema variant adds the
-    // schema constraint to the same envelope shape so downstream
-    // `{{previous_step.data.X}}` resolution stays uniform.
-    match &step.output_format {
-        crate::models::StepOutputFormat::Structured => {
-            prompt.push_str(crate::workflows::template::STRUCTURED_OUTPUT_INSTRUCTIONS);
-        }
-        crate::models::StepOutputFormat::TypedSchema { schema } => {
-            prompt.push_str(&crate::workflows::template::build_typed_schema_instruction(schema));
-        }
-        crate::models::StepOutputFormat::FreeText => {}
     }
 
     // Auto-inject on_result signal instructions into the prompt
@@ -143,7 +200,7 @@ pub async fn execute_step(
                 if needs_envelope {
                     let envelope = crate::workflows::template::extract_step_envelope(&final_output);
                     let validation_error = match (&step.output_format, &envelope) {
-                        (crate::models::StepOutputFormat::TypedSchema { schema }, Some(env)) => {
+                        (crate::models::StepOutputFormat::TypedSchema { schema, .. }, Some(env)) => {
                             crate::workflows::template::validate_envelope_against_schema(
                                 &env.data_json, schema,
                             ).err()
@@ -172,23 +229,68 @@ pub async fn execute_step(
                             &step.output_format,
                             validation_error.as_deref(),
                         );
+                        let mut final_validation_error: Option<String> = validation_error.clone();
+                        let mut repair_valid = false;
                         if let Ok(repair_output) = run_agent_with_timeout(step, project_path, work_dir, &repair_prompt, tokens_config, full_access, None).await {
                             total_tokens += repair_output.tokens_used;
                             let repaired_env = crate::workflows::template::extract_step_envelope(&repair_output.text);
-                            let repair_valid = match (&step.output_format, &repaired_env) {
-                                (crate::models::StepOutputFormat::TypedSchema { schema }, Some(env)) => {
+                            let repaired_error = match (&step.output_format, &repaired_env) {
+                                (crate::models::StepOutputFormat::TypedSchema { schema, .. }, Some(env)) => {
                                     crate::workflows::template::validate_envelope_against_schema(
                                         &env.data_json, schema,
-                                    ).is_ok()
+                                    ).err()
                                 }
-                                (_, Some(_)) => true,
-                                (_, None) => false,
+                                _ => None,
                             };
+                            repair_valid = matches!((&repaired_env, &repaired_error), (Some(_), None));
                             if repair_valid {
                                 final_output = repair_output.text;
                                 tracing::info!("Step '{}': repair succeeded", step.name);
                             } else {
-                                tracing::warn!("Step '{}': repair failed, using raw output", step.name);
+                                tracing::warn!("Step '{}': repair failed", step.name);
+                                // Surface the latest error in the StepResult
+                                // so the operator sees what was wrong, not
+                                // the original pre-repair error.
+                                if let Some(err) = repaired_error {
+                                    final_validation_error = Some(err);
+                                } else if repaired_env.is_none() {
+                                    final_validation_error = Some("missing envelope after repair".into());
+                                }
+                            }
+                        }
+
+                        // 0.8.3 — `on_invalid: Fail` short-circuits the
+                        // step when repair didn't fix the output. Used by
+                        // Feasibility-Gated triage so the implement step
+                        // never receives an invalid manifest. Default is
+                        // `Continue` (0.7.0 behavior: warn + raw output).
+                        if !repair_valid {
+                            if let crate::models::StepOutputFormat::TypedSchema {
+                                on_invalid: crate::models::OnInvalid::Fail, ..
+                            } = &step.output_format {
+                                let err_msg = final_validation_error
+                                    .unwrap_or_else(|| "TypedSchema validation failed and repair did not fix it".into());
+                                tracing::warn!("Step '{}': failing run (on_invalid=Fail) — {}", step.name, err_msg);
+                                return StepOutcome {
+                                    result: StepResult {
+                                        step_name: step.name.clone(),
+                                        status: RunStatus::Failed,
+                                        output: format!(
+                                            "TypedSchema validation failed after repair attempt.\n\nError: {}\n\nLast agent output:\n{}",
+                                            err_msg, final_output,
+                                        ),
+                                        tokens_used: total_tokens,
+                                        duration_ms: start.elapsed().as_millis() as u64,
+                                        started_at: None,
+                                        condition_result: None,
+                                        envelope_detected: Some(false),
+                                        step_kind: None,
+                                        step_agent: None,
+                                        step_api_plugin_slug: None,
+                                        step_api_endpoint_path: None,
+                                    },
+                                    condition_action: None,
+                                };
                             }
                         }
                     }
@@ -611,6 +713,130 @@ mod tests {
         let output = "line1\nline2\nline3\nline4\nline5\n[SIGNAL: STOP_SIGNAL]";
         let action = evaluate_conditions(&rules, output);
         assert!(matches!(action, Some(ConditionAction::Stop)));
+    }
+
+    // ── build_step_prompt — 0.8.3 (TD-265) ──────────────────────────────
+    //
+    // The prompt-assembly path was extracted from execute_step so we can
+    // unit-test the behavior independently from the agent spawn. These
+    // tests lock in the wiring between extra_context (linked_repos +
+    // universe block injected by the runner) and the final prompt the
+    // agent sees. A regression here would silently drop the cross-repo
+    // evidence the entire 0.8.3 release is built around.
+
+    fn make_step(prompt_template: &str) -> WorkflowStep {
+        // Mirror of `workflows::big_ticket_template::blank_step` —
+        // duplicated here because it's `fn` private in the sibling module
+        // and we want this test file standalone.
+        WorkflowStep {
+            name: "t".into(),
+            step_type: crate::models::StepType::Agent,
+            description: None,
+            agent: crate::models::AgentType::ClaudeCode,
+            prompt_template: prompt_template.into(),
+            mode: crate::models::StepMode::Normal,
+            output_format: crate::models::StepOutputFormat::FreeText,
+            mcp_config_ids: vec![],
+            agent_settings: None,
+            on_result: vec![],
+            stall_timeout_secs: None,
+            retry: None,
+            delay_after_secs: None,
+            skill_ids: vec![],
+            profile_ids: vec![],
+            directive_ids: vec![],
+            batch_quick_prompt_id: None,
+            batch_items_from: None,
+            batch_wait_for_completion: None,
+            batch_max_items: None,
+            batch_workspace_mode: None,
+            batch_chain_prompt_ids: vec![],
+            batch_concurrent_limit: None,
+            quick_api_id: None,
+            notify_config: None,
+            api_plugin_slug: None,
+            api_config_id: None,
+            api_endpoint_path: None,
+            api_method: None,
+            api_path_params: None,
+            api_query: None,
+            api_headers: None,
+            api_body: None,
+            api_extract: None,
+            api_pagination: None,
+            api_timeout_ms: None,
+            api_max_retries: None,
+            api_output_var: None,
+            gate_message: None,
+            gate_request_changes_target: None,
+            gate_notify_url: None,
+            exec_command: None,
+            exec_args: vec![],
+            exec_timeout_secs: None,
+            exec_setup_command: None,
+            exec_setup_args: vec![],
+            quick_prompt_id: None,
+            json_data_payload: None,
+        }
+    }
+
+    #[test]
+    fn build_step_prompt_returns_rendered_template_when_extra_context_is_empty() {
+        // No project = no companion-repo context. The prompt is just
+        // the rendered template; callers must not see any synthetic
+        // "## Linked repositories" header injected.
+        let step = make_step("Hello world");
+        let ctx = TemplateContext::new();
+        let prompt = build_step_prompt(&step, &ctx, "").expect("must render");
+        assert_eq!(prompt, "Hello world",
+            "empty extra_context must not leak any header into the prompt");
+    }
+
+    #[test]
+    fn build_step_prompt_appends_extra_context_after_render() {
+        // The runner pre-computes `## Linked repositories ...` + the
+        // `## Other Kronn projects ...` block ONCE and passes them as
+        // extra_context. The helper appends them VERBATIM after the
+        // template render — that's the entire wiring the cross-repo
+        // evidence pattern depends on.
+        let step = make_step("Do the thing.");
+        let ctx = TemplateContext::new();
+        let extra = "\n\n## Linked repositories (companion repos)\n- **front_africanews** — `/r/front_africanews`\n";
+        let prompt = build_step_prompt(&step, &ctx, extra).expect("must render");
+        assert!(prompt.starts_with("Do the thing."),
+            "rendered template must lead the prompt");
+        assert!(prompt.contains("## Linked repositories (companion repos)"),
+            "extra_context header must be present in final prompt — wiring regression");
+        assert!(prompt.contains("front_africanews"),
+            "concrete companion entries must reach the prompt");
+        // Order matters: extra_context must come AFTER the rendered
+        // template (so the trailing addenda below — output_format /
+        // triage — anchor the END of the prompt).
+        let user_idx = prompt.find("Do the thing.").unwrap();
+        let extra_idx = prompt.find("## Linked repositories").unwrap();
+        assert!(user_idx < extra_idx,
+            "extra_context must be appended AFTER the rendered template, not prepended");
+    }
+
+    #[test]
+    fn build_step_prompt_keeps_addenda_anchored_at_the_end() {
+        // When the step has a TypedSchema output_format AND a triage
+        // description, both addenda must trail the prompt — even when
+        // extra_context is also present. LLMs follow trailing
+        // instructions more reliably than leading ones, so the order
+        // is load-bearing: template → extra_context → output_format
+        // addendum → triage addendum.
+        let mut step = make_step("Triage this ticket");
+        step.description = Some("[TRIAGE] feasibility audit".into());
+        step.output_format = crate::workflows::triage::triage_output_format();
+        let ctx = TemplateContext::new();
+        let extra = "\n\n## Linked repositories\n- ref\n";
+        let prompt = build_step_prompt(&step, &ctx, extra).expect("must render");
+        let template_idx = prompt.find("Triage this ticket").unwrap();
+        let extra_idx = prompt.find("## Linked repositories").unwrap();
+        let triage_idx = prompt.find("TRIAGE MODE").expect("triage addendum must be appended");
+        assert!(template_idx < extra_idx && extra_idx < triage_idx,
+            "order must be: template → extra_context → triage addendum; got idx {template_idx}/{extra_idx}/{triage_idx}");
     }
 
     // ── fail_fast_on_unresolved ──────────────────────────────────────────

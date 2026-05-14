@@ -75,6 +75,16 @@ export interface DiscussionsPageProps {
   cleanupStream: (discId: string) => void;
   // Lifted unseen tracking (lives in Dashboard for cross-page visibility)
   markDiscussionSeen: (discId: string, msgCount: number) => void;
+  /** 0.8.3 (#277) — bulk-seed every discussion's last-seen counter to
+   *  its current `message_count`. Wired to the sidebar "Mark all as
+   *  read" button so users can purge accumulated unread backlogs from
+   *  pre-feature discussions / archived discs / batch children in one
+   *  click. Lives in Dashboard alongside `markDiscussionSeen` so both
+   *  use the same `lastSeenMsgCount` state + localStorage entry.
+   *  Optional so existing tests that pre-date this feature don't need
+   *  to be updated — the sidebar simply hides the button when no
+   *  handler is wired. */
+  markAllDiscussionsSeen?: () => void;
   onActiveDiscussionChange: (id: string | null) => void;
   lastSeenMsgCount: Record<string, number>;
   mcpConfigs?: McpConfigDisplay[];
@@ -128,6 +138,7 @@ export function DiscussionsPage({
   abortControllers,
   cleanupStream: cleanupStreamBase,
   markDiscussionSeen,
+  markAllDiscussionsSeen,
   onActiveDiscussionChange,
   lastSeenMsgCount,
   initialActiveDiscussionId,
@@ -146,6 +157,14 @@ export function DiscussionsPage({
   const [activeDiscussionId, setActiveDiscussionId] = useState<string | null>(initialActiveDiscussionId ?? null);
   const [showNewDiscussion, setShowNewDiscussion] = useState(false);
   const [showGitPanel, setShowGitPanel] = useState(false);
+  // 0.8.3 (#280) — flag set when an audit is running on the same
+  // project as the active discussion. Drives the banner that warns
+  // the user "MCPs are temporarily filtered for audit perf — re-run
+  // your query after the audit if you need the full set". Polled
+  // every 8 s while the discussion is open AND on a project with no
+  // current audit signal yet (cheap GET; stops polling once an audit
+  // is detected and again polls to confirm completion).
+  const [auditRunningOnActiveProject, setAuditRunningOnActiveProject] = useState(false);
   const [pendingFilesCount, setPendingFilesCount] = useState(0);
   // Test mode (worktree swap-in-main flow). `busy` guards against
   // double-clicks on enter/exit which would race with the backend's
@@ -432,6 +451,41 @@ export function DiscussionsPage({
   }, [contactsList, activeDiscussionId, refetchDiscussions, setSendingMap, toast, t]);
   const { connected: wsConnected } = useWebSocket(handleWsMessage);
 
+  // 0.8.3 (#280) — Poll the audit-status of the active discussion's
+  // project so we can show a banner when an audit is running. The
+  // backend exposes `null` when no audit is in progress and an
+  // `AuditProgress` object otherwise. Poll every 8 s while the
+  // discussion is open + on a real project; stop when the disc is
+  // closed or has no project_id. Banner reads from this state — see
+  // the render section below for the JSX. Cheap call (single DB
+  // read for the tracker map lookup); no impact on the audit run.
+  useEffect(() => {
+    const activeProjectId = activeDiscussionId
+      ? allDiscussions.find(d => d.id === activeDiscussionId)?.project_id
+      : null;
+    if (!activeProjectId) {
+      setAuditRunningOnActiveProject(false);
+      return;
+    }
+    let cancelled = false;
+    const fetchOnce = async () => {
+      try {
+        const progress = await projectsApi.auditStatus(activeProjectId);
+        if (!cancelled) setAuditRunningOnActiveProject(progress !== null);
+      } catch {
+        // 404 / network → assume no audit, hide the banner. The
+        // poll re-tries every 8s so a transient failure self-heals.
+        if (!cancelled) setAuditRunningOnActiveProject(false);
+      }
+    };
+    fetchOnce();
+    const interval = setInterval(fetchOnce, 8_000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [activeDiscussionId, allDiscussions]);
+
 
   // Mark active discussion as seen + sync activeDiscussionId to parent
   useEffect(() => {
@@ -440,9 +494,21 @@ export function DiscussionsPage({
 
   useEffect(() => {
     if (activeDiscussionId && activeDiscussion) {
-      markDiscussionSeen(activeDiscussionId, activeDiscussion.messages.length);
+      // 0.8.3 (#277) — guard against the off-by-N+ bug where the
+      // list endpoint returns `messages: []` (empty by design,
+      // populated only by `discussions.get`). The first render of a
+      // freshly-opened discussion has `activeDiscussion` resolved
+      // from `allDiscussions.find(...)` → `messages.length = 0`,
+      // so we'd mark "0 seen" and the unread counter would stay
+      // at message_count until the get() resolves the next tick.
+      // Use the max of both signals so the seed never under-counts.
+      const total = Math.max(
+        activeDiscussion.messages.length,
+        activeDiscussion.message_count ?? 0,
+      );
+      markDiscussionSeen(activeDiscussionId, total);
     }
-  }, [activeDiscussionId, activeDiscussion?.messages.length, markDiscussionSeen]);
+  }, [activeDiscussionId, activeDiscussion?.messages.length, activeDiscussion?.message_count, markDiscussionSeen]);
 
   // Timer for agent activity duration — uses lifted startMap to survive page switches
   useEffect(() => {
@@ -1358,6 +1424,7 @@ export function DiscussionsPage({
           activeId={activeDiscussionId}
           sendingMap={sendingMap}
           lastSeenMsgCount={lastSeenMsgCount}
+          onMarkAllRead={markAllDiscussionsSeen}
           contacts={contactsList}
           contactsOnline={contactsOnline}
           wsConnected={wsConnected}
@@ -1547,6 +1614,94 @@ export function DiscussionsPage({
             <div className="disc-messages-git-row">
             <div className="disc-messages-col">
 
+            {/* 0.8.3 (#280) — Audit-running warning. When an audit
+                is in progress on the same project, Kronn has filtered
+                `.mcp.json` down to the audit allowlist (~5 servers)
+                for perf. Discussions opened during this window see
+                the filtered subset; this banner explains why so the
+                user doesn't think their MCPs vanished. Auto-hides
+                when the audit finishes (8 s poll). Skipped for
+                system-managed discs (briefing/bootstrap/validation)
+                whose own CTAs already drive the flow. */}
+            {auditRunningOnActiveProject && activeDiscussion.project_id &&
+              !isBriefingDisc(activeDiscussion.title) &&
+              !isBootstrapDisc(activeDiscussion.title) &&
+              !isValidationDisc(activeDiscussion.title) && (
+              <div className="disc-cta-banner" data-variant="info">
+                <p className="disc-cta-text" data-variant="info">
+                  <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />
+                  {t('audit.runningMcpFilterBanner')}
+                </p>
+              </div>
+            )}
+
+            {/* 0.8.3 (#276) — Unaudited-project warning banner.
+                Persistent banner shown at the top of any discussion on
+                a project whose audit hasn't been completed and validated.
+                New users discovering Kronn typically don't know there's
+                an AI audit step that pre-fills the agent's context — so
+                they spend tokens re-explaining their project on every
+                turn. This banner guides them through the right flow
+                (briefing → audit → validation) BEFORE they burn budget
+                on a context-less conversation.
+
+                Hidden for system-managed discussions (briefing /
+                bootstrap / validation), which have their own dedicated
+                CTAs further down and already drive the user toward the
+                next step. Also hidden once the project is `Audited` or
+                `Validated` — at that point the context is loaded into
+                the agent and the warning is just noise. */}
+            {(() => {
+              if (!activeDiscussion.project_id) return null;
+              if (
+                isBriefingDisc(activeDiscussion.title) ||
+                isBootstrapDisc(activeDiscussion.title) ||
+                isValidationDisc(activeDiscussion.title)
+              ) return null;
+              const proj = projects.find(p => p.id === activeDiscussion.project_id);
+              if (!proj) return null;
+              // Only fire on pre-audit states. Once `Audited` or
+              // `Validated`, the docs/ tree is loaded into context and
+              // the warning is obsolete.
+              const unaudited = proj.audit_status === 'NoTemplate'
+                || proj.audit_status === 'TemplateInstalled'
+                || proj.audit_status === 'Bootstrapped';
+              if (!unaudited) return null;
+
+              // Adaptive CTA based on briefing_notes presence.
+              // Empty briefing → push toward briefing first (multiplies
+              // audit quality by giving the agent business context).
+              // Briefing present → user already gave context, can jump
+              // straight to launching the audit from the project page.
+              const hasBriefing = (proj.briefing_notes ?? '').trim().length > 0;
+              const projectId = activeDiscussion.project_id;
+              return (
+                <div className="disc-cta-banner" data-variant="warning">
+                  <p className="disc-cta-text" data-variant="warning">
+                    <AlertTriangle size={14} />
+                    {hasBriefing
+                      ? t('audit.unauditedWarningWithBriefing')
+                      : t('audit.unauditedWarning')}
+                  </p>
+                  {/* Primary CTA adapts. With briefing → invite to
+                      launch the audit; without → invite to do the
+                      briefing first (which is a 10 min interactive
+                      flow that significantly improves audit quality). */}
+                  <button
+                    className="disc-cta-btn"
+                    data-variant="warning"
+                    onClick={() => onNavigate('projects', { projectId })}
+                  >
+                    {hasBriefing ? (
+                      <><Play size={12} /> {t('audit.unauditedCtaLaunch')}</>
+                    ) : (
+                      <><MessageSquare size={12} /> {t('audit.unauditedCtaBriefing')}</>
+                    )}
+                  </button>
+                </div>
+              );
+            })()}
+
             {/* Vibe API mode notice */}
             {activeDiscussion.agent === 'Vibe' && (
               <div className="disc-agent-notice" data-agent="Vibe">
@@ -1624,6 +1779,7 @@ export function DiscussionsPage({
                     onExpandSummary={handleMsgExpandSummary}
                     onNavigate={onNavigate}
                     discussionId={activeDiscussion.id}
+                    projectId={activeDiscussion.project_id ?? null}
                     t={t}
                   />
                 );
@@ -1870,7 +2026,16 @@ export function DiscussionsPage({
                       className="disc-cta-btn"
                       data-variant="accent"
                       onClick={() => {
-                        onLaunchWorkflowFromPreset('ticket-to-pr', projectId);
+                        // 0.8.3 — Switched from `ticket-to-pr` to
+                        // `feasibility-autopilot`. The new preset adds
+                        // a triage step that classifies every sub-task
+                        // into doable / decided / mocked / blocked
+                        // BEFORE any code is written, plus a
+                        // drift_check Exec that surfaces every freedom
+                        // the agent took. Required for big tickets
+                        // where silent improvisation breaks the
+                        // implementation (cf. EW-7247 stress test).
+                        onLaunchWorkflowFromPreset('feasibility-autopilot', projectId);
                         onNavigate('workflows');
                       }}
                     >
@@ -1904,10 +2069,67 @@ export function DiscussionsPage({
                 );
               })()}
 
-              {/* Workflow ready banner */}
+              {/* 0.8.3 — Bundle ready banner (KRONN:BUNDLE_READY).
+                  Atomic creation of N Quick Prompts + N Quick APIs +
+                  N Custom APIs + 1 Workflow. Takes precedence over
+                  the legacy WORKFLOW_READY block below — they're
+                  mutually exclusive in well-formed agent outputs. */}
               {(() => {
                 const agentMsgs = activeDiscussion.messages.filter((m, idx) => m.role === 'Agent' && idx > 0);
                 const wfStreamedText = streamingMap[activeDiscussion.id] ?? '';
+                const readyMsg = [...agentMsgs].reverse().find(m => m.content.toUpperCase().includes('KRONN:BUNDLE_READY'))
+                  || (wfStreamedText.toUpperCase().includes('KRONN:BUNDLE_READY') ? { content: wfStreamedText } : null);
+                if (!readyMsg) return null;
+                const jsonMatch = readyMsg.content.match(/```json\s*\n([\s\S]*?)\n```/);
+                if (!jsonMatch) return null;
+                let parsedPayload: unknown;
+                try { parsedPayload = JSON.parse(jsonMatch[1]); } catch { return null; }
+                if (!parsedPayload || typeof parsedPayload !== 'object' || !('workflow' in (parsedPayload as Record<string, unknown>))) return null;
+                const payload = parsedPayload as Record<string, unknown>;
+                // Inject project_id from discussion context on the
+                // wrapped workflow if the agent left it null. We do
+                // NOT inject on each QP/QA — those default to
+                // global-scope when unspecified, which is what an
+                // agent-emitted bundle typically wants.
+                const inner = (payload.workflow ?? {}) as Record<string, unknown>;
+                if (!inner.project_id && activeDiscussion.project_id) {
+                  inner.project_id = activeDiscussion.project_id;
+                  payload.workflow = inner;
+                }
+                const qpCount = Array.isArray(payload.quick_prompts) ? payload.quick_prompts.length : 0;
+                const qaCount = Array.isArray(payload.quick_apis) ? payload.quick_apis.length : 0;
+                const caCount = Array.isArray(payload.custom_apis) ? payload.custom_apis.length : 0;
+                const extras = qpCount + qaCount + caCount;
+                return (
+                  <div className="disc-cta-banner" data-variant="accent">
+                    <p className="disc-cta-text" data-variant="accent">
+                      <Zap size={14} /> {t('wf.aiBundleReady', qpCount, qaCount, caCount)}
+                    </p>
+                    <button className="disc-cta-btn" data-variant="accent" onClick={async () => {
+                      try {
+                        const resp = await workflowsApi.createBundle(payload);
+                        console.info('Bundle created:', resp);
+                        onNavigate('workflows');
+                      } catch (e) {
+                        console.warn('Failed to create bundle:', e);
+                      }
+                    }}>
+                      <Check size={12} /> {t('wf.createBundleBtn', extras)}
+                    </button>
+                  </div>
+                );
+              })()}
+
+              {/* Workflow ready banner (legacy single-workflow path) */}
+              {(() => {
+                const agentMsgs = activeDiscussion.messages.filter((m, idx) => m.role === 'Agent' && idx > 0);
+                const wfStreamedText = streamingMap[activeDiscussion.id] ?? '';
+                // If a BUNDLE_READY is also present, the bundle path
+                // above wins — skip rendering the legacy button so
+                // the user doesn't see two buttons.
+                const hasBundle = [...agentMsgs].some(m => m.content.toUpperCase().includes('KRONN:BUNDLE_READY'))
+                  || wfStreamedText.toUpperCase().includes('KRONN:BUNDLE_READY');
+                if (hasBundle) return null;
                 const readyMsg = [...agentMsgs].reverse().find(m => m.content.toUpperCase().includes('KRONN:WORKFLOW_READY'))
                   || (wfStreamedText.toUpperCase().includes('KRONN:WORKFLOW_READY') ? { content: wfStreamedText } : null);
                 if (!readyMsg) return null;

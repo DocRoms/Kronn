@@ -8,7 +8,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use ts_rs::TS;
 
+pub mod agent_decisions;
 pub mod agents;
+pub mod bundle;
 pub mod db;
 pub mod discussions;
 pub mod git;
@@ -21,7 +23,9 @@ pub mod setup;
 pub mod stats;
 pub mod workflows;
 
+pub use agent_decisions::*;
 pub use agents::*;
+pub use bundle::*;
 pub use db::*;
 pub use discussions::*;
 pub use git::*;

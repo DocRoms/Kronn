@@ -1,7 +1,7 @@
 use std::convert::Infallible;
 use std::pin::Pin;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     response::sse::{Event, Sse},
     Json,
 };
@@ -436,6 +436,60 @@ pub async fn create(
         Ok(()) => Json(ApiResponse::ok(wf)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
+}
+
+/// GET /api/agent-decisions?run_id=… OR ?project_id=… — 0.8.3.
+/// Reads the `agent_decisions` table. Exactly one of the two query
+/// params must be set. Returns rows newest-first when filtering by
+/// project, oldest-first when filtering by run (insertion order
+/// matches manifest order for that run).
+pub async fn list_agent_decisions(
+    State(state): State<AppState>,
+    Query(params): Query<crate::api::workflows::AgentDecisionsQuery>,
+) -> Json<ApiResponse<Vec<crate::models::AgentDecision>>> {
+    let limit = params.limit.unwrap_or(50).min(500);
+    let result = match (params.run_id.as_deref(), params.project_id.as_deref()) {
+        (Some(run_id), None) => {
+            let run_id = run_id.to_string();
+            state.db.with_conn(move |conn| {
+                crate::db::agent_decisions::list_for_run(conn, &run_id)
+            }).await
+        }
+        (None, Some(project_id)) => {
+            let project_id = project_id.to_string();
+            state.db.with_conn(move |conn| {
+                crate::db::agent_decisions::list_recent_for_project(conn, &project_id, limit)
+            }).await
+        }
+        _ => return Json(ApiResponse::err(
+            "Provide exactly one of `run_id` or `project_id` as a query parameter"
+        )),
+    };
+    match result {
+        Ok(rows) => Json(ApiResponse::ok(rows)),
+        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AgentDecisionsQuery {
+    pub run_id: Option<String>,
+    pub project_id: Option<String>,
+    pub limit: Option<u32>,
+}
+
+/// POST /api/workflows/templates/feasibility-autopilot — 0.8.3.
+/// Instantiates the 5-step Feasibility-Gated Implementation template
+/// (triage → gate → implement → tests → pr_draft) for a given project
+/// and ticket. Delegates to `create()` for validation + insert so the
+/// usual safety checks (step references, guards, on_failure, …) all
+/// apply uniformly.
+pub async fn create_feasibility_autopilot(
+    State(state): State<AppState>,
+    Json(params): Json<crate::workflows::big_ticket_template::FeasibilityWorkflowParams>,
+) -> Json<ApiResponse<Workflow>> {
+    let req = crate::workflows::big_ticket_template::build_feasibility_workflow(params);
+    create(State(state), Json(req)).await
 }
 
 /// PUT /api/workflows/:id
@@ -1230,7 +1284,9 @@ pub async fn test_step(
     let agents = cfg.agents.clone();
     drop(cfg);
 
-    // Resolve project path (for MCP context)
+    // Resolve project path (for MCP context). 0.8.3 — also pre-format
+    // the companion-repo context blocks so test-step preview matches
+    // production-run prompt content. Symmetric with execute_run.
     let project_path = if let Some(pid) = &req.project_id {
         let id = pid.clone();
         match state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &id)).await {
@@ -1240,6 +1296,10 @@ pub async fn test_step(
     } else {
         std::env::temp_dir().to_string_lossy().to_string()
     };
+    let agent_extra_context = crate::api::projects::compute_companion_context(
+        &state,
+        req.project_id.as_deref(),
+    ).await;
     let work_dir = project_path.clone();
 
     // Build template context with mock data
@@ -1301,7 +1361,7 @@ pub async fn test_step(
 
         let outcome = crate::workflows::steps::execute_step(
             &step, &project_path, &work_dir, &tokens, full_access, &ctx,
-            Some(progress_tx),
+            &agent_extra_context, Some(progress_tx),
         ).await;
 
         let _ = tx.send(crate::workflows::runner::RunEvent::StepDone {

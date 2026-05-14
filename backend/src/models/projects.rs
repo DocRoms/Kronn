@@ -47,8 +47,45 @@ pub struct Project {
     pub default_profile_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub briefing_notes: Option<String>,
+    /// 0.8.3 — Companion repos that an agent on this project should
+    /// know about. A typical setup: a frontend project pointing at
+    /// the backend API repo, the IaC repo, and the shared design
+    /// system repo. The audit pipeline + every discussion / QP /
+    /// workflow running on this project picks up this list in its
+    /// system prompt prelude. Stored as in-row JSON (small data,
+    /// projects rarely have more than 5 links). See
+    /// [[TD-20260512-linked-repos-companions]].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub linked_repos: Vec<LinkedRepo>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// A companion repository linked to a project. The `location` is
+/// either a filesystem path (preferred — gives the agent direct
+/// read access) or a URL (GitHub/GitLab — the agent still gets it
+/// in context as a pointer to fetch on demand). The `kind` is just
+/// a UI hint for the icon + grouping; it doesn't change runtime
+/// behavior.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[ts(export)]
+pub struct LinkedRepo {
+    pub id: String,
+    pub name: String,
+    /// Bucket for UI grouping + icon: `"api"` | `"iac"` | `"design"`
+    /// | `"shared-lib"` | `"docs"` | `"other"`. Stored as String for
+    /// forward-compat (new kinds don't break rows already in DB).
+    pub kind: String,
+    /// Filesystem path (`/home/user/repos/my-api`) OR URL
+    /// (`https://github.com/org/my-api`). The agent decides what to
+    /// do with it based on the format.
+    pub location: String,
+    /// One-line explanation of why this repo is linked. Shown to
+    /// agents in the prompt prelude so they know when to consult
+    /// each link (e.g. "GraphQL schema lives here" vs "frontend
+    /// design tokens").
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -132,6 +169,18 @@ pub struct AuditProgress {
     /// sub-audits, `"full_audit"` for the end-to-end variant. Kept as a
     /// string so future audit kinds don't force a schema migration.
     pub kind: String,
+    /// 0.8.3 — live chips state surfaced via the poll endpoint, NOT
+    /// just via SSE. Solves the case where the SSE stream stalls or
+    /// buffers (nginx, agent freeze, page re-mount): the frontend
+    /// polls `/api/audit-status` every few seconds and re-seeds the
+    /// chips from these fields. Optional so the JSON shape stays
+    /// backwards-compatible with old clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens_so_far: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_tool: Option<String>,
 }
 
 /// One row in the `audit_runs` table — one record per audit invocation.
@@ -160,9 +209,21 @@ pub struct AuditRun {
     pub ended_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u32>,
-    /// `Running` while in flight; `Completed` / `Failed` / `Cancelled`
-    /// once terminal.
+    /// `Running` while in flight; `Completed` / `Failed` / `Cancelled` /
+    /// `Interrupted` once terminal. `Interrupted` (0.8.3 #311) means
+    /// the SSE stream ended before reaching step 10 *without* an
+    /// explicit cancel — typically a rate-limit, claude crash, or
+    /// network blip. The frontend treats `Interrupted` specifically:
+    /// it shows a "Reprendre Step N/10" button (where N is
+    /// `last_completed_step + 1`) instead of a fresh "Lancer".
     pub status: String,
+    /// 0.8.3 (#311) — last successfully completed step (1-based,
+    /// matches `ANALYSIS_STEPS` indexing). 0 = no step done yet.
+    /// 10 = full pipeline ran to end. Set on every `step_done` where
+    /// `validate_and_repair_step_output` returns success=true. Drives
+    /// the resume mechanism: on resume we start at `this + 1`.
+    #[serde(default)]
+    pub last_completed_step: u32,
     #[serde(default)]
     pub td_critical: u32,
     #[serde(default)]
@@ -320,6 +381,12 @@ pub struct LaunchAuditRequest {
     /// `kind == AuditKind::Custom`. Ignored otherwise.
     #[serde(default)]
     pub custom_prompt: Option<String>,
+    /// 0.8.3 (#311) — resume an interrupted run: skip steps 1..=N
+    /// and start at step N+1. Read from `audit_runs.last_completed_step`
+    /// by the frontend before POSTing. None / 0 / >= 10 means start
+    /// fresh from step 1.
+    #[serde(default)]
+    pub resume_from: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, TS)]

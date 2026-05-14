@@ -251,7 +251,7 @@ jobs:
         # config seeding.
         run: |
           export KRONN_DATA_DIR=$(mktemp -d)
-          ./backend/target/release/kronn > /tmp/backend.log 2>&1 &
+          ./target/release/kronn > /tmp/backend.log 2>&1 &
           echo $! > /tmp/backend.pid
           # Wait for backend to be ready (max 60s).
           for i in {1..60}; do

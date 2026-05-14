@@ -6,6 +6,7 @@ import { useIsMobile } from '../hooks/useMediaQuery';
 import { isValidationDisc, isBriefingDisc, isBootstrapDisc, isUsable, isTrackerMcp } from '../lib/constants';
 import { AiDocViewer } from './AiDocViewer';
 import { ProjectSkills } from './ProjectSkills';
+import { ProjectLinkedRepos } from './ProjectLinkedRepos';
 import {
   saveAuditCheckpoint, loadAuditCheckpoint, clearAuditCheckpoint,
   type AuditCheckpointKind,
@@ -99,6 +100,26 @@ export function ProjectCard({
   // the load effect — see AiDocViewer L37).
   const [docDeepLink, setDocDeepLink] = useState<string | undefined>(undefined);
 
+  // 0.8.3 (#314) — post-validation deep-link consumer. MessageBubble
+  // writes `kronn:postValidation:<projectId>` to sessionStorage when
+  // the user clicks the "View Tech Debts" CTA in the validation
+  // discussion. We read + clear it on every render where the card is
+  // open AND the AI Context tab is exposable; the value is the
+  // folder path to deep-link into (e.g. `docs/tech-debt`). One-shot:
+  // we always remove the key so a manual reload doesn't re-trigger.
+  useEffect(() => {
+    if (!isOpen) return;
+    let target: string | null = null;
+    try {
+      target = sessionStorage.getItem(`kronn:postValidation:${proj.id}`);
+      if (target) sessionStorage.removeItem(`kronn:postValidation:${proj.id}`);
+    } catch { /* private mode / quota — no deep-link */ }
+    if (target) {
+      setExpandedTab('docAi');
+      setDocDeepLink(target);
+    }
+  }, [isOpen, proj.id]);
+
   // ── Audit state ──
   const [auditActive, setAuditActive] = useState(false);
   const [auditStep, setAuditStep] = useState(0);
@@ -110,6 +131,21 @@ export function ProjectCard({
   // updates without re-polling the network. Cleared when the audit ends.
   const [auditStartedAt, setAuditStartedAt] = useState<number | null>(null);
   const [, setAuditTick] = useState(0);
+  // 0.8.3 TD #274 — per-step + cumulative token counters surfaced live.
+  // Backend's enriched `step_done` SSE event carries:
+  //   - tokens: max(input+output) for the step just finished (Claude
+  //     reports cumulative per-call, so `.max()` over the stream is
+  //     the correct aggregation, NOT a sum).
+  //   - total_tokens: running sum across all completed steps.
+  // Both are `null` until the first `step_done` lands; the UI hides
+  // the chips until then so we don't show misleading "0 tk" on a
+  // fresh audit that hasn't burned anything yet.
+  const [auditLastStepTokens, setAuditLastStepTokens] = useState<number | null>(null);
+  const [auditTotalTokens, setAuditTotalTokens] = useState<number | null>(null);
+  // 0.8.3 (#281) — currently-active tool the agent is calling (Read,
+  // Glob, mcp__..., …). Surfaced as a chip so the user knows what
+  // the agent is busy with during the step. Cleared on step_done.
+  const [auditCurrentTool, setAuditCurrentTool] = useState<string | null>(null);
   const [auditAbortController, setAuditAbortController] = useState<AbortController | null>(null);
   const [auditAgentChoice, setAuditAgentChoice] = useState<AgentType | undefined>(undefined);
   /// Briefing-start in flight — pre-fix the button was only disabled when
@@ -145,9 +181,29 @@ export function ProjectCard({
    *  feedback before the refetch removes the banner entirely. */
   const [migrationSuccess, setMigrationSuccess] = useState<{ filesMoved: number } | null>(null);
 
+  // 0.8.3 (#311) — resumable audit detection. Polled at mount + after
+  // each audit completion/error so the "Lancer l'audit" button can
+  // flip to "Reprendre Step N/10" when an Interrupted run is on file
+  // for this project. `null` = no resumable run; otherwise the row.
+  const [resumableAudit, setResumableAudit] = useState<{ id: string; last_completed_step: number; started_at: string } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    projectsApi.auditResumable(proj.id).then(row => {
+      if (cancelled) return;
+      setResumableAudit(row);
+    }).catch(() => { /* idle on error — button stays "Lancer" */ });
+    return () => { cancelled = true; };
+  }, [proj.id, proj.audit_status, auditActive]);
+
   // ── Computed ──
   const validationDisc = projDiscussions.find(d => isValidationDisc(d.title));
-  const validationInProgress = !!validationDisc && proj.audit_status === 'Audited';
+  // 0.8.3 (#311 + #312) — a resumable audit run takes priority over
+  // a leftover validation disc. Pre-fix, a rate-limit at step 5 still
+  // marked the project Audited + left a validation disc, so the
+  // ProjectCard read "Validation en cours" on an audit that hadn't
+  // actually produced anything past step 5. The resumable check
+  // catches that state and forces the "Reprendre" CTA instead.
+  const validationInProgress = !!validationDisc && proj.audit_status === 'Audited' && !resumableAudit;
   const bootstrapDisc = projDiscussions.find(d => isBootstrapDisc(d.title));
   const bootstrapInProgress = !!bootstrapDisc && proj.audit_status === 'TemplateInstalled';
   // Use the locale-aware detector — the backend's `start_briefing` emits
@@ -265,7 +321,7 @@ export function ProjectCard({
     onRefetchDiscussions();
   }, [auditAbortController, proj.id, toast, t, onRefetch, onRefetchDiscussions, stopAuditPolling]);
 
-  const handleFullAudit = useCallback(async () => {
+  const handleFullAudit = useCallback(async (resumeFromOverride?: number) => {
     // Guard against double-click — `setAuditActive(true)` flips the UI to
     // the progress panel synchronously, but a fast double-click can call
     // this handler twice before React re-renders, spawning two concurrent
@@ -276,12 +332,26 @@ export function ProjectCard({
     // bails out before the second SSE is dispatched.
     if (auditActiveRef.current) return;
     auditActiveRef.current = true;
+    // 0.8.3 (#311) — resume support. If the caller didn't pass
+    // an explicit `resumeFromOverride` AND there is a resumable
+    // interrupted run on file, transparently resume from there.
+    // The button copy reflects this via `resumableAudit` in the
+    // render block.
+    const resumeFrom = resumeFromOverride ?? resumableAudit?.last_completed_step ?? 0;
     const controller = new AbortController();
     setAuditAbortController(controller);
     setAuditActive(true);
     setAuditStep(0);
     setAuditTotalSteps(10);
     setAuditCurrentFile(t('audit.templateStep'));
+    // 0.8.3 TD #274 — fallback wallclock seed so the elapsed chip
+    // ticks during Phase 1 (template install + legacy migration)
+    // BEFORE the `start` SSE event lands. Replaced by the backend's
+    // authoritative value once `onAuditStart` fires.
+    setAuditStartedAt(Date.now());
+    setAuditLastStepTokens(null);
+    setAuditTotalTokens(null);
+    setAuditCurrentTool(null);
     // Seed the resume checkpoint immediately so a tab-away during phase 1
     // (template install) still leaves a breadcrumb to poll against.
     const startedAt = new Date().toISOString();
@@ -291,8 +361,16 @@ export function ProjectCard({
     });
     try {
       const auditAgent = auditAgentChoice ?? agents.filter(canAudit)[0]?.agent_type ?? 'ClaudeCode';
-      await projectsApi.fullAuditStream(proj.id, { agent: auditAgent }, {
+      await projectsApi.fullAuditStream(proj.id, { agent: auditAgent, resume_from: resumeFrom > 0 ? resumeFrom : null }, {
         onTemplateInstalled: () => {},
+        // 0.8.3 TD #274 — backend-authoritative wallclock for the
+        // live elapsed counter. Overrides the local fallback so the
+        // displayed value matches what the server uses internally
+        // (avoids local-clock drift on long audits).
+        onAuditStart: (_totalSteps, startedAtIso) => {
+          const ms = Date.parse(startedAtIso);
+          if (!Number.isNaN(ms)) setAuditStartedAt(ms);
+        },
         onStepStart: (step, total, file) => {
           setAuditStep(step);
           setAuditTotalSteps(total);
@@ -305,7 +383,50 @@ export function ProjectCard({
           });
         },
         onChunk: () => {},
-        onStepDone: () => {},
+        onStepDone: (_step, _success, tokens, _durationMs, totalTokens) => {
+          // 0.8.3 TD #274 — surface per-step + cumulative tokens so
+          // the operator sees `4,521 tk · 23,890 tk total` chips
+          // live during the audit. `tokens` is the last step's
+          // cost (max of input+output, NOT a sum); `totalTokens`
+          // is the running sum maintained server-side. Both stay
+          // null when the agent doesn't speak stream-json (Vibe,
+          // Ollama direct) — the chips hide rather than show 0.
+          if (typeof tokens === 'number') setAuditLastStepTokens(tokens);
+          if (typeof totalTokens === 'number') setAuditTotalTokens(totalTokens);
+          // 0.8.3 (#281) — clear current tool when step finishes so
+          // the chip doesn't show stale "🔧 Read" on the next step.
+          setAuditCurrentTool(null);
+        },
+        // 0.8.3 (#281) — live token tick during a step. Backend
+        // emits this every time it sees a `Usage` event in the
+        // stream-json. Updates the same chip as `onStepDone` so
+        // the counter ticks DURING the step instead of jumping at
+        // the end.
+        onStepProgress: (_step, stepTokens, totalTokensSoFar) => {
+          setAuditLastStepTokens(stepTokens);
+          if (totalTokensSoFar > 0) setAuditTotalTokens(totalTokensSoFar);
+        },
+        // 0.8.3 (#281) — name of the tool the agent just started
+        // calling (Read, Glob, mcp__atlassian__..., …). Display
+        // briefly as a chip — last-write-wins is fine; the user
+        // mostly cares about "is something happening?".
+        onToolCall: (_step, tool) => {
+          setAuditCurrentTool(tool);
+        },
+        // 0.8.3 root-cause fix — the CLI exited 0 but the step's
+        // target_file is empty / truncated (e.g. agent crashed
+        // mid-Write or the sandbox blocked the file write but the
+        // CLI didn't propagate). Backend already auto-repaired from
+        // the template; we surface a per-step warning toast so the
+        // user immediately knows the audit "succeeded" but this
+        // particular step didn't produce useful output.
+        onStepWarning: (_step, file, reason, repaired) => {
+          console.warn(`[audit] step warning on ${file}: ${reason} (repaired=${repaired})`);
+          toast(
+            t('audit.stepWarning', file, reason, repaired ? t('audit.stepWarningRepaired') : t('audit.stepWarningNotRepaired')),
+            'error',
+          );
+        },
         onValidationCreated: () => {},
         onDone: (discussionId) => {
           auditActiveRef.current = false;
@@ -345,7 +466,7 @@ export function ProjectCard({
     } finally {
       setAuditAbortController(null);
     }
-  }, [auditAgentChoice, agents, proj.id, t, toast, onRefetch, onRefetchDiscussions, onAutoRunDiscussion, onNavigate]);
+  }, [auditAgentChoice, agents, proj.id, t, toast, onRefetch, onRefetchDiscussions, onAutoRunDiscussion, onNavigate, resumableAudit]);
 
   const startPartialAudit = useCallback(async (drift: DriftCheckResponse) => {
     if (auditActiveRef.current) return;
@@ -417,8 +538,15 @@ export function ProjectCard({
   useEffect(() => {
     if (resumeSettledRef.current) return;
     resumeSettledRef.current = true;
+    // 0.8.3 — fix: do NOT gate on `cp` presence. Pre-fix, a missing
+    // localStorage checkpoint (storage cleared, cross-domain navigation,
+    // dev-mode HMR wipe, page-refresh on a tab that never wrote one)
+    // would skip the backend poll entirely → the user saw "Start audit"
+    // even when an audit was actively running server-side. Now we ALWAYS
+    // ask the backend once at mount; the checkpoint stays as a UX
+    // optimization (seeds the panel before the network round-trip
+    // completes) but is no longer a precondition.
     const cp = loadAuditCheckpoint(proj.id);
-    if (!cp) return;
 
     let cancelled = false;
 
@@ -451,19 +579,42 @@ export function ProjectCard({
             totalSteps: p.total_steps,
             currentFile: p.current_file ?? null,
           });
+          // 0.8.3 hotfix — re-seed the live chips from the poll so
+          // they survive SSE buffer stalls AND page re-mounts.
+          // Only overwrite when the backend has a value; otherwise
+          // keep whatever the SSE stream last set (avoids flashing
+          // null while the tracker resets between steps).
+          if (typeof p.step_tokens === 'number') setAuditLastStepTokens(p.step_tokens);
+          else if (p.step_tokens === null) setAuditLastStepTokens(null);
+          if (typeof p.total_tokens_so_far === 'number') setAuditTotalTokens(p.total_tokens_so_far);
+          if (typeof p.current_tool === 'string') setAuditCurrentTool(p.current_tool);
+          else if (p.current_tool === null) setAuditCurrentTool(null);
         } else {
           // Server reports nothing → either the audit wrapped up while we
-          // were away or the checkpoint is orphaned (server restart, etc.).
-          // Either way: drop the checkpoint, stop the UI state, refetch.
+          // were away, the checkpoint is orphaned (server restart, etc.),
+          // or this card is just idle (no audit, never had one).
+          // Drop the checkpoint defensively, stop polling, and reset
+          // local state IF it was active. Don't refetch on every idle
+          // poll — that would spam the projects list endpoint when
+          // every ProjectCard sits idle. Only refetch when we were
+          // ACTIVELY showing an audit bar that just disappeared.
           clearAuditCheckpoint(proj.id);
+          const wasActive = auditActiveRef.current;
           auditActiveRef.current = false;
           setAuditActive(false);
           setAuditStartedAt(null);
+          // 0.8.3 (#274) — clear token chips when the audit wraps so
+          // the next run starts from a clean slate instead of
+          // briefly flashing the stale "23,890 tk total" from the
+          // previous audit before the first step_done lands.
+          setAuditLastStepTokens(null);
+          setAuditTotalTokens(null);
+          setAuditCurrentTool(null);
           if (auditPollRef.current) {
             clearInterval(auditPollRef.current);
             auditPollRef.current = null;
           }
-          onRefetch();
+          if (wasActive) onRefetch();
         }
       } catch (err) {
         // Network hiccup — keep the checkpoint, keep polling. If the backend
@@ -472,15 +623,26 @@ export function ProjectCard({
       }
     };
 
-    // Seed the UI immediately from the checkpoint so the resume bar shows
-    // up without waiting for the first network round-trip.
-    auditActiveRef.current = true;
-    setAuditActive(true);
-    setAuditStep(cp.stepIndex);
-    setAuditTotalSteps(cp.totalSteps);
-    setAuditCurrentFile(cp.currentFile ?? '');
+    // 0.8.3 — when a checkpoint exists, seed the UI immediately so
+    // the resume bar shows up without waiting for the first network
+    // round-trip. When it doesn't, the first `poll()` below decides
+    // whether to mount the bar based on what the backend actually
+    // says — which is the authoritative source.
+    if (cp) {
+      auditActiveRef.current = true;
+      setAuditActive(true);
+      setAuditStep(cp.stepIndex);
+      setAuditTotalSteps(cp.totalSteps);
+      setAuditCurrentFile(cp.currentFile ?? '');
+    }
 
-    // Fire one immediate poll then every 2 s.
+    // Fire one immediate poll. Whatever the local checkpoint says,
+    // the BACKEND is the source of truth — if it has a live audit
+    // for this project, the poll inside will flip `auditActive=true`
+    // even without a local checkpoint. Then keep polling every 2 s
+    // ONLY when an audit is actually live (the interval is stopped
+    // by the `else` branch of `poll()` when the server reports
+    // `null`, so idle cards don't burn network).
     poll();
     auditPollRef.current = setInterval(poll, 2000);
 
@@ -538,7 +700,23 @@ export function ProjectCard({
         <ChevronRight size={14} style={{ color: 'var(--kr-accent-ink)', transform: isOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s' }} />
         <div className="flex-1">
           <div className="flex-row gap-3 flex-wrap">
-            <span className="dash-proj-name">{proj.name}</span>
+            <span className="dash-proj-name">
+              {proj.name}
+              {/* 0.8.3 UX — spinner sur le titre quand une activité longue
+                  (audit ou validation) tourne. Visible d'un coup d'œil sans
+                  déplier la card ni lire les badges, surtout utile quand
+                  l'user a 10+ projets et veut savoir lesquels mouline. Le
+                  title prop permet le hover-info ("Audit en cours" / "Validation
+                  en cours") pour la a11y / clarification. */}
+              {(auditActive || validationInProgress) && (
+                <Loader2
+                  size={12}
+                  className="dash-proj-name-spinner"
+                  style={{ animation: 'spin 1s linear infinite' }}
+                  aria-label={t('audit.activityInProgress')}
+                />
+              )}
+            </span>
             {/* Project docs badge */}
             {proj.audit_status === 'NoTemplate' ? (
               <span className="dash-badge-gray"><FileCode size={9} /> Project docs</span>
@@ -751,7 +929,21 @@ export function ProjectCard({
             // the docs context.
             let banner: React.ReactNode = null;
             const status = proj.audit_status;
-            if (status === 'NoTemplate' || status === 'TemplateInstalled') {
+            // 0.8.3 UX — when an audit is RUNNING, override the static
+            // CTA banners with a live "building in progress" notice so
+            // the user understands why they're seeing template
+            // placeholders instead of filled docs. Without this, the
+            // banner would still say "Lance un audit IA pour…" which
+            // is contradictory mid-audit. Takes priority over the
+            // status-based branches below.
+            if (auditActive) {
+              banner = (
+                <div className="dash-doc-banner dash-doc-banner-info">
+                  <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
+                  <span>{t('projects.docAi.banner.auditRunning')}</span>
+                </div>
+              );
+            } else if (status === 'NoTemplate' || status === 'TemplateInstalled') {
               banner = (
                 <div className="dash-doc-banner dash-doc-banner-info">
                   <Cpu size={11} />
@@ -927,6 +1119,27 @@ export function ProjectCard({
             )}
           </div>
 
+          {/* -- 5b. Linked repos (0.8.3) — companion projects.
+              Lives between Skills and AI Context because it's
+              configuration that feeds INTO the agent's context
+              (same conceptual layer as skills), and the audit
+              pipeline picks it up at the same prompt-assembly
+              point as briefing_notes. */}
+          <div className="dash-section">
+            <button className="dash-collapsible-header" onClick={() => toggleSection('linkedRepos')} aria-expanded={isSectionOpen('linkedRepos')}>
+              {isSectionOpen('linkedRepos') ? <ChevronDown size={12} className="flex-shrink-0" /> : <ChevronRight size={12} className="flex-shrink-0" />}
+              <FolderInput size={14} /> <span className="dash-section-title">{t('linkedRepos.title')}</span>
+              <span className="dash-count">{(proj.linked_repos ?? []).length}</span>
+            </button>
+            {isSectionOpen('linkedRepos') && (
+              <ProjectLinkedRepos
+                projectId={proj.id}
+                currentRepos={proj.linked_repos ?? []}
+                onUpdate={onRefetch}
+              />
+            )}
+          </div>
+
           {/* -- 6. AI Context / Audit -- */}
           <div className="dash-section">
             <button className="dash-collapsible-header" onClick={() => toggleSection('aiContext')} aria-expanded={isSectionOpen('aiContext')}>
@@ -1033,10 +1246,12 @@ export function ProjectCard({
                       </select>
                       <button
                         className="dash-icon-btn dash-btn-accent-border"
-                        onClick={handleFullAudit}
+                        onClick={() => handleFullAudit()}
                         disabled={agents.filter(canAudit).length === 0}
                       >
-                        <Play size={12} /> {t('audit.startFullAudit')}
+                        <Play size={12} /> {resumableAudit
+                          ? t('audit.resumeFromStep', resumableAudit.last_completed_step + 1)
+                          : t('audit.startFullAudit')}
                       </button>
                     </div>
                   </div>
@@ -1052,6 +1267,33 @@ export function ProjectCard({
                       {auditStartedAt !== null && (
                         <span className="text-2xs text-ghost" title={t('audit.elapsedTooltip')}>
                           {t('audit.elapsed', formatElapsedShort(Date.now() - auditStartedAt))}
+                        </span>
+                      )}
+                      {/* 0.8.3 (#274) — last step + cumulative token
+                          chips. Both stay hidden until the first
+                          step_done lands AND the agent reports usage
+                          (Vibe/Ollama direct stream stay 0). Gives
+                          the operator a live signal for "which step
+                          should I optimize" without polling. */}
+                      {auditLastStepTokens !== null && auditLastStepTokens > 0 && (
+                        <span className="text-2xs text-ghost" title={t('audit.lastStepTokensTooltip')}>
+                          {t('audit.lastStepTokens', auditLastStepTokens.toLocaleString())}
+                        </span>
+                      )}
+                      {auditTotalTokens !== null && auditTotalTokens > 0 && (
+                        <span className="text-2xs text-ghost" title={t('audit.totalTokensTooltip')}>
+                          {t('audit.totalTokens', auditTotalTokens.toLocaleString())}
+                        </span>
+                      )}
+                      {/* 0.8.3 (#281) — current tool the agent is
+                          calling. Last-write-wins (the agent fires
+                          tool_call as it goes); cleared on
+                          step_done. Hidden when null so the chip
+                          doesn't take space when the agent is
+                          just thinking. */}
+                      {auditCurrentTool && (
+                        <span className="text-2xs text-ghost" title={t('audit.currentToolTooltip')}>
+                          {t('audit.currentTool', auditCurrentTool)}
                         </span>
                       )}
                       <button
@@ -1104,10 +1346,12 @@ export function ProjectCard({
                       </select>
                       <button
                         className="dash-icon-btn dash-btn-accent-border"
-                        onClick={handleFullAudit}
+                        onClick={() => handleFullAudit()}
                         disabled={agents.filter(canAudit).length === 0}
                       >
-                        <Play size={12} /> {t('audit.startFullAudit')}
+                        <Play size={12} /> {resumableAudit
+                          ? t('audit.resumeFromStep', resumableAudit.last_completed_step + 1)
+                          : t('audit.startFullAudit')}
                       </button>
                     </div>
                   </div>
@@ -1157,6 +1401,26 @@ export function ProjectCard({
                 {proj.audit_status === 'Validated' && !auditActive && (
                   <div className="dash-audit-validated">
                     <ShieldCheck size={11} /> {t('audit.done')}
+                    {/* 0.8.3 — quick access to the TD index post-validation.
+                       Same deep-link pattern as the TD badge on the card
+                       header: expand the card if collapsed + open the
+                       AiDocViewer at `docs/tech-debt/`. Shown only when
+                       there is at least one TD to look at — surfacing a
+                       button to an empty folder would be pointless. */}
+                    {(proj.tech_debt_count ?? 0) > 0 && (
+                      <button
+                        type="button"
+                        className="dash-audit-view-tds-btn"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (!isOpen) onToggleOpen();
+                          setExpandedTab('docAi');
+                          setDocDeepLink('docs/tech-debt');
+                        }}
+                      >
+                        {t('audit.viewTechDebts', proj.tech_debt_count!)}
+                      </button>
+                    )}
                   </div>
                 )}
               </>

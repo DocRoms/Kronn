@@ -69,8 +69,37 @@ impl AuditTracker {
                 current_file: None,
                 started_at: chrono::Utc::now(),
                 kind: kind.into(),
+                step_tokens: None,
+                total_tokens_so_far: None,
+                current_tool: None,
             },
         );
+    }
+
+    /// 0.8.3 — update the live-chip state on every step_progress
+    /// SSE event. The poll endpoint surfaces these fields so the
+    /// frontend can re-seed the chips when SSE buffers / stalls.
+    pub fn update_chips(
+        &mut self,
+        project_id: &str,
+        step_tokens: Option<u64>,
+        total_tokens_so_far: Option<u64>,
+        current_tool: Option<String>,
+    ) {
+        if let Some(entry) = self.progress.get_mut(project_id) {
+            if let Some(s) = step_tokens { entry.step_tokens = Some(s); }
+            if let Some(t) = total_tokens_so_far { entry.total_tokens_so_far = Some(t); }
+            if let Some(tool) = current_tool { entry.current_tool = Some(tool); }
+        }
+    }
+
+    /// 0.8.3 — clear the per-step ephemeral chips when a step ends.
+    /// Keeps `total_tokens_so_far` intact (it's cumulative across steps).
+    pub fn clear_step_chips(&mut self, project_id: &str) {
+        if let Some(entry) = self.progress.get_mut(project_id) {
+            entry.step_tokens = None;
+            entry.current_tool = None;
+        }
     }
 
     /// Update the step counter when a `step_start` SSE event fires. No-op
@@ -430,6 +459,12 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/projects/{id}/full-audit", post(api::audit::full_audit))
         .route("/api/projects/{id}/cancel-audit", post(api::audit::cancel_audit))
         .route("/api/projects/{id}/audit-status", get(api::audit::audit_status))
+        // 0.8.3 (#288) — fleet-wide view of every running audit.
+        .route("/api/audit-status", get(api::audit::audit_status_all))
+        // 0.8.3 (#311) — last resumable audit run for a project. Drives
+        // the "Reprendre Step N/10" button on the ProjectCard when an
+        // earlier run was interrupted (rate-limit, crash, network blip).
+        .route("/api/projects/{id}/audit-resumable", get(api::audit::audit_latest_resumable))
         .route("/api/projects/{id}/remap-path", post(api::projects::remap_path))
         // 0.7.1 — `ai/` → `docs/` convention migration. Idempotent, safe
         // to call on already-migrated or never-bootstrapped projects.
@@ -444,6 +479,9 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
                 .delete(api::user_context::delete))
         .route("/api/projects/{id}/default-skills", put(api::projects::set_default_skills))
         .route("/api/projects/{id}/default-profile", put(api::projects::set_default_profile))
+        // 0.8.3 — companion repos. Body = full Vec<LinkedRepo>;
+        // atomic replace (no partial CRUD per row).
+        .route("/api/projects/{id}/linked-repos", put(api::projects::set_linked_repos))
         .route("/api/projects/{id}/briefing", get(api::audit::get_briefing).put(api::audit::set_briefing))
         .route("/api/projects/{id}/start-briefing", post(api::audit::start_briefing))
         .route("/api/projects/{id}/ai-files", get(api::ai_docs::list_ai_files))
@@ -497,6 +535,21 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/mcps/context/{project_id}/{slug}", get(api::mcps::get_context).put(api::mcps::update_context))
         // ── Workflows ──
         .route("/api/workflows", get(api::workflows::list).post(api::workflows::create))
+        // 0.8.3 — Feasibility-Gated Implementation: one-shot template
+        // creation for big tickets. POST `{project_id, ticket_ref?,
+        // ticket_body?, agent?, name?}` → returns a 5-step workflow.
+        .route("/api/workflows/templates/feasibility-autopilot", post(api::workflows::create_feasibility_autopilot))
+        // 0.8.3 — Bundle creator. Atomic creation of (Quick Prompts
+        // × N) + (Quick APIs × N) + (Custom API plugins × N) +
+        // (1 Workflow) from a single `KRONN:BUNDLE_READY` chat
+        // signal. Single SQLite transaction — rollback on any error.
+        // See `api::bundle` for the wire shape + ref-resolution
+        // protocol (`@bundle:<id>` placeholders).
+        .route("/api/workflows/bundle", post(api::bundle::create_bundle))
+        // 0.8.3 — Feasibility-Gated traceability surface. Read-only
+        // for now; mutation (override / mark resolved) lands once the
+        // frontend Decision-log page does.
+        .route("/api/agent-decisions", get(api::workflows::list_agent_decisions))
         .route("/api/workflows/{id}", get(api::workflows::get).put(api::workflows::update).delete(api::workflows::delete))
         .route("/api/workflows/test-step", post(api::workflows::test_step))
         .route("/api/workflows/test-batch-step", post(api::workflows::test_batch_step))

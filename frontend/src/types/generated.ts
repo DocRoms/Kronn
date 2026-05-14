@@ -197,6 +197,10 @@ export type AiAuditStatus = "NoTemplate" | "TemplateInstalled" | "Bootstrapped" 
 
 export interface LaunchAuditRequest {
   agent: AgentType;
+  kind?: string | null;
+  custom_prompt?: string | null;
+  // 0.8.3 (#311) — resume an interrupted run from step `resume_from + 1`.
+  resume_from?: number | null;
 }
 
 /**
@@ -214,6 +218,11 @@ export interface AuditProgress {
   current_file?: string | null;
   started_at: string;
   kind: string;
+  // 0.8.3 — live chips state surfaced via the poll endpoint so the
+  // frontend can re-seed when SSE buffers / stalls.
+  step_tokens?: number | null;
+  total_tokens_so_far?: number | null;
+  current_tool?: string | null;
 }
 
 export interface BootstrapProjectRequest {
@@ -305,8 +314,24 @@ export interface Project {
   needs_docs_migration?: boolean;
   default_skill_ids?: string[];
   briefing_notes?: string | null;
+  /** 0.8.3 — companion repos the agent on this project should know
+   *  about. Surfaced in every audit / discussion / QP / workflow's
+   *  system prompt prelude so cross-repo context flows naturally. */
+  linked_repos?: LinkedRepo[];
   created_at: string; // ISO 8601
   updated_at: string;
+}
+
+/** A companion repository linked to a project (0.8.3). The
+ *  `location` is either a filesystem path or a URL. `kind` is a UI
+ *  hint for the icon + grouping; recognized values: api / iac /
+ *  design / shared-lib / docs / other. Backend validates that. */
+export interface LinkedRepo {
+  id: string;
+  name: string;
+  kind: string;
+  location: string;
+  description?: string;
 }
 
 export interface TokenOverride {
@@ -569,13 +594,19 @@ export type WorkflowTrigger =
 export type TrackerSourceConfig =
   | { type: "GitHub"; owner: string; repo: string };
 
+/** 0.8.3 — what happens after `TypedSchema` validation still fails
+ *  post-repair. `Continue` keeps the pre-0.8.3 behavior (warn + raw
+ *  output). `Fail` fails the step (and the run, unless guarded). */
+export type OnInvalid = "Continue" | "Fail";
+
 export type StepOutputFormat =
   | { type: "FreeText" }
   | { type: "Structured" }
   /** 0.7.0 — like Structured, but `data` is constrained by a JSON-Schema
    *  subset. The schema is sent to the LLM in the prompt and validated
-   *  post-extract by the runner. */
-  | { type: "TypedSchema"; schema: unknown };
+   *  post-extract by the runner.
+   *  0.8.3 — `on_invalid` controls strict mode for contract steps. */
+  | { type: "TypedSchema"; schema: unknown; on_invalid?: OnInvalid };
 
 export interface WorkflowStep {
   name: string;
@@ -903,6 +934,27 @@ export interface CreateWorkflowRequest {
   exec_allowlist?: string[];
   /** 0.6.0 UX pass — manual launch variables. */
   variables?: PromptVariable[];
+}
+
+// 0.8.3 — Bundle endpoint types (atomic Workflow + QP + QA + CustomAPI).
+// See backend/src/models/bundle.rs for the canonical source.
+
+export interface BundleCreated {
+  bundle_id: string;
+  id: string;
+  name: string;
+}
+
+export interface BundleWorkflowCreated {
+  id: string;
+  name: string;
+}
+
+export interface BundleResponse {
+  quick_prompts: BundleCreated[];
+  quick_apis: BundleCreated[];
+  custom_apis: BundleCreated[];
+  workflow: BundleWorkflowCreated;
 }
 
 export interface UpdateWorkflowRequest {

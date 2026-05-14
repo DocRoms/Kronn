@@ -21,6 +21,150 @@ pub use git::*;
 pub use migrate::*;
 pub use template::*;
 
+/// 0.8.3 — Format the list of OTHER Kronn-registered projects as a
+/// candidate pool for the audit agent to look for companion-repo
+/// evidence in. Scales to users with 200+ repos on disk because we
+/// only consider projects already known to Kronn (typically 5-20),
+/// not the whole filesystem.
+///
+/// Returns `None` when there are no other projects (the current one
+/// is the only project in Kronn — nothing to suggest).
+///
+/// The block uses `## Other Kronn projects on this machine` as
+/// header. Each entry shows name + path so the agent can verify
+/// evidence with file reads. The current project is excluded by id
+/// to keep self-references out of the suggestions.
+pub(crate) fn format_kronn_projects_universe_for_prompt(
+    other_projects: &[Project],
+    current_project_id: &str,
+) -> Option<String> {
+    let candidates: Vec<&Project> = other_projects
+        .iter()
+        .filter(|p| p.id != current_project_id)
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    let mut out = String::from(
+        "## Other Kronn projects on this machine (companion-repo candidate pool)\n\
+         The user has the following other projects registered in Kronn. If you find evidence in the current project — a manifest reference (`composer.json`, `package.json`, `go.mod`, `Cargo.toml`), a `docker-compose.yml` build path, a `.gitmodules` entry, a code import with an absolute path, or a README mention — that links this project to one of these, surface it.\n\
+         \n\
+         **Detection rule**: only suggest links you can BACK with a file:line citation. Do NOT guess from naming similarity alone (e.g. `front_api` vs `front_apollo` are not necessarily linked — verify with the manifests).\n\
+         \n\
+         **Efficient lookup**: each candidate is a Kronn-registered project, so it has a `docs/AGENTS.md` at the path above. When you need to confirm what a candidate does (to decide if it's actually a companion vs just a sibling repo), read its `docs/AGENTS.md` FIRST — that's where the canonical project description lives. Random file scans of unfamiliar repos waste tokens.\n\
+         \n\
+         **If you find any companion**, write a `## Suggested companion repos` section in `docs/AGENTS.md` listing each finding as:\n\
+         \n\
+         ```\n\
+         - **<other-project-name>** — `<location>` — evidence: `<file:line or quote>`\n\
+         ```\n\
+         \n\
+         If you find none, OMIT the section entirely — silence means \"no companions detected\".\n\
+         \n\
+         **Candidate pool** (only these projects are valid suggestions):\n\n"
+    );
+    for p in candidates {
+        out.push_str(&format!("- **{}** — `{}`\n", p.name, p.path));
+    }
+    Some(out)
+}
+
+/// 0.8.3 — Format `Project.linked_repos` for inclusion in agent /
+/// audit prompts. Returns `None` when the project has no linked
+/// repos (so the caller can `if let Some(...)` and skip the
+/// section header entirely). Capped at 20 entries by the API
+/// validator so the block stays bounded.
+///
+/// The block uses `## Linked repositories (companion repos)` as
+/// header so it composes with the existing `## Project briefing
+/// (from the user)` block already injected by the audit pipeline.
+/// Each entry shows kind + name + location + (optional) description
+/// — agents see all four fields and decide when/how to read each
+/// repo.
+pub(crate) fn format_linked_repos_for_prompt(repos: &[LinkedRepo]) -> Option<String> {
+    if repos.is_empty() {
+        return None;
+    }
+    let mut out = String::from(
+        "## Linked repositories (companion repos)\n\
+         This project has companion repos that you may need to read for cross-project context (frontend ↔ API, app ↔ IaC, etc.). When a task references a concept that isn't in the current repo, check the relevant companion before asking the user — the path/URL is given below.\n\
+         \n\
+         **How to read a linked repo** — start with `<repo-path>/docs/AGENTS.md` (Kronn's canonical project-context entry point — every Kronn-bootstrapped repo has one). Only fall back to random file scans / READMEs if AGENTS.md doesn't answer your question. This saves you parse cycles AND ensures you use the same context layer the repo's own agents use.\n\n"
+    );
+    for r in repos {
+        out.push_str(&format!(
+            "- **{name}** ({kind}) → `{location}`",
+            name = r.name,
+            kind = r.kind,
+            location = r.location,
+        ));
+        if !r.description.is_empty() {
+            out.push_str(&format!(" — {}", r.description));
+        }
+        out.push('\n');
+    }
+    Some(out)
+}
+
+/// 0.8.3 — consolidate `linked_repos` + Kronn-projects-universe blocks
+/// into a single ready-to-append context string for any agent surface
+/// (discussion streaming, orchestration handoffs, workflow runner).
+///
+/// Pre-pads each block with `\n\n` so the caller can splice it onto the
+/// end of any prompt without worrying about delimiters. Returns an
+/// empty string when:
+///   - `project_id` is `None` (general discussion, no project binding)
+///   - the project has neither `linked_repos` nor sibling projects in Kronn
+///
+/// One DB round-trip for the project, a second for `list_projects`
+/// (the candidate-pool for companion suggestion). Both queries are
+/// cheap; callers wire this helper into any agent-prompt assembly that
+/// has access to `AppState`.
+pub(crate) async fn compute_companion_context(
+    state: &AppState,
+    project_id: Option<&str>,
+) -> String {
+    let Some(pid) = project_id else {
+        return String::new();
+    };
+    let pid_clone = pid.to_string();
+    let project_opt = state
+        .db
+        .with_conn(move |conn| crate::db::projects::get_project(conn, &pid_clone))
+        .await
+        .ok()
+        .flatten();
+    let Some(project) = project_opt else {
+        return String::new();
+    };
+    let linked_block = format_linked_repos_for_prompt(&project.linked_repos);
+    let pid_for_universe = pid.to_string();
+    let universe_block = match state
+        .db
+        .with_conn(crate::db::projects::list_projects)
+        .await
+    {
+        Ok(all) => format_kronn_projects_universe_for_prompt(&all, &pid_for_universe),
+        Err(e) => {
+            tracing::warn!(
+                "Failed to load Kronn projects for companion-context block: {}",
+                e
+            );
+            None
+        }
+    };
+    let mut extra = String::new();
+    if let Some(b) = linked_block {
+        extra.push_str("\n\n");
+        extra.push_str(&b);
+    }
+    if let Some(b) = universe_block {
+        extra.push_str("\n\n");
+        extra.push_str(&b);
+    }
+    extra
+}
+
 /// Read briefing notes: try `<docs>/briefing.md` from the filesystem
 /// first (path-agnostic — picks docs/ post-pivot or ai/ legacy), fall
 /// back to the DB field.
@@ -112,5 +256,396 @@ pub(super) async fn determine_parent_dir(state: &AppState) -> Result<String, Str
             Some(p) => Ok(p),
             None => Err("No scan path configured and no existing projects.".to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lr(name: &str, kind: &str, location: &str, description: &str) -> LinkedRepo {
+        LinkedRepo {
+            id: format!("lr-{name}"),
+            name: name.into(),
+            kind: kind.into(),
+            location: location.into(),
+            description: description.into(),
+        }
+    }
+
+    #[test]
+    fn format_linked_repos_for_prompt_returns_none_when_empty() {
+        // Empty list = caller skips the section entirely (no header
+        // injected for a no-op).
+        assert!(format_linked_repos_for_prompt(&[]).is_none());
+    }
+
+    #[test]
+    fn format_linked_repos_for_prompt_renders_each_entry_with_kind_and_location() {
+        let block = format_linked_repos_for_prompt(&[
+            lr("backend-api", "api", "/home/priol/Repos/backend-api", "GraphQL schema lives here"),
+            lr("infra", "iac", "https://github.com/org/infra", ""),
+        ]).expect("non-empty list must produce a block");
+        assert!(block.contains("## Linked repositories"));
+        assert!(block.contains("**backend-api** (api)"));
+        assert!(block.contains("/home/priol/Repos/backend-api"));
+        assert!(block.contains("GraphQL schema lives here"));
+        // Entry without description has no trailing "— "
+        assert!(block.contains("**infra** (iac) → `https://github.com/org/infra`\n"));
+        assert!(!block.contains("**infra** (iac) → `https://github.com/org/infra` —"));
+    }
+
+    #[test]
+    fn format_linked_repos_for_prompt_instructs_to_read_agents_md_first() {
+        // Critical hint: when the agent needs to read a linked repo,
+        // it must start with `<repo>/docs/AGENTS.md`. Without this
+        // instruction it does random file scans on unfamiliar
+        // codebases and burns tokens. Lock the hint here.
+        let block = format_linked_repos_for_prompt(&[
+            lr("api", "api", "/path/to/api", "")
+        ]).unwrap();
+        assert!(block.contains("docs/AGENTS.md"),
+            "skill must instruct the agent to start with docs/AGENTS.md when reading linked repos");
+        assert!(block.to_lowercase().contains("canonical")
+             || block.to_lowercase().contains("entry point"),
+            "block should frame docs/AGENTS.md as the canonical entry point");
+    }
+
+    #[test]
+    fn format_linked_repos_for_prompt_explains_when_to_consult() {
+        // The header sentence must teach the agent the trigger:
+        // "cross-project context" / "check the relevant companion
+        // before asking the user". Locks in the why so future edits
+        // of the helper don't accidentally strip the rationale.
+        let block = format_linked_repos_for_prompt(&[
+            lr("api", "api", "/x", "")
+        ]).unwrap();
+        assert!(block.to_lowercase().contains("cross-project"));
+        assert!(block.to_lowercase().contains("before asking the user")
+             || block.to_lowercase().contains("when a task references"));
+    }
+
+    // ─── format_kronn_projects_universe_for_prompt — 0.8.3 ─────────────
+
+    fn mk_project(id: &str, name: &str, path: &str) -> Project {
+        let now = chrono::Utc::now();
+        Project {
+            id: id.into(), name: name.into(), path: path.into(),
+            repo_url: None, token_override: None,
+            ai_config: AiConfigStatus { detected: false, configs: vec![] },
+            audit_status: Default::default(),
+            ai_todo_count: 0, tech_debt_count: 0, needs_docs_migration: false,
+            default_skill_ids: vec![], default_profile_id: None,
+            briefing_notes: None, linked_repos: vec![],
+            created_at: now, updated_at: now,
+        }
+    }
+
+    #[test]
+    fn universe_returns_none_when_only_current_project_exists() {
+        // No other projects = nothing to suggest. Caller skips the
+        // block entirely (no header injected for a no-op).
+        let projects = vec![mk_project("p1", "alone", "/home/u/Repos/alone")];
+        assert!(format_kronn_projects_universe_for_prompt(&projects, "p1").is_none());
+    }
+
+    #[test]
+    fn universe_excludes_current_project_by_id() {
+        // The current project must NOT appear in its own suggestion
+        // pool (would be a self-reference).
+        let projects = vec![
+            mk_project("p1", "current", "/r/current"),
+            mk_project("p2", "front_api", "/r/front_api"),
+        ];
+        let block = format_kronn_projects_universe_for_prompt(&projects, "p1").unwrap();
+        assert!(block.contains("front_api"));
+        assert!(!block.contains("**current**"), "current project must not be suggested as its own companion");
+    }
+
+    #[test]
+    fn universe_instructs_evidence_required() {
+        // The prompt must demand evidence (file:line citation) so
+        // the agent doesn't suggest links from naming similarity
+        // alone. Locks the safety rail in place.
+        let projects = vec![
+            mk_project("p1", "current", "/r/current"),
+            mk_project("p2", "front_api", "/r/front_api"),
+        ];
+        let block = format_kronn_projects_universe_for_prompt(&projects, "p1").unwrap();
+        assert!(block.to_lowercase().contains("evidence"),
+            "block must require evidence before suggesting a link");
+        assert!(block.contains("file:line") || block.contains("citation"),
+            "block must demand a citation");
+        assert!(block.to_lowercase().contains("guess") || block.to_lowercase().contains("naming similarity"),
+            "block must warn against naming-similarity guesses");
+    }
+
+    #[test]
+    fn universe_instructs_to_read_agents_md_first_on_candidates() {
+        // Same rule as for actual linked_repos: when probing a
+        // candidate, start with its docs/AGENTS.md instead of
+        // random file scans.
+        let projects = vec![
+            mk_project("p1", "current", "/r/current"),
+            mk_project("p2", "front_api", "/r/front_api"),
+        ];
+        let block = format_kronn_projects_universe_for_prompt(&projects, "p1").unwrap();
+        assert!(block.contains("docs/AGENTS.md"),
+            "universe block must instruct the agent to read candidates' AGENTS.md FIRST");
+    }
+
+    #[test]
+    fn universe_instructs_to_write_findings_to_agents_md() {
+        // The output side: agent should write findings to a
+        // specific section in docs/AGENTS.md so the user can read
+        // + manually add them via the UI.
+        let projects = vec![
+            mk_project("p1", "current", "/r/current"),
+            mk_project("p2", "front_api", "/r/front_api"),
+        ];
+        let block = format_kronn_projects_universe_for_prompt(&projects, "p1").unwrap();
+        assert!(block.contains("## Suggested companion repos"),
+            "universe block must specify the section name the agent should write to");
+        assert!(block.contains("OMIT the section entirely") || block.contains("omit the section entirely")
+             || block.to_lowercase().contains("silence means"),
+            "block must instruct: no findings = no section (avoid noise)");
+    }
+
+    #[test]
+    fn universe_lists_each_candidate_with_name_and_path() {
+        let projects = vec![
+            mk_project("p1", "current", "/r/current"),
+            mk_project("p2", "front_api", "/r/front_api"),
+            mk_project("p3", "infra", "/r/infra"),
+        ];
+        let block = format_kronn_projects_universe_for_prompt(&projects, "p1").unwrap();
+        assert!(block.contains("**front_api** — `/r/front_api`"));
+        assert!(block.contains("**infra** — `/r/infra`"));
+    }
+
+    // ─── compute_companion_context — 0.8.3 (TD-265) ──────────────────────
+    //
+    // Integration-style tests for the async helper that consolidates the
+    // two blocks into a single ready-to-append context string for any
+    // agent surface (workflow runner, discussions, orchestration).
+
+    use crate::db::Database;
+    use crate::AppState;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    fn test_state() -> AppState {
+        let db = Arc::new(Database::open_in_memory().expect("in-memory DB"));
+        let config = Arc::new(RwLock::new(crate::core::config::default_config()));
+        AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS)
+    }
+
+    #[tokio::test]
+    async fn compute_companion_context_returns_empty_for_no_project() {
+        // General discussions (no project) get an empty context — the
+        // caller must short-circuit and skip the section header
+        // entirely so the prompt prelude stays clean.
+        let state = test_state();
+        let ctx = compute_companion_context(&state, None).await;
+        assert!(ctx.is_empty(), "no project → empty string, got: {ctx:?}");
+    }
+
+    #[tokio::test]
+    async fn compute_companion_context_returns_empty_for_unknown_project() {
+        // A project_id that doesn't resolve also yields empty —
+        // defensive guard against stale references (run row pointing
+        // at a deleted project, etc.). Symmetric with the
+        // None case so callers don't have to branch.
+        let state = test_state();
+        let ctx = compute_companion_context(&state, Some("nonexistent")).await;
+        assert!(ctx.is_empty(), "unknown project → empty string, got: {ctx:?}");
+    }
+
+    #[tokio::test]
+    async fn compute_companion_context_emits_linked_repos_block_when_present() {
+        // Project with at least one linked repo → block is included.
+        // Confirms the helper actually calls
+        // `format_linked_repos_for_prompt` and concatenates with the
+        // `\n\n` pre-padding so the caller can splice without delimiters.
+        let state = test_state();
+        let pid = "p_test".to_string();
+        let project = Project {
+            id: pid.clone(),
+            name: "test-current".into(),
+            path: "/r/test-current".into(),
+            linked_repos: vec![lr(
+                "test-api",
+                "api",
+                "/r/test-api",
+                "GraphQL schema lives here",
+            )],
+            ..mk_project(&pid, "test-current", "/r/test-current")
+        };
+        state.db.with_conn(move |conn| {
+            crate::db::projects::insert_project(conn, &project)?;
+            Ok::<_, anyhow::Error>(())
+        }).await.expect("insert project");
+
+        let ctx = compute_companion_context(&state, Some(&pid)).await;
+        assert!(ctx.contains("## Linked repositories"),
+            "linked_repos block must be present, got: {ctx:?}");
+        assert!(ctx.contains("**test-api** (api)"),
+            "linked repo entry must be rendered");
+        // Pre-padding so the caller can splice without worrying about
+        // delimiters — the very first char of the context should be
+        // newline.
+        assert!(ctx.starts_with("\n\n"),
+            "context must be pre-padded with \\n\\n");
+    }
+
+    // ── Source-level wiring guards — 0.8.3 (TD-267 + TD-268) ──────────────
+    //
+    // The companion_context helper above is well-tested in isolation,
+    // but the FULL benefit only materializes when each agent surface
+    // actually CALLS it. A future refactor (e.g. removing an unused
+    // import, "tidying" prompt assembly) could silently drop the call
+    // and we wouldn't notice until a user complains that the agent
+    // forgot a linked repo.
+    //
+    // These tests read the source files at compile time and assert
+    // the wiring is in place. Brittle by design — any move/rename
+    // surfaces here loudly. The single line each test scans for is
+    // the contract; if you legitimately move the call site, update
+    // the regex too.
+
+    fn read_source(rel: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    }
+
+    #[test]
+    fn discussions_streaming_calls_compute_companion_context() {
+        // TD-265 + TD-267: the user-facing chat path must inject
+        // linked_repos into context_files_prompt before passing it to
+        // start_agent_with_config. Without this wiring, a user
+        // chatting in a project discussion can't see the companion
+        // repos they registered on the project.
+        let src = read_source("src/api/discussions/streaming.rs");
+        assert!(
+            src.contains("compute_companion_context"),
+            "discussions/streaming.rs must call compute_companion_context — \
+             user chat with an agent regresses to no linked_repos visibility"
+        );
+        assert!(
+            src.contains("companion_context"),
+            "the result must be named `companion_context` (consumed by context_files_prompt below)"
+        );
+    }
+
+    #[test]
+    fn orchestration_calls_compute_companion_context_once_at_setup() {
+        // TD-265 + TD-268: the multi-agent debate orchestration
+        // computes the block ONCE at setup and reuses it across all
+        // agent rounds + the synthesis pass. Computing it per-round
+        // would N-double the DB cost; not computing it at all would
+        // regress the multi-agent path to no linked_repos visibility.
+        let src = read_source("src/api/discussions/orchestration.rs");
+        let occurrences = src.matches("compute_companion_context").count();
+        assert!(
+            occurrences >= 1,
+            "orchestration.rs must call compute_companion_context at least once \
+             (currently {} call(s)) — multi-agent debate regresses to no linked_repos",
+            occurrences
+        );
+        // Pre-computed binding is named `companion_context` and is
+        // referenced in the user-facing agent calls (debate + synthesis)
+        // via `&companion_context` as `context_files_prompt`. The 3
+        // internal summarization calls intentionally pass `""` because
+        // companion repos are noise in a "compress conversation" prompt.
+        let debate_and_synth_refs = src.matches("context_files_prompt: &companion_context").count();
+        assert!(
+            debate_and_synth_refs >= 2,
+            "expected at least 2 user-facing agent calls to pass &companion_context as context_files_prompt \
+             (debate round + final synthesis), found {}",
+            debate_and_synth_refs
+        );
+    }
+
+    #[test]
+    fn orchestration_summarization_passes_empty_context_files_prompt() {
+        // The 3 internal summarization sites (line 286 main-disc
+        // summary, line 689 generate_summary_on_demand, line 864
+        // generate_summary_on_demand inner) compress conversation
+        // history into a brief — they don't reason about the project.
+        // Injecting linked_repos there would waste tokens on every
+        // summary pass without producing better summaries.
+        //
+        // This guard fires if someone "fixes" them by symmetrically
+        // adding `&companion_context` and we end up paying 3x the
+        // companion_context tokens per turn.
+        let src = read_source("src/api/discussions/orchestration.rs");
+        // We need at least 3 explicit `context_files_prompt: ""` to
+        // remain. There may be 4 (one per summarization call) — that's
+        // also fine. What we DON'T want is for that count to drop.
+        let empty_calls = src.matches("context_files_prompt: \"\"").count();
+        assert!(
+            empty_calls >= 3,
+            "expected ≥3 summarization sites to keep `context_files_prompt: \"\"` (token-saver), \
+             found {}. If you intentionally added companion_context to a summary pass, \
+             confirm it actually improves the summary before relaxing this guard.",
+            empty_calls
+        );
+    }
+
+    #[test]
+    fn workflow_runner_calls_compute_companion_context() {
+        // TD-258: workflow runner is the original surface for the
+        // cross-repo evidence wiring. Same guard as the discussion
+        // surfaces above — the run-once-at-start pattern is what
+        // keeps the cost bounded.
+        let src = read_source("src/workflows/runner.rs");
+        assert!(
+            src.contains("compute_companion_context"),
+            "workflow runner must call compute_companion_context once per run"
+        );
+        assert!(
+            src.contains("agent_extra_context"),
+            "the result must be named `agent_extra_context` — passed to execute_step's extra_context param"
+        );
+    }
+
+    #[test]
+    fn workflow_test_step_endpoint_calls_compute_companion_context() {
+        // TD-265: the test-step preview SSE endpoint (api/workflows.rs)
+        // is the user-facing "try a single step before saving" path.
+        // Without this wiring, the preview would diverge from the
+        // production run prompt, defeating the "what you see is what
+        // you'll get" guarantee.
+        let src = read_source("src/api/workflows.rs");
+        assert!(
+            src.contains("compute_companion_context"),
+            "test-step endpoint must call compute_companion_context for preview/prod parity"
+        );
+    }
+
+    #[tokio::test]
+    async fn compute_companion_context_emits_universe_block_when_other_projects_exist() {
+        // Two projects in DB → the universe block (candidate pool) is
+        // emitted for the current project, listing the other one.
+        let state = test_state();
+        let current = mk_project("p_current", "current", "/r/current");
+        let sibling = mk_project("p_sibling", "sibling-repo", "/r/sibling-repo");
+        let cur_clone = current.clone();
+        let sib_clone = sibling.clone();
+        state.db.with_conn(move |conn| {
+            crate::db::projects::insert_project(conn, &cur_clone)?;
+            crate::db::projects::insert_project(conn, &sib_clone)?;
+            Ok::<_, anyhow::Error>(())
+        }).await.expect("insert projects");
+
+        let ctx = compute_companion_context(&state, Some("p_current")).await;
+        assert!(ctx.contains("## Other Kronn projects"),
+            "universe block must be present, got: {ctx:?}");
+        assert!(ctx.contains("**sibling-repo** — `/r/sibling-repo`"),
+            "sibling project must be listed in candidate pool");
+        // Current project must NOT self-reference in its own pool.
+        assert!(!ctx.contains("**current** — `/r/current`"),
+            "current project must be excluded from its own candidate pool");
     }
 }

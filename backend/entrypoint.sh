@@ -171,4 +171,26 @@ if [ "${KRONN_HOST_OS:-}" = "macOS" ]; then
   fi
 fi
 
+# 0.8.3 (#313) — npm `_npx` cache is corrupted by parallel `npx -y …` calls
+# that race on `node_modules/<pkg>` rename. Concrete symptom observed
+# during the DOCROMS_WEB audit Step 8 (MCP introspection runs 4 npx
+# servers — context7, sequential-thinking, memory, sometimes more — in
+# the same window): `npm ERR! ENOTEMPTY: rename .../ajv → .ajv-<hash>`
+# leaves the install half-baked, and EVERY subsequent invocation of
+# any of these MCPs fails to start. The agent then describes the MCP
+# as "tools not exposed" and inserts a `TODO: ask user` marker — even
+# though the server is configured correctly.
+#
+# Fix: nuke the per-user `_npx` cache on container start. npx will
+# re-download the package next time it's launched, which is at most
+# a 5-10 s cold-start per package (already documented + tolerated by
+# the audit prompt). A clean state on every container start trades
+# one cold-start for permanent correctness.
+#
+# We do this AFTER all the symlink/mount bridging above so a stale
+# cache from a previous container life doesn't poison the run.
+if [ -d "${HOME}/.npm/_npx" ]; then
+  rm -rf "${HOME}/.npm/_npx" 2>/dev/null || true
+fi
+
 exec "$@"

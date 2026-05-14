@@ -46,6 +46,16 @@ pub async fn run_audit(
     let project_path_str = project.path.clone();
     let project_path = scanner::resolve_host_path(&project.path);
     let briefing_notes = crate::api::projects::resolve_briefing_notes(&project_path, &project.briefing_notes);
+    let linked_repos_block = crate::api::projects::format_linked_repos_for_prompt(&project.linked_repos);
+    let pid_for_universe = project.id.clone();
+    let kronn_projects_universe_block = match state
+        .db
+        .with_conn(crate::db::projects::list_projects)
+        .await
+    {
+        Ok(all) => crate::api::projects::format_kronn_projects_universe_for_prompt(&all, &pid_for_universe),
+        Err(_) => None,
+    };
 
     // Remove bootstrap prompt before running audit
     let index_file = project_path.join("docs/AGENTS.md");
@@ -81,6 +91,7 @@ pub async fn run_audit(
             // polling client catches the same "step 3/10 — repo-map.md".
             if let Ok(mut t) = audit_tracker.lock() {
                 t.advance_step(&project_id_for_progress, step as u32, Some(file_label.to_string()));
+                t.clear_step_chips(&project_id_for_progress);
             }
 
             let step_start = serde_json::json!({
@@ -101,6 +112,12 @@ pub async fn run_audit(
             // Inject user briefing notes if available
             if let Some(ref notes) = briefing_notes {
                 full_prompt.push_str(&format!("\n\n## Project briefing (from the user)\n{}\n", notes));
+            }
+            if let Some(ref block) = linked_repos_block {
+                full_prompt.push_str(&format!("\n\n{}\n", block));
+            }
+            if let Some(ref block) = kronn_projects_universe_block {
+                full_prompt.push_str(&format!("\n\n{}\n", block));
             }
 
             // No profiles for audit — solo agent mode produces clean factual documentation.
@@ -203,4 +220,39 @@ pub async fn audit_status(
         Err(_) => return Json(ApiResponse::err("audit tracker lock poisoned")),
     };
     Json(ApiResponse::ok(snapshot))
+}
+
+/// 0.8.3 (#288) — list ALL audits currently in progress across every
+/// project. Powers the `ActiveAuditsPopover` on the Projets nav button,
+/// same UX as `ActiveRunsPopover` for workflows: one badge with the
+/// running count, click intercepts navigation to surface the list +
+/// per-audit Stop button. Returns an empty Vec when no audit is
+/// running (the popover then hides itself; the nav button keeps the
+/// normal click-to-navigate behavior).
+pub async fn audit_status_all(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<Vec<AuditProgress>>> {
+    let snapshot = match state.audit_tracker.lock() {
+        Ok(t) => t.progress.values().cloned().collect::<Vec<_>>(),
+        Err(_) => return Json(ApiResponse::err("audit tracker lock poisoned")),
+    };
+    Json(ApiResponse::ok(snapshot))
+}
+
+/// 0.8.3 (#311) — fetch the most-recent resumable audit run for a project,
+/// or `None`. Resumable = `status = 'Interrupted'` AND
+/// `last_completed_step` ∈ 1..=9. The frontend uses this to decide
+/// whether the "Lancer l'audit" button should become "Reprendre Step N/10"
+/// + populate `resume_from` in the next launch request.
+pub async fn audit_latest_resumable(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<Option<crate::models::AuditRun>>> {
+    let result = state.db.with_conn(move |conn| {
+        crate::db::audit_runs::latest_resumable(conn, &id)
+    }).await;
+    match result {
+        Ok(row) => Json(ApiResponse::ok(row)),
+        Err(e) => Json(ApiResponse::err(format!("db: {e}"))),
+    }
 }

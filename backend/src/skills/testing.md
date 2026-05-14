@@ -9,7 +9,7 @@ builtin: true
 
 ## Procedures
 
-1. **Write tests WITH the code, never after** — red-green-refactor. Failing test first, make it pass, then clean up. For the strict TDD ritual (the "iron law" of "no production code without a failing test first"), pair this skill with `test-driven-development` (vendored from obra/superpowers, MIT) — that skill enforces the rigorous red→verify-red→green→verify-green→refactor cycle and lists common rationalizations to reject.
+1. **Write tests WITH the code, never after** — red-green-refactor. Failing test first, make it pass, then clean up.
 2. **Respect the pyramid** — many unit tests (fast), fewer integration tests (real DB/HTTP), minimal e2e (critical flows only).
 3. **Mock at boundaries only** — I/O, network, clock, filesystem. Never mock internal collaborators; it couples tests to implementation.
 4. **Name tests as behavior** — `should_reject_expired_token` not `test_validate`. Tests are documentation.
@@ -34,3 +34,7 @@ builtin: true
 
 ✓ New `calculate_discount()` ships with tests covering edge cases.
 ✗ New `calculate_discount()` ships, tests planned "for later."
+
+## Related
+
+For the strict TDD ritual (the "iron law" of "no production code without a failing test first"), pair this skill with `test-driven-development` (vendored from obra/superpowers, MIT) — it enforces the rigorous red→verify-red→green→verify-green→refactor cycle and lists common rationalizations to reject.

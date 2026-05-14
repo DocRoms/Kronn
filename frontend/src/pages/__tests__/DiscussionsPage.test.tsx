@@ -45,6 +45,10 @@ vi.mock('../../lib/api', () => ({
     scan: vi.fn(),
     create: vi.fn(),
     delete: vi.fn(),
+    // 0.8.3 (#280) — DiscussionsPage polls this every 8 s to decide
+    // whether to show the audit-running banner. Default = null (no
+    // audit). Tests that need the running state override per-test.
+    auditStatus: vi.fn().mockResolvedValue(null),
   },
   skills: {
     list: vi.fn().mockResolvedValue([]),
@@ -93,9 +97,9 @@ vi.mock('../../hooks/useWebSocket', () => ({
   useWebSocket: vi.fn(() => ({ connected: false })),
 }));
 
-import { discussions as discussionsApi } from '../../lib/api';
+import { discussions as discussionsApi, projects as projectsApi } from '../../lib/api';
 import { DiscussionsPage } from '../DiscussionsPage';
-import type { AgentDetection, AiAuditStatus, Discussion } from '../../types/generated';
+import type { AgentDetection, AiAuditStatus, Discussion, Project } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
 
 const noop = () => {};
@@ -1464,5 +1468,256 @@ describe('DiscussionsPage', () => {
     // Should have a delete button
     const deleteBtn = document.querySelector('button[title="Supprimer"]');
     expect(deleteBtn).toBeTruthy();
+  });
+
+  // ─── Unaudited project warning banner (0.8.3 #276) ───────────────────
+  //
+  // Killer UX win: a new Kronn user starting a discussion on a project
+  // they just registered has NO idea there's an AI audit step. They
+  // burn tokens re-explaining the project on every turn. This banner
+  // surfaces the missing audit upfront, with an adaptive CTA based on
+  // briefing presence (no briefing → push to briefing first; briefing
+  // done → push to launch audit).
+  //
+  // Tested invariants:
+  //   1. Shows on unaudited states (NoTemplate / TemplateInstalled / Bootstrapped)
+  //   2. Hidden once audit_status === 'Audited' or 'Validated'
+  //   3. Hidden on system-managed discs (briefing/bootstrap/validation)
+  //      — they have their own dedicated CTAs
+  //   4. CTA adapts: empty briefing_notes → briefing CTA; present → launch CTA
+  //   5. CTA navigates to the project page with the correct project_id
+
+  const makeProject = (id: string, audit_status: AiAuditStatus, briefing?: string): Project => ({
+    id, name: `Project ${id}`, path: `/r/${id}`,
+    repo_url: null, token_override: null,
+    ai_config: { detected: false, configs: [] },
+    audit_status,
+    ai_todo_count: 0, tech_debt_count: 0, needs_docs_migration: false,
+    default_skill_ids: [],
+    briefing_notes: briefing ?? null,
+    linked_repos: [],
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  });
+
+  const makeProjectDisc = (id: string, projectId: string, title = 'My question'): Discussion => ({
+    id, project_id: projectId, title,
+    agent: 'ClaudeCode', language: 'fr',
+    participants: ['ClaudeCode'],
+    messages: [
+      { id: 'm1', role: 'User', content: 'Tell me about my project', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+    ],
+    message_count: 1,
+    archived: false, pinned: false,
+    workspace_mode: 'Direct',
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  });
+
+  const renderWithDisc = async (proj: Project, disc: Discussion, onNavigateSpy = vi.fn()) => {
+    vi.mocked(discussionsApi.get).mockResolvedValue(disc);
+    await wrap(
+      <DiscussionsPage
+        projects={[proj]}
+        agents={[]}
+        allDiscussions={[disc]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={onNavigateSpy}
+        toast={toastFn}
+        initialActiveDiscussionId={disc.id}
+        {...liftedProps()}
+      />
+    );
+    await act(async () => { await new Promise(r => setTimeout(r, 30)); });
+    return onNavigateSpy;
+  };
+
+  it('unaudited banner: shows on NoTemplate with briefing CTA when briefing_notes empty', async () => {
+    const proj = makeProject('p1', 'NoTemplate');
+    const disc = makeProjectDisc('d-unaud-1', 'p1');
+    await renderWithDisc(proj, disc);
+    const body = document.body.textContent ?? '';
+    // FR copy ships in i18n; check the marker phrase from the warning.
+    expect(body).toMatch(/n['']a pas encore d['']audit IA validé/i);
+    // CTA pushes toward briefing because briefing_notes is empty.
+    expect(body).toMatch(/Faire le briefing/i);
+    // The launch-audit CTA must NOT show in the no-briefing variant
+    // — we want the user to do the briefing first.
+    expect(body).not.toMatch(/Lancer l['']audit IA/i);
+  });
+
+  it('unaudited banner: shows on TemplateInstalled with launch CTA when briefing_notes present', async () => {
+    const proj = makeProject('p2', 'TemplateInstalled', 'We use Symfony, RTL/i18n required.');
+    const disc = makeProjectDisc('d-unaud-2', 'p2');
+    await renderWithDisc(proj, disc);
+    const body = document.body.textContent ?? '';
+    // Adapted warning copy (briefing-done variant).
+    expect(body).toMatch(/Briefing effectué, mais l['']audit IA n['']a pas/i);
+    // CTA pushes toward audit launch.
+    expect(body).toMatch(/Lancer l['']audit IA/i);
+  });
+
+  it('unaudited banner: shows on Bootstrapped state too', async () => {
+    // Bootstrapped means the AI did Phase 1 (template + briefing-style
+    // intro) but didn't run the 10-step audit — the user still needs
+    // to launch it to load real project context.
+    const proj = makeProject('p3', 'Bootstrapped', 'context');
+    const disc = makeProjectDisc('d-unaud-3', 'p3');
+    await renderWithDisc(proj, disc);
+    const body = document.body.textContent ?? '';
+    expect(body).toMatch(/Lancer l['']audit IA/i);
+  });
+
+  it('unaudited banner: hidden once audit_status === Audited', async () => {
+    const proj = makeProject('p4', 'Audited', 'context');
+    const disc = makeProjectDisc('d-unaud-4', 'p4');
+    await renderWithDisc(proj, disc);
+    const body = document.body.textContent ?? '';
+    // Both variants of the warning must be absent.
+    expect(body).not.toMatch(/n['']a pas encore d['']audit IA validé/i);
+    expect(body).not.toMatch(/Briefing effectué, mais l['']audit IA/i);
+  });
+
+  it('unaudited banner: hidden once audit_status === Validated', async () => {
+    const proj = makeProject('p5', 'Validated', 'context');
+    const disc = makeProjectDisc('d-unaud-5', 'p5');
+    await renderWithDisc(proj, disc);
+    const body = document.body.textContent ?? '';
+    expect(body).not.toMatch(/n['']a pas encore d['']audit IA validé/i);
+    expect(body).not.toMatch(/Briefing effectué, mais l['']audit IA/i);
+  });
+
+  it('unaudited banner: hidden on system briefing/bootstrap/validation discs', async () => {
+    // These have their own dedicated banners further down; stacking
+    // the warning on top would be redundant + the user is already
+    // in the right flow.
+    const proj = makeProject('p6', 'NoTemplate');
+    const briefingDisc = makeProjectDisc('d-brief', 'p6', 'Briefing projet');
+    await renderWithDisc(proj, briefingDisc);
+    const body = document.body.textContent ?? '';
+    expect(body).not.toMatch(/n['']a pas encore d['']audit IA validé/i);
+  });
+
+  it('unaudited banner: hidden for discussions without a project_id', async () => {
+    // Project-less general discussions can't be audited — there's
+    // no project to audit. Showing the banner would be misleading.
+    const proj = makeProject('p7', 'NoTemplate');
+    const noProjDisc: Discussion = { ...makeProjectDisc('d-noproj', 'p7'), project_id: null };
+    await renderWithDisc(proj, noProjDisc);
+    const body = document.body.textContent ?? '';
+    expect(body).not.toMatch(/n['']a pas encore d['']audit IA validé/i);
+  });
+
+  it('unaudited banner: CTA fires onNavigate with the project_id', async () => {
+    const proj = makeProject('p8', 'NoTemplate');
+    const disc = makeProjectDisc('d-cta', 'p8');
+    const onNav = vi.fn();
+    await renderWithDisc(proj, disc, onNav);
+    // Click the primary CTA (briefing variant since no briefing_notes).
+    const btn = Array.from(document.body.querySelectorAll('button'))
+      .find(b => b.textContent?.includes('Faire le briefing'));
+    expect(btn).toBeTruthy();
+    fireEvent.click(btn!);
+    expect(onNav).toHaveBeenCalledWith('projects', { projectId: 'p8' });
+  });
+
+  // ─── Audit-running MCP filter banner (0.8.3 #280) ────────────────────
+  //
+  // When an audit is in progress on the same project as the active
+  // discussion, the backend has installed an MCP allowlist swap. The
+  // user's discussion sees the filtered subset — the banner explains
+  // why and that normal MCPs return automatically. Polled every 8 s
+  // via projectsApi.auditStatus.
+  //
+  // Coverage:
+  //   1. Banner visible when auditStatus returns a non-null progress
+  //   2. Banner hidden when auditStatus returns null
+  //   3. Banner hidden for system discs (briefing/bootstrap/validation)
+  //   4. Banner hidden for discussions without a project_id
+  //   5. Banner re-evaluates when auditStatus flips during the disc
+  //   6. Pessimistic on network error (no banner shown — defensive)
+
+  // Audit-running banner uses an `Audited` project (banner is
+  // independent of unaudited state — even fully-audited projects can
+  // have a re-audit running). The unaudited banner uses NoTemplate /
+  // TemplateInstalled / Bootstrapped, so picking Audited here keeps
+  // it out of the way of the MCP-filter banner.
+  const audited = (id: string) => makeProject(id, 'Audited', 'context');
+
+  it('audit-running banner: visible when auditStatus returns a running run', async () => {
+    vi.mocked(projectsApi.auditStatus).mockResolvedValue({
+      project_id: 'pA',
+      phase: 'auditing',
+      step_index: 3,
+      total_steps: 10,
+      current_file: 'docs/AGENTS.md',
+      started_at: '2026-05-14T17:44:14Z',
+      kind: 'full_audit',
+    });
+    const proj = audited('pA');
+    const disc = makeProjectDisc('d-running', 'pA');
+    await renderWithDisc(proj, disc);
+    // Mount triggers the poll's first call → the banner must mount
+    // once the promise resolves. Tick a small wait to let React
+    // flush the state update.
+    await act(async () => { await new Promise(r => setTimeout(r, 50)); });
+    const body = document.body.textContent ?? '';
+    expect(body).toMatch(/Audit IA en cours sur ce projet/i);
+    expect(body).toMatch(/MCPs/i);
+  });
+
+  it('audit-running banner: hidden when auditStatus returns null (no audit)', async () => {
+    vi.mocked(projectsApi.auditStatus).mockResolvedValue(null);
+    const proj = audited('pB');
+    const disc = makeProjectDisc('d-none', 'pB');
+    await renderWithDisc(proj, disc);
+    await act(async () => { await new Promise(r => setTimeout(r, 50)); });
+    const body = document.body.textContent ?? '';
+    expect(body).not.toMatch(/Audit IA en cours sur ce projet/i);
+  });
+
+  it('audit-running banner: hidden on system discs (briefing/validation/bootstrap)', async () => {
+    // System discs have their own dedicated CTAs. Stacking the
+    // MCP-filter warning on top would dilute the primary signal.
+    vi.mocked(projectsApi.auditStatus).mockResolvedValue({
+      project_id: 'pC', phase: 'auditing', step_index: 1, total_steps: 10,
+      current_file: null, started_at: '2026-05-14T17:44:14Z', kind: 'full_audit',
+    });
+    const proj = audited('pC');
+    const briefingDisc = makeProjectDisc('d-brief', 'pC', 'Briefing projet');
+    await renderWithDisc(proj, briefingDisc);
+    await act(async () => { await new Promise(r => setTimeout(r, 50)); });
+    const body = document.body.textContent ?? '';
+    expect(body).not.toMatch(/Audit IA en cours sur ce projet/i);
+  });
+
+  it('audit-running banner: hidden when discussion has no project_id', async () => {
+    // No project → no audit possible → no banner. Defensive against
+    // a future regression that polls indiscriminately.
+    vi.mocked(projectsApi.auditStatus).mockResolvedValue({
+      project_id: 'unused', phase: 'auditing', step_index: 1, total_steps: 10,
+      current_file: null, started_at: '2026-05-14T17:44:14Z', kind: 'full_audit',
+    });
+    const proj = audited('pD');
+    const noProjDisc: Discussion = { ...makeProjectDisc('d-noproj', 'pD'), project_id: null };
+    await renderWithDisc(proj, noProjDisc);
+    await act(async () => { await new Promise(r => setTimeout(r, 50)); });
+    const body = document.body.textContent ?? '';
+    expect(body).not.toMatch(/Audit IA en cours sur ce projet/i);
+  });
+
+  it('audit-running banner: pessimistic on network error — no banner', async () => {
+    // The auditStatus poll can fail transiently. We must default to
+    // "no banner" rather than the worst-case "show banner forever".
+    vi.mocked(projectsApi.auditStatus).mockRejectedValue(new Error('network down'));
+    const proj = audited('pE');
+    const disc = makeProjectDisc('d-err', 'pE');
+    await renderWithDisc(proj, disc);
+    await act(async () => { await new Promise(r => setTimeout(r, 50)); });
+    const body = document.body.textContent ?? '';
+    expect(body).not.toMatch(/Audit IA en cours sur ce projet/i);
   });
 });

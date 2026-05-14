@@ -20,6 +20,7 @@ pub mod info;
 pub mod reconciliation;
 pub mod run;
 pub mod validate;
+pub mod validation;
 
 pub use briefing::*;
 pub use drift::*;
@@ -38,14 +39,34 @@ pub(super) type SseStream = Pin<Box<dyn Stream<Item = Result<Event, Infallible>>
 
 pub(crate) const PROMPT_PREAMBLE: &str = "\
 Rules: Write in English. Be factual and concise — this is AI context for coding agents, NOT human documentation.\n\
-- Do NOT invent information — mark unknowns with `<!-- TODO: verify -->`.\n\
+- Do NOT invent information — see § MARKER DISCIPLINE below.\n\
 - Replace ALL `{{PLACEHOLDERS}}` and `<!-- ... -->` comment placeholders with real content. {{PLACEHOLDERS}} are literal text markers — replace by editing file content directly.\n\
 - Keep the existing file structure and section headings — fill in the blanks, do NOT rewrite the file from scratch.\n\
 - If a section does not apply to this project, replace placeholders with 'N/A — not used in this project.' Do not delete the section.\n\
 - Write plain facts, not opinions or recommendations. No debate, no trade-offs analysis.\n\
 - Each section should be self-contained: another AI agent reading just that section should get the full picture.\n\
 - Add or remove table rows as needed to match the project. Write fewer entries rather than inventing content to fill slots.\n\
-This is an autonomous (non-interactive) pass. Do NOT ask questions — mark unknowns with `<!-- TODO: verify -->` and move on.";
+\n\
+## MARKER DISCIPLINE (critical — avoid marker overuse)\n\
+\n\
+Three marker types exist. Each has a STRICT semantic — using the wrong one creates noise the user has to triage later.\n\
+\n\
+1. **`<!-- TODO: verify -->`** — RESERVED for facts you literally could not check.\n\
+   Examples: file lives outside the repo (linked_repos), tool requires credentials not provided, sandbox blocks the read.\n\
+   **DO NOT use** when you DID verify (via Glob/Read/ls) — write the conclusion directly:\n\
+   - WRONG: `phpstan.neon.dist <!-- TODO: verify — file not present at project root -->`\n\
+   - RIGHT: `phpstan.neon.dist (not present at project root)`\n\
+   If you Globed for a config and found nothing, that IS the verified answer — don't add a TODO marker.\n\
+\n\
+2. **`<!-- TODO: ask user -->`** — for facts that require a HUMAN DECISION, not a verification you could do yourself.\n\
+   Examples: \"is this rule aspirational or enforced?\", \"which domain is canonical?\", \"is this port intentional or vestigial?\".\n\
+   The Phase 2 validation discussion will ask the user these specific questions.\n\
+\n\
+3. **`<!-- TODO: unknown -->`** — placeholder when a previous validation pass left a question unanswered. Rare. Don't introduce new ones; only preserve existing.\n\
+\n\
+**Default behaviour**: if you can verify, verify and write the result. Markers are escape hatches, not opt-out tokens. A doc with 25 `TODO: verify` markers from a non-interactive audit usually means the agent gave up on verification — try harder.\n\
+\n\
+This is an autonomous (non-interactive) pass. Do NOT ask questions inline — use the marker discipline above and move on.";
 
 pub(crate) struct AnalysisStep {
     pub(crate) target_file: &'static str,
@@ -146,8 +167,26 @@ Fill docs/architecture/overview.md — replace ALL {{PLACEHOLDERS}}:\n\
 - Key patterns: replace {{PATTERN_*_NAME}} and {{PATTERN_*_DESCRIPTION}} with 3-5 architectural patterns \
   (API pattern, state management, auth, data flow, caching, etc.) — 2-3 sentences each\n\
 - {{SEPARATION_DESCRIPTION}}: how the codebase is organized (by feature, by layer, etc.)\n\
-- Data flow: replace {{DATA_FLOW_DIAGRAM}} with ASCII flow diagram and {{DATA_FLOW_DESCRIPTION}}\n\
-- Legacy table: replace {{AREA}}, {{CURRENT}}, {{TARGET}} for any legacy patterns or planned migrations",
+- {{DATA_FLOW_DESCRIPTION}}: 2-3 sentences on how data moves through the system\n\
+- Legacy table: replace {{AREA}}, {{CURRENT}}, {{TARGET}} for any legacy patterns or planned migrations\n\n\
+**Mermaid diagrams** — mandatory, REPLACES the old ASCII placeholder:\n\
+1. **Architecture overview** — replace `{{ARCHITECTURE_MERMAID}}` with a `flowchart TD` (or `LR` for wide projects) inside a ```mermaid fence. \
+Show every service from the table above, the main data flow direction (HTTP, DB, message bus, etc.), and external systems (APIs, third-party providers). \
+Use `subgraph` blocks to group related components. If the project warrants it (multi-tier app, hexagonal arch), \
+simulate **C4-style layers** with named subgraphs (`Person`, `System`, `Container`, `Component`) — still in Mermaid syntax, no PlantUML/Structurizr.\n\
+2. **Sequence diagrams** — for the 2-3 MOST CRITICAL flows you can identify in the code (auth, primary request lifecycle, deploy/CI pipeline, payment, etc.), \
+write ONE file per flow under `docs/architecture/sequences/<flow-name>.md` using `sequenceDiagram` Mermaid syntax. \
+Hard cap: **3 files maximum**. Quality > quantity — if you only identify ONE clear critical flow, write only one. \
+Each file must include a 2-3 sentence intro before the diagram (\"This sequence describes how a user authenticates against the API. It starts when the client POSTs to /auth/login and ends with a JWT in the response cookie.\").\n\n\
+**Mermaid sequenceDiagram safety rules** — Mermaid 11.x parser is unforgiving on message strings; respect these or the diagram won't render and the user sees a parse error instead of a flow:\n\
+- **Message text is ASCII-only**. Replace `…` with `...`, `→` with `->`, em-dash with `-`. Unicode punctuation routinely trips the parser.\n\
+- **Avoid `:` and `;` inside message text**. The first `:` after the arrow is the separator (`A->>B: msg`), but additional `:` / `;` combined with parens or Unicode can confuse the lexer. Rephrase: write `Cache-Control maxage=604800` instead of `Cache-Control: maxage=604800`, `Link rel=preload` instead of `Link: ...; rel=preload`.\n\
+- **No literal `(`/`)`/`[`/`]`/`{`/`}` chains** inside a message. Short, declarative prose only: `301 redirect to /a-propos` not `301 Location: /a-propos (set by LocaleRedirectSubscriber)`. If you need the detail, add a `Note over X` block.\n\
+- **Keep each line ≤ 100 chars**. Long lines hide parser-state issues. Break into multiple messages or a `Note over` block.\n\
+- Test mentally: would `mermaid.parse` accept this verbatim? If unsure, simplify.\n\n\
+**Why Mermaid + file separation**: every viewer (GitHub, GitLab, Obsidian, VS Code) renders Mermaid natively — no external tools. \
+Sequence diagrams live in separate files so `docs/AGENTS.md` Tier 1 stays small; an agent only loads them when working on the related flow.\n\
+- {{DATA_FLOW_DIAGRAM}}: REMOVED — replaced by `{{ARCHITECTURE_MERMAID}}` above.",
         sources: &["docker-compose.yml", "src/main.*", "src/lib.*", "src/index.*"],
     },
 
@@ -176,6 +215,9 @@ Fill the table with: name, package, purpose, key capabilities (3-5 main tools), 
 For each MCP server that has tools available, use the MCP tools to discover:\n\
 1. **Tool inventory**: list the main tools exposed (via tools/list if available). \
 For each tool: name, one-line description, whether it is read-only or mutating, and a use-case.\n\
+**Cold-start note**: npx-launched servers (`context7`, `sequential-thinking`, …) can take 5-10s to download + boot on first call. \
+If a tools/list call returns empty on the FIRST attempt, retry ONCE after a short wait before concluding the server exposes no tools. \
+Distinguish \"server not configured / credentials missing\" (configured: skip; no creds: note and move on) from \"server is configured but slow to start\" (retry once).\n\
 2. **Project context**: call read-only tools to discover real project data. Examples:\n\
    - Jira/Linear: project keys, open ticket count, labels in use, sprint cadence\n\
    - GitHub/GitLab: repo names, open PRs count, branch strategy, CI status\n\
@@ -385,25 +427,72 @@ metadata:\n\
 ```\n\
 \n\
 For UPDATES of existing TDs: APPEND a new entry to `audit_history`, do not replace previous entries. The chronological list is the value.\n\n\
-
-# E. ALSO FILL docs/decisions.md\n\
-\n\
-Intentional architectural choices observed in the code that might look unusual to a newcomer (e.g., why a certain pattern was chosen over a simpler one). \
-This is NOT a tech-debt file — it's a positive record. Examples: \"Single Mutex on SQLite (rationale: single-writer model)\", \"No ORM (rationale: pure SQL is faster for our access pattern)\".",
+\
+**Scope reminder**: this step ONLY fills `docs/inconsistencies-tech-debt.md` + creates/updates `docs/tech-debt/TD-*.md` detail files. The companion `docs/decisions.md` is intentionally filled in Step 10 (not here) so the agent has the full audit picture before recording positive choices.",
         sources: &["__GIT_HEAD__"],
     },
 
-    // Step 10: Final review
+    // Step 10: Final review + fill decisions.md
+    //
+    // 0.8.3 — Step 10 now has a *real* target_file (`docs/decisions.md`)
+    // so the validate_and_repair_step_output guard catches the case
+    // where the agent forgets it. The prompt is a TWO-PHASE pass:
+    //   (1) Final quality review across all docs/ files (was Step 10).
+    //   (2) Fill docs/decisions.md with intentional architectural
+    //       choices observed during steps 1-9 (was Step 9 § E,
+    //       systematically forgotten because it was 200 lines deep
+    //       in the tech-debt prompt).
+    //
+    // The two phases are deliberately ordered: review first (catches
+    // contradictions + cleans up markers), then decisions.md (last
+    // free-form write where the agent has the full picture).
     AnalysisStep {
-        target_file: "REVIEW",
+        target_file: "docs/decisions.md",
         prompt: "\
-Read ALL docs/ files. Final quality pass — fix issues directly.\n\n\
-Check: no remaining `{{` placeholders · no orphan `<!-- fill -->` comments (keep `<!-- TODO: ask user -->`) \
-· no duplicated facts · consistent terminology with glossary · valid cross-references \
-· no contradictions · no empty critical sections · clean markdown · each tech-debt entry has a detail file \
-· TODO markers are genuine unknowns.\n\n\
-Empty sections for missing features → 'N/A — not used'.",
-        sources: &[],
+This is the FINAL step. Execute the two phases in order:\n\n\
+\
+# PHASE 1 — Final quality review (across all docs/ files)\n\
+\n\
+Read ALL docs/ files. Fix issues directly (Write/Edit each file as needed).\n\
+\n\
+Check:\n\
+- **No remaining `{{...}}` placeholders** — replace with content or `N/A — not used` for missing features. \
+A surviving `{{PLACEHOLDER}}` is a hard failure: the file looked rendered but isn't.\n\
+- **Marker discipline** — there are 3 marker types, each with a strict semantic:\n\
+  · `<!-- TODO: ask user -->` — info requires human decision (intent, archi choice). KEEP — Phase 2 validation asks the user.\n\
+  · `<!-- TODO: verify -->` — you couldn't verify (sandbox blocked, file out-of-tree). FOR EACH ONE: try a final Glob/Read pass; if still impossible, CONVERT to `<!-- TODO: ask user -->` so Phase 2 escalates. If verification succeeded, write the conclusion WITHOUT any marker.\n\
+  · `<!-- TODO: unknown -->` — placeholder from a previous validation skip. KEEP — same path as `ask user`.\n\
+- No duplicated facts across files (one canonical home per concept).\n\
+- Consistent terminology with `glossary.md`.\n\
+- Valid cross-references (clickable links resolve to existing files).\n\
+- No contradictions between files (e.g. coding-rules says X is enforced but testing-quality says no linter exists).\n\
+- No empty critical sections.\n\
+- Clean markdown (no broken tables, no stray HTML).\n\
+- Each tech-debt entry in `inconsistencies-tech-debt.md` has a matching detail file under `tech-debt/`.\n\
+- Empty sections for missing features → write `N/A — not used` (don't leave the heading bare).\n\n\
+\
+# PHASE 2 — Fill docs/decisions.md\n\
+\n\
+This file captures **intentional architectural choices** observed in the code that might look unusual to a newcomer (e.g., why a certain pattern was chosen over a simpler one). It is the *positive* counterpart to `inconsistencies-tech-debt.md` — choices the team made deliberately, NOT problems.\n\n\
+\
+Read the source code (entry points, key modules, configs) AND the docs you just reviewed in Phase 1. Replace the `{{DECISION_*}}` / `{{REASON}}` / `{{ANTI_PATTERN}}` / `{{FILE_OR_USER}}` placeholders with **real decisions** you can trace to evidence.\n\n\
+\
+Format each row:\n\
+- **Decision**: one-line summary of the choice (e.g., \"Subdomain-based locale routing\").\n\
+- **Why chosen**: rationale you can defend from the code or docs (e.g., \"SEO + hreflang correctness, simpler than middleware-based path prefixing\").\n\
+- **What NOT to do**: anti-pattern a newcomer might attempt (e.g., \"Don't add a `/fr/` path prefix — it would duplicate routes and break the `_alternates` SEO logic\").\n\
+- **Source**: file:line OR `briefing.md` OR `user` if confirmed by the user during validation. Use `inferred from <evidence>` only when no single source is canonical.\n\n\
+\
+Quality rules:\n\
+- **Quality > quantity**: target 3-8 real decisions. A repo with 2 strong decisions is fine; a list of 15 fluff items is worse than 3 strong ones.\n\
+- **Do NOT invent**: every decision must be traceable to code or a user-confirmed source. If you can't cite evidence, skip it.\n\
+- **Examples** (good shape — adapt to the actual repo):\n\
+  · \"Single Mutex on SQLite\" → \"Single-writer model fits our access pattern; multi-writer would need WAL + busy_timeout tuning\" → \"Don't add a connection pool\" → `src/db/conn.rs:42`\n\
+  · \"No ORM\" → \"Pure SQL is faster for our 12-table schema; the maintenance cost of an ORM dependency exceeds the win\" → \"Don't introduce diesel/sea-orm\" → `src/db/queries.rs` + user\n\
+- Remove the `{{DECISION_2}}` row entirely if you only have one real decision (don't pad).\n\n\
+\
+**End state**: `docs/decisions.md` has zero `{{...}}` placeholders, contains 3-8 traceable decisions, and all OTHER docs/ files passed the Phase 1 review with markers cleaned up per the discipline rules above.",
+        sources: &["__GIT_HEAD__"],
     },
 ];
 
@@ -873,6 +962,164 @@ mod prompt_tests {
     }
 
     #[test]
+    fn step6_prompt_enforces_mermaid_safety_rules() {
+        // 0.8.3 — user reported DOCROMS_WEB sequence file `page-request.md`
+        // wouldn't render: line `FP-->>U: 103 Early Hints (Link: …; rel=preload)`
+        // triggered "Parse error on line 50, got NEWLINE expecting arrow".
+        // The combination of Unicode `…`, parens, `:` and `;` inside the
+        // message text confuses Mermaid 11.x's lexer. The prompt now
+        // teaches the agent to write parser-safe messages.
+        let arch_step = ANALYSIS_STEPS
+            .iter()
+            .find(|s| s.target_file == "docs/architecture/overview.md")
+            .expect("architecture step must exist");
+        let p = arch_step.prompt;
+        assert!(p.contains("Mermaid sequenceDiagram safety rules"),
+            "Step 6 must surface the safety rules section by name");
+        // The 4 specific gotchas the user hit:
+        assert!(p.contains("ASCII-only"),
+            "Step 6 must require ASCII-only message text (Unicode … breaks parser)");
+        assert!(p.contains(": ") && p.contains(";"),
+            "Step 6 must call out `:` + `;` inside message text as risky");
+        assert!(p.contains("Note over"),
+            "Step 6 must redirect detailed info to Note blocks");
+        assert!(p.contains("100 char") || p.contains("≤ 100"),
+            "Step 6 must cap line length to surface parser-state issues");
+    }
+
+    #[test]
+    fn step10_target_is_decisions_md_for_validate_and_repair_guard() {
+        // 0.8.3 FIX — decisions.md was getting forgotten because it was
+        // a *secondary* output of Step 9 (tech-debt) buried 200 lines
+        // deep in the prompt. `validate_and_repair_step_output` only
+        // checks `target_file`, so a missed decisions.md produced no
+        // step_warning. Step 10 now PROMOTES decisions.md to its own
+        // target_file so the guard fires when it's not filled, AND
+        // the prompt is short + focused (2 phases: review + decisions).
+        let step10 = ANALYSIS_STEPS.last().expect("at least one step");
+        assert_eq!(
+            step10.target_file,
+            "docs/decisions.md",
+            "Step 10 must target decisions.md so validate_and_repair_step_output catches an unfilled file"
+        );
+        // The prompt must still cover the original "final review" duty.
+        assert!(step10.prompt.contains("PHASE 1"), "Step 10 must keep the final-review phase");
+        assert!(step10.prompt.contains("PHASE 2"), "Step 10 must include the decisions.md fill phase");
+        // And explicitly mention all 3 marker types so the agent
+        // applies the discipline rules added in #303 (F2).
+        for marker in ["TODO: ask user", "TODO: verify", "TODO: unknown"] {
+            assert!(step10.prompt.contains(marker),
+                "Step 10 prompt must mention `{marker}` so the agent disambiguates marker types");
+        }
+    }
+
+    #[test]
+    fn preamble_documents_marker_discipline_three_types() {
+        // 0.8.3 FIX — DOCROMS_WEB audit had 26 `<!-- TODO: verify -->` on
+        // testing-quality.md alone, most of them on files the agent
+        // HAD actually verified (Glob/Read). The pre-fix preamble said
+        // "mark unknowns with TODO: verify" with zero discrimination
+        // between "I couldn't check" and "I checked and it's missing".
+        // The new MARKER DISCIPLINE block names all 3 marker types,
+        // gives a WRONG/RIGHT example, and explicitly tells the agent
+        // not to fall back to TODO: verify after a successful Glob.
+        assert!(PROMPT_PREAMBLE.contains("MARKER DISCIPLINE"),
+            "PREAMBLE must surface the marker discipline section by name (it's the regression we're guarding)");
+        for marker in ["TODO: verify", "TODO: ask user", "TODO: unknown"] {
+            assert!(PROMPT_PREAMBLE.contains(marker),
+                "PREAMBLE must mention `{marker}` so the agent knows the 3 types");
+        }
+        // The WRONG/RIGHT pair is what teaches the agent to skip the
+        // marker after a confirmed Glob — preserve both labels.
+        assert!(PROMPT_PREAMBLE.contains("WRONG:") && PROMPT_PREAMBLE.contains("RIGHT:"),
+            "PREAMBLE must show the WRONG/RIGHT example pair");
+        // Anti-regression: the old terse line "mark unknowns with TODO: verify"
+        // was the very pattern that caused the over-use. Make sure the
+        // new wording mentions the unverified case explicitly.
+        assert!(PROMPT_PREAMBLE.contains("could not check") || PROMPT_PREAMBLE.contains("couldn't check"),
+            "PREAMBLE must qualify TODO: verify as 'could not check', not generic 'unknown'");
+    }
+
+    #[test]
+    fn step9_does_not_duplicate_decisions_md_instruction() {
+        // 0.8.3 FIX — before, Step 9 also had a `# E. ALSO FILL
+        // docs/decisions.md` section that the agent routinely
+        // forgot (buried in 200 lines). We moved the duty to Step 10
+        // and replaced the Step 9 mention with a scope reminder. Pin
+        // the no-duplicate state so a future "let's also fill it here"
+        // drift gets caught.
+        let step9 = ANALYSIS_STEPS
+            .iter()
+            .find(|s| s.target_file == "docs/inconsistencies-tech-debt.md")
+            .expect("Step 9 must exist");
+        // The "ALSO FILL" pattern is the regex marker for the bug.
+        assert!(!step9.prompt.contains("ALSO FILL docs/decisions.md"),
+            "Step 9 must NOT instruct decisions.md fill anymore — Step 10 owns it now");
+    }
+
+    #[test]
+    fn architecture_template_carries_mermaid_placeholder_and_sequences_pointer() {
+        // The audit prompt + the template ship together. If one
+        // grows a section the other must keep up, otherwise the
+        // agent fills `{{ARCHITECTURE_MERMAID}}` into a section
+        // that doesn't exist and the placeholder leaks into the
+        // final docs/architecture/overview.md.
+        let tpl_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("templates/docs/architecture/overview.md");
+        let body = std::fs::read_to_string(&tpl_path)
+            .unwrap_or_else(|e| panic!("read template {}: {e}", tpl_path.display()));
+        assert!(body.contains("{{ARCHITECTURE_MERMAID}}"),
+            "template must expose `{{{{ARCHITECTURE_MERMAID}}}}` so the audit step can write into it");
+        assert!(body.contains("Architecture diagram"),
+            "template must have an `Architecture diagram` section header");
+        assert!(body.contains("Sequence diagrams"),
+            "template must have a `Sequence diagrams` section that points to `sequences/`");
+        assert!(body.contains("sequences/"),
+            "template must link to the dedicated sequences subfolder");
+        // Sanity: the sequences/ subfolder ships with a README and a
+        // TEMPLATE.md so the audit doesn't generate orphan files.
+        let seq_readme = tpl_path
+            .parent().unwrap()
+            .join("sequences/README.md");
+        let seq_tpl = tpl_path
+            .parent().unwrap()
+            .join("sequences/TEMPLATE.md");
+        assert!(seq_readme.exists(), "sequences/README.md must ship with the template tree");
+        assert!(seq_tpl.exists(), "sequences/TEMPLATE.md must ship with the template tree");
+        let tpl_body = std::fs::read_to_string(&seq_tpl).unwrap();
+        assert!(tpl_body.contains("sequenceDiagram"),
+            "sequences/TEMPLATE.md must show a Mermaid `sequenceDiagram` so the audit fills follow the same shape");
+    }
+
+    #[test]
+    fn step6_architecture_step_requires_mermaid_diagrams() {
+        // 0.8.3 (#286) — the architecture step ships with a mandatory
+        // Mermaid diagram (replacing the legacy ASCII flow) PLUS a
+        // bounded sequence-diagram budget (max 3 files under
+        // `sequences/`). Lock the contract so a future "let's drop
+        // the diagram, agents waste tokens on it" tidy-up gets caught.
+        let arch_step = ANALYSIS_STEPS
+            .iter()
+            .find(|s| s.target_file == "docs/architecture/overview.md")
+            .expect("audit must include an architecture step");
+        let p = arch_step.prompt;
+        assert!(p.contains("Mermaid") || p.contains("mermaid"),
+            "architecture step must instruct the agent to emit Mermaid syntax");
+        assert!(p.contains("flowchart"),
+            "architecture step must specify a `flowchart` Mermaid block for the overview");
+        assert!(p.contains("ARCHITECTURE_MERMAID"),
+            "the template placeholder must match the prompt's named field");
+        assert!(p.contains("sequenceDiagram"),
+            "architecture step must mention `sequenceDiagram` so per-flow files are also Mermaid");
+        assert!(p.contains("sequences/"),
+            "architecture step must point to the dedicated `sequences/` subfolder");
+        assert!(p.contains("3 files maximum") || p.contains("max 3") || p.contains("3 maximum"),
+            "architecture step must cap sequence diagrams to avoid token explosion on big projects");
+    }
+
+    #[test]
     fn step9_baseline_includes_community_standards_gate() {
         // The Step 9 prompt grew an OSS-intent-gated community standards
         // section (LICENSE / README description / issue+PR templates /
@@ -907,6 +1154,57 @@ mod prompt_tests {
                 "{} prompt with tracker MCP must contain the template check", lang);
             assert!(!without.contains(".github/ISSUE_TEMPLATE"),
                 "{} prompt WITHOUT tracker MCP must NOT contain the template check (noise)", lang);
+        }
+    }
+
+    #[test]
+    fn phase2_scans_all_three_marker_types_and_drives_to_resolution() {
+        // 0.8.3 FIX — pre-fix Phase 2 only mentioned `TODO: unknown`
+        // (the value the user could set), never scanned `TODO: verify`
+        // or `TODO: ask user`. Result: 26 verify markers from
+        // DOCROMS_WEB's testing-quality.md stayed in the docs forever,
+        // never converted to user questions. The new Phase 2 explicitly
+        // enumerates all 3 types AND tells the agent to grep + resolve.
+        for lang in ["fr", "en", "es"] {
+            let info = AuditInfo { files: vec![], todos: vec![], tech_debt_items: vec![] };
+            let prompt = build_validation_prompt(lang, &info, false);
+            for marker in ["TODO: ask user", "TODO: verify", "TODO: unknown"] {
+                assert!(prompt.contains(marker),
+                    "{lang} Phase 2 must mention `{marker}` so the agent processes it");
+            }
+            // The grep instruction is what makes the scan systematic.
+            assert!(prompt.contains("grep") || prompt.contains("MCP"),
+                "{lang} Phase 2 must instruct an enumeration step (grep / MCP)");
+        }
+    }
+
+    #[test]
+    fn phase3_is_bulk_first_not_one_by_one() {
+        // 0.8.3 — Phase 3 was rewritten to surface a compact table of
+        // ALL findings + a single bulk question (all-confirm / all-
+        // reject / discuss-selected). The "1-by-1" anti-pattern bored
+        // users into bailing out before reaching Critical items.
+        // Pin the rewrite so a future "drive-by simplification" can't
+        // silently revert it.
+        for lang in ["fr", "en", "es"] {
+            let info = AuditInfo { files: vec![], todos: vec![], tech_debt_items: vec![] };
+            let prompt = build_validation_prompt(lang, &info, false);
+            // The new flow advertises itself with "BULK-FIRST" — a
+            // marker an unfamiliar editor will see + understand.
+            assert!(prompt.contains("BULK-FIRST"),
+                "{} Phase 3 must use BULK-FIRST protocol (marker missing)", lang);
+            // Compact table header must be in the prompt so the
+            // agent renders the same shape across languages.
+            assert!(prompt.contains("| ID | Severity"),
+                "{} Phase 3 must instruct the compact markdown table", lang);
+            // Three bulk options (a) / (b) / (c) are the contract.
+            let lower = prompt.to_lowercase();
+            assert!(lower.contains("(a)") && lower.contains("(b)") && lower.contains("(c)"),
+                "{} Phase 3 must offer 3 bulk options (a)/(b)/(c)", lang);
+            // Default for non-selected TDs is `Confirmed by user`
+            // (per user UX decision in 0.8.3 session).
+            assert!(prompt.contains("Confirmed by user"),
+                "{} Phase 3 must default non-selected TDs to `Confirmed by user`", lang);
         }
     }
 

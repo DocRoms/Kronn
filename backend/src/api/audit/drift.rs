@@ -83,6 +83,16 @@ pub async fn partial_audit(
     let project_path_str = project.path.clone();
     let project_path = scanner::resolve_host_path(&project.path);
     let briefing_notes = crate::api::projects::resolve_briefing_notes(&project_path, &project.briefing_notes);
+    let linked_repos_block = crate::api::projects::format_linked_repos_for_prompt(&project.linked_repos);
+    let pid_for_universe = project.id.clone();
+    let kronn_projects_universe_block = match state
+        .db
+        .with_conn(crate::db::projects::list_projects)
+        .await
+    {
+        Ok(all) => crate::api::projects::format_kronn_projects_universe_for_prompt(&all, &pid_for_universe),
+        Err(_) => None,
+    };
 
     // Validate requested step numbers
     let total_analysis_steps = ANALYSIS_STEPS.len();
@@ -125,6 +135,7 @@ pub async fn partial_audit(
             // not the absolute audit step number — matches what the SSE reports.
             if let Ok(mut t) = audit_tracker.lock() {
                 t.advance_step(&project_id_for_progress, (progress_idx + 1) as u32, Some(file_label.to_string()));
+                t.clear_step_chips(&project_id_for_progress);
             }
 
             let step_start = serde_json::json!({
@@ -144,6 +155,12 @@ pub async fn partial_audit(
 
             if let Some(ref notes) = briefing_notes {
                 full_prompt.push_str(&format!("\n\n## Project briefing (from the user)\n{}\n", notes));
+            }
+            if let Some(ref block) = linked_repos_block {
+                full_prompt.push_str(&format!("\n\n{}\n", block));
+            }
+            if let Some(ref block) = kronn_projects_universe_block {
+                full_prompt.push_str(&format!("\n\n{}\n", block));
             }
 
             match runner::start_agent_with_config(runner::AgentStartConfig {

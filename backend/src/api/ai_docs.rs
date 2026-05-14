@@ -52,8 +52,24 @@ fn build_ai_file_tree(dir: &std::path::Path, rel_prefix: &str) -> Vec<AiFileNode
         Err(_) => return nodes,
     };
 
+    // 0.8.3 UX — sort directories FIRST (A-Z), then files (A-Z).
+    // The previous flat alphabetic sort intermixed dirs and files
+    // (`architecture/`, `briefing.md`, `coding-rules.md`, `operations/`)
+    // which doesn't match the common file-explorer convention users
+    // expect (folders grouped at the top). Two-tier key: (is_file, name).
     let mut entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-    entries.sort_by_key(|e| e.file_name());
+    entries.sort_by(|a, b| {
+        let a_is_dir = a.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+        let b_is_dir = b.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+        match (a_is_dir, b_is_dir) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            // Same kind → case-insensitive name compare so `architecture/`
+            // and `Architecture/` cohabit predictably regardless of FS
+            // case sensitivity.
+            _ => a.file_name().to_ascii_lowercase().cmp(&b.file_name().to_ascii_lowercase()),
+        }
+    });
 
     for entry in entries {
         let name = entry.file_name().to_string_lossy().to_string();
@@ -191,5 +207,70 @@ pub async fn read_ai_file(
     match result {
         Ok(content) => Json(ApiResponse::ok(content)),
         Err(e) => Json(ApiResponse::err(e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 0.8.3 UX regression — verrouille l'ordre dirs-first puis files.
+    // Avant : tri alphabétique pur mélangeait `architecture/`,
+    // `briefing.md`, `coding-rules.md`, `operations/`. Convention
+    // file-explorer attendue : dossiers groupés en haut.
+    fn touch(p: &std::path::Path) {
+        if let Some(parent) = p.parent() { std::fs::create_dir_all(parent).unwrap(); }
+        std::fs::write(p, "x").unwrap();
+    }
+
+    #[test]
+    fn tree_lists_dirs_first_then_files_each_alphabetic() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        // Mix: file, dir, file, dir — pre-fix would interleave them.
+        touch(&root.join("briefing.md"));
+        touch(&root.join("architecture/overview.md"));
+        touch(&root.join("coding-rules.md"));
+        touch(&root.join("operations/debug.md"));
+        touch(&root.join("AGENTS.md"));
+
+        let tree = build_ai_file_tree(root, "docs");
+        let names: Vec<&str> = tree.iter().map(|n| n.name.as_str()).collect();
+
+        // Expect: dirs A-Z first, then files A-Z (case-insensitive).
+        assert_eq!(
+            names,
+            vec!["architecture", "operations", "AGENTS.md", "briefing.md", "coding-rules.md"],
+            "dirs must come before files; within each group sort case-insensitive A-Z"
+        );
+    }
+
+    #[test]
+    fn tree_recursion_keeps_same_ordering_in_subdirs() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        touch(&root.join("architecture/overview.md"));
+        touch(&root.join("architecture/sequences/auth.md"));
+        touch(&root.join("architecture/README.md"));
+
+        let tree = build_ai_file_tree(root, "docs");
+        assert_eq!(tree.len(), 1);
+        let arch_children: Vec<&str> = tree[0].children.iter().map(|n| n.name.as_str()).collect();
+        // sequences/ (dir) first, then files A-Z.
+        assert_eq!(arch_children, vec!["sequences", "overview.md", "README.md"]);
+    }
+
+    #[test]
+    fn tree_case_insensitive_sort_groups_letters() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        // Mix uppercase + lowercase — must sort as if lowercase.
+        touch(&root.join("Zebra.md"));
+        touch(&root.join("apple.md"));
+        touch(&root.join("Banana.md"));
+
+        let tree = build_ai_file_tree(root, "docs");
+        let names: Vec<&str> = tree.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(names, vec!["apple.md", "Banana.md", "Zebra.md"]);
     }
 }

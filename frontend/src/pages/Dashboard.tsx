@@ -3,7 +3,7 @@ import { useState, useCallback, useRef, useEffect, useMemo, lazy, Suspense } fro
 import { projects as projectsApi, mcps as mcpsApi, agents as agentsApi, discussions as discussionsApi, workflows as workflowsApi, config as configApi, skills as skillsApi } from '../lib/api';
 import { useApi } from '../hooks/useApi';
 import { useToast } from '../hooks/useToast';
-import type { RemoteRepo, RepoSource, DriftCheckResponse } from '../types/generated';
+import type { RemoteRepo, RepoSource, DriftCheckResponse, AuditProgress } from '../types/generated';
 import { useT } from '../lib/I18nContext';
 import { detectStaleStreams } from '../lib/stream-watchdog';
 import { useIsMobile } from '../hooks/useMediaQuery';
@@ -24,6 +24,7 @@ const WorkflowsPage = lazy(() => import('./WorkflowsPage').then(m => ({ default:
 const SettingsPage = lazy(() => import('./SettingsPage').then(m => ({ default: m.SettingsPage })));
 const DiscussionsPage = lazy(() => import('./DiscussionsPage').then(m => ({ default: m.DiscussionsPage })));
 import { ActiveRunsPopover } from '../components/workflows/ActiveRunsPopover';
+import { ActiveAuditsPopover } from '../components/ActiveAuditsPopover';
 import { ProjectList } from '../components/ProjectList';
 import {
   Folder, FolderOpen, Puzzle,
@@ -227,6 +228,39 @@ export function Dashboard({ onReset }: DashboardProps) {
     return () => { clearInterval(interval); document.removeEventListener('visibilitychange', onVisibilityChange); };
   }, [refetchWorkflows, page, runningWorkflows]);
 
+  // 0.8.3 (#288) — fleet-wide active-audits state. Mirror of
+  // `runningWorkflows` above: fast poll (3 s) when at least one
+  // audit is live, slow poll (10 s on projets page, 60 s elsewhere)
+  // when idle. Drives the Projets nav badge + ActiveAuditsPopover.
+  const [activeAudits, setActiveAudits] = useState<AuditProgress[]>([]);
+  const [activeAuditsPopoverOpen, setActiveAuditsPopoverOpen] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const fetchAudits = async () => {
+      try {
+        const list = await projectsApi.auditStatusAll();
+        if (!cancelled) setActiveAudits(list);
+      } catch {
+        if (!cancelled) setActiveAudits([]);
+      }
+    };
+    fetchAudits();
+    const auditPollInterval = activeAudits.length > 0
+      ? 3000
+      : page === 'projects' ? 10000 : 60000;
+    const interval = setInterval(fetchAudits, auditPollInterval);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') fetchAudits();
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [page, activeAudits.length]);
+
   const projects = projectList ?? [];
 
   // ─── Drift detection fetch ──────────
@@ -254,6 +288,32 @@ export function Dashboard({ onReset }: DashboardProps) {
       return next;
     });
   }, []);
+
+  /** 0.8.3 (#277) — bulk-seed the per-discussion "last seen" counter
+   *  to the current `message_count` for EVERY discussion in
+   *  `allDiscussions` (active, archived, batch children — all of
+   *  them). Wipes accumulated unread backlogs that historical users
+   *  rack up because:
+   *    - Discussions that pre-date this feature have no entry in
+   *      `lastSeenMsgCount` → entire `message_count` counts as unread.
+   *    - Archived discs / batch children are rarely opened individually,
+   *      so the per-disc seed on open never fires for them.
+   *  One click resolves the count without changing per-disc semantics
+   *  (re-opening a disc still updates its individual entry on the next
+   *  `markDiscussionSeen` call). */
+  const markAllDiscussionsSeen = useCallback(() => {
+    setLastSeenMsgCount(prev => {
+      const next = { ...prev };
+      for (const d of allDiscussions) {
+        const total = Math.max(d.messages.length, d.message_count ?? 0);
+        // Only bump UP — never lower an existing seed. Defensive against
+        // an `allDiscussions` snapshot that lags behind the cache.
+        if ((next[d.id] ?? 0) < total) next[d.id] = total;
+      }
+      localStorage.setItem('kronn:lastSeenMsgCount', JSON.stringify(next));
+      return next;
+    });
+  }, [allDiscussions]);
 
   const totalUnseen = useMemo(() => allDiscussions.reduce((acc, disc) => {
     const unseen = (disc.message_count ?? disc.messages.length) - (lastSeenMsgCount[disc.id] ?? 0);
@@ -514,7 +574,11 @@ export function Dashboard({ onReset }: DashboardProps) {
               // doesn't fire when the user re-clicks the nav button to toggle
               // it closed — without this the outside-close + onClick-toggle
               // race leaves the popover stuck open.
-              onMouseDown={id === 'workflows' ? (e) => e.stopPropagation() : undefined}
+              onMouseDown={
+                id === 'workflows' || id === 'projects'
+                  ? (e) => e.stopPropagation()
+                  : undefined
+              }
               onClick={() => {
                 // When workflows are running, hijack the nav click to open the
                 // active-runs popover instead of navigating — single-click
@@ -524,12 +588,21 @@ export function Dashboard({ onReset }: DashboardProps) {
                   setActiveRunsPopoverOpen(o => !o);
                   return;
                 }
+                // 0.8.3 (#288) — mirror the same hijack pattern for audits.
+                // The Projets nav opens the audits popover when an audit
+                // is in progress and we're not already on the page.
+                if (id === 'projects' && activeAudits.length > 0 && page !== 'projects') {
+                  setActiveAuditsPopoverOpen(o => !o);
+                  return;
+                }
                 setPage(id as Page);
                 if (id !== 'mcps') setMcpSelectedConfigId(null);
               }}
               title={label}
             >
               {id === 'workflows' && runningWorkflows > 0
+                ? <Loader2 size={isMobile ? 16 : 14} style={{ animation: 'spin 1s linear infinite' }} className="text-accent" />
+                : id === 'projects' && activeAudits.length > 0
                 ? <Loader2 size={isMobile ? 16 : 14} style={{ animation: 'spin 1s linear infinite' }} className="text-accent" />
                 : <Icon size={isMobile ? 16 : 14} />
               }
@@ -557,8 +630,62 @@ export function Dashboard({ onReset }: DashboardProps) {
                   {runningWorkflows}
                 </span>
               )}
+              {id === 'projects' && activeAudits.length > 0 && (
+                <span
+                  className="dash-nav-badge"
+                  title={t('audit.runningTooltip', activeAudits.length, activeAudits.length > 1 ? 's' : '')}
+                  aria-label={t('audit.runningTooltip', activeAudits.length, activeAudits.length > 1 ? 's' : '')}
+                >
+                  {activeAudits.length}
+                </span>
+              )}
             </button>
           );
+          if (id === 'projects') {
+            return (
+              <div
+                key={id}
+                className="dash-nav-projects-wrap"
+                style={{ position: 'relative', display: 'inline-flex' }}
+              >
+                {btn}
+                {activeAuditsPopoverOpen && (
+                  <ActiveAuditsPopover
+                    audits={activeAudits}
+                    projects={projects}
+                    onClose={() => setActiveAuditsPopoverOpen(false)}
+                    onNavigateToProject={(projectId) => {
+                      // 0.8.3 (#288) — same pattern as workflow nav:
+                      // navigate to the page and let the ProjectCard
+                      // resume effect surface the live progress bar
+                      // (poll auditStatus inside the card kicks in).
+                      setExpandedId(projectId);
+                      setPage('projects');
+                      setActiveAuditsPopoverOpen(false);
+                    }}
+                    onViewAllProjects={() => {
+                      setPage('projects');
+                      setActiveAuditsPopoverOpen(false);
+                    }}
+                    onAfterCancel={async () => {
+                      // Refetch the fleet-wide audit list so the
+                      // popover updates instantly when a cancel
+                      // succeeds; if 0 audits remain, the popover
+                      // auto-hides via the empty-state branch.
+                      try {
+                        const list = await projectsApi.auditStatusAll();
+                        setActiveAudits(list);
+                      } catch { /* ignore */ }
+                      // Refetch the project list so card statuses
+                      // (Audited / Validated / TemplateInstalled)
+                      // catch up to the cancellation.
+                      refetch();
+                    }}
+                  />
+                )}
+              </div>
+            );
+          }
           if (id === 'workflows') {
             return (
               <div
@@ -1138,6 +1265,7 @@ export function Dashboard({ onReset }: DashboardProps) {
             abortControllers={abortControllers}
             cleanupStream={cleanupStream}
             markDiscussionSeen={markDiscussionSeen}
+            markAllDiscussionsSeen={markAllDiscussionsSeen}
             onActiveDiscussionChange={setActiveDiscussionId}
             initialActiveDiscussionId={openDiscussionId ?? activeDiscussionId}
             lastSeenMsgCount={lastSeenMsgCount}

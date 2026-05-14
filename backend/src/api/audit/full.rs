@@ -55,8 +55,31 @@ pub async fn full_audit(
     let project_path = scanner::resolve_host_path(&project.path);
     let project_default_skill_ids = project.default_skill_ids.clone();
     let briefing_notes = crate::api::projects::resolve_briefing_notes(&project_path, &project.briefing_notes);
+    let linked_repos_block = crate::api::projects::format_linked_repos_for_prompt(&project.linked_repos);
+    // 0.8.3 — candidate pool for companion-repo detection. The agent
+    // only suggests links from this finite list (typically 5-20),
+    // not "every repo I see on disk" — keeps suggestions scalable
+    // for users with hundreds of repos.
+    let pid_for_universe = project_id.clone();
+    let kronn_projects_universe_block = match state
+        .db
+        .with_conn(crate::db::projects::list_projects)
+        .await
+    {
+        Ok(all) => crate::api::projects::format_kronn_projects_universe_for_prompt(&all, &pid_for_universe),
+        Err(e) => {
+            tracing::warn!("Failed to load Kronn projects for companion-detection block: {}", e);
+            None
+        }
+    };
     let agent_type = req.agent;
     let agent_label = format!("{:?}", agent_type);
+    // 0.8.3 (#311) — resume support. Caller passes the
+    // `last_completed_step` of an interrupted run; we skip steps
+    // 1..=resume_from and start at resume_from+1. Clamped to total_steps
+    // so a malicious / stale client can't ask us to skip past the
+    // pipeline entirely. None / 0 / >= total → fresh run.
+    let resume_from: u32 = req.resume_from.unwrap_or(0);
 
     // 0.8.2 — Resolve specialized audit kind. `Full` is the default
     // (backwards-compat for clients that don't send `kind`). `Custom`
@@ -136,7 +159,7 @@ pub async fn full_audit(
 
         if template_installed {
             let pp = project_path_str.clone();
-            let install_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
+            let install_result = tokio::task::spawn_blocking(move || -> Result<(crate::core::legacy_docs::LegacyMigrationReport,), String> {
                 let project_path = scanner::resolve_host_path(&pp);
                 if !project_path.exists() {
                     return Err(format!("Project path not found: {}", project_path.display()));
@@ -154,6 +177,17 @@ pub async fn full_audit(
                     }
                 }
 
+                // 0.8.3 (#272) — Pre-audit legacy docs migration. If the
+                // user pointed Kronn at a project with hand-curated docs
+                // (no Kronn signature in docs/AGENTS.md), move everything
+                // under docs/legacy/ BEFORE the template install. The
+                // audit prompt below is patched to read docs/legacy/**
+                // as the PRIMARY source of truth when filling fresh
+                // Kronn templates. Idempotent: already-Kronn-managed
+                // docs/ → no-op (the signature check returns true).
+                let legacy_report = crate::core::legacy_docs::migrate_user_docs_to_legacy(&docs_target)
+                    .map_err(|e| format!("legacy docs migration failed: {}", e))?;
+
                 let template_dir = crate::api::projects::resolve_templates_dir();
                 if !template_dir.exists() {
                     return Err(format!("Templates directory not found: {}", template_dir.display()));
@@ -165,12 +199,40 @@ pub async fn full_audit(
                 }
                 crate::api::projects::ensure_agent_writable_subfolders(&docs_target)?;
 
-                for filename in &["CLAUDE.md", ".cursorrules", ".windsurfrules", ".clinerules"] {
+                // 0.8.3 (#278) — inject the Kronn-managed block into
+                // every root agent file. Replaces the pre-0.8.3
+                // `copy if !exists` loop that silently skipped user-
+                // curated files → the agent never learned that Kronn
+                // had put `docs/AGENTS.md` in place. The new helper:
+                //   - Creates the file with Kronn block + Kronn template
+                //     when the file is missing.
+                //   - Prepends just the Kronn block above the user's
+                //     existing content when the file exists, byte-
+                //     preserving everything the user already wrote.
+                //   - Re-renders ONLY the marker zone on a re-audit,
+                //     so the user's content never piles up duplicates.
+                // Failures on one file don't abort the audit — we log
+                // and move on so a single locked / permission-denied
+                // file doesn't break the whole install path.
+                for filename in crate::core::root_agent_files::KRONN_ROOT_AGENT_FILES {
                     let src = template_dir.join(filename);
                     let dst = project_path.join(filename);
-                    if src.exists() && !dst.exists() {
-                        if let Err(e) = std::fs::copy(&src, &dst) {
-                            tracing::warn!("Failed to copy {}: {}", filename, e);
+                    let template_body = std::fs::read_to_string(&src).ok();
+                    match crate::core::root_agent_files::inject_or_update(
+                        &dst,
+                        template_body.as_deref(),
+                    ) {
+                        Ok(outcome) => {
+                            tracing::debug!(
+                                "Kronn block in {}: {:?}",
+                                filename, outcome
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to inject Kronn block in {}: {}",
+                                filename, e
+                            );
                         }
                     }
                 }
@@ -181,23 +243,63 @@ pub async fn full_audit(
                 }
 
                 runner::fix_file_ownership(&project_path);
-                Ok(())
+                Ok((legacy_report,))
             }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
-            if let Err(e) = install_result {
-                // Install failed — drop progress so the UI stops polling with
-                // a stale "installing" state.
-                if let Ok(mut t) = audit_tracker.lock() { t.clear_progress(&project_id); }
-                let err = serde_json::json!({ "error": e });
-                yield Event::default().event("error").data(err.to_string());
-                return;
-            }
+            let legacy_migration = match install_result {
+                Err(e) => {
+                    // Install failed — drop progress so the UI stops polling with
+                    // a stale "installing" state.
+                    if let Ok(mut t) = audit_tracker.lock() { t.clear_progress(&project_id); }
+                    let err = serde_json::json!({ "error": e });
+                    yield Event::default().event("error").data(err.to_string());
+                    return;
+                }
+                Ok((report,)) => report,
+            };
 
             crate::core::mcp_scanner::ensure_gitignore_public(&project_path_str, "docs/var/");
+
+            // 0.8.3 (#272) — surface the legacy-docs migration so the
+            // frontend can show a toast + list of moved entries. The
+            // report carries `migrated=false` + a skip_reason when
+            // nothing was done (no docs/, already-Kronn-managed,
+            // empty docs/). Frontend renders only when migrated=true.
+            if legacy_migration.migrated {
+                yield Event::default().event("legacy_docs_migrated").data(
+                    serde_json::to_string(&legacy_migration).unwrap_or_else(|_| "{}".into())
+                );
+            }
         }
 
         let tmpl_event = serde_json::json!({ "installed": template_installed });
         yield Event::default().event("template_installed").data(tmpl_event.to_string());
+
+        // 0.8.3 (#280) — MCP allowlist for the audit. On projects
+        // with 10+ MCP servers wired (Fastly, Docker, GitLab, M365,
+        // Playwright, …), the agent's system prompt balloons to 12-
+        // 15K tokens of tool descriptions BEFORE it starts thinking.
+        // The audit doesn't need any of those — it reads local files
+        // and fills templates. We swap `.mcp.json` for a filtered
+        // version covering only the introspection / reasoning /
+        // lookup tools, then restore via RAII Drop when this handler
+        // returns (success OR panic). Discussions / workflows that
+        // would spawn during this window see the filtered set + a
+        // banner explains; trade-off documented in the swap module.
+        let _audit_mcp_swap = crate::core::audit_mcp_filter::AuditMcpSwap::install(&project_path)
+            .ok()
+            .flatten();
+        if let Some(ref swap) = _audit_mcp_swap {
+            let r = swap.report();
+            yield Event::default().event("audit_mcp_filtered").data(
+                serde_json::json!({
+                    "kept": r.kept,
+                    "dropped": r.dropped,
+                    "kept_count": r.kept.len(),
+                    "dropped_count": r.dropped.len(),
+                }).to_string()
+            );
+        }
 
         // ── Phase 2: Run 10-step audit ──
         // Remove bootstrap prompt
@@ -216,7 +318,40 @@ pub async fn full_audit(
             &project_path.join("docs"),
         );
 
-        let start = serde_json::json!({ "total_steps": total_steps });
+        // 0.8.3 (#274) — cumulative token counter surfaced on each
+        // `step_done`. Without this, the frontend had to estimate
+        // audit cost after-the-fact from the validation discussion
+        // (which only exists post-Phase 3) and couldn't show "you've
+        // spent X tokens after Y steps, optimise step Z now".
+        //
+        // The `started_at` we surface in the `start` SSE event is the
+        // SAME wallclock taken at the very top of this handler (line
+        // ~119, before Phase 1 — template install + legacy migration
+        // + bootstrap inject). Re-declaring it here would shift the
+        // anchor forward by the Phase 1 duration (~10-30 s on first
+        // audits) and the frontend's live-elapsed counter would jump
+        // BACK in time once the SSE event lands, leaving the user
+        // staring at a counter that re-starts from 0 mid-run.
+        let mut total_tokens_so_far: u64 = 0;
+        // 0.8.3 (#311) — track resume + completion status. On every
+        // successful `step_done` we bump `last_successful_step` AND
+        // persist via `update_last_completed_step`. At end-of-stream
+        // we use these two locals to decide between:
+        //   - `complete()`         (all 10 steps success — happy path)
+        //   - `mark_interrupted()` (some step warning OR stream ended
+        //                          before step 10 — resumable later)
+        //   - `mark_failed()`      (catastrophic failure, e.g. start_agent
+        //                          returned Err for every step)
+        // The validation discussion is only created on the happy path.
+        // 0.8.3 (#311) — when resuming, prime `last_successful_step`
+        // with the caller-provided value so the "did we reach step 10?"
+        // check at end-of-stream considers the previously-done steps.
+        let mut last_successful_step: u32 = resume_from.min(total_steps as u32);
+        let mut any_step_warning: bool = false;
+        let start = serde_json::json!({
+            "total_steps": total_steps,
+            "started_at": audit_started_at.to_rfc3339(),
+        });
         yield Event::default().event("start").data(start.to_string());
 
         for (step_num, analysis_step) in steps.iter().enumerate() {
@@ -238,8 +373,31 @@ pub async fn full_audit(
             let step = step_num + 1;
             let file_label = if analysis_step.target_file == "REVIEW" { "Final review" } else { analysis_step.target_file };
 
+            // 0.8.3 (#311) — resume support. Skip steps the previous
+            // interrupted run already completed. We still advance the
+            // tracker's `step_index` so the UI bar shows correct
+            // progress, but we don't spawn an agent for these.
+            if (step as u32) <= resume_from {
+                if let Ok(mut t) = audit_tracker.lock() {
+                    t.advance_step(&project_id, step as u32, Some(file_label.to_string()));
+                }
+                // Surface to the frontend so it can render a "(skipped — already done)"
+                // marker on the step instead of pretending we re-did the work.
+                yield Event::default().event("step_skipped").data(
+                    serde_json::json!({
+                        "step": step, "total": total_steps, "file": file_label, "reason": "resume",
+                    }).to_string()
+                );
+                continue;
+            }
+
             if let Ok(mut t) = audit_tracker.lock() {
                 t.advance_step(&project_id, step as u32, Some(file_label.to_string()));
+                // 0.8.3 — clear per-step ephemeral chips so a stale
+                // "🔧 Read" or per-step token count from step N-1
+                // doesn't leak into the poll snapshot for step N.
+                // total_tokens_so_far stays intact (cumulative).
+                t.clear_step_chips(&project_id);
             }
 
             let step_start = serde_json::json!({
@@ -257,6 +415,41 @@ pub async fn full_audit(
             if let Some(ref notes) = briefing_notes {
                 full_prompt.push_str(&format!("\n\n## Project briefing (from the user)\n{}\n", notes));
             }
+            // 0.8.3 (#272) — pre-existing user docs are migrated to
+            // docs/legacy/ before the audit runs. Tell the agent to
+            // READ them FIRST as the primary source of truth when
+            // filling fresh Kronn templates. Only inject the block
+            // when docs/legacy/ actually exists (a fresh project or
+            // a re-audit on already-Kronn-managed docs has no
+            // legacy/ subdir).
+            let legacy_dir_exists = project_path.join("docs/legacy").is_dir();
+            if legacy_dir_exists {
+                full_prompt.push_str("\n\n## Legacy docs (PRIMARY SOURCE for this audit)\nThis project had a hand-curated `docs/` folder BEFORE Kronn was bootstrapped. We moved that content under `docs/legacy/` so the freshly-installed Kronn templates don't collide with it. **READ every `*.md` under `docs/legacy/` BEFORE filling the Kronn templates.** That content is the human-curated knowledge — the README and source code alone would lose 6 months of accumulated context.\n\nWhen filling each Kronn template, cite the legacy source inline (`see docs/legacy/installation.md`, `cf docs/legacy/architecture/overview.md`) so the user can verify the mapping and decide what to keep / discard after the audit. After the audit, the user reviews `docs/legacy/` and either deletes it or migrates remaining pieces into the Kronn structure manually.\n\n**Navigation requirement for `docs/AGENTS.md` ONLY (Step 1):** when filling `docs/AGENTS.md`, add ONE line in the appropriate section (or a small dedicated `## Legacy docs (pre-Kronn snapshot)` section if none fits) that points future agents to `docs/legacy/` — wording like `> Hand-curated docs from before Kronn — see [docs/legacy/README.md](legacy/README.md) for context preserved from the previous structure.` Without this pointer the folder is invisible to anyone re-reading `AGENTS.md` next week. Do NOT add this line to other Kronn templates (`glossary.md`, `repo-map.md`, etc.) — the entry point is enough.\n");
+            }
+            if let Some(ref block) = linked_repos_block {
+                full_prompt.push_str(&format!("\n\n{}\n", block));
+            }
+            if let Some(ref block) = kronn_projects_universe_block {
+                full_prompt.push_str(&format!("\n\n{}\n", block));
+            }
+
+            // 0.8.3 (#274) — per-step instrumentation. The audit UI
+            // shows a static "Step N/M — file.md" today; users have
+            // no signal for how long things take or what tokens are
+            // burning. We track:
+            //   - step_started_at: wall-clock start (Instant)
+            //   - step_tokens:    max(input+output) seen via
+            //     `parse_claude_stream_line` — Claude reports
+            //     cumulative usage per call, so `.max()` is correct
+            //     (NOT a sum, which would double-count).
+            //   - total_tokens_so_far: running counter across all
+            //     finished steps + the current one's last reading.
+            // Surfaced via the enriched `step_done` event below; the
+            // frontend then displays per-step + total tokens + a
+            // live elapsed counter (computed client-side from the
+            // step_started_at wallclock).
+            let step_started_at = std::time::Instant::now();
+            let mut step_tokens: u64 = 0;
 
             match runner::start_agent_with_config(runner::AgentStartConfig {
                 agent_type: &agent_type, project_path: &project_path_str, work_dir: None,
@@ -274,9 +467,124 @@ pub async fn full_audit(
                         }
                     }
 
-                    while let Some(line) = process.next_line().await {
+                    let is_stream_json = process.output_mode == runner::OutputMode::StreamJson;
+                    // 0.8.3 (#309) — Zombie audit detection.
+                    //
+                    // The naive `while let Some(line) = process.next_line().await`
+                    // blocks indefinitely when the child claude exits but its
+                    // stdout pipe is still held open by descendant processes
+                    // (npx-launched MCP servers — `sequential-thinking`,
+                    // `memory`, `context7` — inherit the stdout fd and don't
+                    // release it on parent exit). Result: the audit stays
+                    // "auditing step N/10" forever in the tracker, the user
+                    // can't proceed, and 100+k tokens are wasted on a run
+                    // that's actually dead.
+                    //
+                    // Fix: `tokio::select!` with a 60s idle timer. Every
+                    // 60s without a new line, we check `try_wait()` on the
+                    // child. If the child exited cleanly OR was reaped by
+                    // an external SIGKILL, we treat the stream as ended
+                    // and break out so the loop can emit `step_done` and
+                    // move on. 60s is generous enough to absorb long
+                    // thinking-only LLM phases without false positives.
+                    let mut stream_ended = false;
+                    while !stream_ended {
+                        let next = tokio::select! {
+                            maybe_line = process.next_line() => maybe_line,
+                            _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {
+                                // 60s idle → probe the child. If it's gone,
+                                // the open stdout pipe is held by a
+                                // descendant; we break with a warning.
+                                match process.child.try_wait() {
+                                    Ok(Some(status)) => {
+                                        tracing::warn!(
+                                            "Audit step {} ({}): child claude exited (status: {:?}) but stdout pipe still open after 60s idle — zombie audit detected, breaking SSE loop. Likely cause: descendant MCP processes holding the stdout fd.",
+                                            step, file_label, status
+                                        );
+                                        None
+                                    }
+                                    Ok(None) => continue,  // child still alive, keep waiting
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "Audit step {} ({}): try_wait failed ({}); treating as zombie",
+                                            step, file_label, e
+                                        );
+                                        None
+                                    }
+                                }
+                            }
+                        };
+                        let Some(line) = next else {
+                            stream_ended = true;
+                            continue;
+                        };
+                        // Forward the raw line verbatim — frontend
+                        // expects the legacy chunk shape for the
+                        // streaming text preview.
                         let chunk = serde_json::json!({ "text": line, "step": step });
                         yield Event::default().event("chunk").data(chunk.to_string());
+
+                        // 0.8.3 (#281) — typed-event surfacing for the
+                        // live UX. The raw `chunk` above is for the
+                        // legacy log preview / fallback; the typed
+                        // events below feed the new dedicated chips
+                        // (live tokens, current tool name, partial
+                        // text). Non-stream-json agents (Vibe direct,
+                        // Ollama) skip this branch — their chips stay
+                        // empty rather than show stale 0 values.
+                        if is_stream_json {
+                            match runner::parse_claude_stream_line(&line) {
+                                runner::StreamJsonEvent::Usage { input_tokens, output_tokens, .. } => {
+                                    step_tokens = step_tokens.max(input_tokens + output_tokens);
+                                    let cumulative = total_tokens_so_far.saturating_add(step_tokens);
+                                    // 0.8.3 — mirror the live value into
+                                    // the AuditTracker so the poll
+                                    // endpoint can re-seed the chips
+                                    // when SSE buffers / stalls (nginx
+                                    // buffering, agent thinking-only
+                                    // output, page re-mount).
+                                    if let Ok(mut t) = audit_tracker.lock() {
+                                        t.update_chips(&project_id, Some(step_tokens), Some(cumulative), None);
+                                    }
+                                    // Surface tokens-so-far LIVE so the
+                                    // frontend chip ticks during the
+                                    // step (was previously emitted only
+                                    // at `step_done`, leaving the user
+                                    // staring at a static counter).
+                                    yield Event::default().event("step_progress").data(
+                                        serde_json::json!({
+                                            "step": step,
+                                            "step_tokens": step_tokens,
+                                            "total_tokens_so_far": cumulative,
+                                        }).to_string()
+                                    );
+                                }
+                                runner::StreamJsonEvent::ToolStart(name) => {
+                                    // 0.8.3 — also persist the tool in
+                                    // the tracker so the poll re-seeds
+                                    // it after a buffer / re-mount.
+                                    if let Ok(mut t) = audit_tracker.lock() {
+                                        t.update_chips(&project_id, None, None, Some(name.clone()));
+                                    }
+                                    // The agent is about to call a
+                                    // tool (Read, Glob, Bash, MCP,
+                                    // …). Surface the name so the UI
+                                    // shows "🔧 Reading docs/AGENTS.md"
+                                    // — way more informative than a
+                                    // spinning loader.
+                                    yield Event::default().event("tool_call").data(
+                                        serde_json::json!({
+                                            "step": step,
+                                            "tool": name,
+                                        }).to_string()
+                                    );
+                                }
+                                runner::StreamJsonEvent::Text(_)
+                                | runner::StreamJsonEvent::ToolInputDelta(_)
+                                | runner::StreamJsonEvent::ToolEnd
+                                | runner::StreamJsonEvent::Skip => {}
+                            }
+                        }
                     }
                     let status = process.child.wait().await;
                     process.fix_ownership();
@@ -294,15 +602,82 @@ pub async fn full_audit(
                         return;
                     }
 
-                    let success = status.map(|s| s.success()).unwrap_or(false);
+                    let cli_success = status.map(|s| s.success()).unwrap_or(false);
+                    let duration_ms = step_started_at.elapsed().as_millis() as u64;
+                    total_tokens_so_far = total_tokens_so_far.saturating_add(step_tokens);
+
+                    // 0.8.3 — Root-cause guard for the empty-tech-debt
+                    // bug on DOCROMS_WEB. The CLI exited 0 (cli_success)
+                    // but on a step that targets a real file we ALSO
+                    // need to confirm the file was actually written and
+                    // looks plausible. Without this, an agent that
+                    // crashes mid-Write (or that writes the empty
+                    // string in a parse-error fallback) produces a
+                    // 0-byte file silently — users only discover the
+                    // hole later when validating findings, or never.
+                    //
+                    // If suspicious: emit `step_warning` (frontend
+                    // surfaces a banner), auto-repair from the template
+                    // so the user can re-run the step OR resume from a
+                    // clean baseline, and report `success: false` in
+                    // step_done so the overall audit summary is honest.
+                    let (success, warning) = crate::api::audit::validation::validate_and_repair_step_output(
+                        cli_success,
+                        &project_path,
+                        analysis_step.target_file,
+                    );
+
+                    if let Some(w) = &warning {
+                        tracing::warn!(
+                            "Audit step {} ({}) produced suspicious output: {}",
+                            step, file_label, w.reason
+                        );
+                        yield Event::default().event("step_warning").data(
+                            serde_json::json!({
+                                "step": step,
+                                "file": file_label,
+                                "reason": w.reason,
+                                "repaired_from_template": w.repaired,
+                            }).to_string()
+                        );
+                    }
 
                     let step_done = serde_json::json!({
-                        "step": step, "success": success, "file": file_label
+                        "step": step,
+                        "success": success,
+                        "file": file_label,
+                        "tokens": step_tokens,
+                        "duration_ms": duration_ms,
+                        "total_tokens": total_tokens_so_far,
                     });
                     yield Event::default().event("step_done").data(step_done.to_string());
+
+                    // 0.8.3 (#311) — track per-step progress in audit_runs
+                    // so an interrupted SSE stream can be resumed at
+                    // `last_completed_step + 1` instead of restarting
+                    // from step 1. We only update on `success=true`
+                    // (no warning, no cli_failure) so a half-baked step
+                    // doesn't get treated as done on resume.
+                    if success {
+                        last_successful_step = step as u32;
+                        let run_id = audit_run_id.clone();
+                        let step_n = step as u32;
+                        let _ = db.with_conn(move |conn| {
+                            crate::db::audit_runs::update_last_completed_step(conn, &run_id, step_n)
+                        }).await;
+                    } else {
+                        // Track that something went wrong so the
+                        // end-of-stream branch knows to mark the run
+                        // as Interrupted rather than Completed and
+                        // skip the validation discussion creation
+                        // (cf F8c #312 — no validation disc unless all
+                        // 10 steps reported success).
+                        any_step_warning = true;
+                    }
                 }
                 Err(e) => {
                     tracing::error!("Audit step {} failed to start: {}", step, e);
+                    any_step_warning = true;
                     let err = serde_json::json!({
                         "error": format!("Step {} ({}): {}", step, file_label, e),
                         "step": step
@@ -401,7 +776,32 @@ pub async fn full_audit(
         // discussion: they emit findings into their own index file and
         // the user reviews them directly. The 4-phase validation flow
         // only makes sense after a complete docs/ regeneration.
-        let disc_id: Option<String> = if is_full {
+        //
+        // 0.8.3 (#312 F8c) — additional gate: the validation disc is
+        // ONLY created when every step reported success AND we made
+        // it through all 10 steps. Pre-fix, a rate-limit at step 5
+        // produced a validation disc anyway (because the SSE handler
+        // reached this code regardless of step outcomes), and the
+        // ProjectCard then said "Validation en cours" on an audit
+        // that hadn't actually produced anything past step 5.
+        let audit_fully_succeeded = last_successful_step == total_steps as u32
+            && !any_step_warning;
+        if !audit_fully_succeeded {
+            tracing::info!(
+                "Audit run {} on project {} interrupted at step {}/{} (any_step_warning={}). Skipping validation discussion creation.",
+                audit_run_id, project_id, last_successful_step, total_steps, any_step_warning
+            );
+            // Surface the interrupted state to the frontend so it can
+            // show "Reprendre Step N/10" instead of "Validation en cours".
+            yield Event::default().event("audit_interrupted").data(
+                serde_json::json!({
+                    "last_completed_step": last_successful_step,
+                    "total_steps": total_steps as u32,
+                    "had_warnings": any_step_warning,
+                }).to_string()
+            );
+        }
+        let disc_id: Option<String> = if is_full && audit_fully_succeeded {
         if let Ok(mut t) = audit_tracker.lock() { t.mark_validating(&project_id); }
 
         let pp = project_path_str.clone();
@@ -549,14 +949,28 @@ pub async fn full_audit(
         .await
         .map(|(counts, resolved, new, carried, score, recs_json)| {
             let run_id = run_id_for_complete.clone();
+            let succeeded = audit_fully_succeeded;
+            let last_step = last_successful_step;
             tokio::spawn(async move {
                 let _ = db_for_complete.with_conn(move |conn| {
-                    crate::db::audit_runs::complete(
-                        conn, &run_id, ended_at, "Completed",
-                        counts.critical, counts.high, counts.medium, counts.low,
-                        resolved, new, carried,
-                        score, None, recs_json.as_deref(),
-                    )
+                    if succeeded {
+                        crate::db::audit_runs::complete(
+                            conn, &run_id, ended_at, "Completed",
+                            counts.critical, counts.high, counts.medium, counts.low,
+                            resolved, new, carried,
+                            score, None, recs_json.as_deref(),
+                        )
+                    } else {
+                        // 0.8.3 (#311) — mark as Interrupted (not Completed,
+                        // not Failed): the resume mechanism will pick this
+                        // row up via `latest_resumable` and the frontend
+                        // shows "Reprendre Step N/10".
+                        crate::db::audit_runs::mark_interrupted(
+                            conn,
+                            &run_id,
+                            &format!("interrupted after step {last_step}/10 (warning or stream-end)"),
+                        )
+                    }
                 }).await;
             });
         });

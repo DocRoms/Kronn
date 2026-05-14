@@ -1,9 +1,10 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { projects as projectsApi } from '../lib/api';
 import type { AiFileNode } from '../types/generated';
 import { useT } from '../lib/I18nContext';
+import { MermaidDiagram } from './MermaidDiagram';
 import './AiDocViewer.css';
 import {
   ChevronRight, ChevronDown, ChevronUp,
@@ -554,34 +555,56 @@ function flattenFilePaths(nodes: AiFileNode[], out: string[]) {
 
 // ─── Markdown ────────────────────────────────────────────────────────────────
 
+// HOISTED at module level (NOT inline inside the component) so the
+// reference is stable across renders. Critical for performance + state
+// retention: when a parent re-renders (e.g. Dashboard's 3s
+// `auditStatusAll` polling), passing a fresh `components` object would
+// make ReactMarkdown unmount + remount every child, which resets the
+// MermaidDiagram's `fullscreen` state and makes the overlay disappear
+// every 3 seconds. 0.8.3 user bug report.
+const DOC_MD_COMPONENTS = {
+  p: ({ children }: { children?: ReactNode }) => <p>{children}</p>,
+  h1: ({ children }: { children?: ReactNode }) => <h1>{children}</h1>,
+  h2: ({ children }: { children?: ReactNode }) => <h2>{children}</h2>,
+  h3: ({ children }: { children?: ReactNode }) => <h3>{children}</h3>,
+  ul: ({ children }: { children?: ReactNode }) => <ul>{children}</ul>,
+  ol: ({ children }: { children?: ReactNode }) => <ol>{children}</ol>,
+  li: ({ children }: { children?: ReactNode }) => <li>{children}</li>,
+  code: ({ className, children }: { className?: string; children?: ReactNode }) => {
+    const isBlock = className?.includes('language-');
+    return isBlock
+      ? <code className="aidoc-md-pre-code">{children}</code>
+      : <code>{children}</code>;
+  },
+  pre: ({ children }: { children?: ReactNode }) => {
+    // Intercept ```mermaid blocks and render them visually instead of
+    // dumping the source. Audit Step 6 ships diagrams in
+    // docs/architecture/overview.md and docs/architecture/sequences/*.md.
+    const childEl = Array.isArray(children) ? children[0] : children;
+    const codeEl = childEl as { props?: { className?: string; children?: ReactNode } } | undefined;
+    const className = codeEl?.props?.className ?? '';
+    if (className.includes('language-mermaid')) {
+      const raw = codeEl?.props?.children;
+      const source = Array.isArray(raw) ? raw.join('') : String(raw ?? '');
+      return <MermaidDiagram source={source.trim()} />;
+    }
+    return <pre>{children}</pre>;
+  },
+  table: ({ children }: { children?: ReactNode }) => <table>{children}</table>,
+  th: ({ children }: { children?: ReactNode }) => <th>{children}</th>,
+  td: ({ children }: { children?: ReactNode }) => <td>{children}</td>,
+  blockquote: ({ children }: { children?: ReactNode }) => <blockquote>{children}</blockquote>,
+  hr: () => <hr />,
+  a: ({ href, children }: { href?: string; children?: ReactNode }) =>
+    <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,
+  strong: ({ children }: { children?: ReactNode }) => <strong>{children}</strong>,
+};
+
+const DOC_MD_REMARK_PLUGINS = [remarkGfm];
+
 const DocMarkdown = ({ content }: { content: string }) => (
   <div className="aidoc-md">
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      components={{
-        p: ({ children }) => <p>{children}</p>,
-        h1: ({ children }) => <h1>{children}</h1>,
-        h2: ({ children }) => <h2>{children}</h2>,
-        h3: ({ children }) => <h3>{children}</h3>,
-        ul: ({ children }) => <ul>{children}</ul>,
-        ol: ({ children }) => <ol>{children}</ol>,
-        li: ({ children }) => <li>{children}</li>,
-        code: ({ className, children }) => {
-          const isBlock = className?.includes('language-');
-          return isBlock
-            ? <code className="aidoc-md-pre-code">{children}</code>
-            : <code>{children}</code>;
-        },
-        pre: ({ children }) => <pre>{children}</pre>,
-        table: ({ children }) => <table>{children}</table>,
-        th: ({ children }) => <th>{children}</th>,
-        td: ({ children }) => <td>{children}</td>,
-        blockquote: ({ children }) => <blockquote>{children}</blockquote>,
-        hr: () => <hr />,
-        a: ({ href, children }) => <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,
-        strong: ({ children }) => <strong>{children}</strong>,
-      }}
-    >
+    <ReactMarkdown remarkPlugins={DOC_MD_REMARK_PLUGINS} components={DOC_MD_COMPONENTS}>
       {content}
     </ReactMarkdown>
   </div>

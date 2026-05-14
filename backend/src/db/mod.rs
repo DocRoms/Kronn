@@ -1,3 +1,4 @@
+pub mod agent_decisions;
 pub mod audit_runs;
 pub mod contacts;
 pub mod discussions;

@@ -250,6 +250,7 @@ pub async fn create(
         default_skill_ids: vec![],
         default_profile_id: None,
         briefing_notes: None,
+        linked_repos: vec![],
         created_at: now,
         updated_at: now,
     };
@@ -379,6 +380,7 @@ pub async fn add_folder(
         default_skill_ids: vec![],
         default_profile_id: None,
         briefing_notes: None,
+        linked_repos: vec![],
         created_at: now,
         updated_at: now,
     };
@@ -497,6 +499,62 @@ pub async fn set_default_skills(
             }).await;
             Json(ApiResponse::ok(true))
         }
+        Ok(false) => Json(ApiResponse::err("Project not found")),
+        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
+/// PUT /api/projects/:id/linked-repos — 0.8.3.
+/// Replaces the project's `linked_repos` list with the body payload.
+/// Validates basic shape (non-empty `name` + `location`, recognized
+/// `kind` value). The frontend Settings UI on ProjectCard sends the
+/// full list on every edit; we don't expose partial CRUD endpoints
+/// for individual links because the list is small (rarely > 5 items)
+/// and atomic-replace is simpler than per-row reconciliation.
+pub async fn set_linked_repos(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(payload): Json<Vec<LinkedRepo>>,
+) -> Json<ApiResponse<bool>> {
+    // Allowed kinds — kept loose with a fallback to "other" so a
+    // future kind doesn't break existing rows. The frontend picker
+    // surfaces these as the canonical set.
+    const ALLOWED_KINDS: &[&str] = &["api", "iac", "design", "shared-lib", "docs", "other"];
+
+    for (idx, repo) in payload.iter().enumerate() {
+        if repo.name.trim().is_empty() {
+            return Json(ApiResponse::err(format!(
+                "linked_repos[{idx}] requires a non-empty `name`"
+            )));
+        }
+        if repo.location.trim().is_empty() {
+            return Json(ApiResponse::err(format!(
+                "linked_repos[{idx}] requires a non-empty `location`"
+            )));
+        }
+        if !ALLOWED_KINDS.contains(&repo.kind.as_str()) {
+            return Json(ApiResponse::err(format!(
+                "linked_repos[{idx}] has unknown kind `{}` — expected one of: {}",
+                repo.kind,
+                ALLOWED_KINDS.join(", ")
+            )));
+        }
+    }
+
+    // Cap the list at 20 to keep the prompt prelude bounded.
+    if payload.len() > 20 {
+        return Json(ApiResponse::err(format!(
+            "Too many linked repos ({} ; max 20). A project usually needs 1-5 companions; if you need more, consider grouping them.",
+            payload.len()
+        )));
+    }
+
+    let pid = id.clone();
+    let list = payload.clone();
+    match state.db.with_conn(move |conn| {
+        crate::db::projects::update_project_linked_repos(conn, &pid, &list)
+    }).await {
+        Ok(true) => Json(ApiResponse::ok(true)),
         Ok(false) => Json(ApiResponse::err("Project not found")),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }

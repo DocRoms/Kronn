@@ -614,3 +614,62 @@ fn workflow_step_api_call_roundtrip() {
         other => panic!("expected Auto, got {other:?}"),
     }
 }
+
+// ─── 0.8.3 — TypedSchema.on_invalid (Feasibility-Gated triage) ──────────
+
+#[test]
+fn typed_schema_defaults_on_invalid_to_continue() {
+    // Pre-0.8.3 workflows in DB don't carry `on_invalid`. They MUST
+    // parse with `Continue` (the 0.7.0 behavior) — any other default
+    // would silently fail every existing TypedSchema workflow on
+    // upgrade.
+    let json = serde_json::json!({
+        "type": "TypedSchema",
+        "schema": { "type": "object" }
+    });
+    let parsed: StepOutputFormat = serde_json::from_value(json).unwrap();
+    match parsed {
+        StepOutputFormat::TypedSchema { on_invalid, .. } => {
+            assert_eq!(on_invalid, OnInvalid::Continue);
+        }
+        other => panic!("expected TypedSchema, got {other:?}"),
+    }
+}
+
+#[test]
+fn typed_schema_round_trips_on_invalid_fail() {
+    let original = StepOutputFormat::TypedSchema {
+        schema: serde_json::json!({ "type": "object" }),
+        on_invalid: OnInvalid::Fail,
+    };
+    let json = serde_json::to_string(&original).unwrap();
+    assert!(
+        json.contains("\"on_invalid\":\"Fail\""),
+        "expected on_invalid=Fail in serialized output, got: {json}"
+    );
+    let parsed: StepOutputFormat = serde_json::from_str(&json).unwrap();
+    match parsed {
+        StepOutputFormat::TypedSchema { on_invalid, .. } => {
+            assert_eq!(on_invalid, OnInvalid::Fail);
+        }
+        other => panic!("expected TypedSchema, got {other:?}"),
+    }
+}
+
+#[test]
+fn typed_schema_round_trips_explicit_continue() {
+    // Explicit `Continue` should round-trip too — frontend may emit it
+    // for clarity even though it's the default.
+    let original = StepOutputFormat::TypedSchema {
+        schema: serde_json::json!({ "type": "string" }),
+        on_invalid: OnInvalid::Continue,
+    };
+    let json = serde_json::to_string(&original).unwrap();
+    let parsed: StepOutputFormat = serde_json::from_str(&json).unwrap();
+    match parsed {
+        StepOutputFormat::TypedSchema { on_invalid, .. } => {
+            assert_eq!(on_invalid, OnInvalid::Continue);
+        }
+        other => panic!("expected TypedSchema, got {other:?}"),
+    }
+}

@@ -7,7 +7,7 @@ import { gravatarUrl } from '../lib/gravatar';
 import { formatRelativeTime } from '../lib/relativeTime';
 import type { ToastFn } from '../hooks/useToast';
 import {
-  Folder, ChevronLeft, ChevronRight, Plus, X, MessageSquare, Archive, Search, Users2, Trash2, Star,
+  Folder, ChevronLeft, ChevronRight, Plus, X, MessageSquare, Archive, Search, Users2, Trash2, Star, CheckCheck,
 } from 'lucide-react';
 
 export interface DiscussionSidebarProps {
@@ -63,6 +63,12 @@ export interface DiscussionSidebarProps {
   onToggleGroup: (key: string) => void;
   /** Desktop only: collapse sidebar into a thin rail */
   onCollapse?: () => void;
+  /** 0.8.3 (#277) — bulk-seed every discussion's last-seen counter to
+   *  its current `message_count`. Wired from Dashboard via
+   *  DiscussionsPage. Surfaces as a "Mark all as read" button in the
+   *  sidebar header, gated on a non-zero total unread count so it
+   *  doesn't bait the user when nothing's unread. */
+  onMarkAllRead?: () => void;
 }
 
 /** Default cap on loose discs per project group in the sidebar. The full
@@ -112,6 +118,7 @@ export function DiscussionSidebar({
   collapsedGroups,
   onToggleGroup,
   onCollapse,
+  onMarkAllRead,
 }: DiscussionSidebarProps) {
   // ─── Sidebar-only state ───────────────────────────────────────────────
   // Search input — kept fresh for the controlled input. The actual filter
@@ -158,6 +165,23 @@ export function DiscussionSidebar({
     }
     return { activeDiscByProject: activeMap, archivedDiscussions: archived };
   }, [discussions]);
+
+  // 0.8.3 (#277) — total unseen count across ALL discussions
+  // (including archived + batch children) so we know whether to
+  // show the "Mark all as read" button. Mirrors `unseenByGroup`'s
+  // math except it doesn't exclude archived nor the active disc —
+  // the user clicked the button to clear ALL backlog, so we include
+  // both. Cheap O(N) reduce, runs alongside the existing one.
+  const totalUnseenAll = useMemo(() => {
+    let sum = 0;
+    for (const disc of discussions) {
+      const total = Math.max(disc.messages.length, disc.message_count ?? 0);
+      const seen = lastSeenMsgCount[disc.id] ?? 0;
+      const unseen = total - seen;
+      if (unseen > 0) sum += unseen;
+    }
+    return sum;
+  }, [discussions, lastSeenMsgCount]);
 
   // Unseen count PER GROUP KEY — used to badge collapsed group headers so
   // the user can tell at a glance which group hides unread conversations.
@@ -221,6 +245,23 @@ export function DiscussionSidebar({
       <div className="disc-sidebar-header">
         <span className="disc-sidebar-header-title">Discussions</span>
         <div className="disc-sidebar-header-actions">
+          {/* 0.8.3 (#277) — "Mark all as read" button. Only rendered
+              when (a) the parent wired the handler AND (b) there's at
+              least one unread message anywhere (archived + batch
+              children + active included). Without (b) the button is
+              just clutter on a clean inbox; without (a) it'd be a
+              dead button. Title carries the count so users know what
+              they'd clear before clicking. */}
+          {onMarkAllRead && totalUnseenAll > 0 && (
+            <button
+              className="disc-icon-btn"
+              onClick={onMarkAllRead}
+              aria-label={t('disc.markAllRead')}
+              title={t('disc.markAllReadTooltip', totalUnseenAll)}
+            >
+              <CheckCheck size={14} />
+            </button>
+          )}
           <button className="disc-scan-btn" data-tour-id="new-disc-btn" onClick={onNewDiscussion}>
             <Plus size={12} /> {t('disc.new')}
           </button>

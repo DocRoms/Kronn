@@ -686,23 +686,513 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             api_spec: None,
         },
         // ── Email ─────────────────────────────────────────────────────────
+        // Resend — hybrid plugin (MCP for agents in Quick Prompts +
+        // REST API for zero-token ApiCall steps). Same pattern as
+        // `mcp-github` / `mcp-atlassian`: one entry, one credential
+        // (`RESEND_API_KEY`), two surfaces. Pick MCP for exploratory
+        // chat; pick API for deterministic CSM/lifecycle pipelines
+        // where the send step must stay at ~0 tokens.
         McpDefinition {
             id: "mcp-resend".into(),
             name: "Resend".into(),
-            description: "Send transactional emails — official Resend MCP server".into(),
+            description: "Transactional + lifecycle email — MCP for agents (Quick Prompts) + REST API for désagentified ApiCall steps (CSM email pipelines at ~0 tokens/send)".into(),
             transport: McpTransport::Stdio {
                 command: "npx".into(),
                 args: vec!["-y".into(), "resend-mcp".into()],
             },
             env_keys: vec!["RESEND_API_KEY".into()],
-            tags: vec!["email".into(), "mailing".into(), "communication".into()],
+            tags: vec!["email".into(), "mailing".into(), "communication".into(), "transactional".into(), "api".into(), "csm".into()],
             token_url: Some("https://resend.com/api-keys".into()),
-            token_help: Some("API key from Resend dashboard".into()),
+            token_help: Some("API key from Resend dashboard (https://resend.com/api-keys). Prefix `re_`. The same token powers both the MCP transport (used by agents in Quick Prompts) and the REST API (used by ApiCall workflow steps) — configure once. ⚠ Before sending, register and verify the sending domain at https://resend.com/domains — the `from` address MUST be on a verified domain (or use `onboarding@resend.dev` for tests).".into()),
             publisher: "Resend".into(),
             official: true,
             alt_packages: vec![],
-            default_context: None,
-            api_spec: None,
+            default_context: Some(r#"# Resend — Usage Context
+
+> Instructions for agents calling the **Resend REST API** via curl.
+
+Resend is a developer-first email API. Two send patterns matter:
+single (`POST /emails`) and batch (`POST /emails/batch`, up to 100).
+For lifecycle/CSM flows, batch + the `Idempotency-Key` header is the
+right combo: cheap and replay-safe.
+
+## 1. Auth — Bearer token (already injected by Kronn)
+
+```
+Authorization: Bearer re_xxxxxxxx
+Content-Type: application/json
+```
+
+Do NOT suggest the key in `headers` — Kronn injects it. Just hit the
+endpoint with the JSON body.
+
+## 2. Send one email — `POST /emails`
+
+```bash
+curl -X POST "https://api.resend.com/emails" \
+  -H "Authorization: Bearer $RESEND_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: csm-followup-{user_id}-{date}" \
+  -d '{
+    "from": "Acme <hello@acme.dev>",
+    "to": ["user@example.com"],
+    "subject": "Quick check-in",
+    "html": "<p>Hi there — saw you logged in 3 times last week…</p>",
+    "tags": [
+      {"name": "category", "value": "csm_followup"},
+      {"name": "user_id", "value": "{user_id}"}
+    ]
+  }'
+```
+
+Response: `{"id": "re_xxx"}` — store it for tracking + webhook
+correlation.
+
+### Required fields
+- `from` — `"Display Name <addr@verified-domain.tld>"` OR `"addr@…"`.
+  **The domain MUST be verified** in `https://resend.com/domains`,
+  otherwise you get a 422 `"The from address is not valid"` even when
+  the address itself is well-formed. For tests, use the open sandbox
+  domain `onboarding@resend.dev`.
+- `to` — array of strings (max 50 in a single request).
+- `subject` — string.
+- Either `html` **or** `text` (one of the two required; both allowed).
+
+### Optional
+- `cc`, `bcc` — arrays of strings.
+- `reply_to` — STRING (singular), not array.
+- `headers` — `{"X-Entity-Ref-ID": "…", "List-Unsubscribe": "<…>", "X-Tag": "…"}`.
+  Custom headers passthrough. Useful for List-Unsubscribe on marketing.
+- `attachments` — `[{filename, content (base64), content_type?}]`. Max
+  total payload 40MB. **Not supported in batch.**
+- `scheduled_at` — ISO 8601 (`"2026-05-20T14:00:00Z"`) or natural
+  language (`"in 1 hour"`). **Not supported in batch.**
+- `tags` — `[{name, value}]` for analytics. Keys/values ASCII letters,
+  digits, `_`, `-` (no spaces, no `@`, no `.`). **Hard rule** — Resend
+  silently drops a tag whose key has a space.
+
+## 3. Batch send — `POST /emails/batch`
+
+Body is a JSON **array** (not an envelope object). One Resend call,
+up to 100 messages, charged as 100 sends. Perfect for CSM fan-out.
+
+```bash
+curl -X POST "https://api.resend.com/emails/batch" \
+  -H "Authorization: Bearer $RESEND_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '[
+    {"from":"Acme <hello@acme.dev>","to":["a@x.com"],"subject":"…","html":"…"},
+    {"from":"Acme <hello@acme.dev>","to":["b@x.com"],"subject":"…","html":"…"}
+  ]'
+```
+
+Response: `{"data":[{"id":"…"},{"id":"…"}, …]}` — index-aligned with
+the request.
+
+**Restrictions vs single send:**
+- No `attachments`.
+- No `scheduled_at`.
+- ALL messages in the array must validate; a single bad `from` rejects
+  the whole batch with `422`. Validate the payload locally first.
+
+## 4. Idempotency — `Idempotency-Key` header
+
+Pass `Idempotency-Key: <stable-string>` on `POST /emails` and
+`POST /emails/batch`. Resend returns the original response for repeated
+calls within 24h. **Always set it on CSM workflows** — a retry must
+not double-send.
+
+Recommended shape: `{workflow_run_id}-{user_id}` so re-runs of the same
+workflow on the same user are idempotent but DIFFERENT users still
+go through.
+
+## 5. Retrieve email status — `GET /emails/{id}`
+
+```bash
+curl "https://api.resend.com/emails/re_xxx" \
+  -H "Authorization: Bearer $RESEND_API_KEY"
+```
+
+Returns `last_event`: `delivered | bounced | complained | opened |
+clicked | sent | …` + timestamps. Useful in a Notify/Gate followup
+step to verify delivery before marking the user as "contacted" in your
+DB. **Note**: opens/clicks require tracking pixels — disabled by default
+on some Resend plans.
+
+## 6. Contacts / Audiences / Broadcasts (lifecycle / marketing)
+
+For CSM lists rather than 1-to-1 transactional:
+
+- `GET  /audiences` — list audiences (your "lists").
+- `POST /audiences` — `{name}` — create an audience.
+- `POST /audiences/{audience_id}/contacts` — `{email, first_name?, last_name?, unsubscribed?}` — add or update a contact (idempotent on email).
+- `GET  /audiences/{audience_id}/contacts` — paginated.
+- `DELETE /audiences/{audience_id}/contacts/{id_or_email}` — remove contact.
+- `POST /broadcasts` — `{audience_id, from, subject, html, name?, reply_to?, preview_text?}` — DRAFT a broadcast (not sent yet).
+- `POST /broadcasts/{broadcast_id}/send` — `{scheduled_at?}` — fire it.
+- `GET  /broadcasts/{id}` — status (`draft | queued | sending | sent`).
+
+Pattern for a CSM nudge campaign:
+1. `POST /audiences/{id}/contacts` to push the at-risk users.
+2. `POST /broadcasts` to draft the email (templated body).
+3. **Human Gate** in Kronn — operator reviews the audience + preview.
+4. `POST /broadcasts/{id}/send` once approved.
+
+## 7. Sanity check — `GET /domains`
+
+```bash
+curl "https://api.resend.com/domains" \
+  -H "Authorization: Bearer $RESEND_API_KEY"
+```
+
+Returns the list of verified domains. `200` + non-empty `data` → auth
+works AND at least one sending domain is ready. `401` → wrong key.
+Cheaper than triggering a send to test credentials.
+
+## 8. Error code matrix (the ones you'll actually see)
+
+- `401 unauthorized` — `RESEND_API_KEY` revoked or wrong (does NOT
+  start with `re_`).
+- `403 forbidden` — domain blocked (compliance) or rate-limit ceiling
+  per account.
+- `422 validation_error` — most common in practice:
+  - `"The from address is not valid"` → domain not in `/domains` OR
+    not yet verified (DNS records pending). Check there first.
+  - `"to must contain valid email addresses"` → typo, or testing with
+    `example.com` (Resend rejects RFC-2606 reserved TLDs in prod).
+  - `"missing_required_field"` → one of `from`, `to`, `subject`,
+    `html`/`text`.
+- `429 rate_limit_exceeded` — default 2 req/s, 10 req/s on Pro.
+  Response includes `Retry-After` seconds. Solution: switch to
+  `/emails/batch` (1 call = up to 100 messages, single rate-limit hit).
+- `400 invalid_idempotency_key` — must be ≤ 256 chars, ASCII only.
+
+## 9. Common gotchas (sorted by how much time they cost)
+
+- **Domain not verified** — you'll waste an hour debugging "valid"
+  addresses that 422. Always verify the domain in the Resend dashboard
+  before launching a CSM flow. `onboarding@resend.dev` is fine for
+  dev/staging but rate-limited.
+- **`to` is an array, even for one recipient** — `"to": "a@x.com"`
+  silently 422s.
+- **`reply_to` is a STRING, not an array.** Counter-intuitive given
+  `to/cc/bcc` are arrays.
+- **Tags with spaces in `name` are dropped silently.** No error, no tag.
+  Use `csm_followup`, not `csm followup`.
+- **No `scheduled_at` in batch** — split sends into single calls if you
+  need scheduling per row.
+- **Webhooks vs polling** — for high-volume CSM, set up webhooks at
+  `https://resend.com/webhooks` rather than polling `GET /emails/{id}`
+  for every send.
+
+Official docs: https://resend.com/docs/api-reference/introduction
+"#.into()),
+            api_spec: Some(ApiSpec {
+                base_url: "https://api.resend.com".into(),
+                auth: ApiAuthKind::Bearer {
+                    env_key: "RESEND_API_KEY".into(),
+                },
+                docs_url: Some("https://resend.com/docs/api-reference/introduction".into()),
+                config_keys: vec![],
+                endpoints: vec![
+                    // ── Sanity check ────────────────────────────────────────
+                    ApiEndpoint { path: "/domains".into(),                              method: "GET".into(),    description: "[SANITY] List verified sending domains. Use this as the first call after wiring the key — 200 + non-empty data = auth OK + at least one usable `from` domain. 401 = wrong/revoked key.".into() },
+                    // ── Send ────────────────────────────────────────────────
+                    ApiEndpoint { path: "/emails".into(),                                method: "POST".into(),   description: "[SEND · single] Send one transactional email. Body: `{from, to[], subject, html|text, cc?, bcc?, reply_to?, tags?, headers?, attachments?, scheduled_at?}`. ALWAYS pass `Idempotency-Key` header for CSM/replay-safe flows. `from` MUST be on a verified domain (see /domains).".into() },
+                    ApiEndpoint { path: "/emails/batch".into(),                          method: "POST".into(),   description: "[SEND · batch ≤100] Body is a JSON ARRAY (not an envelope). One call = up to 100 messages, billed accordingly, 1 rate-limit hit. NO `attachments`, NO `scheduled_at`. One bad message = whole batch 422 → validate locally first. Returns `{data: [{id}, …]}` index-aligned.".into() },
+                    ApiEndpoint { path: "/emails/{email_id}".into(),                     method: "GET".into(),    description: "[SEND · status] Retrieve an email by id. Returns `last_event` (`delivered|bounced|complained|opened|clicked|sent`) + timestamps. Replace `{email_id}` with the id returned by /emails.".into() },
+                    ApiEndpoint { path: "/emails/{email_id}".into(),                     method: "PATCH".into(),  description: "[SEND · reschedule] Reschedule a scheduled-but-not-yet-sent email. Body: `{scheduled_at: \"ISO8601\"}`.".into() },
+                    ApiEndpoint { path: "/emails/{email_id}".into(),                     method: "DELETE".into(), description: "[SEND · cancel] Cancel a scheduled email that hasn't fired yet. Returns 200 if cancelled, 422 if already sent.".into() },
+                    // ── Audiences (lifecycle / marketing lists) ─────────────
+                    ApiEndpoint { path: "/audiences".into(),                             method: "GET".into(),    description: "[AUDIENCES] List audiences (Resend's term for contact lists). Paginated.".into() },
+                    ApiEndpoint { path: "/audiences".into(),                             method: "POST".into(),   description: "[AUDIENCES] Create an audience. Body: `{name}`. Returns `{id, name}`.".into() },
+                    ApiEndpoint { path: "/audiences/{audience_id}".into(),                method: "GET".into(),    description: "[AUDIENCES] Single audience metadata.".into() },
+                    ApiEndpoint { path: "/audiences/{audience_id}".into(),                method: "DELETE".into(), description: "[AUDIENCES] Delete an audience. Contacts inside are also removed.".into() },
+                    // ── Contacts (members of audiences) ─────────────────────
+                    ApiEndpoint { path: "/audiences/{audience_id}/contacts".into(),       method: "POST".into(),   description: "[CONTACTS] Add or upsert a contact in an audience. Body: `{email, first_name?, last_name?, unsubscribed?}`. Idempotent on `email`. Useful in a CSM batch: push the at-risk user list, then create a broadcast.".into() },
+                    ApiEndpoint { path: "/audiences/{audience_id}/contacts".into(),       method: "GET".into(),    description: "[CONTACTS] List contacts in an audience. Paginated.".into() },
+                    ApiEndpoint { path: "/audiences/{audience_id}/contacts/{id}".into(),  method: "GET".into(),    description: "[CONTACTS] Single contact by id or email.".into() },
+                    ApiEndpoint { path: "/audiences/{audience_id}/contacts/{id}".into(),  method: "PATCH".into(),  description: "[CONTACTS] Update a contact (e.g. `unsubscribed: true` to suppress).".into() },
+                    ApiEndpoint { path: "/audiences/{audience_id}/contacts/{id}".into(),  method: "DELETE".into(), description: "[CONTACTS] Remove a contact from the audience.".into() },
+                    // ── Broadcasts (audience-wide sends) ────────────────────
+                    ApiEndpoint { path: "/broadcasts".into(),                            method: "GET".into(),    description: "[BROADCASTS] List broadcasts (drafts + sent).".into() },
+                    ApiEndpoint { path: "/broadcasts".into(),                            method: "POST".into(),   description: "[BROADCASTS · draft] Create a broadcast (NOT yet sent). Body: `{audience_id, from, subject, html|text, name?, reply_to?, preview_text?}`. Use this then human-Gate in Kronn before firing.".into() },
+                    ApiEndpoint { path: "/broadcasts/{broadcast_id}".into(),              method: "GET".into(),    description: "[BROADCASTS] Status: `draft|queued|sending|sent`.".into() },
+                    ApiEndpoint { path: "/broadcasts/{broadcast_id}/send".into(),         method: "POST".into(),   description: "[BROADCASTS · fire] Send the broadcast NOW or schedule it. Body: `{scheduled_at?: \"ISO8601\"}`. Returns 200 + status `queued`.".into() },
+                    ApiEndpoint { path: "/broadcasts/{broadcast_id}".into(),              method: "DELETE".into(), description: "[BROADCASTS] Delete a draft broadcast. Already-sent broadcasts cannot be deleted.".into() },
+                    // ── API keys (read-only — managing keys via API is rare) ──
+                    ApiEndpoint { path: "/api-keys".into(),                              method: "GET".into(),    description: "[KEYS · introspection] List API keys (metadata only — secrets never returned).".into() },
+                ],
+            }),
+        },
+        // Mailjet — EU-friendly transactional + marketing email API. The
+        // counterweight to Resend for users with RGPD / data-residency
+        // constraints (media, banking, public sector). Auth = HTTP Basic
+        // `api_key:api_secret`, the wire format Mailjet has shipped since
+        // v3. Send API v3.1 is the modern endpoint — body is a
+        // `{Messages: [...]}` envelope. **Sender validation** is the
+        // single biggest pitfall: `From.Email` must exist in
+        // `/v3/REST/sender` and be validated, otherwise 400.
+        McpDefinition {
+            id: "api-mailjet".into(),
+            name: "Mailjet".into(),
+            description: "Mailjet REST API — EU-hosted transactional + marketing email (Send API v3.1, contacts, lists, templates, stats). Pair with a Kronn Gate for human-approved CSM flows. Sister provider to Resend (`mcp-resend`) for EU/RGPD use cases.".into(),
+            transport: McpTransport::ApiOnly,
+            env_keys: vec!["MAILJET_API_KEY".into(), "MAILJET_API_SECRET".into()],
+            tags: vec!["email".into(), "mailing".into(), "communication".into(), "transactional".into(), "marketing".into(), "api".into(), "eu".into(), "csm".into()],
+            token_url: Some("https://app.mailjet.com/account/apikeys".into()),
+            token_help: Some("API key + Secret key pair from Mailjet → Account Settings → API Key Management. Both halves required. ⚠ Before sending, register a sender at https://app.mailjet.com/account/sender (or validate a whole domain) — `From.Email` MUST match a validated sender or you get 400. Sandbox mode (`SandboxMode: true` in body) lets you dry-run without actually sending.".into()),
+            publisher: "Mailjet".into(),
+            official: true,
+            alt_packages: vec![],
+            default_context: Some(r#"# Mailjet — Usage Context
+
+> Instructions for agents calling the **Mailjet REST API** via curl.
+
+Mailjet is an EU-hosted email API (data residency in Paris/Brussels)
+covering transactional + marketing in one product. The send surface
+moved from a flat body (v3) to an envelope-array (v3.1) — **always
+target v3.1 for new code**; v3 is kept only for legacy callers.
+
+## 1. Auth — HTTP Basic with api_key:api_secret (already injected by Kronn)
+
+```
+Authorization: Basic <base64(MAILJET_API_KEY:MAILJET_API_SECRET)>
+Content-Type: application/json
+```
+
+Both halves come from Mailjet → Account Settings → API Key Management.
+Kronn injects both — never put the credentials in `headers` or the URL.
+
+## 2. Send one email — `POST /v3.1/send` (the only send you should use)
+
+```bash
+curl -X POST "https://api.mailjet.com/v3.1/send" \
+  -u "$MAILJET_API_KEY:$MAILJET_API_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Messages": [
+      {
+        "From":    { "Email": "hello@acme.eu", "Name": "Acme" },
+        "To":      [{ "Email": "user@example.com", "Name": "User" }],
+        "Subject": "Quick check-in",
+        "TextPart": "Hi there…",
+        "HTMLPart": "<p>Hi there — saw you logged in 3 times last week…</p>",
+        "CustomID": "csm-followup-{user_id}-{date}",
+        "EventPayload": "{\"workflow_run\":\"…\",\"user_id\":\"…\"}"
+      }
+    ]
+  }'
+```
+
+Response shape:
+
+```json
+{
+  "Messages": [
+    {
+      "Status": "success",
+      "CustomID": "csm-followup-…",
+      "To": [{ "Email": "user@example.com", "MessageUUID": "…", "MessageID": 12345, "MessageHref": "https://api.mailjet.com/v3/REST/message/12345" }]
+    }
+  ]
+}
+```
+
+**Status values:** `success`, `error`. Partial failures are surfaced
+per-message — the HTTP code can be 200 even with one message in error.
+**Always iterate `Messages[].Status`**, do not just check `response.ok`.
+
+## 3. Batch send — same endpoint, multiple `Messages`
+
+There is no separate batch URL. You just push N messages into the
+`Messages` array (limit ~50 per request, ~500 KB total).
+
+```json
+{
+  "Messages": [
+    { "From": {…}, "To": [{…}], "Subject": "…", "HTMLPart": "…" },
+    { "From": {…}, "To": [{…}], "Subject": "…", "HTMLPart": "…" }
+  ]
+}
+```
+
+Each message is processed independently. Mix and match templates,
+recipients, languages in the same call.
+
+## 4. Required fields per message
+
+- `From.Email` — **must be a validated sender** (see §7). 400 if not.
+- `To` — array of `{Email, Name?}` objects. **Always an array**, even
+  for one recipient.
+- `Subject` — string.
+- Either `TextPart` or `HTMLPart` (one minimum, both allowed).
+
+## 5. Useful optional fields
+
+- `Cc`, `Bcc` — same shape as `To`.
+- `ReplyTo` — `{Email, Name?}` object (NOT a string, unlike Resend).
+- `TemplateID` — integer (id from `/v3/REST/template`). Combine with
+  `TemplateLanguage: true` to enable MJML / variable interpolation.
+- `Variables` — `{key: value, …}` injected into the template.
+- `TemplateErrorReporting` — `{Email, Name?}` — where to send template
+  rendering errors.
+- `TemplateErrorDeliver` — boolean. `true` = deliver the email even if
+  template rendering errors out (useful when the fallback is "send a
+  raw email rather than fail silently").
+- `Headers` — `{...}` for custom headers (List-Unsubscribe, X-Tag, etc.).
+- `Attachments`, `InlinedAttachments` — `[{ContentType, Filename, Base64Content}]`.
+- `Priority` — `0..3` (0 = lowest, 2 = normal default, 3 = highest).
+- `CustomCampaign`, `DeduplicateCampaign` — group sends by campaign name + dedupe.
+- `TrackOpens`, `TrackClicks` — `"account_default" | "enabled" | "disabled"`.
+- `CustomID` — your free-form trace id, echoed in response + webhooks.
+  **Use this to correlate sends with workflow runs**.
+- `EventPayload` — opaque string returned in webhooks (max 1KB). Pack
+  JSON metadata here for stateless event handlers.
+- `SandboxMode` — `true` = validate without sending (no charge, no
+  delivery). Perfect for CSM dry-runs / Gate previews.
+
+## 6. Sandbox / dry-run
+
+Set `SandboxMode: true` at the message level OR top-level. Mailjet
+validates the payload (sender, template, recipients) and returns the
+same response shape — **without sending**. Use this in a Gate-preview
+step to surface "would-be sent" to the human reviewer.
+
+```json
+{
+  "SandboxMode": true,
+  "Messages": [ … ]
+}
+```
+
+## 7. Senders — the #1 pitfall
+
+`From.Email` must be a validated sender registered for THIS api_key.
+You manage them via `/v3/REST/sender`.
+
+- `GET /v3/REST/sender` — list (filter by `IsDomain=false` for emails,
+  `=true` for whole domains). Returns `{Data: [{Email, Status, …}]}`.
+- `POST /v3/REST/sender` — `{Email}` — register. Mailjet emails the
+  address with a verification link.
+- `POST /v3/REST/sender/{id}/validate` — re-trigger validation.
+
+**Status** values:
+- `Active` → usable.
+- `Inactive` → registered but not yet validated.
+- `Deleted` → don't try, will 400.
+
+If you 400 with `Sender not allowed for this account`, run
+`GET /v3/REST/sender` first and pick from the `Active` rows.
+
+## 8. Contacts + lists (CSM / lifecycle)
+
+- `GET  /v3/REST/contact` — list, paginated (`Limit`, `Offset`).
+- `POST /v3/REST/contact` — `{Email, Name?}` — register a contact.
+- `GET  /v3/REST/contact/{id_or_email}` — single contact (id or email).
+- `PUT  /v3/REST/contactdata/{contact_id}` — `{Data: [{Name, Value}, …]}`
+  set custom properties for a contact.
+- `GET  /v3/REST/contactslist` — list contact lists.
+- `POST /v3/REST/contactslist` — `{Name}` — create a list.
+- `POST /v3/REST/contactslist/{list_id}/managecontact` — **the killer
+  endpoint** — `{Email, Action, Properties?}` where `Action` is
+  `addnoforce | addforce | remove | unsub`. Use this to push CSM
+  signals: at-risk users into "at-risk", churned into "churned", etc.
+- `POST /v3/REST/contactslist/{list_id}/managemanycontacts` — bulk
+  version (up to 1000 contacts in one async job).
+
+## 9. Templates
+
+- `GET /v3/REST/template` — list templates (filter `OwnerType=user`).
+- `GET /v3/REST/template/{id}/detailcontent` — full HTML/MJML + variables.
+
+Reference a template in a send via `TemplateID` (integer). Use
+`TemplateLanguage: true` to enable Mailjet's variable syntax
+(`{{var:firstname:""}}`) and conditional blocks.
+
+## 10. Stats
+
+- `GET /v3/REST/statcounters` — aggregated counters. Query:
+  `CounterSource=APIKey`, `CounterResolution=Day`, `CounterTiming=Message`,
+  `FromTS=<epoch>`, `ToTS=<epoch>`.
+- `GET /v3/REST/messagesentstatistics` — per-message stats (opens,
+  clicks per message-id).
+
+## 11. Error matrix
+
+- `401 unauthorized` — wrong api_key:api_secret pair (one half wrong
+  is enough). Re-check both env vars.
+- `400 Bad Request`:
+  - `"Invalid email format"` → typo in `From.Email` or `To[].Email`.
+  - `"Sender not allowed for this account"` → `From.Email` not in
+    `/v3/REST/sender` or `Status != Active`. **The most common 400.**
+  - `"Either TextPart or HTMLPart is required"` → both omitted.
+  - `"Argument value is invalid for property: …"` → check field types
+    (e.g. `Priority` is int, `TrackOpens` is string).
+- `403 forbidden` — sub-account permissions / IP allowlist mismatch.
+- `429 Too Many Requests` — Mailjet rate-limits per account tier
+  (default 500/hour for transactional, more on paid plans). Header
+  `Retry-After: <seconds>`.
+- `200` with `Messages[].Status == "error"` — partial failure.
+  Always inspect each message's status, do not stop at HTTP-200.
+
+## 12. Common gotchas (sorted by pain)
+
+- **`From.Email` not validated** — accounts for ~70% of integration
+  failures. Run `GET /v3/REST/sender` and copy the exact `Email` value.
+- **Status check on partial failures** — a 200 OK does NOT mean all
+  messages were sent. Loop `Messages[].Status`.
+- **`v3` legacy URL** — `POST /v3/send` (flat body, `FromEmail`,
+  `Recipients`) is still alive but property names changed in v3.1.
+  Don't mix the two flavors in one workflow.
+- **CustomID is for YOU, MessageID is the Mailjet id** — webhooks
+  return both. Persist `CustomID` to correlate with your DB.
+- **EU region** — `https://api.mailjet.com` is the canonical URL for
+  ALL accounts (EU/US). There is no separate EU subdomain — data
+  residency is set per account at signup, not at the URL.
+
+Official docs: https://dev.mailjet.com/email/reference/
+"#.into()),
+            api_spec: Some(ApiSpec {
+                base_url: "https://api.mailjet.com".into(),
+                auth: ApiAuthKind::Basic {
+                    user_env: "MAILJET_API_KEY".into(),
+                    password_env: "MAILJET_API_SECRET".into(),
+                },
+                docs_url: Some("https://dev.mailjet.com/email/reference/".into()),
+                config_keys: vec![],
+                endpoints: vec![
+                    // ── Sanity check / sender validation ───────────────────
+                    ApiEndpoint { path: "/v3/REST/sender".into(),                                  method: "GET".into(),  description: "[SENDER · sanity] List validated senders. Run this FIRST when wiring the key — 200 + at least one row with `Status: Active` = auth OK and at least one usable `From.Email`. 401 = wrong key/secret pair.".into() },
+                    ApiEndpoint { path: "/v3/REST/sender".into(),                                  method: "POST".into(), description: "[SENDER] Register a new sender. Body: `{Email}` (single address) or `{Email: \"*@yourdomain.eu\"}` (whole domain). Mailjet sends a verification email.".into() },
+                    ApiEndpoint { path: "/v3/REST/sender/{id}/validate".into(),                    method: "POST".into(), description: "[SENDER] Re-trigger the validation email for an `Inactive` sender.".into() },
+                    // ── Send (the headline endpoint) ───────────────────────
+                    ApiEndpoint { path: "/v3.1/send".into(),                                       method: "POST".into(), description: "[SEND · v3.1] Modern send. Body is `{Messages: [{From, To[], Subject, HTMLPart|TextPart, TemplateID?, Variables?, CustomID?, EventPayload?, SandboxMode?}, …]}`. Up to ~50 messages per call. **Always check `Messages[].Status`** — a 200 can hide per-message errors. `SandboxMode: true` = validate without sending.".into() },
+                    ApiEndpoint { path: "/v3/send".into(),                                         method: "POST".into(), description: "[SEND · v3 legacy] Old flat body (`FromEmail`, `Recipients`, `Text-part`, `Html-part`). Kept only for legacy callers — prefer /v3.1/send for new code.".into() },
+                    // ── Sent message introspection ─────────────────────────
+                    ApiEndpoint { path: "/v3/REST/message".into(),                                 method: "GET".into(),  description: "[MESSAGES] List sent messages. Filter by `Contact_ID`, `CustomID`, `FromTS`, `ToTS`. Returns delivery status + open/click counts.".into() },
+                    ApiEndpoint { path: "/v3/REST/message/{message_id}".into(),                   method: "GET".into(),  description: "[MESSAGES] Single message status by Mailjet `MessageID` (returned in send response).".into() },
+                    ApiEndpoint { path: "/v3/REST/messagehistory/{message_id}".into(),            method: "GET".into(),  description: "[MESSAGES] Event timeline for a message (queued → sent → opened → clicked).".into() },
+                    // ── Contacts ───────────────────────────────────────────
+                    ApiEndpoint { path: "/v3/REST/contact".into(),                                 method: "GET".into(),  description: "[CONTACTS] List contacts. Paginated (`Limit`, `Offset` — max `Limit=1000`).".into() },
+                    ApiEndpoint { path: "/v3/REST/contact".into(),                                 method: "POST".into(), description: "[CONTACTS] Create. Body: `{Email, Name?, IsExcludedFromCampaigns?}`.".into() },
+                    ApiEndpoint { path: "/v3/REST/contact/{id_or_email}".into(),                  method: "GET".into(),  description: "[CONTACTS] Single contact by id or email.".into() },
+                    ApiEndpoint { path: "/v3/REST/contact/{id}".into(),                            method: "PUT".into(),  description: "[CONTACTS] Update. Body: `{Name?, IsExcludedFromCampaigns?}`.".into() },
+                    ApiEndpoint { path: "/v3/REST/contactdata/{contact_id}".into(),               method: "PUT".into(),  description: "[CONTACTS · props] Set custom properties. Body: `{Data: [{Name, Value}, …]}`. Properties must exist first via /v3/REST/contactmetadata.".into() },
+                    // ── Contact lists (CSM segmentation) ───────────────────
+                    ApiEndpoint { path: "/v3/REST/contactslist".into(),                            method: "GET".into(),  description: "[LISTS] List contact lists (paginated).".into() },
+                    ApiEndpoint { path: "/v3/REST/contactslist".into(),                            method: "POST".into(), description: "[LISTS] Create a list. Body: `{Name}`.".into() },
+                    ApiEndpoint { path: "/v3/REST/contactslist/{list_id}".into(),                  method: "GET".into(),  description: "[LISTS] Single list metadata.".into() },
+                    ApiEndpoint { path: "/v3/REST/contactslist/{list_id}/managecontact".into(),    method: "POST".into(), description: "[LISTS · killer] Add/remove/unsub a single contact in a list. Body: `{Email, Action: \"addnoforce\"|\"addforce\"|\"remove\"|\"unsub\", Name?, Properties?}`. Idempotent on email — perfect for CSM segmentation (`at-risk`, `churned`, `power-user`).".into() },
+                    ApiEndpoint { path: "/v3/REST/contactslist/{list_id}/managemanycontacts".into(), method: "POST".into(), description: "[LISTS · bulk] Async bulk variant — up to 1000 contacts. Body: `{Contacts: [{Email, Name?, Properties?}, …], Action}`. Returns a `JobID` to poll via /v3/REST/contactslist/{list_id}/managemanycontacts/{job_id}.".into() },
+                    // ── Templates (transactional) ──────────────────────────
+                    ApiEndpoint { path: "/v3/REST/template".into(),                                method: "GET".into(),  description: "[TEMPLATES] List templates. Filter `OwnerType=user` to exclude system templates.".into() },
+                    ApiEndpoint { path: "/v3/REST/template/{template_id}/detailcontent".into(),    method: "GET".into(),  description: "[TEMPLATES] HTML/MJML body + declared variables for a template. Use to pre-fill `Variables` in /v3.1/send.".into() },
+                    // ── Stats ──────────────────────────────────────────────
+                    ApiEndpoint { path: "/v3/REST/statcounters".into(),                            method: "GET".into(),  description: "[STATS] Aggregated counters. Query: `CounterSource=APIKey&CounterResolution=Day&CounterTiming=Message&FromTS=<epoch>&ToTS=<epoch>`.".into() },
+                    ApiEndpoint { path: "/v3/REST/messagesentstatistics".into(),                   method: "GET".into(),  description: "[STATS] Per-message statistics (opens, clicks). Joinable on MessageID.".into() },
+                ],
+            }),
         },
         // ── AI & Reasoning ───────────────────────────────────────────────
         McpDefinition {
@@ -1909,5 +2399,135 @@ mod tests {
                 assert!(!command.is_empty(), "MCP {} has empty command", def.id);
             }
         }
+    }
+
+    /// `mcp-resend` is a hybrid plugin (Stdio MCP transport + REST API
+    /// spec) — same convention as `mcp-github` and `mcp-atlassian`. One
+    /// entry, one credential (`RESEND_API_KEY`), two surfaces: MCP for
+    /// agent-rich Quick Prompts, ApiCall for zero-token workflow steps.
+    /// Guards against accidental removal of the `api_spec` (which would
+    /// silently regress the plugin back to MCP-only — exactly the
+    /// pre-0.8.3 state).
+    #[test]
+    fn resend_is_a_hybrid_mcp_plus_api_plugin() {
+        let reg = builtin_registry();
+        let def = reg
+            .iter()
+            .find(|d| d.id == "mcp-resend")
+            .expect("mcp-resend missing from registry");
+
+        // ── MCP transport (for Quick Prompts) ──
+        match &def.transport {
+            McpTransport::Stdio { command, args } => {
+                assert_eq!(command, "npx");
+                assert!(args.iter().any(|a| a == "resend-mcp"),
+                    "mcp-resend args must reference the resend-mcp package, got {args:?}");
+            }
+            other => panic!("mcp-resend must keep Stdio transport (MCP capability), got {other:?}"),
+        }
+
+        // ── API capability (for zero-token ApiCall steps) ──
+        let spec = def.api_spec.as_ref()
+            .expect("mcp-resend MUST declare api_spec — the hybrid is the whole point of the 0.8.3 work, do NOT regress to MCP-only");
+        assert_eq!(spec.base_url, "https://api.resend.com");
+        match &spec.auth {
+            ApiAuthKind::Bearer { env_key } => assert_eq!(env_key, "RESEND_API_KEY"),
+            other => panic!("Resend auth must be Bearer, got {other:?}"),
+        }
+        assert!(spec.docs_url.is_some());
+        assert!(!spec.endpoints.is_empty());
+        // Headline endpoints — if a future rename drops them, CSM/lifecycle
+        // flows break. Lock them by name.
+        assert!(spec.endpoints.iter().any(|e| e.path == "/emails" && e.method == "POST"),
+            "Resend api_spec must keep POST /emails (single send)");
+        assert!(spec.endpoints.iter().any(|e| e.path == "/emails/batch" && e.method == "POST"),
+            "Resend api_spec must keep POST /emails/batch (fan-out send)");
+
+        // ── Shared shape (credential + metadata) ──
+        assert_eq!(def.env_keys, vec!["RESEND_API_KEY"],
+            "one credential drives both surfaces — never split into two env keys");
+        assert!(def.tags.contains(&"email".into()));
+        assert!(def.tags.contains(&"api".into()),
+            "the `api` tag flags this plugin as ApiCall-callable, even when the entry is `mcp-` prefixed");
+        assert!(def.tags.contains(&"csm".into()),
+            "Resend should carry the `csm` tag — CSM/lifecycle is the use case the API spec exists for");
+        assert!(def.default_context.is_some(),
+            "mcp-resend must ship a default_context covering the API pitfalls (verified domain, idempotency, batch constraints)");
+        assert_eq!(def.publisher, "Resend");
+        assert!(def.official);
+        assert!(def.token_url.is_some());
+        assert!(def.token_help.is_some());
+    }
+
+    /// `api-mailjet` — Mailjet Send API v3.1. EU/RGPD counterpart of Resend.
+    /// Auth = HTTP Basic with `api_key:api_secret`; both env keys required.
+    /// Guards `/v3.1/send` (modern body shape) and sender introspection.
+    #[test]
+    fn api_mailjet_is_registered_and_shaped_correctly() {
+        let reg = builtin_registry();
+        let def = reg
+            .iter()
+            .find(|d| d.id == "api-mailjet")
+            .expect("api-mailjet missing from registry");
+
+        assert!(matches!(def.transport, McpTransport::ApiOnly));
+        assert!(def.env_keys.contains(&"MAILJET_API_KEY".into()));
+        assert!(def.env_keys.contains(&"MAILJET_API_SECRET".into()));
+        assert_eq!(def.env_keys.len(), 2,
+            "api-mailjet must declare EXACTLY the two halves of Basic auth — no more, no less");
+        assert!(def.tags.contains(&"email".into()));
+        assert!(def.tags.contains(&"eu".into()),
+            "api-mailjet should carry the `eu` tag — RGPD positioning is the reason it exists alongside Resend");
+        assert!(def.tags.contains(&"csm".into()));
+        assert!(def.default_context.is_some(), "api-mailjet must ship a default_context");
+        assert_eq!(def.publisher, "Mailjet");
+        assert!(def.official, "api-mailjet is by Mailjet, must be `official: true`");
+        assert!(def.token_url.is_some());
+        assert!(def.token_help.is_some());
+
+        let spec = def.api_spec.as_ref().expect("api-mailjet must declare api_spec");
+        assert_eq!(spec.base_url, "https://api.mailjet.com");
+        match &spec.auth {
+            ApiAuthKind::Basic { user_env, password_env } => {
+                assert_eq!(user_env, "MAILJET_API_KEY");
+                assert_eq!(password_env, "MAILJET_API_SECRET");
+            }
+            other => panic!("api-mailjet auth must be Basic, got {other:?}"),
+        }
+        assert!(!spec.endpoints.is_empty());
+        assert!(spec.endpoints.iter().any(|e| e.path == "/v3.1/send" && e.method == "POST"),
+            "api-mailjet must keep POST /v3.1/send (modern send envelope)");
+        assert!(spec.endpoints.iter().any(|e| e.path == "/v3/REST/sender" && e.method == "GET"),
+            "api-mailjet must keep GET /v3/REST/sender (sanity + sender lookup — #1 pitfall guard)");
+        assert!(spec.endpoints.iter().any(|e| e.path.contains("/managecontact") && e.method == "POST"),
+            "api-mailjet must keep /managecontact (the killer CSM segmentation endpoint)");
+    }
+
+    /// `search()` must surface the new email plugins by vendor name + by
+    /// the `email` / `csm` tags so they're discoverable from the McpPage
+    /// drawer for users not typing the exact slug.
+    #[test]
+    fn search_surfaces_resend_and_mailjet_email_plugins() {
+        let resend_hits = search("resend");
+        assert!(resend_hits.iter().any(|d| d.id == "mcp-resend"),
+            "`search(\"resend\")` must return mcp-resend; got: {:?}",
+            resend_hits.iter().map(|d| &d.id).collect::<Vec<_>>());
+
+        let mailjet_hits = search("mailjet");
+        assert!(mailjet_hits.iter().any(|d| d.id == "api-mailjet"),
+            "`search(\"mailjet\")` must return api-mailjet; got: {:?}",
+            mailjet_hits.iter().map(|d| &d.id).collect::<Vec<_>>());
+
+        // Both should also be tag-discoverable via the `email` family.
+        let email_hits = search("email");
+        let ids: Vec<&String> = email_hits.iter().map(|d| &d.id).collect();
+        assert!(ids.contains(&&"mcp-resend".to_string()));
+        assert!(ids.contains(&&"api-mailjet".to_string()));
+
+        // CSM filter should surface both — the use case the plugins exist for.
+        let csm_hits = search("csm");
+        let csm_ids: Vec<&String> = csm_hits.iter().map(|d| &d.id).collect();
+        assert!(csm_ids.contains(&&"mcp-resend".to_string()));
+        assert!(csm_ids.contains(&&"api-mailjet".to_string()));
     }
 }

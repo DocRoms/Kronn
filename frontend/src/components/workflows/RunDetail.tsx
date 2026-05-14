@@ -133,10 +133,275 @@ function PausedSince({
   return <span className="wf-paused-since">{label}</span>;
 }
 
+/** 0.8.3 — shape of a Feasibility-Gated triage manifest as emitted by
+ *  the triage step and substituted into the review_triage Gate message.
+ *  Mirror of `backend/src/workflows/triage.rs::triage_manifest_schema`.
+ *  Fields beyond the four categories (e.g. `files_touched`) are tolerated
+ *  but rendered in a collapsible summary so they don't dominate the panel.
+ */
+type TriageClear = { id: string; what: string; where?: string };
+type TriageDecided = {
+  id: string;
+  what: string;
+  chosen: string;
+  why: string;
+  options_considered?: string[];
+};
+type TriageMocked = {
+  id: string;
+  what: string;
+  placeholder: string;
+  strategy?: string;
+  revisit_when?: string;
+};
+type TriageBlocked = {
+  id: string;
+  what: string;
+  why: string;
+  needed_from: string;
+  workaround?: string;
+};
+type TriageManifest = {
+  clear: TriageClear[];
+  decided: TriageDecided[];
+  mocked: TriageMocked[];
+  blocked: TriageBlocked[];
+  files_touched?: string[];
+};
+
+/** Try to extract a triage manifest from a Gate message. The runner
+ *  substitutes `{{steps.triage.data}}` with the JSON value, so the
+ *  message has prose + one embedded JSON object. We scan for the first
+ *  `{`, brace-count to the matching `}`, and parse. Returns `null` if
+ *  the JSON is missing, malformed, or doesn't match the manifest shape.
+ *
+ *  Defensive: any non-triage Gate (e.g. a plain "approve to deploy?"
+ *  Gate) won't match the shape and we fall back to the raw message.
+ *
+ *  Exported for tests. The brace-counter has to handle `{` / `}` inside
+ *  strings without mis-counting; the test suite exercises escaped quotes,
+ *  nested objects, missing categories, and non-array category values. */
+export function tryParseTriageManifest(msg: string): TriageManifest | null {
+  if (!msg) return null;
+  const openIdx = msg.indexOf('{');
+  if (openIdx < 0) return null;
+  let depth = 0;
+  let endIdx = -1;
+  let inStr = false;
+  let esc = false;
+  for (let i = openIdx; i < msg.length; i++) {
+    const ch = msg[i];
+    if (inStr) {
+      if (esc) {
+        esc = false;
+      } else if (ch === '\\') {
+        esc = true;
+      } else if (ch === '"') {
+        inStr = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inStr = true;
+    } else if (ch === '{') {
+      depth++;
+    } else if (ch === '}') {
+      depth--;
+      if (depth === 0) {
+        endIdx = i + 1;
+        break;
+      }
+    }
+  }
+  if (endIdx < 0) return null;
+  try {
+    const obj = JSON.parse(msg.slice(openIdx, endIdx));
+    if (!obj || typeof obj !== 'object') return null;
+    if (
+      !Array.isArray(obj.clear) ||
+      !Array.isArray(obj.decided) ||
+      !Array.isArray(obj.mocked) ||
+      !Array.isArray(obj.blocked)
+    ) {
+      return null;
+    }
+    return obj as TriageManifest;
+  } catch {
+    return null;
+  }
+}
+
+/** 0.8.3 — structured rendering of a Feasibility-Gated triage manifest.
+ *  Replaces the raw-JSON dump that the user used to see in the Gate
+ *  panel. Each of the four categories is a collapsible section with
+ *  per-entry cards; `files_touched` lives in a separate collapsible
+ *  footer so it doesn't dominate the view. */
+function TriageManifestPanel({
+  manifest,
+  t,
+}: {
+  manifest: TriageManifest;
+  t: (key: string, ...args: (string | number)[]) => string;
+}) {
+  const [openCat, setOpenCat] = useState<Record<string, boolean>>({
+    clear: false,
+    decided: true,
+    mocked: true,
+    blocked: true,
+  });
+  const [openFiles, setOpenFiles] = useState(false);
+
+  const counts = {
+    clear: manifest.clear.length,
+    decided: manifest.decided.length,
+    mocked: manifest.mocked.length,
+    blocked: manifest.blocked.length,
+  };
+
+  const toggle = (cat: string) => setOpenCat(s => ({ ...s, [cat]: !s[cat] }));
+
+  return (
+    <div className="wf-triage-manifest">
+      {/* CLEAR — single-way items, no judgment call */}
+      <details className="wf-triage-section" data-cat="clear" open={openCat.clear}>
+        <summary onClick={(e) => { e.preventDefault(); toggle('clear'); }}>
+          <span className="wf-triage-cat-label">{t('wf.gate.triage.clear')}</span>
+          <span className="wf-triage-cat-count">{counts.clear}</span>
+        </summary>
+        <div className="wf-triage-list">
+          {manifest.clear.map((it) => (
+            <div key={it.id} className="wf-triage-entry" data-cat="clear">
+              <div className="wf-triage-entry-id">{it.id}</div>
+              <div className="wf-triage-entry-what">{it.what}</div>
+              {it.where && <div className="wf-triage-entry-where">→ <code>{it.where}</code></div>}
+            </div>
+          ))}
+        </div>
+      </details>
+
+      {/* DECIDED — multiple options, agent picked one. Most useful for review. */}
+      <details className="wf-triage-section" data-cat="decided" open={openCat.decided}>
+        <summary onClick={(e) => { e.preventDefault(); toggle('decided'); }}>
+          <span className="wf-triage-cat-label">{t('wf.gate.triage.decided')}</span>
+          <span className="wf-triage-cat-count">{counts.decided}</span>
+        </summary>
+        <div className="wf-triage-list">
+          {manifest.decided.map((it) => (
+            <div key={it.id} className="wf-triage-entry" data-cat="decided">
+              <div className="wf-triage-entry-id">{it.id}</div>
+              <div className="wf-triage-entry-what">{it.what}</div>
+              <div className="wf-triage-entry-chosen">
+                <span className="wf-triage-entry-label">{t('wf.gate.triage.chosen')}</span>
+                <span>{it.chosen}</span>
+              </div>
+              <div className="wf-triage-entry-why">
+                <span className="wf-triage-entry-label">{t('wf.gate.triage.why')}</span>
+                <span>{it.why}</span>
+              </div>
+              {it.options_considered && it.options_considered.length > 0 && (
+                <details className="wf-triage-entry-considered">
+                  <summary>{t('wf.gate.triage.optionsConsidered', it.options_considered.length)}</summary>
+                  <ul>
+                    {it.options_considered.map((o, i) => <li key={i}>{o}</li>)}
+                  </ul>
+                </details>
+              )}
+            </div>
+          ))}
+        </div>
+      </details>
+
+      {/* MOCKED — real value missing, safe placeholder lets the rest ship */}
+      <details className="wf-triage-section" data-cat="mocked" open={openCat.mocked}>
+        <summary onClick={(e) => { e.preventDefault(); toggle('mocked'); }}>
+          <span className="wf-triage-cat-label">{t('wf.gate.triage.mocked')}</span>
+          <span className="wf-triage-cat-count">{counts.mocked}</span>
+        </summary>
+        <div className="wf-triage-list">
+          {manifest.mocked.map((it) => (
+            <div key={it.id} className="wf-triage-entry" data-cat="mocked">
+              <div className="wf-triage-entry-id">{it.id}</div>
+              <div className="wf-triage-entry-what">{it.what}</div>
+              <div className="wf-triage-entry-placeholder">
+                <span className="wf-triage-entry-label">{t('wf.gate.triage.placeholder')}</span>
+                <span>{it.placeholder}</span>
+              </div>
+              {it.strategy && (
+                <div className="wf-triage-entry-strategy">
+                  <span className="wf-triage-entry-label">{t('wf.gate.triage.strategy')}</span>
+                  <span>{it.strategy}</span>
+                </div>
+              )}
+              {it.revisit_when && (
+                <div className="wf-triage-entry-revisit">
+                  <span className="wf-triage-entry-label">{t('wf.gate.triage.revisitWhen')}</span>
+                  <span>{it.revisit_when}</span>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </details>
+
+      {/* BLOCKED — cannot proceed, needs external input */}
+      <details className="wf-triage-section" data-cat="blocked" open={openCat.blocked}>
+        <summary onClick={(e) => { e.preventDefault(); toggle('blocked'); }}>
+          <span className="wf-triage-cat-label">{t('wf.gate.triage.blocked')}</span>
+          <span className="wf-triage-cat-count">{counts.blocked}</span>
+        </summary>
+        <div className="wf-triage-list">
+          {manifest.blocked.map((it) => (
+            <div key={it.id} className="wf-triage-entry" data-cat="blocked">
+              <div className="wf-triage-entry-id">{it.id}</div>
+              <div className="wf-triage-entry-what">{it.what}</div>
+              <div className="wf-triage-entry-needed">
+                <span className="wf-triage-entry-label">{t('wf.gate.triage.neededFrom')}</span>
+                <span>{it.needed_from}</span>
+              </div>
+              <div className="wf-triage-entry-why">
+                <span className="wf-triage-entry-label">{t('wf.gate.triage.why')}</span>
+                <span>{it.why}</span>
+              </div>
+              {it.workaround && (
+                <div className="wf-triage-entry-workaround">
+                  <span className="wf-triage-entry-label">{t('wf.gate.triage.workaround')}</span>
+                  <span>{it.workaround}</span>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </details>
+
+      {/* files_touched is a flat list — collapsible footer so it
+          doesn't compete with the four decision categories for attention. */}
+      {manifest.files_touched && manifest.files_touched.length > 0 && (
+        <details
+          className="wf-triage-files"
+          open={openFiles}
+          onToggle={(e) => setOpenFiles((e.target as HTMLDetailsElement).open)}
+        >
+          <summary>
+            {t('wf.gate.triage.filesTouched', manifest.files_touched.length)}
+          </summary>
+          <ul className="wf-triage-files-list">
+            {manifest.files_touched.map((f, i) => <li key={i}><code>{f}</code></li>)}
+          </ul>
+        </details>
+      )}
+    </div>
+  );
+}
+
 /** 0.7.0 Phase 4 — interactive panel rendered when the run is paused on a
  *  Gate step. Shows the operator the rendered message + 3 decision buttons.
  *  The "Request changes" path requires a non-empty comment (the agent
- *  needs feedback to act on); the other two make the comment optional. */
+ *  needs feedback to act on); the other two make the comment optional.
+ *
+ *  0.8.3 — when the message wraps a Feasibility-Gated triage manifest
+ *  (detected via `tryParseTriageManifest`), the JSON dump is replaced
+ *  with a structured visualization (`TriageManifestPanel`). Non-triage
+ *  Gates render the raw message verbatim as before. */
 function GatePanel({
   message,
   onDecide,
@@ -149,6 +414,7 @@ function GatePanel({
   const [comment, setComment] = useState('');
   const [submitting, setSubmitting] = useState<GateDecisionKind | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const triageManifest = tryParseTriageManifest(message);
 
   const handle = async (decision: GateDecisionKind) => {
     if (decision === 'request_changes' && comment.trim() === '') {
@@ -172,7 +438,9 @@ function GatePanel({
         <span className="font-semibold">{t('wf.gate.title')}</span>
       </div>
       <div className="wf-gate-message">
-        {message || t('wf.gate.defaultMessage')}
+        {triageManifest
+          ? <TriageManifestPanel manifest={triageManifest} t={t} />
+          : (message || t('wf.gate.defaultMessage'))}
       </div>
       <textarea
         className="wf-gate-comment"
