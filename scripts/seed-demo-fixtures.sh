@@ -34,7 +34,7 @@
 #   KRONN_SANDBOX_PORT=3145          Where the sandbox backend listens
 #   KRONN_SANDBOX_DATA=/tmp/kronn-demo-XXXXXX   Data dir (mktemp by default)
 #   KRONN_SANDBOX_REPOS=/tmp/kronn-demo-repos-XXXXXX  Demo repo dir
-#   KRONN_BINARY=./backend/target/release/kronn   Path to the backend binary
+#   KRONN_BINARY=./target/release/kronn          Path to the backend binary
 #
 # # Exit codes
 #
@@ -47,8 +47,19 @@ set -euo pipefail
 PORT="${KRONN_SANDBOX_PORT:-3145}"
 DATA_DIR="${KRONN_SANDBOX_DATA:-$(mktemp -d -t kronn-demo-data.XXXXXX)}"
 REPOS_DIR="${KRONN_SANDBOX_REPOS:-$(mktemp -d -t kronn-demo-repos.XXXXXX)}"
-BINARY="${KRONN_BINARY:-./backend/target/release/kronn}"
-if [ ! -x "$BINARY" ]; then
+# 0.8.3 — the shared `.cargo/config.toml` at repo root sets
+# `target-dir = "target"`, so the binary now lives at `target/release/kronn`
+# (NOT `backend/target/...`). Keep a fallback to the old path for
+# devs running on an older branch + a final fallback to the debug build.
+if [ -n "${KRONN_BINARY:-}" ]; then
+  BINARY="$KRONN_BINARY"
+elif [ -x "./target/release/kronn" ]; then
+  BINARY="./target/release/kronn"
+elif [ -x "./backend/target/release/kronn" ]; then
+  BINARY="./backend/target/release/kronn"
+elif [ -x "./target/debug/kronn" ]; then
+  BINARY="./target/debug/kronn"
+else
   BINARY="./backend/target/debug/kronn"
 fi
 API="http://localhost:${PORT}/api"

@@ -2288,6 +2288,156 @@
   overflow-y: auto;
 }
 
+/* 0.8.3 — Feasibility-Gated triage manifest panel inside the Gate
+   message slot. When the gate message wraps a triage manifest, the
+   raw JSON dump is replaced with this structured view. */
+.wf-triage-manifest {
+  white-space: normal;          /* override .wf-gate-message pre-wrap */
+  max-height: 60vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.wf-triage-section {
+  border: 1px solid var(--kr-border-faint);
+  border-radius: 4px;
+  background: var(--kr-bg-base);
+}
+.wf-triage-section > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--kr-fs-sm);
+  font-weight: 600;
+  user-select: none;
+  border-radius: 4px;
+}
+.wf-triage-section > summary::-webkit-details-marker { display: none; }
+.wf-triage-section > summary::before {
+  content: '▸';
+  font-size: 10px;
+  color: var(--kr-text-faint);
+  transition: transform 0.12s ease;
+}
+.wf-triage-section[open] > summary::before { transform: rotate(90deg); }
+
+.wf-triage-section[data-cat="clear"]   > summary { color: var(--kr-text-secondary); }
+.wf-triage-section[data-cat="decided"] > summary { color: var(--kr-accent-ink); }
+.wf-triage-section[data-cat="mocked"]  > summary { color: var(--kr-warning); }
+.wf-triage-section[data-cat="blocked"] > summary { color: var(--kr-error); }
+
+.wf-triage-cat-label { flex: 0 0 auto; }
+.wf-triage-cat-count {
+  margin-left: auto;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--kr-bg-elevated);
+  border-radius: 10px;
+  color: var(--kr-text-secondary);
+}
+
+.wf-triage-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 12px 12px;
+}
+
+.wf-triage-entry {
+  padding: 8px 10px;
+  background: var(--kr-bg-elevated);
+  border-radius: 4px;
+  border-left: 3px solid var(--kr-border-medium);
+  font-size: var(--kr-fs-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.wf-triage-entry[data-cat="clear"]   { border-left-color: var(--kr-text-faint); }
+.wf-triage-entry[data-cat="decided"] { border-left-color: var(--kr-accent-ink); }
+.wf-triage-entry[data-cat="mocked"]  { border-left-color: var(--kr-warning); }
+.wf-triage-entry[data-cat="blocked"] { border-left-color: var(--kr-error); }
+
+.wf-triage-entry-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--kr-text-faint);
+}
+.wf-triage-entry-what {
+  font-weight: 600;
+  color: var(--kr-text-primary);
+}
+.wf-triage-entry-where {
+  font-size: 11px;
+  color: var(--kr-text-secondary);
+}
+.wf-triage-entry-where code,
+.wf-triage-files-list code {
+  font-size: 11px;
+  background: transparent;
+  padding: 0;
+  color: var(--kr-accent-ink);
+}
+
+.wf-triage-entry-label {
+  display: inline-block;
+  margin-right: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--kr-text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.wf-triage-entry-considered {
+  margin-top: 2px;
+}
+.wf-triage-entry-considered > summary {
+  cursor: pointer;
+  list-style: none;
+  font-size: 11px;
+  color: var(--kr-text-faint);
+  font-style: italic;
+}
+.wf-triage-entry-considered > summary::-webkit-details-marker { display: none; }
+.wf-triage-entry-considered > summary::before {
+  content: '▸ ';
+  color: var(--kr-text-faint);
+}
+.wf-triage-entry-considered[open] > summary::before { content: '▾ '; }
+.wf-triage-entry-considered ul {
+  margin: 4px 0 0 16px;
+  padding: 0;
+  list-style: '— ';
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-sm);
+}
+
+.wf-triage-files {
+  border: 1px dashed var(--kr-border-faint);
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-secondary);
+}
+.wf-triage-files > summary {
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.wf-triage-files > summary::-webkit-details-marker { display: none; }
+.wf-triage-files-list {
+  margin: 6px 0 0 12px;
+  padding: 0;
+  list-style: '· ';
+}
+
 .wf-gate-comment {
   width: 100%;
   padding: 8px 10px;

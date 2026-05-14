@@ -104,7 +104,7 @@ New code placement: see [repo-map](repo-map.md).
 - Missing/ambiguous info → say `NOT_FOUND`, ask. Never guess.
 - Large refactor needed → add entry to [inconsistencies-tech-debt](inconsistencies-tech-debt.md).
 - **Write tests for every change** — see § 4. No exceptions.
-- After task: update `docs/` if you learned something non-obvious. Prefer the agent-writable subfolders: `docs/conventions/`, `docs/gotchas/`, `docs/architecture/`, `docs/operations/`. Never edit `docs/AGENTS.md` (curated by audit) or `docs/templates/` directly.
+- After task: update `docs/` if you learned something non-obvious. Prefer the agent-writable subfolders: `docs/conventions/`, `docs/gotchas/`, `docs/architecture/`, `docs/operations/`. Never edit `docs/AGENTS.md` (curated by audit) directly.
 
 ---
 

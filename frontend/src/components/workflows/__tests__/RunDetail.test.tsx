@@ -16,7 +16,7 @@ import type { WorkflowRun, WorkflowStep, StepResult } from '../../../types/gener
 
 vi.mock('../../../lib/api', () => buildApiMock());
 
-import { RunDetail } from '../RunDetail';
+import { RunDetail, tryParseTriageManifest } from '../RunDetail';
 
 const t = (key: string, ...args: (string | number)[]) =>
   args.length > 0 ? `${key}:${args.join(',')}` : key;
@@ -315,6 +315,338 @@ describe('RunDetail — Gate decision panel (0.7.0 Phase 4 — human-in-the-loop
     expect(onDecide).not.toHaveBeenCalled();
     // Inline error visible to operator after the React state flush.
     expect(screen.getByText(/wf\.gate\.commentRequired/)).toBeInTheDocument();
+  });
+
+  // 0.8.3 — Feasibility-Gated triage manifest rendering. When the
+  // review_triage Gate's message wraps a triage manifest, the raw
+  // JSON dump is replaced by a structured panel with one collapsible
+  // section per category. Non-triage Gates fall back to the raw text.
+  it('renders the structured triage panel when message wraps a manifest', () => {
+    const manifest = {
+      clear: [
+        { id: 'brand-enum', what: 'Create Brand backed enum', where: 'src/Enum/Brand.php' },
+      ],
+      decided: [
+        {
+          id: 'brand-context-impl',
+          what: 'How to inject brand context',
+          chosen: 'Stateful service',
+          why: 'Matches existing LocaleService pattern',
+          options_considered: ['Request attribute', 'Compiler pass'],
+        },
+      ],
+      mocked: [
+        {
+          id: 'adobe-dtm',
+          what: 'Adobe DTM URLs',
+          placeholder: 'legacy values lifted from front_africanews',
+          strategy: 'Replace with Data team confirmation',
+          revisit_when: 'Data team responds',
+        },
+      ],
+      blocked: [
+        {
+          id: 'visitor-ns',
+          what: 'Africanews visitorNamespace',
+          why: 'Not present in legacy codebase',
+          needed_from: 'Data team',
+          workaround: 'Empty-string KRONN-MOCKED placeholder',
+        },
+      ],
+      files_touched: ['src/Enum/Brand.php', 'src/Listener/BrandListener.php'],
+    };
+    const message = `Triage manifest produced. Review the four categories below before approving:\n\n${JSON.stringify(manifest)}\n\n- Approve\n- Request changes`;
+    const run = mkRun({
+      status: 'WaitingApproval',
+      finished_at: null,
+      step_results: [
+        mkResult({ step_name: 'review_triage', step_kind: 'Gate', status: 'WaitingApproval', output: message }),
+      ],
+    });
+    const { container } = render(<RunDetail run={run} onDelete={() => {}} onDecide={() => {}} />);
+    // Structured panel mounts (vs. .wf-gate-message that holds raw text on non-triage gates)
+    expect(container.querySelector('.wf-triage-manifest')).not.toBeNull();
+    // Each of the four section headers is rendered with its count badge
+    expect(screen.getByText(/wf\.gate\.triage\.clear/)).toBeInTheDocument();
+    expect(screen.getByText(/wf\.gate\.triage\.decided/)).toBeInTheDocument();
+    expect(screen.getByText(/wf\.gate\.triage\.mocked/)).toBeInTheDocument();
+    expect(screen.getByText(/wf\.gate\.triage\.blocked/)).toBeInTheDocument();
+    // Per-entry surface: id + chosen line for the `decided` entry
+    expect(screen.getByText('brand-context-impl')).toBeInTheDocument();
+    expect(screen.getByText('Stateful service')).toBeInTheDocument();
+    // Per-entry surface for `blocked`: needed_from is the killer field the
+    // user reads to know which team to ping
+    expect(screen.getByText('Data team')).toBeInTheDocument();
+    // files_touched collapsible footer summarizes the count
+    expect(screen.getByText(/wf\.gate\.triage\.filesTouched:2/)).toBeInTheDocument();
+    // Decision buttons still wired below the manifest panel
+    expect(screen.getByText(/wf\.gate\.approve/)).toBeInTheDocument();
+  });
+
+  it('falls back to the raw message when the gate is not a triage gate', () => {
+    // A plain "approve to deploy?" Gate with no embedded JSON must NOT
+    // trigger the structured panel — defensive against false positives.
+    const run = mkRun({
+      status: 'WaitingApproval',
+      finished_at: null,
+      step_results: [
+        mkResult({
+          step_name: 'pause_pre_merge',
+          step_kind: 'Gate',
+          status: 'WaitingApproval',
+          output: 'Approve the merge to main?',
+        }),
+      ],
+    });
+    const { container } = render(<RunDetail run={run} onDelete={() => {}} onDecide={() => {}} />);
+    expect(container.querySelector('.wf-triage-manifest')).toBeNull();
+    expect(container.querySelector('.wf-gate-message')!.textContent)
+      .toContain('Approve the merge to main?');
+  });
+
+  // ── TriageManifestPanel edge cases (0.8.3, TD-270) ─────────────────
+  //
+  // Beyond the "happy path" + "fallback to raw text" tests above, the
+  // panel has its own rendering branches: empty categories, missing
+  // files_touched, options_considered absent, and the toggle behavior
+  // (sections collapse + expand). These tests pin them so a future
+  // refactor of the panel doesn't silently break the empty-state UX.
+
+  const buildTriageMsg = (manifest: object) =>
+    `Review:\n\n${JSON.stringify(manifest)}\n\n- Approve`;
+
+  it('renders all 4 section headers even when categories are empty', () => {
+    // An empty manifest is degenerate but valid — the agent classified
+    // everything as clear and one category happened to be empty. The
+    // panel must still render the headers with count=0 (silently
+    // hiding them would mask "the agent found nothing here", which
+    // IS the operator's signal that the run is over-confident).
+    const msg = buildTriageMsg({ clear: [], decided: [], mocked: [], blocked: [] });
+    const run = mkRun({
+      status: 'WaitingApproval',
+      finished_at: null,
+      step_results: [
+        mkResult({ step_name: 'review_triage', step_kind: 'Gate', status: 'WaitingApproval', output: msg }),
+      ],
+    });
+    const { container } = render(<RunDetail run={run} onDelete={() => {}} onDecide={() => {}} />);
+    expect(container.querySelector('.wf-triage-manifest')).not.toBeNull();
+    // All 4 section headers present
+    expect(screen.getByText(/wf\.gate\.triage\.clear/)).toBeInTheDocument();
+    expect(screen.getByText(/wf\.gate\.triage\.decided/)).toBeInTheDocument();
+    expect(screen.getByText(/wf\.gate\.triage\.mocked/)).toBeInTheDocument();
+    expect(screen.getByText(/wf\.gate\.triage\.blocked/)).toBeInTheDocument();
+    // 4 count badges showing 0
+    const counts = container.querySelectorAll('.wf-triage-cat-count');
+    expect(counts).toHaveLength(4);
+    counts.forEach(el => expect(el.textContent).toBe('0'));
+  });
+
+  it('omits the files_touched footer when manifest has no files', () => {
+    // files_touched is optional; when absent (or empty) the footer
+    // must be hidden so it doesn't bait the operator into expanding
+    // an empty list.
+    const msg = buildTriageMsg({
+      clear: [{ id: 'a', what: 'A' }], decided: [], mocked: [], blocked: [],
+    });
+    const run = mkRun({
+      status: 'WaitingApproval',
+      finished_at: null,
+      step_results: [
+        mkResult({ step_name: 'review_triage', step_kind: 'Gate', status: 'WaitingApproval', output: msg }),
+      ],
+    });
+    const { container } = render(<RunDetail run={run} onDelete={() => {}} onDecide={() => {}} />);
+    expect(container.querySelector('.wf-triage-files')).toBeNull();
+    expect(screen.queryByText(/wf\.gate\.triage\.filesTouched/)).not.toBeInTheDocument();
+  });
+
+  it('renders the files_touched footer with count when present', () => {
+    const msg = buildTriageMsg({
+      clear: [], decided: [], mocked: [], blocked: [],
+      files_touched: ['src/a.rs', 'src/b.rs', 'src/c.rs'],
+    });
+    const run = mkRun({
+      status: 'WaitingApproval',
+      finished_at: null,
+      step_results: [
+        mkResult({ step_name: 'review_triage', step_kind: 'Gate', status: 'WaitingApproval', output: msg }),
+      ],
+    });
+    const { container } = render(<RunDetail run={run} onDelete={() => {}} onDecide={() => {}} />);
+    expect(container.querySelector('.wf-triage-files')).not.toBeNull();
+    // Count interpolated via i18n placeholder
+    expect(screen.getByText(/wf\.gate\.triage\.filesTouched:3/)).toBeInTheDocument();
+  });
+
+  it('omits options_considered sub-collapsible when the decided entry has none', () => {
+    // `options_considered` is optional — a decided entry without it
+    // is fine (some decisions have no rejected alternatives worth
+    // listing). The collapsible must NOT render in that case so
+    // the empty UI doesn't bait the operator.
+    const msg = buildTriageMsg({
+      clear: [], mocked: [], blocked: [],
+      decided: [{
+        id: 'no-opts', what: 'simple decision', chosen: 'X', why: 'Y',
+        // no options_considered
+      }],
+    });
+    const run = mkRun({
+      status: 'WaitingApproval',
+      finished_at: null,
+      step_results: [
+        mkResult({ step_name: 'review_triage', step_kind: 'Gate', status: 'WaitingApproval', output: msg }),
+      ],
+    });
+    const { container } = render(<RunDetail run={run} onDelete={() => {}} onDecide={() => {}} />);
+    expect(container.querySelector('.wf-triage-entry-considered')).toBeNull();
+    expect(screen.queryByText(/wf\.gate\.triage\.optionsConsidered/)).not.toBeInTheDocument();
+  });
+
+  it('toggles a section open ↔ closed when the summary is clicked', async () => {
+    // Sections start with decided/mocked/blocked OPEN (most decisions
+    // to review) and clear CLOSED (mechanical, less urgent). Clicking
+    // the summary must flip the state — a regression here would
+    // freeze the panel in its initial layout.
+    const msg = buildTriageMsg({
+      clear: [{ id: 'c1', what: 'clear entry' }],
+      decided: [], mocked: [], blocked: [],
+    });
+    const run = mkRun({
+      status: 'WaitingApproval',
+      finished_at: null,
+      step_results: [
+        mkResult({ step_name: 'review_triage', step_kind: 'Gate', status: 'WaitingApproval', output: msg }),
+      ],
+    });
+    const { container } = render(<RunDetail run={run} onDelete={() => {}} onDecide={() => {}} />);
+    const clearSection = container.querySelector('.wf-triage-section[data-cat="clear"]') as HTMLDetailsElement;
+    expect(clearSection).not.toBeNull();
+    // Initial: clear is closed (mechanical, lower priority)
+    expect(clearSection.open).toBe(false);
+    // Click summary → opens
+    const summary = clearSection.querySelector('summary')!;
+    await act(async () => {
+      summary.click();
+    });
+    expect(clearSection.open).toBe(true);
+    // Click again → closes
+    await act(async () => {
+      summary.click();
+    });
+    expect(clearSection.open).toBe(false);
+  });
+});
+
+describe('tryParseTriageManifest — JSON extraction from Gate message (0.8.3)', () => {
+  // The parser scans the Gate message for the first `{`, brace-counts
+  // to the matching `}`, parses, then validates the manifest shape.
+  // These tests lock in the edge cases the brace-counter has to handle
+  // — every one of them was a real risk of false-negative (manifest
+  // present but parser bails) or false-positive (random JSON
+  // accidentally accepted as a triage manifest).
+
+  const validManifest = {
+    clear: [{ id: 'a', what: 'A' }],
+    decided: [{ id: 'b', what: 'B', chosen: 'X', why: 'Y' }],
+    mocked: [],
+    blocked: [],
+  };
+
+  it('returns null on empty message (defensive)', () => {
+    expect(tryParseTriageManifest('')).toBeNull();
+  });
+
+  it('returns null when there is no JSON object at all', () => {
+    expect(tryParseTriageManifest('Approve the merge to main?')).toBeNull();
+  });
+
+  it('returns null on malformed JSON (unclosed brace)', () => {
+    // Brace-counter walks to end of string without depth=0 — must
+    // return null rather than throw.
+    const msg = 'prose {"clear": [{ "id": "a", "what": "A" }';
+    expect(tryParseTriageManifest(msg)).toBeNull();
+  });
+
+  it('returns null when JSON is valid but not a manifest shape', () => {
+    // {"foo": 1} parses fine but has no `clear/decided/mocked/blocked`
+    // arrays — defensive guard against random JSON in a non-triage Gate
+    // message accidentally matching the panel.
+    expect(tryParseTriageManifest('Approve? {"foo": 1}')).toBeNull();
+  });
+
+  it('returns null when ANY of the 4 categories is not an array', () => {
+    // All 4 array-checks must pass — missing or wrong-typed category
+    // bails. Without this guard we would render `.map()` on undefined
+    // and crash the panel.
+    const m = { ...validManifest, blocked: 'not an array' };
+    expect(tryParseTriageManifest(`x ${JSON.stringify(m)}`)).toBeNull();
+  });
+
+  it('returns null when ONE of the 4 categories is missing entirely', () => {
+    const m: Record<string, unknown> = { ...validManifest };
+    delete m.blocked;
+    expect(tryParseTriageManifest(`x ${JSON.stringify(m)}`)).toBeNull();
+  });
+
+  it('parses a manifest preceded by prose preamble (the real shape)', () => {
+    // This is what the runner actually emits — prose + JSON on its
+    // own paragraph. The parser must skip the prose and pick the
+    // first `{`.
+    const msg = `Triage manifest produced. Review the categories:\n\n${JSON.stringify(validManifest)}\n\n- Approve...`;
+    const m = tryParseTriageManifest(msg);
+    expect(m).not.toBeNull();
+    expect(m!.decided[0].id).toBe('b');
+  });
+
+  it('handles braces inside string values without mis-counting', () => {
+    // The brace-counter must respect strings: a `{` or `}` inside a
+    // quoted value must NOT change depth, otherwise the parser stops
+    // at the wrong character and trims valid JSON.
+    const m = {
+      clear: [{ id: 'a', what: 'String with {} braces inside' }],
+      decided: [], mocked: [], blocked: [],
+    };
+    const parsed = tryParseTriageManifest(`x ${JSON.stringify(m)} y`);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.clear[0].what).toContain('{}');
+  });
+
+  it('handles escaped quotes inside strings without mis-counting', () => {
+    // `\"` inside a string must not terminate the string for the
+    // brace-counter's string-mode tracking. JSON.stringify produces
+    // this for any value containing a `"`.
+    const m = {
+      clear: [{ id: 'a', what: 'value with "embedded" quotes' }],
+      decided: [], mocked: [], blocked: [],
+    };
+    const parsed = tryParseTriageManifest(`prose ${JSON.stringify(m)}`);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.clear[0].what).toContain('embedded');
+  });
+
+  it('handles deeply nested objects inside entries', () => {
+    // `decided` entries carry `options_considered` (array of strings)
+    // but downstream features may push richer nested structures.
+    // Parser must brace-count through all depths.
+    const m = {
+      clear: [], mocked: [], blocked: [],
+      decided: [{
+        id: 'x', what: 'y', chosen: 'z', why: 'w',
+        options_considered: ['opt1', 'opt2', 'opt3'],
+      }],
+    };
+    const parsed = tryParseTriageManifest(`x ${JSON.stringify(m)}`);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.decided[0].options_considered).toHaveLength(3);
+  });
+
+  it('returns null when all categories are present but empty arrays — wait, this is valid', () => {
+    // Empty manifest is a degenerate but VALID shape (every entry
+    // classifies as clear and the agent emitted nothing).
+    // Important: parser accepts; panel handles count=0 gracefully.
+    const m = { clear: [], decided: [], mocked: [], blocked: [] };
+    expect(tryParseTriageManifest(`x ${JSON.stringify(m)}`)).not.toBeNull();
   });
 });
 

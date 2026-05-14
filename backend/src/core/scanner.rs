@@ -502,6 +502,109 @@ pub fn detect_audit_status(project_path: &str) -> crate::models::AiAuditStatus {
     AiAuditStatus::Audited
 }
 
+/// One `KRONN-(ASSUMED|MOCKED|TODO)(<id>): <why>` marker found in
+/// source code by `scan_kronn_markers`. 0.8.3 — populates the
+/// `code_locations` field on `agent_decisions` rows so the
+/// Decision-log page can deep-link to the actual line.
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+pub struct KronnMarker {
+    /// File path, relative to the scan root.
+    pub path: String,
+    pub line: usize,
+    /// `ASSUMED` | `MOCKED` | `TODO`.
+    pub kind: String,
+    /// The kebab-case identifier inside the parentheses.
+    pub decision_id: String,
+    /// Everything after the `: ` colon, trimmed. May be empty if the
+    /// agent forgot the rationale.
+    pub note: String,
+}
+
+/// Scan a directory tree for `KRONN-(ASSUMED|MOCKED|TODO)(<id>): <why>`
+/// markers. Designed for the Feasibility-Gated Implementation pattern:
+/// after the `implement` step finishes, this surfaces every freedom
+/// the agent took (or every block it left), tied back to the manifest
+/// via `decision_id`.
+///
+/// The walk skips common heavy dirs (`node_modules`, `vendor`,
+/// `target`, `.git`, `dist`, `build`) and binary files (via extension
+/// allowlist — only ASCII-text source extensions are scanned). Max
+/// depth is bounded to keep the scan under ~1s on a 100kLOC repo.
+pub fn scan_kronn_markers(root: &std::path::Path) -> Vec<KronnMarker> {
+    static SKIP_DIRS: &[&str] = &[
+        "node_modules", "vendor", "target", ".git", "dist", "build",
+        ".next", ".kronn", ".kronn-worktrees", ".venv", "__pycache__",
+    ];
+    // Allowlist of text-source extensions. Anything else (.png, .lock,
+    // .so, .map…) is skipped without a read, keeping the scan fast.
+    static TEXT_EXTS: &[&str] = &[
+        "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs",
+        "php", "py", "go", "java", "kt", "rb", "cs",
+        "c", "h", "cpp", "hpp", "cc",
+        "html", "twig", "vue", "svelte",
+        "yml", "yaml", "toml", "json", "ini", "env",
+        "sh", "bash", "zsh", "fish",
+        "scss", "sass", "css", "less",
+        "md", "mdx", "txt",
+    ];
+    // The marker grammar:
+    //   KRONN-<KIND>(<id>):<space><note...>
+    // where:
+    //   <KIND> ∈ {ASSUMED, MOCKED, TODO}
+    //   <id>   = kebab-case identifier ([A-Za-z0-9_-]+)
+    //   <note> = anything until end of line
+    static MARKER_RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
+        regex_lite::Regex::new(
+            r"KRONN-(ASSUMED|MOCKED|TODO)\(([A-Za-z0-9_.-]+)\):\s*(.*)"
+        ).expect("static regex must compile")
+    });
+    let re = &*MARKER_RE;
+
+    let mut out = Vec::new();
+    let walker = WalkDir::new(root)
+        .max_depth(8)
+        .into_iter()
+        .filter_entry(|e| {
+            // Skip heavy dirs anywhere in the tree.
+            e.file_name()
+                .to_str()
+                .map(|name| !SKIP_DIRS.contains(&name))
+                .unwrap_or(true)
+        });
+    for entry in walker.filter_map(|e| e.ok()) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let ext_ok = path.extension()
+            .and_then(|e| e.to_str())
+            .map(|ext| TEXT_EXTS.contains(&ext))
+            .unwrap_or(false);
+        if !ext_ok {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(path) else { continue; };
+        // Cheap pre-filter so we don't run regex on every line of
+        // every source file — the marker is rare.
+        if !content.contains("KRONN-") {
+            continue;
+        }
+        let rel = path.strip_prefix(root).unwrap_or(path);
+        for (idx, line) in content.lines().enumerate() {
+            if let Some(captures) = re.captures(line) {
+                out.push(KronnMarker {
+                    path: rel.to_string_lossy().to_string(),
+                    line: idx + 1,
+                    kind: captures[1].to_string(),
+                    decision_id: captures[2].to_string(),
+                    note: captures[3].trim().to_string(),
+                });
+            }
+        }
+    }
+    out
+}
+
 /// Count remaining `<!-- TODO -->` markers under the project's docs
 /// folder. Path-agnostic — picks `docs/` (post-pivot) or `ai/`
 /// (legacy) via `detect_docs_dir`, so projects on either layout get
@@ -896,5 +999,91 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("docs")).unwrap();
         std::fs::create_dir_all(tmp.path().join("ai")).unwrap();
         assert_eq!(detect_docs_dir(tmp.path()), tmp.path().join("docs"));
+    }
+
+    // ─── scan_kronn_markers (0.8.3 Feasibility-Gated Implementation) ─────────
+
+    #[test]
+    fn scan_kronn_markers_finds_all_three_variants() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("src/Service")).unwrap();
+        std::fs::write(
+            tmp.path().join("src/Service/BrandContext.php"),
+            "<?php\n\
+             // KRONN-ASSUMED(brand-context-impl): EventListener over CompilerPass\n\
+             final class BrandContext {}\n\
+             // KRONN-MOCKED(adobe-dtm-an): env var KRONN_ADOBE_DTM_AN_URL_PROD\n\
+             public function getDtm(): string { return ''; }\n\
+             // KRONN-TODO(adobe-visitor-an): waiting on Data team\n",
+        ).unwrap();
+
+        let markers = scan_kronn_markers(tmp.path());
+        assert_eq!(markers.len(), 3, "expected 3 markers, got {markers:?}");
+        let kinds: Vec<&str> = markers.iter().map(|m| m.kind.as_str()).collect();
+        assert!(kinds.contains(&"ASSUMED"));
+        assert!(kinds.contains(&"MOCKED"));
+        assert!(kinds.contains(&"TODO"));
+        // decision_id preserved verbatim.
+        assert!(markers.iter().any(|m| m.decision_id == "brand-context-impl"));
+        assert!(markers.iter().any(|m| m.decision_id == "adobe-dtm-an"));
+        assert!(markers.iter().any(|m| m.decision_id == "adobe-visitor-an"));
+    }
+
+    #[test]
+    fn scan_kronn_markers_skips_heavy_dirs() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Marker INSIDE node_modules — must be ignored.
+        std::fs::create_dir_all(tmp.path().join("node_modules/foo")).unwrap();
+        std::fs::write(
+            tmp.path().join("node_modules/foo/index.js"),
+            "// KRONN-ASSUMED(x): should not be found\n",
+        ).unwrap();
+        // Marker in src/ — must be found.
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::write(
+            tmp.path().join("src/app.js"),
+            "// KRONN-MOCKED(y): real marker\n",
+        ).unwrap();
+
+        let markers = scan_kronn_markers(tmp.path());
+        assert_eq!(markers.len(), 1);
+        assert_eq!(markers[0].decision_id, "y");
+    }
+
+    #[test]
+    fn scan_kronn_markers_skips_binary_extensions() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // A `.png` file with the marker string in it (pretend binary)
+        // — must not be read.
+        std::fs::write(
+            tmp.path().join("logo.png"),
+            "KRONN-TODO(should-not-match): binary file\n",
+        ).unwrap();
+        let markers = scan_kronn_markers(tmp.path());
+        assert!(markers.is_empty(), "binary file must be skipped");
+    }
+
+    #[test]
+    fn scan_kronn_markers_captures_line_number_and_note() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("a.rs"),
+            "// line 1\n\
+             fn main() {}\n\
+             // KRONN-ASSUMED(decision-id): the rationale text here\n",
+        ).unwrap();
+        let markers = scan_kronn_markers(tmp.path());
+        assert_eq!(markers.len(), 1);
+        let m = &markers[0];
+        assert_eq!(m.line, 3);
+        assert_eq!(m.decision_id, "decision-id");
+        assert_eq!(m.note, "the rationale text here");
+    }
+
+    #[test]
+    fn scan_kronn_markers_empty_when_no_markers() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "fn main() {}\n").unwrap();
+        assert!(scan_kronn_markers(tmp.path()).is_empty());
     }
 }

@@ -144,26 +144,38 @@ pub(crate) fn ensure_agent_writable_subfolders(docs_dir: &std::path::Path) -> Re
         // bootstrap is in a degraded state.
         return Ok(());
     }
+    // The README copy below makes one point explicit: these folders
+    // are EMPTY by default after the audit. The audit pipeline does
+    // NOT seed them — they're discovery-time scratchpads filled by
+    // agents (and humans) as they encounter conventions / gotchas /
+    // contributors during real work. Without this notice, users
+    // open the empty folders after their first audit and assume
+    // something went wrong. 0.8.3 (F5).
     static SUBFOLDERS: &[(&str, &str)] = &[
         (
             "conventions",
             "# Conventions\n\n\
-             Project-specific conventions discovered by agents at runtime — code style, build, CI, naming patterns.\n\n\
+             > **Empty by design after the initial audit.** This folder fills up over time, one file at a time, as agents and humans encounter project-specific conventions while doing real work. The audit pipeline does NOT seed it — only `coding-rules.md` (one level up) is filled at audit time.\n\n\
+             ## What goes here\n\
+             Project-specific conventions discovered at runtime — naming patterns, idioms agents must follow, micro-rules that don't fit `coding-rules.md`.\n\n\
              One file per topic, e.g. `pnpm-vs-npm.md`, `git-signoff.md`, `commit-style.md`.\n\n\
              Curated by humans + agents. Cross-ref with `[[wikilinks]]` for Obsidian graph.\n",
         ),
         (
             "gotchas",
             "# Gotchas\n\n\
-             Sharp edges agents (and humans) should know before touching code — runtime quirks, footguns, version-specific issues.\n\n\
+             > **Empty by design after the initial audit.** This folder fills up over time as agents (and humans) hit footguns during real work. The audit pipeline does NOT seed it — only generic `inconsistencies-tech-debt.md` (one level up) is filled at audit time.\n\n\
+             ## What goes here\n\
+             Sharp edges to know before touching code — runtime quirks, footguns, version-specific issues, MCP integration weirdness, framework bugs.\n\n\
              One file per topic, e.g. `jira-mcp-escapes-panels.md`, `migration-locks-table.md`.\n",
         ),
         (
             "people",
             "# People\n\n\
-             Optional team context — preferences, ownership, review style.\n\
-             Helps agents adapt to the human they're collaborating with.\n\n\
-             One file per person if useful: `alice.md`, `bob.md`. Skip if not relevant for your project.\n",
+             > **Empty by design after the initial audit.** Optional folder. Skip if your project is solo or if collaborators don't need agent-tailored context.\n\n\
+             ## What goes here\n\
+             Team context — preferences, ownership areas, review style. Helps agents adapt to the human they're collaborating with.\n\n\
+             One file per person if useful: `alice.md`, `bob.md`.\n",
         ),
     ];
     for (name, readme) in SUBFOLDERS {
@@ -181,7 +193,21 @@ pub(crate) fn ensure_agent_writable_subfolders(docs_dir: &std::path::Path) -> Re
     Ok(())
 }
 
-/// Recursively copy a directory, skipping files that already exist at the destination.
+/// Recursively copy a directory, skipping files that already exist at
+/// the destination — EXCEPT when the destination file is corrupted
+/// (empty / truncated). Corruption almost always comes from a prior
+/// audit that failed mid-write (timeout, CLI crash, sandbox abort)
+/// and left a 0-byte file behind. Without this guard, the next audit
+/// has nothing to fill in for that step — Step 9 (`inconsistencies-
+/// tech-debt.md`) is the canonical victim because it's the longest
+/// step and most likely to hit a CLI timeout.
+///
+/// Threshold heuristic: if dest is smaller than 25% of source AND
+/// source is non-trivial (≥ 200 B), the dest is treated as corrupt
+/// and re-copied from the template. The user's own content is never
+/// at risk because the templates are static and the user's edits to
+/// any post-audit file are still ≥ 25% of the template size in any
+/// realistic scenario.
 pub(crate) fn copy_dir_nondestructive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
     std::fs::create_dir_all(dst).map_err(|e| format!("mkdir {}: {}", dst.display(), e))?;
 
@@ -195,12 +221,36 @@ pub(crate) fn copy_dir_nondestructive(src: &std::path::Path, dst: &std::path::Pa
 
         if src_path.is_dir() {
             copy_dir_nondestructive(&src_path, &dst_path)?;
-        } else if !dst_path.exists() {
+        } else if !dst_path.exists() || is_corrupted_template_file(&src_path, &dst_path) {
             std::fs::copy(&src_path, &dst_path)
                 .map_err(|e| format!("copy {} -> {}: {}", src_path.display(), dst_path.display(), e))?;
         }
     }
     Ok(())
+}
+
+/// Heuristic to detect a destination file that is the leftover of a
+/// failed prior audit (empty / truncated). The check is conservative:
+/// we only consider files where the template source is non-trivial
+/// (≥ 200 B) AND the dest is < 25% of source. Both conditions reduce
+/// the false-positive rate on legitimate short user files.
+fn is_corrupted_template_file(src: &std::path::Path, dst: &std::path::Path) -> bool {
+    let (Ok(src_meta), Ok(dst_meta)) = (std::fs::metadata(src), std::fs::metadata(dst)) else {
+        return false;
+    };
+    let src_size = src_meta.len();
+    let dst_size = dst_meta.len();
+    // Source must be a "real" template, not an empty placeholder we
+    // accidentally ship — otherwise the heuristic flags everything.
+    if src_size < 200 {
+        return false;
+    }
+    // Dest is corrupted if it's empty OR < 25% of source. The "< 25%"
+    // is generous: even a user who deleted half the template still
+    // has ≥ 50%. A user who keeps only the title (e.g. 30 B) is
+    // unusual — and re-copying the template is a safe operation
+    // since the user is presumably starting fresh anyway.
+    dst_size == 0 || dst_size * 4 < src_size
 }
 
 /// Inject the bootstrap prompt at the top of the project's docs entry
@@ -304,6 +354,26 @@ mod tests {
     }
 
     #[test]
+    fn ensure_subfolders_readme_explicitly_says_empty_by_design() {
+        // 0.8.3 F5 — users opened conventions/gotchas/people after
+        // the first audit, saw only a tiny README, and assumed
+        // something failed. The README now states upfront that these
+        // folders are MEANT to be empty post-audit (they're filled
+        // at runtime by agents and humans, not by the audit pipeline).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let docs = tmp.path().join("docs");
+        std::fs::create_dir(&docs).unwrap();
+        ensure_agent_writable_subfolders(&docs).unwrap();
+        for sub in &["conventions", "gotchas", "people"] {
+            let body = std::fs::read_to_string(docs.join(sub).join("README.md")).unwrap();
+            assert!(
+                body.contains("Empty by design"),
+                "{sub}/README.md must explicitly call out the empty-by-design status (got: {body:?})"
+            );
+        }
+    }
+
+    #[test]
     fn ensure_subfolders_is_idempotent_does_not_overwrite_existing_readme() {
         let tmp = tempfile::TempDir::new().unwrap();
         let docs = tmp.path().join("docs");
@@ -324,5 +394,116 @@ mod tests {
         let docs = tmp.path().join("does_not_exist");
         assert!(ensure_agent_writable_subfolders(&docs).is_ok());
         assert!(!docs.exists());
+    }
+
+    // ─── copy_dir_nondestructive: corruption-repair regression suite
+    //
+    // 0.8.3 user bug on DOCROMS_WEB: a prior audit failed mid-Step-9
+    // and left `inconsistencies-tech-debt.md` at 0 bytes. The next
+    // audit's `copy_dir_nondestructive` saw the file existed and
+    // skipped it — Step 9 then asked Claude to fill a totally blank
+    // file with no template to inherit, and produced nothing.
+    //
+    // The repair heuristic re-copies a dest file ONLY when the
+    // template src is ≥ 200 B AND dest is < 25% of src. These tests
+    // pin the threshold + the "don't touch healthy dest" promise.
+
+    fn write(path: &std::path::Path, content: &str) {
+        if let Some(parent) = path.parent() { std::fs::create_dir_all(parent).unwrap(); }
+        std::fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn copy_nondestructive_creates_missing_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        write(&src.join("a.md"), &"x".repeat(500));
+        copy_dir_nondestructive(&src, &dst).unwrap();
+        assert!(dst.join("a.md").is_file());
+    }
+
+    #[test]
+    fn copy_nondestructive_skips_healthy_existing_file() {
+        // The user has edited the doc — must NOT be overwritten.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        write(&src.join("a.md"), &"x".repeat(500));
+        let user_content = "# My fresh content".repeat(50); // healthy size, distinct from template
+        write(&dst.join("a.md"), &user_content);
+        copy_dir_nondestructive(&src, &dst).unwrap();
+        assert_eq!(std::fs::read_to_string(dst.join("a.md")).unwrap(), user_content);
+    }
+
+    #[test]
+    fn copy_nondestructive_repairs_empty_dest() {
+        // The exact DOCROMS_WEB scenario: prior audit left 0-byte file.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        let template = "# Tech debt index\n".to_string() + &"placeholder ".repeat(50);
+        write(&src.join("inconsistencies-tech-debt.md"), &template);
+        write(&dst.join("inconsistencies-tech-debt.md"), "");
+        copy_dir_nondestructive(&src, &dst).unwrap();
+        let after = std::fs::read_to_string(dst.join("inconsistencies-tech-debt.md")).unwrap();
+        assert_eq!(after, template, "0-byte dest must be repaired from template");
+    }
+
+    #[test]
+    fn copy_nondestructive_repairs_truncated_dest() {
+        // Truncated mid-write (e.g. CLI crashed after writing the
+        // first line) — must also be treated as corrupt.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        let template = "x".repeat(1000); // 1000 B
+        write(&src.join("a.md"), &template);
+        write(&dst.join("a.md"), "x"); // 1 B → < 25% of 1000
+        copy_dir_nondestructive(&src, &dst).unwrap();
+        assert_eq!(std::fs::read_to_string(dst.join("a.md")).unwrap(), template);
+    }
+
+    #[test]
+    fn copy_nondestructive_does_not_repair_small_template_files() {
+        // Source < 200 B (e.g. a tiny README) — the heuristic is
+        // disabled to avoid touching legitimately-small user files.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        write(&src.join("README.md"), "# Short");
+        write(&dst.join("README.md"), "");
+        copy_dir_nondestructive(&src, &dst).unwrap();
+        // Dest stays empty because src is < 200 B → repair skipped.
+        assert_eq!(std::fs::read_to_string(dst.join("README.md")).unwrap(), "");
+    }
+
+    #[test]
+    fn copy_nondestructive_preserves_dest_just_above_threshold() {
+        // 25% threshold: just above must be preserved (the user
+        // legitimately deleted 70% of the template — that's their
+        // call, not ours).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        write(&src.join("a.md"), &"x".repeat(1000));
+        let user_kept = "y".repeat(300); // 300 B = 30% of 1000 → above threshold
+        write(&dst.join("a.md"), &user_kept);
+        copy_dir_nondestructive(&src, &dst).unwrap();
+        assert_eq!(std::fs::read_to_string(dst.join("a.md")).unwrap(), user_kept);
+    }
+
+    #[test]
+    fn copy_nondestructive_recurses_into_subdirs() {
+        // Corruption in a nested file (e.g. docs/tech-debt/TD-…)
+        // must also be repaired by the recursive walk.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        write(&src.join("tech-debt/TEMPLATE.md"), &"x".repeat(500));
+        write(&dst.join("tech-debt/TEMPLATE.md"), "");
+        copy_dir_nondestructive(&src, &dst).unwrap();
+        let after = std::fs::read_to_string(dst.join("tech-debt/TEMPLATE.md")).unwrap();
+        assert_eq!(after.len(), 500);
     }
 }

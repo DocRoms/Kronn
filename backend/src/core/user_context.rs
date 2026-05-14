@@ -133,8 +133,8 @@ pub fn build_memory_prelude_prompt() -> String {
      `architecture/`, `conventions/`, `gotchas/`, `operations/`, `people/`).\n\
      Use one short file per topic. Prefer markdown links `[name](path.md)` for\n\
      cross-refs to other docs files (Obsidian-friendly graph view).\n\n\
-     Do NOT edit `docs/AGENTS.md` (curated by the audit workflow) or anything\n\
-     under `docs/templates/`. Do NOT write secrets — Kronn rejects writes\n\
+     Do NOT edit `docs/AGENTS.md` (curated by the audit workflow).\n\
+     Do NOT write secrets — Kronn rejects writes\n\
      that match `.env`, `.pem`, `.ssh/`, or token shapes (sk-, ghp_, AKIA, JWT).\n\n\
      Some projects still use the legacy `ai/` folder instead of `docs/` —\n\
      same conventions, just a different root. Use whichever the project has."
@@ -296,9 +296,17 @@ mod tests {
 
     #[test]
     fn memory_prelude_forbids_writing_to_curated_areas() {
+        // 0.8.3 — `docs/templates/exchanges.md` was an obsolete artifact
+        // from the pre-Kronn era when agents had to coordinate via
+        // a shared markdown file. The discussion system (and the
+        // 0.8.4 cross-agent memory MCP) supersedes it entirely, so
+        // the dedicated `docs/templates/` folder + its mention here
+        // were removed. Only `docs/AGENTS.md` remains as the curated
+        // off-limits target.
         let prelude = build_memory_prelude_prompt();
         assert!(prelude.contains("docs/AGENTS.md"), "must explicitly forbid editing docs/AGENTS.md");
-        assert!(prelude.contains("docs/templates/"), "must explicitly forbid editing templates/");
+        assert!(!prelude.contains("docs/templates/"),
+            "docs/templates/ was removed in 0.8.3 (obsolete since cross-agent discussions)");
     }
 
     #[test]

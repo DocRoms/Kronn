@@ -317,6 +317,17 @@
 .dash-proj-name {
   font-weight: 600;
   font-size: var(--kr-fs-lg);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+}
+
+/* 0.8.3 — discreet inline spinner next to the project name when an audit
+ * or validation is running. Color matches the accent so it reads as
+ * "this project is busy" rather than a destructive / warning state. */
+.dash-proj-name-spinner {
+  color: var(--kr-accent-ink);
+  flex-shrink: 0;
 }
 
 .dash-proj-path {
@@ -755,6 +766,27 @@
   display: flex;
   align-items: center;
   gap: var(--kr-sp-2);
+  flex-wrap: wrap;
+}
+
+/* 0.8.3 — quick-access CTA next to the post-audit "Validated" badge.
+ * Discrete inline button (not a primary CTA) so it doesn't compete with
+ * the validation chip itself. */
+.dash-audit-view-tds-btn {
+  margin-left: var(--kr-sp-2);
+  padding: 2px 8px;
+  font-size: var(--kr-fs-xs);
+  background: var(--kr-bg-raised);
+  border: 1px solid var(--kr-border-soft);
+  border-radius: 4px;
+  color: var(--kr-text-secondary);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.dash-audit-view-tds-btn:hover {
+  background: var(--kr-bg-elevated);
+  color: var(--kr-text-primary);
 }
 
 /* ── Progress bar ──────────────────────────────────────── */

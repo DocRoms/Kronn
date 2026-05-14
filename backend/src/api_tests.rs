@@ -261,6 +261,7 @@ mod tests {
                 default_skill_ids: vec![],
                 default_profile_id: None,
                 briefing_notes: None,
+            linked_repos: vec![],
                 created_at: now,
                 updated_at: now,
             };
@@ -1252,6 +1253,7 @@ mod tests {
                 default_skill_ids: vec![],
                 default_profile_id: None,
                 briefing_notes: None,
+            linked_repos: vec![],
                 created_at: now,
                 updated_at: now,
             };
@@ -1292,6 +1294,7 @@ mod tests {
                 default_skill_ids: vec![],
                 default_profile_id: None,
                 briefing_notes: None,
+            linked_repos: vec![],
                 created_at: now,
                 updated_at: now,
             };
@@ -1343,6 +1346,7 @@ mod tests {
                 default_skill_ids: vec![],
                 default_profile_id: None,
                 briefing_notes: None,
+            linked_repos: vec![],
                 created_at: now,
                 updated_at: now,
             };
@@ -1389,6 +1393,7 @@ mod tests {
                 default_skill_ids: vec![],
                 default_profile_id: None,
                 briefing_notes: None,
+            linked_repos: vec![],
                 created_at: now,
                 updated_at: now,
             };
@@ -1485,6 +1490,7 @@ mod tests {
                 default_skill_ids: vec![],
                 default_profile_id: None,
                 briefing_notes: None,
+            linked_repos: vec![],
                 created_at: now,
                 updated_at: now,
             };
@@ -2033,5 +2039,323 @@ mod tests {
             state.config.read().await.disabled_auto_skills.is_empty(),
             "list must be empty again"
         );
+    }
+
+    // ─── 0.8.3 — Bundle endpoint (KRONN:BUNDLE_READY) ────────────────────────
+
+    /// Happy path: a bundle with 1 Quick Prompt + 1 Quick API +
+    /// 1 Workflow, the workflow referencing both via `@bundle:` ids.
+    /// All artifacts must land in DB and the workflow steps must
+    /// have the real ids substituted in.
+    #[tokio::test]
+    async fn bundle_creates_qp_qa_and_workflow_atomically() {
+        let state = test_state();
+
+        let body = serde_json::json!({
+            "quick_prompts": [{
+                "bundle_id": "summarize",
+                "name": "Summarize one item",
+                "icon": "📝",
+                "prompt_template": "Summarize {{batch.item.title}} in 2 sentences.",
+                "agent": "ClaudeCode",
+                "description": "Per-item summarizer for daily digest"
+            }],
+            "quick_apis": [{
+                "bundle_id": "fetch-cb",
+                "name": "Top pages",
+                "icon": "📊",
+                "api_plugin_slug": "chartbeat",
+                "api_config_id": "stub-cfg",
+                "api_endpoint_path": "/v3/historical/topPages.json",
+                "api_method": "GET"
+            }],
+            "workflow": {
+                "name": "Daily digest",
+                "trigger": { "type": "Manual" },
+                "steps": [
+                    {
+                        "name": "fetch",
+                        "step_type": { "type": "ApiCall" },
+                        "agent": "ClaudeCode",
+                        "prompt_template": "",
+                        "mode": { "type": "Normal" },
+                        "quick_api_id": "@bundle:fetch-cb"
+                    },
+                    {
+                        "name": "summarize_each",
+                        "step_type": { "type": "BatchQuickPrompt" },
+                        "agent": "ClaudeCode",
+                        "prompt_template": "",
+                        "mode": { "type": "Normal" },
+                        "batch_quick_prompt_id": "@bundle:summarize",
+                        "batch_items_from": "{{steps.fetch.data}}"
+                    }
+                ]
+            }
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/workflows/bundle")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let (status, resp) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK, "bundle endpoint should 200: {resp}");
+        assert_eq!(resp["success"], true, "bundle should succeed: {resp}");
+
+        let data = &resp["data"];
+        let qp_id = data["quick_prompts"][0]["id"].as_str().expect("qp id").to_string();
+        let qa_id = data["quick_apis"][0]["id"].as_str().expect("qa id").to_string();
+        let wf_id = data["workflow"]["id"].as_str().expect("wf id").to_string();
+        assert!(!qp_id.is_empty() && !qa_id.is_empty() && !wf_id.is_empty());
+        assert_eq!(data["quick_prompts"][0]["bundle_id"], "summarize");
+        assert_eq!(data["quick_apis"][0]["bundle_id"], "fetch-cb");
+
+        // Round-trip: GET the workflow and verify substitution happened.
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/api/workflows/{}", wf_id))
+            .body(Body::empty()).unwrap();
+        let (_, body) = send(state.clone(), false, req).await;
+        let steps = &body["data"]["steps"];
+        assert_eq!(steps[0]["quick_api_id"], qa_id,
+            "step `fetch` quick_api_id must have been substituted from @bundle:fetch-cb to {qa_id}");
+        assert_eq!(steps[1]["batch_quick_prompt_id"], qp_id,
+            "step `summarize_each` batch_quick_prompt_id must have been substituted from @bundle:summarize to {qp_id}");
+
+        // Double-check the QP and QA are listable independently.
+        let req = Request::builder().method("GET").uri("/api/quick-prompts").body(Body::empty()).unwrap();
+        let (_, qps) = send(state.clone(), false, req).await;
+        assert!(qps["data"].as_array().unwrap().iter().any(|v| v["id"] == qp_id),
+            "created QP must appear in /api/quick-prompts");
+        let req = Request::builder().method("GET").uri("/api/quick-apis").body(Body::empty()).unwrap();
+        let (_, qas) = send(state.clone(), false, req).await;
+        assert!(qas["data"].as_array().unwrap().iter().any(|v| v["id"] == qa_id),
+            "created QA must appear in /api/quick-apis");
+    }
+
+    /// Validation: a workflow referencing `@bundle:nonexistent` must
+    /// 200 + `success: false` (errors flow through `ApiResponse`),
+    /// with NO artifacts created. The error message must name the
+    /// missing ref so the user (or the calling agent) can fix the
+    /// payload.
+    #[tokio::test]
+    async fn bundle_rejects_unknown_bundle_ref_and_creates_nothing() {
+        let state = test_state();
+        let body = serde_json::json!({
+            "quick_prompts": [{
+                "bundle_id": "summarize",
+                "name": "QP",
+                "prompt_template": "..."
+            }],
+            "workflow": {
+                "name": "Broken",
+                "trigger": { "type": "Manual" },
+                "steps": [
+                    {
+                        "name": "fetch",
+                        "step_type": { "type": "Agent" },
+                        "agent": "ClaudeCode",
+                        "prompt_template": "test",
+                        "mode": { "type": "Normal" },
+                        "quick_prompt_id": "@bundle:NONEXISTENT"
+                    }
+                ]
+            }
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/workflows/bundle")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let (_, resp) = send(state.clone(), false, req).await;
+        assert_eq!(resp["success"], false, "must reject: {resp}");
+        let err = resp["error"].as_str().unwrap_or("");
+        assert!(err.contains("NONEXISTENT") || err.contains("unknown bundle_id"),
+            "error message must surface the missing ref: {err}");
+
+        // Negative side-effect check: the QP we declared must NOT
+        // have landed in DB (the validator runs before any insert).
+        let req = Request::builder().method("GET").uri("/api/quick-prompts").body(Body::empty()).unwrap();
+        let (_, qps) = send(state.clone(), false, req).await;
+        let arr = qps["data"].as_array().unwrap();
+        assert!(arr.is_empty(),
+            "no QP must be created when the workflow validation fails: got {} rows", arr.len());
+    }
+
+    /// Validation: duplicate bundle_id across categories must be
+    /// rejected. We don't want `@bundle:foo` to resolve ambiguously.
+    #[tokio::test]
+    async fn bundle_rejects_duplicate_bundle_id_across_categories() {
+        let state = test_state();
+        let body = serde_json::json!({
+            "quick_prompts": [{ "bundle_id": "dup", "name": "QP", "prompt_template": "x" }],
+            "quick_apis":    [{
+                "bundle_id": "dup",
+                "name": "QA",
+                "api_plugin_slug": "chartbeat",
+                "api_config_id": "stub",
+                "api_endpoint_path": "/x"
+            }],
+            "workflow": {
+                "name": "Doesn't matter",
+                "trigger": { "type": "Manual" },
+                "steps": [
+                    { "name": "s1", "step_type": { "type": "Agent" }, "agent": "ClaudeCode",
+                      "prompt_template": "x", "mode": { "type": "Normal" } }
+                ]
+            }
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/workflows/bundle")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let (_, resp) = send(state, false, req).await;
+        assert_eq!(resp["success"], false, "must reject duplicate bundle_id: {resp}");
+        assert!(resp["error"].as_str().unwrap_or("").contains("Duplicate"),
+            "error must say 'Duplicate': {}", resp["error"]);
+    }
+
+    /// 0.8.3 — Linked repos PUT happy path. Creates a project,
+    /// PUTs a list of 2 companion repos, GETs the project back and
+    /// asserts the list round-trips. Locks the canonical
+    /// "atomic-replace via PUT" semantics so a future per-row
+    /// CRUD refactor can't silently change the wire shape.
+    #[tokio::test]
+    async fn linked_repos_put_round_trips_via_get_project() {
+        let state = test_state();
+
+        // Spawn a project directly in DB (avoids the bootstrap flow
+        // which needs filesystem state we don't want to stub here).
+        let project_path = std::env::temp_dir()
+            .join(format!("kronn-test-linked-{}", uuid::Uuid::new_v4()))
+            .to_string_lossy()
+            .to_string();
+        std::fs::create_dir_all(&project_path).expect("test project dir");
+        let pid = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now();
+        let project = crate::models::Project {
+            id: pid.clone(),
+            name: "test-with-linked".into(),
+            path: project_path.clone(),
+            repo_url: None,
+            token_override: None,
+            ai_config: crate::models::AiConfigStatus { detected: false, configs: vec![] },
+            audit_status: Default::default(),
+            ai_todo_count: 0,
+            tech_debt_count: 0,
+            needs_docs_migration: false,
+            default_skill_ids: vec![],
+            default_profile_id: None,
+            briefing_notes: None,
+            linked_repos: vec![],
+            created_at: now,
+            updated_at: now,
+        };
+        state.db.with_conn(move |conn| {
+            crate::db::projects::insert_project(conn, &project)
+        }).await.expect("insert project");
+
+        let body = serde_json::json!([
+            { "id": "lr-1", "name": "backend-api", "kind": "api",
+              "location": "/home/priol/Repos/backend-api",
+              "description": "GraphQL schema for the frontend" },
+            { "id": "lr-2", "name": "infra", "kind": "iac",
+              "location": "https://github.com/org/infra",
+              "description": "" }
+        ]);
+        let req = Request::builder()
+            .method("PUT")
+            .uri(format!("/api/projects/{}/linked-repos", pid))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let (status, resp) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(resp["success"], true, "PUT linked-repos must succeed: {resp}");
+
+        // Round-trip via GET /api/projects (list endpoint returns
+        // `linked_repos` on each Project — the list view feeds the
+        // ProjectCard which is where the user reads them back).
+        let req = Request::builder().method("GET").uri("/api/projects").body(Body::empty()).unwrap();
+        let (_, body) = send(state.clone(), false, req).await;
+        let proj = body["data"].as_array().unwrap()
+            .iter().find(|p| p["id"] == pid)
+            .expect("project must be in list");
+        let linked = proj["linked_repos"].as_array().expect("linked_repos array");
+        assert_eq!(linked.len(), 2);
+        assert_eq!(linked[0]["name"], "backend-api");
+        assert_eq!(linked[0]["kind"], "api");
+        assert_eq!(linked[1]["name"], "infra");
+        let _ = std::fs::remove_dir_all(&project_path);
+    }
+
+    /// Validation: a linked repo with an unknown `kind` must be
+    /// rejected (so the UI picker and the prompt formatter can rely
+    /// on a closed set of values without runtime surprises).
+    #[tokio::test]
+    async fn linked_repos_put_rejects_unknown_kind() {
+        let state = test_state();
+        let pid = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now();
+        let project = crate::models::Project {
+            id: pid.clone(),
+            name: "p".into(), path: "/tmp/p".into(),
+            repo_url: None, token_override: None,
+            ai_config: crate::models::AiConfigStatus { detected: false, configs: vec![] },
+            audit_status: Default::default(),
+            ai_todo_count: 0, tech_debt_count: 0, needs_docs_migration: false,
+            default_skill_ids: vec![], default_profile_id: None,
+            briefing_notes: None, linked_repos: vec![],
+            created_at: now, updated_at: now,
+        };
+        state.db.with_conn(move |conn| crate::db::projects::insert_project(conn, &project)).await.unwrap();
+
+        let body = serde_json::json!([
+            { "id": "lr-1", "name": "weird", "kind": "blockchain-mainframe", "location": "/x" }
+        ]);
+        let req = Request::builder()
+            .method("PUT")
+            .uri(format!("/api/projects/{}/linked-repos", pid))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let (_, resp) = send(state, false, req).await;
+        assert_eq!(resp["success"], false, "unknown kind must be rejected: {resp}");
+        assert!(resp["error"].as_str().unwrap_or("").contains("kind"),
+            "error message must mention `kind`: {}", resp["error"]);
+    }
+
+    /// Empty bundle (no QP/QA, just a workflow) is allowed — behaves
+    /// like a regular `POST /api/workflows`. Locks the principle
+    /// "bundle is a superset, not a different endpoint shape".
+    #[tokio::test]
+    async fn bundle_with_only_a_workflow_succeeds() {
+        let state = test_state();
+        let body = serde_json::json!({
+            "workflow": {
+                "name": "Just a workflow",
+                "trigger": { "type": "Manual" },
+                "steps": [
+                    { "name": "s1", "step_type": { "type": "Agent" }, "agent": "ClaudeCode",
+                      "prompt_template": "Hi", "mode": { "type": "Normal" } }
+                ]
+            }
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/workflows/bundle")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let (status, resp) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(resp["success"], true, "empty bundle must succeed: {resp}");
+        assert!(resp["data"]["quick_prompts"].as_array().unwrap().is_empty());
+        assert!(resp["data"]["quick_apis"].as_array().unwrap().is_empty());
+        assert!(resp["data"]["workflow"]["id"].as_str().is_some());
     }
 }

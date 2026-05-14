@@ -3,7 +3,9 @@
 //! Ticks every 30s, checks triggers, enforces concurrency limits,
 //! and spawns runs.
 
+pub mod big_ticket_template;
 pub mod template;
+pub mod triage;
 pub mod workspace;
 pub mod steps;
 pub mod batch_step;

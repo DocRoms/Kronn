@@ -594,7 +594,7 @@ pub fn build_repair_prompt(
 ) -> String {
     use crate::models::StepOutputFormat;
     match output_format {
-        StepOutputFormat::TypedSchema { schema } => {
+        StepOutputFormat::TypedSchema { schema, .. } => {
             let pretty = serde_json::to_string_pretty(schema).unwrap_or_else(|_| schema.to_string());
             let problem = schema_error
                 .map(|e| format!("Your previous response failed: schema validation failed: {}\n\n", e))
@@ -1618,7 +1618,7 @@ mod tests {
             "type": "object",
             "properties": { "score": { "type": "integer" } }
         });
-        let fmt = crate::models::StepOutputFormat::TypedSchema { schema };
+        let fmt = crate::models::StepOutputFormat::TypedSchema { schema, on_invalid: Default::default() };
         let prompt = build_repair_prompt(
             "previous output here",
             &fmt,

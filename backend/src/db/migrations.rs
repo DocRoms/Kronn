@@ -70,6 +70,9 @@ pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> 
         ("048_disc_summary_ranges", include_str!("sql/048_disc_summary_ranges.sql")),
         ("049_introspection_call_count", include_str!("sql/049_introspection_call_count.sql")),
         ("050_audit_runs", include_str!("sql/050_audit_runs.sql")),
+        ("051_agent_decisions", include_str!("sql/051_agent_decisions.sql")),
+        ("052_project_linked_repos", include_str!("sql/052_project_linked_repos.sql")),
+        ("053_audit_runs_last_completed_step", include_str!("sql/053_audit_runs_last_completed_step.sql")),
     ];
 
     // Check if there are pending migrations before backing up

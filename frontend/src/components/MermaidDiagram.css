@@ -1,0 +1,191 @@
+/* 0.8.3 (#289) — Mermaid diagram styling.
+ * Used by AiDocViewer (audit-generated sequence diagrams) and
+ * MessageBubble (chat-emitted Mermaid blocks). */
+
+.kronn-mermaid {
+  margin: 16px 0;
+  padding: 16px;
+  background: var(--kr-bg-raised);
+  border: 1px solid var(--kr-border-soft);
+  border-radius: 8px;
+  overflow-x: auto;
+}
+
+.kronn-mermaid-svg {
+  display: flex;
+  justify-content: center;
+}
+
+.kronn-mermaid-svg svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.kronn-mermaid-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.kronn-mermaid-action-btn {
+  background: var(--kr-bg-elevated);
+  border: 1px solid var(--kr-border-soft);
+  color: var(--kr-text-secondary);
+  cursor: pointer;
+  font-size: var(--kr-fs-xs);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.kronn-mermaid-action-btn:hover {
+  background: var(--kr-bg-raised);
+  color: var(--kr-text-primary);
+}
+
+.kronn-mermaid-source-toggle {
+  background: transparent;
+  border: none;
+  color: var(--kr-text-faint);
+  cursor: pointer;
+  font-size: var(--kr-fs-xs);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 0;
+}
+
+.kronn-mermaid-source-toggle:hover {
+  color: var(--kr-text-secondary);
+}
+
+/* Fullscreen overlay — opaque dark background, centered SVG.
+ * `position: fixed` + `inset: 0` covers the viewport regardless of
+ * scroll position. z-index 9000 stays under our toast (9500) but
+ * above every page-level chrome. */
+.kronn-mermaid-fullscreen-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.82);
+  z-index: 9000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  animation: kronn-mermaid-fade-in 0.15s ease-out;
+}
+
+@keyframes kronn-mermaid-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.kronn-mermaid-fullscreen-content {
+  position: relative;
+  background: white; /* Mermaid SVG is rendered against neutral theme — white reads cleanly */
+  border-radius: 8px;
+  width: 100%;
+  height: 100%;
+  max-width: 1600px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 24px 24px;
+  overflow: auto;
+}
+
+.kronn-mermaid-fullscreen-svg {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+}
+
+.kronn-mermaid-fullscreen-svg svg {
+  /* Scale up the diagram aggressively — that's the whole point of
+   * fullscreen. The browser's intrinsic max-width:100% will still
+   * keep it within the dialog. */
+  width: 100%;
+  height: auto;
+  max-height: 100%;
+}
+
+.kronn-mermaid-fullscreen-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  background: var(--kr-bg-base);
+  border: 1px solid var(--kr-border-soft);
+  border-radius: 4px;
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: var(--kr-text-primary);
+}
+
+.kronn-mermaid-fullscreen-close:hover {
+  background: var(--kr-bg-raised);
+}
+
+.kronn-mermaid-source {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  background: var(--kr-bg-elevated);
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--kr-text-secondary);
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.kronn-mermaid-error {
+  padding: 8px;
+  border-left: 3px solid var(--kr-warning);
+  background: var(--kr-bg-base);
+}
+
+.kronn-mermaid-error p {
+  margin: 0 0 8px;
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-warning);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.kronn-mermaid-error details {
+  font-size: 11px;
+  color: var(--kr-text-faint);
+}
+
+.kronn-mermaid-error details summary {
+  cursor: pointer;
+}
+
+.kronn-mermaid-error pre {
+  margin: 6px 0 0;
+  padding: 6px;
+  font-size: 11px;
+  background: var(--kr-bg-elevated);
+  border-radius: 4px;
+  overflow-x: auto;
+}
+
+.kronn-mermaid-source-fallback {
+  margin: 8px 0 0;
+  padding: 8px;
+  background: var(--kr-bg-elevated);
+  border-radius: 4px;
+  font-size: 11px;
+  white-space: pre;
+  overflow-x: auto;
+}

@@ -11,6 +11,11 @@ vi.mock('../../lib/api', () => ({
     delete: vi.fn(),
     installTemplate: vi.fn(),
     auditStream: vi.fn(),
+    // 0.8.3 (#311) — ProjectCard polls these at mount; without stubs
+    // the mocked module returns undefined and the cards crash silently.
+    auditStatus: vi.fn().mockResolvedValue(null),
+    auditResumable: vi.fn().mockResolvedValue(null),
+    auditStatusAll: vi.fn().mockResolvedValue([]),
   },
   mcps: {
     registry: vi.fn().mockResolvedValue([]),

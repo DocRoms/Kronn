@@ -137,7 +137,7 @@ pub fn list_recent(conn: &Connection, project_id: &str, limit: u32) -> Result<Ve
         "SELECT id, project_id, kind, agent_type, started_at, ended_at, duration_ms, status,
                 td_critical, td_high, td_medium, td_low, td_total,
                 td_resolved_since_last, td_new_since_last, td_carried_over,
-                health_score, report_path, recommendations_json
+                health_score, report_path, recommendations_json, last_completed_step
          FROM audit_runs
          WHERE project_id = ?1
          ORDER BY started_at DESC
@@ -159,7 +159,7 @@ pub fn latest_completed(conn: &Connection, project_id: &str) -> Result<Option<Au
         "SELECT id, project_id, kind, agent_type, started_at, ended_at, duration_ms, status,
                 td_critical, td_high, td_medium, td_low, td_total,
                 td_resolved_since_last, td_new_since_last, td_carried_over,
-                health_score, report_path, recommendations_json
+                health_score, report_path, recommendations_json, last_completed_step
          FROM audit_runs
          WHERE project_id = ?1 AND status = 'Completed'
          ORDER BY ended_at DESC
@@ -203,7 +203,68 @@ fn row_to_audit_run(row: &rusqlite::Row) -> rusqlite::Result<AuditRun> {
         health_score: row.get::<_, Option<i64>>(16)?.map(|v| v.clamp(0, 100) as u8),
         report_path: row.get(17)?,
         recommendations_json: row.get(18)?,
+        last_completed_step: row.get::<_, i64>(19).unwrap_or(0).max(0) as u32,
     })
+}
+
+/// 0.8.3 (#311) — bump `last_completed_step` on every successful
+/// `step_done` event so the resume mechanism knows where to pick up
+/// if the SSE stream gets interrupted mid-run. `step` is 1-based.
+/// Idempotent: if the new value isn't greater than the current one
+/// (rare race where two updates land out of order), the existing
+/// value wins. No-op on terminal rows.
+pub fn update_last_completed_step(conn: &Connection, id: &str, step: u32) -> Result<()> {
+    conn.execute(
+        "UPDATE audit_runs SET last_completed_step = ?2
+         WHERE id = ?1 AND status = 'Running' AND last_completed_step < ?2",
+        params![id, step as i64],
+    )?;
+    Ok(())
+}
+
+/// 0.8.3 (#311) — mark an audit run as `Interrupted`. Different from
+/// `Cancelled` (explicit user action) and `Failed` (terminal error
+/// the pipeline can't recover from). `Interrupted` means the SSE
+/// stream ended before reaching step 10 without an explicit signal,
+/// most often a CLI rate-limit, OOM, or network blip. The frontend
+/// surfaces these specifically as resumable: "Reprendre Step N/10".
+pub fn mark_interrupted(conn: &Connection, id: &str, reason: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE audit_runs SET
+            ended_at = ?2,
+            duration_ms = CAST(((julianday(?2) - julianday(started_at)) * 86400000) AS INTEGER),
+            status = 'Interrupted',
+            report_path = COALESCE(report_path, ?3)
+         WHERE id = ?1 AND status = 'Running'",
+        params![id, Utc::now().to_rfc3339(), format!("interrupted: {reason}")],
+    )?;
+    Ok(())
+}
+
+/// 0.8.3 (#311) — fetch the most-recent resumable run for a project,
+/// if any. "Resumable" means `status = 'Interrupted'` AND
+/// `last_completed_step` is in 1..=9 (no point resuming if step 10
+/// finished, and step 0 means nothing was produced so resume = restart).
+/// Returns `None` when the project has no resumable run.
+pub fn latest_resumable(conn: &Connection, project_id: &str) -> Result<Option<AuditRun>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, project_id, kind, agent_type, started_at, ended_at, duration_ms, status,
+                td_critical, td_high, td_medium, td_low, td_total,
+                td_resolved_since_last, td_new_since_last, td_carried_over,
+                health_score, report_path, recommendations_json, last_completed_step
+         FROM audit_runs
+         WHERE project_id = ?1
+           AND status = 'Interrupted'
+           AND last_completed_step BETWEEN 1 AND 9
+         ORDER BY started_at DESC
+         LIMIT 1",
+    )?;
+    let mut rows = stmt.query_map(params![project_id], row_to_audit_run)?;
+    if let Some(r) = rows.next() {
+        Ok(Some(r?))
+    } else {
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
@@ -235,7 +296,8 @@ mod tests {
                 td_carried_over INTEGER NOT NULL DEFAULT 0,
                 health_score INTEGER,
                 report_path TEXT,
-                recommendations_json TEXT
+                recommendations_json TEXT,
+                last_completed_step INTEGER NOT NULL DEFAULT 0
             );
             INSERT INTO projects (id, name, path) VALUES ('p1', 'Test', '/tmp/test');",
         )
@@ -297,6 +359,75 @@ mod tests {
         let latest = latest.unwrap();
         assert_eq!(latest.id, "r1", "must be the completed one, not the running one");
         assert_eq!(latest.health_score, Some(84));
+    }
+
+    #[test]
+    fn update_last_completed_step_bumps_only_forward_on_running_rows() {
+        // 0.8.3 (#311) — the bump must be strictly monotonic
+        // (out-of-order updates from a glitchy SSE shouldn't rewind
+        // progress) AND scoped to Running rows (a terminal status
+        // shouldn't accept new step updates).
+        let conn = fresh_conn();
+        let start = Utc::now();
+        insert_running(&conn, "rr-1", "p1", "Full", "ClaudeCode", start).unwrap();
+        // Bumps forward.
+        update_last_completed_step(&conn, "rr-1", 3).unwrap();
+        let after1 = list_recent(&conn, "p1", 1).unwrap();
+        assert_eq!(after1[0].last_completed_step, 3);
+        update_last_completed_step(&conn, "rr-1", 5).unwrap();
+        let after2 = list_recent(&conn, "p1", 1).unwrap();
+        assert_eq!(after2[0].last_completed_step, 5);
+        // Out-of-order: lower value must NOT win.
+        update_last_completed_step(&conn, "rr-1", 2).unwrap();
+        let after3 = list_recent(&conn, "p1", 1).unwrap();
+        assert_eq!(after3[0].last_completed_step, 5, "monotonic — lower step ignored");
+        // Terminal: mark complete then try to bump — must not move.
+        complete(&conn, "rr-1", start + chrono::Duration::seconds(30), "Completed",
+                 0, 0, 0, 0, 0, 0, 0, 100, None, None).unwrap();
+        update_last_completed_step(&conn, "rr-1", 9).unwrap();
+        let after4 = list_recent(&conn, "p1", 1).unwrap();
+        assert_eq!(after4[0].last_completed_step, 5, "terminal rows must not accept new bumps");
+    }
+
+    #[test]
+    fn mark_interrupted_writes_status_and_preserves_last_completed_step() {
+        // 0.8.3 (#311) — interrupted run keeps last_completed_step
+        // so the resume mechanism knows where to pick up.
+        let conn = fresh_conn();
+        let start = Utc::now();
+        insert_running(&conn, "ri-1", "p1", "Full", "ClaudeCode", start).unwrap();
+        update_last_completed_step(&conn, "ri-1", 5).unwrap();
+        mark_interrupted(&conn, "ri-1", "rate-limit hit").unwrap();
+
+        let runs = list_recent(&conn, "p1", 1).unwrap();
+        assert_eq!(runs[0].status, "Interrupted");
+        assert_eq!(runs[0].last_completed_step, 5,
+            "last_completed_step must survive the mark_interrupted call so resume knows where to restart");
+        assert!(runs[0].report_path.as_deref().unwrap_or("").contains("rate-limit"),
+            "interruption reason must be captured for forensics");
+    }
+
+    #[test]
+    fn latest_resumable_only_returns_interrupted_partial_runs() {
+        // Eligible: Interrupted AND last_completed_step in 1..=9.
+        let conn = fresh_conn();
+        let start = Utc::now();
+        // Completed run — not resumable.
+        insert_running(&conn, "r-done", "p1", "Full", "Codex", start).unwrap();
+        complete(&conn, "r-done", start + chrono::Duration::seconds(10),
+                 "Completed", 0, 0, 0, 0, 0, 0, 0, 90, None, None).unwrap();
+        // Interrupted but no step done — restart, not resume.
+        insert_running(&conn, "r-empty", "p1", "Full", "Codex", start).unwrap();
+        mark_interrupted(&conn, "r-empty", "crashed at step 1").unwrap();
+        // Interrupted with step 5 done — resumable!
+        insert_running(&conn, "r-good", "p1", "Full", "ClaudeCode", start).unwrap();
+        update_last_completed_step(&conn, "r-good", 5).unwrap();
+        mark_interrupted(&conn, "r-good", "rate-limit").unwrap();
+
+        let res = latest_resumable(&conn, "p1").unwrap();
+        let row = res.expect("must find r-good as resumable");
+        assert_eq!(row.id, "r-good");
+        assert_eq!(row.last_completed_step, 5);
     }
 
     #[test]

@@ -191,7 +191,7 @@ kiro-login: .env _gen-override
 clean:
 	@echo "$(YELLOW)▸ Cleaning up...$(RESET)"
 	@$(DOCKER_COMP) down -v --remove-orphans
-	@rm -rf backend/target frontend/node_modules frontend/dist
+	@rm -rf target backend/target frontend/node_modules frontend/dist
 	@rm -f docker-compose.override.yml
 
 ## Production build (no Docker)
@@ -200,7 +200,7 @@ build:
 	cd backend && cargo build --release
 	@echo "$(GREEN)▸ Building frontend...$(RESET)"
 	cd frontend && pnpm install && pnpm build
-	@echo "$(GREEN)▸ Done. Binary at backend/target/release/$(APP_NAME)$(RESET)"
+	@echo "$(GREEN)▸ Done. Binary at target/release/$(APP_NAME)$(RESET)"
 
 # ─── Development ─────────────────────────────────────────────────────────────
 

@@ -2083,6 +2083,7 @@ async fn bootstrap_find_common_parent_logic() {
             default_skill_ids: vec![],
             default_profile_id: None,
             briefing_notes: None,
+            linked_repos: vec![],
             created_at: now,
             updated_at: now,
         };
@@ -2546,6 +2547,7 @@ async fn exec_returns_expected_fields() {
         default_skill_ids: vec![],
         default_profile_id: None,
         briefing_notes: None,
+        linked_repos: vec![],
         created_at: now,
         updated_at: now,
     };

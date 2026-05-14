@@ -1,0 +1,6 @@
+# Shared target directory for the whole repo.
+# Mutualises ~200 common crates (tokio, serde, reqwest, anyhow…) between
+# `backend/` and `desktop/src-tauri/` instead of compiling them twice.
+# Reduces local build cache size by ~40-50%.
+[build]
+target-dir = "target"

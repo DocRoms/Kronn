@@ -4,6 +4,7 @@ import { useTheme } from '../lib/ThemeContext';
 import { MatrixText } from './MatrixText';
 import { DocPreview } from './DocPreview';
 import { DocDataExport } from './DocDataExport';
+import { MermaidDiagram } from './MermaidDiagram';
 import remarkGfm from 'remark-gfm';
 import remarkEmoji from 'remark-emoji';
 import '../pages/DiscussionsPage.css';
@@ -12,7 +13,7 @@ import { agentColor } from '../lib/constants';
 import { gravatarUrl } from '../lib/gravatar';
 import {
   Cpu, AlertTriangle, Zap, Loader2, Pause, Play,
-  Key, Settings, Send, Pencil, RotateCcw, Check, Copy, Clock,
+  Key, Settings, Send, Pencil, RotateCcw, Check, Copy, Clock, ShieldCheck,
 } from 'lucide-react';
 
 // Hoisted regexes (avoid creating new RegExp objects per message per render)
@@ -51,13 +52,19 @@ export interface MessageBubbleProps {
    *  `kronn-doc-preview` fence handler knows which generated-files
    *  directory to target when the user clicks "Export PDF". */
   discussionId?: string;
+  /** 0.8.3 — project id of the active discussion (when bound). When a
+   * message contains `KRONN:VALIDATION_COMPLETE` AND we have a
+   * projectId, render a "View Tech Debts" CTA under the bubble that
+   * jumps the user to the project card with the docs/tech-debt
+   * section pre-expanded. Saves N clicks at end-of-validation. */
+  projectId?: string | null;
   t: (key: string, ...args: (string | number)[]) => string;
 }
 
 export const MessageBubble = memo(function MessageBubble(props: MessageBubbleProps) {
   const { msg, isLastUser, isLastAgent, isEditing, isCopied, isTtsActive, ttsState: tts, isExpandedSummary,
     prevUserTs, defaultAgent, summaryCache, language, sending, editingText, hasFullAccess,
-    onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onExpandSummary, onNavigate, discussionId, t } = props;
+    onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onExpandSummary, onNavigate, discussionId, projectId, t } = props;
   const isUser = msg.role === 'User';
   const agentType = msg.agent_type ?? defaultAgent;
 
@@ -260,6 +267,38 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             </button>
           </div>
         )}
+        {/* 0.8.3 — End-of-validation CTA. When the agent emits
+            KRONN:VALIDATION_COMPLETE in a project-bound discussion,
+            surface a one-click jump to the TD index. Pattern: same
+            as the auth-error / timeout CTAs above (button below the
+            bubble, before the footer). The hash + onNavigate combo
+            re-uses Dashboard's existing `#project-<id>` deep-link so
+            we don't need new plumbing in the Dashboard state machine. */}
+        {projectId && /KRONN:VALIDATION_COMPLETE/i.test(msg.content) && (
+          <div className="disc-auth-error-cta">
+            <button
+              className="disc-scan-btn"
+              style={{ fontSize: 11, padding: '5px 12px' }}
+              onClick={() => {
+                // 0.8.3 (#314) — deep-link directly to the tech-debt folder.
+                // Pre-fix the CTA only navigated to the project (via hash
+                // #project-<id>) and the user landed on the AI Context
+                // tab but had to manually expand + click into docs/tech-debt/.
+                // The sessionStorage flag is read by ProjectCard on mount
+                // and triggers `setExpandedTab('docAi') + setDocDeepLink`
+                // automatically, so a single click takes the user from
+                // "validation finished" to "looking at the TDs".
+                try {
+                  sessionStorage.setItem(`kronn:postValidation:${projectId}`, 'docs/tech-debt');
+                } catch { /* private-mode / quota — fall through */ }
+                window.location.hash = `#project-${projectId}`;
+                onNavigate('projects');
+              }}
+            >
+              <ShieldCheck size={11} /> {t('audit.viewTechDebtsAfterValidation')}
+            </button>
+          </div>
+        )}
         <div className="disc-msg-footer">
           <div className="disc-msg-time-row">
             <span className="disc-msg-time">{formattedTime}</span>
@@ -409,6 +448,16 @@ export const MarkdownContent = memo(({ content, discussionId }: { content: strin
         const childEl = Array.isArray(children) ? children[0] : children;
         const codeEl = (childEl as { props?: { className?: string; children?: ReactNode } } | undefined);
         const className: string = codeEl?.props?.className ?? '';
+        // 0.8.3 (#289) — visual Mermaid render in chat. Same pattern
+        // as kronn-doc-preview below: intercept the fence, dynamic
+        // import the renderer. Out-of-band Mermaid blocks (agent
+        // emits a diagram mid-conversation) get the same treatment
+        // as docs files for consistency.
+        if (className.includes('language-mermaid')) {
+          const raw = codeEl?.props?.children;
+          const source = Array.isArray(raw) ? raw.join('') : String(raw ?? '');
+          return <MermaidDiagram source={source.trim()} />;
+        }
         if (className.includes('language-kronn-doc-preview')) {
           // `children` of a fenced block is typically a string (or an
           // array with one string); coerce safely.

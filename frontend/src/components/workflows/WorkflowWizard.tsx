@@ -265,7 +265,13 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
       : null;
     const repoHintedSlug = inferTrackerSlugFromRepoUrl(linkedProjectRepoUrl);
 
-    const candidatePlugins = preset.id === 'ticket-to-pr'
+    // Both `ticket-to-pr` and 0.8.3's `feasibility-autopilot` share
+    // the JsonData → ApiCall upgrade path: the first step seeds
+    // ticket fixture data, and when a tracker plugin (Jira/GitHub/
+    // GitLab) is wired for the project we swap it for a real fetch.
+    // The transform body below assumes the step is named `fetch_issue`
+    // in both presets — keep that naming consistent.
+    const candidatePlugins = (preset.id === 'ticket-to-pr' || preset.id === 'feasibility-autopilot')
       ? availableApiPlugins.filter(p =>
           TRACKER_PLUGINS.includes(p.server.id)
           && (!initialProjectId

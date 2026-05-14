@@ -28,11 +28,13 @@ When you need information from the user, format EACH question on its own line us
 ```
 
 Rules:
-- `variable_name` must be ASCII alphanumeric + underscores only (no accents, no spaces)
+- `variable_name` must be ASCII alphanumeric + underscores only (no accents, no spaces). The parser uses the same `\w+` grammar as Quick Prompts `{{var}}` templates — `{{priorité}}` is rejected on purpose so the same renderer works on both sides.
 - One question per line, each starting with `{{name}}:`
+- **Keep the question text on the SAME line as `{{var}}:`** — the parser regex matches `[ \t]*` between the colon and the question (not `\s*`), so a newline between `{{var}}:` and the question body silently drops the entry from the form. If your question is long, write it as a single long line; the form input will wrap it visually.
+- **Don't emit empty `{{var}}:` (no body)** — empty entries are skipped silently. If you find yourself writing `{{foo}}:` with no follow-up question text, you've lost a form field.
 - Keep variable names short and descriptive: `priority`, `scope`, `deadline`, `language`
-- You can add context paragraphs BEFORE the questions — only lines matching `{{var}}: text` become form fields
-- The UI will render these as a structured form with labeled input fields
+- You can add context paragraphs BEFORE the questions — only lines matching `{{var}}: text` become form fields. **First-occurrence wins for duplicate vars** — if you write `{{priority}}: …` twice, the second is ignored.
+- The UI will render these as a structured form (`AgentQuestionForm` above the ChatInput) with labeled input fields the user fills directly. Submitting the form produces a single `var: value\n…` reply the parser already understands.
 
 Example — good:
 

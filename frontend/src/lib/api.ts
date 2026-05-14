@@ -5,6 +5,7 @@ import type {
   ApiKeyDisplay,
   ApiKeysResponse,
   Project,
+  LinkedRepo,
   DetectedRepo,
   McpDefinition,
   McpOverview,
@@ -45,6 +46,7 @@ import type {
   StepResult,
   CreateWorkflowRequest,
   UpdateWorkflowRequest,
+  BundleResponse,
   AgentUsageSummary,
   Skill,
   CreateSkillRequest,
@@ -211,6 +213,7 @@ async function parseSSEStream(
 interface AuditSseEvent {
   step?: number;
   total?: number;
+  total_steps?: number;
   file?: string;
   text?: string;
   success?: boolean;
@@ -218,6 +221,47 @@ interface AuditSseEvent {
   error?: string;
   discussion_id?: string;
   template_was_installed?: boolean;
+  // 0.8.3 (#272) — legacy-docs migration report. Emitted ONCE in
+  // Phase 1 when a user-curated docs/ was detected and moved to
+  // docs/legacy/. Frontend renders a toast + the moved entries list.
+  migrated?: boolean;
+  skip_reason?: string;
+  moved_entries?: string[];
+  moved_count?: number;
+  // 0.8.3 (#274) — per-step instrumentation (carried by `step_done`)
+  // and audit-wide start timestamp (carried by `start`). Tokens are
+  // the `.max(input + output)` for the step (Claude reports
+  // cumulative usage); duration_ms is wallclock for the step;
+  // total_tokens is the running sum across steps. started_at is an
+  // ISO-8601 timestamp surfaced once on the `start` event so the
+  // frontend can compute live elapsed without local-clock drift.
+  tokens?: number;
+  duration_ms?: number;
+  total_tokens?: number;
+  started_at?: string;
+  // 0.8.3 (#281) — live step progress + tool-call events fired
+  // mid-step (Claude stream-json only). step_tokens = current
+  // step's max(input+output); total_tokens_so_far = running sum
+  // including the current step's latest reading. tool = name of
+  // the tool the agent just started calling.
+  step_tokens?: number;
+  total_tokens_so_far?: number;
+  tool?: string;
+  // 0.8.3 root-cause fix — `step_warning` is emitted when the CLI
+  // exited 0 but the step's target_file is empty / suspiciously
+  // small (e.g. agent crashed mid-Write). Backend auto-repairs from
+  // template; frontend surfaces a per-step banner so the user knows
+  // the audit "succeeded" but this step actually didn't produce
+  // useful output.
+  reason?: string;
+  repaired_from_template?: boolean;
+}
+
+export interface LegacyDocsMigrationReport {
+  migrated: boolean;
+  skip_reason: string;
+  moved_entries: string[];
+  moved_count: number;
 }
 
 async function fetchAndParseSSE(
@@ -415,12 +459,34 @@ export const projects = {
    * the server-side process keeps running regardless of the SSE client.
    */
   auditStatus: (id: string) => api<AuditProgress | null>('GET', `/projects/${id}/audit-status`),
+  /**
+   * 0.8.3 (#288) — fleet-wide list of audits currently in progress
+   * across every project. Powers the ActiveAuditsPopover on the
+   * Projets nav button. Returns `[]` when nothing is running.
+   */
+  auditStatusAll: () => api<AuditProgress[]>('GET', '/audit-status'),
+  /**
+   * 0.8.3 (#311) — fetch the most-recent resumable audit run for the
+   * project, or `null`. Resumable = status='Interrupted' AND
+   * last_completed_step in 1..=9. Used by ProjectCard to flip the
+   * "Lancer l'audit" button to "Reprendre Step N/10" + pass
+   * `resume_from` in the launch request.
+   */
+  auditResumable: (id: string) =>
+    api<{ id: string; last_completed_step: number; started_at: string } | null>(
+      'GET', `/projects/${id}/audit-resumable`,
+    ),
   checkDrift: (id: string) => api<DriftCheckResponse>('GET', `/projects/${id}/drift`),
   getBriefing: (id: string) => api<string | null>('GET', `/projects/${id}/briefing`),
   setBriefing: (id: string, notes: string | null) => api<void>('PUT', `/projects/${id}/briefing`, { notes }),
   startBriefing: (id: string, agent: string) => api<{ discussion_id: string }>('POST', `/projects/${id}/start-briefing`, { agent }),
   setDefaultSkills: (id: string, skillIds: string[]) => api<boolean>('PUT', `/projects/${id}/default-skills`, skillIds),
   setDefaultProfile: (id: string, profileId: string | null) => api<boolean>('PUT', `/projects/${id}/default-profile`, { profile_id: profileId }),
+  /** 0.8.3 — Replace the project's linked_repos list. The backend
+   *  validates kind ∈ {api, iac, design, shared-lib, docs, other},
+   *  non-empty name + location, max 20 entries. Atomic replace —
+   *  no per-row CRUD. */
+  setLinkedRepos: (id: string, repos: LinkedRepo[]) => api<boolean>('PUT', `/projects/${id}/linked-repos`, repos),
   listAiFiles: (id: string) => api<AiFileNode[]>('GET', `/projects/${id}/ai-files`),
   readAiFile: (id: string, path: string) => api<AiFileContent>('GET', `/projects/${id}/ai-file?path=${encodeURIComponent(path)}`),
   searchAiFiles: (id: string, q: string) => api<AiSearchResult[]>('GET', `/projects/${id}/ai-search?q=${encodeURIComponent(q)}`),
@@ -512,9 +578,51 @@ export const projects = {
     req: LaunchAuditRequest,
     handlers: {
       onTemplateInstalled: (installed: boolean) => void;
+      onLegacyDocsMigrated?: (report: LegacyDocsMigrationReport) => void;
+      /**
+       * 0.8.3 (#274) — first event in the audit loop. Carries the
+       * total step count + the wallclock start so the frontend can
+       * show a live elapsed counter. Optional for backwards compat —
+       * callers that haven't upgraded just don't see the new UX.
+       */
+      onAuditStart?: (totalSteps: number, startedAt: string) => void;
       onStepStart: (step: number, total: number, file: string) => void;
       onChunk: (text: string, step: number) => void;
-      onStepDone: (step: number, success: boolean) => void;
+      /**
+       * 0.8.3 (#274) — extended with per-step tokens, duration and
+       * the running total. Existing callers (single-arg + step
+       * only) keep working because the tuple is positional-extended.
+       */
+      onStepDone: (
+        step: number,
+        success: boolean,
+        tokens?: number,
+        durationMs?: number,
+        totalTokens?: number,
+      ) => void;
+      /**
+       * 0.8.3 (#281) — live token counter during a step. Fires every
+       * time the agent emits a `Usage` event in its stream-json. The
+       * frontend uses this to tick the `💬 X tk` chip in real time
+       * rather than waiting for `step_done` (which can be 30-120s on
+       * a heavy step). Optional for backwards compat.
+       */
+      onStepProgress?: (step: number, stepTokens: number, totalTokensSoFar: number) => void;
+      /**
+       * 0.8.3 (#281) — agent started calling a tool (Read, Glob,
+       * Bash, mcp__...). Frontend surfaces the name as a chip so
+       * the user knows what the agent is busy doing during the
+       * step. Optional for backwards compat.
+       */
+      onToolCall?: (step: number, tool: string) => void;
+      /**
+       * 0.8.3 root-cause fix — backend detected that this step's
+       * `target_file` is empty / truncated despite the CLI exiting 0.
+       * Backend auto-repairs from template; frontend should surface
+       * a warning so the user knows the step didn't produce useful
+       * output and may want to re-audit. Optional for backwards-compat.
+       */
+      onStepWarning?: (step: number, file: string, reason: string, repaired: boolean) => void;
       onValidationCreated: (discussionId: string) => void;
       onDone: (discussionId: string | null, templateWasInstalled: boolean) => void;
       onError: (error: string) => void;
@@ -534,9 +642,75 @@ export const projects = {
           const p = payload as AuditSseEvent;
           switch (type) {
             case 'template_installed': handlers.onTemplateInstalled(p.installed as boolean); break;
+            // 0.8.3 (#272) — pre-audit legacy docs migration. Emitted
+            // at most once per run, BEFORE the 10-step audit loop.
+            // The handler is optional so older callers compile without
+            // changes; when present, the frontend shows a toast +
+            // list of moved entries so the user sees that their
+            // hand-curated docs survived and where they live now.
+            case 'legacy_docs_migrated':
+              handlers.onLegacyDocsMigrated?.({
+                migrated: p.migrated ?? false,
+                skip_reason: p.skip_reason ?? '',
+                moved_entries: p.moved_entries ?? [],
+                moved_count: p.moved_count ?? 0,
+              });
+              break;
+            // 0.8.3 (#274) — first event in the audit loop. Carries
+            // the wallclock start (ISO-8601) + total step count so
+            // the frontend can compute a live elapsed counter without
+            // local-clock drift. Optional handler keeps backwards-
+            // compat with callers that don't show the new chip.
+            case 'start':
+              handlers.onAuditStart?.(
+                (p.total_steps ?? p.total ?? 0) as number,
+                (p.started_at ?? new Date().toISOString()) as string,
+              );
+              break;
             case 'step_start': handlers.onStepStart(p.step as number, p.total as number, p.file as string); break;
             case 'chunk': handlers.onChunk(p.text as string, p.step as number); break;
-            case 'step_done': handlers.onStepDone(p.step as number, p.success as boolean); break;
+            case 'step_done':
+              handlers.onStepDone(
+                p.step as number,
+                p.success as boolean,
+                p.tokens,
+                p.duration_ms,
+                p.total_tokens,
+              );
+              break;
+            case 'step_progress':
+              // 0.8.3 (#281) — live token tick. Both fields are
+              // numbers but we guard for type safety in case a
+              // future backend version omits one.
+              if (typeof p.step === 'number' && typeof p.step_tokens === 'number') {
+                handlers.onStepProgress?.(
+                  p.step,
+                  p.step_tokens,
+                  (p.total_tokens_so_far as number | undefined) ?? 0,
+                );
+              }
+              break;
+            case 'tool_call':
+              if (typeof p.step === 'number' && typeof p.tool === 'string') {
+                handlers.onToolCall?.(p.step, p.tool);
+              }
+              break;
+            case 'step_warning':
+              // 0.8.3 root-cause fix — emitted when the step's
+              // target_file is empty/truncated. The backend has
+              // already repaired the file from the template (if
+              // available); the frontend just surfaces the alert so
+              // the user sees the partial failure rather than a
+              // silent green tick.
+              if (typeof p.step === 'number' && typeof p.file === 'string') {
+                handlers.onStepWarning?.(
+                  p.step,
+                  p.file,
+                  p.reason ?? 'Step output looks incomplete',
+                  p.repaired_from_template ?? false,
+                );
+              }
+              break;
             case 'step_error': handlers.onError(p.error ?? 'Step error'); break;
             case 'validation_created': handlers.onValidationCreated(p.discussion_id as string); break;
             case 'done': done(p.discussion_id ?? null, p.template_was_installed ?? false); break;
@@ -786,6 +960,13 @@ export const workflows = {
   list: () => api<WorkflowSummary[]>('GET', '/workflows'),
   get: (id: string) => api<Workflow>('GET', `/workflows/${id}`),
   create: (req: CreateWorkflowRequest) => api<Workflow>('POST', '/workflows', req),
+  /** 0.8.3 — atomic bundle creation. POSTs a payload with optional
+   *  `quick_prompts` / `quick_apis` / `custom_apis` sections plus a
+   *  `workflow` section that may reference them via `@bundle:<id>`
+   *  sentinels. The server creates everything in a single SQLite
+   *  transaction — rollback on any failure, no orphan rows. Drives
+   *  the `KRONN:BUNDLE_READY` chat signal flow. */
+  createBundle: (req: unknown) => api<BundleResponse>('POST', '/workflows/bundle', req),
   update: (id: string, req: UpdateWorkflowRequest) => api<Workflow>('PUT', `/workflows/${id}`, req),
   delete: (id: string) => api<void>('DELETE', `/workflows/${id}`),
   trigger: (id: string) => api<WorkflowRun>('POST', `/workflows/${id}/trigger`),

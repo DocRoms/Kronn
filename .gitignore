@@ -1,4 +1,5 @@
-# Rust
+# Rust — shared target dir at repo root (see .cargo/config.toml)
+/target/
 backend/target/
 backend/bindings/
 

@@ -24,7 +24,15 @@ export class WorkflowWizardPage {
   }
 
   get presetAutoDev(): Locator { return this.preset(/Auto-Dev avec tests|Auto-Dev with tests/i); }
-  get presetTicketToPr(): Locator { return this.preset(/Ticket Autopilot/i); }
+  // 0.8.3 — anchor on the 🎫 emoji prefix (unique to `ticket-to-pr`)
+  // because the broader `/Ticket Autopilot/i` substring also matches
+  // the new `🎯 Big-ticket AutoPilot — feasibility-gated` preset and
+  // strict-mode fails with "resolved to 2 elements". The emoji is
+  // part of the preset's `icon` field (frozen contract, see
+  // `workflow-templates/v07-presets.ts:489`), so this locator is as
+  // stable as the title regex was.
+  get presetTicketToPr(): Locator { return this.preset(/🎫\s*Ticket Autopilot/i); }
+  get presetFeasibilityAutopilot(): Locator { return this.preset(/🎯\s*Big-ticket AutoPilot/i); }
   get presetDailyHostAudit(): Locator { return this.preset(/Audit quotidien|Daily audit/i); }
 
   // ─── Step type buttons (in-step editor) ─────────────────────────────

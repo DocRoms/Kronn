@@ -159,6 +159,17 @@ pub async fn orchestrate(
         String::new()
     };
 
+    // 0.8.3 (TD-265) — companion-repo context (linked_repos + Kronn
+    // projects universe). Computed once here so each agent round +
+    // the final synthesis pass shares the same blocks without paying
+    // the DB hits per agent. Internal summarization calls (line 286,
+    // 689, 864) do NOT receive this — they compress conversation
+    // history and don't reason about the project's companions.
+    let companion_context = crate::api::projects::compute_companion_context(
+        &state,
+        disc.project_id.as_deref(),
+    ).await;
+
     // For general discussions (no project), write .mcp.json + build MCP context
     let global_mcp_context = if project_path.is_empty() {
         crate::api::disc_git::prepare_general_mcp(&state, &orch_workspace_path).await
@@ -343,7 +354,7 @@ pub async fn orchestrate(
                     skill_ids: &orch_skill_ids, directive_ids: &orch_directive_ids, profile_ids: &orch_profile_ids,
                     mcp_context_override: global_mcp_context.as_deref(),
                     tier: disc_tier, model_tiers: Some(&model_tiers_config),
-                    context_files_prompt: "",
+                    context_files_prompt: &companion_context,
                     discussion_id: Some(&id),
                 }).await {
                     Ok(process) => {
@@ -447,7 +458,7 @@ pub async fn orchestrate(
                 skill_ids: &orch_skill_ids, directive_ids: &orch_directive_ids, profile_ids: &orch_profile_ids,
                 mcp_context_override: global_mcp_context.as_deref(),
                 tier: disc_tier, model_tiers: Some(&model_tiers_config),
-                context_files_prompt: "",
+                context_files_prompt: &companion_context,
                 discussion_id: Some(&id),
             }).await {
                 Ok(process) => {

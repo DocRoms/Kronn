@@ -108,6 +108,44 @@ export const PLUGIN_TIPS: Record<string, PluginTips> = {
 - 403 = propriété pas vérifiée pour l'identité OAuth.`,
     docsUrl: 'https://developers.google.com/webmaster-tools/v1/searchanalytics/query',
   },
+
+  // ── Email API plugins (CSM / lifecycle / transactional) ────────────
+  // Lore here is the *operational* knowledge that bites users in
+  // production: domain verification, body shape, status-code traps.
+  // Keep it terse — full reference lives in `default_context` côté
+  // backend (injecté dans le prompt de l'agent en mode curl).
+
+  // Hybrid plugin (MCP + API) — same convention as mcp-github / mcp-atlassian.
+  // The slug stays `mcp-resend` even when the tip is API-flavoured, because
+  // `tipsForSlug` is keyed on the registry id (`server.id`), not the surface.
+  'mcp-resend': {
+    body: `- Auth : Bearer \`re_…\` (déjà injecté par Kronn — JAMAIS le suggérer dans \`headers\`).
+- \`from\` DOIT être sur un domaine vérifié dans https://resend.com/domains, sinon \`422 The from address is not valid\`. Pour les tests, \`onboarding@resend.dev\` (sandbox, rate-limité).
+- \`to\`, \`cc\`, \`bcc\` = TOUJOURS array, même pour 1 destinataire. \`reply_to\` = STRING (singulier), pas array — piège classique.
+- \`POST /emails\` = 1 mail (supporte \`attachments\`, \`scheduled_at\`, \`tags\`). \`POST /emails/batch\` = jusqu'à 100 mails en 1 appel (body = ARRAY direct, pas un envelope), PAS d'attachments, PAS de scheduled_at.
+- **Idempotency** : header \`Idempotency-Key: <stable-string>\` valide 24h sur \`/emails\` et \`/emails/batch\`. À mettre SYSTÉMATIQUEMENT sur les workflows CSM — un retry ne doit pas double-envoyer. Forme recommandée : \`{workflow_run_id}-{user_id}\`.
+- \`tags\` = \`[{name, value}]\` avec name/value ASCII [a-zA-Z0-9_-] uniquement. Un name avec espace est DROPPÉ silencieusement (pas d'erreur). \`csm_followup\` ✓, \`csm followup\` ✗.
+- Codes : 401 = clé révoquée ; 422 \`from address is not valid\` = domaine pas vérifié ; 422 \`missing_required_field\` = un de \`from\`/\`to\`/\`subject\`/\`html\`|\`text\` manque ; 429 = rate-limit (2 req/s free, 10 req/s Pro, header \`Retry-After\`).
+- Sanity check rapide : \`GET /domains\` (200 + data non-vide = auth + ≥1 domaine prêt).
+- Lifecycle : \`/audiences\` (listes) + \`/audiences/{id}/contacts\` (POST = upsert idempotent sur email) + \`/broadcasts\` (draft puis POST \`/send\` après Gate humain).`,
+    docsUrl: 'https://resend.com/docs/api-reference/introduction',
+  },
+
+  'api-mailjet': {
+    body: `- Auth : HTTP Basic \`MAILJET_API_KEY:MAILJET_API_SECRET\` (DEUX env injectées par Kronn — jamais à mettre dans \`headers\`).
+- **L'erreur #1** : 400 \`Sender not allowed for this account\`. \`From.Email\` DOIT être un sender validé (\`Status: Active\` dans \`GET /v3/REST/sender\`). Toujours vérifier la liste avant de coder un \`From\` en dur.
+- Endpoint moderne : \`POST /v3.1/send\` avec body envelope \`{Messages: [{From, To[], Subject, HTMLPart|TextPart, …}]}\`. **Pas** \`/v3/send\` (legacy, body plat, propriétés renommées — ne pas mélanger).
+- \`From\` / \`ReplyTo\` = OBJETS \`{Email, Name?}\` (pas des strings, contrairement à Resend). \`To\`/\`Cc\`/\`Bcc\` = arrays d'objets \`{Email, Name?}\`.
+- ⚠ Un HTTP **200 ne garantit PAS l'envoi** — boucler sur \`response.Messages[].Status\` (\`success\` | \`error\`). Les erreurs par-message sont silencieuses sinon.
+- Batch : pas d'endpoint séparé, on empile les messages dans \`Messages\` (max ~50/call, ~500 KB).
+- **Sandbox / dry-run** : \`SandboxMode: true\` (top-level ou par message) = validation sans envoi (parfait pour preview dans un Gate Kronn).
+- \`CustomID\` = ton trace id (echoed dans webhooks + response), \`EventPayload\` = string opaque ≤ 1KB pour packer du JSON métier.
+- Templates : \`TemplateID\` (entier de \`/v3/REST/template\`) + \`TemplateLanguage: true\` pour activer \`{{var:firstname:""}}\` et conditionnels MJML.
+- Segmentation CSM (le killer) : \`POST /v3/REST/contactslist/{id}/managecontact\` avec \`{Email, Action: "addnoforce"|"addforce"|"remove"|"unsub"}\` — idempotent sur email, parfait pour pousser des signaux (at-risk, churned, power-user).
+- EU/RGPD : \`https://api.mailjet.com\` est l'URL canonique pour tous les comptes (data residency réglée au signup, pas par URL). Pas de sous-domaine EU séparé.
+- Codes : 401 = mauvaise paire key/secret ; 400 \`Invalid email format\` = typo ; 429 = rate-limit (header \`Retry-After\`).`,
+    docsUrl: 'https://dev.mailjet.com/email/reference/',
+  },
 };
 
 /** Lookup by plugin slug. Returns `null` when no lore is registered — the

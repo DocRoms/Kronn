@@ -18,12 +18,13 @@ const t = (key: string) => key;
 describe('v07 presets registry', () => {
   it('exposes 6 presets with unique IDs', () => {
     const presets = buildV07Presets(t);
-    expect(presets).toHaveLength(6);
+    expect(presets).toHaveLength(7);
     const ids = presets.map(p => p.id);
     expect(new Set(ids).size).toBe(ids.length);
     expect(ids).toEqual(expect.arrayContaining([
       'auto-dev', 'pr-gate', 'deploy-rollback',
       'feature-planner', 'daily-host-audit', 'ticket-to-pr',
+      'feasibility-autopilot',
     ]));
   });
 
@@ -177,5 +178,110 @@ describe('TICKET_TO_PR preset', () => {
     // routinely hit 20-25 min of streamed activity.
     expect(implement.stall_timeout_secs).toBe(1800);
     expect(review.stall_timeout_secs).toBe(1800);
+  });
+});
+
+// 0.8.3 — Feasibility-Gated AutoPilot preset. Mirror of the Rust
+// `build_feasibility_workflow` shape (see backend/src/workflows/
+// big_ticket_template.rs). If the two drift, the AutoPilot CTA path
+// produces a different workflow than the `/api/workflows/templates/
+// feasibility-autopilot` endpoint — caught here.
+describe('FEASIBILITY_AUTOPILOT preset', () => {
+  const findFA = () => {
+    const p = buildV07Presets(t).find(x => x.id === 'feasibility-autopilot');
+    if (!p) throw new Error('feasibility-autopilot preset not found');
+    return p;
+  };
+
+  it('ships the expected 7-step pipeline (mixed primitives)', () => {
+    const p = findFA();
+    expect(p.steps.map(s => s.name)).toEqual([
+      'fetch_issue',
+      'triage',
+      'review_triage',
+      'implement',
+      'run_tests',
+      'drift_check',
+      'pr_draft',
+    ]);
+  });
+
+  it('only triage / implement / pr_draft are Agent — désagentification rule', () => {
+    // [[feedback_kronn_deagentify_first]] — never let this preset
+    // regress to all-Agent. Token cost = 0 on fetch_issue (JsonData),
+    // review_triage (Gate), run_tests (Exec), drift_check (Exec).
+    const p = findFA();
+    const agentSteps = p.steps
+      .filter(s => (s.step_type as { type: string }).type === 'Agent')
+      .map(s => s.name);
+    expect(agentSteps).toEqual(['triage', 'implement', 'pr_draft']);
+  });
+
+  it('triage step uses TypedSchema with on_invalid=Fail', () => {
+    // The `[TRIAGE]` marker prefix lives in the i18n string at runtime
+    // (see `wiz.preset.feasibilityAutopilot.triageDesc` in i18n.ts).
+    // This test only asserts the structural contract — the literal
+    // marker substring is checked by `i18n.test.ts` and by
+    // `triage::is_triage_step` on the backend.
+    const p = findFA();
+    const triage = p.steps.find(s => s.name === 'triage')!;
+    expect(triage.description).toBe('wiz.preset.feasibilityAutopilot.triageDesc');
+    const fmt = triage.output_format as { type: string; on_invalid?: string; schema?: unknown };
+    expect(fmt.type).toBe('TypedSchema');
+    expect(fmt.on_invalid).toBe('Fail');
+  });
+
+  it('gate routes RequestChanges back to triage', () => {
+    const p = findFA();
+    const gate = p.steps.find(s => s.name === 'review_triage')!;
+    expect(gate.gate_request_changes_target).toBe('triage');
+  });
+
+  it('implement signals BLOCKED → Goto(triage) capped at 3', () => {
+    const p = findFA();
+    const impl = p.steps.find(s => s.name === 'implement')!;
+    const rule = impl.on_result?.[0];
+    expect(rule?.contains).toBe('BLOCKED');
+    expect((rule?.action as { step_name: string }).step_name).toBe('triage');
+    expect((rule?.action as { max_iterations: number }).max_iterations).toBe(3);
+  });
+
+  it('run_tests is Exec bash with auto-detect across stacks', () => {
+    const p = findFA();
+    const rt = p.steps.find(s => s.name === 'run_tests')!;
+    expect((rt.step_type as { type: string }).type).toBe('Exec');
+    expect(rt.exec_command).toBe('bash');
+    const script = rt.exec_args?.[1] ?? '';
+    for (const needle of ['make test', 'cargo test', 'pnpm test', 'composer test', 'pytest']) {
+      expect(script).toContain(needle);
+    }
+  });
+
+  it('drift_check is Exec greping KRONN markers, skipping heavy dirs', () => {
+    const p = findFA();
+    const dc = p.steps.find(s => s.name === 'drift_check')!;
+    expect((dc.step_type as { type: string }).type).toBe('Exec');
+    const script = dc.exec_args?.[1] ?? '';
+    expect(script).toContain('KRONN-(ASSUMED|MOCKED|TODO)');
+    expect(script).toContain('--exclude-dir=node_modules');
+    expect(script).toContain('--exclude-dir=vendor');
+  });
+
+  it('pr_draft wires prompt + description i18n keys', () => {
+    // Content is in i18n.ts; here we just guard the wiring contract.
+    // A drift between the key emitted by the preset and what the
+    // wizard renders breaks the run silently — surfacing the key
+    // here lets a CI search match the actual i18n.ts entry.
+    const p = findFA();
+    const pr = p.steps.find(s => s.name === 'pr_draft')!;
+    expect(pr.prompt_template).toBe('wiz.preset.feasibilityAutopilot.prDraftPrompt');
+    expect(pr.description).toBe('wiz.preset.feasibilityAutopilot.prDraftDesc');
+  });
+
+  it('exec_allowlist covers every runner the Exec steps may need', () => {
+    const p = findFA();
+    for (const bin of ['bash', 'grep', 'make', 'cargo', 'pnpm', 'composer', 'pytest']) {
+      expect(p.execAllowlist).toContain(bin);
+    }
   });
 });
