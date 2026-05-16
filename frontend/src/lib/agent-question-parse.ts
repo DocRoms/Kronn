@@ -25,6 +25,30 @@ export interface AgentQuestion {
 }
 
 /**
+ * Strip fenced code blocks (```…```) and inline code (`…`) by replacing
+ * them with same-length whitespace runs. We keep the byte length and
+ * newlines intact so downstream line-anchored regexes still match at
+ * the right offsets — only the *content* of the code regions becomes
+ * unparseable.
+ *
+ * Without this, agents emitting QP refactors / git commands containing
+ * placeholders like `--after="{{date}}T{{h1}}:00"` would trip the
+ * question parser into reading `h1` and `h2` as questions with the
+ * trailing `:00"` as the question body. Cf. user-reported UX bug in
+ * the QP Improver flow, 0.8.4 dogfooding.
+ */
+function stripCodeRegions(content: string): string {
+  const fence = /```[\s\S]*?```/g;
+  // Inline code: backtick-delimited, no newline inside. We're loose
+  // here — markdown actually allows `` `…` `` (double backticks to
+  // embed a backtick inside) but agents don't emit that in practice
+  // for our case (questions vs. code disambiguation).
+  const inline = /`[^`\n]*`/g;
+  const blank = (m: string) => m.replace(/[^\n]/g, ' ');
+  return content.replace(fence, blank).replace(inline, blank);
+}
+
+/**
  * Extract structured `{{var}}: question` entries from an agent message.
  *
  * Returns them in source order. Duplicate `var` names: first occurrence wins
@@ -35,21 +59,32 @@ export interface AgentQuestion {
  * - `content` is empty / whitespace-only
  * - No matching pattern is found
  * - The only matches have empty question text (e.g. `{{foo}}:` alone)
+ *
+ * Anchoring rules (0.8.4 fix): the `{{var}}:` token MUST appear at the
+ * start of a line — optionally preceded by whitespace, a bullet marker
+ * (`- ` / `* ` / `+ ` / `• `), or a markdown ordered list prefix
+ * (`1. `). A `{{var}}:` token sitting mid-sentence (e.g. inside
+ * `--after="{{date}}T{{h1}}:00"`) is rejected. Same goes for tokens
+ * inside fenced or inline code — those regions are blanked out before
+ * matching (see `stripCodeRegions`).
  */
 export function parseAgentQuestions(content: string): AgentQuestion[] {
   if (!content || !content.trim()) return [];
 
-  // `\w+` is ASCII-only in JS regex by default (no `u` flag) — this is
-  // what we want: `{{priorité}}` is NOT a valid var name, matching the
-  // Quick Prompts rule.
-  // `[ \t]*` (NOT `\s*`) after the colon — we must stay on the same line
-  // so `{{orphan}}:\n{{next}}: body` doesn't capture `{{next}}: body` as
-  // the orphan's question.
-  const pattern = /\{\{(\w+)\}\}:[ \t]*([^\n]+)/g;
+  const sanitized = stripCodeRegions(content);
+
+  // Anchored at start-of-line (`m` flag → `^` matches per line).
+  // Optional prefix: indentation, then optional bullet (`-`, `*`, `+`,
+  // `•`) or ordered-list marker (digits + `.` or `)`), then one
+  // mandatory space/tab after the marker. Followed immediately by
+  // `{{var}}:` then `[ \t]*` then the question body.
+  // `\w+` stays ASCII-only (no `u` flag) — matches the Quick Prompts
+  // renderer rule.
+  const pattern = /^[ \t]*(?:(?:[-*+•]|\d+[.)])[ \t]+)?\{\{(\w+)\}\}:[ \t]*([^\n]+)/gm;
   const seen = new Set<string>();
   const out: AgentQuestion[] = [];
 
-  for (const match of content.matchAll(pattern)) {
+  for (const match of sanitized.matchAll(pattern)) {
     const varName = match[1];
     const question = match[2].trim();
     if (!question) continue;           // empty body → skip

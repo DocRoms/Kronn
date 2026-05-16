@@ -194,6 +194,8 @@ mod tests {
             api_timeout_ms: Some(5000),
             api_max_retries: Some(3),
             variables: vec![],
+            profile_ids: vec![],
+            directive_ids: vec![],
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

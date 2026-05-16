@@ -226,7 +226,14 @@ fn template_source_for(target_file: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::io::Write;
+
+    // All tests that mutate the `KRONN_TEMPLATES_DIR` env var are
+    // serialized under the `kronn_templates_env` key so they don't
+    // race with each other or with mcp_scanner_test.rs (which touches
+    // the same env var). Tests that don't read the env var are left
+    // parallel.
 
     /// Build a fake project root with `target_file` written at the
     /// requested size, paired with a fake `templates/` directory
@@ -290,6 +297,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(kronn_templates_env)]
     fn healthy_dest_passes_through() {
         let (_tmp, project) = fixture("docs/foo.md", 1000, 1000);
         let (success, warn) =
@@ -299,6 +307,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(kronn_templates_env)]
     fn empty_dest_flagged_and_repaired() {
         // 0 B vs 1000 B template — must flag + repair.
         let (_tmp, project) = fixture("docs/inconsistencies-tech-debt.md", 0, 1000);
@@ -317,6 +326,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(kronn_templates_env)]
     fn truncated_dest_flagged_and_repaired() {
         // 100 B vs 1000 B = 10 % → below 25 % threshold.
         let (_tmp, project) = fixture("docs/architecture/overview.md", 100, 1000);
@@ -332,6 +342,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(kronn_templates_env)]
     fn dest_at_threshold_is_preserved() {
         // 300 B vs 1000 B = 30 % → above 25 % threshold, must NOT
         // flag or touch the user's content.
@@ -346,6 +357,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(kronn_templates_env)]
     fn placeholder_leakage_is_detected_even_when_size_matches_template() {
         // 0.8.3 (#310) — DOCROMS_WEB user hit this: claude rate-limited
         // BEFORE writing decisions.md, the file stayed at exact template
@@ -394,6 +406,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(kronn_templates_env)]
     fn missing_template_only_flags_empty_dest() {
         // No template on disk (sub-audit case): we can only flag a
         // total miss; we can't size-check.

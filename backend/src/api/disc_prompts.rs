@@ -638,7 +638,7 @@ mod tests {
             model_tier: None,
             cost_usd: None,
             author_pseudo: None,
-            author_avatar_email: None, source_msg_id: None,
+            author_avatar_email: None, source_msg_id: None, duration_ms: None,
         }
     }
 

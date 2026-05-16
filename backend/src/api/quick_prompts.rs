@@ -38,6 +38,8 @@ pub async fn create(
         agent: req.agent.unwrap_or(AgentType::ClaudeCode),
         project_id: req.project_id,
         skill_ids: req.skill_ids,
+        profile_ids: req.profile_ids,
+        directive_ids: req.directive_ids,
         tier: req.tier,
         description: req.description,
         created_at: now,
@@ -73,6 +75,8 @@ pub async fn update(
         agent: req.agent.unwrap_or(existing.agent),
         project_id: req.project_id,
         skill_ids: req.skill_ids,
+        profile_ids: req.profile_ids,
+        directive_ids: req.directive_ids,
         tier: req.tier,
         // Description is always taken from the request, even if empty —
         // that's how the user clears it.
@@ -95,6 +99,59 @@ pub async fn delete(
 ) -> Json<ApiResponse<()>> {
     match state.db.with_conn(move |conn| crate::db::quick_prompts::delete_quick_prompt(conn, &id)).await {
         Ok(()) => Json(ApiResponse::ok(())),
+        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
+/// GET /api/quick-prompts/:id/history
+///
+/// 0.8.5 — returns the full version snapshot list for a QP, newest
+/// first. Pre-0.8.5 QPs have no history (v1 is seeded by
+/// `insert_quick_prompt` for new ones); the frontend handles the
+/// empty case by showing "No version history yet".
+pub async fn history(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<Vec<crate::models::QuickPromptVersion>>> {
+    match state.db.with_conn(move |conn| crate::db::quick_prompts::list_quick_prompt_versions(conn, &id)).await {
+        Ok(v) => Json(ApiResponse::ok(v)),
+        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
+/// DELETE /api/quick-prompts/:id/versions/:version_index
+///
+/// 0.8.5 — remove an archived QP version from the history. The
+/// CURRENT version (highest `version_index`) is refused — it's the
+/// anchor for the live QP body. Discussions that referenced the
+/// deleted version see their lineage cleared so the metrics aggregator
+/// stops attributing those launches.
+pub async fn delete_version(
+    State(state): State<AppState>,
+    Path((id, version_index)): Path<(String, u32)>,
+) -> Json<ApiResponse<bool>> {
+    match state.db.with_conn(move |conn| {
+        crate::db::quick_prompts::delete_quick_prompt_version(conn, &id, version_index)
+    }).await {
+        Ok(b) => Json(ApiResponse::ok(b)),
+        Err(e) => Json(ApiResponse::err(format!("{}", e))),
+    }
+}
+
+/// GET /api/quick-prompts/:id/metrics
+///
+/// 0.8.5 — aggregated launch metrics per QP version (avg tokens, avg
+/// duration_ms, avg cost_usd, launch count). One row per version that
+/// has ≥ 1 launch with `originating_qp_version` set. Versions with
+/// zero launches are NOT returned — the frontend pairs the metrics
+/// rows against the full version list from `/history` and renders
+/// "no runs yet" where appropriate.
+pub async fn metrics(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<Vec<crate::models::QuickPromptVersionMetrics>>> {
+    match state.db.with_conn(move |conn| crate::db::quick_prompts::list_quick_prompt_version_metrics(conn, &id)).await {
+        Ok(v) => Json(ApiResponse::ok(v)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
 }

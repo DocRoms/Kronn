@@ -375,7 +375,7 @@ pub struct WorkflowStep {
     // Only meaningful when `step_type == ApiCall`. Calls a Kronn-configured
     // API plugin directly from the Rust engine — zero agent tokens. Params
     // support the same `{{steps.X.data}}` templates as agent prompts.
-    // See `ai/operations/deagent-apicall.md` for the full contract.
+    // See `docs/operations/deagent-apicall.md` for the full contract.
 
     /// Registry slug of the plugin to invoke (e.g. `"chartbeat"`, `"jira"`).
     /// The slug resolves to an `ApiSpec` in the plugin registry; the request

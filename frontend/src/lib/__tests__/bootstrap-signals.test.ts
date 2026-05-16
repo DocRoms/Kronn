@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 
 // Test the signal stripping regex (same as MessageBubble.tsx)
-const SIGNAL_REGEX = /KRONN:(BRIEFING_COMPLETE|VALIDATION_COMPLETE|BOOTSTRAP_COMPLETE|WORKFLOW_READY|REPO_READY|ARCHITECTURE_READY|PLAN_READY|STRUCTURE_READY|ISSUES_READY|ISSUES_CREATED)/gi;
+const SIGNAL_REGEX = /KRONN:(BRIEFING_COMPLETE|VALIDATION_COMPLETE|BOOTSTRAP_COMPLETE|WORKFLOW_READY|REPO_READY|ARCHITECTURE_READY|PLAN_READY|STRUCTURE_READY|ISSUES_READY|ISSUES_CREATED|QP_IMPROVED|BUNDLE_READY)/gi;
 
 describe('Bootstrap++ signal detection', () => {
   it('strips ARCHITECTURE_READY from message content', () => {
@@ -44,6 +44,9 @@ describe('Bootstrap++ signal detection', () => {
       'KRONN:ARCHITECTURE_READY',
       'KRONN:PLAN_READY',
       'KRONN:ISSUES_CREATED',
+      // 0.8.5 — QP AI improver signal + bundle deploy signal.
+      'KRONN:QP_IMPROVED',
+      'KRONN:BUNDLE_READY',
     ];
     for (const signal of signals) {
       const cleaned = `Text.\n${signal}`.replace(SIGNAL_REGEX, '').trim();

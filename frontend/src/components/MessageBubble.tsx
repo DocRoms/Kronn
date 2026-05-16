@@ -20,6 +20,71 @@ import {
 const RE_AUTH_ERROR = /api.?key|invalid.*key|key.*not.*config|authenticat|unauthori|login|sign.?in/i;
 const RE_PARTIAL_RESPONSE = /Réponse partielle.*interrompu|Timeout d'inactivité/i;
 
+// 0.8.5 (#qp-improver UX follow-up) — Kronn-emitted "seed" envelope.
+// When the QP AI Improver / Workflow Architect / Bootstrap Architect
+// spawn a discussion, the User message they post carries:
+//   - a short visible status line ("✨ Audit en cours…")
+//   - THEN the full technical seed wrapped in this marker pair.
+// The agent runtime reads the entire message verbatim, so the seed
+// reaches the agent. The UI parses the marker out and renders the
+// seed inside a collapsed `<details>`-style toggle so the user isn't
+// forced to scroll past hundreds of lines of QP JSON + catalog.
+const RE_SEED = /<!--KRONN_SEED_START-->\s*([\s\S]*?)\s*<!--KRONN_SEED_END-->/;
+
+/**
+ * Split a message body into a visible prefix + an optional collapsed
+ * "seed" payload. Pure helper extracted for unit testing. When no
+ * marker pair is found, the entire content is returned as `visible`
+ * with `seed = null` — legacy messages stay untouched.
+ */
+export function splitMessageSeed(content: string): { visible: string; seed: string | null } {
+  const m = content.match(RE_SEED);
+  if (!m) return { visible: content, seed: null };
+  // index is set when match succeeds; ts-narrow it for the slice.
+  const idx = m.index ?? 0;
+  const visible = content.slice(0, idx).trim();
+  return { visible, seed: m[1].trim() };
+}
+
+// 0.8.5 — collapsed disclosure for Kronn-internal seed payloads.
+// Mirrors `<details>` semantics with kronn-styled controls. Hidden
+// by default; opens on click. Pre-renders the seed inside a `<pre>`
+// with whitespace-preserved formatting so JSON stays readable.
+const KronnSeedToggle = memo(({ seed }: { seed: string }) => {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="kronn-seed-toggle" data-testid="kronn-seed-toggle" style={{ marginTop: 8, fontSize: 12, color: 'var(--kr-text-dim)' }}>
+      <button
+        type="button"
+        className="disc-icon-btn"
+        style={{ padding: '3px 8px', fontSize: 11, color: 'var(--kr-text-dim)' }}
+        onClick={() => setOpen(o => !o)}
+        aria-expanded={open}
+      >
+        {open ? '▾' : '▸'} Contexte technique envoyé à l'agent
+      </button>
+      {open && (
+        <pre
+          data-testid="kronn-seed-body"
+          style={{
+            marginTop: 6,
+            padding: 8,
+            borderRadius: 4,
+            background: 'rgba(255, 255, 255, 0.04)',
+            fontSize: 11,
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+            maxHeight: 320,
+            overflow: 'auto',
+          }}
+        >
+          {seed}
+        </pre>
+      )}
+    </div>
+  );
+});
+
 // ─── MessageBubble component (memo'd to avoid re-rendering all messages) ─────
 
 export interface MessageBubbleProps {
@@ -238,7 +303,22 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             <MatrixText text={msg.content} />
           </div>
         ) : (
-          <MarkdownContent content={msg.content.replace(/KRONN:(BRIEFING_COMPLETE|VALIDATION_COMPLETE|BOOTSTRAP_COMPLETE|WORKFLOW_READY|REPO_READY|ARCHITECTURE_READY|PLAN_READY|STRUCTURE_READY|ISSUES_READY|ISSUES_CREATED)/gi, '').trim()} discussionId={discussionId} />
+          (() => {
+            // 0.8.5 — split off the optional Kronn-internal seed payload
+            // BEFORE we strip the KRONN:* signals. The seed itself may
+            // contain a signal name inside instructions ("emit KRONN:QP_IMPROVED"),
+            // and stripping those would corrupt the agent prompt. Splitting first
+            // keeps the agent-bound full content intact in the DB while the UI
+            // only renders the visible prefix.
+            const { visible, seed } = splitMessageSeed(msg.content);
+            const cleaned = visible.replace(/KRONN:(BRIEFING_COMPLETE|VALIDATION_COMPLETE|BOOTSTRAP_COMPLETE|WORKFLOW_READY|REPO_READY|ARCHITECTURE_READY|PLAN_READY|STRUCTURE_READY|ISSUES_READY|ISSUES_CREATED|QP_IMPROVED|BUNDLE_READY)/gi, '').trim();
+            return (
+              <>
+                <MarkdownContent content={cleaned} discussionId={discussionId} />
+                {seed && <KronnSeedToggle seed={seed} />}
+              </>
+            );
+          })()
         )}
         {msg.role === 'Agent' && (
           <button

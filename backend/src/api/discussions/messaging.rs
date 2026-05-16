@@ -79,7 +79,7 @@ pub async fn send_message(
         tokens_used: 0,
         auth_mode: None,
         model_tier: None, cost_usd: None, author_pseudo, author_avatar_email,
-        source_msg_id: None,
+        source_msg_id: None, duration_ms: None,
     };
     let disc_id = id.clone();
     let msg = user_msg.clone();

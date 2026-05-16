@@ -1349,6 +1349,8 @@ export interface RevealSecretRequest {
   config_id: string;
 }
 
+// 0.8.5 — `originating_qp_id` added at the bottom; stamped server-side
+// from the snapshot table to compute the current version_index.
 export interface CreateDiscussionRequest {
   project_id: string | null;
   title: string;
@@ -1361,6 +1363,10 @@ export interface CreateDiscussionRequest {
   workspace_mode?: string;
   base_branch?: string;
   tier?: ModelTier;
+  /** 0.8.5 — when set, the backend resolves the QP's current
+   *  version_index from the snapshot table and stamps both columns on
+   *  `discussions`. Drives the QP-metrics aggregator. */
+  originating_qp_id?: string | null;
 }
 
 export interface SendMessageRequest {
@@ -1480,6 +1486,36 @@ export interface PromptVariable {
   required?: boolean;
 }
 
+// 0.8.5 — QP version history snapshot. One row written per
+// insert/update via db::quick_prompts::snapshot_quick_prompt_version.
+export interface QuickPromptVersion {
+  id: string;
+  quick_prompt_id: string;
+  version_index: number;
+  name: string;
+  icon: string;
+  prompt_template: string;
+  variables: PromptVariable[];
+  agent: AgentType;
+  project_id?: string | null;
+  skill_ids?: string[];
+  profile_ids?: string[];
+  directive_ids?: string[];
+  tier?: ModelTier;
+  description?: string;
+  created_at: string;
+}
+
+// 0.8.5 — Per-version aggregated launch metrics. Returned by
+// GET /api/quick-prompts/:id/metrics.
+export interface QuickPromptVersionMetrics {
+  version_index: number;
+  launches: number;
+  avg_tokens: number;
+  avg_duration_ms?: number | null;
+  avg_cost_usd?: number | null;
+}
+
 export interface QuickPrompt {
   id: string;
   name: string;
@@ -1489,6 +1525,10 @@ export interface QuickPrompt {
   agent: AgentType;
   project_id?: string | null;
   skill_ids?: string[];
+  /** 0.8.5 — persona binding pinned at the QP level. */
+  profile_ids?: string[];
+  /** 0.8.5 — directive binding pinned at the QP level. */
+  directive_ids?: string[];
   tier?: ModelTier;
   /** Human description of what this Quick Prompt does. Shown in batch picker. */
   description?: string;
@@ -1504,6 +1544,10 @@ export interface CreateQuickPromptRequest {
   agent?: AgentType | null;
   project_id?: string | null;
   skill_ids?: string[];
+  /** 0.8.5 — picked in the QP form, persisted as JSON column. */
+  profile_ids?: string[];
+  /** 0.8.5 — picked in the QP form, persisted as JSON column. */
+  directive_ids?: string[];
   tier?: ModelTier;
   description?: string;
 }
@@ -1533,6 +1577,10 @@ export interface QuickApi {
   api_timeout_ms?: number | null;
   api_max_retries?: number | null;
   variables: PromptVariable[];
+  /** 0.8.5 — bindings propagate to downstream LLM consumers (chained QP, compare). */
+  profile_ids?: string[];
+  /** 0.8.5 — bindings propagate to downstream LLM consumers (chained QP, compare). */
+  directive_ids?: string[];
   created_at: string;
   updated_at: string;
 }
@@ -1555,6 +1603,10 @@ export interface CreateQuickApiRequest {
   api_timeout_ms?: number | null;
   api_max_retries?: number | null;
   variables?: PromptVariable[];
+  /** 0.8.5 — same field as QuickPrompt; ignored by HTTP path, used by downstream LLM. */
+  profile_ids?: string[];
+  /** 0.8.5 — same field as QuickPrompt; ignored by HTTP path, used by downstream LLM. */
+  directive_ids?: string[];
 }
 
 export interface QuickApiExportEnvelope {

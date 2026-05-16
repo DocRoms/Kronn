@@ -98,6 +98,14 @@ pub async fn hydrate_step_from_quick_prompt(
     if step.skill_ids.is_empty() {
         step.skill_ids = qp.skill_ids;
     }
+    // 0.8.5 — same merge logic for the new QP-level bindings. Step-level
+    // explicit choice always wins; otherwise inherit from the QP.
+    if step.profile_ids.is_empty() {
+        step.profile_ids = qp.profile_ids;
+    }
+    if step.directive_ids.is_empty() {
+        step.directive_ids = qp.directive_ids;
+    }
 
     Ok(())
 }
@@ -134,6 +142,8 @@ mod tests {
             agent: AgentType::ClaudeCode,
             project_id: None,
             skill_ids: vec!["skill-a".to_string(), "skill-b".to_string()],
+            profile_ids: vec!["coder".to_string()],
+            directive_ids: vec!["concise".to_string()],
             tier: ModelTier::Reasoning,
             description: String::new(),
             created_at: Utc::now(),
@@ -250,6 +260,33 @@ mod tests {
         step.skill_ids = vec!["step-skill".to_string()];
         hydrate_step_from_quick_prompt(&mut step, &db).await.unwrap();
         assert_eq!(step.skill_ids, vec!["step-skill"]);
+    }
+
+    #[tokio::test]
+    async fn step_profile_and_directive_ids_inherited_from_qp_when_empty() {
+        // 0.8.5 — hydrate also flows profile_ids + directive_ids from the
+        // QP into the step when the step itself has none set.
+        let db = Database::open_in_memory().unwrap();
+        let qp_id = seed_qp(&db, make_qp("qp-bind", "...")).await;
+        let mut step = blank_step(Some(qp_id));
+        // step has empty profile_ids/directive_ids; hydrate should inherit.
+        hydrate_step_from_quick_prompt(&mut step, &db).await.unwrap();
+        assert_eq!(step.profile_ids, vec!["coder"]);
+        assert_eq!(step.directive_ids, vec!["concise"]);
+    }
+
+    #[tokio::test]
+    async fn step_profile_and_directive_ids_win_when_explicit() {
+        // 0.8.5 — when the step has its own explicit bindings, hydrate
+        // must NOT overwrite them (same merge logic as skill_ids).
+        let db = Database::open_in_memory().unwrap();
+        let qp_id = seed_qp(&db, make_qp("qp-bind-2", "...")).await;
+        let mut step = blank_step(Some(qp_id));
+        step.profile_ids = vec!["step-profile".to_string()];
+        step.directive_ids = vec!["step-directive".to_string()];
+        hydrate_step_from_quick_prompt(&mut step, &db).await.unwrap();
+        assert_eq!(step.profile_ids, vec!["step-profile"]);
+        assert_eq!(step.directive_ids, vec!["step-directive"]);
     }
 
     #[tokio::test]

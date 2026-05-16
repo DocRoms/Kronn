@@ -112,7 +112,7 @@ pub fn recover_partial_responses(conn: &Connection) -> Result<Vec<String>> {
             model_tier: None,
             cost_usd: None,
             author_pseudo: None,
-            author_avatar_email: None, source_msg_id: None,
+            author_avatar_email: None, source_msg_id: None, duration_ms: None,
         };
         match insert_message(conn, &disc_id, &msg) {
             Ok(_) => {
@@ -476,7 +476,7 @@ pub fn update_discussion_participants(conn: &Connection, id: &str, participants:
 /// Load all messages grouped by discussion_id in a single query (avoids N+1).
 fn list_all_messages(conn: &Connection) -> Result<std::collections::HashMap<String, Vec<DiscussionMessage>>> {
     let mut stmt = conn.prepare(
-        "SELECT discussion_id, id, role, content, agent_type, timestamp, tokens_used, auth_mode, model_tier, cost_usd
+        "SELECT discussion_id, id, role, content, agent_type, timestamp, tokens_used, auth_mode, model_tier, cost_usd, duration_ms
          FROM messages ORDER BY sort_order, timestamp"
     )?;
 
@@ -498,6 +498,7 @@ fn list_all_messages(conn: &Connection) -> Result<std::collections::HashMap<Stri
             cost_usd: row.get::<_, Option<f64>>(9).unwrap_or(None),
             author_pseudo: None,
             author_avatar_email: None, source_msg_id: None,
+            duration_ms: row.get::<_, Option<i64>>(10).unwrap_or(None).map(|d| d as u64),
         }))
     })?;
 
@@ -510,7 +511,7 @@ fn list_all_messages(conn: &Connection) -> Result<std::collections::HashMap<Stri
 
 pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<DiscussionMessage>> {
     let mut stmt = conn.prepare(
-        "SELECT id, role, content, agent_type, timestamp, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email
+        "SELECT id, role, content, agent_type, timestamp, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email, source_msg_id, duration_ms
          FROM messages WHERE discussion_id = ?1
          ORDER BY sort_order, timestamp"
     )?;
@@ -532,6 +533,7 @@ pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<Discu
             author_pseudo: row.get::<_, Option<String>>(9).unwrap_or(None),
             author_avatar_email: row.get::<_, Option<String>>(10).unwrap_or(None),
             source_msg_id: row.get::<_, Option<String>>(11).unwrap_or(None),
+            duration_ms: row.get::<_, Option<i64>>(12).unwrap_or(None).map(|d| d as u64),
         })
     })?.filter_map(|r| r.ok()).collect();
 
@@ -547,8 +549,8 @@ pub fn insert_message(conn: &Connection, discussion_id: &str, msg: &DiscussionMe
     )?;
 
     conn.execute(
-        "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, sort_order, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email, source_msg_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, sort_order, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email, source_msg_id, duration_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             msg.id,
             discussion_id,
@@ -564,6 +566,7 @@ pub fn insert_message(conn: &Connection, discussion_id: &str, msg: &DiscussionMe
             msg.author_pseudo,
             msg.author_avatar_email,
             msg.source_msg_id,
+            msg.duration_ms.map(|d| d as i64),
         ],
     )?;
 
@@ -573,6 +576,20 @@ pub fn insert_message(conn: &Connection, discussion_id: &str, msg: &DiscussionMe
     )?;
 
     update_discussion_timestamp(conn, discussion_id)?;
+    Ok(())
+}
+
+/// 0.8.5 — Stamp the QP lineage on a discussion that was spawned by a
+/// QP launch. Sets `originating_qp_id` + `originating_qp_version`,
+/// which the metrics aggregator GROUPs BY when computing per-version
+/// avg tokens / duration / cost. Safe to call multiple times on the
+/// same discussion — last write wins (used by the compare-agents
+/// flow where every child gets the same lineage).
+pub fn set_originating_qp(conn: &Connection, disc_id: &str, qp_id: &str, version_index: u32) -> Result<()> {
+    conn.execute(
+        "UPDATE discussions SET originating_qp_id = ?2, originating_qp_version = ?3 WHERE id = ?1",
+        params![disc_id, qp_id, version_index as i64],
+    )?;
     Ok(())
 }
 

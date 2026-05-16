@@ -44,6 +44,16 @@ pub struct QuickPrompt {
     pub project_id: Option<String>,
     #[serde(default)]
     pub skill_ids: Vec<String>,
+    /// 0.8.5 — optional profile binding (persona injection at launch).
+    /// Mirrors `WorkflowStep.profile_ids` + `Discussion.profile_ids`. Empty
+    /// vec = no profile bound (legacy behaviour).
+    #[serde(default)]
+    pub profile_ids: Vec<String>,
+    /// 0.8.5 — optional directive binding (rules-of-conduct at launch).
+    /// Mirrors `WorkflowStep.directive_ids` + `Discussion.directive_ids`.
+    /// Empty vec = no directive bound (legacy behaviour).
+    #[serde(default)]
+    pub directive_ids: Vec<String>,
     #[serde(default)]
     pub tier: ModelTier,
     /// Optional human description of what this Quick Prompt does. Shown
@@ -67,6 +77,10 @@ pub struct CreateQuickPromptRequest {
     pub project_id: Option<String>,
     #[serde(default)]
     pub skill_ids: Vec<String>,
+    #[serde(default)]
+    pub profile_ids: Vec<String>,
+    #[serde(default)]
+    pub directive_ids: Vec<String>,
     #[serde(default)]
     pub tier: ModelTier,
     #[serde(default)]
@@ -122,6 +136,17 @@ pub struct QuickApi {
     /// the keys mapped from each batch item (batch-call).
     pub variables: Vec<PromptVariable>,
 
+    /// 0.8.5 — optional profile binding. Picked up by any downstream
+    /// agent surface that consumes this Quick API (e.g. the "Compare
+    /// agents" QA helper). Empty vec = unbound. Pure API calls ignore
+    /// this; it only matters when the QA result feeds into an LLM step.
+    #[serde(default)]
+    pub profile_ids: Vec<String>,
+    /// 0.8.5 — optional directive binding. Same rationale as
+    /// `profile_ids` above.
+    #[serde(default)]
+    pub directive_ids: Vec<String>,
+
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -148,6 +173,59 @@ pub struct CreateQuickApiRequest {
     pub api_max_retries: Option<u8>,
     #[serde(default)]
     pub variables: Vec<PromptVariable>,
+    #[serde(default)]
+    pub profile_ids: Vec<String>,
+    #[serde(default)]
+    pub directive_ids: Vec<String>,
+}
+
+// 0.8.5 — Quick Prompt version snapshot. Written by `db::quick_prompts`
+// on every INSERT (v1) and UPDATE (v2, v3, …). Carries every editable
+// field at the time of the change so the history drawer can render the
+// timeline + the metrics aggregator can group launches by `(qp_id,
+// version_index)` via the matching columns on `discussions`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct QuickPromptVersion {
+    pub id: String,
+    pub quick_prompt_id: String,
+    pub version_index: u32,
+    pub name: String,
+    pub icon: String,
+    pub prompt_template: String,
+    pub variables: Vec<PromptVariable>,
+    pub agent: AgentType,
+    pub project_id: Option<String>,
+    pub skill_ids: Vec<String>,
+    pub profile_ids: Vec<String>,
+    pub directive_ids: Vec<String>,
+    pub tier: ModelTier,
+    pub description: String,
+    pub created_at: DateTime<Utc>,
+}
+
+// 0.8.5 — Aggregated launch metrics for a single QP version. Returned
+// by `GET /api/quick-prompts/:id/metrics` (one row per `version_index`
+// that has at least one launch with `originating_qp_version` set).
+// Only the FIRST agent reply of each discussion is counted — that's
+// the message that reflects the QP's pertinence; follow-up turns are
+// driven by the user's reactions, not the QP itself.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct QuickPromptVersionMetrics {
+    pub version_index: u32,
+    /// Number of launched discussions whose first-agent-reply lands
+    /// in this version's window. Pertinence Δs are only emitted when
+    /// `launches >= 3` (the noise floor).
+    pub launches: u32,
+    pub avg_tokens: u64,
+    /// Mean wall-clock duration of the first agent reply, milliseconds.
+    /// `None` when no launch in this version has a captured
+    /// `duration_ms` (legacy rows or imported transcripts).
+    pub avg_duration_ms: Option<u64>,
+    /// Mean USD cost of the first agent reply. `None` when no launch
+    /// has cost data (e.g. local Ollama runs).
+    pub avg_cost_usd: Option<f64>,
 }
 
 // Skills / Profiles / Directives extracted to `agents.rs` (TD-models-monolith).

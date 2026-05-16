@@ -14,6 +14,7 @@ import type { NewDiscConfig } from '../components/NewDiscussionForm';
 import { AgentQuestionForm } from '../components/AgentQuestionForm';
 import { parseAgentQuestions } from '../lib/agent-question-parse';
 import { userError } from '../lib/userError';
+import { getDeployedVersion, setDeployedVersion } from '../lib/qp-improver-banner';
 import type { Project, AgentDetection, Discussion, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile, BatchRunSummary } from '../types/generated';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useQpChain } from '../hooks/useQpChain';
@@ -180,6 +181,13 @@ export function DiscussionsPage({
   // `deleteLastAgentMessages` + `editLastUserMessage` + `runAgent` in
   // parallel, producing duplicate user edits and parallel agent runs.
   const editingMsgInFlightRef = useRef(false);
+  // 0.8.4 follow-up — QP improver deploy CTA needs (a) a busy state to
+  // disable the button + show "Déploiement en cours…" while the PUT
+  // round-trips, and (b) a useRef guard against a fast double-click
+  // (the useState is closure-stale for ~1 paint after click). Pattern
+  // mirrors `editingMsgInFlightRef` above. Cf. [[feedback_race_guards]].
+  const deployingQpRef = useRef(false);
+  const [deployingQpDiscId, setDeployingQpDiscId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState('');
   // Per-discussion override of the agent shown in the streaming placeholder.
   // Set when the user pings `@codex` (or any other agent) instead of the
@@ -2157,6 +2165,125 @@ export function DiscussionsPage({
                       }
                     }}>
                       <Check size={12} /> {t('wf.createThisWorkflow')}
+                    </button>
+                  </div>
+                );
+              })()}
+
+              {/* 0.8.5 — QP AI Improver banner.
+                  Triggered when the agent emits `KRONN:QP_IMPROVED`
+                  inside a discussion whose title starts with the
+                  `[Improve QP <id>]` prefix WorkflowsPage.handleImproveQP
+                  uses. Recovers the target QP id from the title, parses
+                  the JSON the agent emitted, and offers a one-click
+                  PUT /api/quick-prompts/:id. We deliberately do NOT
+                  trust the JSON's `id` field — the agent could hallucinate
+                  it; the title is the source of truth. */}
+              {(() => {
+                const titleMatch = activeDiscussion.title.match(/^\[Improve QP (qp-[^\]]+|[0-9a-f-]+)\]/i);
+                if (!titleMatch) return null;
+                const qpTargetId = titleMatch[1];
+
+                // Persisted "already deployed" marker (0.8.4 follow-up).
+                // Without this, the banner re-derives from the agent
+                // message content on every render — and that content
+                // still has the KRONN:QP_IMPROVED signal + JSON block
+                // forever, so the CTA stayed active after a successful
+                // deploy. Now we stash the resulting version index in
+                // localStorage and render the disabled "✅ déployé"
+                // state instead. Cf. [[project_qp_ai_improver]].
+                const deployedVersion = getDeployedVersion(activeDiscussion.id);
+                if (deployedVersion != null) {
+                  return (
+                    <div className="disc-cta-banner" data-variant="accent">
+                      <p className="disc-cta-text" data-variant="accent">
+                        {t('qp.deployedAtVersion', String(deployedVersion))}
+                      </p>
+                    </div>
+                  );
+                }
+
+                const agentMsgs = activeDiscussion.messages.filter((m, idx) => m.role === 'Agent' && idx > 0);
+                const wfStreamedText = streamingMap[activeDiscussion.id] ?? '';
+                const readyMsg = [...agentMsgs].reverse().find(m => m.content.toUpperCase().includes('KRONN:QP_IMPROVED'))
+                  || (wfStreamedText.toUpperCase().includes('KRONN:QP_IMPROVED') ? { content: wfStreamedText } : null);
+                if (!readyMsg) return null;
+                const jsonMatch = readyMsg.content.match(/```json\s*\n([\s\S]*?)\n```/);
+                if (!jsonMatch) return null;
+                let parsedPayload: Record<string, unknown> | null = null;
+                try {
+                  const v: unknown = JSON.parse(jsonMatch[1]);
+                  if (v && typeof v === 'object') parsedPayload = v as Record<string, unknown>;
+                } catch { return null; }
+                if (!parsedPayload) return null;
+                // Strip any `id` the agent emitted — the URL drives PUT identity.
+                delete parsedPayload.id;
+
+                const isDeploying = deployingQpDiscId === activeDiscussion.id;
+
+                return (
+                  <div className="disc-cta-banner" data-variant="accent">
+                    <p className="disc-cta-text" data-variant="accent">
+                      <Zap size={14} /> {t('qp.improvedReady')}
+                    </p>
+                    <button
+                      className="disc-cta-btn"
+                      data-variant="accent"
+                      disabled={isDeploying}
+                      onClick={async () => {
+                        // useRef guard against a fast double-click — the
+                        // `disabled` prop is closure-stale for ~1 paint
+                        // after setState. Cf. [[feedback_race_guards]].
+                        if (deployingQpRef.current) return;
+                        deployingQpRef.current = true;
+                        setDeployingQpDiscId(activeDiscussion.id);
+                        try {
+                          await quickPromptsApi.update(qpTargetId, parsedPayload as unknown as Parameters<typeof quickPromptsApi.update>[1]);
+                          // Look up the freshly-snapshotted version index.
+                          // `history` returns versions newest-first; the
+                          // first entry IS the one we just wrote. If for
+                          // any reason the history call fails (network
+                          // flake mid-deploy), we still claim success and
+                          // mark with `?` rather than blocking the nav.
+                          let newVersion: number | null = null;
+                          try {
+                            const versions = await quickPromptsApi.history(qpTargetId);
+                            if (versions.length > 0) newVersion = versions[0].version_index;
+                          } catch { /* non-fatal — version display falls back */ }
+                          if (newVersion != null) {
+                            setDeployedVersion(activeDiscussion.id, newVersion);
+                            toast(t('qp.deploySuccess', String(newVersion)), 'success');
+                          }
+                          // 0.8.5 follow-up — deep-link to the QP card on
+                          // the Quick Prompts tab. WorkflowsPage reads
+                          // this key on mount: switches tab + scrolls
+                          // to the matching card + flashes a highlight.
+                          try {
+                            sessionStorage.setItem('kronn:postQpImproved', qpTargetId);
+                          } catch { /* private-mode / quota — fall through */ }
+                          onNavigate('workflows');
+                        } catch (e) {
+                          // 0.8.4 follow-up — pre-fix this was a silent
+                          // `console.warn`, so a 400 from the backend
+                          // (agent-emitted JSON missing required fields,
+                          // invalid agent enum, etc.) looked to the user
+                          // like "click does nothing".
+                          toast(t('qp.deployFailed', userError(e)), 'error');
+                        } finally {
+                          deployingQpRef.current = false;
+                          setDeployingQpDiscId(null);
+                        }
+                      }}
+                    >
+                      {isDeploying ? (
+                        <>
+                          <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> {t('qp.deployInProgress')}
+                        </>
+                      ) : (
+                        <>
+                          <Check size={12} /> {t('qp.deployImproved')}
+                        </>
+                      )}
                     </button>
                   </div>
                 );

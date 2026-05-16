@@ -299,7 +299,6 @@ Only suggest workflows where all required vendor MCPs are actually configured.",
 Real issues only, not hypothetical. Read all docs/ files AND scan source code. \
 Scan: entry points, config files, Dockerfiles, CI configs, and 5-10 core source files \
 (prioritize auth, data persistence, external input handling).\n\n\
-
 # A. MANDATORY BASELINE CHECKLIST (never skip, never trim)\n\
 \n\
 These are well-known defaults that silently break security/ops in production. \
@@ -358,7 +357,6 @@ For OSS-intent projects, each missing item below emits a TD at **Low or Medium**
 \n\
 The 6 categories above are MANDATORY when their gating condition matches. Even if you find 30 other findings, you MUST scan them. \
 The cap in § D point 5 applies AFTER these baseline findings are emitted.\n\n\
-
 # B. DIMENSIONAL SCAN (free-form, on top of the baseline)\n\
 \n\
 Systematically audit across these 10 dimensions:\n\
@@ -372,7 +370,6 @@ Systematically audit across these 10 dimensions:\n\
 - **Compliance**: GDPR issues (external resources, data retention), license incompatibilities (`composer licenses` / `cargo deny` / `license-checker`).\n\
 - **Performance** (if perf-sensitive per `docs/briefing.md` or repo README): CWV regression risk, bundle size, image optim missing, cache headers weak, no CDN.\n\
 - **Documentation drift**: cross-check the docs/ files you just wrote (steps 1-8) against the source code. Flag concrete contradictions (e.g. `coding-rules.md` says X is enforced but no linter rule exists, `testing-quality.md` claims N tests but actual count differs, `mcp-servers.md` lists a server not in `.mcp.json`).\n\n\
-
 # C. ANTI-REPETITION (priors from previous audits)\n\
 \n\
 Before emitting findings, list existing files under `docs/tech-debt/` (excluding README.md, TEMPLATE.md, _template.md, and any file starting with `_`). \
@@ -394,7 +391,6 @@ For each: TD ID + your best guess (`fixed in commit X`, `no longer visible in so
 The pipeline will run a reconciliation pass after Step 9 to classify them definitively.\n\
 \n\
 This rule is critical: the user wiped TDs once to evaluate a fresh audit, but most users don't. Re-discovery under a new slug breaks their workflow.\n\n\
-
 # D. OUTPUT FORMAT\n\
 \n\
 Fill `docs/inconsistencies-tech-debt.md` — replace ALL `{{PLACEHOLDERS}}` and `<!-- ... -->` comments. For every finding:\n\

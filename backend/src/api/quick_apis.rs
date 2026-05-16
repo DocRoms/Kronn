@@ -67,6 +67,8 @@ pub async fn create(
         api_timeout_ms: req.api_timeout_ms,
         api_max_retries: req.api_max_retries,
         variables: req.variables,
+        profile_ids: req.profile_ids,
+        directive_ids: req.directive_ids,
         created_at: now,
         updated_at: now,
     };
@@ -112,6 +114,8 @@ pub async fn update(
         api_timeout_ms: req.api_timeout_ms.or(existing.api_timeout_ms),
         api_max_retries: req.api_max_retries.or(existing.api_max_retries),
         variables: req.variables,
+        profile_ids: req.profile_ids,
+        directive_ids: req.directive_ids,
         created_at: existing.created_at,
         updated_at: Utc::now(),
     };

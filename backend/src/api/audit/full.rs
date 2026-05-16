@@ -889,7 +889,7 @@ pub async fn full_audit(
             timestamp: now,
             tokens_used: 0,
             auth_mode: None,
-            model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None, source_msg_id: None,
+            model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None, source_msg_id: None, duration_ms: None,
         };
 
         // 0.8.4 (#287 + #322 / F2) — title carries the audit kind

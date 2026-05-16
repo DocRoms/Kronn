@@ -3749,6 +3749,43 @@
   background: var(--kr-bg-subtle);
   border: 1px solid var(--kr-border);
 }
+/* 0.8.5 — post-deploy QP focus flash. Briefly highlights the card the
+   user just deployed an improved version of, via a fading accent
+   border + glow. Animation is set inline via `.qp-card-flash`
+   (added/removed by the WorkflowsPage post-deploy effect) and runs
+   ~1.5s. Respects prefers-reduced-motion. */
+/* 0.8.5 — compact "fitness" chip inside the QP card header. Renders
+   the current version's avg tokens / avg duration / launch count
+   so the user can read pertinence at a glance without opening the
+   history drawer. */
+.qp-card-metrics-chip {
+  display: inline-flex;
+  align-items: center;
+  margin-left: var(--kr-sp-3, 6px);
+  padding: 2px 6px;
+  font-size: 11px;
+  background: var(--kr-bg-raised);
+  border: 1px solid var(--kr-border);
+  border-radius: 4px;
+  color: var(--kr-text-primary);
+  white-space: nowrap;
+}
+.qp-card-metrics-sep {
+  color: var(--kr-text-dim);
+  margin: 0 4px;
+}
+
+@keyframes qp-card-flash-anim {
+  0%   { box-shadow: 0 0 0 0 var(--kr-accent), 0 0 0 0 rgba(0, 0, 0, 0); border-color: var(--kr-accent); }
+  20%  { box-shadow: 0 0 0 4px rgba(var(--kr-accent-rgb, 200, 255, 0), 0.35); border-color: var(--kr-accent); }
+  100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0); border-color: var(--kr-border); }
+}
+.qp-card.qp-card-flash {
+  animation: qp-card-flash-anim 1.5s ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .qp-card.qp-card-flash { animation: none; outline: 2px solid var(--kr-accent); outline-offset: 2px; }
+}
 .qp-card-header {
   display: flex;
   align-items: center;

@@ -132,6 +132,13 @@ pub struct DiscussionMessage {
     /// Kronn message (created via the UI / API, not imported).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_msg_id: Option<String>,
+    /// 0.8.5 — wall-clock duration of the agent reply, in milliseconds.
+    /// Captured by the streaming layer (delta between agent run start
+    /// and message commit). NULL on User / System messages and on
+    /// legacy rows (pre-migration 057). Used by the QP-metrics
+    /// aggregator to compute "avg first-reply duration" per QP version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 /// Per-discussion summary strategy. Pre-fix the auto-summary loop fired
@@ -191,6 +198,14 @@ pub struct CreateDiscussionRequest {
     /// Model capability tier (economy / default / reasoning).
     #[serde(default)]
     pub tier: ModelTier,
+    /// 0.8.5 — when this discussion is being spawned by a Quick Prompt
+    /// launch (single, batch, or compare-agents path that bypasses
+    /// `create_batch_run`), the originating QP id. The backend
+    /// resolves the current version_index and stamps both on the
+    /// `discussions` row so the metrics aggregator can group.
+    /// `None` = not a QP launch (briefing / manual / etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub originating_qp_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, TS)]

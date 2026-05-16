@@ -267,7 +267,7 @@ pub struct McpDefinition {
     #[ts(skip)]
     pub alt_packages: Vec<String>,
     /// Pre-filled MCP context content (best practices, token-saving tips).
-    /// Written to ai/operations/mcp-servers/<slug>.md on first install instead of empty template.
+    /// Written to <docs>/operations/mcp-servers/<slug>.md on first install instead of empty template.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(skip)]
     pub default_context: Option<String>,

@@ -182,7 +182,7 @@ pub async fn spawn_agent_run_with_chain(
             model_tier: None,
             cost_usd: None,
             author_pseudo: Some(format!("⚡ {}", qp.name)),
-            author_avatar_email: None, source_msg_id: None,
+            author_avatar_email: None, source_msg_id: None, duration_ms: None,
         };
         let disc_id_for_insert = discussion_id.clone();
         if let Err(e) = state.db.with_conn(move |conn| {
