@@ -79,6 +79,7 @@
 | What | File(s) |
 |------|---------|
 | Project documentation | `docs/` |
+| Cross-repo context (companion repos) | `docs/linked-repos.md` — read ONLY when your task references something not in this repo |
 <!-- Fill after audit: data models, API routes, DB schema, config files -->
 {{SOURCES}}
 

@@ -554,7 +554,30 @@ pub async fn set_linked_repos(
     match state.db.with_conn(move |conn| {
         crate::db::projects::update_project_linked_repos(conn, &pid, &list)
     }).await {
-        Ok(true) => Json(ApiResponse::ok(true)),
+        Ok(true) => {
+            // 0.8.4 (#295) — push→pull migration. Auto-write
+            // `docs/linked-repos.md` from the canonical list so the
+            // agent reads it on-demand instead of receiving the block
+            // inlined into EVERY disc/WF system prompt (saves 500-2000
+            // tokens/message on chatty sessions). If `docs/` doesn't
+            // exist yet (project pre-bootstrap), `sync_linked_repos_doc`
+            // is a no-op — the audit Phase 1 will recall it. Log on
+            // failure; never block the CRUD response.
+            let project_for_doc = state.db.with_conn({
+                let pid2 = id.clone();
+                move |conn| crate::db::projects::get_project(conn, &pid2)
+            }).await;
+            if let Ok(Some(project)) = project_for_doc {
+                let project_path = crate::core::scanner::resolve_host_path(&project.path);
+                if let Err(e) = super::sync_linked_repos_doc(&project_path, &payload) {
+                    tracing::warn!(
+                        "Failed to sync docs/linked-repos.md for project {} ({}): {} — agent will rely on stale doc until next audit",
+                        project.name, id, e
+                    );
+                }
+            }
+            Json(ApiResponse::ok(true))
+        }
         Ok(false) => Json(ApiResponse::err("Project not found")),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }

@@ -1,4 +1,5 @@
 pub mod checksums;
+pub mod kronn_state;
 pub mod cmd;
 pub mod context_files;
 pub mod env;

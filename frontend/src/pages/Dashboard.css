@@ -1483,3 +1483,96 @@
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* 0.8.4 (#285) — Désagentified briefing form (inline, no modal). */
+.briefing-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-4);
+  margin: var(--kr-sp-4) 0;
+  background: var(--kr-bg-raised);
+  border: 1px solid var(--kr-border-soft);
+  border-radius: 8px;
+}
+
+.briefing-form-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.briefing-form-header h3 {
+  margin: 0;
+  font-size: var(--kr-fs-md);
+  color: var(--kr-text-primary);
+}
+
+.briefing-form-close {
+  background: transparent;
+  border: none;
+  color: var(--kr-text-faint);
+  cursor: pointer;
+  padding: 2px;
+}
+
+.briefing-form-intro {
+  margin: 0;
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-secondary);
+}
+
+.briefing-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--kr-fs-xs);
+}
+
+.briefing-form-q {
+  font-weight: 600;
+  color: var(--kr-text-primary);
+}
+
+.briefing-form textarea {
+  background: var(--kr-bg-elevated);
+  border: 1px solid var(--kr-border-soft);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-primary);
+  resize: vertical;
+}
+
+.briefing-form textarea:focus {
+  outline: 1px solid var(--kr-accent-ink);
+  border-color: transparent;
+}
+
+.briefing-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--kr-sp-2);
+  margin-top: var(--kr-sp-2);
+}
+
+.briefing-form-actions button {
+  padding: 6px 14px;
+  font-size: var(--kr-fs-xs);
+  background: var(--kr-bg-elevated);
+  border: 1px solid var(--kr-border-soft);
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--kr-text-secondary);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.briefing-form-submit {
+  background: var(--kr-accent-bg) !important;
+  border-color: var(--kr-accent-ink) !important;
+  color: var(--kr-accent-ink) !important;
+  font-weight: 600;
+}

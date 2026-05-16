@@ -73,6 +73,8 @@ pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> 
         ("051_agent_decisions", include_str!("sql/051_agent_decisions.sql")),
         ("052_project_linked_repos", include_str!("sql/052_project_linked_repos.sql")),
         ("053_audit_runs_last_completed_step", include_str!("sql/053_audit_runs_last_completed_step.sql")),
+        ("054_cross_agent_memory", include_str!("sql/054_cross_agent_memory.sql")),
+        ("055_audit_run_steps", include_str!("sql/055_audit_run_steps.sql")),
     ];
 
     // Check if there are pending migrations before backing up

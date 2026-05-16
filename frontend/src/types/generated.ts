@@ -223,6 +223,12 @@ export interface AuditProgress {
   step_tokens?: number | null;
   total_tokens_so_far?: number | null;
   current_tool?: string | null;
+  // 0.8.4 (#319 / B3) — running count of tool calls in the current
+  // step. Bumped on every tool_call event regardless of token activity
+  // so the user sees a "still alive" signal during long tool-only
+  // phases (Step 9 of Full audit writes 25+ TD files without
+  // intermediate Usage events).
+  current_tool_call_count?: number | null;
 }
 
 export interface BootstrapProjectRequest {

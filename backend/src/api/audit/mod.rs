@@ -203,19 +203,56 @@ Fill docs/operations/debug-operations.md — replace ALL {{PLACEHOLDERS}}:\n\
         sources: &["docker-compose.yml", "Makefile", "Dockerfile"],
     },
 
-    // Step 8: MCP servers overview + capability introspection
+    // Step 8: MCP servers overview + (conditional) capability introspection.
+    //
+    // 0.8.4 (#331) — short-circuit when only Kronn helper MCPs are
+    // configured. Pre-fix this step took 5-12 min on every audit,
+    // dominated by tool_list + tool_call probes on `Memory`,
+    // `Sequential Thinking`, `context7`, `kronn-internal` — all
+    // generic helpers with NO project-specific data to extract.
+    // Result on DOCROMS_WEB (Playwright session 2026-05-16):
+    // 11 min on Step 8 producing a near-empty mcp-servers.md that
+    // every other project also generates.
+    //
+    // New gate: if the MCP list is a subset of HELPERS_ONLY, the
+    // agent SKIPS sections B/C/D and writes a minimal template. The
+    // saved time goes back to the user — Step 8 drops from ~10 min
+    // to ~30s in the helper-only case (the common case on personal
+    // projects without Jira/GitHub/Linear MCPs).
     AnalysisStep {
         target_file: "docs/operations/mcp-servers.md",
         prompt: "\
 Read docs/AGENTS.md for context. Check if .mcp.json or .mcp.json.example or .env.mcp.example exists in the repo.\n\n\
-If MCP config exists:\n\n\
+\
+# Helper-only short-circuit (read FIRST)\n\n\
+\
+Some MCP servers are **Kronn helpers** with no project-specific data to extract:\n\
+- `Memory` (mcp-memory) — generic key/value scratchpad\n\
+- `Sequential Thinking` / `Sequential_Thinking` — reasoning aid\n\
+- `context7` — public library docs lookup\n\
+- `kronn-internal` — Kronn introspection of the current discussion\n\n\
+\
+If the project's `.mcp.json` contains ONLY servers from the helper list above (or is empty / missing), do the following and STOP:\n\
+1. Replace `docs/operations/mcp-servers.md` content with:\n\
+```\n\
+# MCP Servers\n\n\
+No project-specific (vendor) MCP server is configured.\n\n\
+The audit runtime ships generic helpers (Memory, Sequential Thinking, context7, kronn-internal). \
+They support the agent but carry no project data, so they're not documented in detail here.\n\n\
+> To add a vendor MCP (Jira, GitHub, Linear, Slack, …) and benefit from project-context introspection on the next audit, configure it in `.mcp.json` and re-run the audit.\n\
+```\n\
+2. Do NOT call `tools/list` or any other MCP tool. Do NOT create per-MCP context files. Do NOT fill the workflow automation hints table.\n\
+3. Move on to step 9.\n\n\
+\
+# Vendor MCP path (only if at least ONE non-helper MCP is configured)\n\n\
+\
 ### A) Document each server in docs/operations/mcp-servers.md\n\
 Fill the table with: name, package, purpose, key capabilities (3-5 main tools), credentials.\n\n\
 ### B) Introspect capabilities\n\
-For each MCP server that has tools available, use the MCP tools to discover:\n\
+For each VENDOR MCP server (skip helpers), use the MCP tools to discover:\n\
 1. **Tool inventory**: list the main tools exposed (via tools/list if available). \
 For each tool: name, one-line description, whether it is read-only or mutating, and a use-case.\n\
-**Cold-start note**: npx-launched servers (`context7`, `sequential-thinking`, …) can take 5-10s to download + boot on first call. \
+**Cold-start note**: npx-launched servers can take 5-10s to download + boot on first call. \
 If a tools/list call returns empty on the FIRST attempt, retry ONCE after a short wait before concluding the server exposes no tools. \
 Distinguish \"server not configured / credentials missing\" (configured: skip; no creds: note and move on) from \"server is configured but slow to start\" (retry once).\n\
 2. **Project context**: call read-only tools to discover real project data. Examples:\n\
@@ -227,18 +264,17 @@ Distinguish \"server not configured / credentials missing\" (configured: skip; n
    Only call read-only/list operations — never create, update, or delete anything.\n\
    If a tool call fails or credentials are missing, note it and move on.\n\n\
 ### C) Create per-MCP context files\n\
-For each server where you discovered capabilities or project context, \
+For each VENDOR server where you discovered capabilities or project context, \
 create docs/operations/mcp-servers/<slug>.md following the TEMPLATE.md structure:\n\
 - Fill the Capabilities table with discovered tools\n\
 - Fill Project context with real identifiers found via introspection\n\
 - Add rules and gotchas based on what you observed\n\
-Do NOT create empty or boilerplate context files — only if you have real data.\n\n\
+Do NOT create empty or boilerplate context files — only if you have real data.\n\
+Do NOT create context files for helper MCPs (Memory/Sequential Thinking/context7/kronn-internal).\n\n\
 ### D) Fill the workflow automation hints table\n\
-Based on the MCP combinations present, suggest 2-5 possible automated workflows.\n\
+Based on the VENDOR MCP combinations present, suggest 2-5 possible automated workflows.\n\
 For each: which MCPs are combined, what the workflow does, and who benefits (Dev/PM/Ops).\n\
-Only suggest workflows where all required MCPs are actually configured.\n\n\
-If no MCP config exists: replace docs/operations/mcp-servers.md content with:\n\
-'# MCP Servers\\n\\nNo MCP servers configured for this project.'",
+Only suggest workflows where all required vendor MCPs are actually configured.",
         sources: &[".mcp.json"],
     },
 
@@ -789,14 +825,133 @@ Do NOT modify source. Do NOT touch other docs/ files.",
     },
 ];
 
+pub(crate) const RGAA_STEPS: &[AnalysisStep] = &[
+    AnalysisStep {
+        target_file: "docs/inconsistencies-rgaa.md",
+        prompt: "\
+RGAA 4.1 AUDIT (0.8.4) — focused re-scan against the French Référentiel Général d'Amélioration de l'Accessibilité, version 4.1 (106 criteria across 13 topics). Stricter than WCAG 2.1 AA: RGAA mandates specific French-context implementations (e.g. `lang=\"fr\"` propagation, `aria-label` text in French, specific patterns for govt e-forms). Mandatory for French public-service sites + companies > 250 employees (loi du 11 février 2005, décret n° 2019-768).\n\n\
+\
+Read existing `docs/inconsistencies-rgaa.md` if present (anti-repetition: don't re-discover the same finding under a new slug — refresh / reuse the ID per § F below).\n\n\
+\
+# A. THÉMATIQUE 1 — IMAGES (8 critères)\n\
+- 1.1: Every `<img>` carries a `alt` (decorative ⇒ `alt=\"\"`, informative ⇒ pertinent text in the page's language).\n\
+- 1.2: SVG / icons that convey meaning have `<title>` or `aria-label`; decorative SVG → `aria-hidden=\"true\"` + no `tabindex`.\n\
+- 1.3: Image captions linked via `<figure>` / `<figcaption>` when applicable.\n\
+- 1.6: Map images (graph, chart) have a structured text equivalent (data table or `<details>`).\n\
+- 1.8: CAPTCHA: provide an alternative not based on vision.\n\n\
+\
+# B. THÉMATIQUE 3 — COULEURS (3 critères)\n\
+- 3.1: Information NEVER conveyed by color alone (RGAA stricter than WCAG: scan ALL status indicators + form-error styling, flag any color-only signal as critical, not just \"recommended\").\n\
+- 3.2: Body text contrast ≥ 4.5:1 ; large text (≥ 24px or ≥ 18.5px bold) ≥ 3:1. Read the design-token file (`tokens.css`, `_colors.scss`, etc.) and compute contrast for the 5 most common pairings. Flag any pair under 4.5:1 as Critical or High.\n\
+- 3.3: Non-text contrast (focus rings, form borders, icon-only buttons) ≥ 3:1 against adjacent colors.\n\n\
+\
+# C. THÉMATIQUE 7 — SCRIPTS (5 critères)\n\
+- 7.1: Custom widgets (dropdowns / tabs / accordions / modals) follow ARIA Authoring Practices (correct role + keyboard support).\n\
+- 7.3: Each scripted control is keyboard-operable (Tab, Enter, Esc, Arrow keys per pattern).\n\
+- 7.4: Status updates use `aria-live` (polite for non-urgent, assertive for errors). Toast/notification components MUST announce.\n\
+- 7.5: Time-limited interactions can be paused/extended (auto-dismissing alerts especially).\n\n\
+\
+# D. THÉMATIQUE 8 — ÉLÉMENTS OBLIGATOIRES (10 critères)\n\
+- 8.1: HTML validates (no parse errors that break assistive tech).\n\
+- 8.2: `<html lang=\"fr\">` (or appropriate locale) is set at the root.\n\
+- 8.4: Page title (`<title>`) is unique and descriptive.\n\
+- 8.6: Heading structure: ONE `<h1>`, no skipped levels.\n\
+- 8.7: Lists are real `<ul>`/`<ol>`, not stacks of `<div>`.\n\
+- 8.9: HTML uses semantic tags appropriately (no `<div onClick>` instead of `<button>`).\n\n\
+\
+# E. THÉMATIQUE 11 — FORMULAIRES (13 critères)\n\
+- 11.1: Every input has an associated `<label for=>` (or wraps the input, or carries `aria-label`/`aria-labelledby`). Placeholder-only is NOT a label.\n\
+- 11.2: Form labels are pertinent (in French if the page is French) — e.g. `<label>Adresse e-mail</label>` not `<label>Champ 3</label>`.\n\
+- 11.5: Required fields are explicitly marked (visual cue + `aria-required=\"true\"` + announced).\n\
+- 11.10: Form errors are bound to the field via `aria-describedby` AND announced via a live region.\n\
+- 11.13: Fields collecting personal data have the correct `autocomplete` attribute (RGPD + RGAA — `autocomplete=\"email\"`, `\"family-name\"`, `\"tel\"`, etc.).\n\n\
+\
+# F. ANTI-REPETITION + OUTPUT FORMAT\n\
+\n\
+Same rules as the Full audit Step 9: anti-repetition pass + detail-file schema + severity calibration. Index file = `docs/inconsistencies-rgaa.md`. For each finding, the detail file at `docs/tech-debt/TD-<date>-<slug>.md` carries:\n\
+- `**Category**: rgaa`\n\
+- `**RGAA Criterion**: <thématique>.<critère>` (e.g. `3.2`, `11.10`)\n\
+- `**WCAG mapping**: <reference>` if applicable (e.g. `1.4.3`)\n\
+- Severity calibration: Critical = bloquant + applicable au scope du décret 2019-768 (public service site or large org); High = compromet l'usabilité pour screen reader / keyboard-only users.\n\n\
+\
+If no findings, the index reads `'Aucune non-conformité RGAA identifiée lors de cet audit.'`.\n\n\
+\
+# G. POUR ALLER PLUS LOIN — AUDIT MANUEL + FORMATION (obligatoire)\n\
+\n\
+**À TOUJOURS ÉCRIRE en fin de `docs/inconsistencies-rgaa.md`**, même quand il n'y a aucune non-conformité automatisée. Section littérale (à reformuler dans le ton de la doc projet, mais le fond doit y être) :\n\n\
+\
+```\n\
+## ⚠️ Cet audit ne remplace PAS un audit complet\n\
+\n\
+**À lire AVANT de conclure que « le site est conforme ».**\n\
+\n\
+Cet audit automatique a dépoussiéré une grande partie des problèmes structurels — labels manquants, contrastes faibles, semantic HTML, marqueurs ARIA, attributs `autocomplete`. C'est utile pour rattraper le retard rapide, mais **il y a presque certainement des choses non trouvées** :\n\
+\n\
+- Beaucoup de critères RGAA (navigation clavier complète, parcours lecteur d'écran, pertinence des alternatives textuelles, gestion du focus dans les widgets complexes, accessibilité cognitive) **ne peuvent PAS être évalués par du tooling**. Le W3C et la DINUM le rappellent explicitement.\n\
+- Le tooling automatique couvre **30-40 % des critères au mieux**. Les 60-70 % restants demandent une revue humaine.\n\
+\n\
+**Deux options non négociables** pour se considérer réellement conforme :\n\
+\n\
+### 1. Re-tester soi-même avec une grille manuelle\n\
+\n\
+- Suivre la **grille d'évaluation officielle RGAA 4.1** (DINUM) — 106 critères, page par page, sur un échantillon représentatif du site.\n\
+- Compléter avec des outils : Wave, Axe DevTools, **et surtout** un vrai lecteur d'écran (NVDA sous Windows, VoiceOver sous macOS/iOS, TalkBack sous Android) + navigation au clavier seul + simulation de daltonisme.\n\
+- Livrable : déclaration d'accessibilité (obligatoire si vous êtes soumis au décret n° 2019-768) + plan d'action pluriannuel + schéma pluriannuel.\n\
+- Personne dédiée formée requise (cf. § Formation ci-dessous).\n\
+\n\
+### 2. Faire appel à un pro\n\
+\n\
+- **[Access42](https://access42.net)** — la référence française pour l'**audit RGAA officiel et certifiant**. C'est une agence spécialisée 100 % accessibilité : audits d'experts qui produisent la documentation légale opposable, accompagnement de mise en conformité, jurisprudence à jour. **C'est ici qu'on va si on a besoin d'un audit qui tienne devant une demande de la DGCCRF ou un contrôle d'un référent ministériel.**\n\
+\n\
+### Formation continue (pour ne plus laisser passer)\n\
+\n\
+Sans compréhension des enjeux, les correctifs sont superficiels et les régressions inévitables à chaque release.\n\
+\n\
+- **[Access42](https://access42.net)** propose aussi un cursus métier — référent accessibilité numérique, expert RGAA. À privilégier pour un profil dont c'est le cœur du job (référent a11y / lead front).\n\
+- **[Opquast](https://www.opquast.com)** — certification « Maîtrise de la qualité en projet web ». Plus large (240 règles : qualité, perf, RGPD, accessibilité, UX, SEO), accessible à tous les profils (devs, designers, PO, chefs de projet, contenu). RGAA y est traité comme un sous-ensemble. La cert reste valide à vie. **À privilégier pour faire monter en compétence toute l'équipe** sur la qualité Web globale, avec un volet a11y solide.\n\
+\n\
+Vise au minimum **un référent accessibilité Access42-formé par produit** + **toute l'équipe certifiée Opquast** pour que la qualité d'ensemble ne régresse pas entre deux audits.\n\
+```\n\n\
+\
+Apply the marker discipline (`TODO: verify` only if you couldn't check; `TODO: ask user` for human decisions). Do NOT modify source.",
+        sources: &[],
+    },
+];
+
 pub(crate) const DATABASE_STEPS: &[AnalysisStep] = &[
     AnalysisStep {
         target_file: "docs/inconsistencies-database.md",
         prompt: "\
-DATABASE AUDIT (0.8.2) — placeholder body, content lands in S2.D4-5.\n\n\
-Scope: schema drift, missing indexes, unsafe migrations, ORM lazy-load surprises, \
-transaction boundaries. Same TD detail-file schema.",
-        sources: &[],
+DATABASE AUDIT (0.8.4) — focused re-scan on data-layer hygiene. Read existing `docs/inconsistencies-database.md` if present (anti-repetition: don't re-discover the same finding under a new slug — refresh / reuse the ID per § C below).\n\n\
+\
+# A. SCHEMA + MIGRATIONS\n\
+- **Migration safety**: any migration that ALTERs a table > 1M rows must be backed by a non-blocking strategy (online DDL, shadow column + backfill, pt-online-schema-change). Flag `ALTER TABLE ... ADD COLUMN NOT NULL DEFAULT ...` on big tables — locks the whole table on MySQL pre-8.0.\n\
+- **Migration reversibility**: each migration file should declare a `down()` or be explicitly marked irreversible. Check the `migrations/` folder (Flyway, Alembic, Diesel, Knex, sqlx, etc.).\n\
+- **Schema drift**: compare the live schema (or the dump committed alongside migrations) with what the ORM models declare. Stale columns, missing NOT NULL, missing FK constraints.\n\
+- **Charset/collation**: in 2026, only `utf8mb4` is acceptable on MySQL. `utf8` (3-byte) breaks emoji + supplementary planes.\n\n\
+\
+# B. INDEXES + PERFORMANCE\n\
+- Missing indexes on common WHERE clauses (read the ORM hot paths — list-by-user-id, filter-by-status, ordered-by-created-at).\n\
+- Over-indexing: tables with > 8 indexes incur write penalty + RAM pressure.\n\
+- Compound indexes with wrong column order (low-cardinality column first wastes the index).\n\
+- Missing `WHERE clause` in DELETE/UPDATE in app code (PostgreSQL: missing `... WHERE id = $1` on `DELETE FROM users` is catastrophic).\n\n\
+\
+# C. ORM + N+1\n\
+- **N+1 queries**: scan the most-used list / dashboard endpoints. ORM lazy-load on a collection of N parent rows produces N+1 queries.\n\
+- **Unbounded SELECT**: queries without LIMIT on user-facing endpoints (`User.all` on the admin page when the table grew to 500k rows).\n\
+- **Transaction boundaries**: long-running transactions that hold locks (PostgreSQL `idle in transaction`, MySQL row-locking) blocking other writers. Check that DB calls inside HTTP handlers commit promptly.\n\n\
+\
+# D. DATA INTEGRITY\n\
+- Foreign keys: missing constraints (ORM-level FK only is not enforced at the DB layer if `disable_constraints` was ever set in tests).\n\
+- Soft-delete vs hard-delete inconsistency (some queries scope WHERE deleted_at IS NULL, others don't — leak risk).\n\
+- Nullable columns that the app treats as required: TypeScript / Rust types may say `string` but the column allows NULL.\n\n\
+\
+# E. ANTI-REPETITION + OUTPUT FORMAT\n\
+\n\
+Same rules as the Full audit Step 9 (§ C and § D): scan `docs/tech-debt/` for existing TDs; for each finding, decide REUSE / REFINE / NEW per § C; create `docs/tech-debt/TD-<date>-<slug>.md` for new ones; UPDATE `audit_history` for existing. Detail file schema = the Full audit's. Index file = `docs/inconsistencies-database.md` (not `inconsistencies-tech-debt.md`). Severity calibration is the same.\n\n\
+\
+Apply the marker discipline (`TODO: verify` only if you couldn't check; `TODO: ask user` for human decisions). If no findings, the index reads `'None identified during this database audit pass'`.",
+        sources: &["__GIT_HEAD__"],
     },
 ];
 
@@ -804,12 +959,77 @@ pub(crate) const API_DESIGN_STEPS: &[AnalysisStep] = &[
     AnalysisStep {
         target_file: "docs/inconsistencies-api.md",
         prompt: "\
-API DESIGN AUDIT (0.8.2) — placeholder body, content lands in S2.D4-5.\n\n\
-Scope: REST/RPC consistency, error envelope, versioning, pagination, contract drift \
-vs documentation. Same TD detail-file schema.",
+API DESIGN AUDIT (0.8.4) — focused re-scan on the public-facing contract. Read existing `docs/inconsistencies-api.md` if present (anti-repetition rules apply, same as Full audit Step 9).\n\n\
+\
+# A. CONTRACT CONSISTENCY\n\
+- **Naming**: REST endpoints must follow ONE convention (kebab-case, snake_case, camelCase) — flag inconsistencies like `/api/users-list` next to `/api/orderItems`. Same for query params, JSON keys.\n\
+- **HTTP semantics**: GET that mutates state (anti-pattern); POST that returns 200 for create (should be 201); DELETE that returns the deleted resource (should be 204 unless explicitly part of the contract); PATCH vs PUT confusion.\n\
+- **Error envelope**: ONE shape, used by EVERY endpoint. Flag endpoints returning `{ \"error\": \"...\" }` next to ones returning `{ \"errors\": [...] }`, mixed status codes (400 vs 422 for validation).\n\
+- **Status codes**: 200 vs 201 vs 204 on writes ; 401 vs 403 (authn vs authz) ; 404 vs 410 (gone). Flag wrong codes that leak app behaviour (e.g. 200 with `{ \"error\": ... }` for a failed login).\n\n\
+\
+# B. VERSIONING + EVOLUTION\n\
+- **Versioning strategy**: header (`Accept: application/vnd.api+json; version=2`) vs path (`/api/v2/`) — pick one, don't mix.\n\
+- **Breaking changes**: removing a field, narrowing a type, renaming — without a deprecation window or version bump.\n\
+- **Additive changes safety**: new required field on an existing endpoint breaks old clients.\n\n\
+\
+# C. PAGINATION + LIST RESPONSES\n\
+- Unbounded list endpoints (no `?limit=` enforcement) — DoS surface + cursor unsafe at scale.\n\
+- Inconsistent pagination shape (cursor on some endpoints, offset on others, or no metadata at all).\n\
+- Missing `total` / `has_more` on responses that consumers need to render pagination UI.\n\n\
+\
+# D. AUTHN + AUTHZ + RATE LIMITING\n\
+- Endpoints that should require auth but don't (read the routing config — the audit's `repo-map.md` is a primer).\n\
+- IDOR risk: endpoints scoped by URL param (`/api/orders/:id`) without ownership check.\n\
+- Rate limiting absent on public auth endpoints (`/login`, `/register`, `/password-reset`).\n\
+- CSRF tokens absent on state-mutating endpoints when cookies are used for session (SPA + cookie auth).\n\n\
+\
+# E. DOC DRIFT\n\
+- OpenAPI / GraphQL schema in the repo (if any) vs what the endpoints actually accept / return. Flag fields documented but unused, or used but undocumented.\n\
+- Examples in the docs that no longer parse (wrong field names, stale auth headers).\n\n\
+\
+# F. ANTI-REPETITION + OUTPUT FORMAT\n\
+\n\
+Same rules as the Full audit Step 9: anti-repetition pass + detail-file schema + severity calibration. Index file = `docs/inconsistencies-api.md`. If no findings, the index reads `'None identified during this API design audit pass'`.\n\n\
+\
+Apply the marker discipline (`TODO: verify` only if you couldn't check; `TODO: ask user` for human decisions).",
         sources: &[],
     },
 ];
+
+/// 0.8.4 (#331) — MCP server names that ship as "Kronn helpers" with
+/// no project-specific data to introspect. Match is case-insensitive
+/// and tolerates the underscore/space variants the agent runtimes
+/// expose (`Sequential Thinking` vs `Sequential_Thinking`).
+///
+/// Used by the Step 8 prompt + a Rust-side helper that lets us
+/// short-circuit the LLM call entirely on helper-only setups in
+/// future iterations (today the prompt itself does the short-circuit
+/// — the Rust helper is kept for unit tests + future use).
+#[allow(dead_code)]
+pub(crate) const HELPER_MCP_NAMES: &[&str] = &[
+    "memory",
+    "sequential thinking",
+    "sequential_thinking",
+    "sequentialthinking",
+    "context7",
+    "kronn-internal",
+    "kronn_internal",
+];
+
+/// True when ALL the configured MCP server names belong to the
+/// helper list (or the list is empty). False when at least one
+/// vendor MCP is configured. Case-insensitive.
+#[allow(dead_code)]
+pub(crate) fn is_helper_only_mcp_setup(mcp_names: &[String]) -> bool {
+    if mcp_names.is_empty() {
+        return true; // no MCP at all = no vendor MCP either
+    }
+    let helpers: std::collections::HashSet<String> = HELPER_MCP_NAMES
+        .iter()
+        .map(|s| s.to_lowercase())
+        .collect();
+    mcp_names.iter().all(|name| helpers.contains(&name.to_lowercase()))
+}
 
 /// Dispatch table for `LaunchAuditRequest.kind`. Returns the step
 /// slice to drive the agent through. For `Custom`, callers should
@@ -823,6 +1043,7 @@ pub(crate) fn kind_to_steps(kind: crate::models::AuditKind) -> &'static [Analysi
         AuditKind::Docker        => DOCKER_STEPS,
         AuditKind::Performance   => PERFORMANCE_STEPS,
         AuditKind::Accessibility => ACCESSIBILITY_STEPS,
+        AuditKind::Rgaa          => RGAA_STEPS,
         AuditKind::Database      => DATABASE_STEPS,
         AuditKind::ApiDesign     => API_DESIGN_STEPS,
         // Custom is handled at the call site: it builds a one-off
@@ -887,6 +1108,7 @@ mod kind_dispatch_tests {
             (AuditKind::Docker,        "docs/inconsistencies-docker"),
             (AuditKind::Performance,   "docs/inconsistencies-performance"),
             (AuditKind::Accessibility, "docs/inconsistencies-accessibility"),
+            (AuditKind::Rgaa,          "docs/inconsistencies-rgaa"),
             (AuditKind::Database,      "docs/inconsistencies-database"),
             (AuditKind::ApiDesign,     "docs/inconsistencies-api"),
         ] {
@@ -921,6 +1143,7 @@ mod kind_dispatch_tests {
             (AuditKind::Docker,        "Docker"),
             (AuditKind::Performance,   "Performance"),
             (AuditKind::Accessibility, "Accessibility"),
+            (AuditKind::Rgaa,          "Rgaa"),
             (AuditKind::Database,      "Database"),
             (AuditKind::ApiDesign,     "ApiDesign"),
             (AuditKind::Custom,        "Custom"),
@@ -928,6 +1151,150 @@ mod kind_dispatch_tests {
         for (kind, label) in expected {
             assert_eq!(kind.as_label(), label, "label drift on {:?}", kind);
         }
+    }
+
+    // ─── 0.8.4 (#331) Step 8 helper-only short-circuit ──────────────
+
+    #[test]
+    fn is_helper_only_mcp_setup_handles_canonical_helpers() {
+        use super::is_helper_only_mcp_setup;
+        // Empty MCP list — no vendor MCP either.
+        assert!(is_helper_only_mcp_setup(&[]));
+        // Single canonical helper.
+        assert!(is_helper_only_mcp_setup(&["Memory".to_string()]));
+        // All four Kronn helpers — common case on personal projects.
+        assert!(is_helper_only_mcp_setup(&[
+            "Memory".to_string(),
+            "Sequential Thinking".to_string(),
+            "context7".to_string(),
+            "kronn-internal".to_string(),
+        ]));
+        // Case-insensitive — DOCROMS_WEB sample uses "MEMORY".
+        assert!(is_helper_only_mcp_setup(&[
+            "MEMORY".to_string(),
+            "Context7".to_string(),
+        ]));
+        // Underscore variant (the agent runtime sometimes substitutes).
+        assert!(is_helper_only_mcp_setup(&[
+            "Sequential_Thinking".to_string(),
+        ]));
+    }
+
+    #[test]
+    fn is_helper_only_mcp_setup_detects_vendor_mcps() {
+        use super::is_helper_only_mcp_setup;
+        // Single vendor MCP.
+        assert!(!is_helper_only_mcp_setup(&["github".to_string()]));
+        // Helper + vendor mix — not helper-only.
+        assert!(!is_helper_only_mcp_setup(&[
+            "Memory".to_string(),
+            "Atlassian".to_string(),
+        ]));
+        // All vendors.
+        assert!(!is_helper_only_mcp_setup(&[
+            "Jira".to_string(),
+            "GitHub".to_string(),
+            "Linear".to_string(),
+        ]));
+    }
+
+    #[test]
+    fn step_8_prompt_documents_helper_short_circuit() {
+        // The Step 8 prompt MUST contain the helper-only escape hatch
+        // at the top of the prompt body (read FIRST). Otherwise the
+        // agent walks through tools/list + tool_call probes on each
+        // helper MCP and burns 10 min on a personal project with no
+        // vendor MCP — the exact pattern that triggered #331.
+        let step = super::ANALYSIS_STEPS.iter()
+            .find(|s| s.target_file == "docs/operations/mcp-servers.md")
+            .expect("Step 8 mcp-servers.md must exist");
+        let prompt = step.prompt;
+        // The short-circuit header must appear BEFORE the vendor path.
+        let helper_idx = prompt.find("Helper-only short-circuit")
+            .expect("Step 8 must document the helper short-circuit");
+        let vendor_idx = prompt.find("Vendor MCP path")
+            .expect("Step 8 must document the vendor path");
+        assert!(helper_idx < vendor_idx,
+            "helper short-circuit must come BEFORE vendor instructions \
+             so the agent reads the escape hatch first");
+        // Cites every canonical helper so the agent recognizes them.
+        assert!(prompt.contains("Memory"), "must list Memory helper");
+        assert!(prompt.contains("Sequential Thinking"), "must list Sequential Thinking helper");
+        assert!(prompt.contains("context7"), "must list context7 helper");
+        assert!(prompt.contains("kronn-internal"), "must list kronn-internal helper");
+        // And tells the agent to STOP without B/C/D when the list is helper-only.
+        let lower = prompt.to_lowercase();
+        assert!(lower.contains("do not call") || lower.contains("do not"),
+            "Step 8 must instruct the agent to skip tools/list calls in the helper-only path");
+        assert!(prompt.contains("no project-specific")
+                || prompt.contains("No project-specific")
+                || prompt.contains("No vendor")
+                || prompt.contains("no vendor"),
+            "Step 8's short-circuit body must explain why introspection is skipped");
+    }
+
+    #[test]
+    fn audit_kind_display_name_is_user_facing_french() {
+        // 0.8.4 (#322 / F2) — `display_name()` is what users actually
+        // read (disc titles, log lines). The TitleCase wire labels
+        // (`as_label()`) leak as "Rgaa" which reads as a typo — this
+        // helper exposes the human form ("RGAA 4.1", "Sécurité").
+        use crate::models::AuditKind;
+        assert_eq!(AuditKind::Rgaa.display_name(), "RGAA 4.1",
+            "RGAA must keep its uppercase acronym + version");
+        assert_eq!(AuditKind::Security.display_name(), "Sécurité",
+            "FR: must say Sécurité not Security");
+        assert_eq!(AuditKind::Accessibility.display_name(), "Accessibilité");
+        assert_eq!(AuditKind::Database.display_name(), "Base de données");
+        assert_eq!(AuditKind::ApiDesign.display_name(), "Design d'API");
+        assert_eq!(AuditKind::Full.display_name(), "Audit global");
+        // Wire labels stay TitleCase (the disc.kind column round-trips
+        // through serde — never break the format).
+        assert_eq!(AuditKind::Rgaa.as_label(), "Rgaa");
+        assert_eq!(AuditKind::Security.as_label(), "Security");
+    }
+
+    #[test]
+    fn rgaa_kind_carries_french_criteria_and_distinct_index() {
+        // 0.8.4 (#287) — RGAA must check the French norm explicitly,
+        // not be a translated copy of the WCAG-flavored Accessibility
+        // prompt. Spot-check that the prompt:
+        //   1. mentions the RGAA reference + version 4.1;
+        //   2. cites concrete criteria numbers (1.x, 11.x);
+        //   3. writes to its OWN index file (not the WCAG one).
+        let steps = kind_to_steps(AuditKind::Rgaa);
+        assert_eq!(steps.len(), 1, "Rgaa is a single-step focused audit");
+        let prompt = steps[0].prompt;
+        assert!(prompt.contains("RGAA"), "must reference the French norm by name");
+        assert!(prompt.contains("4.1"), "must pin the RGAA version (4.1 as of 2026)");
+        // A handful of canonical criteria — drift in any of these means
+        // the prompt was edited to remove the French specificity, which
+        // defeats the whole reason this kind exists.
+        assert!(prompt.contains("11.10"), "must cover form-error binding (critère 11.10)");
+        assert!(prompt.contains("autocomplete"), "must cover the RGPD-adjacent autocomplete reqs");
+        assert!(prompt.contains("contrast") || prompt.contains("contrast"),
+            "must cover thématique 3 (couleurs + contraste)");
+        assert_eq!(steps[0].target_file, "docs/inconsistencies-rgaa.md",
+            "RGAA must NOT clobber the WCAG-flavored accessibility index");
+        // Manual-audit-is-mandatory section: must educate the user that
+        // automation only covers 30-40% of RGAA, and point them to the
+        // two French training references (Access42 + Opquast). Without
+        // this, the audit ships a false sense of compliance.
+        assert!(prompt.contains("audit") && prompt.contains("manuel"),
+            "must explicitly require the manual-audit section");
+        assert!(prompt.contains("Access42"),
+            "must reference Access42 — the certifying-RGAA reference (audit officiel + expertise)");
+        assert!(prompt.contains("Opquast"),
+            "must reference Opquast — the broader web-quality certification with RGAA coverage");
+        assert!(prompt.contains("W3C") || prompt.contains("DINUM"),
+            "must cite the authority recommending manual audit");
+        // Anti-false-sense-of-compliance: explicitly tell the agent to
+        // warn the user that automated audits do NOT mean the site is
+        // conforming. Without this, users tend to read the empty-findings
+        // case as "all good".
+        assert!(prompt.contains("ne remplace") || prompt.contains("non trouvées")
+                || prompt.contains("retestent") || prompt.contains("appel à un pro"),
+            "must explicitly warn against the false sense of compliance");
     }
 
     #[test]
@@ -1283,9 +1650,9 @@ mod prompt_tests {
 
     #[test]
     fn briefing_prompt_is_localized() {
-        let fr = build_briefing_prompt("fr");
-        let en = build_briefing_prompt("en");
-        let es = build_briefing_prompt("es");
+        let fr = build_briefing_prompt("fr", None);
+        let en = build_briefing_prompt("en", None);
+        let es = build_briefing_prompt("es", None);
         assert_ne!(fr, en, "FR and EN briefing prompts must differ");
         assert_ne!(en, es, "EN and ES briefing prompts must differ");
         assert_ne!(fr, es, "FR and ES briefing prompts must differ");
@@ -1293,9 +1660,9 @@ mod prompt_tests {
 
     #[test]
     fn briefing_prompt_forbids_code_reading() {
-        let fr = build_briefing_prompt("fr");
-        let en = build_briefing_prompt("en");
-        let es = build_briefing_prompt("es");
+        let fr = build_briefing_prompt("fr", None);
+        let en = build_briefing_prompt("en", None);
+        let es = build_briefing_prompt("es", None);
         assert!(fr.contains("ne lis PAS"),
             "FR briefing prompt must contain 'ne lis PAS'");
         assert!(en.contains("Do NOT read"),
@@ -1307,7 +1674,7 @@ mod prompt_tests {
     #[test]
     fn briefing_prompt_requires_answers_1_to_5() {
         for lang in ["fr", "en", "es"] {
-            let prompt = build_briefing_prompt(lang);
+            let prompt = build_briefing_prompt(lang, None);
             assert!(prompt.contains("1-5") || prompt.contains("1 a 5") || prompt.contains("1-5"),
                 "Briefing prompt ({}) must reference questions 1-5 as required", lang);
             let lower = prompt.to_lowercase();
@@ -1319,7 +1686,7 @@ mod prompt_tests {
     #[test]
     fn briefing_prompt_says_stack_auto_detected() {
         for lang in ["fr", "en", "es"] {
-            let prompt = build_briefing_prompt(lang);
+            let prompt = build_briefing_prompt(lang, None);
             let lower = prompt.to_lowercase();
             assert!(lower.contains("auto-detect") || lower.contains("auto-detect"),
                 "Briefing prompt ({}) must mention stack is auto-detected", lang);
@@ -1329,9 +1696,137 @@ mod prompt_tests {
     #[test]
     fn briefing_prompt_contains_completion_signal() {
         for lang in ["fr", "en", "es"] {
-            let prompt = build_briefing_prompt(lang);
+            let prompt = build_briefing_prompt(lang, None);
             assert!(prompt.contains("KRONN:BRIEFING_COMPLETE"),
                 "Briefing prompt ({}) must contain KRONN:BRIEFING_COMPLETE", lang);
+        }
+    }
+
+    /// 0.8.4 (#320 / B4) — guard against ts-rs export drift on
+    /// `LaunchAuditRequest`. ts-rs 12.x has an incremental-compile
+    /// quirk: when fields are added to a `#[ts(export)]` struct,
+    /// `cargo test` doesn't always re-fire the auto-generated export
+    /// test, so the .ts file goes stale and the frontend can compile
+    /// against a wrong shape. This test fails loudly when the
+    /// declared Rust shape no longer matches what we expect the .ts
+    /// file to contain, forcing the maintainer to either run
+    /// `touch backend/src/models/projects.rs && cargo test export_bindings`
+    /// to regen, or hand-edit `frontend/src/types/LaunchAuditRequest.ts`.
+    #[test]
+    fn launch_audit_request_shape_pins_kind_and_resume_from() {
+        // Round-trip JSON to assert the field set hasn't drifted from
+        // what the frontend expects. If a new field is added to the
+        // Rust struct, this test forces the maintainer to also update
+        // the hand-shipped `frontend/src/types/LaunchAuditRequest.ts`
+        // (which the ts-rs auto-export sometimes fails to refresh —
+        // see B4 in `PLAYWRIGHT_AUDIT_REVIEW.md`).
+        use crate::models::{AgentType, AuditKind, LaunchAuditRequest};
+        let req: LaunchAuditRequest = serde_json::from_str(r#"{
+            "agent": "ClaudeCode",
+            "kind": "Rgaa",
+            "custom_prompt": null,
+            "resume_from": 5
+        }"#).expect("LaunchAuditRequest must accept the full 0.8.4 shape");
+        assert!(matches!(req.agent, AgentType::ClaudeCode));
+        assert_eq!(req.kind, Some(AuditKind::Rgaa));
+        assert!(req.custom_prompt.is_none());
+        assert_eq!(req.resume_from, Some(5));
+
+        // Backwards compat: a 0.8.2-era client that only sends `agent`
+        // must still parse (the audit pipeline defaults kind=Full).
+        let legacy: LaunchAuditRequest = serde_json::from_str(r#"{"agent":"ClaudeCode"}"#)
+            .expect("legacy 0.8.2 shape must still parse");
+        assert!(legacy.kind.is_none());
+        assert!(legacy.resume_from.is_none());
+    }
+
+    /// 0.8.4 (#320 / B4) — assert the hand-shipped
+    /// `frontend/src/types/LaunchAuditRequest.ts` covers ALL fields of
+    /// the Rust struct. ts-rs auto-export is unreliable on this struct
+    /// in the current setup (cf. `launch_audit_request_shape_pins_kind_and_resume_from`),
+    /// so we pin the file content here. If a new field is added to
+    /// the Rust struct, this test fails until the .ts file is
+    /// updated to match — preventing the silent type drift that bit
+    /// us during the 0.8.4 sub-audit work.
+    #[test]
+    fn launch_audit_request_ts_file_covers_all_rust_fields() {
+        // The .ts file lives outside the crate; resolve via
+        // CARGO_MANIFEST_DIR which points at `backend/`.
+        let manifest = std::env::var("CARGO_MANIFEST_DIR")
+            .expect("CARGO_MANIFEST_DIR set by cargo");
+        let ts_path = std::path::Path::new(&manifest)
+            .join("..")
+            .join("frontend")
+            .join("src")
+            .join("types")
+            .join("LaunchAuditRequest.ts");
+        let content = std::fs::read_to_string(&ts_path)
+            .unwrap_or_else(|e| panic!(
+                "Cannot read {} — did the file get deleted? ({})",
+                ts_path.display(), e,
+            ));
+
+        // Each Rust field must appear in the .ts shape, in some form
+        // (with `?` for Option<T>). The test is intentionally loose
+        // on the exact spelling — what matters is that the property
+        // name is present and the file imports the right enum types.
+        for field in ["agent", "kind", "custom_prompt", "resume_from"] {
+            assert!(content.contains(field),
+                "LaunchAuditRequest.ts is missing field `{}` — update the hand-shipped file to match the Rust struct ({})",
+                field, ts_path.display(),
+            );
+        }
+        // The enum-typed fields must import their referenced types so
+        // tsc compiles. A regen that strips the import would compile
+        // fine in isolation but break consumers.
+        assert!(content.contains("AgentType"),
+            "LaunchAuditRequest.ts must reference AgentType");
+        assert!(content.contains("AuditKind"),
+            "LaunchAuditRequest.ts must reference AuditKind (0.8.4)");
+    }
+
+    #[test]
+    fn briefing_review_prompt_skips_the_6_q_interrogation() {
+        // 0.8.4 UX fix — when the user has already submitted the form,
+        // the agent must NOT re-ask the 6 questions. The review prompt
+        // embeds the user's answers verbatim and only asks targeted
+        // clarifications.
+        let prefilled = "## Purpose\nA Kronn-managed audit dashboard.\n\n## Team\nSolo dev.\n";
+        for lang in ["fr", "en", "es"] {
+            let prompt = build_briefing_prompt(lang, Some(prefilled));
+            assert!(prompt.contains(prefilled),
+                "Review prompt ({lang}) must echo the user's answers verbatim");
+            // Must explicitly forbid re-asking the 6 questions wholesale.
+            let lower = prompt.to_lowercase();
+            assert!(
+                lower.contains("ne repose pas") || lower.contains("not re-ask") || lower.contains("no repreguntes"),
+                "Review prompt ({lang}) must forbid re-asking the full 6-question set",
+            );
+            // Still ends with the completion signal so the audit pipeline
+            // can detect readiness.
+            assert!(prompt.contains("KRONN:BRIEFING_COMPLETE"),
+                "Review prompt ({lang}) must keep the completion signal");
+            // Must NOT include the legacy 6-question enumeration that the
+            // None branch ships — that's the whole point.
+            assert!(
+                !prompt.contains("STEP 1") && !prompt.contains("ETAPE 1") && !prompt.contains("PASO 1"),
+                "Review prompt ({lang}) must NOT re-display the legacy 6-step interrogation header",
+            );
+        }
+    }
+
+    #[test]
+    fn briefing_prompt_legacy_mode_unchanged_when_no_prefill() {
+        // Sanity check: the original 6-Q prompt is still emitted when
+        // the caller passes None (no form submission yet). Without this
+        // the audit pipeline that calls start_briefing directly would
+        // silently switch to review mode + crash on empty notes.
+        for lang in ["fr", "en", "es"] {
+            let prompt = build_briefing_prompt(lang, None);
+            assert!(
+                prompt.contains("STEP 1") || prompt.contains("ETAPE 1") || prompt.contains("PASO 1"),
+                "Legacy briefing prompt ({lang}) must still expose the step header when no prefill",
+            );
         }
     }
 }

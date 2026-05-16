@@ -22,7 +22,7 @@ use crate::AppState;
 
 use super::helpers::{
     check_ai_dir_permissions, compute_audit_info_sync, detect_issue_tracker_mcp,
-    detect_project_skills, build_validation_prompt, remove_bootstrap_block,
+    detect_project_skills, build_validation_prompt, build_sub_audit_validation_prompt, remove_bootstrap_block,
 };
 use super::{SseStream, ANALYSIS_STEPS, AUDIT_REDIRECTOR_FILES, PROMPT_PREAMBLE};
 
@@ -198,6 +198,19 @@ pub async fn full_audit(
                     crate::api::projects::copy_dir_nondestructive(&docs_template, &docs_target)?;
                 }
                 crate::api::projects::ensure_agent_writable_subfolders(&docs_target)?;
+
+                // 0.8.4 (#295) — auto-write `docs/linked-repos.md` from
+                // the project's linked_repos list. Catch-up for projects
+                // created before the push→pull migration: the disc/WF
+                // prompts no longer inject the block inline, so the
+                // file on disk IS the source of truth. Idempotent +
+                // no-op on empty list (file is removed if present).
+                if let Err(e) = crate::api::projects::sync_linked_repos_doc_in(&docs_target, &project.linked_repos) {
+                    tracing::warn!(
+                        "Failed to seed docs/linked-repos.md during audit Phase 1 (project {}): {}",
+                        project.name, e
+                    );
+                }
 
                 // 0.8.3 (#278) — inject the Kronn-managed block into
                 // every root agent file. Replaces the pre-0.8.3
@@ -404,6 +417,21 @@ pub async fn full_audit(
                 "step": step, "total": total_steps, "file": file_label
             });
             yield Event::default().event("step_start").data(step_start.to_string());
+
+            // 0.8.4 (#298) — persist per-step metrics for the recap panel.
+            // Idempotent on (audit_run_id, step_index) so resuming an
+            // interrupted run (#311) that re-fires step_start for the
+            // first replayed step doesn't crash on UNIQUE.
+            {
+                let run_id = audit_run_id.clone();
+                let label = file_label.to_string();
+                let started = Utc::now();
+                let _ = db.with_conn(move |conn| {
+                    crate::db::audit_runs::insert_audit_step_start(
+                        conn, &run_id, step as u32, &label, started,
+                    )
+                }).await;
+            }
 
             let today = Utc::now().format("%Y-%m-%d").to_string();
             let today_compact = Utc::now().format("%Y%m%d").to_string();
@@ -652,6 +680,32 @@ pub async fn full_audit(
                     });
                     yield Event::default().event("step_done").data(step_done.to_string());
 
+                    // 0.8.4 (#298) — finalize the per-step row. `success`
+                    // captures both CLI exit code AND the validation
+                    // (#292) result, so a step that wrote a placeholder
+                    // file shows up in the recap with cli_success=false
+                    // even though the CLI exited 0.
+                    {
+                        let run_id = audit_run_id.clone();
+                        let warn_reason = warning.as_ref().map(|w| w.reason.clone());
+                        let repaired = warning.as_ref().map(|w| w.repaired).unwrap_or(false);
+                        let ended = Utc::now();
+                        let _ = db.with_conn(move |conn| {
+                            crate::db::audit_runs::finalize_audit_step(
+                                conn,
+                                &run_id,
+                                step as u32,
+                                ended,
+                                duration_ms,
+                                step_tokens,
+                                total_tokens_so_far,
+                                success,
+                                warn_reason.as_deref(),
+                                repaired,
+                            )
+                        }).await;
+                    }
+
                     // 0.8.3 (#311) — track per-step progress in audit_runs
                     // so an interrupted SSE stream can be resumed at
                     // `last_completed_step + 1` instead of restarting
@@ -801,7 +855,10 @@ pub async fn full_audit(
                 }).to_string()
             );
         }
-        let disc_id: Option<String> = if is_full && audit_fully_succeeded {
+        // 0.8.4 (#287) — both Full and sub-audits get a validation
+        // discussion now. Pre-fix only Full was wired; sub-audits
+        // would dump TDs to disk with no human-validation flow.
+        let disc_id: Option<String> = if kind.is_validatable() && audit_fully_succeeded {
         if let Ok(mut t) = audit_tracker.lock() { t.mark_validating(&project_id); }
 
         let pp = project_path_str.clone();
@@ -812,7 +869,15 @@ pub async fn full_audit(
         // Detect if project has an issue tracker MCP (GitHub, GitLab, Jira, Linear, etc.)
         let has_issue_tracker_mcp = detect_issue_tracker_mcp(&project_path);
 
-        let validation_prompt = build_validation_prompt(&language, &audit_info, has_issue_tracker_mcp);
+        // 0.8.4 (#287) — Full keeps the 4-phase protocol; sub-audits
+        // get the shorter version scoped to the kind-specific index
+        // file + (for RGAA) the explicit manual-audit + Access42 /
+        // Opquast reminder.
+        let validation_prompt = if kind.is_sub_audit() {
+            build_sub_audit_validation_prompt(kind, &language, has_issue_tracker_mcp)
+        } else {
+            build_validation_prompt(&language, &audit_info, has_issue_tracker_mcp)
+        };
 
         let now = Utc::now();
         let discussion_id = Uuid::new_v4().to_string();
@@ -824,13 +889,23 @@ pub async fn full_audit(
             timestamp: now,
             tokens_used: 0,
             auth_mode: None,
-            model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None,
+            model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None, source_msg_id: None,
         };
 
+        // 0.8.4 (#287 + #322 / F2) — title carries the audit kind
+        // via `display_name()` so the user sees "Validation audit RGAA 4.1"
+        // not "Validation audit Rgaa AI" (the TitleCase enum label
+        // leaks otherwise). Disc titles are the user-facing surface;
+        // wire-level labels stay in `as_label()` for serde stability.
+        let disc_title = if kind.is_sub_audit() {
+            format!("Validation audit {}", kind.display_name())
+        } else {
+            "Validation audit AI".to_string()
+        };
         let discussion = Discussion {
             id: discussion_id.clone(),
             project_id: Some(project_id.clone()),
-            title: "Validation audit AI".to_string(),
+            title: disc_title,
             agent: agent_type.clone(),
             language: language.clone(),
             participants: vec![agent_type.clone()],
@@ -908,6 +983,9 @@ pub async fn full_audit(
                     tracing::warn!("Failed to write checksums: {}", e);
                 } else {
                     tracing::info!("Wrote docs/checksums.json with {} mappings", mappings.len());
+                }
+                if let Err(e) = crate::core::kronn_state::record_audit(&pp, "full") {
+                    tracing::warn!("Failed to record audit in .kronn.json: {}", e);
                 }
             }).await;
         }

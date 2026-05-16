@@ -92,6 +92,139 @@ pub(super) fn compute_audit_info_sync(project_path_str: &str) -> AuditInfo {
     AuditInfo { files, todos, tech_debt_items }
 }
 
+/// 0.8.4 (#287) — sub-audit validation prompt. Shorter than the Full
+/// version: a sub-audit only writes ONE index file + a handful of TD
+/// detail files, so Phase 1 (autonomous doc fix-up across 10 files)
+/// AND Phase 4 (challenge questions on cross-file consistency) make
+/// no sense. We keep:
+///
+/// - Phase 2 (ambiguity markers in the new TD files)
+/// - Phase 3 (bulk-first TD review on the kind-specific index)
+/// - Phase 4 light: for RGAA only, the explicit reminder that
+///   automated audits cover 30-40% of criteria and that the user
+///   MUST re-test manually OR call Access42 / get Opquast-certified.
+pub(crate) fn build_sub_audit_validation_prompt(
+    kind: crate::models::AuditKind,
+    language: &str,
+    has_issue_tracker_mcp: bool,
+) -> String {
+    use crate::models::AuditKind;
+    let (kind_label, index_file) = match kind {
+        AuditKind::Security      => ("sécurité",      "docs/inconsistencies-security.md"),
+        AuditKind::Docker        => ("Docker",        "docs/inconsistencies-docker.md"),
+        AuditKind::Performance   => ("performance",   "docs/inconsistencies-performance.md"),
+        AuditKind::Accessibility => ("accessibility (WCAG 2.1)", "docs/inconsistencies-accessibility.md"),
+        AuditKind::Rgaa          => ("RGAA 4.1",      "docs/inconsistencies-rgaa.md"),
+        AuditKind::Database      => ("base de données", "docs/inconsistencies-database.md"),
+        AuditKind::ApiDesign     => ("design d'API",  "docs/inconsistencies-api.md"),
+        // Defensive: Full + Drift + Custom should never reach this path
+        // (gated by `kind.is_sub_audit()` in `full_audit`). Keep a sane
+        // fallback so a future variant added without updating this match
+        // still produces a usable prompt.
+        _ => ("ciblé", "docs/inconsistencies-tech-debt.md"),
+    };
+
+    // Header is language-aware; the bulk-first protocol stays in French
+    // because Kronn discussions are FR-first and the validation flow
+    // ships in FR. The agent translates when answering the user.
+    let header = match language {
+        "en" => format!(
+            "Validate the findings of the **{} sub-audit** that just ran. \
+             Do NOT touch source code — your job is to confirm the TDs and \
+             refine the index file. End with the exact phrase \
+             \"KRONN:VALIDATION_COMPLETE\" once everything below is done.\n\n",
+            kind_label,
+        ),
+        "es" => format!(
+            "Valida los hallazgos de la **sub-auditoría {}** recién ejecutada. \
+             NO toques código fuente — tu trabajo es confirmar las TDs y \
+             refinar el archivo índice. Termina con la frase exacta \
+             \"KRONN:VALIDATION_COMPLETE\" cuando todo esté hecho.\n\n",
+            kind_label,
+        ),
+        _ => format!(
+            "Valide les résultats du **sous-audit {}** qui vient de tourner. \
+             Tu ne touches PAS au code — ton job est de confirmer les TDs \
+             et de raffiner le fichier d'index. Termine par la phrase \
+             exacte \"KRONN:VALIDATION_COMPLETE\" une fois tout fait.\n\n",
+            kind_label,
+        ),
+    };
+
+    let mut s = header;
+    s.push_str(&format!(
+        "## Périmètre\n\
+         - Fichier d'index : `{}`\n\
+         - Nouveaux détails TD : tous les `docs/tech-debt/TD-*.md` créés ou modifiés par ce run.\n\
+         - **Ne pas** re-valider les TDs d'audits précédents (ils ont été traités par leur propre discussion de validation).\n\n",
+        index_file,
+    ));
+
+    // Phase 2 — ambiguity markers in the new TD detail files only.
+    s.push_str(&format!(
+        "## Phase 2 — Ambiguïtés\n\
+         Lance `grep -rn 'TODO: ' {}` (ou via MCP) limité aux fichiers TD créés par ce run. \
+         Pour chaque marker :\n\
+         - `<!-- TODO: ask user -->` → pose la question directement.\n\
+         - `<!-- TODO: verify -->` → tente une vérification (Glob/Read) ; si impossible, escalade en question utilisateur.\n\
+         - `<!-- TODO: unknown -->` → re-pose à l'utilisateur (priors).\n\
+         Une fois la réponse reçue, mets à jour le fichier TD concerné ET retire le marker. Phase 2 termine quand tous les markers sont résolus ou explicitement laissés en `unknown`.\n\n",
+        index_file.rsplit_once('/').map(|(d, _)| d).unwrap_or("docs"),
+    ));
+
+    // Phase 3 — bulk-first TD review, scoped to the kind-specific index.
+    s.push_str(&format!(
+        "## Phase 3 — Revue des TDs (BULK-FIRST)\n\
+         **Ne PAS dérouler les TDs un par un** — ça épuise l'utilisateur avant la fin.\n\n\
+         En UN seul message :\n\
+         1. Lis `{}` ET chaque détail TD créé par ce run.\n\
+         2. Présente un **tableau markdown compact** :\n\
+            `| ID | Sévérité | Domaine | Titre | Statut | Effort |`\n\
+            Une ligne par TD. Tronque le titre à ~50 chars si nécessaire.\n\
+         3. Demande à l'utilisateur :\n\
+            > « Voici les N TDs identifiés par le sous-audit {}. Tu peux :\n\
+            > (a) **Tout valider** → tous deviennent `Confirmed by user` ;\n\
+            > (b) **Tout rejeter** → tous deviennent `Rejected` (le prochain audit ne les recréera pas) ;\n\
+            > (c) **Détailler certains** → liste les IDs à discuter. Les TDs non listés en (c) seront `Confirmed by user` par défaut. »\n\
+         4. Applique la réponse en mettant à jour le champ `audit_history` de chaque détail TD.\n",
+        index_file, kind_label,
+    ));
+    if has_issue_tracker_mcp {
+        s.push_str(
+            "5. Pour les TDs Critical/High validés, propose **en UN batch** : « Je crée les tickets sur le tracker ? » Si oui, batch-crée-les via le MCP tracker disponible (pas de question 1-by-1).\n\n",
+        );
+    } else {
+        s.push('\n');
+    }
+
+    // Phase 4 light — RGAA gets the "audit manuel + Access42/Opquast"
+    // reminder; other sub-audits get a shorter "anything we missed?"
+    // close-out.
+    if matches!(kind, AuditKind::Rgaa) {
+        s.push_str(
+            "## Phase 4 — Pour aller plus loin (RGAA, à NE PAS sauter)\n\
+             Rappelle EXPLICITEMENT à l'utilisateur :\n\
+             1. **Cet audit automatique ne remplace PAS un audit manuel.** Tooling = 30-40 % des critères couverts. Les 60-70 % restants (lecteur d'écran réel, parcours utilisateur, alternatives textuelles pertinentes, accessibilité cognitive) demandent une revue humaine.\n\
+             2. **Deux options officielles** pour être réellement conforme :\n\
+                - **Re-tester soi-même** avec la grille DINUM RGAA 4.1, NVDA/JAWS, VoiceOver, navigation clavier-only.\n\
+                - **Faire appel à un pro** : [Access42](https://access42.net) — référence française pour l'audit officiel et certifiant.\n\
+             3. **Se former** pour ne plus laisser passer :\n\
+                - **Access42** propose un cursus certifiant (référent accessibilité, expert RGAA) — pour un profil dédié.\n\
+                - **Opquast** propose la cert « Maîtrise de la qualité en projet web » (240 règles dont RGAA) — pour faire monter en compétence toute l'équipe.\n\n\
+             Pose ensuite UNE question : « As-tu déjà un référent accessibilité formé sur ce projet, et est-il temps de planifier un audit Access42 ? » Ne valide pas le sous-audit sans cette discussion.\n\n",
+        );
+    } else {
+        s.push_str(&format!(
+            "## Phase 4 — Close-out\n\
+             Pose UNE question : « Le sous-audit {} a-t-il manqué un angle évident (config, environnement, dépendances tierces) que tu connais et qu'on devrait creuser dans une prochaine passe ? » Note la réponse dans `{}` en bas (section `## Notes utilisateur`).\n\n",
+            kind_label, index_file,
+        ));
+    }
+
+    s.push_str("## Sortie\nUne fois TOUTES les phases ci-dessus terminées, émets la phrase exacte : \"KRONN:VALIDATION_COMPLETE\". Ne l'émets jamais avant.");
+    s
+}
+
 /// Build the validation discussion prompt with file/TODO/tech-debt enrichment.
 /// The prompt follows a strict 4-phase protocol to ensure thorough validation.
 pub(crate) fn build_validation_prompt(language: &str, info: &AuditInfo, has_issue_tracker_mcp: bool) -> String {
@@ -467,8 +600,116 @@ pub(super) fn remove_bootstrap_block(index_file: &std::path::Path) {
     }
 }
 
-/// Build the briefing discussion prompt (conversational pre-audit)
-pub(crate) fn build_briefing_prompt(language: &str) -> String {
+/// Build the briefing discussion prompt (conversational pre-audit).
+///
+/// 0.8.4 (#285+UX) — when `prefilled_notes` is `Some`, the user just
+/// submitted the désagentified form and we already have the 6 answers.
+/// Instead of re-asking them all, the agent enters a SHORT
+/// "review + deep-dive" mode: read the briefing back to the user, ask
+/// at most 2-3 targeted clarifications on ambiguous answers, then
+/// finalize. Cuts ~80% of the briefing-discussion tokens vs the legacy
+/// 6-question flow while keeping the door open for nuance the form
+/// can't capture.
+///
+/// When `prefilled_notes` is `None`, the agent runs the legacy 6-Q
+/// flow (kept for backwards-compat — callers that never wrote to the
+/// form still work).
+pub(crate) fn build_briefing_prompt(language: &str, prefilled_notes: Option<&str>) -> String {
+    if let Some(notes) = prefilled_notes {
+        return build_briefing_review_prompt(language, notes);
+    }
+    build_briefing_legacy_prompt(language)
+}
+
+/// 0.8.4 (#285+UX) — review prompt fired after the form has been
+/// submitted. The agent reads the answers, picks 2-3 ambiguous ones
+/// (if any), asks for clarification, then writes the final
+/// `docs/briefing.md` and emits `KRONN:BRIEFING_COMPLETE`. The user
+/// who answered everything cleanly can fast-path through this in a
+/// single turn ("LGTM, ship it").
+fn build_briefing_review_prompt(language: &str, prefilled_notes: &str) -> String {
+    match language {
+        "en" => format!(
+            "ROLE: You are a project briefing reviewer.\n\n\
+             The user just submitted the briefing form. Their answers are at the bottom of this message.\n\n\
+             YOUR JOB — short and focused, NOT a full re-interrogation:\n\
+             1. Read their answers below.\n\
+             2. If 1-3 answers are ambiguous, vague (e.g. \"some traps\"), or contradict each other, ask for clarification on those SPECIFIC points only — in ONE message, max 3 questions, bulleted. Do NOT re-ask answers that already look complete.\n\
+             3. If all answers look usable as-is, skip to step 4.\n\
+             4. Write `docs/briefing.md` with the EXACT format below, merging the original answers + any clarifications you got.\n\
+             5. End your last message with: `KRONN:BRIEFING_COMPLETE`\n\n\
+             ABSOLUTE RULES:\n\
+             - Do NOT re-ask the 6 questions wholesale. The user has already answered. This is REVIEW, not interrogation.\n\
+             - Do NOT read source code or guess anything.\n\
+             - Do NOT modify any file other than `docs/briefing.md`.\n\n\
+             Format for `docs/briefing.md` (write this LITERALLY, in English even if the conversation is in another language):\n\n\
+             # Project Briefing\n\
+             > Auto-generated from user-submitted form + AI review.\n\
+             ## Purpose\n[from Q1, refined by clarification if any]\n\
+             ## Team\n[from Q2]\n\
+             ## Maturity\n[from Q3]\n\
+             ## External Dependencies\n[from Q4 — if none, write \"None.\"]\n\
+             ## Traps & Fragile Areas\n[from Q5 — bullet list if multiple]\n\
+             ## Additional Context\n[from Q6 — if skipped, write \"None.\"]\n\n\
+             USER'S FORM ANSWERS:\n\n{}\n",
+            prefilled_notes,
+        ),
+        "es" => format!(
+            "ROL: Eres un revisor de briefing de proyecto.\n\n\
+             El usuario acaba de enviar el formulario de briefing. Sus respuestas estan al final de este mensaje.\n\n\
+             TU TAREA — corta y enfocada, NO una re-interrogacion completa:\n\
+             1. Lee sus respuestas.\n\
+             2. Si 1-3 respuestas son ambiguas, vagas (ej. \"algunas trampas\") o se contradicen, pide aclaracion sobre esos puntos ESPECIFICOS — en UN solo mensaje, max 3 preguntas. NO repreguntes lo que ya esta claro.\n\
+             3. Si todas las respuestas son utiles tal cual, salta al paso 4.\n\
+             4. Escribe `docs/briefing.md` con el formato EXACTO de abajo.\n\
+             5. Termina con: `KRONN:BRIEFING_COMPLETE`\n\n\
+             REGLAS ABSOLUTAS:\n\
+             - NO repreguntes las 6 preguntas completas. El usuario ya respondio.\n\
+             - NO leas codigo fuente ni adivines nada.\n\
+             - NO modifiques ningun archivo fuera de `docs/briefing.md`.\n\n\
+             Formato (escribir LITERALMENTE, en ingles aunque la conversacion sea en otro idioma):\n\n\
+             # Project Briefing\n\
+             > Auto-generated from user-submitted form + AI review.\n\
+             ## Purpose\n[de Q1, refinado por aclaracion si la hay]\n\
+             ## Team\n[de Q2]\n\
+             ## Maturity\n[de Q3]\n\
+             ## External Dependencies\n[de Q4 — si ninguna, escribir \"None.\"]\n\
+             ## Traps & Fragile Areas\n[de Q5 — lista de puntos]\n\
+             ## Additional Context\n[de Q6 — si omitida, escribir \"None.\"]\n\n\
+             RESPUESTAS DEL USUARIO:\n\n{}\n",
+            prefilled_notes,
+        ),
+        _ => format!(
+            "ROLE: Tu es un relecteur de briefing projet.\n\n\
+             L'utilisateur vient de remplir le formulaire de briefing. Ses reponses sont en bas de ce message.\n\n\
+             TON JOB — court et cible, PAS une re-interrogation complete :\n\
+             1. Relis ses reponses ci-dessous.\n\
+             2. Si 1 a 3 reponses sont ambigues, vagues (ex: \"des pieges\"), ou se contredisent, demande des clarifications UNIQUEMENT sur ces points precis — en UN seul message, max 3 questions en liste. Ne repose PAS les questions deja completes.\n\
+             3. Si toutes les reponses sont utilisables telles quelles, saute a l'etape 4.\n\
+             4. Ecris `docs/briefing.md` avec le format EXACT ci-dessous, en fusionnant les reponses initiales + tes eventuelles clarifications.\n\
+             5. Termine ton dernier message par : `KRONN:BRIEFING_COMPLETE`\n\n\
+             REGLES ABSOLUES :\n\
+             - Ne repose PAS les 6 questions en bloc. L'utilisateur a deja repondu. C'est une RELECTURE, pas un interrogatoire.\n\
+             - Ne lis PAS le code source, ne devine rien.\n\
+             - Ne modifie aucun fichier autre que `docs/briefing.md`.\n\n\
+             Format pour `docs/briefing.md` (a ecrire LITTERALEMENT, en anglais meme si la conversation est dans une autre langue) :\n\n\
+             # Project Briefing\n\
+             > Auto-generated from user-submitted form + AI review.\n\
+             ## Purpose\n[depuis Q1, raffine par les clarifications si besoin]\n\
+             ## Team\n[depuis Q2]\n\
+             ## Maturity\n[depuis Q3]\n\
+             ## External Dependencies\n[depuis Q4 — si aucune, ecrire \"None.\"]\n\
+             ## Traps & Fragile Areas\n[depuis Q5 — liste a puces si plusieurs]\n\
+             ## Additional Context\n[depuis Q6 — si omise, ecrire \"None.\"]\n\n\
+             REPONSES DU FORMULAIRE :\n\n{}\n",
+            prefilled_notes,
+        ),
+    }
+}
+
+/// Legacy 6-question briefing prompt — kept for `start_briefing`
+/// callers that didn't pre-fill the form (no `prefilled_notes`).
+fn build_briefing_legacy_prompt(language: &str) -> String {
     match language {
         "en" => concat!(
             "ROLE: You are a project briefing assistant.\n\n",

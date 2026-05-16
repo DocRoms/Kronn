@@ -1,0 +1,449 @@
+/**
+ * AuditRecapPanel — 0.8.4 (#332 + #333)
+ *
+ * Theme-aware drawer for the audit history. ALL colors must come from
+ * `--kr-*` tokens (see styles/tokens.css) so the panel renders correctly
+ * across the 5 ships themes: dark (default), light, sakura, matrix,
+ * batman. Pre-fix the panel had hardcoded `rgba(255,255,255,0.04)` +
+ * `#1d1f24` which broke every non-dark theme.
+ *
+ * Structure:
+ *   .arp-cta              the compact "Voir les audits précédents (N)" button
+ *   .arp-overlay          dim backdrop, click to close
+ *   .arp-drawer           the side panel itself (480px right)
+ *   .arp-drawer-header    title + close
+ *   .arp-drawer-body      scrollable inner
+ *   .arp-filter-row       Tous · Full · Rgaa · … pills
+ *   .arp-filter-pill[data-active="true"]   highlighted state
+ *   .arp-runs             vertical stack of cards
+ *   .arp-run-card         one run, click to expand
+ *   .arp-run-card[data-active]    expanded variant (accent border)
+ *   .arp-run-card[data-failed]    rose tint for non-Completed runs
+ *   .arp-run-card-header  flex row inside the card button
+ *   .arp-run-meta         the second line (⏱ tokens TD health)
+ *   .arp-run-steps        wrapper for the inline per-step table
+ *   .arp-steps-table      the table itself
+ */
+
+/* ═══════════════════════════════════════════════════════════════════════
+   CTA button — sits next to the launcher in AI Context.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.arp-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  margin-bottom: 6px;
+  font-size: var(--kr-fs-xs, 12px);
+  background: var(--kr-bg-elevated);
+  border: 1px solid var(--kr-border);
+  border-radius: 6px;
+  color: var(--kr-text-primary);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.arp-cta:hover {
+  background: var(--kr-bg-hover);
+  border-color: var(--kr-border-medium);
+}
+
+.arp-cta:focus-visible {
+  outline: 2px solid var(--kr-accent-ink);
+  outline-offset: 2px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Overlay + drawer chrome.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.arp-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--kr-bg-overlay, rgba(0, 0, 0, 0.5));
+  z-index: 998;
+  animation: arp-fade-in 0.15s ease-out;
+}
+
+.arp-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 480px;
+  max-width: 95vw;
+  /* Use --kr-bg-surface (canonical "card" surface) instead of -raised
+     so we ALWAYS sit one level above the page (light bg or dark bg)
+     and the cards inside can use a slightly different shade for visual
+     hierarchy. Pre-fix we used -raised which on matrix theme is
+     #0a100a — too close to surface #0e140e, killing all contrast. */
+  background: var(--kr-bg-surface);
+  border-left: 1px solid var(--kr-border-medium);
+  box-shadow: -4px 0 24px var(--kr-bg-scrim, rgba(0, 0, 0, 0.3));
+  z-index: 999;
+  display: flex;
+  flex-direction: column;
+  color: var(--kr-text-primary);
+  animation: arp-slide-in 0.22s ease-out;
+}
+
+@keyframes arp-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes arp-slide-in {
+  from { transform: translateX(100%); }
+  to   { transform: translateX(0); }
+}
+
+.arp-drawer-header {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--kr-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  /* Header matches the drawer body (already on --kr-bg-surface);
+     differentiator is the bottom border + slightly raised contrast. */
+  background: var(--kr-bg-raised);
+}
+
+.arp-drawer-title {
+  margin: 0;
+  font-size: var(--kr-fs-base, 14px);
+  font-weight: 600;
+  color: var(--kr-text-primary);
+}
+
+.arp-drawer-title-count {
+  margin-left: 8px;
+  font-weight: 400;
+  color: var(--kr-text-muted);
+}
+
+.arp-drawer-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--kr-text-secondary);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.arp-drawer-close:hover {
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
+}
+
+.arp-drawer-close:focus-visible {
+  outline: 2px solid var(--kr-accent-ink);
+  outline-offset: 1px;
+}
+
+.arp-drawer-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.arp-drawer-body p {
+  margin: 0;
+  font-size: var(--kr-fs-xs, 12px);
+  color: var(--kr-text-secondary);
+}
+
+.arp-error {
+  color: var(--kr-error);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Filter pills.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.arp-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.arp-filter-pill {
+  padding: 3px 9px;
+  font-size: var(--kr-fs-xs, 11px);
+  background: transparent;
+  border: 1px solid var(--kr-border);
+  border-radius: 999px;
+  color: var(--kr-text-secondary);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.arp-filter-pill:hover {
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
+}
+
+.arp-filter-pill[data-active="true"] {
+  background: var(--kr-accent-bg);
+  border-color: var(--kr-accent-border);
+  color: var(--kr-accent-text);
+  font-weight: 500;
+}
+
+.arp-filter-pill:focus-visible {
+  outline: 2px solid var(--kr-accent-ink);
+  outline-offset: 1px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Run cards.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.arp-runs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.arp-run-card {
+  /* Cards sit ON the drawer (which is --kr-bg-surface). Elevated +
+     emphasized border = readable hierarchy on every theme. */
+  background: var(--kr-bg-elevated);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: 8px;
+  overflow: hidden;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.arp-run-card:hover {
+  border-color: var(--kr-border-medium);
+}
+
+.arp-run-card[data-active="true"] {
+  border-color: var(--kr-accent-ink);
+  background: var(--kr-bg-selected);
+}
+
+/* Failed/Interrupted runs — RGAA AA contrast guard.
+   Pre-fix used `--kr-error-soft` as a background, but on the dark
+   theme `--kr-error-soft = #ff9aa9` (a TEXT color), not a tint, so
+   the card became saturated pink with red text on top — contrast
+   dropped below 3:1. New approach: a very low-alpha tint based on
+   `--kr-error-rgb` for the background, paired with `--kr-text-primary`
+   for the body and a left accent bar in `--kr-error` for the status
+   marker. Body text stays primary (always AA on every theme); only
+   the kind icon + "· Interrupted" suffix shift to error red. */
+.arp-run-card[data-failed="true"] {
+  background: rgba(var(--kr-error-rgb), 0.06);
+  border-color: rgba(var(--kr-error-rgb), 0.35);
+  position: relative;
+}
+
+.arp-run-card[data-failed="true"]::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--kr-error);
+  border-radius: 8px 0 0 8px;
+}
+
+.arp-run-card[data-failed="true"][data-active="true"] {
+  border-color: var(--kr-error);
+  background: rgba(var(--kr-error-rgb), 0.10);
+}
+
+.arp-run-card-btn {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+}
+
+.arp-run-card-btn:focus-visible {
+  outline: 2px solid var(--kr-accent-ink);
+  outline-offset: -2px;
+}
+
+.arp-run-card-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+
+.arp-run-card-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--kr-fs-sm, 13px);
+  font-weight: 600;
+  color: var(--kr-text-primary);
+}
+
+/* Title stays primary (max contrast for the kind name). Only the
+   inline status marker (rendered as `· Interrupted` etc.) leans
+   error-red, which is enough signal without trashing readability. */
+.arp-run-card[data-failed="true"] .arp-run-card-title {
+  color: var(--kr-text-primary);
+}
+
+.arp-run-card-time {
+  font-weight: 400;
+  font-size: var(--kr-fs-xs, 11px);
+  color: var(--kr-text-muted);
+}
+
+.arp-run-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: var(--kr-fs-xs, 11px);
+  color: var(--kr-text-secondary);
+}
+
+/* Meta line stays at --kr-text-secondary for AA contrast; the
+   error red is reserved for the `· Interrupted` suffix span which
+   is short enough to read against the tinted background. */
+.arp-run-card[data-failed="true"] .arp-run-meta {
+  color: var(--kr-text-secondary);
+}
+
+.arp-run-status-failed {
+  color: var(--kr-error);
+  font-weight: 500;
+}
+
+.arp-run-chevron {
+  flex-shrink: 0;
+  color: var(--kr-text-muted);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Inline step table (expanded card).
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.arp-run-steps {
+  padding: 8px 12px 12px;
+  border-top: 1px solid var(--kr-border-medium);
+  /* Step table sits inside the card, slightly recessed. On dark
+     themes we drop to --kr-bg-raised (closer to drawer body) for a
+     subtle indent feel; on light themes the visual is enough. */
+  background: var(--kr-bg-raised);
+}
+
+.arp-run-steps p {
+  margin: 0;
+  font-size: var(--kr-fs-xs, 11px);
+  color: var(--kr-text-secondary);
+}
+
+.arp-steps-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--kr-fs-xs, 11px);
+  margin-top: 4px;
+}
+
+.arp-steps-table thead th {
+  text-align: left;
+  padding: 4px 6px;
+  font-weight: 500;
+  color: var(--kr-text-muted);
+  border-bottom: 1px solid var(--kr-border-light);
+}
+
+.arp-steps-table th[data-sortable="true"] {
+  cursor: pointer;
+  user-select: none;
+}
+
+.arp-steps-table th[data-sortable="true"]:hover {
+  color: var(--kr-text-primary);
+}
+
+.arp-steps-table th.arp-num,
+.arp-steps-table td.arp-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.arp-steps-table tbody tr {
+  border-bottom: 1px solid var(--kr-border-ghost, transparent);
+}
+
+.arp-steps-table tbody tr:last-child {
+  border-bottom: none;
+}
+
+/* Failing step rows — RGAA AA contrast.
+   Same logic as the run cards: low-alpha background tint + primary
+   text so contrast holds; only the step number leans red as the
+   visual cue. The warning tooltip on hover carries the full
+   detail message. */
+.arp-steps-table tbody tr[data-failed="true"] {
+  background: rgba(var(--kr-error-rgb), 0.08);
+}
+
+.arp-steps-table tbody tr[data-failed="true"] .arp-num:first-child {
+  color: var(--kr-error);
+  font-weight: 600;
+}
+
+.arp-steps-table td {
+  padding: 4px 6px;
+  color: var(--kr-text-primary);
+}
+
+.arp-steps-table tbody tr[data-failed="true"] td {
+  color: var(--kr-text-primary);
+}
+
+.arp-repair-icon {
+  margin-left: 6px;
+  font-size: var(--kr-fs-xs, 11px);
+  color: var(--kr-warning);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Pagination button (+ N plus anciens / – Réduire).
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.arp-show-more {
+  width: 100%;
+  margin-top: 12px;
+  padding: 6px 8px;
+  font-size: var(--kr-fs-xs, 11px);
+  background: transparent;
+  border: 1px dashed var(--kr-border-medium);
+  border-radius: 6px;
+  color: var(--kr-text-secondary);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.arp-show-more:hover {
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
+  border-color: var(--kr-border-strong);
+}
+
+.arp-show-more:focus-visible {
+  outline: 2px solid var(--kr-accent-ink);
+  outline-offset: 1px;
+}

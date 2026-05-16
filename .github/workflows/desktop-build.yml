@@ -137,7 +137,30 @@ jobs:
         if: startsWith(matrix.os, 'macos')
         shell: bash
         run: |
-          APP_PATH=$(find desktop/src-tauri/target/${{ matrix.target }}/release/bundle -name "*.app" -maxdepth 3 | head -1)
+          # `bash -e -o pipefail` propagates find's non-zero exit when its
+          # search path doesn't exist, which kills the whole step before
+          # the fallback message can run. Guard the directory explicitly
+          # and log diagnostics — useful when tauri-bundler decides to
+          # write the bundle under a different target prefix than we
+          # expect (happened on macos-15 / x86_64-apple-darwin where the
+          # bundle landed under `release/bundle` without the target prefix).
+          BUNDLE_DIR="desktop/src-tauri/target/${{ matrix.target }}/release/bundle"
+          if [ ! -d "$BUNDLE_DIR" ]; then
+            echo "Bundle dir not found at $BUNDLE_DIR — searching alternative paths:"
+            # Fall back to the unprefixed `target/release/bundle` layout
+            # that Tauri uses when `--target` is the host-default triple.
+            ALT_DIR="desktop/src-tauri/target/release/bundle"
+            if [ -d "$ALT_DIR" ]; then
+              echo "  found at $ALT_DIR — using it"
+              BUNDLE_DIR="$ALT_DIR"
+            else
+              echo "  no alternative bundle dir either; listing target tree for diagnostics:"
+              ls -la "desktop/src-tauri/target/" 2>/dev/null || echo "  (target/ missing entirely)"
+              echo "Skipping ad-hoc sign — no bundle to sign."
+              exit 0
+            fi
+          fi
+          APP_PATH=$(find "$BUNDLE_DIR" -maxdepth 3 -name "*.app" 2>/dev/null | head -1)
           if [ -n "$APP_PATH" ] && [ -z "$_APPLE_CERTIFICATE" ]; then
             echo "No Apple Developer certificate — applying ad-hoc signature"
             codesign --force --deep -s - "$APP_PATH"
@@ -164,8 +187,16 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kronn-${{ matrix.label }}
+          # Two candidate paths: tauri-bundler usually writes under the
+          # target-prefixed dir, but on macos-15 / x86_64-apple-darwin
+          # (cross-compile on arm64 host) it was observed writing to the
+          # unprefixed `target/release/bundle/dmg`. Globbing both — only
+          # the one that exists will produce files; the other is silently
+          # skipped by upload-artifact.
           path: |
             desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            desktop/src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
 
       - name: Upload Linux artifacts
         if: matrix.os == 'ubuntu-22.04'

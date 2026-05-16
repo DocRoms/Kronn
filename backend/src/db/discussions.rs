@@ -112,7 +112,7 @@ pub fn recover_partial_responses(conn: &Connection) -> Result<Vec<String>> {
             model_tier: None,
             cost_usd: None,
             author_pseudo: None,
-            author_avatar_email: None,
+            author_avatar_email: None, source_msg_id: None,
         };
         match insert_message(conn, &disc_id, &msg) {
             Ok(_) => {
@@ -159,7 +159,8 @@ pub fn list_discussions_paginated(conn: &Connection, limit: Option<u32>, offset:
                 d.shared_id, d.shared_with_json, d.workflow_run_id,
                 d.pinned,
                 d.test_mode_restore_branch, d.test_mode_stash_ref,
-                d.summary_strategy, d.introspection_call_count
+                d.summary_strategy, d.introspection_call_count,
+                d.source_agent, d.source_session_id, d.imported_at, d.diverged_at
          FROM discussions d ORDER BY d.updated_at DESC{}",
         match (limit, offset) {
             (Some(l), Some(o)) => format!(" LIMIT {} OFFSET {}", l, o),
@@ -241,7 +242,8 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
                 summary_cache, summary_up_to_msg_idx, model_tier, pin_first_message,
                 shared_id, shared_with_json, workflow_run_id, pinned,
                 test_mode_restore_branch, test_mode_stash_ref,
-                summary_strategy, introspection_call_count
+                summary_strategy, introspection_call_count,
+                source_agent, source_session_id, imported_at, diverged_at
          FROM discussions WHERE id = ?1"
     )?;
 
@@ -495,7 +497,7 @@ fn list_all_messages(conn: &Connection) -> Result<std::collections::HashMap<Stri
             model_tier: row.get::<_, Option<String>>(8).unwrap_or(None),
             cost_usd: row.get::<_, Option<f64>>(9).unwrap_or(None),
             author_pseudo: None,
-            author_avatar_email: None,
+            author_avatar_email: None, source_msg_id: None,
         }))
     })?;
 
@@ -529,6 +531,7 @@ pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<Discu
             cost_usd: row.get::<_, Option<f64>>(8).unwrap_or(None),
             author_pseudo: row.get::<_, Option<String>>(9).unwrap_or(None),
             author_avatar_email: row.get::<_, Option<String>>(10).unwrap_or(None),
+            source_msg_id: row.get::<_, Option<String>>(11).unwrap_or(None),
         })
     })?.filter_map(|r| r.ok()).collect();
 
@@ -544,8 +547,8 @@ pub fn insert_message(conn: &Connection, discussion_id: &str, msg: &DiscussionMe
     )?;
 
     conn.execute(
-        "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, sort_order, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, sort_order, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email, source_msg_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             msg.id,
             discussion_id,
@@ -560,6 +563,7 @@ pub fn insert_message(conn: &Connection, discussion_id: &str, msg: &DiscussionMe
             msg.cost_usd,
             msg.author_pseudo,
             msg.author_avatar_email,
+            msg.source_msg_id,
         ],
     )?;
 

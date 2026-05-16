@@ -4605,3 +4605,295 @@ async fn test_mode_enter_shape_matches_ts_envelope() {
     assert!(data["kind"].is_string());
     assert!(data["message"].is_string());
 }
+
+// ─── 0.8.4 (#294) cross-agent memory route integration tests ──────────
+
+#[tokio::test]
+async fn disc_create_round_trip_with_source_binding() {
+    // The end-to-end happy path: create a disc bound to a CC session,
+    // round-trip find_by_session, append a message, dedupe a second
+    // identical push, unlink, find now resolves to None.
+    let app = test_app();
+
+    // 1. Create with binding.
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/disc/create",
+        serde_json::json!({
+            "title": "Imported from CC",
+            "agent": "ClaudeCode",
+            "source_agent": "ClaudeCode",
+            "source_session_id": "sess-test-1",
+        }),
+    ).await;
+    assert_eq!(created["success"], true, "create must succeed: {:?}", created);
+    let disc_id = created["data"]["disc_id"].as_str().unwrap().to_string();
+    assert_eq!(created["data"]["created"], true);
+
+    // 2. find_by_session resolves to the new id.
+    let (_, found) = get_json(
+        app.clone(),
+        "/api/disc/find_by_session?source_agent=ClaudeCode&source_session_id=sess-test-1",
+    ).await;
+    assert_eq!(found["success"], true);
+    assert_eq!(found["data"]["disc_id"].as_str().unwrap(), disc_id);
+
+    // 3. Idempotent re-create returns the SAME id without inserting.
+    let (_, recreated) = post_json(
+        app.clone(),
+        "/api/disc/create",
+        serde_json::json!({
+            "title": "should be ignored",
+            "agent": "ClaudeCode",
+            "source_agent": "ClaudeCode",
+            "source_session_id": "sess-test-1",
+        }),
+    ).await;
+    assert_eq!(recreated["data"]["disc_id"].as_str().unwrap(), disc_id);
+    assert_eq!(recreated["data"]["created"], false, "second call must NOT create");
+
+    // 4. Append two messages.
+    let (_, appended) = post_json(
+        app.clone(),
+        "/api/disc/append",
+        serde_json::json!({
+            "disc_id": disc_id,
+            "messages": [
+                { "source_msg_id": "cc-1", "role": "User",  "content": "Hello from CC" },
+                { "source_msg_id": "cc-2", "role": "Agent", "content": "Hi back" },
+            ],
+        }),
+    ).await;
+    assert_eq!(appended["success"], true);
+    assert_eq!(appended["data"]["appended"], 2);
+    assert_eq!(appended["data"]["skipped_as_duplicates"], 0);
+
+    // 5. Re-push the same payload: must dedupe.
+    let (_, redo) = post_json(
+        app.clone(),
+        "/api/disc/append",
+        serde_json::json!({
+            "disc_id": disc_id,
+            "messages": [
+                { "source_msg_id": "cc-1", "role": "User",  "content": "Hello from CC" },
+                { "source_msg_id": "cc-2", "role": "Agent", "content": "Hi back" },
+            ],
+        }),
+    ).await;
+    assert_eq!(redo["data"]["appended"], 0);
+    assert_eq!(redo["data"]["skipped_as_duplicates"], 2);
+
+    // 6. load_other returns the 2 messages.
+    let (_, loaded) = get_json(
+        app.clone(),
+        &format!("/api/disc/load_other?disc_id={}", disc_id),
+    ).await;
+    assert_eq!(loaded["success"], true);
+    assert_eq!(loaded["data"]["total_messages"], 2);
+    assert_eq!(loaded["data"]["messages"].as_array().unwrap().len(), 2);
+
+    // 7. unlink closes the binding.
+    let (_, unlinked) = post_json(
+        app.clone(),
+        "/api/disc/unlink",
+        serde_json::json!({ "disc_id": disc_id }),
+    ).await;
+    assert_eq!(unlinked["success"], true);
+    assert_eq!(unlinked["data"], true);
+
+    // 8. find_by_session no longer resolves.
+    let (_, missing) = get_json(
+        app.clone(),
+        "/api/disc/find_by_session?source_agent=ClaudeCode&source_session_id=sess-test-1",
+    ).await;
+    assert_eq!(missing["success"], true);
+    assert!(missing["data"]["disc_id"].is_null(),
+        "post-unlink, find_by_session must return null disc_id");
+}
+
+#[tokio::test]
+async fn disc_link_rebinds_to_new_session() {
+    // Last-link-wins: re-linking to a different session must override
+    // the previous binding and close the old history row.
+    let app = test_app();
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/disc/create",
+        serde_json::json!({
+            "title": "test",
+            "agent": "ClaudeCode",
+            "source_agent": "ClaudeCode",
+            "source_session_id": "sess-A",
+        }),
+    ).await;
+    let disc_id = created["data"]["disc_id"].as_str().unwrap().to_string();
+
+    // Re-bind to a different (agent, session).
+    let (_, linked) = post_json(
+        app.clone(),
+        "/api/disc/link",
+        serde_json::json!({
+            "disc_id": disc_id,
+            "source_agent": "Cursor",
+            "source_session_id": "sess-B",
+        }),
+    ).await;
+    assert_eq!(linked["success"], true);
+
+    // Old binding no longer resolves.
+    let (_, old) = get_json(
+        app.clone(),
+        "/api/disc/find_by_session?source_agent=ClaudeCode&source_session_id=sess-A",
+    ).await;
+    assert!(old["data"]["disc_id"].is_null());
+
+    // New binding resolves.
+    let (_, new) = get_json(
+        app.clone(),
+        "/api/disc/find_by_session?source_agent=Cursor&source_session_id=sess-B",
+    ).await;
+    assert_eq!(new["data"]["disc_id"].as_str().unwrap(), disc_id);
+}
+
+#[tokio::test]
+async fn disc_search_finds_by_title_and_content() {
+    let app = test_app();
+    // Seed two discs with distinct titles + messages.
+    let (_, c1) = post_json(
+        app.clone(),
+        "/api/disc/create",
+        serde_json::json!({
+            "title": "auth refactor planning",
+            "agent": "ClaudeCode",
+        }),
+    ).await;
+    let did1 = c1["data"]["disc_id"].as_str().unwrap().to_string();
+    let (_, c2) = post_json(
+        app.clone(),
+        "/api/disc/create",
+        serde_json::json!({
+            "title": "weekly sync",
+            "agent": "ClaudeCode",
+        }),
+    ).await;
+    let did2 = c2["data"]["disc_id"].as_str().unwrap().to_string();
+    let _ = post_json(
+        app.clone(),
+        "/api/disc/append",
+        serde_json::json!({
+            "disc_id": did2,
+            "messages": [{
+                "source_msg_id": "m-x",
+                "role": "User",
+                "content": "We need to revisit the JWT middleware",
+            }],
+        }),
+    ).await;
+
+    // Search hits c1 by title.
+    let (_, t_hit) = get_json(app.clone(), "/api/disc/search?q=refactor").await;
+    let hits1 = t_hit["data"].as_array().unwrap();
+    assert!(hits1.iter().any(|h| h["disc_id"].as_str() == Some(&did1)),
+        "search by title must match");
+    // Search hits c2 by content.
+    let (_, c_hit) = get_json(app.clone(), "/api/disc/search?q=JWT").await;
+    let hits2 = c_hit["data"].as_array().unwrap();
+    assert!(hits2.iter().any(|h| h["disc_id"].as_str() == Some(&did2)),
+        "search by message content must match");
+}
+
+#[tokio::test]
+async fn disc_search_rejects_empty_query() {
+    let app = test_app();
+    let (_, resp) = get_json(app, "/api/disc/search?q=").await;
+    assert_eq!(resp["success"], false, "empty q must error out, not return all discs");
+}
+
+#[tokio::test]
+async fn disc_append_404s_on_unknown_disc_id() {
+    let app = test_app();
+    let (_, resp) = post_json(
+        app,
+        "/api/disc/append",
+        serde_json::json!({
+            "disc_id": "does-not-exist",
+            "messages": [{ "source_msg_id": "x", "role": "User", "content": "x" }],
+        }),
+    ).await;
+    assert_eq!(resp["success"], false);
+}
+
+// 0.8.4 (#317 / B1) — admin cleanup of stale `Running` audit_runs.
+#[tokio::test]
+async fn audit_runs_cleanup_flips_running_to_interrupted() {
+    use kronn::core::scanner;
+    let state = test_state();
+    // Seed a project + 2 Running audit_runs + 1 Completed.
+    let pid = "p-cleanup".to_string();
+    let proj = kronn::models::Project {
+        id: pid.clone(),
+        name: "cleanup-test".into(),
+        path: "/tmp/cleanup".into(),
+        repo_url: None,
+        token_override: None,
+        ai_config: kronn::models::AiConfigStatus { detected: false, configs: vec![] },
+        audit_status: kronn::models::AiAuditStatus::Validated,
+        ai_todo_count: 0,
+        tech_debt_count: 0,
+        needs_docs_migration: false,
+        default_skill_ids: vec![],
+        default_profile_id: None,
+        briefing_notes: None,
+        linked_repos: vec![],
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    state.db.with_conn(move |conn| {
+        kronn::db::projects::insert_project(conn, &proj)?;
+        let now = chrono::Utc::now();
+        kronn::db::audit_runs::insert_running(conn, "stale-1", &pid, "Full", "ClaudeCode", now - chrono::Duration::hours(3))?;
+        kronn::db::audit_runs::insert_running(conn, "stale-2", &pid, "Full", "ClaudeCode", now - chrono::Duration::hours(1))?;
+        kronn::db::audit_runs::insert_running(conn, "done", &pid, "Full", "ClaudeCode", now - chrono::Duration::hours(2))?;
+        kronn::db::audit_runs::complete(conn, "done", now - chrono::Duration::hours(1), "Completed",
+            0, 0, 0, 0, 0, 0, 0, 100, None, None)?;
+        Ok::<_, anyhow::Error>(())
+    }).await.expect("seed");
+    let _ = scanner::resolve_host_path; // keep the import alive
+
+    let app = kronn::build_router(state);
+    let (_, resp) = post_json(app, "/api/audit-runs/cleanup", serde_json::json!({})).await;
+    assert_eq!(resp["success"], true);
+    assert_eq!(resp["data"], 2, "exactly 2 Running rows should have been flipped, terminal row untouched");
+}
+
+#[tokio::test]
+async fn disc_load_other_clamps_range_to_total() {
+    // A misbehaving caller asking for [0..9999] on a 2-message disc
+    // must NOT OOM nor return garbage — the range should clamp.
+    let app = test_app();
+    let (_, c) = post_json(
+        app.clone(),
+        "/api/disc/create",
+        serde_json::json!({ "title": "x", "agent": "ClaudeCode" }),
+    ).await;
+    let did = c["data"]["disc_id"].as_str().unwrap().to_string();
+    let _ = post_json(
+        app.clone(),
+        "/api/disc/append",
+        serde_json::json!({
+            "disc_id": did,
+            "messages": [
+                { "source_msg_id": "a", "role": "User",  "content": "1" },
+                { "source_msg_id": "b", "role": "Agent", "content": "2" },
+            ],
+        }),
+    ).await;
+
+    let (_, loaded) = get_json(
+        app,
+        &format!("/api/disc/load_other?disc_id={}&from=0&to=9999", did),
+    ).await;
+    assert_eq!(loaded["data"]["total_messages"], 2);
+    assert_eq!(loaded["data"]["to_idx"], 2, "to must clamp to total");
+    assert_eq!(loaded["data"]["messages"].as_array().unwrap().len(), 2);
+}

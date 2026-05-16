@@ -476,10 +476,112 @@ export const projects = {
     api<{ id: string; last_completed_step: number; started_at: string } | null>(
       'GET', `/projects/${id}/audit-resumable`,
     ),
+  /**
+   * 0.8.4 (#298) — most-recent completed audit for the project, or
+   * `null`. The ProjectCard recap panel uses this to find the
+   * `audit_run_id` to feed `auditRunSteps`.
+   */
+  auditLatest: (id: string) =>
+    api<{
+      id: string;
+      project_id: string;
+      kind: string;
+      agent_type: string;
+      started_at: string;
+      ended_at?: string | null;
+      duration_ms?: number | null;
+      status: string;
+      td_total: number;
+      health_score?: number | null;
+    } | null>('GET', `/projects/${id}/audit-latest`),
+  /**
+   * 0.8.4 (#298) — recent audit history (Full + sub-audits combined),
+   * newest first. Powers the chip strip on the recap panel so the user
+   * can switch between past audits and see each one's per-step
+   * breakdown. Server-capped at 20 entries.
+   */
+  auditHistory: (id: string) =>
+    api<Array<{
+      id: string;
+      project_id: string;
+      kind: string;
+      agent_type: string;
+      started_at: string;
+      ended_at?: string | null;
+      duration_ms?: number | null;
+      status: string;
+      td_total: number;
+      health_score?: number | null;
+    }>>('GET', `/projects/${id}/audit-history`),
+  /**
+   * 0.8.4 (#298) — per-step metrics for the audit recap panel.
+   * Returns one row per step (1..N) with duration_ms, step_tokens,
+   * cumulative_tokens, cli_success + the optional step_warning. Empty
+   * Vec for legacy runs (pre-0.8.4) or runs with no recorded steps.
+   */
+  auditRunSteps: (runId: string) =>
+    api<Array<{
+      audit_run_id: string;
+      step_index: number;
+      file_label: string;
+      started_at: string;
+      ended_at?: string | null;
+      duration_ms?: number | null;
+      step_tokens?: number | null;
+      cumulative_tokens?: number | null;
+      cli_success: boolean;
+      step_warning?: string | null;
+      step_repaired_from_template: boolean;
+    }>>('GET', `/audit-runs/${runId}/steps`),
+  /**
+   * 0.8.4 (#294) — cross-agent memory source bindings.
+   * Returns every disc currently bound to a (source_agent, source_session_id)
+   * pair. The DiscussionsPage sidebar fetches this once at mount to
+   * decorate disc rows with an "imported from X" badge + drive the
+   * source-filter dropdown.
+   */
+  discSources: () =>
+    api<Array<{
+      disc_id: string;
+      source_agent: string;
+      source_session_id: string;
+      imported_at?: string | null;
+      diverged_at?: string | null;
+    }>>('GET', '/disc/sources'),
+  /**
+   * 0.8.4 (#294) — per-disc source binding + full history chain.
+   * Used by ChatHeader tooltip to render "first owned by CC sess A,
+   * then Cursor sess B, …".
+   */
+  discSourceDetail: (id: string) =>
+    api<{
+      current?: {
+        disc_id: string;
+        source_agent: string;
+        source_session_id: string;
+        imported_at?: string | null;
+        diverged_at?: string | null;
+      } | null;
+      history: Array<{
+        source_agent: string;
+        source_session_id: string;
+        linked_at: string;
+        unlinked_at?: string | null;
+      }>;
+    }>('GET', `/discussions/${id}/source`),
   checkDrift: (id: string) => api<DriftCheckResponse>('GET', `/projects/${id}/drift`),
   getBriefing: (id: string) => api<string | null>('GET', `/projects/${id}/briefing`),
   setBriefing: (id: string, notes: string | null) => api<void>('PUT', `/projects/${id}/briefing`, { notes }),
   startBriefing: (id: string, agent: string) => api<{ discussion_id: string }>('POST', `/projects/${id}/start-briefing`, { agent }),
+  /**
+   * 0.8.4 (#285) — désagentified briefing. POST the 6 answers and
+   * the server writes `docs/briefing.md` + persists DB notes without
+   * spawning a discussion / LLM call. Coexists with `startBriefing`.
+   */
+  saveBriefing: (id: string, form: {
+    purpose: string; team: string; maturity: string;
+    dependencies: string; traps: string; additional: string;
+  }) => api<boolean>('POST', `/projects/${id}/save-briefing`, form),
   setDefaultSkills: (id: string, skillIds: string[]) => api<boolean>('PUT', `/projects/${id}/default-skills`, skillIds),
   setDefaultProfile: (id: string, profileId: string | null) => api<boolean>('PUT', `/projects/${id}/default-profile`, { profile_id: profileId }),
   /** 0.8.3 — Replace the project's linked_repos list. The backend

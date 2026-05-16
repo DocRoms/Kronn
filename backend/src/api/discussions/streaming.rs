@@ -829,7 +829,7 @@ pub(super) async fn make_agent_stream(
                     auth_mode: Some(auth_mode_str.clone()),
                     model_tier: tier_label,
                     cost_usd,
-                    author_pseudo: None, author_avatar_email: None,
+                    author_pseudo: None, author_avatar_email: None, source_msg_id: None,
                 };
 
                 let did = disc_id.clone();
@@ -870,7 +870,7 @@ pub(super) async fn make_agent_stream(
                             model_tier: None,
                             cost_usd: None,
                             author_pseudo: None,
-                            author_avatar_email: None,
+                            author_avatar_email: None, source_msg_id: None,
                         };
                         let did_sys = disc_id.clone();
                         let m = sys_msg.clone();
@@ -909,7 +909,7 @@ pub(super) async fn make_agent_stream(
                             model_tier: None,
                             cost_usd: None,
                             author_pseudo: None,
-                            author_avatar_email: None,
+                            author_avatar_email: None, source_msg_id: None,
                         };
                         let did_sys = disc_id.clone();
                         let m = sys_msg.clone();
@@ -932,6 +932,48 @@ pub(super) async fn make_agent_stream(
                 let _ = state.db.with_conn(move |conn| {
                     crate::db::discussions::set_partial_response(conn, &did_clear, None)
                 }).await;
+
+                // ── 0.8.4 (#329 / F9) Auto-archive on validation complete ──
+                //
+                // When a validation disc emits `KRONN:VALIDATION_COMPLETE`,
+                // its job is over: the agent has reviewed the audit, the TD
+                // status updates landed, the project flips to `Validated`.
+                // Pre-fix the disc stayed visible in the sidebar forever,
+                // accumulating one new disc per audit run (Marc-persona
+                // discovery during the 0.8.4 Playwright pass: 3 stale
+                // "Validation audit AI" discs after a Full + 2 sub-audits).
+                //
+                // Archiving silently lifts the noise — the disc is still
+                // reachable via the Archives toggle if the user wants to
+                // re-read the conversation, but it stops cluttering the
+                // active list.
+                //
+                // Bootstrap + briefing discs follow the same lifecycle and
+                // are handled here too (they ship the *_COMPLETE family).
+                if let Some(sig) = stopped_on_signal {
+                    if super::signal_should_auto_archive(sig) {
+                        let did_archive = disc_id.clone();
+                        let archived = state.db.with_conn(move |conn| {
+                            crate::db::discussions::update_discussion(
+                                conn, &did_archive, None, Some(true), None, None,
+                            )
+                        }).await;
+                        match archived {
+                            Ok(true) => tracing::info!(
+                                "Auto-archived discussion {} after terminal signal {}",
+                                disc_id, sig,
+                            ),
+                            Ok(false) => tracing::warn!(
+                                "Auto-archive of disc {} returned no-op (disc deleted?)",
+                                disc_id,
+                            ),
+                            Err(e) => tracing::warn!(
+                                "Auto-archive failed for disc {} on {}: {}",
+                                disc_id, sig, e,
+                            ),
+                        }
+                    }
+                }
 
                 // ── Batch progress hook ────────────────────────────────
                 // If this disc was spawned by a batch workflow run, bump
@@ -1038,7 +1080,7 @@ pub(super) async fn make_agent_stream(
                     timestamp: Utc::now(),
                     tokens_used: 0,
                     auth_mode: None,
-                    model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None,
+                    model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None, source_msg_id: None,
                 };
 
                 let did = disc_id.clone();

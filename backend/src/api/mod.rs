@@ -12,6 +12,7 @@ pub mod disc_git;
 pub mod disc_helpers;
 pub mod disc_introspection;
 pub mod disc_prompts;
+pub mod disc_source;
 pub mod workflows;
 pub mod stats;
 pub mod skills;

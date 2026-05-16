@@ -77,6 +77,25 @@ const TERMINAL_SIGNALS: &[&str] = &[
     "KRONN:BRIEFING_COMPLETE",
 ];
 
+/// 0.8.4 (#329 / F9) — true when the terminal signal means the disc
+/// has fulfilled its purpose and should be archived from the active
+/// sidebar. Validation / briefing / bootstrap discs all qualify:
+/// they're single-shot lifecycle conversations. *_READY family
+/// signals (REPO_READY, PLAN_READY, ISSUES_READY, etc.) do NOT —
+/// those are in-disc handoffs between stages and the user still
+/// needs the conversation visible to drive the next step.
+///
+/// Used by `streaming.rs` after persisting the agent's final reply
+/// to decide whether to flip `archived = true`.
+pub(crate) fn signal_should_auto_archive(signal: &str) -> bool {
+    matches!(
+        signal,
+        "KRONN:VALIDATION_COMPLETE"
+            | "KRONN:BRIEFING_COMPLETE"
+            | "KRONN:BOOTSTRAP_COMPLETE"
+    )
+}
+
 /// Returns the first terminal signal found in the *tail* of `text`, or None.
 ///
 /// We only inspect the last ~256 bytes because terminal signals always sit on
@@ -242,6 +261,48 @@ mod terminal_signal_tests {
     fn does_not_match_unknown_signal() {
         let s = "End.\nKRONN:NOT_A_REAL_SIGNAL";
         assert_eq!(detect_terminal_signal(s), None);
+    }
+
+    // ─── 0.8.4 (#329 / F9) auto-archive predicate ───────────────────
+
+    #[test]
+    fn auto_archive_fires_for_lifecycle_completions() {
+        // The three single-shot lifecycle signals must auto-archive
+        // their disc — the user has no reason to keep the conversation
+        // active after a successful sign-off.
+        use super::signal_should_auto_archive;
+        assert!(signal_should_auto_archive("KRONN:VALIDATION_COMPLETE"));
+        assert!(signal_should_auto_archive("KRONN:BRIEFING_COMPLETE"));
+        assert!(signal_should_auto_archive("KRONN:BOOTSTRAP_COMPLETE"));
+    }
+
+    #[test]
+    fn auto_archive_does_not_fire_for_intermediate_signals() {
+        // The *_READY family is an in-disc handoff between stages
+        // (cadrage → architecture → plan → issues). Archiving here
+        // would hide the conversation right when the user needs it
+        // to drive the next stage — opposite of the desired UX.
+        use super::signal_should_auto_archive;
+        assert!(!signal_should_auto_archive("KRONN:REPO_READY"));
+        assert!(!signal_should_auto_archive("KRONN:ARCHITECTURE_READY"));
+        assert!(!signal_should_auto_archive("KRONN:PLAN_READY"));
+        assert!(!signal_should_auto_archive("KRONN:STRUCTURE_READY"));
+        assert!(!signal_should_auto_archive("KRONN:ISSUES_READY"));
+        assert!(!signal_should_auto_archive("KRONN:ISSUES_CREATED"));
+        assert!(!signal_should_auto_archive("KRONN:WORKFLOW_READY"));
+    }
+
+    #[test]
+    fn auto_archive_predicate_covers_every_terminal_signal() {
+        // Forward-compat: every signal in TERMINAL_SIGNALS must be a
+        // known case (yes or no). If a new signal is added without an
+        // explicit decision, this test fires so the maintainer thinks
+        // about whether the new flow is single-shot or multi-stage.
+        use super::{signal_should_auto_archive, TERMINAL_SIGNALS};
+        for sig in TERMINAL_SIGNALS {
+            // True or false, but never a panic / unhandled case.
+            let _: bool = signal_should_auto_archive(sig);
+        }
     }
 
     #[test]

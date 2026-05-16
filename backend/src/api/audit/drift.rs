@@ -244,6 +244,9 @@ pub async fn partial_audit(
                 } else {
                     tracing::info!("Updated docs/checksums.json for {} re-run steps", steps_clone.len());
                 }
+                if let Err(e) = crate::core::kronn_state::record_audit(&pp, "partial") {
+                    tracing::warn!("Failed to record partial audit in .kronn.json: {}", e);
+                }
             }).await;
         }
 
