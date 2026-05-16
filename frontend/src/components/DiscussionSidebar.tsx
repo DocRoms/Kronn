@@ -1,7 +1,8 @@
-import { useState, useMemo, useRef, useDeferredValue } from 'react';
+import { useState, useMemo, useRef, useDeferredValue, useEffect } from 'react';
 import '../pages/DiscussionsPage.css';
 import { SwipeableDiscItem } from './SwipeableDiscItem';
 import type { Discussion, Project, Contact, BatchRunSummary } from '../types/generated';
+import { projects as projectsApi } from '../lib/api';
 import { getProjectGroup, isHiddenPath } from '../lib/constants';
 import { gravatarUrl } from '../lib/gravatar';
 import { formatRelativeTime } from '../lib/relativeTime';
@@ -148,6 +149,56 @@ export function DiscussionSidebar({
   // mounts the rest of its discs on demand. Search still shows all
   // matches because the user is explicitly hunting.
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(() => new Set());
+
+  // 0.8.4 (#294) — cross-agent source bindings. Fetched once at mount
+  // + on each disc list change so newly-imported discs get the badge
+  // without a manual refresh. The map keys on disc.id.
+  const [sourceBindings, setSourceBindings] = useState<Map<string, { source_agent: string; diverged: boolean }>>(() => new Map());
+  // 0.8.4 (#294) — source filter dropdown. Empty string = "all".
+  // Otherwise filters the sidebar to discs whose binding.source_agent
+  // matches. The selector populates from the unique set of agents in
+  // `sourceBindings`.
+  const [sourceFilter, setSourceFilter] = useState<string>('');
+
+  useEffect(() => {
+    let cancelled = false;
+    projectsApi.discSources()
+      .then((rows) => {
+        if (cancelled) return;
+        const m = new Map<string, { source_agent: string; diverged: boolean }>();
+        for (const r of rows ?? []) {
+          m.set(r.disc_id, { source_agent: r.source_agent, diverged: r.diverged_at != null });
+        }
+        setSourceBindings(m);
+      })
+      .catch((e) => {
+        // Non-fatal — the badge just doesn't render. Don't toast,
+        // the user has no remediation path.
+        console.warn('discSources fetch failed', e);
+      });
+    return () => { cancelled = true; };
+    // Re-run on discussions length change to catch newly-created discs
+    // bound via `disc_create` after mount. discussions.length is a cheap
+    // proxy for "list shape changed".
+  }, [discussions.length]);
+
+  const sourceAgentsAvailable = useMemo(() => {
+    const set = new Set<string>();
+    for (const b of sourceBindings.values()) set.add(b.source_agent);
+    return Array.from(set).sort();
+  }, [sourceBindings]);
+
+  // 0.8.4 (#294) — combined predicate for the disc list filters.
+  // Search OR source — both AND'd. Used by every render site below
+  // so they stay in lockstep with the source filter.
+  const matchesFilters = (d: Discussion): boolean => {
+    if (searchLower && !d.title.toLowerCase().includes(searchLower)) return false;
+    if (sourceFilter) {
+      const bind = sourceBindings.get(d.id);
+      if (!bind || bind.source_agent !== sourceFilter) return false;
+    }
+    return true;
+  };
 
   // ─── Derived data ─────────────────────────────────────────────────────
   const { activeDiscByProject, archivedDiscussions } = useMemo(() => {
@@ -298,6 +349,29 @@ export function DiscussionSidebar({
             </button>
           )}
         </div>
+        {/* 0.8.4 (#294) — cross-agent source filter. Hidden when no
+           imported discs exist (the dropdown would be pointless).
+           Filters the disc list to discs whose source_agent matches. */}
+        {sourceAgentsAvailable.length > 0 && (
+          <select
+            data-testid="disc-source-filter"
+            className="disc-source-filter-select"
+            value={sourceFilter}
+            onChange={e => setSourceFilter(e.target.value)}
+            title={t('disc.source.filterTooltip')}
+            style={{
+              marginTop: 4, fontSize: 11, padding: '2px 4px',
+              background: 'var(--kr-bg-elevated, transparent)',
+              border: '1px solid var(--kr-border-subtle, rgba(255,255,255,0.1))',
+              borderRadius: 4, color: 'inherit',
+            }}
+          >
+            <option value="">{t('disc.source.filterAll')}</option>
+            {sourceAgentsAvailable.map(agent => (
+              <option key={agent} value={agent}>{t('disc.source.filterFrom', agent)}</option>
+            ))}
+          </select>
+        )}
       </div>
 
       {/* Discussion list grouped by project */}
@@ -398,6 +472,8 @@ export function DiscussionSidebar({
                   onStop={onStopDiscussion}
                   onTogglePin={onTogglePin}
                   t={t}
+                  sourceAgent={sourceBindings.get(disc.id)?.source_agent}
+                  sourceDiverged={sourceBindings.get(disc.id)?.diverged}
                 />
               ))}
             </div>
@@ -424,7 +500,7 @@ export function DiscussionSidebar({
                   <span className="disc-group-unseen">{unseenByGroup.get('__global__')}</span>
                 )}
               </button>
-              {!isCollapsed && globalDiscs.filter(d => !searchLower || d.title.toLowerCase().includes(searchLower)).sort((a, b) => b.updated_at.localeCompare(a.updated_at)).map(disc => (
+              {!isCollapsed && globalDiscs.filter(matchesFilters).sort((a, b) => b.updated_at.localeCompare(a.updated_at)).map(disc => (
                 <SwipeableDiscItem
                   key={disc.id}
                   disc={disc}
@@ -437,6 +513,8 @@ export function DiscussionSidebar({
                   onStop={onStopDiscussion}
                   onTogglePin={onTogglePin}
                   t={t}
+                  sourceAgent={sourceBindings.get(disc.id)?.source_agent}
+                  sourceDiverged={sourceBindings.get(disc.id)?.diverged}
                 />
               ))}
             </div>
@@ -510,7 +588,7 @@ export function DiscussionSidebar({
                       {!isCollapsed && (() => {
                         // Filter + sort, then split into batch groups vs loose discs.
                         const filtered = projDiscs
-                          .filter(d => !searchLower || d.title.toLowerCase().includes(searchLower))
+                          .filter(matchesFilters)
                           .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
                         // Group by workflow_run_id — discs without one are "loose".
                         const batchMap = new Map<string, typeof filtered>();
@@ -681,6 +759,8 @@ export function DiscussionSidebar({
                                           onDelete={onDelete}
                                           onStop={onStopDiscussion}
                                           t={t}
+                                          sourceAgent={sourceBindings.get(disc.id)?.source_agent}
+                                          sourceDiverged={sourceBindings.get(disc.id)?.diverged}
                                         />
                                       ))}
                                     </div>
@@ -711,6 +791,8 @@ export function DiscussionSidebar({
                                       onStop={onStopDiscussion}
                                       onTogglePin={onTogglePin}
                                       t={t}
+                                      sourceAgent={sourceBindings.get(disc.id)?.source_agent}
+                                      sourceDiverged={sourceBindings.get(disc.id)?.diverged}
                                     />
                                   ))}
                                   {hiddenCount > 0 && (
@@ -762,7 +844,7 @@ export function DiscussionSidebar({
               <Archive size={10} /> {t('disc.archived')}
               <span className="disc-group-count">{archivedDiscussions.length}</span>
             </button>
-            {(showArchives || !!deferredSearch) && archivedDiscussions.filter(d => !searchLower || d.title.toLowerCase().includes(searchLower)).sort((a, b) => b.updated_at.localeCompare(a.updated_at)).map(disc => (
+            {(showArchives || !!deferredSearch) && archivedDiscussions.filter(matchesFilters).sort((a, b) => b.updated_at.localeCompare(a.updated_at)).map(disc => (
               <SwipeableDiscItem
                 key={disc.id}
                 disc={disc}
@@ -774,6 +856,8 @@ export function DiscussionSidebar({
                 onDelete={onDelete}
                 archiveLabel={t('disc.unarchive')}
                 t={t}
+                sourceAgent={sourceBindings.get(disc.id)?.source_agent}
+                sourceDiverged={sourceBindings.get(disc.id)?.diverged}
               />
             ))}
           </div>

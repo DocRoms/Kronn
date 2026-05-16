@@ -181,6 +181,15 @@ pub struct AuditProgress {
     pub total_tokens_so_far: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_tool: Option<String>,
+    /// 0.8.4 (#319 / B3) — running count of `tool_call` events the
+    /// agent has fired DURING the current step. Reset on every
+    /// `step_start`. Surfaced as a chip after the tool name (e.g.
+    /// `🔧 Write (14)`) so the user has a "still alive" signal even
+    /// when the token chip is frozen (heavy step writing many TD
+    /// files without intermediate `Usage` blocks — the symptom that
+    /// confused the user during the 8-min Step 9 of the Full audit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_tool_call_count: Option<u32>,
 }
 
 /// One row in the `audit_runs` table — one record per audit invocation.
@@ -254,6 +263,42 @@ pub struct AuditRun {
     /// recommendation-shape tweak.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recommendations_json: Option<String>,
+}
+
+/// 0.8.4 (#298) — Per-step metrics for the post-audit recap panel.
+///
+/// One row per step per `audit_runs` row. Inserted at `step_start`
+/// (only the started-at + file_label fields are populated), finalized
+/// at `step_done` (ended_at + duration_ms + tokens + cli_success), and
+/// decorated by `step_warning` (#292) when the step's output doesn't
+/// look right.
+///
+/// The frontend ProjectCard reads `GET /api/audit-runs/:run_id/steps`
+/// for a collapsed "▾ Détails du dernier audit" panel; the table is
+/// sortable by `duration_ms` and `step_tokens` so the user can spot
+/// the heaviest step at a glance.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AuditRunStep {
+    pub audit_run_id: String,
+    pub step_index: u32,
+    pub file_label: String,
+    pub started_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cumulative_tokens: Option<u64>,
+    /// `false` when the CLI exited non-zero OR `step_warning` fired.
+    pub cli_success: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_warning: Option<String>,
+    /// Mirrors the `step_warning.repaired` field from #292.
+    #[serde(default)]
+    pub step_repaired_from_template: bool,
 }
 
 /// Recommendation emitted by the Step 10 cluster detector. Lives in
@@ -346,6 +391,11 @@ pub enum AuditKind {
     Docker,
     Performance,
     Accessibility,
+    /// 0.8.4 (#287) — French RGAA 4.1 accessibility norm.
+    /// Sub-case of `Accessibility` but checks against the stricter
+    /// 106 RGAA criteria (vs WCAG 2.1 AA's 50). Mandatory for
+    /// public-service French sites + companies > 250 employees.
+    Rgaa,
     Database,
     ApiDesign,
     Custom,
@@ -362,10 +412,61 @@ impl AuditKind {
             AuditKind::Docker        => "Docker",
             AuditKind::Performance   => "Performance",
             AuditKind::Accessibility => "Accessibility",
+            AuditKind::Rgaa          => "Rgaa",
             AuditKind::Database      => "Database",
             AuditKind::ApiDesign     => "ApiDesign",
             AuditKind::Custom        => "Custom",
         }
+    }
+
+    /// 0.8.4 (#322 / F2) — user-facing display name for the kind,
+    /// used in disc titles + UI badges. Different from `as_label()`
+    /// (which is the canonical wire / DB token, kept TitleCase for
+    /// serde round-trip stability). `display_name` is what a human
+    /// expects to read: "RGAA 4.1" not "Rgaa", "Sécurité" not
+    /// "Security" (FR — the user-facing locale of Kronn). When the
+    /// app ships in EN/ES the frontend can still translate from the
+    /// `as_label()` token + an i18n key; this helper only matters
+    /// for backend-emitted strings (disc title, log lines).
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            AuditKind::Full          => "Audit global",
+            AuditKind::Drift         => "Drift",
+            AuditKind::Security      => "Sécurité",
+            AuditKind::Docker        => "Docker",
+            AuditKind::Performance   => "Performance",
+            AuditKind::Accessibility => "Accessibilité",
+            AuditKind::Rgaa          => "RGAA 4.1",
+            AuditKind::Database      => "Base de données",
+            AuditKind::ApiDesign     => "Design d'API",
+            AuditKind::Custom        => "Custom",
+        }
+    }
+
+    /// 0.8.4 (#287) — true for kinds that spawn a validation discussion
+    /// after a successful run. Full and the 7 sub-audits all qualify;
+    /// `Drift` and `Custom` don't (Drift is checksum-only, Custom is
+    /// caller-defined and shouldn't get a Kronn-shaped validation flow).
+    pub fn is_validatable(&self) -> bool {
+        matches!(
+            self,
+            AuditKind::Full
+                | AuditKind::Security
+                | AuditKind::Docker
+                | AuditKind::Performance
+                | AuditKind::Accessibility
+                | AuditKind::Rgaa
+                | AuditKind::Database
+                | AuditKind::ApiDesign
+        )
+    }
+
+    /// 0.8.4 (#287) — true for everything except `Full` and the
+    /// non-validatable kinds. Drives the validation-prompt selector:
+    /// sub-audits use `build_sub_audit_validation_prompt`, Full uses
+    /// `build_validation_prompt` (the full 4-phase protocol).
+    pub fn is_sub_audit(&self) -> bool {
+        self.is_validatable() && !matches!(self, AuditKind::Full)
     }
 }
 

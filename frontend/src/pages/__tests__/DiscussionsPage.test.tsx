@@ -49,6 +49,10 @@ vi.mock('../../lib/api', () => ({
     // whether to show the audit-running banner. Default = null (no
     // audit). Tests that need the running state override per-test.
     auditStatus: vi.fn().mockResolvedValue(null),
+    // 0.8.4 (#294) — sidebar fetches this once per mount to decorate
+    // disc rows with the "imported from X" badge. Empty = no
+    // bindings, badge stays hidden.
+    discSources: vi.fn().mockResolvedValue([]),
   },
   skills: {
     list: vi.fn().mockResolvedValue([]),

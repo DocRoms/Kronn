@@ -487,19 +487,57 @@ pub fn detect_audit_status(project_path: &str) -> crate::models::AiAuditStatus {
         return AiAuditStatus::TemplateInstalled;
     }
 
-    if content.contains("KRONN:BOOTSTRAPPED") {
-        // Validated takes priority over Bootstrapped
-        if content.contains("KRONN:VALIDATED") {
+    // 0.8.4 — canonical source of truth: `docs/.kronn.json`. Survives `git
+    // clone`, lives outside the agent-read path (no token cost), and can't
+    // be inferred by accident from the user's own `docs/AGENTS.md`.
+    //
+    // We still honour the legacy `KRONN:VALIDATED` / `KRONN:BOOTSTRAPPED`
+    // HTML markers and `docs/checksums.json` so projects audited before
+    // this release keep their badge — but we no longer fall through to
+    // `Audited` based on filesystem heuristics alone (the old bug:
+    // any project with a pre-existing `docs/AGENTS.md` was tagged green).
+    if let Some(state) = crate::core::kronn_state::read(&path) {
+        if state.validated_at.is_some() {
+            return AiAuditStatus::Validated;
+        }
+        if state.bootstrapped_at.is_some() {
+            return AiAuditStatus::Bootstrapped;
+        }
+        if state.has_any_audit() {
+            return AiAuditStatus::Audited;
+        }
+        // File present but empty (e.g. partial init) — fall through to
+        // legacy checks rather than asserting Audited.
+    }
+
+    // Legacy fallbacks for projects audited before `.kronn.json` existed.
+    // Order matters: Validated wins over Bootstrapped, which wins over
+    // Audited-from-checksums.
+    let has_validated_marker = content.contains("KRONN:VALIDATED");
+    let has_bootstrapped_marker = content.contains("KRONN:BOOTSTRAPPED");
+
+    if has_bootstrapped_marker {
+        if has_validated_marker {
             return AiAuditStatus::Validated;
         }
         return AiAuditStatus::Bootstrapped;
     }
-
-    if content.contains("KRONN:VALIDATED") {
+    if has_validated_marker {
         return AiAuditStatus::Validated;
     }
 
-    AiAuditStatus::Audited
+    // `docs/checksums.json` is written by every full/partial audit and
+    // predates `.kronn.json`. Its presence is hard evidence that Kronn
+    // actually ran an audit on this project — distinct from "docs/
+    // happens to exist because the user wrote their own AGENTS.md".
+    if crate::core::checksums::read_checksums_file(&path).is_some() {
+        return AiAuditStatus::Audited;
+    }
+
+    // No marker, no checksums, no state file — `docs/AGENTS.md` exists
+    // but Kronn never touched it. Treat as "template-ish": the docs dir
+    // is there but no Kronn audit has been recorded.
+    AiAuditStatus::TemplateInstalled
 }
 
 /// One `KRONN-(ASSUMED|MOCKED|TODO)(<id>): <why>` marker found in

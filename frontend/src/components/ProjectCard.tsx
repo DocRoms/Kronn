@@ -5,6 +5,8 @@ import { useT } from '../lib/I18nContext';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { isValidationDisc, isBriefingDisc, isBootstrapDisc, isUsable, isTrackerMcp } from '../lib/constants';
 import { AiDocViewer } from './AiDocViewer';
+import AuditRecapPanel from './AuditRecapPanel';
+import type { AuditKind } from '../types/AuditKind';
 import { ProjectSkills } from './ProjectSkills';
 import { ProjectLinkedRepos } from './ProjectLinkedRepos';
 import {
@@ -18,8 +20,9 @@ import {
   Loader2,
   MessageSquare, AlertTriangle,
   Play, FileCode, ShieldCheck, StopCircle, BookOpen, Rocket, Check, RefreshCw, Puzzle,
-  FolderInput, Plug, X,
+  FolderInput, Plug, X, FileText,
 } from 'lucide-react';
+import { BriefingForm } from './BriefingForm';
 
 const STATUS_COLORS: Record<string, string> = {
   Pending: 'var(--kr-warning)', Running: 'var(--kr-cyan)', Success: 'var(--kr-success)',
@@ -77,12 +80,20 @@ export function ProjectCard({
   onRefetchSkills,
   onRefetchDrift,
 }: ProjectCardProps) {
-  const { t } = useT();
+  const { t, locale } = useT();
   const isMobile = useIsMobile();
 
   // ── Collapsible sections ──
+  // 0.8.4 (#323 / F3) — on `Validated` and `Audited`, `aiContext` is
+  // the action zone (relaunch audit, launch sub-audit, validate). The
+  // pre-fix default sent the user to `discussions` which forced 2
+  // clicks to reach the launcher (and was discovered confusing in
+  // the Marc persona Playwright pass). Bootstrapped keeps
+  // `discussions` because the briefing disc is the natural focus
+  // before audit; NoTemplate / TemplateInstalled also use `aiContext`
+  // since that's where the briefing form CTA lives.
   const defaultSection = (auditStatus: string) =>
-    (auditStatus === 'Bootstrapped' || auditStatus === 'Audited' || auditStatus === 'Validated') ? 'discussions' : 'aiContext';
+    auditStatus === 'Bootstrapped' ? 'discussions' : 'aiContext';
   const [expandedTab, setExpandedTab] = useState<string | undefined>(undefined);
   const isSectionOpen = (section: string) => {
     if (expandedTab === undefined) return section === defaultSection(proj.audit_status);
@@ -122,6 +133,9 @@ export function ProjectCard({
 
   // ── Audit state ──
   const [auditActive, setAuditActive] = useState(false);
+  // 0.8.4 (#298) — bump on every audit completion so the recap panel
+  // refetches the latest run + per-step metrics without manual reload.
+  const [auditCompletedTick, setAuditCompletedTick] = useState(0);
   const [auditStep, setAuditStep] = useState(0);
   const [auditTotalSteps, setAuditTotalSteps] = useState(0);
   const [auditCurrentFile, setAuditCurrentFile] = useState('');
@@ -146,15 +160,28 @@ export function ProjectCard({
   // Glob, mcp__..., …). Surfaced as a chip so the user knows what
   // the agent is busy with during the step. Cleared on step_done.
   const [auditCurrentTool, setAuditCurrentTool] = useState<string | null>(null);
+  // 0.8.4 (#319 / B3) — running count of tool calls in the current
+  // step. Surfaced after the tool name (`🔧 Write (14)`) so the user
+  // sees forward motion even when the agent goes through a long
+  // tool-only phase without `Usage` events to refresh tokens.
+  const [auditToolCallCount, setAuditToolCallCount] = useState<number | null>(null);
   const [auditAbortController, setAuditAbortController] = useState<AbortController | null>(null);
   const [auditAgentChoice, setAuditAgentChoice] = useState<AgentType | undefined>(undefined);
-  /// Briefing-start in flight — pre-fix the button was only disabled when
-  /// `agents.length === 0`, so a double-click on a slow connection created
-  /// two briefing discussions on the same project. The companion ref makes
-  /// the guard race-free against two synchronous click events that fire
-  /// before React re-renders the disabled state.
-  const [briefingStarting, setBriefingStarting] = useState(false);
-  const briefingStartingRef = useRef(false);
+  // 0.8.4 (#287) — selected audit kind for the next launch. Defaults
+  // to Full. Sub-audit options in the dropdown are disabled until the
+  // project reaches Audited/Validated (running a Security/RGAA audit
+  // before the baseline doc audit makes no sense — the agent has no
+  // `inconsistencies-*.md` to refine against).
+  const [auditKindChoice, setAuditKindChoice] = useState<AuditKind>('Full');
+  /// Briefing-start in flight — re-used by the post-form AI review
+  /// trigger. Pre-fix it guarded the now-removed second "Briefing IA"
+  /// button against double-clicks; with the form-only flow the inner
+  /// submit button is already `disabled` while pending, but the state
+  /// is still wired so the outer "Définir le briefing" CTA can grey
+  /// out if a parallel briefing is mid-spawn.
+  const [briefingStarting] = useState(false);
+  // 0.8.4 (#285) — désagentified briefing form modal toggle.
+  const [briefingFormOpen, setBriefingFormOpen] = useState(false);
   /// Companion ref for `auditActive` — keeps `handleFullAudit` and
   /// `startPartialAudit` race-free against a double-click that fires
   /// before React re-renders.
@@ -196,7 +223,7 @@ export function ProjectCard({
   }, [proj.id, proj.audit_status, auditActive]);
 
   // ── Computed ──
-  const validationDisc = projDiscussions.find(d => isValidationDisc(d.title));
+  const validationDisc = projDiscussions.find(d => isValidationDisc(d.title) && !d.archived);
   // 0.8.3 (#311 + #312) — a resumable audit run takes priority over
   // a leftover validation disc. Pre-fix, a rate-limit at step 5 still
   // marked the project Audited + left a validation disc, so the
@@ -204,14 +231,19 @@ export function ProjectCard({
   // actually produced anything past step 5. The resumable check
   // catches that state and forces the "Reprendre" CTA instead.
   const validationInProgress = !!validationDisc && proj.audit_status === 'Audited' && !resumableAudit;
-  const bootstrapDisc = projDiscussions.find(d => isBootstrapDisc(d.title));
+  const bootstrapDisc = projDiscussions.find(d => isBootstrapDisc(d.title) && !d.archived);
   const bootstrapInProgress = !!bootstrapDisc && proj.audit_status === 'TemplateInstalled';
   // Use the locale-aware detector — the backend's `start_briefing` emits
   // a localized title (`Project Briefing` in EN, `Briefing del proyecto`
   // in ES, `Briefing projet` in FR). Pre-fix a startsWith('Briefing')
   // here missed EN, leaving English users without the "Reprendre le
   // briefing" button after they navigated away mid-briefing.
-  const briefingDisc = projDiscussions.find(d => isBriefingDisc(d.title));
+  // 0.8.4 (#329 / F9) — only consider non-archived briefing discs.
+  // Otherwise "Reprendre le briefing" stays visible forever once a
+  // briefing has been auto-archived on `KRONN:BRIEFING_COMPLETE`,
+  // blocking the new "Définir le briefing" CTA. Same for validation
+  // + bootstrap below.
+  const briefingDisc = projDiscussions.find(d => isBriefingDisc(d.title) && !d.archived);
   const briefingDone = proj.audit_status !== 'NoTemplate' && (
     !!proj.briefing_notes ||
     proj.audit_status === 'Audited' || proj.audit_status === 'Validated'
@@ -321,7 +353,7 @@ export function ProjectCard({
     onRefetchDiscussions();
   }, [auditAbortController, proj.id, toast, t, onRefetch, onRefetchDiscussions, stopAuditPolling]);
 
-  const handleFullAudit = useCallback(async (resumeFromOverride?: number) => {
+  const handleFullAudit = useCallback(async (resumeFromOverride?: number, kindOverride?: AuditKind) => {
     // Guard against double-click — `setAuditActive(true)` flips the UI to
     // the progress panel synchronously, but a fast double-click can call
     // this handler twice before React re-renders, spawning two concurrent
@@ -342,7 +374,11 @@ export function ProjectCard({
     setAuditAbortController(controller);
     setAuditActive(true);
     setAuditStep(0);
-    setAuditTotalSteps(10);
+    // 0.8.4 (#287) — sub-audits run a single targeted step (not 10).
+    // Without this the progress bar shows 1/10 forever — visually
+    // freezing as if the audit hung.
+    const isSubAudit = kindOverride !== undefined && kindOverride !== 'Full';
+    setAuditTotalSteps(isSubAudit ? 1 : 10);
     setAuditCurrentFile(t('audit.templateStep'));
     // 0.8.3 TD #274 — fallback wallclock seed so the elapsed chip
     // ticks during Phase 1 (template install + legacy migration)
@@ -352,6 +388,7 @@ export function ProjectCard({
     setAuditLastStepTokens(null);
     setAuditTotalTokens(null);
     setAuditCurrentTool(null);
+    setAuditToolCallCount(null);
     // Seed the resume checkpoint immediately so a tab-away during phase 1
     // (template install) still leaves a breadcrumb to poll against.
     const startedAt = new Date().toISOString();
@@ -361,7 +398,14 @@ export function ProjectCard({
     });
     try {
       const auditAgent = auditAgentChoice ?? agents.filter(canAudit)[0]?.agent_type ?? 'ClaudeCode';
-      await projectsApi.fullAuditStream(proj.id, { agent: auditAgent, resume_from: resumeFrom > 0 ? resumeFrom : null }, {
+      await projectsApi.fullAuditStream(proj.id, {
+        agent: auditAgent,
+        // 0.8.4 (#287) — pass kind through so the backend routes to
+        // SECURITY_STEPS / RGAA_STEPS / DATABASE_STEPS / etc. instead
+        // of the default ANALYSIS_STEPS.
+        kind: kindOverride ?? null,
+        resume_from: resumeFrom > 0 ? resumeFrom : null,
+      }, {
         onTemplateInstalled: () => {},
         // 0.8.3 TD #274 — backend-authoritative wallclock for the
         // live elapsed counter. Overrides the local fallback so the
@@ -396,6 +440,8 @@ export function ProjectCard({
           // 0.8.3 (#281) — clear current tool when step finishes so
           // the chip doesn't show stale "🔧 Read" on the next step.
           setAuditCurrentTool(null);
+          // 0.8.4 (#319 / B3) — reset the per-step tool-call counter.
+          setAuditToolCallCount(null);
         },
         // 0.8.3 (#281) — live token tick during a step. Backend
         // emits this every time it sees a `Usage` event in the
@@ -412,6 +458,12 @@ export function ProjectCard({
         // mostly cares about "is something happening?".
         onToolCall: (_step, tool) => {
           setAuditCurrentTool(tool);
+          // 0.8.4 (#319 / B3) — bump the per-step tool-call counter so
+          // the chip reads `🔧 Tool (N)`. Increments on every tool
+          // call regardless of name change — even Read → Read → Read
+          // makes the count climb, which is what we want (user sees
+          // forward motion in a tool-only phase).
+          setAuditToolCallCount(prev => (prev ?? 0) + 1);
         },
         // 0.8.3 root-cause fix — the CLI exited 0 but the step's
         // target_file is empty / truncated (e.g. agent crashed
@@ -432,6 +484,7 @@ export function ProjectCard({
           auditActiveRef.current = false;
           setAuditActive(false);
           setAuditAbortController(null);
+          setAuditCompletedTick((t) => t + 1);
           clearAuditCheckpoint(proj.id);
           onRefetch();
           onRefetchDiscussions();
@@ -589,6 +642,12 @@ export function ProjectCard({
           if (typeof p.total_tokens_so_far === 'number') setAuditTotalTokens(p.total_tokens_so_far);
           if (typeof p.current_tool === 'string') setAuditCurrentTool(p.current_tool);
           else if (p.current_tool === null) setAuditCurrentTool(null);
+          // 0.8.4 (#319 / B3) — re-seed the tool-call counter from
+          // the poll snapshot. The SSE-driven counter survives buffer
+          // stalls because the backend tracker holds the running
+          // count; the frontend just mirrors it.
+          if (typeof p.current_tool_call_count === 'number') setAuditToolCallCount(p.current_tool_call_count);
+          else if (p.current_tool_call_count === null) setAuditToolCallCount(null);
         } else {
           // Server reports nothing → either the audit wrapped up while we
           // were away, the checkpoint is orphaned (server restart, etc.),
@@ -610,6 +669,7 @@ export function ProjectCard({
           setAuditLastStepTokens(null);
           setAuditTotalTokens(null);
           setAuditCurrentTool(null);
+          setAuditToolCallCount(null);
           if (auditPollRef.current) {
             clearInterval(auditPollRef.current);
             auditPollRef.current = null;
@@ -735,14 +795,19 @@ export function ProjectCard({
             ) : (
               <span className="dash-badge-gray"><Cpu size={9} /> AI audit</span>
             )}
-            {/* Validated badge */}
-            {proj.audit_status === 'Validated' ? (
+            {/* Validated badge — hidden during an active audit (#326 / F6).
+               When `auditActive=true`, the previous "Validated" / TD
+               count / audit-date badges describe a stale state and
+               confuse the user ("Validated but in progress?"). The
+               "AI audit X/10" orange badge above is the only truth
+               while a run is in flight. */}
+            {!auditActive && proj.audit_status === 'Validated' ? (
               <span className="dash-badge-green"><ShieldCheck size={9} /> Validated</span>
-            ) : validationInProgress ? (
+            ) : !auditActive && validationInProgress ? (
               <span className="dash-badge-orange cursor-pointer" onClick={(e) => { e.stopPropagation(); if (validationDisc) onOpenDiscussion(validationDisc.id); onNavigate('discussions'); }}>
                 <Loader2 size={9} style={{ animation: 'spin 1s linear infinite' }} /> Validation
               </span>
-            ) : (proj.audit_status === 'Audited' || proj.audit_status === 'TemplateInstalled') ? (
+            ) : !auditActive && (proj.audit_status === 'Audited' || proj.audit_status === 'TemplateInstalled') ? (
               <span className="dash-badge-gray"><ShieldCheck size={9} /> Validated</span>
             ) : null}
             {/* Tech-debt count badge. 0.8.1: surfaced so users can spot
@@ -750,7 +815,7 @@ export function ProjectCard({
                 detail files under `docs/tech-debt/` and table rows
                 in `docs/inconsistencies-tech-debt.md`. Click jumps to
                 the docs viewer with the tech-debt section open. */}
-            {(proj.tech_debt_count ?? 0) > 0 && (
+            {!auditActive && (proj.tech_debt_count ?? 0) > 0 && (
               <span
                 className="dash-badge-tech-debt"
                 title={t('projects.techDebtBadge', proj.tech_debt_count!)}
@@ -772,8 +837,8 @@ export function ProjectCard({
                 <AlertTriangle size={9} /> {proj.tech_debt_count} TD
               </span>
             )}
-            {/* Drift badge */}
-            {driftStatus && driftStatus.stale_sections.length > 0 && (
+            {/* Drift badge — hidden during active audit (#326 / F6) */}
+            {!auditActive && driftStatus && driftStatus.stale_sections.length > 0 && (
               <>
                 <span
                   className="dash-badge-drift"
@@ -796,10 +861,15 @@ export function ProjectCard({
                 </button>
               </>
             )}
-            {/* Audit date */}
-            {driftStatus?.audit_date && (
+            {/* Audit date — hidden during active audit (#326 / F6) */}
+            {!auditActive && driftStatus?.audit_date && (
               <span className="dash-audit-date">
-                {t('audit.auditDate', new Date(driftStatus.audit_date).toLocaleDateString())}
+                {/* 0.8.4 (#324 / F4) — locale-aware format so the FR
+                   user reads "15 mai 2026" and the EN user reads
+                   "May 15, 2026" — pre-fix this used the browser's
+                   raw `toLocaleDateString()` (no locale arg) which
+                   produced US "5/15/2026" inside a FR app. */}
+                {t('audit.auditDate', new Date(driftStatus.audit_date).toLocaleDateString(locale, { day: '2-digit', month: 'short', year: 'numeric' }))}
               </span>
             )}
           </div>
@@ -972,6 +1042,7 @@ export function ProjectCard({
                   <BookOpen size={14} /> <span className="dash-section-title">{t('projects.docAi')}</span>
                 </button>
                 {isSectionOpen('docAi') && (
+                  <>
                   <AiDocViewer
                     projectId={proj.id}
                     initialExpandFolder={docDeepLink}
@@ -997,6 +1068,7 @@ export function ProjectCard({
                     onNavigate('discussions');
                   }}
                 />
+                  </>
               )}
               </div>
             );
@@ -1151,11 +1223,44 @@ export function ProjectCard({
             </button>
             {isSectionOpen('aiContext') && (
               <>
+                {/* 0.8.4 — audit history panel (chips + per-step table).
+                   Mounted here at the top of AI Context so it's directly
+                   adjacent to the launcher row. Pre-fix it lived inside
+                   "Documentation projet" which is a file browser, not an
+                   audit surface — users had to expand the wrong section
+                   to find their previous runs' timings. The panel
+                   self-hides when history is empty (fresh project). */}
+                <AuditRecapPanel
+                  projectId={proj.id}
+                  refreshTrigger={auditCompletedTick}
+                />
                 {(proj.audit_status === 'NoTemplate' || (proj.audit_status === 'TemplateInstalled' && !bootstrapInProgress)) && !auditActive && (
                   <div className="dash-audit-pad">
                     <p className="dash-audit-warning">
                       <AlertTriangle size={11} /> {proj.audit_status === 'NoTemplate' ? t('audit.noTemplate') : t('audit.description')}
                     </p>
+                    {briefingFormOpen && (
+                      <BriefingForm
+                        projectId={proj.id}
+                        agent={auditAgentChoice ?? agents.filter(canAudit)[0]?.agent_type ?? 'ClaudeCode'}
+                        onClose={() => setBriefingFormOpen(false)}
+                        onSaved={(discId) => {
+                          // 0.8.4 UX fix — single briefing flow. The form
+                          // submits the answers AND spawns the AI review
+                          // disc. Refetch the project list so the briefing
+                          // notes pill updates, refetch discussions so the
+                          // new disc shows up in the sidebar, then jump
+                          // into the disc if it was created.
+                          onRefetch();
+                          onRefetchDiscussions();
+                          if (discId) {
+                            onAutoRunDiscussion(discId);
+                            onNavigate('discussions');
+                          }
+                        }}
+                        toast={toast}
+                      />
+                    )}
                     <div className="flex-row gap-4 mb-4">
                       {briefingDisc && !briefingDone ? (
                         <button
@@ -1165,38 +1270,23 @@ export function ProjectCard({
                           <MessageSquare size={12} /> {t('audit.resumeBriefing')}
                         </button>
                       ) : !briefingDone ? (
+                        // 0.8.4 UX fix — ONE entry point. The form is the
+                        // canonical briefing flow now: fill it, save, AI
+                        // reviews. Pre-fix we had 2 independent buttons
+                        // ("Briefing formulaire" + "Briefing IA") that
+                        // let users fork into inconsistent state. The
+                        // form-only flow keeps the AI value (review +
+                        // clarifications on ambiguous answers) while
+                        // killing the "did I do both? did I do neither?"
+                        // confusion.
                         <button
                           className="dash-icon-btn dash-btn-info"
-                          onClick={async () => {
-                            // Guard against double / triple click — the
-                            // backend's `start_briefing` is not idempotent
-                            // (each call creates a new discussion), so a
-                            // distracted operator could end up with two
-                            // briefing discs on the same project. The state
-                            // alone is not enough: two synchronous clicks
-                            // both read `briefingStarting === false` from
-                            // the closure before React re-renders the
-                            // disabled prop. The ref reads/writes
-                            // synchronously so the second click bails out.
-                            if (briefingStartingRef.current) return;
-                            briefingStartingRef.current = true;
-                            setBriefingStarting(true);
-                            const agent = auditAgentChoice ?? agents.filter(canAudit)[0]?.agent_type ?? 'ClaudeCode';
-                            try {
-                              const { discussion_id } = await projectsApi.startBriefing(proj.id, agent);
-                              onRefetchDiscussions();
-                              onAutoRunDiscussion(discussion_id);
-                              onNavigate('discussions');
-                            } catch (err) {
-                              toast(String(err), 'error');
-                            } finally {
-                              briefingStartingRef.current = false;
-                              setBriefingStarting(false);
-                            }
-                          }}
-                          disabled={briefingStarting || agents.filter(canAudit).length === 0}
+                          onClick={() => setBriefingFormOpen(true)}
+                          disabled={agents.filter(canAudit).length === 0 || briefingStarting}
+                          title={t('briefing.formBtnTooltip')}
+                          data-testid="briefing-open-form-btn"
                         >
-                          <MessageSquare size={12} /> {t('audit.startBriefing')}
+                          <FileText size={12} /> {t('briefing.formBtn')}
                         </button>
                       ) : (
                         <span className="dash-briefing-done">
@@ -1244,14 +1334,36 @@ export function ProjectCard({
                           <option value="" disabled>{t('disc.noAgent')}</option>
                         )}
                       </select>
+                      {/* 0.8.4 (#287) — audit kind dropdown. Sub-audits stay
+                         disabled until the project has a Full audit baseline
+                         (Audited or Validated). Otherwise the targeted
+                         agent would have no `inconsistencies-*.md` to
+                         refine against, producing a half-baked re-discovery
+                         instead of a focused re-scan. */}
+                      <select
+                        className="dash-audit-select"
+                        data-testid="audit-kind-select"
+                        value={auditKindChoice}
+                        onChange={e => setAuditKindChoice(e.target.value as AuditKind)}
+                        title={t('audit.kindSelector.tooltip')}
+                      >
+                        <option value="Full">{t('audit.kind.Full')}</option>
+                        <option value="Security" disabled>{t('audit.kind.Security')} {t('audit.kind.afterFull')}</option>
+                        <option value="Docker" disabled>{t('audit.kind.Docker')} {t('audit.kind.afterFull')}</option>
+                        <option value="Performance" disabled>{t('audit.kind.Performance')} {t('audit.kind.afterFull')}</option>
+                        <option value="Accessibility" disabled>{t('audit.kind.Accessibility')} {t('audit.kind.afterFull')}</option>
+                        <option value="Rgaa" disabled>{t('audit.kind.Rgaa')} {t('audit.kind.afterFull')}</option>
+                        <option value="Database" disabled>{t('audit.kind.Database')} {t('audit.kind.afterFull')}</option>
+                        <option value="ApiDesign" disabled>{t('audit.kind.ApiDesign')} {t('audit.kind.afterFull')}</option>
+                      </select>
                       <button
                         className="dash-icon-btn dash-btn-accent-border"
-                        onClick={() => handleFullAudit()}
+                        onClick={() => handleFullAudit(undefined, auditKindChoice)}
                         disabled={agents.filter(canAudit).length === 0}
                       >
                         <Play size={12} /> {resumableAudit
                           ? t('audit.resumeFromStep', resumableAudit.last_completed_step + 1)
-                          : t('audit.startFullAudit')}
+                          : t('audit.kindSelector.launchLabel', t(`audit.kind.${auditKindChoice}`))}
                       </button>
                     </div>
                   </div>
@@ -1294,6 +1406,11 @@ export function ProjectCard({
                       {auditCurrentTool && (
                         <span className="text-2xs text-ghost" title={t('audit.currentToolTooltip')}>
                           {t('audit.currentTool', auditCurrentTool)}
+                          {/* 0.8.4 (#319 / B3) — show the running tool-call
+                             count so the user sees forward motion during
+                             long tool-only phases (e.g. Step 9 writes 25+
+                             TD files without an intermediate `Usage` event). */}
+                          {auditToolCallCount != null && auditToolCallCount > 0 && ` (${auditToolCallCount})`}
                         </span>
                       )}
                       <button
@@ -1344,14 +1461,30 @@ export function ProjectCard({
                           <option value="" disabled>{t('disc.noAgent')}</option>
                         )}
                       </select>
+                      <select
+                        className="dash-audit-select"
+                        data-testid="audit-kind-select-bootstrapped"
+                        value={auditKindChoice}
+                        onChange={e => setAuditKindChoice(e.target.value as AuditKind)}
+                        title={t('audit.kindSelector.tooltip')}
+                      >
+                        <option value="Full">{t('audit.kind.Full')}</option>
+                        <option value="Security" disabled>{t('audit.kind.Security')} {t('audit.kind.afterFull')}</option>
+                        <option value="Docker" disabled>{t('audit.kind.Docker')} {t('audit.kind.afterFull')}</option>
+                        <option value="Performance" disabled>{t('audit.kind.Performance')} {t('audit.kind.afterFull')}</option>
+                        <option value="Accessibility" disabled>{t('audit.kind.Accessibility')} {t('audit.kind.afterFull')}</option>
+                        <option value="Rgaa" disabled>{t('audit.kind.Rgaa')} {t('audit.kind.afterFull')}</option>
+                        <option value="Database" disabled>{t('audit.kind.Database')} {t('audit.kind.afterFull')}</option>
+                        <option value="ApiDesign" disabled>{t('audit.kind.ApiDesign')} {t('audit.kind.afterFull')}</option>
+                      </select>
                       <button
                         className="dash-icon-btn dash-btn-accent-border"
-                        onClick={() => handleFullAudit()}
+                        onClick={() => handleFullAudit(undefined, auditKindChoice)}
                         disabled={agents.filter(canAudit).length === 0}
                       >
                         <Play size={12} /> {resumableAudit
                           ? t('audit.resumeFromStep', resumableAudit.last_completed_step + 1)
-                          : t('audit.startFullAudit')}
+                          : t('audit.kindSelector.launchLabel', t(`audit.kind.${auditKindChoice}`))}
                       </button>
                     </div>
                   </div>
@@ -1395,18 +1528,58 @@ export function ProjectCard({
                         </button>
                       </>
                     )}
+                    {/* 0.8.4 (#318 / B2) — post-Full launcher BEFORE validation.
+                       Lets the user chain Full → Security/RGAA without
+                       having to finish the validation discussion first.
+                       The Full baseline (docs/ + index files) exists at
+                       this point so sub-audits have something to refine. */}
+                    {!validationInProgress && (
+                      <div className="flex-row gap-4" style={{ marginTop: 8 }}>
+                        <select
+                          className="dash-audit-select"
+                          value={auditAgentChoice ?? agents.filter(canAudit)[0]?.agent_type ?? 'ClaudeCode'}
+                          onChange={e => setAuditAgentChoice(e.target.value as AgentType)}
+                        >
+                          {agents.filter(canAudit).map(a => (
+                            <option key={a.agent_type} value={a.agent_type}>{a.name}</option>
+                          ))}
+                          {agents.filter(canAudit).length === 0 && (
+                            <option value="" disabled>{t('disc.noAgent')}</option>
+                          )}
+                        </select>
+                        <select
+                          className="dash-audit-select"
+                          data-testid="audit-kind-select-audited"
+                          value={auditKindChoice}
+                          onChange={e => setAuditKindChoice(e.target.value as AuditKind)}
+                          title={t('audit.kindSelector.tooltip')}
+                        >
+                          <option value="Full">{t('audit.kind.Full')}</option>
+                          <option value="Security">{t('audit.kind.Security')}</option>
+                          <option value="Docker">{t('audit.kind.Docker')}</option>
+                          <option value="Performance">{t('audit.kind.Performance')}</option>
+                          <option value="Accessibility">{t('audit.kind.Accessibility')}</option>
+                          <option value="Rgaa">{t('audit.kind.Rgaa')}</option>
+                          <option value="Database">{t('audit.kind.Database')}</option>
+                          <option value="ApiDesign">{t('audit.kind.ApiDesign')}</option>
+                        </select>
+                        <button
+                          className="dash-icon-btn dash-btn-accent-border"
+                          onClick={() => handleFullAudit(undefined, auditKindChoice)}
+                          disabled={agents.filter(canAudit).length === 0}
+                        >
+                          <Play size={12} /> {t('audit.kindSelector.launchLabel', t(`audit.kind.${auditKindChoice}`))}
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )}
 
                 {proj.audit_status === 'Validated' && !auditActive && (
+                  <>
                   <div className="dash-audit-validated">
                     <ShieldCheck size={11} /> {t('audit.done')}
-                    {/* 0.8.3 — quick access to the TD index post-validation.
-                       Same deep-link pattern as the TD badge on the card
-                       header: expand the card if collapsed + open the
-                       AiDocViewer at `docs/tech-debt/`. Shown only when
-                       there is at least one TD to look at — surfacing a
-                       button to an empty folder would be pointless. */}
+                    {/* 0.8.3 — quick access to the TD index post-validation. */}
                     {(proj.tech_debt_count ?? 0) > 0 && (
                       <button
                         type="button"
@@ -1422,6 +1595,51 @@ export function ProjectCard({
                       </button>
                     )}
                   </div>
+                  {/* 0.8.4 (#287) — post-baseline re-audit row. SAME shape as
+                     the TemplateInstalled/Bootstrapped launch row (agent +
+                     kind + button). Sub-audits are ENABLED here because the
+                     Full audit baseline exists. */}
+                  <div className="dash-audit-pad">
+                    <p className="dash-audit-desc">{t('audit.kindSelector.reAuditHint')}</p>
+                    <div className="flex-row gap-4">
+                      <select
+                        className="dash-audit-select"
+                        value={auditAgentChoice ?? agents.filter(canAudit)[0]?.agent_type ?? 'ClaudeCode'}
+                        onChange={e => setAuditAgentChoice(e.target.value as AgentType)}
+                      >
+                        {agents.filter(canAudit).map(a => (
+                          <option key={a.agent_type} value={a.agent_type}>{a.name}</option>
+                        ))}
+                        {agents.filter(canAudit).length === 0 && (
+                          <option value="" disabled>{t('disc.noAgent')}</option>
+                        )}
+                      </select>
+                      <select
+                        className="dash-audit-select"
+                        data-testid="audit-kind-select-validated"
+                        value={auditKindChoice}
+                        onChange={e => setAuditKindChoice(e.target.value as AuditKind)}
+                        title={t('audit.kindSelector.tooltip')}
+                      >
+                        <option value="Full">{t('audit.kind.Full')}</option>
+                        <option value="Security">{t('audit.kind.Security')}</option>
+                        <option value="Docker">{t('audit.kind.Docker')}</option>
+                        <option value="Performance">{t('audit.kind.Performance')}</option>
+                        <option value="Accessibility">{t('audit.kind.Accessibility')}</option>
+                        <option value="Rgaa">{t('audit.kind.Rgaa')}</option>
+                        <option value="Database">{t('audit.kind.Database')}</option>
+                        <option value="ApiDesign">{t('audit.kind.ApiDesign')}</option>
+                      </select>
+                      <button
+                        className="dash-icon-btn dash-btn-accent-border"
+                        onClick={() => handleFullAudit(undefined, auditKindChoice)}
+                        disabled={agents.filter(canAudit).length === 0}
+                      >
+                        <Play size={12} /> {t('audit.kindSelector.launchLabel', auditKindChoice === 'Full' ? t('audit.kind.Full') : t(`audit.kind.${auditKindChoice}`))}
+                      </button>
+                    </div>
+                  </div>
+                  </>
                 )}
               </>
             )}

@@ -89,6 +89,16 @@ pub struct Discussion {
     pub test_mode_stash_ref: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    // 0.8.4 (#294) — cross-agent memory source binding intentionally
+    // NOT exposed on this struct. The columns
+    // `source_agent / source_session_id / imported_at / diverged_at`
+    // exist on the `discussions` table (migration 054) as a fast
+    // "current source pointer" but are read through dedicated DB
+    // helpers + a sibling `DiscussionSource` struct in
+    // `db::disc_source_history`. Keeping `Discussion` lean avoids
+    // breaking 50+ test fixtures + every code site that constructs
+    // a discussion (~30 sites). The full link history lives in the
+    // append-only `disc_source_history` table.
 }
 
 fn default_workspace_mode() -> String { "Direct".into() }
@@ -116,6 +126,12 @@ pub struct DiscussionMessage {
     pub author_pseudo: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author_avatar_email: Option<String>,
+    /// 0.8.4 (#294) — when this message came from a CLI transcript
+    /// import, the source-side message id. Used by `disc_append` to
+    /// dedupe re-pushes of the same exported transcript. NULL = native
+    /// Kronn message (created via the UI / API, not imported).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_msg_id: Option<String>,
 }
 
 /// Per-discussion summary strategy. Pre-fix the auto-summary loop fired

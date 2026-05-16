@@ -1,5 +1,5 @@
 import { useState, useRef, memo } from 'react';
-import { ShieldCheck, Zap, Rocket, GitBranch, Loader2, Users, Users2, Square, Star } from 'lucide-react';
+import { ShieldCheck, Zap, Rocket, GitBranch, Loader2, Users, Users2, Square, Star, Download, AlertTriangle } from 'lucide-react';
 import type { Discussion } from '../types/generated';
 import { isValidationDisc, isBriefingDisc, isBootstrapDisc } from '../lib/constants';
 import { formatRelativeTime } from '../lib/relativeTime';
@@ -23,10 +23,21 @@ export interface SwipeableDiscItemProps {
   onTogglePin?: (discId: string, pinned: boolean) => void;
   t: (key: string, ...args: (string | number)[]) => string;
   archiveLabel?: string;
+  /**
+   * 0.8.4 (#294) — cross-agent source binding. When set, the row
+   * renders a "📥 ClaudeCode" badge so the user can see at a glance
+   * that this disc was imported from an external CLI session.
+   * `diverged` flips the icon to a warning when the disc has been
+   * edited inside Kronn AFTER the import (a re-push would overwrite
+   * the user's edits).
+   */
+  sourceAgent?: string | null;
+  sourceDiverged?: boolean;
 }
 
 export const SwipeableDiscItem = memo(function SwipeableDiscItem({
   disc, isActive, lastSeenCount, isSending, onSelect, onArchive, onDelete, onStop, t, archiveLabel,
+  sourceAgent, sourceDiverged,
 }: SwipeableDiscItemProps) {
   const [offsetX, setOffsetX] = useState(0);
   const [swiping, setSwiping] = useState(false);
@@ -126,6 +137,27 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
                 show which discs are in Favorites. The toggle lives in
                 ChatHeader where there's room for a proper button. */}
             {disc.pinned && <Star size={9} style={{ color: 'var(--kr-warning)', fill: 'var(--kr-warning)', flexShrink: 0 }} />}
+            {sourceAgent && (
+              <span
+                data-testid="disc-source-badge"
+                className="disc-source-badge"
+                title={sourceDiverged
+                  ? t('disc.source.divergedHint', sourceAgent)
+                  : t('disc.source.importedHint', sourceAgent)}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 2,
+                  fontSize: 9, padding: '1px 4px', borderRadius: 4,
+                  background: sourceDiverged
+                    ? 'rgba(220, 53, 69, 0.15)'
+                    : 'var(--kr-bg-elevated, rgba(255,255,255,0.06))',
+                  color: sourceDiverged ? 'var(--kr-danger)' : 'var(--kr-text-secondary)',
+                  flexShrink: 0,
+                }}
+              >
+                {sourceDiverged ? <AlertTriangle size={8} /> : <Download size={8} />}
+                {sourceAgent}
+              </span>
+            )}
           </div>
           <div className="disc-item-meta">
             {isSending && <Loader2 size={8} style={{ animation: 'spin 1s linear infinite', color: 'var(--kr-accent-ink)' }} />}

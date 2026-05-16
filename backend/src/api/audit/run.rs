@@ -184,6 +184,9 @@ pub async fn run_audit(
                 } else {
                     tracing::info!("Wrote docs/checksums.json with {} mappings", mappings.len());
                 }
+                if let Err(e) = crate::core::kronn_state::record_audit(&pp, "full") {
+                    tracing::warn!("Failed to record audit in .kronn.json: {}", e);
+                }
             }).await;
         }
 
@@ -237,6 +240,84 @@ pub async fn audit_status_all(
         Err(_) => return Json(ApiResponse::err("audit tracker lock poisoned")),
     };
     Json(ApiResponse::ok(snapshot))
+}
+
+/// 0.8.4 (#298) — fetch the most-recent **completed** audit run for a
+/// project, or `None`. Sister of `audit_latest_resumable` (which only
+/// returns Interrupted rows); this one returns Completed rows so the
+/// ProjectCard recap panel knows which `audit_run_id` to feed to
+/// `audit_run_steps` below.
+pub async fn audit_latest(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<Option<crate::models::AuditRun>>> {
+    let result = state.db.with_conn(move |conn| {
+        crate::db::audit_runs::latest_completed(conn, &id)
+    }).await;
+    match result {
+        Ok(row) => Json(ApiResponse::ok(row)),
+        Err(e) => Json(ApiResponse::err(format!("db: {e}"))),
+    }
+}
+
+/// 0.8.4 (#317 / B1) — admin cleanup: force-mark every `Running`
+/// audit_run as Interrupted, regardless of age. Used by the recap-
+/// panel "Nettoyer l'historique" button when the operator KNOWS
+/// nothing is actually running (just rebuilt docker, mass-killed
+/// stuck audits, etc.). Returns the count of rows touched.
+///
+/// Boot-time reconcile (30-min threshold) is automatic in
+/// `Database::open`. This endpoint is the manual escape hatch.
+pub async fn audit_runs_cleanup(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<u64>> {
+    let result = state.db.with_conn(|conn| {
+        crate::db::audit_runs::reconcile_all_running(conn)
+    }).await;
+    match result {
+        Ok(n) => Json(ApiResponse::ok(n)),
+        Err(e) => Json(ApiResponse::err(format!("db: {e}"))),
+    }
+}
+
+/// 0.8.4 (#298) — history of recent audit runs for a project, newest
+/// first. Powers the audit-history chip strip on the ProjectCard recap
+/// panel: each chip = one row from `audit_runs`, click switches the
+/// per-step table to that run's data. Capped at 20 to avoid heavy
+/// renders on projects with hundreds of historical audits.
+pub async fn audit_history(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<Vec<crate::models::AuditRun>>> {
+    let result = state.db.with_conn(move |conn| {
+        crate::db::audit_runs::list_recent(conn, &id, 20)
+    }).await;
+    match result {
+        Ok(runs) => Json(ApiResponse::ok(runs)),
+        Err(e) => Json(ApiResponse::err(format!("db: {e}"))),
+    }
+}
+
+/// 0.8.4 (#298) — list per-step metrics for a finished (or running)
+/// audit run. Powers the "▾ Détails du dernier audit" collapsed panel
+/// on ProjectCard: one row per step with file label, duration_ms,
+/// step_tokens, cumulative_tokens, success/warning. Ordered by
+/// step_index ASC so the UI can render the timeline directly.
+///
+/// Returns an empty Vec for run_ids with no recorded steps yet (which
+/// is also the legacy case — runs that completed before 0.8.4 don't
+/// have an `audit_run_steps` row).
+pub async fn audit_run_steps(
+    State(state): State<AppState>,
+    Path(run_id): Path<String>,
+) -> Json<ApiResponse<Vec<crate::models::AuditRunStep>>> {
+    let result = state.db.with_conn(move |conn| {
+        crate::db::audit_runs::list_audit_steps(conn, &run_id)
+    }).await;
+    match result {
+        Ok(steps) => Json(ApiResponse::ok(steps)),
+        Err(e) => Json(ApiResponse::err(format!("db: {e}"))),
+    }
 }
 
 /// 0.8.3 (#311) — fetch the most-recent resumable audit run for a project,

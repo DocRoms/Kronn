@@ -246,7 +246,7 @@ pub async fn orchestrate(
                 timestamp: Utc::now(),
                 tokens_used: 0,
                 auth_mode: None,
-            model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None,
+            model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None, source_msg_id: None,
             };
             let did = disc_id.clone();
             if let Err(e) = state.db.with_conn(move |conn| {
@@ -405,7 +405,7 @@ pub async fn orchestrate(
                                 timestamp: Utc::now(),
                                 tokens_used: result.tokens_used,
                                 auth_mode: Some(auth_mode_for(agent_type, &tokens)),
-                                model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None,
+                                model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None, source_msg_id: None,
                             };
                             let did = disc_id.clone();
                             if let Err(e) = state.db.with_conn(move |conn| {
@@ -479,7 +479,7 @@ pub async fn orchestrate(
                             timestamp: Utc::now(),
                             tokens_used: result.tokens_used,
                             auth_mode: Some(auth_mode_for(&primary_agent_type, &tokens)),
-                            model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None,
+                            model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None, source_msg_id: None,
                         };
                         let did = disc_id.clone();
                         if let Err(e) = state.db.with_conn(move |conn| {
@@ -756,7 +756,7 @@ pub(super) async fn maybe_generate_summary(
                             timestamp: chrono::Utc::now(),
                             tokens_used: 0,
                             auth_mode: None,
-                            model_tier: Some("economy".into()), cost_usd: None, author_pseudo: None, author_avatar_email: None,
+                            model_tier: Some("economy".into()), cost_usd: None, author_pseudo: None, author_avatar_email: None, source_msg_id: None,
                         };
                         crate::db::discussions::insert_message(conn, &did2, &sys_msg)?;
                         Ok(())

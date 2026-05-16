@@ -81,6 +81,71 @@ pub(crate) fn format_kronn_projects_universe_for_prompt(
 /// Each entry shows kind + name + location + (optional) description
 /// — agents see all four fields and decide when/how to read each
 /// repo.
+/// 0.8.4 (#295) — render the linked_repos table for `docs/linked-repos.md`.
+/// Same content as the prompt-injection block but without the
+/// "read this NOW" framing — this is a doc artifact the agent reads
+/// on-demand. Returns `None` when there are no companion repos so
+/// the caller can `unlink` the file (avoids stub clutter).
+pub(crate) fn format_linked_repos_for_docs(repos: &[LinkedRepo]) -> Option<String> {
+    if repos.is_empty() {
+        return None;
+    }
+    let mut out = String::from(
+        "# Linked repositories\n\n\
+         > Companion repos for cross-project context. Read this file ONLY when the current task references something not in this repo.\n\n\
+         ## How to read a linked repo\n\n\
+         Start with `<repo-path>/docs/AGENTS.md` (same Kronn entry point used by this repo).\n\
+         Only fall back to file scans / READMEs if AGENTS.md doesn't answer.\n\n\
+         ## Repositories\n\n"
+    );
+    for r in repos {
+        out.push_str(&format!(
+            "- **{name}** ({kind}) → `{location}`",
+            name = r.name,
+            kind = r.kind,
+            location = r.location,
+        ));
+        if !r.description.is_empty() {
+            out.push_str(&format!(" — {}", r.description));
+        }
+        out.push('\n');
+    }
+    Some(out)
+}
+
+/// 0.8.4 (#295) — write `docs/linked-repos.md` from the project's
+/// `linked_repos` list, or delete the file when the list is empty.
+/// Idempotent. Called on project CRUD (linked_repos PUT) AND on each
+/// audit Phase 1 so existing projects pick up the file on next audit.
+///
+/// Two variants:
+///   - `sync_linked_repos_doc(project_path)` — auto-detects `docs/`
+///     via `detect_docs_dir`; no-op if not bootstrapped yet.
+///   - `sync_linked_repos_doc_in(docs_dir)` — called by the audit
+///     Phase 1 which already knows the exact docs path.
+pub(crate) fn sync_linked_repos_doc(project_path: &std::path::Path, repos: &[LinkedRepo]) -> std::io::Result<()> {
+    let docs_dir = crate::core::scanner::detect_docs_dir(project_path);
+    if !docs_dir.is_dir() {
+        return Ok(());
+    }
+    sync_linked_repos_doc_in(&docs_dir, repos)
+}
+
+pub(crate) fn sync_linked_repos_doc_in(docs_dir: &std::path::Path, repos: &[LinkedRepo]) -> std::io::Result<()> {
+    if !docs_dir.is_dir() {
+        return Ok(());
+    }
+    let target = docs_dir.join("linked-repos.md");
+    match format_linked_repos_for_docs(repos) {
+        Some(body) => std::fs::write(&target, body),
+        None => match std::fs::remove_file(&target) {
+            Ok(_) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        },
+    }
+}
+
 pub(crate) fn format_linked_repos_for_prompt(repos: &[LinkedRepo]) -> Option<String> {
     if repos.is_empty() {
         return None;
@@ -120,9 +185,41 @@ pub(crate) fn format_linked_repos_for_prompt(repos: &[LinkedRepo]) -> Option<Str
 /// (the candidate-pool for companion suggestion). Both queries are
 /// cheap; callers wire this helper into any agent-prompt assembly that
 /// has access to `AppState`.
+///
+/// 0.8.4 (#295) — only `compute_companion_context_for_audit` injects
+/// `linked_repos` now; the disc/WF surfaces call the regular version
+/// which drops `linked_repos` since `docs/linked-repos.md` is on disk
+/// and the agent reads it on-demand (saves 500-2000 tokens/message).
+/// The Kronn-projects-universe block stays everywhere — it's small
+/// + lists Kronn-managed companions which is qualitatively different.
 pub(crate) async fn compute_companion_context(
     state: &AppState,
     project_id: Option<&str>,
+) -> String {
+    compute_companion_context_inner(state, project_id, false).await
+}
+
+/// 0.8.4 (#295) — audit-only variant that ALSO injects the
+/// `linked_repos` block (cross-repo findings depend on it — proven
+/// -39% tokens on big-ticket migrations). Disc/WF use the regular fn
+/// which skips linked_repos to keep per-message prompts lean.
+///
+/// Today the audit pipeline composes its own block via
+/// `format_linked_repos_for_prompt` for finer-grained control over
+/// the prompt sections; this helper is kept (with its dedicated tests)
+/// as the canonical entry point for future audit-surface refactors.
+#[allow(dead_code)]
+pub(crate) async fn compute_companion_context_for_audit(
+    state: &AppState,
+    project_id: Option<&str>,
+) -> String {
+    compute_companion_context_inner(state, project_id, true).await
+}
+
+async fn compute_companion_context_inner(
+    state: &AppState,
+    project_id: Option<&str>,
+    include_linked_repos: bool,
 ) -> String {
     let Some(pid) = project_id else {
         return String::new();
@@ -137,7 +234,14 @@ pub(crate) async fn compute_companion_context(
     let Some(project) = project_opt else {
         return String::new();
     };
-    let linked_block = format_linked_repos_for_prompt(&project.linked_repos);
+    // 0.8.4 (#295) — gate the linked_repos injection on the
+    // `include_linked_repos` flag. False = disc/WF (push→pull
+    // migration), True = audit (cross-repo findings need it inline).
+    let linked_block = if include_linked_repos {
+        format_linked_repos_for_prompt(&project.linked_repos)
+    } else {
+        None
+    };
     let pid_for_universe = pid.to_string();
     let universe_block = match state
         .db
@@ -462,11 +566,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compute_companion_context_emits_linked_repos_block_when_present() {
-        // Project with at least one linked repo → block is included.
-        // Confirms the helper actually calls
-        // `format_linked_repos_for_prompt` and concatenates with the
-        // `\n\n` pre-padding so the caller can splice without delimiters.
+    async fn compute_companion_context_drops_linked_repos_for_disc_wf_pulls() {
+        // 0.8.4 (#295) — the disc/WF code path uses
+        // `compute_companion_context` (no `_for_audit`). It must NOT
+        // inject the linked_repos block inline anymore — the agent
+        // reads `docs/linked-repos.md` on-demand instead, saving
+        // 500-2000 tokens per message on a long discussion. The
+        // audit variant gets the inline block via
+        // `compute_companion_context_for_audit` (pinned in the test
+        // right below).
         let state = test_state();
         let pid = "p_test".to_string();
         let project = Project {
@@ -487,13 +595,42 @@ mod tests {
         }).await.expect("insert project");
 
         let ctx = compute_companion_context(&state, Some(&pid)).await;
-        assert!(ctx.contains("## Linked repositories"),
-            "linked_repos block must be present, got: {ctx:?}");
+        assert!(!ctx.contains("Linked repositories (companion repos)"),
+            "disc/WF must NOT inject linked_repos inline anymore (read docs/linked-repos.md on-demand), got: {ctx:?}");
+    }
+
+    #[tokio::test]
+    async fn compute_companion_context_for_audit_keeps_linked_repos_inline() {
+        // 0.8.4 (#295) — the audit code path uses
+        // `compute_companion_context_for_audit` which KEEPS the inline
+        // block. Cross-repo findings depend on it (proven -39% tokens
+        // + bug catch on EW-7247).
+        let state = test_state();
+        let pid = "p_test".to_string();
+        let project = Project {
+            id: pid.clone(),
+            name: "test-current".into(),
+            path: "/r/test-current".into(),
+            linked_repos: vec![lr(
+                "test-api",
+                "api",
+                "/r/test-api",
+                "GraphQL schema lives here",
+            )],
+            ..mk_project(&pid, "test-current", "/r/test-current")
+        };
+        state.db.with_conn(move |conn| {
+            crate::db::projects::insert_project(conn, &project)?;
+            Ok::<_, anyhow::Error>(())
+        }).await.expect("insert project");
+
+        let ctx = compute_companion_context_for_audit(&state, Some(&pid)).await;
+        assert!(ctx.contains("Linked repositories (companion repos)"),
+            "audit variant must keep linked_repos block inline, got: {ctx:?}");
         assert!(ctx.contains("**test-api** (api)"),
             "linked repo entry must be rendered");
         // Pre-padding so the caller can splice without worrying about
-        // delimiters — the very first char of the context should be
-        // newline.
+        // delimiters — the very first char of the context should be newline.
         assert!(ctx.starts_with("\n\n"),
             "context must be pre-padded with \\n\\n");
     }
@@ -648,4 +785,69 @@ mod tests {
         assert!(!ctx.contains("**current** — `/r/current`"),
             "current project must be excluded from its own candidate pool");
     }
+
+    // ─── 0.8.4 (#295) — push → pull migration ─────────────────────────
+
+    #[test]
+    fn format_linked_repos_for_docs_returns_none_when_empty() {
+        // Empty list → no file. Caller deletes any stale on-disk file.
+        assert!(format_linked_repos_for_docs(&[]).is_none());
+    }
+
+    #[test]
+    fn format_linked_repos_for_docs_renders_pull_friendly_header() {
+        // The doc artifact framing is different from the prompt block:
+        // "Read this file ONLY when the current task references something
+        // not in this repo" tells the AGENT (reading the doc) when to
+        // load it. The prompt block was framed as "you will need this
+        // NOW" — wrong for a pull pattern.
+        let repos = vec![lr("front", "frontend", "/r/front", "")];
+        let body = format_linked_repos_for_docs(&repos).expect("non-empty");
+        assert!(body.starts_with("# Linked repositories"),
+            "doc must start with a Markdown H1 (it lives at `docs/linked-repos.md`)");
+        assert!(body.contains("Read this file ONLY when"),
+            "doc must teach the agent when to read (pull semantics)");
+        assert!(body.contains("docs/AGENTS.md"),
+            "doc must still point at the canonical companion entry point");
+    }
+
+    #[test]
+    fn sync_linked_repos_doc_in_writes_then_removes() {
+        // Round-trip: write the file with N entries, then sync with
+        // an empty list — the file disappears so the agent doesn't
+        // read a stale doc that contradicts the project state.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let docs = tmp.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        let repos = vec![
+            lr("front", "frontend", "/r/front", "React app"),
+            lr("api",   "api",      "/r/api",   "GraphQL"),
+        ];
+        sync_linked_repos_doc_in(&docs, &repos).unwrap();
+        let target = docs.join("linked-repos.md");
+        assert!(target.exists(), "non-empty list must write the file");
+        let body = std::fs::read_to_string(&target).unwrap();
+        assert!(body.contains("front") && body.contains("api"),
+            "both entries must be in the file");
+        // Now sync with []: file must vanish.
+        sync_linked_repos_doc_in(&docs, &[]).unwrap();
+        assert!(!target.exists(),
+            "empty list must remove the stale file (no contradictory state on disk)");
+    }
+
+    #[test]
+    fn sync_linked_repos_doc_in_idempotent_on_missing_docs_dir() {
+        // Pre-bootstrap projects don't have docs/ yet. The CRUD must
+        // not crash; the audit Phase 1 will recall the helper later.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let not_a_dir = tmp.path().join("missing-docs");
+        sync_linked_repos_doc_in(&not_a_dir, &[lr("x", "api", "/r/x", "")]).unwrap();
+        // No file created (target dir doesn't exist).
+        assert!(!not_a_dir.join("linked-repos.md").exists());
+    }
+
+    // Note: end-to-end coverage of the audit vs disc gating lives in
+    // the higher-level audit / discussions integration tests where a
+    // full AppState is already wired. Unit-level here is sufficient
+    // for the helpers + the format functions.
 }

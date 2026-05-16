@@ -72,6 +72,7 @@ impl AuditTracker {
                 step_tokens: None,
                 total_tokens_so_far: None,
                 current_tool: None,
+                current_tool_call_count: None,
             },
         );
     }
@@ -89,7 +90,15 @@ impl AuditTracker {
         if let Some(entry) = self.progress.get_mut(project_id) {
             if let Some(s) = step_tokens { entry.step_tokens = Some(s); }
             if let Some(t) = total_tokens_so_far { entry.total_tokens_so_far = Some(t); }
-            if let Some(tool) = current_tool { entry.current_tool = Some(tool); }
+            if let Some(tool) = current_tool {
+                entry.current_tool = Some(tool);
+                // 0.8.4 (#319 / B3) — bump the tool-call counter for
+                // the live "still alive" chip. Every tool_call from
+                // the agent stream lands here, regardless of whether
+                // the agent also emitted a `Usage` block. Reset on
+                // step boundary via `clear_step_chips`.
+                entry.current_tool_call_count = Some(entry.current_tool_call_count.unwrap_or(0) + 1);
+            }
         }
     }
 
@@ -99,6 +108,10 @@ impl AuditTracker {
         if let Some(entry) = self.progress.get_mut(project_id) {
             entry.step_tokens = None;
             entry.current_tool = None;
+            // 0.8.4 (#319 / B3) — the tool-call counter is per-step,
+            // not cumulative across the audit. Reset on every
+            // `step_start` so chip reads `🔧 Tool (1)` then `(2)` etc.
+            entry.current_tool_call_count = None;
         }
     }
 
@@ -465,6 +478,15 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // the "Reprendre Step N/10" button on the ProjectCard when an
         // earlier run was interrupted (rate-limit, crash, network blip).
         .route("/api/projects/{id}/audit-resumable", get(api::audit::audit_latest_resumable))
+        // 0.8.4 (#298) — last completed audit + per-step metrics for the
+        // ProjectCard recap panel. Read-only.
+        .route("/api/projects/{id}/audit-latest", get(api::audit::audit_latest))
+        .route("/api/projects/{id}/audit-history", get(api::audit::audit_history))
+        .route("/api/audit-runs/{run_id}/steps", get(api::audit::audit_run_steps))
+        // 0.8.4 (#317 / B1) — admin: force-clear all `Running` audit_runs.
+        // The boot hook handles the 30-min threshold automatically; this
+        // is the manual escape hatch for operators.
+        .route("/api/audit-runs/cleanup", post(api::audit::audit_runs_cleanup))
         .route("/api/projects/{id}/remap-path", post(api::projects::remap_path))
         // 0.7.1 — `ai/` → `docs/` convention migration. Idempotent, safe
         // to call on already-migrated or never-bootstrapped projects.
@@ -484,6 +506,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/projects/{id}/linked-repos", put(api::projects::set_linked_repos))
         .route("/api/projects/{id}/briefing", get(api::audit::get_briefing).put(api::audit::set_briefing))
         .route("/api/projects/{id}/start-briefing", post(api::audit::start_briefing))
+        // 0.8.4 (#285) — désagentified briefing form. POST the 6 answers
+        // directly, server writes docs/briefing.md + persists DB notes,
+        // no LLM call. Coexists with the conversational variant above.
+        .route("/api/projects/{id}/save-briefing", post(api::audit::save_briefing_form))
         .route("/api/projects/{id}/ai-files", get(api::ai_docs::list_ai_files))
         .route("/api/projects/{id}/ai-file", get(api::ai_docs::read_ai_file))
         .route("/api/projects/{id}/ai-search", get(api::ai_docs::search_ai_files))
@@ -607,6 +633,23 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/discussions/{id}/meta", get(api::disc_introspection::disc_meta))
         .route("/api/discussions/{id}/message/{idx}", get(api::disc_introspection::disc_get_message))
         .route("/api/discussions/{id}/summarize", post(api::disc_introspection::disc_summarize))
+        // 0.8.4 (#294) — cross-agent memory routes. Each one is a
+        // 1:1 mirror of an MCP tool exposed by `disc-introspection-mcp.py`,
+        // so a Claude Code (or any compatible) session can push its
+        // history into Kronn DB and let a different agent pick it up
+        // later. See `project_cross_agent_memory_0_8_4.md`.
+        .route("/api/disc/create",            post(api::disc_source::disc_create))
+        .route("/api/disc/append",            post(api::disc_source::disc_append))
+        .route("/api/disc/link",              post(api::disc_source::disc_link))
+        .route("/api/disc/unlink",            post(api::disc_source::disc_unlink))
+        .route("/api/disc/find_by_session",   get(api::disc_source::disc_find_by_session))
+        .route("/api/disc/search",            get(api::disc_source::disc_search))
+        .route("/api/disc/load_other",        get(api::disc_source::disc_load_other))
+        // 0.8.4 (#294) UI-facing readers — let the frontend decorate
+        // the sidebar with "imported from X" badges + drive the
+        // source-filter dropdown.
+        .route("/api/disc/sources",           get(api::disc_source::list_source_bindings))
+        .route("/api/discussions/{id}/source", get(api::disc_source::disc_source_detail))
         .route("/api/discussions/{id}/git-status", get(api::disc_git::disc_git_status))
         .route("/api/discussions/{id}/git-diff", get(api::disc_git::disc_git_diff))
         .route("/api/discussions/{id}/git-commit", post(api::disc_git::disc_git_commit))
@@ -693,6 +736,60 @@ mod audit_tracker_tests {
         let mut t = AuditTracker::default();
         t.advance_step("ghost", 1, Some("x.md".into()));
         assert!(t.get_progress("ghost").is_none());
+    }
+
+    // ─── 0.8.4 (#319 / B3) tool-call counter ────────────────────────
+
+    #[test]
+    fn tool_call_count_increments_on_each_tool_update() {
+        // The user-facing chip reads `🔧 Tool (N)` — N must reflect
+        // how many tool_call events have hit since step_start so the
+        // user sees forward motion even when the agent is in a long
+        // tool-only phase (Read/Bash/Write loop) without a `Usage`
+        // block to refresh the token chip. Counter resets per-step.
+        let mut t = AuditTracker::default();
+        t.start_progress("p-tc", 10, "full");
+        // Step 1 — three tool calls.
+        t.advance_step("p-tc", 1, Some("AGENTS.md".into()));
+        t.update_chips("p-tc", None, None, Some("Read".into()));
+        t.update_chips("p-tc", None, None, Some("Bash".into()));
+        t.update_chips("p-tc", None, None, Some("Write".into()));
+        {
+            let p = t.get_progress("p-tc").unwrap();
+            assert_eq!(p.current_tool.as_deref(), Some("Write"), "last-tool wins");
+            assert_eq!(p.current_tool_call_count, Some(3), "counter bumps on every tool update");
+        }
+
+        // Step 2 — counter resets via `clear_step_chips` (fired by
+        // the SSE pipeline at step_start).
+        t.clear_step_chips("p-tc");
+        t.advance_step("p-tc", 2, Some("repo-map.md".into()));
+        {
+            let p = t.get_progress("p-tc").unwrap();
+            assert_eq!(p.current_tool_call_count, None, "counter resets at step boundary");
+        }
+        t.update_chips("p-tc", None, None, Some("Grep".into()));
+        {
+            let p = t.get_progress("p-tc").unwrap();
+            assert_eq!(p.current_tool_call_count, Some(1), "first tool in new step → counter = 1");
+        }
+    }
+
+    #[test]
+    fn token_chip_updates_do_not_bump_tool_counter() {
+        // `update_chips` is also called with token updates (no tool).
+        // Those must NOT increment the tool counter — otherwise a
+        // burst of `Usage` events without a real tool change would
+        // produce a misleading "N tool calls" chip.
+        let mut t = AuditTracker::default();
+        t.start_progress("p-tok", 10, "full");
+        t.advance_step("p-tok", 1, Some("AGENTS.md".into()));
+        t.update_chips("p-tok", Some(100), Some(100), None);
+        t.update_chips("p-tok", Some(250), Some(250), None);
+        t.update_chips("p-tok", Some(400), Some(400), None);
+        let p = t.get_progress("p-tok").unwrap();
+        assert_eq!(p.step_tokens, Some(400));
+        assert_eq!(p.current_tool_call_count, None, "token-only updates must NOT bump the counter");
     }
 
     #[test]

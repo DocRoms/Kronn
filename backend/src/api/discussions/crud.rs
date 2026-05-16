@@ -111,6 +111,7 @@ pub async fn create(
         tokens_used: 0,
         auth_mode: None,
         model_tier: None, cost_usd: None, author_pseudo, author_avatar_email,
+        source_msg_id: None,
     };
 
     let workspace_mode = req.workspace_mode.unwrap_or_else(|| "Direct".into());
@@ -292,7 +293,7 @@ pub async fn update(
                 timestamp: chrono::Utc::now(),
                 tokens_used: 0,
                 auth_mode: None,
-                model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None,
+                model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None, source_msg_id: None,
             };
             crate::db::discussions::insert_message(conn, &id, &switch_msg)?;
         }

@@ -1,6 +1,7 @@
 pub mod agent_decisions;
 pub mod audit_runs;
 pub mod contacts;
+pub mod disc_source;
 pub mod discussions;
 pub mod mcps;
 pub mod migrations;
@@ -92,6 +93,19 @@ impl Database {
         // Run migrations before wrapping in Mutex (avoids blocking_lock inside async runtime).
         // Pass db path so a backup is created before pending migrations.
         migrations::run_with_backup(&conn, Some(path))?;
+
+        // 0.8.4 (#317 / B1) — reconcile stale `Running` audit_runs at
+        // boot. A backend crash, container restart, or kill -9 during
+        // an audit leaves the row stuck `Running` forever, polluting
+        // the recap chip strip + the "active audits" badge. Any run
+        // older than 30 min is force-flipped to `Interrupted` (the
+        // resume mechanism still works because last_completed_step
+        // survives — see `reconcile_stale_runs_preserves_last_completed_step`).
+        match audit_runs::reconcile_stale_runs(&conn, 30 * 60) {
+            Ok(0) => {}
+            Ok(n) => tracing::info!("Reconciled {} stale audit_runs (status was 'Running' for > 30 min)", n),
+            Err(e) => tracing::warn!("Failed to reconcile stale audit_runs: {}", e),
+        }
 
         Ok(Self { conn: Arc::new(Mutex::new(conn)), path: path.clone() })
     }

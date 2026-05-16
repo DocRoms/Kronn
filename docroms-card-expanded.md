@@ -1,0 +1,596 @@
+- generic [ref=e6]:
+  - navigation [ref=e7]:
+    - generic [ref=e8]:
+      - img [ref=e9]
+      - generic [ref=e11]: Kronn
+    - generic [ref=e12]:
+      - button "Projets" [ref=e14] [cursor=pointer]:
+        - img [ref=e15]
+        - text: Projets
+      - 'button "Discussions 10 messages non lu{1}" [ref=e17] [cursor=pointer]':
+        - img [ref=e18]
+        - text: Discussions
+        - 'generic "10 messages non lu{1}" [ref=e20]': "10"
+      - button "Plugins" [ref=e21] [cursor=pointer]:
+        - img [ref=e22]
+        - text: Plugins
+      - button "Automatisation" [ref=e25] [cursor=pointer]:
+        - img [ref=e26]
+        - text: Automatisation
+      - button "Config" [ref=e30] [cursor=pointer]:
+        - img [ref=e31]
+        - text: Config
+    - button "Ajouter un projet" [ref=e34] [cursor=pointer]:
+      - img [ref=e35]
+      - text: Ajouter un projet
+    - button "Scanner" [ref=e36] [cursor=pointer]:
+      - img [ref=e37]
+      - text: Scanner
+    - button "Relancer le tour guidé" [ref=e40] [cursor=pointer]:
+      - img [ref=e41]
+  - main [ref=e44]:
+    - generic [ref=e45]:
+      - generic [ref=e47]:
+        - heading "Projets" [level=1] [ref=e48]
+        - paragraph [ref=e49]: 20/20 AI-ready
+      - generic [ref=e50]:
+        - img
+        - textbox "Rechercher un projet..." [ref=e51]
+      - generic [ref=e52]:
+        - button "DocRoms (6)" [expanded] [ref=e53] [cursor=pointer]:
+          - img [ref=e54]
+          - generic [ref=e57]: DocRoms
+          - generic [ref=e58]: (6)
+        - button "AMP_EASY_BACKO Project docs AI audit Validated /home/priol/Repositories/amp-easy-backo 5 0" [ref=e62] [cursor=pointer]:
+          - img [ref=e63]
+          - generic [ref=e65]:
+            - generic [ref=e66]:
+              - generic [ref=e67]: AMP_EASY_BACKO
+              - generic [ref=e68]:
+                - img [ref=e69]
+                - text: Project docs
+              - generic [ref=e74]:
+                - img [ref=e75]
+                - text: AI audit
+              - generic [ref=e78]:
+                - img [ref=e79]
+                - text: Validated
+            - generic [ref=e82]: /home/priol/Repositories/amp-easy-backo
+          - generic [ref=e83]:
+            - generic "Charge MCP OK" [ref=e84]:
+              - img [ref=e85]
+              - text: "5"
+            - generic [ref=e87]:
+              - img [ref=e88]
+              - text: "0"
+      - button "DEMOCRATISCORE_WEB Project docs AI audit Validated /home/priol/Repositories/DEMOCRATISCORE_WEB 6 0" [ref=e93] [cursor=pointer]:
+        - img [ref=e94]
+        - generic [ref=e96]:
+          - generic [ref=e97]:
+            - generic [ref=e98]: DEMOCRATISCORE_WEB
+            - generic [ref=e99]:
+              - img [ref=e100]
+              - text: Project docs
+            - generic [ref=e105]:
+              - img [ref=e106]
+              - text: AI audit
+            - generic [ref=e109]:
+              - img [ref=e110]
+              - text: Validated
+          - generic [ref=e113]: /home/priol/Repositories/DEMOCRATISCORE_WEB
+        - generic [ref=e114]:
+          - generic "Beaucoup de MCPs — possible ralentissement" [ref=e115]:
+            - img [ref=e116]
+            - text: "6"
+          - generic [ref=e118]:
+            - img [ref=e119]
+            - text: "0"
+      - generic [ref=e123]:
+        - button "DOCROMS_WEB Project docs AI audit Validated 26 TD 1 section(s) obsolète(s) Mettre à jour (1 sections) Audité le 5/15/2026 /home/priol/Repositories/DOCROMS_WEB 6 4" [expanded] [active] [ref=e124] [cursor=pointer]:
+          - img [ref=e125]
+          - generic [ref=e127]:
+            - generic [ref=e128]:
+              - generic [ref=e129]: DOCROMS_WEB
+              - generic [ref=e130]:
+                - img [ref=e131]
+                - text: Project docs
+              - generic [ref=e136]:
+                - img [ref=e137]
+                - text: AI audit
+              - generic [ref=e140]:
+                - img [ref=e141]
+                - text: Validated
+              - generic "26 dette(s) technique(s) à traiter — voir docs/tech-debt/" [ref=e144]:
+                - img [ref=e145]
+                - text: 26 TD
+              - generic "docs/operations/mcp-servers.md" [ref=e147]:
+                - img [ref=e148]
+                - text: 1 section(s) obsolète(s)
+              - button "Mettre à jour (1 sections)" [ref=e150]:
+                - img [ref=e151]
+                - text: Mettre à jour (1 sections)
+              - generic [ref=e156]: Audité le 5/15/2026
+            - generic [ref=e157]: /home/priol/Repositories/DOCROMS_WEB
+          - generic [ref=e158]:
+            - generic "Beaucoup de MCPs — possible ralentissement" [ref=e159]:
+              - img [ref=e160]
+              - text: "6"
+            - generic [ref=e162]:
+              - img [ref=e163]
+              - text: "4"
+        - generic [ref=e730]:
+          - generic [ref=e731]:
+            - button "Discussions 4" [expanded] [ref=e732] [cursor=pointer]:
+              - img [ref=e733]
+              - img [ref=e735]
+              - generic [ref=e737]: Discussions
+              - generic [ref=e738]: "4"
+            - generic [ref=e739]:
+              - generic [ref=e742]: Actif
+              - generic [ref=e743] [cursor=pointer]:
+                - generic [ref=e744]:
+                  - img [ref=e745]
+                  - text: Validation audit AI
+                - generic [ref=e748]: 6 msg · ClaudeCode
+              - button "Open discussion" [ref=e749] [cursor=pointer]:
+                - img [ref=e750]
+            - generic [ref=e752]:
+              - generic [ref=e755]: Actif
+              - generic [ref=e756] [cursor=pointer]:
+                - generic [ref=e757]: Briefing projet
+                - generic [ref=e758]: 4 msg · ClaudeCode
+              - button "Open discussion" [ref=e759] [cursor=pointer]:
+                - img [ref=e760]
+            - generic [ref=e762]:
+              - generic [ref=e765]: Actif
+              - generic [ref=e766] [cursor=pointer]:
+                - generic [ref=e767]: Question
+                - generic [ref=e768]: 2 msg · ClaudeCode
+              - button "Open discussion" [ref=e769] [cursor=pointer]:
+                - img [ref=e770]
+            - button "Nouvelle discussion" [ref=e772] [cursor=pointer]:
+              - img [ref=e773]
+              - text: Nouvelle discussion
+          - button "Documentation projet" [ref=e775] [cursor=pointer]:
+            - img [ref=e776]
+            - img [ref=e778]
+            - generic [ref=e780]: Documentation projet
+          - button "Plugins 6" [ref=e782] [cursor=pointer]:
+            - img [ref=e783]
+            - img [ref=e785]
+            - generic [ref=e787]: Plugins
+            - generic [ref=e788]: "6"
+          - button "Workflows 1" [ref=e790] [cursor=pointer]:
+            - img [ref=e791]
+            - img [ref=e793]
+            - generic [ref=e797]: Workflows
+            - generic [ref=e798]: "1"
+          - button "Skills 3" [ref=e800] [cursor=pointer]:
+            - img [ref=e801]
+            - img [ref=e803]
+            - generic [ref=e805]: Skills
+            - generic [ref=e806]: "3"
+          - button "Dépôts liés 0" [ref=e808] [cursor=pointer]:
+            - img [ref=e809]
+            - img [ref=e811]
+            - generic [ref=e814]: Dépôts liés
+            - generic [ref=e815]: "0"
+          - button "AI Context valide" [ref=e817] [cursor=pointer]:
+            - img [ref=e818]
+            - img [ref=e820]
+            - generic [ref=e825]: AI Context
+            - generic [ref=e826]: valide
+          - button "Supprimer" [ref=e829] [cursor=pointer]:
+            - img [ref=e830]
+            - text: Supprimer
+      - button "Kronn Project docs AI audit Validated 11 TD /home/priol/Repositories/Kronn 6 4" [ref=e168] [cursor=pointer]:
+        - img [ref=e169]
+        - generic [ref=e171]:
+          - generic [ref=e172]:
+            - generic [ref=e173]: Kronn
+            - generic [ref=e174]:
+              - img [ref=e175]
+              - text: Project docs
+            - generic [ref=e180]:
+              - img [ref=e181]
+              - text: AI audit
+            - generic [ref=e184]:
+              - img [ref=e185]
+              - text: Validated
+            - generic "11 dette(s) technique(s) à traiter — voir docs/tech-debt/" [ref=e188]:
+              - img [ref=e189]
+              - text: 11 TD
+          - generic [ref=e191]: /home/priol/Repositories/Kronn
+        - generic [ref=e192]:
+          - generic "Beaucoup de MCPs — possible ralentissement" [ref=e193]:
+            - img [ref=e194]
+            - text: "6"
+          - generic [ref=e196]:
+            - img [ref=e197]
+            - text: "4"
+      - button "PLANIFIK_WEB Project docs AI audit Validated 11 TD /home/priol/Repositories/PLANIFIK_WEB 6 2" [ref=e202] [cursor=pointer]:
+        - img [ref=e203]
+        - generic [ref=e205]:
+          - generic [ref=e206]:
+            - generic [ref=e207]: PLANIFIK_WEB
+            - generic [ref=e208]:
+              - img [ref=e209]
+              - text: Project docs
+            - generic [ref=e214]:
+              - img [ref=e215]
+              - text: AI audit
+            - generic [ref=e218]:
+              - img [ref=e219]
+              - text: Validated
+            - generic "11 dette(s) technique(s) à traiter — voir docs/tech-debt/" [ref=e222]:
+              - img [ref=e223]
+              - text: 11 TD
+          - generic [ref=e225]: /home/priol/Repositories/PLANIFIK_WEB
+        - generic [ref=e226]:
+          - generic "Beaucoup de MCPs — possible ralentissement" [ref=e227]:
+            - img [ref=e228]
+            - text: "6"
+          - generic [ref=e230]:
+            - img [ref=e231]
+            - text: "2"
+      - button "rustcrawler Activité en cours sur ce projet Project docs AI audit Validation 15 TD /home/priol/Repositories/rustcrawler 6 2" [ref=e236] [cursor=pointer]:
+        - img [ref=e237]
+        - generic [ref=e239]:
+          - generic [ref=e240]:
+            - generic [ref=e241]:
+              - text: rustcrawler
+              - img "Activité en cours sur ce projet" [ref=e242]
+            - generic [ref=e244]:
+              - img [ref=e245]
+              - text: Project docs
+            - generic [ref=e250]:
+              - img [ref=e251]
+              - text: AI audit
+            - generic [ref=e254]:
+              - img [ref=e255]
+              - text: Validation
+            - generic "15 dette(s) technique(s) à traiter — voir docs/tech-debt/" [ref=e257]:
+              - img [ref=e258]
+              - text: 15 TD
+          - generic [ref=e260]: /home/priol/Repositories/rustcrawler
+        - generic [ref=e261]:
+          - generic "Beaucoup de MCPs — possible ralentissement" [ref=e262]:
+            - img [ref=e263]
+            - text: "6"
+          - generic [ref=e265]:
+            - img [ref=e266]
+            - text: "2"
+      - generic [ref=e268]:
+        - button "Euronews-tech (11)" [expanded] [ref=e269] [cursor=pointer]:
+          - img [ref=e270]
+          - generic [ref=e273]: Euronews-tech
+          - generic [ref=e274]: (11)
+        - button "APP_ANDROID Project docs AI audit Validated /home/priol/Repositories/APP_ANDROID 6 0" [ref=e278] [cursor=pointer]:
+          - img [ref=e279]
+          - generic [ref=e281]:
+            - generic [ref=e282]:
+              - generic [ref=e283]: APP_ANDROID
+              - generic [ref=e284]:
+                - img [ref=e285]
+                - text: Project docs
+              - generic [ref=e290]:
+                - img [ref=e291]
+                - text: AI audit
+              - generic [ref=e294]:
+                - img [ref=e295]
+                - text: Validated
+            - generic [ref=e298]: /home/priol/Repositories/APP_ANDROID
+          - generic [ref=e299]:
+            - generic "Beaucoup de MCPs — possible ralentissement" [ref=e300]:
+              - img [ref=e301]
+              - text: "6"
+            - generic [ref=e303]:
+              - img [ref=e304]
+              - text: "0"
+      - button "APP_IOS Project docs AI audit Validated /home/priol/Repositories/APP_IOS 6 0" [ref=e309] [cursor=pointer]:
+        - img [ref=e310]
+        - generic [ref=e312]:
+          - generic [ref=e313]:
+            - generic [ref=e314]: APP_IOS
+            - generic [ref=e315]:
+              - img [ref=e316]
+              - text: Project docs
+            - generic [ref=e321]:
+              - img [ref=e322]
+              - text: AI audit
+            - generic [ref=e325]:
+              - img [ref=e326]
+              - text: Validated
+          - generic [ref=e329]: /home/priol/Repositories/APP_IOS
+        - generic [ref=e330]:
+          - generic "Beaucoup de MCPs — possible ralentissement" [ref=e331]:
+            - img [ref=e332]
+            - text: "6"
+          - generic [ref=e334]:
+            - img [ref=e335]
+            - text: "0"
+      - button "euronews-chrome-extension Project docs AI audit Validated /home/priol/Repositories/euronews-chrome-extension 7 0" [ref=e340] [cursor=pointer]:
+        - img [ref=e341]
+        - generic [ref=e343]:
+          - generic [ref=e344]:
+            - generic [ref=e345]: euronews-chrome-extension
+            - generic [ref=e346]:
+              - img [ref=e347]
+              - text: Project docs
+            - generic [ref=e352]:
+              - img [ref=e353]
+              - text: AI audit
+            - generic [ref=e356]:
+              - img [ref=e357]
+              - text: Validated
+          - generic [ref=e360]: /home/priol/Repositories/euronews-chrome-extension
+        - generic [ref=e361]:
+          - generic "Beaucoup de MCPs — possible ralentissement" [ref=e362]:
+            - img [ref=e363]
+            - text: "7"
+          - generic [ref=e365]:
+            - img [ref=e366]
+            - text: "0"
+      - button "front_africanews Project docs AI audit Validated 21 TD /home/priol/Repositories/front_africanews 10 3" [ref=e371] [cursor=pointer]:
+        - img [ref=e372]
+        - generic [ref=e374]:
+          - generic [ref=e375]:
+            - generic [ref=e376]: front_africanews
+            - generic [ref=e377]:
+              - img [ref=e378]
+              - text: Project docs
+            - generic [ref=e383]:
+              - img [ref=e384]
+              - text: AI audit
+            - generic [ref=e387]:
+              - img [ref=e388]
+              - text: Validated
+            - generic "21 dette(s) technique(s) à traiter — voir docs/tech-debt/" [ref=e391]:
+              - img [ref=e392]
+              - text: 21 TD
+          - generic [ref=e394]: /home/priol/Repositories/front_africanews
+        - generic [ref=e395]:
+          - generic "Beaucoup de MCPs — possible ralentissement" [ref=e396]:
+            - img [ref=e397]
+            - text: "10"
+          - generic [ref=e399]:
+            - img [ref=e400]
+            - text: "3"
+      - button "front_api Activité en cours sur ce projet Project docs AI audit Validation /home/priol/Repositories/front-api 9 1" [ref=e405] [cursor=pointer]:
+        - img [ref=e406]
+        - generic [ref=e408]:
+          - generic [ref=e409]:
+            - generic [ref=e410]:
+              - text: front_api
+              - img "Activité en cours sur ce projet" [ref=e411]
+            - generic [ref=e413]:
+              - img [ref=e414]
+              - text: Project docs
+            - generic [ref=e419]:
+              - img [ref=e420]
+              - text: AI audit
+            - generic [ref=e423]:
+              - img [ref=e424]
+              - text: Validation
+          - generic [ref=e426]: /home/priol/Repositories/front-api
+        - generic [ref=e427]:
+          - generic "Beaucoup de MCPs — possible ralentissement" [ref=e428]:
+            - img [ref=e429]
+            - text: "9"
+          - generic [ref=e431]:
+            - img [ref=e432]
+            - text: "1"
+      - button "front_apollo Project docs AI audit Validated 6 TD /home/priol/Repositories/front_apollo 8 1" [ref=e437] [cursor=pointer]:
+        - img [ref=e438]
+        - generic [ref=e440]:
+          - generic [ref=e441]:
+            - generic [ref=e442]: front_apollo
+            - generic [ref=e443]:
+              - img [ref=e444]
+              - text: Project docs
+            - generic [ref=e449]:
+              - img [ref=e450]
+              - text: AI audit
+            - generic [ref=e453]:
+              - img [ref=e454]
+              - text: Validated
+            - generic "6 dette(s) technique(s) à traiter — voir docs/tech-debt/" [ref=e457]:
+              - img [ref=e458]
+              - text: 6 TD
+          - generic [ref=e460]: /home/priol/Repositories/front_apollo
+        - generic [ref=e461]:
+          - generic "Beaucoup de MCPs — possible ralentissement" [ref=e462]:
+            - img [ref=e463]
+            - text: "8"
+          - generic [ref=e465]:
+            - img [ref=e466]
+            - text: "1"
+      - button "front_euronews Project docs AI audit Validated 18 TD /home/priol/Repositories/front_euronews 12 104" [ref=e471] [cursor=pointer]:
+        - img [ref=e472]
+        - generic [ref=e474]:
+          - generic [ref=e475]:
+            - generic [ref=e476]: front_euronews
+            - generic [ref=e477]:
+              - img [ref=e478]
+              - text: Project docs
+            - generic [ref=e483]:
+              - img [ref=e484]
+              - text: AI audit
+            - generic [ref=e487]:
+              - img [ref=e488]
+              - text: Validated
+            - generic "18 dette(s) technique(s) à traiter — voir docs/tech-debt/" [ref=e491]:
+              - img [ref=e492]
+              - text: 18 TD
+          - generic [ref=e494]: /home/priol/Repositories/front_euronews
+        - generic [ref=e495]:
+          - generic "Trop de MCPs — risque de timeout agent" [ref=e496]:
+            - img [ref=e497]
+            - text: "12"
+          - generic [ref=e499]:
+            - img [ref=e500]
+            - text: "104"
+      - button "front_image_server Activité en cours sur ce projet Project docs AI audit Validation 15 TD /home/priol/Repositories/front-image-server 8 2" [ref=e505] [cursor=pointer]:
+        - img [ref=e506]
+        - generic [ref=e508]:
+          - generic [ref=e509]:
+            - generic [ref=e510]:
+              - text: front_image_server
+              - img "Activité en cours sur ce projet" [ref=e511]
+            - generic [ref=e513]:
+              - img [ref=e514]
+              - text: Project docs
+            - generic [ref=e519]:
+              - img [ref=e520]
+              - text: AI audit
+            - generic [ref=e523]:
+              - img [ref=e524]
+              - text: Validation
+            - generic "15 dette(s) technique(s) à traiter — voir docs/tech-debt/" [ref=e526]:
+              - img [ref=e527]
+              - text: 15 TD
+          - generic [ref=e529]: /home/priol/Repositories/front-image-server
+        - generic [ref=e530]:
+          - generic "Beaucoup de MCPs — possible ralentissement" [ref=e531]:
+            - img [ref=e532]
+            - text: "8"
+          - generic [ref=e534]:
+            - img [ref=e535]
+            - text: "2"
+      - button "front_iris-api Project docs AI audit Validated /home/priol/Repositories/front_iris-api 10 0" [ref=e540] [cursor=pointer]:
+        - img [ref=e541]
+        - generic [ref=e543]:
+          - generic [ref=e544]:
+            - generic [ref=e545]: front_iris-api
+            - generic [ref=e546]:
+              - img [ref=e547]
+              - text: Project docs
+            - generic [ref=e552]:
+              - img [ref=e553]
+              - text: AI audit
+            - generic [ref=e556]:
+              - img [ref=e557]
+              - text: Validated
+          - generic [ref=e560]: /home/priol/Repositories/front_iris-api
+        - generic [ref=e561]:
+          - generic "Beaucoup de MCPs — possible ralentissement" [ref=e562]:
+            - img [ref=e563]
+            - text: "10"
+          - generic [ref=e565]:
+            - img [ref=e566]
+            - text: "0"
+      - button "front_lambda-gigya-insider Project docs AI audit Validated /home/priol/Repositories/front-lambda-gigya-insider 8 0" [ref=e571] [cursor=pointer]:
+        - img [ref=e572]
+        - generic [ref=e574]:
+          - generic [ref=e575]:
+            - generic [ref=e576]: front_lambda-gigya-insider
+            - generic [ref=e577]:
+              - img [ref=e578]
+              - text: Project docs
+            - generic [ref=e583]:
+              - img [ref=e584]
+              - text: AI audit
+            - generic [ref=e587]:
+              - img [ref=e588]
+              - text: Validated
+          - generic [ref=e591]: /home/priol/Repositories/front-lambda-gigya-insider
+        - generic [ref=e592]:
+          - generic "Beaucoup de MCPs — possible ralentissement" [ref=e593]:
+            - img [ref=e594]
+            - text: "8"
+          - generic [ref=e596]:
+            - img [ref=e597]
+            - text: "0"
+      - button "front_tools Project docs AI audit Validated /home/priol/Repositories/front_tools 8 0" [ref=e602] [cursor=pointer]:
+        - img [ref=e603]
+        - generic [ref=e605]:
+          - generic [ref=e606]:
+            - generic [ref=e607]: front_tools
+            - generic [ref=e608]:
+              - img [ref=e609]
+              - text: Project docs
+            - generic [ref=e614]:
+              - img [ref=e615]
+              - text: AI audit
+            - generic [ref=e618]:
+              - img [ref=e619]
+              - text: Validated
+          - generic [ref=e622]: /home/priol/Repositories/front_tools
+        - generic [ref=e623]:
+          - generic "Beaucoup de MCPs — possible ralentissement" [ref=e624]:
+            - img [ref=e625]
+            - text: "8"
+          - generic [ref=e627]:
+            - img [ref=e628]
+            - text: "0"
+      - generic [ref=e630]:
+        - button "Projets locaux (3)" [expanded] [ref=e631] [cursor=pointer]:
+          - img [ref=e632]
+          - generic [ref=e635]: Projets locaux
+          - generic [ref=e636]: (3)
+        - button "boardgames Project docs AI audit Validated /home/priol/Repositories/boardgames 6 0" [ref=e640] [cursor=pointer]:
+          - img [ref=e641]
+          - generic [ref=e643]:
+            - generic [ref=e644]:
+              - generic [ref=e645]: boardgames
+              - generic [ref=e646]:
+                - img [ref=e647]
+                - text: Project docs
+              - generic [ref=e652]:
+                - img [ref=e653]
+                - text: AI audit
+              - generic [ref=e656]:
+                - img [ref=e657]
+                - text: Validated
+            - generic [ref=e660]: /home/priol/Repositories/boardgames
+          - generic [ref=e661]:
+            - generic "Beaucoup de MCPs — possible ralentissement" [ref=e662]:
+              - img [ref=e663]
+              - text: "6"
+            - generic [ref=e665]:
+              - img [ref=e666]
+              - text: "0"
+      - button "mascotte-generator Project docs AI audit Validated /home/priol/Repositories/mascotte-generator 6 0" [ref=e671] [cursor=pointer]:
+        - img [ref=e672]
+        - generic [ref=e674]:
+          - generic [ref=e675]:
+            - generic [ref=e676]: mascotte-generator
+            - generic [ref=e677]:
+              - img [ref=e678]
+              - text: Project docs
+            - generic [ref=e683]:
+              - img [ref=e684]
+              - text: AI audit
+            - generic [ref=e687]:
+              - img [ref=e688]
+              - text: Validated
+          - generic [ref=e691]: /home/priol/Repositories/mascotte-generator
+        - generic [ref=e692]:
+          - generic "Beaucoup de MCPs — possible ralentissement" [ref=e693]:
+            - img [ref=e694]
+            - text: "6"
+          - generic [ref=e696]:
+            - img [ref=e697]
+            - text: "0"
+      - button "Unikapp Project docs AI audit Validated /home/priol/Repositories/unikapp 6 1" [ref=e702] [cursor=pointer]:
+        - img [ref=e703]
+        - generic [ref=e705]:
+          - generic [ref=e706]:
+            - generic [ref=e707]: Unikapp
+            - generic [ref=e708]:
+              - img [ref=e709]
+              - text: Project docs
+            - generic [ref=e714]:
+              - img [ref=e715]
+              - text: AI audit
+            - generic [ref=e718]:
+              - img [ref=e719]
+              - text: Validated
+          - generic [ref=e722]: /home/priol/Repositories/unikapp
+        - generic [ref=e723]:
+          - generic "Beaucoup de MCPs — possible ralentissement" [ref=e724]:
+            - img [ref=e725]
+            - text: "6"
+          - generic [ref=e727]:
+            - img [ref=e728]
+            - text: "1"

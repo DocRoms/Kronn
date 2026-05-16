@@ -67,17 +67,18 @@ mod tests {
     #[test]
     fn detect_audit_status_instructional_braces_not_placeholder() {
         // Text that mentions {{...}} as an instruction (not a real placeholder) should NOT
-        // cause the status to remain TemplateInstalled
+        // trigger the placeholder check. When combined with a real audit record in
+        // .kronn.json the project should resolve to Audited.
         let tmp = std::env::temp_dir().join("kronn-test-audit-instr-braces");
         let ai_dir = tmp.join("ai");
         let _ = std::fs::create_dir_all(&ai_dir);
         std::fs::write(ai_dir.join("index.md"),
             "# My Project\nIf you see an unfilled `{{...}}`, say NOT_FOUND.\n"
         ).unwrap();
+        crate::core::kronn_state::record_audit(&tmp, "full").unwrap();
         let status = detect_audit_status(&tmp.to_string_lossy());
-        // Should be Audited (not TemplateInstalled), because {{...}} is instructional text
         assert!(matches!(status, crate::models::AiAuditStatus::Audited),
-            "Instructional {{...}} should not trigger TemplateInstalled, got {:?}", status);
+            "Instructional {{...}} + .kronn.json audit entry should yield Audited, got {:?}", status);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -94,12 +95,91 @@ mod tests {
 
     #[test]
     fn detect_audit_status_audited() {
+        // 0.8.4 — Audited now requires a recorded audit in `.kronn.json`,
+        // or a legacy `checksums.json`, or a legacy KRONN: marker.
+        // A plain `index.md` no longer counts (that was the bug: any project
+        // with a pre-existing `docs/AGENTS.md` was tagged green).
         let tmp = std::env::temp_dir().join("kronn-test-audit-audited");
         let ai_dir = tmp.join("ai");
         let _ = std::fs::create_dir_all(&ai_dir);
         std::fs::write(ai_dir.join("index.md"), "# My Project\nFilled content\n").unwrap();
+        crate::core::kronn_state::record_audit(&tmp, "full").unwrap();
         let status = detect_audit_status(&tmp.to_string_lossy());
         assert!(matches!(status, crate::models::AiAuditStatus::Audited));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // 0.8.4 — regression coverage for the false-positive "Audited" bug.
+    #[test]
+    fn detect_audit_status_plain_docs_without_audit_is_template_installed() {
+        // A project with a user-written `docs/AGENTS.md` and no Kronn artefact
+        // (no .kronn.json, no checksums.json, no KRONN: marker) must NOT be
+        // reported as Audited — that was the symptom on AMP_EASY_BACKO and
+        // DEMOCRATISCORE_WEB before this fix.
+        let tmp = std::env::temp_dir().join("kronn-test-audit-plain-docs");
+        let docs_dir = tmp.join("docs");
+        let _ = std::fs::create_dir_all(&docs_dir);
+        std::fs::write(docs_dir.join("AGENTS.md"),
+            "# My Project\nUser-written documentation, no Kronn involvement.\n"
+        ).unwrap();
+        let status = detect_audit_status(&tmp.to_string_lossy());
+        assert!(matches!(status, crate::models::AiAuditStatus::TemplateInstalled),
+            "Plain docs/AGENTS.md without Kronn artefact must be TemplateInstalled, got {:?}", status);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn detect_audit_status_kronn_state_validated() {
+        let tmp = std::env::temp_dir().join("kronn-test-audit-state-validated");
+        let docs_dir = tmp.join("docs");
+        let _ = std::fs::create_dir_all(&docs_dir);
+        std::fs::write(docs_dir.join("AGENTS.md"), "# Project\nContent\n").unwrap();
+        let mut state = crate::core::kronn_state::KronnState {
+            validated_at: Some("2026-05-16".into()),
+            ..Default::default()
+        };
+        crate::core::kronn_state::write(&tmp, &mut state).unwrap();
+        let status = detect_audit_status(&tmp.to_string_lossy());
+        assert!(matches!(status, crate::models::AiAuditStatus::Validated));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn detect_audit_status_kronn_state_bootstrapped() {
+        let tmp = std::env::temp_dir().join("kronn-test-audit-state-bootstrapped");
+        let docs_dir = tmp.join("docs");
+        let _ = std::fs::create_dir_all(&docs_dir);
+        std::fs::write(docs_dir.join("AGENTS.md"), "# Project\nContent\n").unwrap();
+        let mut state = crate::core::kronn_state::KronnState {
+            bootstrapped_at: Some("2026-05-16".into()),
+            ..Default::default()
+        };
+        crate::core::kronn_state::write(&tmp, &mut state).unwrap();
+        let status = detect_audit_status(&tmp.to_string_lossy());
+        assert!(matches!(status, crate::models::AiAuditStatus::Bootstrapped));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn detect_audit_status_legacy_checksums_promotes_to_audited() {
+        // A project audited before `.kronn.json` existed has `docs/checksums.json`
+        // but no state file. We must keep recognising it as Audited so the badge
+        // doesn't regress on upgrade.
+        let tmp = std::env::temp_dir().join("kronn-test-audit-legacy-checksums");
+        let docs_dir = tmp.join("docs");
+        let _ = std::fs::create_dir_all(&docs_dir);
+        std::fs::write(docs_dir.join("AGENTS.md"), "# Project\nFilled\n").unwrap();
+        let checksums = crate::core::checksums::ChecksumsFile {
+            audited_at: "2026-01-01T00:00:00Z".to_string(),
+            mappings: vec![],
+        };
+        std::fs::write(
+            docs_dir.join("checksums.json"),
+            serde_json::to_string(&checksums).unwrap(),
+        ).unwrap();
+        let status = detect_audit_status(&tmp.to_string_lossy());
+        assert!(matches!(status, crate::models::AiAuditStatus::Audited),
+            "legacy checksums.json must keep the project Audited, got {:?}", status);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
