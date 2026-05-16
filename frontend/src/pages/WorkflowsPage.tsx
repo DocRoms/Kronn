@@ -1,7 +1,7 @@
 import { useState, useRef, useMemo, useEffect } from 'react';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { useT } from '../lib/I18nContext';
-import { workflows as workflowsApi, discussions as discussionsApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, mcps as mcpsApi } from '../lib/api';
+import { workflows as workflowsApi, discussions as discussionsApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, mcps as mcpsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi } from '../lib/api';
 import { userError } from '../lib/userError';
 import { useApi } from '../hooks/useApi';
 import type {
@@ -21,6 +21,8 @@ import { WorkflowDetail } from '../components/workflows/WorkflowDetail';
 import { WorkflowWizard } from '../components/workflows/WorkflowWizard';
 import { QuickPromptForm } from '../components/workflows/QuickPromptForm';
 import { QuickApiForm } from '../components/workflows/QuickApiForm';
+import QPHistoryDrawer from '../components/QPHistoryDrawer';
+import QPCardMetricsChip from '../components/QPCardMetricsChip';
 import { parseBatchQAItems } from '../components/workflows/parseBatchQAItems';
 import { ImportDropzone } from '../components/workflows/ImportDropzone';
 import { triggerDownload } from '../lib/downloadBlob';
@@ -94,9 +96,20 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const { t } = useT();
   const isMobile = useIsMobile();
   const [tab, setTab] = useState<'workflows' | 'quickPrompts' | 'quickApis'>('workflows');
+  // 0.8.5 — post-deploy focus: when the user lands here right after
+  // clicking "Deploy improved QP" in DiscussionsPage, this state holds
+  // the target QP id; the page switches to the Quick Prompts tab and
+  // briefly highlights the matching card (CSS class with a fade-out).
+  const [postImprovedQpId, setPostImprovedQpId] = useState<string | null>(null);
   const { data: workflowList, refetch } = useApi(() => workflowsApi.list(), []);
   const { data: quickPromptList, refetch: refetchQP } = useApi(() => quickPromptsApi.list(), []);
   const { data: quickApiList, refetch: refetchQA } = useApi(() => quickApisApi.list(), []);
+  // 0.8.5 — catalogs for the QP form binding pickers (skills + profiles +
+  // directives). Empty-array fallback keeps the form rendering during the
+  // first paint before the API resolves.
+  const { data: skillsCatalog } = useApi(() => skillsApi.list(), []);
+  const { data: profilesCatalog } = useApi(() => profilesApi.list(), []);
+  const { data: directivesCatalog } = useApi(() => directivesApi.list(), []);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showCreateQP, setShowCreateQP] = useState(false);
   const [editingQP, setEditingQP] = useState<QuickPrompt | null>(null);
@@ -165,6 +178,47 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     onPendingPresetConsumed?.();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingPreset]);
+
+  // 0.8.5 — post-deploy QP focus. Read the sessionStorage flag set by
+  // the DiscussionsPage "Deploy improved QP" CTA, switch to the Quick
+  // Prompts tab, clear the flag, and remember the target id so we can
+  // scroll + flash-highlight the card once the QP list is loaded.
+  useEffect(() => {
+    let qpId: string | null = null;
+    try { qpId = sessionStorage.getItem('kronn:postQpImproved'); } catch { /* private mode */ }
+    if (!qpId) return;
+    setTab('quickPrompts');
+    setPostImprovedQpId(qpId);
+    try { sessionStorage.removeItem('kronn:postQpImproved'); } catch { /* ignore */ }
+    // The list might not be loaded yet; the scroll+flash effect below
+    // re-fires when quickPromptList resolves. No dependency on quickPromptList here —
+    // running once on mount is enough because state mutates trigger the next effect.
+  }, []);
+
+  // Scroll + flash highlight the deep-linked QP card once the list is
+  // available. Uses a 1.4s CSS animation (defined in WorkflowsPage.css)
+  // and clears `postImprovedQpId` after to avoid re-flashing on every
+  // re-render of the page.
+  useEffect(() => {
+    if (!postImprovedQpId) return;
+    if (!quickPromptList || quickPromptList.length === 0) return;
+    // Defer to the next paint so the QP cards have mounted under the
+    // active tab (we just switched tabs on mount; the cards render on
+    // the next React commit).
+    const raf1 = requestAnimationFrame(() => {
+      const raf2 = requestAnimationFrame(() => {
+        const el = document.querySelector(`[data-qp-id="${postImprovedQpId}"]`) as HTMLElement | null;
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          el.classList.add('qp-card-flash');
+          window.setTimeout(() => el.classList.remove('qp-card-flash'), 1500);
+        }
+        setPostImprovedQpId(null);
+      });
+      return () => cancelAnimationFrame(raf2);
+    });
+    return () => cancelAnimationFrame(raf1);
+  }, [postImprovedQpId, quickPromptList]);
   const [editingWorkflow, setEditingWorkflow] = useState<Workflow | null>(null);
   // 0.7.0 UX pass — import drawer state. Set when the user clicks the
   // "Importer" button on either tab. Carries the parsed JSON content +
@@ -627,8 +681,32 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     return rendered;
   };
 
+  /**
+   * 0.8.5 follow-up — validate that every variable flagged as required
+   * has a non-empty value before firing a launch / compare-agents.
+   * Pre-fix the buttons fired regardless, sending the agent a prompt
+   * full of empty placeholders. Returns the list of missing variable
+   * labels (or names if no label is set) so the caller can render a
+   * single localized toast. Empty list = OK to proceed.
+   */
+  const collectMissingRequiredVars = (qp: QuickPrompt, vars: Record<string, string>): string[] => {
+    return qp.variables
+      // `required` defaults to true (legacy QPs); only explicitly false skips validation.
+      .filter(v => v.required !== false && !(vars[v.name] ?? '').trim())
+      .map(v => v.label || v.name);
+  };
+
   const handleLaunchQP = async (qp: QuickPrompt) => {
     if (launchingRef.current) return;
+    // 0.8.5 — block launches that leave required variables empty. The
+    // QP form's `required` checkbox is the source of truth; this is
+    // the launcher mirror so the agent never receives a half-rendered
+    // template.
+    const missing = collectMissingRequiredVars(qp, launchVars);
+    if (missing.length > 0) {
+      if (toastProp) toastProp(t('qp.launch.missingRequired', missing.join(', ')), 'error');
+      return;
+    }
     launchingRef.current = true;
     setLaunching(true);
     try {
@@ -643,6 +721,15 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         language: configLanguage || 'fr',
         initial_prompt: rendered,
         skill_ids: qp.skill_ids?.length ? qp.skill_ids : undefined,
+        // 0.8.5 — propagate QP-level persona + directive bindings to the
+        // freshly spawned discussion so the agent is configured the same
+        // way every time this QP is launched.
+        profile_ids: qp.profile_ids?.length ? qp.profile_ids : undefined,
+        directive_ids: qp.directive_ids?.length ? qp.directive_ids : undefined,
+        // 0.8.5 — lineage: the QP-metrics aggregator GROUPs BY this column
+        // to compute avg tokens / duration / cost per version_index.
+        // Backend resolves the version itself (server-side source of truth).
+        originating_qp_id: qp.id,
         tier: qp.tier !== 'default' ? qp.tier : undefined,
       });
       setLaunchingQP(null);
@@ -653,6 +740,95 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     } finally {
       launchingRef.current = false;
       setLaunching(false);
+    }
+  };
+
+  /**
+   * 0.8.5 — Spawn an AI-improver discussion for the given QP. The
+   * agent receives the canonical QP body (id + name + template + vars
+   * + bindings) in the initial prompt and the `qp-improver` skill in
+   * its context. It audits the prompt and emits a refactored version
+   * tagged with `KRONN:QP_IMPROVED` — the DiscussionsPage banner
+   * parses the JSON and offers a one-click deploy back to PUT
+   * `/api/quick-prompts/:id`.
+   *
+   * The discussion title carries the QP id under the bracketed prefix
+   * `[Improve QP <id>]` so the banner can recover the target id from
+   * the discussion alone (the QP id is not re-emitted by the agent).
+   */
+  const handleImproveQP = async (qp: QuickPrompt) => {
+    try {
+      const payload = {
+        id: qp.id,
+        name: qp.name,
+        icon: qp.icon,
+        prompt_template: qp.prompt_template,
+        variables: qp.variables,
+        agent: qp.agent,
+        project_id: qp.project_id ?? null,
+        skill_ids: qp.skill_ids ?? [],
+        profile_ids: qp.profile_ids ?? [],
+        directive_ids: qp.directive_ids ?? [],
+        tier: qp.tier ?? 'default',
+        description: qp.description ?? '',
+      };
+      // 0.8.5 follow-up — feed the agent the actual catalog of
+      // skills / profiles / directives so it can RECOMMEND additions
+      // (not just preserve what's already on the QP). Without this
+      // section the skill's anti-hallucination rule forces empty
+      // arrays, which surprised the user on the first run. The
+      // catalog is rendered compact (id + short description) — ~30
+      // lines total for a typical Kronn install, negligible token cost.
+      const renderCatalog = <T extends { id: string; description?: string; name?: string }>(
+        items: T[] | undefined | null,
+        label: string,
+        emptyHint: string,
+      ): string => {
+        if (!items || items.length === 0) return `### ${label}\n${emptyHint}\n`;
+        const lines = items
+          .map(it => `- \`${it.id}\` — ${(it.description || it.name || '').replace(/\s+/g, ' ').slice(0, 120)}`)
+          .join('\n');
+        return `### ${label} (${items.length})\n${lines}\n`;
+      };
+      const profileLine = (p: { id: string; persona_name?: string; role?: string }): string => {
+        const desc = [p.persona_name, p.role].filter(Boolean).join(' · ').slice(0, 120);
+        return `- \`${p.id}\` — ${desc || p.id}`;
+      };
+      const profilesBlock = !profilesCatalog || profilesCatalog.length === 0
+        ? `### ${t('qp.improveCatalogProfiles')}\n${t('qp.improveCatalogEmpty')}\n`
+        : `### ${t('qp.improveCatalogProfiles')} (${profilesCatalog.length})\n${profilesCatalog.map(profileLine).join('\n')}\n`;
+      const catalog = [
+        renderCatalog(skillsCatalog, t('qp.improveCatalogSkills'), t('qp.improveCatalogEmpty')),
+        profilesBlock,
+        renderCatalog(directivesCatalog, t('qp.improveCatalogDirectives'), t('qp.improveCatalogEmpty')),
+      ].join('\n');
+      // 0.8.5 follow-up — wrap the heavy technical seed (QP JSON +
+      // catalog + audit protocol reminder) in the KRONN_SEED markers
+      // so MessageBubble can collapse it behind a toggle. The user
+      // sees a short status line (`✨ Audit du QP en cours…`); the
+      // agent still reads the entire message verbatim.
+      const visibleIntro = t('qp.improveVisibleIntro', qp.name);
+      const seedBody =
+        `${t('qp.improveInitialPrompt', qp.name)}\n\n` +
+        '```json\n' + JSON.stringify(payload, null, 2) + '\n```\n\n' +
+        `## ${t('qp.improveCatalogHeader')}\n` +
+        `${t('qp.improveCatalogIntro')}\n\n` +
+        catalog;
+      const initialPrompt = `${visibleIntro}\n<!--KRONN_SEED_START-->\n${seedBody}\n<!--KRONN_SEED_END-->`;
+      const disc = await discussionsApi.create({
+        project_id: qp.project_id ?? null,
+        title: `[Improve QP ${qp.id}] ${qp.name}`,
+        agent: qp.agent,
+        language: configLanguage || 'fr',
+        initial_prompt: initialPrompt,
+        // Pin the qp-improver skill so the agent reads the audit
+        // protocol every time, even if no other context is wired in.
+        skill_ids: ['qp-improver'],
+      });
+      onNavigateDiscussion?.(disc.id);
+    } catch (e) {
+      console.warn('QP improve failed:', e);
+      if (toastProp) toastProp(userError(e), 'error');
     }
   };
 
@@ -669,6 +845,14 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
    */
   const handleCompareAgents = async (qp: QuickPrompt) => {
     if (launchingRef.current) return;
+    // 0.8.5 — same required-vars guard as `handleLaunchQP`. Compare
+    // is a worse offender than a single launch because the empty
+    // template gets fanned-out across N agents (N × wasted runs).
+    const missing = collectMissingRequiredVars(qp, launchVars);
+    if (missing.length > 0) {
+      if (toastProp) toastProp(t('qp.launch.missingRequired', missing.join(', ')), 'error');
+      return;
+    }
     // `compareAgents` is null when the user hasn't touched the chip
     // selector yet — fall back to "all installed" in that case so the
     // 🤝 button on a freshly opened form still does the right thing.
@@ -1205,6 +1389,9 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
             <QuickPromptForm
               editPrompt={editingQP ?? undefined}
               projects={projects}
+              skills={skillsCatalog ?? []}
+              profiles={profilesCatalog ?? []}
+              directives={directivesCatalog ?? []}
               onSave={handleSaveQP}
               onCancel={() => { setShowCreateQP(false); setEditingQP(null); }}
             />
@@ -1221,7 +1408,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
               ) : (
                 <div className="qp-list">
                   {quickPromptList.map(qp => (
-                    <div key={qp.id} className="qp-card">
+                    <div key={qp.id} className="qp-card" data-qp-id={qp.id}>
                       <div className="qp-card-header">
                         <span className="qp-card-icon">{qp.icon}</span>
                         <span className="qp-card-name">{qp.name}</span>
@@ -1242,10 +1429,35 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                         {qp.variables.length > 0 && (
                           <span className="qp-card-vars">{t('qp.vars', qp.variables.length)}</span>
                         )}
+                        {/* 0.8.5 — fitness chip: current-version avg
+                            tokens / duration + launch count. Hidden
+                            until the QP has ≥ 1 launch. */}
+                        <QPCardMetricsChip qpId={qp.id} />
                         <div className="qp-card-actions">
                           <button className="wf-icon-btn" onClick={() => setEditingQP(qp)} title="Edit">
                             <Eye size={12} />
                           </button>
+                          {/* 0.8.5 — "Improve with AI" — opens a discussion
+                              seeded with the QP body + the qp-improver
+                              skill. The agent audits the prompt, emits a
+                              refactored version, and a DiscussionsPage CTA
+                              deploys it in one click via PUT
+                              /api/quick-prompts/:id. */}
+                          <button
+                            className="wf-icon-btn"
+                            data-testid="qp-improve-btn"
+                            disabled={!installedAgentTypes || installedAgentTypes.length === 0}
+                            onClick={() => handleImproveQP(qp)}
+                            title={t('qp.improveWithAi')}
+                          >
+                            ✨
+                          </button>
+                          {/* 0.8.5 — version history + metrics drawer.
+                              Reads /api/quick-prompts/:id/{history,metrics}.
+                              Hides itself when the QP has no snapshot
+                              (legacy pre-0.8.5 QPs). */}
+                          <QPHistoryDrawer qpId={qp.id} qpName={qp.name} />
+
                           {/* 0.7.0 UX pass — export QP as JSON file. */}
                           <button className="wf-icon-btn" onClick={async () => {
                             try {

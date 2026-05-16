@@ -69,6 +69,8 @@ import type {
   TestStepRequest,
   QuickPrompt,
   CreateQuickPromptRequest,
+  QuickPromptVersion,
+  QuickPromptVersionMetrics,
   QuickApi,
   CreateQuickApiRequest,
   RunQuickApiRequest,
@@ -1338,6 +1340,18 @@ export const quickPrompts = {
   },
   importQp: (payload: ImportQuickPromptRequest) =>
     api<QuickPrompt>('POST', '/quick-prompts/import', payload),
+  /** 0.8.5 — full version history, newest first. Empty array for legacy
+   *  QPs that pre-date 0.8.5 (no snapshot was seeded). */
+  history: (id: string) => api<QuickPromptVersion[]>('GET', `/quick-prompts/${id}/history`),
+  /** 0.8.5 — per-version aggregated launch metrics (avg tokens, avg
+   *  duration, avg cost). One row per version that has ≥ 1 launch. */
+  metrics: (id: string) => api<QuickPromptVersionMetrics[]>('GET', `/quick-prompts/${id}/metrics`),
+  /** 0.8.5 — delete an archived QP version. Refused on the current
+   *  (highest) version_index by the backend. Discussions stamped with
+   *  the deleted version have their lineage cleared (lost attribution,
+   *  the disc itself stays). */
+  deleteVersion: (id: string, versionIndex: number) =>
+    api<boolean>('DELETE', `/quick-prompts/${id}/versions/${versionIndex}`),
 };
 
 // ─── Quick APIs (0.6.0) ─────────────────────────────────────────────────────

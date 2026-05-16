@@ -38,6 +38,12 @@ pub(super) async fn make_agent_stream(
     discussion_id: String,
     agent_override: Option<AgentType>,
 ) -> Sse<SseStream> {
+    // 0.8.5 — capture the agent-run start wallclock. The delta between
+    // this and the moment we commit the Agent message gives us the
+    // real reply duration in milliseconds (excludes user typing time).
+    // Stored on `messages.duration_ms` for the QP-metrics aggregator.
+    let run_started_at: std::time::Instant = std::time::Instant::now();
+
     // Extract info from DB
     let disc = state.db.with_conn({
         let did = discussion_id.clone();
@@ -829,7 +835,15 @@ pub(super) async fn make_agent_stream(
                     auth_mode: Some(auth_mode_str.clone()),
                     model_tier: tier_label,
                     cost_usd,
-                    author_pseudo: None, author_avatar_email: None, source_msg_id: None,
+                    author_pseudo: None,
+                    author_avatar_email: None,
+                    source_msg_id: None,
+                    // 0.8.5 — wallclock duration of THIS agent run. Captured
+                    // from `run_started_at` (set at the very top of
+                    // `make_agent_stream`) to now-commit. Used by the
+                    // QP-metrics aggregator to compute avg first-reply
+                    // duration per QP version.
+                    duration_ms: Some(run_started_at.elapsed().as_millis() as u64),
                 };
 
                 let did = disc_id.clone();
@@ -870,7 +884,7 @@ pub(super) async fn make_agent_stream(
                             model_tier: None,
                             cost_usd: None,
                             author_pseudo: None,
-                            author_avatar_email: None, source_msg_id: None,
+                            author_avatar_email: None, source_msg_id: None, duration_ms: None,
                         };
                         let did_sys = disc_id.clone();
                         let m = sys_msg.clone();
@@ -909,7 +923,7 @@ pub(super) async fn make_agent_stream(
                             model_tier: None,
                             cost_usd: None,
                             author_pseudo: None,
-                            author_avatar_email: None, source_msg_id: None,
+                            author_avatar_email: None, source_msg_id: None, duration_ms: None,
                         };
                         let did_sys = disc_id.clone();
                         let m = sys_msg.clone();
@@ -1080,7 +1094,7 @@ pub(super) async fn make_agent_stream(
                     timestamp: Utc::now(),
                     tokens_used: 0,
                     auth_mode: None,
-                    model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None, source_msg_id: None,
+                    model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None, source_msg_id: None, duration_ms: None,
                 };
 
                 let did = disc_id.clone();

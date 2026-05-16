@@ -2888,6 +2888,8 @@ mod tests {
             agent: AgentType::ClaudeCode,
             project_id: Some("src-project".into()),
             skill_ids: vec![],
+            profile_ids: vec![],
+            directive_ids: vec![],
             tier: ModelTier::Default,
             description: "Audit a repo".into(),
             created_at: chrono::Utc::now(),

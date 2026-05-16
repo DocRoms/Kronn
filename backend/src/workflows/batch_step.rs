@@ -707,6 +707,8 @@ mod tests {
             agent: AgentType::ClaudeCode,
             project_id: None,
             skill_ids: vec![],
+            profile_ids: vec![],
+            directive_ids: vec![],
             tier: ModelTier::Default,
             description: "E2E test QP".into(),
             created_at: Utc::now(),

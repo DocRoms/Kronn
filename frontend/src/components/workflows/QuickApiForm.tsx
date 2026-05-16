@@ -100,6 +100,14 @@ export function QuickApiForm({
   const [apiPagination, setApiPagination] = useState<QuickApi['api_pagination']>(editApi?.api_pagination ?? null);
   const [apiTimeoutMs, setApiTimeoutMs] = useState<number | null>(editApi?.api_timeout_ms ?? null);
   const [apiMaxRetries, setApiMaxRetries] = useState<number | null>(editApi?.api_max_retries ?? null);
+  // 0.8.5 — profile + directive bindings (symmetric with QuickPrompt).
+  // QA is a pure HTTP call so these don't affect the request directly;
+  // they propagate to downstream LLM consumers (e.g. when a chained QP
+  // reads the QA output). The picker UI lives only in QuickPromptForm
+  // today — QAs round-trip the bindings unchanged from import/bundle
+  // payloads, which is enough until a real QA-driven LLM surface ships.
+  const profileIds = editApi?.profile_ids ?? [];
+  const directiveIds = editApi?.directive_ids ?? [];
 
   // Synthesize a step-shaped object so ApiCallStepCard can render against
   // it. The card only reads the fields it knows about — extra fields are
@@ -218,6 +226,8 @@ export function QuickApiForm({
         api_timeout_ms: apiTimeoutMs,
         api_max_retries: apiMaxRetries,
         variables,
+        profile_ids: profileIds,
+        directive_ids: directiveIds,
       });
     } catch (e) {
       // Backend validation errors (400 Bad Request, "name must be 1-200

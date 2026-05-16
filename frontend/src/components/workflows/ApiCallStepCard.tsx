@@ -47,7 +47,7 @@ type ExtractField = 'data' | 'status' | 'summary';
  *  Calque desktop (split 60/40) : à gauche le JSON response cliquable,
  *  à droite le panneau d'extraction (radios + path input + preview live).
  *  Mobile reste en stack vertical — l'édition sur petit écran est
- *  intentionnellement dégradée (cf. `ai/operations/deagent-apicall.md`). */
+ *  intentionnellement dégradée (cf. `docs/operations/deagent-apicall.md`). */
 export function ApiCallStepCard({
   step,
   onChange,

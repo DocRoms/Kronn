@@ -77,7 +77,7 @@ fn sample_message(id: &str, role: MessageRole) -> DiscussionMessage {
         tokens_used: 0,
         auth_mode: None,
         model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None,
-        source_msg_id: None,
+        source_msg_id: None, duration_ms: None,
     }
 }
 
@@ -1587,6 +1587,8 @@ fn sample_qp_for_batch(id: &str) -> QuickPrompt {
         agent: crate::models::AgentType::ClaudeCode,
         project_id: None,
         skill_ids: vec![],
+        profile_ids: vec![],
+        directive_ids: vec![],
         tier: crate::models::ModelTier::Default,
         description: "Test QP for batch chaining".into(),
         created_at: now,
@@ -2689,6 +2691,8 @@ fn quick_prompt_crud() {
         agent: crate::models::AgentType::ClaudeCode,
         project_id: None,
         skill_ids: vec![],
+        profile_ids: vec!["coder".into()],
+        directive_ids: vec!["concise".into()],
         tier: crate::models::ModelTier::Default,
         description: "Analyse technique d'un ticket Jira pour cadrage".into(),
         created_at: now,
@@ -2713,6 +2717,9 @@ fn quick_prompt_crud() {
     assert_eq!(found_qp.variables[0].description.as_deref(), Some("Identifiant Jira du ticket à analyser"));
     assert!(found_qp.variables[0].required);
     assert!(found_qp.variables[1].description.is_none());
+    // 0.8.5 — profile/directive ids roundtrip.
+    assert_eq!(found_qp.profile_ids, vec!["coder".to_string()]);
+    assert_eq!(found_qp.directive_ids, vec!["concise".to_string()]);
 
     // Update
     let mut updated = qp.clone();
@@ -2726,6 +2733,345 @@ fn quick_prompt_crud() {
     crate::db::quick_prompts::delete_quick_prompt(&conn, "qp1").unwrap();
     let all2 = crate::db::quick_prompts::list_quick_prompts(&conn).unwrap();
     assert_eq!(all2.len(), 0);
+}
+
+// ─── 0.8.5 — QP version history + metrics ─────────────────────────
+
+#[test]
+fn quick_prompt_insert_seeds_version_v1() {
+    // After insert_quick_prompt, list_quick_prompt_versions should
+    // return exactly one row with version_index = 1.
+    let conn = test_db();
+    let now = Utc::now();
+    let qp = crate::models::QuickPrompt {
+        id: "qp-versions-1".into(),
+        name: "QP V1".into(),
+        icon: "⚡".into(),
+        prompt_template: "Initial body".into(),
+        variables: vec![],
+        agent: crate::models::AgentType::ClaudeCode,
+        project_id: None,
+        skill_ids: vec![],
+        profile_ids: vec![],
+        directive_ids: vec![],
+        tier: crate::models::ModelTier::Default,
+        description: "v1".into(),
+        created_at: now,
+        updated_at: now,
+    };
+    crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
+    let versions = crate::db::quick_prompts::list_quick_prompt_versions(&conn, "qp-versions-1").unwrap();
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0].version_index, 1);
+    assert_eq!(versions[0].prompt_template, "Initial body");
+    assert_eq!(versions[0].description, "v1");
+}
+
+#[test]
+fn quick_prompt_update_snapshots_v2_v3() {
+    // Each update_quick_prompt appends a new snapshot with the NEW
+    // body and version_index = max + 1.
+    let conn = test_db();
+    let now = Utc::now();
+    let mut qp = crate::models::QuickPrompt {
+        id: "qp-versions-2".into(),
+        name: "Init".into(),
+        icon: "⚡".into(),
+        prompt_template: "v1 body".into(),
+        variables: vec![],
+        agent: crate::models::AgentType::ClaudeCode,
+        project_id: None,
+        skill_ids: vec![],
+        profile_ids: vec![],
+        directive_ids: vec![],
+        tier: crate::models::ModelTier::Default,
+        description: "v1".into(),
+        created_at: now,
+        updated_at: now,
+    };
+    crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
+
+    qp.prompt_template = "v2 body".into();
+    qp.description = "v2".into();
+    qp.updated_at = Utc::now();
+    crate::db::quick_prompts::update_quick_prompt(&conn, &qp).unwrap();
+
+    qp.prompt_template = "v3 body".into();
+    qp.description = "v3".into();
+    qp.updated_at = Utc::now();
+    crate::db::quick_prompts::update_quick_prompt(&conn, &qp).unwrap();
+
+    let versions = crate::db::quick_prompts::list_quick_prompt_versions(&conn, "qp-versions-2").unwrap();
+    // Newest first: v3, v2, v1
+    assert_eq!(versions.len(), 3);
+    assert_eq!(versions[0].version_index, 3);
+    assert_eq!(versions[0].prompt_template, "v3 body");
+    assert_eq!(versions[1].version_index, 2);
+    assert_eq!(versions[1].prompt_template, "v2 body");
+    assert_eq!(versions[2].version_index, 1);
+    assert_eq!(versions[2].prompt_template, "v1 body");
+
+    // current_version_index() returns the highest
+    let cur = crate::db::quick_prompts::current_version_index(&conn, "qp-versions-2").unwrap();
+    assert_eq!(cur, Some(3));
+}
+
+#[test]
+fn quick_prompt_metrics_aggregates_first_agent_reply_per_version() {
+    use crate::models::{Discussion, DiscussionMessage, MessageRole, AgentType, ModelTier};
+    let conn = test_db();
+    let now = Utc::now();
+    let mut qp = crate::models::QuickPrompt {
+        id: "qp-metrics".into(),
+        name: "Metrics QP".into(),
+        icon: "⚡".into(),
+        prompt_template: "v1".into(),
+        variables: vec![],
+        agent: AgentType::ClaudeCode,
+        project_id: None,
+        skill_ids: vec![],
+        profile_ids: vec![],
+        directive_ids: vec![],
+        tier: ModelTier::Default,
+        description: "".into(),
+        created_at: now,
+        updated_at: now,
+    };
+    crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
+    // Bump to v2
+    qp.prompt_template = "v2".into();
+    qp.updated_at = Utc::now();
+    crate::db::quick_prompts::update_quick_prompt(&conn, &qp).unwrap();
+
+    // Seed 2 launches on v1 (tokens 1000+2000, duration 5000+7000)
+    // and 1 launch on v2 (tokens 800, duration 3000).
+    let seed_disc = |disc_id: &str, v: u32, agent_tokens: u64, agent_dur: u64| {
+        let d = Discussion {
+            id: disc_id.into(), project_id: None, title: format!("Disc {}", disc_id),
+            agent: AgentType::ClaudeCode, language: "fr".into(),
+            participants: vec![AgentType::ClaudeCode], messages: vec![], message_count: 0,
+            skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
+            archived: false, pinned: false,
+            workspace_mode: "Direct".into(), workspace_path: None, worktree_branch: None,
+            tier: ModelTier::Default, pin_first_message: false,
+            summary_cache: None, summary_up_to_msg_idx: None,
+            summary_strategy: crate::models::SummaryStrategy::Auto,
+            introspection_call_count: 0,
+            shared_id: None, shared_with: vec![],
+            workflow_run_id: None,
+            test_mode_restore_branch: None, test_mode_stash_ref: None,
+            created_at: Utc::now(), updated_at: Utc::now(),
+        };
+        crate::db::discussions::insert_discussion(&conn, &d).unwrap();
+        // User msg + Agent msg (with tokens + duration).
+        let user_msg = DiscussionMessage {
+            id: format!("{}-u", disc_id), role: MessageRole::User, content: "ask".into(),
+            agent_type: None, timestamp: Utc::now(), tokens_used: 0,
+            auth_mode: None, model_tier: None, cost_usd: None,
+            author_pseudo: None, author_avatar_email: None, source_msg_id: None, duration_ms: None,
+        };
+        let agent_msg = DiscussionMessage {
+            id: format!("{}-a", disc_id), role: MessageRole::Agent, content: "reply".into(),
+            agent_type: Some(AgentType::ClaudeCode), timestamp: Utc::now(),
+            tokens_used: agent_tokens, auth_mode: None,
+            model_tier: None, cost_usd: None,
+            author_pseudo: None, author_avatar_email: None, source_msg_id: None,
+            duration_ms: Some(agent_dur),
+        };
+        crate::db::discussions::insert_message(&conn, disc_id, &user_msg).unwrap();
+        crate::db::discussions::insert_message(&conn, disc_id, &agent_msg).unwrap();
+        crate::db::discussions::set_originating_qp(&conn, disc_id, "qp-metrics", v).unwrap();
+    };
+    seed_disc("d-v1-a", 1, 1000, 5000);
+    seed_disc("d-v1-b", 1, 2000, 7000);
+    seed_disc("d-v2-a", 2, 800,  3000);
+
+    let metrics = crate::db::quick_prompts::list_quick_prompt_version_metrics(&conn, "qp-metrics").unwrap();
+    // Newest first: v2 then v1
+    assert_eq!(metrics.len(), 2);
+    assert_eq!(metrics[0].version_index, 2);
+    assert_eq!(metrics[0].launches, 1);
+    assert_eq!(metrics[0].avg_tokens, 800);
+    assert_eq!(metrics[0].avg_duration_ms, Some(3000));
+    assert_eq!(metrics[1].version_index, 1);
+    assert_eq!(metrics[1].launches, 2);
+    assert_eq!(metrics[1].avg_tokens, 1500);
+    assert_eq!(metrics[1].avg_duration_ms, Some(6000));
+}
+
+#[test]
+fn quick_prompt_metrics_empty_for_qp_without_launches() {
+    let conn = test_db();
+    let now = Utc::now();
+    let qp = crate::models::QuickPrompt {
+        id: "qp-no-launches".into(),
+        name: "Solo".into(),
+        icon: "⚡".into(),
+        prompt_template: "...".into(),
+        variables: vec![],
+        agent: crate::models::AgentType::ClaudeCode,
+        project_id: None,
+        skill_ids: vec![],
+        profile_ids: vec![],
+        directive_ids: vec![],
+        tier: crate::models::ModelTier::Default,
+        description: "".into(),
+        created_at: now,
+        updated_at: now,
+    };
+    crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
+    let m = crate::db::quick_prompts::list_quick_prompt_version_metrics(&conn, "qp-no-launches").unwrap();
+    assert!(m.is_empty(), "no launches → no metrics rows");
+}
+
+#[test]
+fn quick_prompt_delete_version_refuses_current_and_succeeds_on_older() {
+    use crate::models::{AgentType, ModelTier};
+    let conn = test_db();
+    let now = Utc::now();
+    let mut qp = crate::models::QuickPrompt {
+        id: "qp-del".into(), name: "Del".into(), icon: "⚡".into(),
+        prompt_template: "v1".into(),
+        variables: vec![], agent: AgentType::ClaudeCode,
+        project_id: None, skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
+        tier: ModelTier::Default, description: "".into(),
+        created_at: now, updated_at: now,
+    };
+    crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
+    qp.prompt_template = "v2".into();
+    qp.updated_at = Utc::now();
+    crate::db::quick_prompts::update_quick_prompt(&conn, &qp).unwrap();
+    qp.prompt_template = "v3".into();
+    qp.updated_at = Utc::now();
+    crate::db::quick_prompts::update_quick_prompt(&conn, &qp).unwrap();
+
+    // current = v3; trying to delete it MUST fail.
+    let err = crate::db::quick_prompts::delete_quick_prompt_version(&conn, "qp-del", 3).unwrap_err();
+    assert!(err.to_string().contains("current"), "error mentions current: {}", err);
+
+    // Deleting v2 (older) succeeds and returns true.
+    let ok = crate::db::quick_prompts::delete_quick_prompt_version(&conn, "qp-del", 2).unwrap();
+    assert!(ok);
+    let versions = crate::db::quick_prompts::list_quick_prompt_versions(&conn, "qp-del").unwrap();
+    assert_eq!(versions.len(), 2);
+    assert_eq!(versions[0].version_index, 3);
+    assert_eq!(versions[1].version_index, 1);
+
+    // Deleting a non-existent version returns false (idempotent).
+    let none = crate::db::quick_prompts::delete_quick_prompt_version(&conn, "qp-del", 99).unwrap();
+    assert!(!none);
+}
+
+#[test]
+fn quick_prompt_delete_version_clears_discussion_lineage() {
+    use crate::models::{Discussion, AgentType, ModelTier};
+    let conn = test_db();
+    let now = Utc::now();
+    let mut qp = crate::models::QuickPrompt {
+        id: "qp-cascade".into(), name: "C".into(), icon: "⚡".into(),
+        prompt_template: "v1".into(),
+        variables: vec![], agent: AgentType::ClaudeCode,
+        project_id: None, skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
+        tier: ModelTier::Default, description: "".into(),
+        created_at: now, updated_at: now,
+    };
+    crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
+    qp.prompt_template = "v2".into();
+    qp.updated_at = Utc::now();
+    crate::db::quick_prompts::update_quick_prompt(&conn, &qp).unwrap();
+
+    // Seed a discussion stamped with v1 (the version we'll delete).
+    let d = Discussion {
+        id: "d-orphan".into(), project_id: None, title: "T".into(),
+        agent: AgentType::ClaudeCode, language: "fr".into(),
+        participants: vec![AgentType::ClaudeCode], messages: vec![], message_count: 0,
+        skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
+        archived: false, pinned: false,
+        workspace_mode: "Direct".into(), workspace_path: None, worktree_branch: None,
+        tier: ModelTier::Default, pin_first_message: false,
+        summary_cache: None, summary_up_to_msg_idx: None,
+        summary_strategy: crate::models::SummaryStrategy::Auto,
+        introspection_call_count: 0,
+        shared_id: None, shared_with: vec![],
+        workflow_run_id: None,
+        test_mode_restore_branch: None, test_mode_stash_ref: None,
+        created_at: Utc::now(), updated_at: Utc::now(),
+    };
+    crate::db::discussions::insert_discussion(&conn, &d).unwrap();
+    crate::db::discussions::set_originating_qp(&conn, "d-orphan", "qp-cascade", 1).unwrap();
+
+    // Delete v1 (older — v2 is the current). The discussion's lineage
+    // must be cleared so its launch no longer counts under this QP.
+    crate::db::quick_prompts::delete_quick_prompt_version(&conn, "qp-cascade", 1).unwrap();
+    let (orig_qp, orig_version): (Option<String>, Option<i64>) = conn
+        .query_row(
+            "SELECT originating_qp_id, originating_qp_version FROM discussions WHERE id = ?1",
+            rusqlite::params!["d-orphan"],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert!(orig_qp.is_none(), "originating_qp_id must be cleared after version deletion");
+    assert!(orig_version.is_none(), "originating_qp_version must be cleared too");
+}
+
+#[test]
+fn quick_prompt_metrics_ignores_non_first_agent_replies() {
+    // If a discussion has 3 agent messages, only the FIRST counts toward
+    // the QP's metrics — the QP's pertinence is reflected in the
+    // initial reply, not subsequent back-and-forth.
+    use crate::models::{Discussion, DiscussionMessage, MessageRole, AgentType, ModelTier};
+    let conn = test_db();
+    let now = Utc::now();
+    let qp = crate::models::QuickPrompt {
+        id: "qp-first-only".into(),
+        name: "F".into(), icon: "⚡".into(), prompt_template: "v1".into(),
+        variables: vec![], agent: AgentType::ClaudeCode,
+        project_id: None, skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
+        tier: ModelTier::Default, description: "".into(),
+        created_at: now, updated_at: now,
+    };
+    crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
+    let d = Discussion {
+        id: "d-multi".into(), project_id: None, title: "T".into(),
+        agent: AgentType::ClaudeCode, language: "fr".into(),
+        participants: vec![AgentType::ClaudeCode], messages: vec![], message_count: 0,
+        skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
+        archived: false, pinned: false,
+        workspace_mode: "Direct".into(), workspace_path: None, worktree_branch: None,
+        tier: ModelTier::Default, pin_first_message: false,
+        summary_cache: None, summary_up_to_msg_idx: None,
+        summary_strategy: crate::models::SummaryStrategy::Auto,
+        introspection_call_count: 0,
+        shared_id: None, shared_with: vec![],
+        workflow_run_id: None,
+        test_mode_restore_branch: None, test_mode_stash_ref: None,
+        created_at: Utc::now(), updated_at: Utc::now(),
+    };
+    crate::db::discussions::insert_discussion(&conn, &d).unwrap();
+    // Three Agent replies — only the first should be counted.
+    let mk = |id: &str, role: MessageRole, toks: u64, dur: u64| DiscussionMessage {
+        id: id.into(), role, content: "x".into(),
+        agent_type: Some(AgentType::ClaudeCode), timestamp: Utc::now(),
+        tokens_used: toks, auth_mode: None,
+        model_tier: None, cost_usd: None,
+        author_pseudo: None, author_avatar_email: None, source_msg_id: None,
+        duration_ms: Some(dur),
+    };
+    crate::db::discussions::insert_message(&conn, "d-multi",
+        &DiscussionMessage { agent_type: None, ..mk("u1", MessageRole::User, 0, 0) }).unwrap();
+    crate::db::discussions::insert_message(&conn, "d-multi", &mk("a1", MessageRole::Agent, 1000, 5000)).unwrap();
+    crate::db::discussions::insert_message(&conn, "d-multi",
+        &DiscussionMessage { agent_type: None, ..mk("u2", MessageRole::User, 0, 0) }).unwrap();
+    crate::db::discussions::insert_message(&conn, "d-multi", &mk("a2", MessageRole::Agent, 9999, 99999)).unwrap();
+    crate::db::discussions::insert_message(&conn, "d-multi", &mk("a3", MessageRole::Agent, 8888, 88888)).unwrap();
+    crate::db::discussions::set_originating_qp(&conn, "d-multi", "qp-first-only", 1).unwrap();
+
+    let m = crate::db::quick_prompts::list_quick_prompt_version_metrics(&conn, "qp-first-only").unwrap();
+    assert_eq!(m.len(), 1);
+    assert_eq!(m[0].launches, 1);
+    // The first agent message's values, not the later ones.
+    assert_eq!(m[0].avg_tokens, 1000);
+    assert_eq!(m[0].avg_duration_ms, Some(5000));
 }
 
 #[test]
@@ -2757,6 +3103,8 @@ fn quick_prompt_variables_roundtrip() {
         agent: crate::models::AgentType::ClaudeCode,
         project_id: None,
         skill_ids: vec!["security".into()],
+        profile_ids: vec![],
+        directive_ids: vec![],
         tier: crate::models::ModelTier::Reasoning,
         description: String::new(),
         created_at: now,

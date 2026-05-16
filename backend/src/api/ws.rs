@@ -472,7 +472,7 @@ fn handle_incoming_chat_message(
         cost_usd: None,
         author_pseudo: Some(from_pseudo.to_string()),
         author_avatar_email: from_avatar_email.map(|s| s.to_string()),
-        source_msg_id: None,
+        source_msg_id: None, duration_ms: None,
     };
 
     crate::db::discussions::insert_message(conn, &disc_id, &msg)?;

@@ -161,6 +161,8 @@ pub async fn create_bundle(
             agent: qp.request.agent.clone().unwrap_or(AgentType::ClaudeCode),
             project_id: qp.request.project_id.clone(),
             skill_ids: qp.request.skill_ids.clone(),
+            profile_ids: qp.request.profile_ids.clone(),
+            directive_ids: qp.request.directive_ids.clone(),
             tier: qp.request.tier,
             description: qp.request.description.clone(),
             created_at: now,
@@ -189,6 +191,8 @@ pub async fn create_bundle(
             api_timeout_ms: qa.request.api_timeout_ms,
             api_max_retries: qa.request.api_max_retries,
             variables: qa.request.variables.clone(),
+            profile_ids: qa.request.profile_ids.clone(),
+            directive_ids: qa.request.directive_ids.clone(),
             created_at: now,
             updated_at: now,
         });

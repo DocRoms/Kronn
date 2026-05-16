@@ -162,6 +162,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       checkDrift: resolve({ stale_steps: [], checksums_outdated: false }),
       getBriefing: resolve(null),
       startBriefing: resolve({ discussion_id: '' }),
+      saveBriefing: resolve({}),
       listAiFiles: resolve([]),
       createPr: resolve({ url: '' }),
       bootstrap: resolve({}),
@@ -260,6 +261,10 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       create: resolve({}),
       update: resolve({}),
       delete: resolve(undefined),
+      // 0.8.5 — empty defaults for the version history + metrics drawer.
+      history: resolve([]),
+      metrics: resolve([]),
+      deleteVersion: resolve(true),
     },
 
     quickApis: {

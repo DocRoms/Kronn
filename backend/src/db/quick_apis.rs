@@ -47,6 +47,10 @@ fn row_to_quick_api(row: &rusqlite::Row) -> QuickApi {
         variables: parse_json_opt(row.get(17).unwrap_or(None)).unwrap_or_default(),
         created_at: parse_dt(&row.get::<_, String>(18).unwrap_or_default()),
         updated_at: parse_dt(&row.get::<_, String>(19).unwrap_or_default()),
+        // 0.8.5 — columns 20/21 added by migration 056. Pre-056 rows get
+        // backfilled to '[]' by the ALTER; the unwrap_or here is defensive.
+        profile_ids: parse_json_opt::<Vec<String>>(row.get::<_, String>(20).ok()).unwrap_or_default(),
+        directive_ids: parse_json_opt::<Vec<String>>(row.get::<_, String>(21).ok()).unwrap_or_default(),
     }
 }
 
@@ -55,7 +59,8 @@ const COLUMNS: &str =
      api_plugin_slug, api_config_id, api_endpoint_path, api_method, \
      api_query_json, api_path_params_json, api_headers_json, api_body, \
      api_extract_json, api_pagination_json, api_timeout_ms, api_max_retries, \
-     variables_json, created_at, updated_at";
+     variables_json, created_at, updated_at, \
+     profile_ids_json, directive_ids_json";
 
 pub fn list_quick_apis(conn: &Connection) -> Result<Vec<QuickApi>> {
     let sql = format!("SELECT {COLUMNS} FROM quick_apis ORDER BY updated_at DESC");
@@ -81,14 +86,18 @@ pub fn insert_quick_api(conn: &Connection, qa: &QuickApi) -> Result<()> {
     let api_pagination_json = qa.api_pagination.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
     let variables_json = serde_json::to_string(&qa.variables).unwrap_or_else(|_| "[]".into());
 
+    let profile_ids_json = serde_json::to_string(&qa.profile_ids).unwrap_or_else(|_| "[]".into());
+    let directive_ids_json = serde_json::to_string(&qa.directive_ids).unwrap_or_else(|_| "[]".into());
+
     conn.execute(
         "INSERT INTO quick_apis (
             id, name, description, icon, project_id,
             api_plugin_slug, api_config_id, api_endpoint_path, api_method,
             api_query_json, api_path_params_json, api_headers_json, api_body,
             api_extract_json, api_pagination_json, api_timeout_ms, api_max_retries,
-            variables_json, created_at, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+            variables_json, created_at, updated_at,
+            profile_ids_json, directive_ids_json
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
         params![
             qa.id,
             qa.name,
@@ -110,6 +119,8 @@ pub fn insert_quick_api(conn: &Connection, qa: &QuickApi) -> Result<()> {
             variables_json,
             qa.created_at.to_rfc3339(),
             qa.updated_at.to_rfc3339(),
+            profile_ids_json,
+            directive_ids_json,
         ],
     )?;
     Ok(())
@@ -123,13 +134,17 @@ pub fn update_quick_api(conn: &Connection, qa: &QuickApi) -> Result<()> {
     let api_pagination_json = qa.api_pagination.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
     let variables_json = serde_json::to_string(&qa.variables).unwrap_or_else(|_| "[]".into());
 
+    let profile_ids_json = serde_json::to_string(&qa.profile_ids).unwrap_or_else(|_| "[]".into());
+    let directive_ids_json = serde_json::to_string(&qa.directive_ids).unwrap_or_else(|_| "[]".into());
+
     conn.execute(
         "UPDATE quick_apis SET
             name = ?2, description = ?3, icon = ?4, project_id = ?5,
             api_plugin_slug = ?6, api_config_id = ?7, api_endpoint_path = ?8, api_method = ?9,
             api_query_json = ?10, api_path_params_json = ?11, api_headers_json = ?12, api_body = ?13,
             api_extract_json = ?14, api_pagination_json = ?15, api_timeout_ms = ?16, api_max_retries = ?17,
-            variables_json = ?18, updated_at = ?19
+            variables_json = ?18, updated_at = ?19,
+            profile_ids_json = ?20, directive_ids_json = ?21
          WHERE id = ?1",
         params![
             qa.id,
@@ -151,6 +166,8 @@ pub fn update_quick_api(conn: &Connection, qa: &QuickApi) -> Result<()> {
             qa.api_max_retries,
             variables_json,
             qa.updated_at.to_rfc3339(),
+            profile_ids_json,
+            directive_ids_json,
         ],
     )?;
     Ok(())
@@ -198,6 +215,8 @@ mod tests {
                 description: None,
                 required: true,
             }],
+            profile_ids: vec![],
+            directive_ids: vec![],
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

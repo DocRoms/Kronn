@@ -111,7 +111,7 @@ pub async fn create(
         tokens_used: 0,
         auth_mode: None,
         model_tier: None, cost_usd: None, author_pseudo, author_avatar_email,
-        source_msg_id: None,
+        source_msg_id: None, duration_ms: None,
     };
 
     let workspace_mode = req.workspace_mode.unwrap_or_else(|| "Direct".into());
@@ -151,9 +151,20 @@ pub async fn create(
 
     let disc = discussion.clone();
     let msg = initial_message;
+    // 0.8.5 — when this create is part of a QP launch, capture the QP
+    // id so we can stamp the lineage in the same transaction. The
+    // version_index is resolved server-side from the snapshot table
+    // (the client only knows the QP id; treating the server as the
+    // source of truth avoids races against concurrent QP updates).
+    let originating_qp_id = req.originating_qp_id.clone();
     match state.db.with_conn(move |conn| {
         crate::db::discussions::insert_discussion(conn, &disc)?;
         crate::db::discussions::insert_message(conn, &disc.id, &msg)?;
+        if let Some(ref qp_id) = originating_qp_id {
+            if let Ok(Some(v)) = crate::db::quick_prompts::current_version_index(conn, qp_id) {
+                crate::db::discussions::set_originating_qp(conn, &disc.id, qp_id, v)?;
+            }
+        }
         Ok(())
     }).await {
         Ok(()) => {
@@ -293,7 +304,7 @@ pub async fn update(
                 timestamp: chrono::Utc::now(),
                 tokens_used: 0,
                 auth_mode: None,
-                model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None, source_msg_id: None,
+                model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None, source_msg_id: None, duration_ms: None,
             };
             crate::db::discussions::insert_message(conn, &id, &switch_msg)?;
         }

@@ -2,6 +2,11 @@
 mod tests {
     use std::collections::HashMap;
     use crate::core::mcp_scanner::*;
+    use serial_test::serial;
+
+    // Tests that mutate `KRONN_TEMPLATES_DIR` share the
+    // `kronn_templates_env` key with audit::validation::tests so
+    // they never race across modules.
 
     fn make_test_data() -> McpJsonFile {
         let mut servers = HashMap::new();
@@ -304,6 +309,7 @@ mod tests {
     // ─── ensure_redirectors ────────────────────────────────────────────────
 
     #[test]
+    #[serial(kronn_templates_env)]
     fn ensure_redirectors_skips_projects_without_ai_dir() {
         let tmp = setup_tmp("redir-no-ai");
         // No ai/ directory — should do nothing
@@ -317,6 +323,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(kronn_templates_env)]
     fn ensure_redirectors_creates_missing_files() {
         let tmp = setup_tmp("redir-create");
         // Create ai/ directory so project qualifies
@@ -348,6 +355,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(kronn_templates_env)]
     fn ensure_redirectors_does_not_overwrite_existing() {
         let tmp = setup_tmp("redir-no-overwrite");
         std::fs::create_dir_all(tmp.join("ai")).unwrap();

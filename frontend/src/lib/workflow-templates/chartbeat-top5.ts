@@ -2,7 +2,7 @@
 // =============================================================================
 //
 // This is the **aha moment** of the désagentification feature (see
-// `ai/operations/deagent-apicall.md`). A one-click clone that shows an
+// `docs/operations/deagent-apicall.md`). A one-click clone that shows an
 // ApiCall step feeding an Agent step, with the BatchQuickPrompt-compatible
 // shape, all in a single pre-wired flow. Users copy, plug their Chartbeat
 // host + API key, save. End-to-end demo in ~30 seconds.

@@ -603,6 +603,15 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/quick-prompts/{id}/batch", post(api::quick_prompts::batch_run))
         // Compare-agents mode — fan out the same prompt across N agents.
         .route("/api/quick-prompts/{id}/compare-agents", post(api::quick_prompts::compare_agents))
+        // 0.8.5 — version history + per-version metrics for the QP
+        // history drawer (avg tokens, avg duration, avg cost per
+        // version_index).
+        .route("/api/quick-prompts/{id}/history", get(api::quick_prompts::history))
+        .route("/api/quick-prompts/{id}/metrics", get(api::quick_prompts::metrics))
+        // 0.8.5 — drop an archived QP version. Refused on the current
+        // (highest) version_index; cascades originating_qp_* on discs
+        // referencing the deleted version to NULL.
+        .route("/api/quick-prompts/{id}/versions/{version_index}", delete(api::quick_prompts::delete_version))
         // 0.7.0 UX pass — per-item export / import.
         .route("/api/quick-prompts/{id}/export", get(api::quick_prompts::export_qp))
         .route("/api/quick-prompts/import", post(api::quick_prompts::import_qp))

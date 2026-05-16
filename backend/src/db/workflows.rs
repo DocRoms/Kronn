@@ -419,7 +419,7 @@ pub fn create_batch_run(
             cost_usd: None,
             author_pseudo: input.author_pseudo.clone(),
             author_avatar_email: input.author_avatar_email.clone(),
-            source_msg_id: None,
+            source_msg_id: None, duration_ms: None,
         };
         // Per-item agent override (Compare-agents mode) falls back
         // to the QP's default agent when None.
@@ -434,8 +434,12 @@ pub fn create_batch_run(
             messages: vec![initial_message.clone()],
             message_count: 1,
             skill_ids: qp.skill_ids.clone(),
-            profile_ids: vec![],
-            directive_ids: vec![],
+            // 0.8.5 — QP bindings now flow into the child discussion so
+            // a "compare agents", "batch run", or QP-chain spawn inherits
+            // the persona + directives picked at the QP level. Pre-0.8.5
+            // these were always empty.
+            profile_ids: qp.profile_ids.clone(),
+            directive_ids: qp.directive_ids.clone(),
             archived: false,
             pinned: false,
             workspace_mode: workspace_mode.clone(),
@@ -460,6 +464,15 @@ pub fn create_batch_run(
 
     let discussion_ids: Vec<String> = discussions.iter().map(|(d, _)| d.id.clone()).collect();
 
+    // 0.8.5 — resolve the CURRENT QP version once outside the loop. The
+    // version_index is stamped on every spawned discussion so the metrics
+    // aggregator can group "what was the QP body that produced this run".
+    // `None` means the QP has no snapshot (legacy QP pre-0.8.5 without a
+    // backfill); the discussion-level columns stay NULL in that case.
+    let originating_version = crate::db::quick_prompts::current_version_index(conn, &qp.id)
+        .ok()
+        .flatten();
+
     // Single transaction: placeholder workflow + run + all discussions/messages.
     conn.execute_batch("BEGIN")?;
     let tx_result: Result<()> = (|| {
@@ -468,6 +481,12 @@ pub fn create_batch_run(
         for (disc, msg) in &discussions {
             crate::db::discussions::insert_discussion(conn, disc)?;
             crate::db::discussions::insert_message(conn, &disc.id, msg)?;
+            // Stamp the QP lineage. Skipped when the QP has no version
+            // snapshot — the column simply stays NULL and the metrics
+            // aggregator excludes the row.
+            if let Some(v) = originating_version {
+                crate::db::discussions::set_originating_qp(conn, &disc.id, &qp.id, v)?;
+            }
         }
         Ok(())
     })();

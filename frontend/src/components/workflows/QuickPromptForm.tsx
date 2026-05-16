@@ -1,8 +1,17 @@
 import { useState, useRef, useEffect } from 'react';
 import { useT } from '../../lib/I18nContext';
 import { AGENT_LABELS } from '../../lib/constants';
-import type { QuickPrompt, PromptVariable, CreateQuickPromptRequest, Project, AgentType } from '../../types/generated';
-import { Plus, Save, X } from 'lucide-react';
+import type {
+  QuickPrompt,
+  PromptVariable,
+  CreateQuickPromptRequest,
+  Project,
+  AgentType,
+  Skill,
+  AgentProfile,
+  Directive,
+} from '../../types/generated';
+import { Plus, Save, X, Check, Zap, UserCircle, FileText, ChevronRight } from 'lucide-react';
 
 const ALL_AGENTS: AgentType[] = ['ClaudeCode', 'Codex', 'GeminiCli', 'Kiro', 'Vibe', 'CopilotCli'];
 
@@ -17,11 +26,25 @@ function extractVars(template: string): string[] {
 interface Props {
   editPrompt?: QuickPrompt;
   projects: Project[];
+  /** 0.8.5 — full skills catalog, used by the multi-select picker. Empty array hides the section. */
+  skills?: Skill[];
+  /** 0.8.5 — full profiles catalog. Empty array hides the section. */
+  profiles?: AgentProfile[];
+  /** 0.8.5 — full directives catalog. Empty array hides the section. */
+  directives?: Directive[];
   onSave: (req: CreateQuickPromptRequest) => Promise<void>;
   onCancel: () => void;
 }
 
-export function QuickPromptForm({ editPrompt, projects, onSave, onCancel }: Props) {
+export function QuickPromptForm({
+  editPrompt,
+  projects,
+  skills = [],
+  profiles = [],
+  directives = [],
+  onSave,
+  onCancel,
+}: Props) {
   const { t } = useT();
   const [name, setName] = useState(editPrompt?.name ?? '');
   const [icon, setIcon] = useState(editPrompt?.icon ?? '');
@@ -30,6 +53,12 @@ export function QuickPromptForm({ editPrompt, projects, onSave, onCancel }: Prop
   const [variables, setVariables] = useState<PromptVariable[]>(editPrompt?.variables ?? []);
   const [agent, setAgent] = useState<AgentType>(editPrompt?.agent ?? 'ClaudeCode');
   const [projectId, setProjectId] = useState(editPrompt?.project_id ?? '');
+  // 0.8.5 — three binding axes mirroring the Discussion form.
+  const [skillIds, setSkillIds] = useState<string[]>(editPrompt?.skill_ids ?? []);
+  const [profileIds, setProfileIds] = useState<string[]>(editPrompt?.profile_ids ?? []);
+  const [directiveIds, setDirectiveIds] = useState<string[]>(editPrompt?.directive_ids ?? []);
+  // Accordion: only one section open at a time, none by default.
+  const [expandedBinding, setExpandedBinding] = useState<'skills' | 'profiles' | 'directives' | null>(null);
   const [saving, setSaving] = useState(false);
   // Race-free guard: `disabled={saving}` is closure-stale between two
   // synchronous clicks, so a fast double-click on Save creates the
@@ -79,7 +108,9 @@ export function QuickPromptForm({ editPrompt, projects, onSave, onCancel }: Prop
         variables,
         agent,
         project_id: projectId || null,
-        skill_ids: editPrompt?.skill_ids ?? [],
+        skill_ids: skillIds,
+        profile_ids: profileIds,
+        directive_ids: directiveIds,
         tier: editPrompt?.tier ?? 'default',
         description,
       });
@@ -88,6 +119,8 @@ export function QuickPromptForm({ editPrompt, projects, onSave, onCancel }: Prop
       setSaving(false);
     }
   };
+
+  const bindingCount = skillIds.length + profileIds.length + directiveIds.length;
 
   return (
     <div className="qp-form">
@@ -123,9 +156,7 @@ export function QuickPromptForm({ editPrompt, projects, onSave, onCancel }: Prop
         </select>
       </div>
 
-      {/* Prompt description — documents what this QP does.
-          Used by the batch-workflow picker to help the user pick the
-          right QP for their use case. Optional but strongly encouraged. */}
+      {/* Prompt description — documents what this QP does. */}
       <label className="wf-label">{t('qp.descriptionLabel')}</label>
       <textarea
         className="wf-textarea mb-4"
@@ -134,6 +165,142 @@ export function QuickPromptForm({ editPrompt, projects, onSave, onCancel }: Prop
         onChange={e => setDescription(e.target.value)}
         placeholder={t('qp.descriptionPlaceholder')}
       />
+
+      {/* 0.8.5 — Bindings accordion: skills + profiles + directives.
+          Renders the same chip-pickers the Discussion form uses so the
+          user has a single mental model. Hidden entirely when no
+          catalogs are provided (e.g. embed contexts that don't load
+          them). */}
+      {(skills.length + profiles.length + directives.length > 0) && (
+        <div className="qp-bindings mb-4" data-testid="qp-bindings">
+          <div className="disc-advanced-section-label" style={{ marginBottom: 6 }}>
+            {t('qp.bindingsLabel')}
+            {bindingCount > 0 && (
+              <span className="disc-advanced-count" style={{ marginLeft: 6 }}>
+                {bindingCount}
+              </span>
+            )}
+          </div>
+
+          {skills.length > 0 && (
+            <div className="disc-advanced-section">
+              <button
+                type="button"
+                className="disc-advanced-section-toggle"
+                onClick={() => setExpandedBinding(prev => prev === 'skills' ? null : 'skills')}
+                data-testid="qp-bindings-skills-toggle"
+              >
+                <ChevronRight size={9} className="disc-chevron" data-expanded={expandedBinding === 'skills'} />
+                <Zap size={10} />
+                <span>{t('skills.selectSkills')}</span>
+                {skillIds.length > 0 && <span className="disc-advanced-count">{skillIds.length}</span>}
+              </button>
+              {expandedBinding === 'skills' && (
+                <div className="disc-advanced-chips" data-testid="qp-bindings-skills-chips">
+                  {skills.map(skill => {
+                    const selected = skillIds.includes(skill.id);
+                    return (
+                      <button
+                        key={skill.id}
+                        type="button"
+                        className="disc-chip"
+                        data-active={selected}
+                        data-color="accent"
+                        onClick={() => setSkillIds(prev => selected ? prev.filter(id => id !== skill.id) : [...prev, skill.id])}
+                        title={skill.description || skill.name}
+                      >
+                        {selected && <Check size={9} />} {skill.name}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {profiles.length > 0 && (
+            <div className="disc-advanced-section">
+              <button
+                type="button"
+                className="disc-advanced-section-toggle"
+                onClick={() => setExpandedBinding(prev => prev === 'profiles' ? null : 'profiles')}
+                data-testid="qp-bindings-profiles-toggle"
+              >
+                <ChevronRight size={9} className="disc-chevron" data-expanded={expandedBinding === 'profiles'} />
+                <UserCircle size={10} />
+                <span>{t('profiles.select')}</span>
+                {profileIds.length > 0 && <span className="disc-advanced-count">{profileIds.length}</span>}
+              </button>
+              {expandedBinding === 'profiles' && (
+                <div className="disc-advanced-chips" data-testid="qp-bindings-profiles-chips">
+                  <button
+                    type="button"
+                    className="disc-chip"
+                    data-active={profileIds.length === 0}
+                    data-color="purple"
+                    onClick={() => setProfileIds([])}
+                  >
+                    {t('profiles.none')}
+                  </button>
+                  {profiles.map(profile => {
+                    const selected = profileIds.includes(profile.id);
+                    return (
+                      <button
+                        key={profile.id}
+                        type="button"
+                        className="disc-chip"
+                        data-active={selected}
+                        data-color="purple"
+                        onClick={() => setProfileIds(prev => selected ? prev.filter(id => id !== profile.id) : [...prev, profile.id])}
+                        title={profile.role || profile.persona_name || profile.name}
+                        style={selected && profile.color ? { borderColor: profile.color, background: `${profile.color}15`, color: profile.color } : undefined}
+                      >
+                        {selected && <Check size={9} />} {profile.avatar} {profile.persona_name || profile.name}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {directives.length > 0 && (
+            <div className="disc-advanced-section">
+              <button
+                type="button"
+                className="disc-advanced-section-toggle"
+                onClick={() => setExpandedBinding(prev => prev === 'directives' ? null : 'directives')}
+                data-testid="qp-bindings-directives-toggle"
+              >
+                <ChevronRight size={9} className="disc-chevron" data-expanded={expandedBinding === 'directives'} />
+                <FileText size={10} />
+                <span>{t('directives.title')}</span>
+                {directiveIds.length > 0 && <span className="disc-advanced-count">{directiveIds.length}</span>}
+              </button>
+              {expandedBinding === 'directives' && (
+                <div className="disc-advanced-chips" data-testid="qp-bindings-directives-chips">
+                  {directives.map(directive => {
+                    const selected = directiveIds.includes(directive.id);
+                    return (
+                      <button
+                        key={directive.id}
+                        type="button"
+                        className="disc-chip"
+                        data-active={selected}
+                        data-color="warning"
+                        onClick={() => setDirectiveIds(prev => selected ? prev.filter(id => id !== directive.id) : [...prev, directive.id])}
+                        title={directive.description || directive.name}
+                      >
+                        {selected && <Check size={9} />} {directive.icon} {directive.name}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Variables — each can now have an optional description + a
           required flag. Required is ON by default (legacy behaviour). */}

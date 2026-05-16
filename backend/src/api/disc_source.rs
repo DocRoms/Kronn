@@ -237,6 +237,11 @@ pub async fn disc_append(
             author_pseudo: None,
             author_avatar_email: None,
             source_msg_id: Some(incoming.source_msg_id.clone()),
+            // 0.8.5 — imported messages don't carry an authoritative
+            // wall-clock duration (the source CLI may not have tracked
+            // it). Always NULL on import; metrics aggregator excludes
+            // NULLs from the AVG so this doesn't skew per-version data.
+            duration_ms: None,
         };
         let did_insert = did_for_loop.clone();
         let msg_clone = msg.clone();

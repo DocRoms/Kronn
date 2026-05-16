@@ -39,6 +39,9 @@ const BUILTIN_SKILLS: &[BuiltinSkill] = &[
     BuiltinSkill { id: "mobile", content: include_str!("../skills/mobile.md") },
     BuiltinSkill { id: "workflow-architect", content: include_str!("../skills/workflow-architect.md") },
     BuiltinSkill { id: "bootstrap-architect", content: include_str!("../skills/bootstrap-architect.md") },
+    // 0.8.5 — AI critic + rewriter for Quick Prompts. Triggered by the
+    // "✨ Improve with AI" button on every QP card.
+    BuiltinSkill { id: "qp-improver", content: include_str!("../skills/qp-improver.md") },
     BuiltinSkill { id: "kronn-docs", content: include_str!("../skills/kronn-docs.md") },
     // Business
     BuiltinSkill { id: "seo", content: include_str!("../skills/seo.md") },
@@ -1041,5 +1044,35 @@ body"#;
         // "I'll ask you some questions".
         assert!(c.contains("AgentQuestionForm") || c.contains("inline form"),
             "structured-questions must reference the `AgentQuestionForm` renderer or 'inline form' so the agent surfaces the UI affordance");
+    }
+
+    /// 0.8.5 guard — the `qp-improver` skill MUST be a registered builtin
+    /// and MUST teach the strict output protocol (audit table → bullets →
+    /// refactored JSON → `KRONN:QP_IMPROVED` signal). The frontend deploy
+    /// CTA looks for the literal signal and the first fenced ```json
+    /// block; if the skill drifts away from this contract, the deploy
+    /// button silently disappears.
+    #[test]
+    fn qp_improver_skill_teaches_strict_output_protocol() {
+        let skills = list_all_skills();
+        let s = skills.iter().find(|s| s.id == "qp-improver")
+            .expect("qp-improver skill must exist");
+        let c = &s.content;
+
+        // The signal is the load-bearing contract — pin it byte-for-byte.
+        assert!(c.contains("KRONN:QP_IMPROVED"),
+            "qp-improver must instruct the agent to emit `KRONN:QP_IMPROVED` verbatim");
+        // The 3-section protocol must be visible.
+        assert!(c.contains("Section 1") && c.contains("Section 2") && c.contains("Section 3"),
+            "qp-improver must structure output as three sections (audit / changes / refactored JSON)");
+        // The audit dimensions must include the new 0.8.5 bindings axis.
+        assert!(c.to_lowercase().contains("skill_ids") && c.to_lowercase().contains("profile_ids") && c.to_lowercase().contains("directive_ids"),
+            "qp-improver must teach the skill_ids / profile_ids / directive_ids bindings axis");
+        // The JSON block fencing must be explicit so the frontend regex catches it.
+        assert!(c.contains("```json"),
+            "qp-improver must emit a fenced ```json block (frontend extracts the first one after the signal)");
+        // Anti-hallucination guard.
+        assert!(c.contains("Never invent a variable") || c.contains("never invent"),
+            "qp-improver must teach the 'never invent' rule for variables / bindings");
     }
 }

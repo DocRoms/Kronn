@@ -96,6 +96,64 @@ Je continue dès que tu me dis.
       { var: 'v', question: 'Quelle valeur ?' },
     ]);
   });
+
+  // ── 0.8.4 follow-up — anchoring + code-region exclusion ─────────────
+  // Bug repro: the QP Improver agent emits markdown like
+  //   `--after="{{date}}T{{h1}}:00"` (inline code)
+  // and ` ```git log ... {{h2}}:00 ... ``` ` (fenced).
+  // Pre-fix the parser matched `{{h1}}:` mid-sentence and rendered a
+  // garbage mini-form with "00\" --before=..." as the question text.
+
+  it('rejects {{var}}: appearing mid-sentence (not at start of line)', () => {
+    const content = `Voici la commande : --after="{{date}}T{{h1}}:00" suivie de plus de texte.`;
+    expect(parseAgentQuestions(content)).toEqual([]);
+  });
+
+  it('ignores {{var}}: inside inline code (backticks)', () => {
+    const content = 'Use this : `--after="{{date}}T{{h1}}:00"` — strict ISO 8601.';
+    expect(parseAgentQuestions(content)).toEqual([]);
+  });
+
+  it('ignores {{var}}: inside fenced code blocks', () => {
+    const content = `Voilà :\n\n\`\`\`bash\ngit log --after="{{date}}T{{h1}}:00" --before="{{date}}T{{h2}}:00"\n\`\`\`\n`;
+    expect(parseAgentQuestions(content)).toEqual([]);
+  });
+
+  it('still matches questions prefixed with a bullet marker', () => {
+    const content = `- {{priority}}: low/medium/high ?\n* {{scope}}: backend ou full-stack ?\n+ {{deadline}}: deadline ?\n• {{owner}}: qui pilote ?`;
+    expect(parseAgentQuestions(content)).toEqual([
+      { var: 'priority', question: 'low/medium/high ?' },
+      { var: 'scope', question: 'backend ou full-stack ?' },
+      { var: 'deadline', question: 'deadline ?' },
+      { var: 'owner', question: 'qui pilote ?' },
+    ]);
+  });
+
+  it('still matches questions prefixed with an ordered-list marker', () => {
+    const content = `1. {{priority}}: priorité ?\n2) {{scope}}: scope ?`;
+    expect(parseAgentQuestions(content)).toEqual([
+      { var: 'priority', question: 'priorité ?' },
+      { var: 'scope', question: 'scope ?' },
+    ]);
+  });
+
+  it('reproduces the QP Improver bug case from the field', () => {
+    // Slice of the real agent reply: recommendation prose with the
+    // problematic `{{date}}T{{h1}}:00` inline code + a fenced JSON
+    // block containing the same pattern. None of these are questions.
+    const content = [
+      '## Recommandations',
+      '',
+      '1. **Git command** → remplacer par `--after="{{date}}T{{h1}}:00" --before="{{date}}T{{h2}}:00"` (format ISO 8601 strict).',
+      '',
+      '```json',
+      '{',
+      '  "prompt_template": "git log --after=\\"{{date}}T{{h1}}:00\\" --before=\\"{{date}}T{{h2}}:00\\""',
+      '}',
+      '```',
+    ].join('\n');
+    expect(parseAgentQuestions(content)).toEqual([]);
+  });
 });
 
 describe('composeAnswers', () => {
