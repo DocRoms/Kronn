@@ -2166,18 +2166,21 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                     } : prev);
                     return;
                   }
-                  setLaunchingWorkflow(prev => prev ? { ...prev, submitting: true, error: null } : prev);
-                  try {
-                    await fireTrigger(launchingWorkflow.workflow.id, launchingWorkflow.values);
-                    setLaunchingWorkflow(null);
-                  } catch (e) {
+                  // 0.8.5 — close the modal IMMEDIATELY after validation
+                  // passes. Pre-fix the modal awaited `fireTrigger(...)`
+                  // which only resolves when the SSE stream completes
+                  // (i.e. the whole run is done) — so the launch box
+                  // stayed open for the entire workflow duration, often
+                  // tens of minutes. The live progress view (`liveRun`)
+                  // takes over rendering once `fireTrigger` fires.
+                  const wfId = launchingWorkflow.workflow.id;
+                  const vals = launchingWorkflow.values;
+                  setLaunchingWorkflow(null);
+                  fireTrigger(wfId, vals).catch(e => {
+                    // Failure path: the live-run pane surfaces the error;
+                    // we just log here so the warning still hits devtools.
                     console.warn('Launch failed:', e);
-                    setLaunchingWorkflow(prev => prev ? {
-                      ...prev,
-                      submitting: false,
-                      error: String(e),
-                    } : prev);
-                  }
+                  });
                 }}
               >
                 {launchingWorkflow.submitting

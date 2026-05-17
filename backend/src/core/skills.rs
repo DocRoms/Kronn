@@ -1075,4 +1075,103 @@ body"#;
         assert!(c.contains("Never invent a variable") || c.contains("never invent"),
             "qp-improver must teach the 'never invent' rule for variables / bindings");
     }
+
+    /// 0.8.5 guard: both architect skills MUST teach the new MCP
+    /// draft-creation tools (`workflow_create_draft` /
+    /// `qp_create_draft`) so the agent knows when to use the
+    /// autonomous fast lane vs the existing signal+button review
+    /// flow. Pinned after the user explicitly asked for this path
+    /// 2026-05-18 ("via MCP il puisse au moins faire un draft").
+    #[test]
+    fn architect_skills_teach_mcp_draft_creation_tools() {
+        let skills = list_all_skills();
+
+        let arch = skills.iter().find(|s| s.id == "workflow-architect")
+            .expect("workflow-architect skill must exist");
+        let c = &arch.content;
+        assert!(c.contains("workflow_create_draft"),
+            "workflow-architect skill must teach the `workflow_create_draft` MCP tool name");
+        // The safety property MUST be spelled out — otherwise an agent
+        // might assume `enabled: true` is achievable via the draft path.
+        assert!(
+            c.contains("enabled: false")
+                && (c.to_lowercase().contains("forces")
+                    || c.to_lowercase().contains("always")),
+            "workflow-architect must spell out the `enabled: false` safety contract on the draft path",
+        );
+        // The signal vs MCP decision must be present so the agent
+        // doesn't reflexively pick MCP for every workflow design.
+        assert!(c.contains("workflow_create_draft") && c.contains("KRONN:WORKFLOW_READY"),
+            "workflow-architect must keep teaching the signal path alongside MCP — they're complementary");
+
+        let qp = skills.iter().find(|s| s.id == "qp-improver")
+            .expect("qp-improver skill must exist");
+        let qpc = &qp.content;
+        assert!(qpc.contains("qp_create_draft"),
+            "qp-improver skill must teach the `qp_create_draft` MCP tool for brand-new QP creation");
+        // The signal vs MCP distinction (existing QP vs new) must be
+        // explicit so the agent doesn't accidentally fork the user's
+        // current QP into a duplicate.
+        assert!(qpc.contains("KRONN:QP_IMPROVED")
+            && (qpc.to_lowercase().contains("existing qp")
+                || qpc.to_lowercase().contains("targets an existing")),
+            "qp-improver must distinguish the existing-QP signal path from the new-QP MCP path");
+        // 0.8.5+: agents MUST list before creating. The skill must say
+        // so explicitly — otherwise the agent will reflexively call
+        // `qp_create_draft` and silently duplicate an existing QP.
+        assert!(qpc.contains("qp_list()") && qpc.to_lowercase().contains("list before"),
+            "qp-improver must teach 'always list before you create' via `qp_list()`");
+        assert!(c.contains("workflow_list()") && c.contains("qp_list()") && c.contains("qa_list()") && c.contains("mcp_list()"),
+            "workflow-architect must enumerate ALL four listing tools (workflow_list / qp_list / qa_list / mcp_list) so the agent knows the read surface");
+    }
+
+    /// 0.8.5 guard: the workflow-architect skill MUST document the
+    /// homogenised canonical step-output envelope, otherwise
+    /// AI-generated workflows will keep emitting the pre-0.8.5
+    /// dialects (bare JSON, no signal, etc.) and the inter-step
+    /// plumbing will silently drift back to two-strategy territory.
+    /// Pinned after the user dogfooded the EW-7247 AutoPilot run
+    /// 2026-05-17 and asked "are skills up to date with the new norm?"
+    #[test]
+    fn workflow_architect_skill_teaches_canonical_envelope_and_signal_coverage() {
+        let skills = list_all_skills();
+        let arch = skills.iter().find(|s| s.id == "workflow-architect")
+            .expect("workflow-architect skill must exist");
+        let c = &arch.content;
+
+        // The canonical envelope must be documented with its byte-for-byte
+        // markers + the signal line — the agent needs both to compose
+        // prompts that consumers can parse.
+        assert!(c.contains("---STEP_OUTPUT---") && c.contains("---END_STEP_OUTPUT---"),
+            "skill must show the canonical `---STEP_OUTPUT---` markers");
+        assert!(c.contains("[SIGNAL:"),
+            "skill must show the `[SIGNAL: …]` line that accompanies the canonical envelope");
+        // The "every step type emits this" claim must be explicit so
+        // the agent stops pretending Notify / JsonData / Batch don't
+        // produce structured output.
+        assert!(c.to_lowercase().contains("every envelope-producing step type")
+                || c.to_lowercase().contains("every step type emits"),
+            "skill must declare envelope homogeneity (every envelope-producing step emits the same shape)");
+        // The signals table must enumerate Notify + JsonData + BatchQuickPrompt
+        // as signal-emitting step types (they were "branching not supported"
+        // pre-0.8.5 — the user reported AI-generated workflows still
+        // working around that).
+        assert!(c.contains("`Notify`") && c.contains("[SIGNAL: ERROR]"),
+            "skill must teach that Notify emits `[SIGNAL: ERROR]` on non-2xx (0.8.5+)");
+        assert!(c.contains("`BatchQuickPrompt`") && c.contains("[SIGNAL: PARTIAL]"),
+            "skill must teach that BatchQuickPrompt emits PARTIAL/OK/ERROR signals");
+        // The Gate / FreeText exceptions must stay called out — they're
+        // the only producers without an envelope and silent drift here
+        // breaks downstream consumers.
+        assert!(c.contains("Gate")
+                && (c.to_lowercase().contains("no envelope")
+                    || c.contains("**no**")
+                    || c.contains("Gate is a pause")),
+            "skill must keep flagging Gate as envelope-less");
+        assert!(c.contains("FreeText")
+                && (c.to_lowercase().contains("only `.output`")
+                    || c.to_lowercase().contains("raw text only")
+                    || c.contains("No envelope produced")),
+            "skill must keep flagging Agent FreeText as envelope-less");
+    }
 }

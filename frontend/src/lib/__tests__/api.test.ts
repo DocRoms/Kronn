@@ -153,6 +153,68 @@ describe('api module', () => {
       await expect(projects.list()).rejects.toThrow('Server error (HTTP 502)');
     });
 
+    // 0.8.5 — Axum returns 422 + Content-Type text/plain when the JSON
+    // extractor fails to deserialize the request body. The body holds
+    // the actual reason ("missing field `agent`"). Pre-fix we threw
+    // away that body and the QP-Improver agent on the JIRA helper had
+    // no clue what to fix → went in circles.
+    it('surfaces the body in the error message when Content-Type is not JSON', async () => {
+      (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        status: 422,
+        headers: {
+          get: (name: string) => name === 'content-type' ? 'text/plain' : null,
+        },
+        text: () => Promise.resolve('Failed to deserialize the JSON body: missing field `agent` at line 1 column 234'),
+      });
+      const { projects } = await getApi();
+      await expect(projects.list()).rejects.toThrow(/missing field `agent`/);
+    });
+
+    it('truncates non-JSON error bodies to 500 chars', async () => {
+      const huge = 'X'.repeat(2000);
+      (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        status: 500,
+        headers: {
+          get: (name: string) => name === 'content-type' ? 'text/html' : null,
+        },
+        text: () => Promise.resolve(huge),
+      });
+      const { projects } = await getApi();
+      try {
+        await projects.list();
+        throw new Error('expected throw');
+      } catch (e) {
+        const msg = (e as Error).message;
+        expect(msg).toContain('Server error (HTTP 500) — ');
+        // 500-char body + "Server error (HTTP 500) — " prefix
+        expect(msg.length).toBeLessThanOrEqual(540);
+      }
+    });
+
+    it('omits the body suffix when the response body is empty', async () => {
+      (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        status: 502,
+        headers: {
+          get: (name: string) => name === 'content-type' ? 'text/html' : null,
+        },
+        text: () => Promise.resolve(''),
+      });
+      const { projects } = await getApi();
+      await expect(projects.list()).rejects.toThrow(/^Server error \(HTTP 502\)$/);
+    });
+
+    it('omits the body suffix when text() throws (defensive)', async () => {
+      (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        status: 502,
+        headers: {
+          get: (name: string) => name === 'content-type' ? 'text/html' : null,
+        },
+        text: () => Promise.reject(new Error('stream error')),
+      });
+      const { projects } = await getApi();
+      await expect(projects.list()).rejects.toThrow(/^Server error \(HTTP 502\)$/);
+    });
+
     it('throws "Unknown API error" when error field is null', async () => {
       (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
         status: 500,

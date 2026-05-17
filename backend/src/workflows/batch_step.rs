@@ -534,11 +534,18 @@ fn build_structured_output(
         ),
     );
 
-    serde_json::json!({
-        "data": data,
-        "status": status,
-        "summary": summary,
-    }).to_string()
+    // 0.8.5 — canonical Kronn envelope (markers + signal) via the
+    // shared formatter. The signal matches the status so consumers can
+    // branch via `on_result: [{ contains: "PARTIAL", action: Skip }]`
+    // or similar without re-parsing the JSON. Cf.
+    // [[project_step_output_homogenisation_0_9_0]].
+    super::step_output_format::format_step_output(
+        serde_json::to_value(&data).unwrap_or(serde_json::Value::Null),
+        status,
+        &summary,
+        None,
+        &[status],
+    )
 }
 
 #[cfg(test)]
@@ -627,37 +634,48 @@ mod tests {
         assert_eq!(out, "Static template");
     }
 
+    // 0.8.5 — outputs go through the canonical Kronn envelope
+    // (markers + signal). These tests parse via `parse_envelope_for_test`
+    // so a future format tweak only changes the helper, not 20 tests.
+    use super::super::step_output_format::parse_envelope_for_test;
+
     #[test]
     fn build_structured_output_ok() {
         let out = build_structured_output("run-1", 3, 3, 0, &["d1".into(), "d2".into(), "d3".into()], true);
-        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let v = parse_envelope_for_test(&out);
         assert_eq!(v["status"], "OK");
         assert_eq!(v["data"]["total"], 3);
         assert_eq!(v["data"]["ok"], 3);
         assert_eq!(v["data"]["failed"], 0);
         assert_eq!(v["data"]["batch_run_id"], "run-1");
         assert_eq!(v["data"]["discussion_ids"].as_array().unwrap().len(), 3);
+        // Canonical envelope must also carry the matching SIGNAL line so
+        // `on_result.contains` rules can branch on status.
+        assert!(out.contains("[SIGNAL: OK]"));
     }
 
     #[test]
     fn build_structured_output_partial() {
         let out = build_structured_output("run-1", 5, 3, 2, &[], true);
-        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let v = parse_envelope_for_test(&out);
         assert_eq!(v["status"], "PARTIAL");
+        assert!(out.contains("[SIGNAL: PARTIAL]"));
     }
 
     #[test]
     fn build_structured_output_error() {
         let out = build_structured_output("run-1", 5, 0, 5, &[], true);
-        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let v = parse_envelope_for_test(&out);
         assert_eq!(v["status"], "ERROR");
+        assert!(out.contains("[SIGNAL: ERROR]"));
     }
 
     #[test]
     fn build_structured_output_pending_fire_and_forget() {
         let out = build_structured_output("run-1", 5, 0, 0, &[], false);
-        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let v = parse_envelope_for_test(&out);
         assert_eq!(v["status"], "PENDING");
+        assert!(out.contains("[SIGNAL: PENDING]"));
     }
 
     // ─── E2E tests for `execute_batch_quick_prompt_step` ─────────────────────
@@ -848,8 +866,7 @@ mod tests {
         // ─ Step-level assertions
         assert_eq!(outcome.result.status, RunStatus::Success,
             "fire-and-forget should always return Success once the spawn loop fires");
-        let envelope: serde_json::Value = serde_json::from_str(&outcome.result.output)
-            .expect("structured output is JSON");
+        let envelope = parse_envelope_for_test(&outcome.result.output);
         assert_eq!(envelope["status"], "PENDING",
             "wait_for_completion=false must produce PENDING (caller knows it's racing)");
         let data = &envelope["data"];
@@ -937,8 +954,7 @@ mod tests {
         // ─ The wait completed and propagated the counters from our synthesized event.
         assert_eq!(outcome.result.status, RunStatus::Success,
             "all 3 children OK → step Success (success = at-least-one OK)");
-        let envelope: serde_json::Value = serde_json::from_str(&outcome.result.output)
-            .expect("structured output is JSON");
+        let envelope = parse_envelope_for_test(&outcome.result.output);
         assert_eq!(envelope["status"], "OK", "3 ok / 0 failed → OK envelope");
         assert_eq!(envelope["data"]["total"], 3);
         assert_eq!(envelope["data"]["ok"], 3);

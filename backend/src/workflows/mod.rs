@@ -4,6 +4,7 @@
 //! and spawns runs.
 
 pub mod big_ticket_template;
+pub mod step_output_format;
 pub mod template;
 pub mod triage;
 pub mod workspace;

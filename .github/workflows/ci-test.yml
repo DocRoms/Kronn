@@ -158,6 +158,26 @@ jobs:
           SCCACHE_GHA_ENABLED: "true"
           RUSTC_WRAPPER: "sccache"
 
+  # ── Python helper tests ────────────────────────────────────────────────
+  # `backend/scripts/disc-introspection-mcp.py` powers the kronn-internal
+  # MCP server (5+ agent CLIs invoke it). Its 0.8.5 auto-inherit helpers
+  # have no Rust coverage — these unittest cases pin the contract:
+  # cache behaviour, missing-env handling, idempotency-collision guard
+  # on `source_session_id`. Stdlib only — zero dev deps, sub-second run.
+  test-python:
+    if: github.event.label.name == 'ci-test'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run MCP helper tests
+        run: python3 -m unittest discover -s backend/scripts -p 'test_*.py' -v
+
   test-frontend:
     if: github.event.label.name == 'ci-test'
     runs-on: ubuntu-latest

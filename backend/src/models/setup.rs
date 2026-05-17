@@ -429,9 +429,20 @@ pub struct AgentDetection {
 
 fn default_true() -> bool { true }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, Default)]
 #[ts(export)]
 pub enum AgentType {
+    /// 0.8.5 — picked as the serde default for `WorkflowStep.agent`. The
+    /// field is required at runtime for agent-driven steps (Agent /
+    /// BatchQuickPrompt) but irrelevant for non-LLM steps (ApiCall,
+    /// Exec, Gate, …). Before this default the wizard had to invent a
+    /// placeholder agent on every ApiCall step or the JSON payload
+    /// failed to deserialize on `PUT /workflow-steps/test-api-call`
+    /// with `missing field "agent"` (caught the user during the JIRA
+    /// helper dogfooding on 2026-05-17). ClaudeCode is the safe pick
+    /// because it's the only agent guaranteed to be installed by the
+    /// onboarding flow.
+    #[default]
     ClaudeCode,
     Codex,
     Vibe,

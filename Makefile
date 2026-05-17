@@ -241,6 +241,14 @@ test-backend:
 	@echo "$(CYAN)▸ Running backend tests...$(RESET)"
 	cd backend && cargo test --lib -- --skip export_bindings
 
+## Run Python helper tests (MCP bridge auto-inheritance contract).
+## Stdlib `unittest` only — no extra dev deps. The MCP script
+## (`disc-introspection-mcp.py`) drives the kronn-internal MCP server
+## that 5+ agent CLIs talk to, so its helpers MUST stay green.
+test-python:
+	@echo "$(CYAN)▸ Running Python helper tests...$(RESET)"
+	python3 -m unittest discover -s backend/scripts -p 'test_*.py' -v
+
 ## Run frontend unit tests (vitest)
 test-frontend:
 	@echo "$(CYAN)▸ Running frontend unit tests (vitest)...$(RESET)"

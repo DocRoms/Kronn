@@ -26,12 +26,14 @@ test.describe('Wizard — Create button validation', () => {
     await dashboard.goto();
     await dashboard.clickWorkflows();
     await workflows.openNewWorkflowWizard();
-    await wizard.gotoStepsPage('e2e-create-validation');
 
-    // Apply the Ticket Autopilot preset → 9 steps populated, first is
-    // JsonData with a `json_data_payload`. The predicate would disable
-    // Create if it (wrongly) fell back to the prompt_template branch.
-    await wizard.presetTicketToPr.click();
+    // 0.8.5 — applies the Ticket Autopilot preset via the unified
+    // QuickStartPicker on step 0 (Infos). The wizard auto-jumps to
+    // advanced step 2 (Steps) after applying, matching the pre-0.8.5
+    // flow. The preset's first step is JsonData with a
+    // `json_data_payload` — the predicate would wrongly disable Create
+    // if it fell back to the `prompt_template` branch.
+    await wizard.applyQuickStart('e2e-create-validation', /🎫\s*Ticket Autopilot/i);
 
     // Walk to the last step (Résumé) where the Create button lives :
     //   Steps → Config → Résumé

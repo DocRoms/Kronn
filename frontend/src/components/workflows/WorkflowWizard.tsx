@@ -4,6 +4,8 @@ import { workflows as workflowsApi, skills as skillsApi, profiles as profilesApi
 import { ApiCallStepCard, type ApiPluginOption } from './ApiCallStepCard';
 import { STARTER_TEMPLATES, cloneTemplateSteps } from '../../lib/workflow-templates/chartbeat-top5';
 import { buildV07Presets } from '../../lib/workflow-templates/v07-presets';
+import { WorkflowQuickStartPicker } from './WorkflowQuickStartPicker';
+import { buildQuickStartCatalogue, type UnifiedQuickStart } from '../../lib/workflow-quick-start';
 import { parseRepoUrl, buildOldestIssueRequest, inferTrackerSlugFromRepoUrl } from '../../lib/constants';
 import { AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES, isAgentRestricted } from '../../lib/constants';
 import type {
@@ -19,7 +21,7 @@ import type { AgentsConfig } from '../../types/generated';
 import {
   Plus, Loader2, Check, X, ChevronRight, ChevronDown, ChevronUp,
   Clock, GitBranch, Zap, HelpCircle, Settings, Shield,
-  AlertTriangle, UserCircle, FileText, Sparkles, Layers, Send,
+  AlertTriangle, UserCircle, FileText, Layers, Send,
   Info, Hand, RotateCcw, Terminal, Bot, Plug, Braces,
 } from 'lucide-react';
 import { scanUndeclaredVars } from '../../lib/scanUndeclaredVars';
@@ -335,7 +337,6 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     // pipeline is visible.
     setWizardMode('advanced');
     setWizardStep(2);
-    setShowSuggestions(false);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialPresetId, initialProjectId, pluginsLoaded]);
   // 0.7.0 Phase 5b — ref so the Exec form's "Configure now" button can
@@ -409,9 +410,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     });
   };
 
-  // Workflow suggestions from MCP introspection
+  // Workflow suggestions from MCP introspection (fed into the unified
+  // QuickStart picker — no longer surfaced via its own toggle).
   const [suggestions, setSuggestions] = useState<WorkflowSuggestion[]>([]);
-  const [showSuggestions, setShowSuggestions] = useState(false);
   const [suggestionsLoading, setSuggestionsLoading] = useState(false);
 
   useEffect(() => {
@@ -449,16 +450,10 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     if (!projectId) { setSuggestions([]); return; }
     setSuggestionsLoading(true);
     workflowsApi.suggestions(projectId)
-      .then(s => {
-        setSuggestions(s);
-        // Auto-show suggestions UNLESS we're applying a deep-linked preset
-        // — in that case the user came here for a specific preset, not for
-        // orthogonal MCP-aware suggestions. Showing both clutters the view.
-        if (s.length > 0 && !isEdit && !initialPresetId) setShowSuggestions(true);
-      })
+      .then(setSuggestions)
       .catch(() => setSuggestions([]))
       .finally(() => setSuggestionsLoading(false));
-  }, [projectId, isEdit, initialPresetId]);
+  }, [projectId]);
 
   const applySuggestion = (s: WorkflowSuggestion) => {
     setName(s.title);
@@ -472,7 +467,6 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
       setCronWeekdays(parsed.weekdays);
       setCronRaw(parsed.raw ?? '');
     }
-    setShowSuggestions(false);
     // Multi-step or advanced suggestions → force advanced mode
     if (s.steps.length > 1 || s.complexity === 'advanced') {
       setWizardMode('advanced');
@@ -493,9 +487,38 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     setName(template.title_fr);
     setSteps(steps);
     setTriggerType('Manual');
-    setShowSuggestions(false);
     setWizardMode('advanced');
     setWizardStep(2); // Jump straight to Steps so the user sees the chain.
+  };
+
+  /** 0.8.5 — unified entry point for the QuickStart picker.
+   *  Branches on the payload kind to delegate to the existing apply
+   *  functions / inline setters — keeps the three native shapes intact
+   *  while presenting one consistent UI. */
+  const applyQuickStart = (entry: UnifiedQuickStart) => {
+    switch (entry.payload.kind) {
+      case 'starter':
+        applyStarterTemplate(entry.payload.template.id);
+        break;
+      case 'project-suggestion':
+        applySuggestion(entry.payload.suggestion);
+        break;
+      case 'preset': {
+        // Mirrors the previous inline preset-card click handler:
+        // steps + on-failure + exec-allowlist + variables. Does NOT
+        // set the name — a preset is project-agnostic, the user
+        // names it. Jump to advanced step 2 so the user sees the
+        // applied chain immediately (same behaviour as starters).
+        const p = entry.payload.preset;
+        setSteps(p.steps);
+        if (p.onFailure) setOnFailureSteps(p.onFailure);
+        if (p.execAllowlist) setExecAllowlist(p.execAllowlist);
+        if (p.variables) setWfVariables(p.variables);
+        setWizardMode('advanced');
+        setWizardStep(2);
+        break;
+      }
+    }
   };
 
   /** Build a fresh blank step. Centralised so `addStep` (append) and
@@ -766,76 +789,6 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
         </div>
       )}
 
-      {/* Starter templates — désagentification aha moment. Only shown on
-          fresh creation (not edit) and only if at least one template's
-          primary plugin is configured on the project (otherwise the clone
-          would leave `api_config_id: null` and the step can't run). */}
-      {!isEdit && STARTER_TEMPLATES.some(t => availableApiPlugins.some(p => p.server.id === t.primary_plugin_slug)) && (
-        <div className="wf-starter-templates">
-          {STARTER_TEMPLATES.filter(t => availableApiPlugins.some(p => p.server.id === t.primary_plugin_slug)).map(tpl => (
-            <button
-              key={tpl.id}
-              type="button"
-              className="wf-starter-template-btn"
-              onClick={() => applyStarterTemplate(tpl.id)}
-              title={tpl.description_fr}
-            >
-              <Sparkles size={12} /> {tpl.title_fr}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {/* Suggestions toggle */}
-      {suggestions.length > 0 && !showSuggestions && (
-        <button
-          className="wf-suggestions-toggle"
-          onClick={() => setShowSuggestions(true)}
-        >
-          <Sparkles size={12} />
-          {t('wiz.suggestionsCount', suggestions.length)}
-        </button>
-      )}
-
-      {/* Suggestions panel */}
-      {showSuggestions && suggestions.length > 0 && (
-        <div className="wf-suggestions-panel">
-          <div className="wf-suggestions-header">
-            <Sparkles size={14} className="text-accent" />
-            <span className="wf-suggestions-title">{t('wiz.suggestionsTitle')}</span>
-            <button className="mcp-icon-btn" onClick={() => setShowSuggestions(false)} aria-label="Close" style={{ marginLeft: 'auto' }}>
-              <X size={12} />
-            </button>
-          </div>
-          <div className="wf-suggestions-grid">
-            {suggestions.map(s => (
-              <div key={s.id} className="wf-suggestion-card">
-                <div className="wf-suggestion-top">
-                  <span className="wf-suggestion-name">{s.title}</span>
-                  <div className="flex-row gap-2">
-                    {s.complexity === 'advanced' && <span className="wf-suggestion-complexity">{t('wiz.modeAdvanced')}</span>}
-                    <span className={`wf-suggestion-audience wf-audience-${s.audience}`}>{s.audience}</span>
-                  </div>
-                </div>
-                <p className="wf-suggestion-desc">{s.description}</p>
-                <p className="wf-suggestion-reason">{s.reason}</p>
-                <div className="wf-suggestion-mcps">
-                  {s.required_mcps.map(m => <span key={m} className="wf-suggestion-mcp-tag">{m}</span>)}
-                  <span className="wf-suggestion-steps-count">{s.steps.length} step{s.steps.length > 1 ? 's' : ''}</span>
-                </div>
-                <button
-                  className="wf-suggestion-apply"
-                  onClick={() => applySuggestion(s)}
-                >
-                  <Zap size={10} /> {s.steps.length > 1 || s.complexity === 'advanced' ? t('wiz.importDraft') : t('wiz.activate')}
-                </button>
-              </div>
-            ))}
-          </div>
-          {suggestionsLoading && <div className="text-center"><Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /></div>}
-        </div>
-      )}
-
       {/* Progress bar */}
       <div className="flex-row gap-2 mb-9">
         {WIZARD_STEPS.map((label, i) => (
@@ -887,6 +840,36 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               <option key={p.id} value={p.id}>{p.name}</option>
             ))}
           </select>
+
+          {/* 0.8.5 — unified QuickStart picker. Replaces three formerly
+              separate UI sections (STARTER_TEMPLATES buttons, project
+              suggestions toggle/panel, v0.7 preset bandeau). Placed
+              AFTER name+project so the user reads the field labels
+              first (else clicking a template before naming the
+              workflow bounced the wizard back to step 0 — confusing).
+              Disabled while `name` is empty, with an explanatory
+              tooltip; ungreys as soon as the user has typed
+              something. */}
+          <div className="mt-6">
+            <WorkflowQuickStartPicker
+              entries={buildQuickStartCatalogue({
+                starters: STARTER_TEMPLATES,
+                suggestions,
+                presets: buildV07Presets(t),
+                ctx: {
+                  projectSelected: !!projectId,
+                  availableApiPlugins,
+                },
+                t,
+              })}
+              isEdit={isEdit}
+              loading={suggestionsLoading}
+              disabled={!name.trim()}
+              disabledReason={t('wiz.quickstart.disabledNoName')}
+              onApply={applyQuickStart}
+              t={t}
+            />
+          </div>
         </div>
       )}
 
@@ -1251,48 +1234,12 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
       {/* Step 2 (advanced): Steps (with advanced per-step config) */}
       {!isSimple && wizardStep === 2 && (
         <div>
-          {/* B4 (0.7.0 UX pass) — Bandeau "Démarrer depuis un pattern".
-              Visible uniquement à la création (pas en édition) ET tant
-              que la config est restée vierge (1 step nommé "main" avec
-              prompt vide). Dès que l'user customise, le bandeau s'efface
-              tout seul — pas besoin d'un bouton dismiss explicite.
-              Click sur une carte = applique steps + on_failure +
-              exec_allowlist du préset. Pédagogique : le user voit
-              comment c'est construit (pas de magie cachée). */}
-          {!isEdit && steps.length === 1 && steps[0].name === 'main' && steps[0].prompt_template === '' && (
-            <div className="wf-presets-bandeau mb-6">
-              <div className="flex-row gap-3 mb-3 items-center">
-                <Sparkles size={14} className="text-accent" />
-                <span className="text-sm font-semibold text-secondary">{t('wiz.presetsTitle')}</span>
-                <span className="text-xs text-ghost">{t('wiz.presetsHint')}</span>
-              </div>
-              <div className="wf-presets-grid">
-                {buildV07Presets(t).map(preset => (
-                  <button
-                    key={preset.id}
-                    type="button"
-                    className="wf-preset-card"
-                    onClick={() => {
-                      setSteps(preset.steps);
-                      if (preset.onFailure) setOnFailureSteps(preset.onFailure);
-                      if (preset.execAllowlist) setExecAllowlist(preset.execAllowlist);
-                      if (preset.variables) setWfVariables(preset.variables);
-                    }}
-                  >
-                    <div className="wf-preset-icon">{preset.icon}</div>
-                    <div className="wf-preset-title">{t(preset.titleKey)}</div>
-                    <div className="wf-preset-desc">{t(preset.descKey)}</div>
-                    <div className="wf-preset-primitives">
-                      {preset.primitives.map(p => (
-                        <span key={p} className="wf-preset-chip">{p}</span>
-                      ))}
-                    </div>
-                  </button>
-                ))}
-              </div>
-              <p className="text-2xs text-ghost mt-3">{t('wiz.presetsBlankHint')}</p>
-            </div>
-          )}
+          {/* 0.8.5 — the previous "Démarrer depuis un pattern" bandeau
+              that lived here was unified with the project suggestions
+              and starter templates into a single QuickStart picker
+              shown at the TOP of step 0. Discovery in three different
+              places (and one of them buried in advanced > step 2) was
+              the worst pain point of the wizard. */}
 
           {/* Worktree isolation hint — visible whenever a project is bound.
               Each WorkflowRun creates its own git worktree at

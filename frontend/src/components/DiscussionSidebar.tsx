@@ -192,7 +192,16 @@ export function DiscussionSidebar({
   // Search OR source — both AND'd. Used by every render site below
   // so they stay in lockstep with the source filter.
   const matchesFilters = (d: Discussion): boolean => {
-    if (searchLower && !d.title.toLowerCase().includes(searchLower)) return false;
+    // 0.8.5 — search input also matches an id prefix (hex, lower-case).
+    // Lets the user paste / type a short id (`04a9c927` from an agent
+    // summary) into the search and land directly on the disc. The
+    // ChatHeader pill copies that same prefix-friendly form. We keep
+    // the title substring match too — both fire on the same query.
+    if (searchLower) {
+      const titleHit = d.title.toLowerCase().includes(searchLower);
+      const idHit = d.id.toLowerCase().startsWith(searchLower);
+      if (!titleHit && !idHit) return false;
+    }
     if (sourceFilter) {
       const bind = sourceBindings.get(d.id);
       if (!bind || bind.source_agent !== sourceFilter) return false;

@@ -118,6 +118,11 @@ pub fn build_feasibility_workflow(params: FeasibilityWorkflowParams) -> CreateWo
         // wired in here, otherwise the validator rejects the workflow.
         exec_allowlist: EXEC_ALLOWLIST.iter().map(|s| s.to_string()).collect(),
         variables: vec![],
+        // 0.8.5 — `enabled: None` lets the handler default to true (the
+        // big-ticket template path is "user clicked the button to create
+        // this", not "agent autonomously drafted it" — same semantics as
+        // every UI-driven create).
+        enabled: None,
     }
 }
 

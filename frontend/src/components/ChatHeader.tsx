@@ -207,6 +207,30 @@ export function ChatHeader({
               🔧 {discussion.introspection_call_count}
             </span>
           )}
+          {/* 0.8.5 — short disc-id pill. Surfaces the id so a user
+              reading an agent summary like "Disc 3 — 04a9c927" can
+              click → copy full UUID + paste it anywhere (next disc,
+              linked-issue field, Slack message…). Sidebar search also
+              matches id prefix in 0.8.5, so this works as a round-trip
+              "agent quotes id → user finds disc in sidebar". Discreet
+              ghost-text styling so it doesn't compete with the title. */}
+          <button
+            type="button"
+            className="disc-id-pill"
+            onClick={async (e) => {
+              e.stopPropagation();
+              try {
+                await navigator.clipboard.writeText(discussion.id);
+                toast(t('disc.idCopied'), 'success');
+              } catch {
+                toast(t('disc.idCopyFailed'), 'error');
+              }
+            }}
+            title={t('disc.idPillTooltip', discussion.id)}
+            aria-label={t('disc.idPillTooltip', discussion.id)}
+          >
+            #{discussion.id.slice(0, 8)}
+          </button>
           {!isValidationDisc(discussion.title) && !isBootstrapDisc(discussion.title) && !isBriefingDisc(discussion.title) && (
           <button
             className="disc-icon-btn"

@@ -396,10 +396,10 @@ These shape engine behavior across the whole run.
 
 ### Template variables (any step's `prompt_template` / `notify_config.body` / `api_*` / `exec_args` / `gate_message`)
 
-- `{{previous_step.output}}` — raw text output from the previous step
-- `{{previous_step.data}}` — extracted JSON data (only if Structured Agent or ApiCall extract)
-- `{{previous_step.summary}}` — one-line summary (Structured Agent only)
-- `{{previous_step.status}}` — `OK`, `NO_RESULTS`, or `ERROR` (Structured Agent only)
+- `{{previous_step.output}}` — raw text output from the previous step (every step type, always available)
+- `{{previous_step.data}}` — structured payload. 0.8.5+: emitted by EVERY step type via the canonical Kronn envelope (see below). Exceptions: `Gate` and `Agent` with `output_format: FreeText` don't emit data, so consumers can only read `.output` from them
+- `{{previous_step.summary}}` — one-line summary; same coverage as `.data`
+- `{{previous_step.status}}` — `OK`, `NO_RESULTS`, `ERROR`, `PARTIAL`, `PENDING`…; same coverage as `.data`
 - `{{steps.STEP_NAME.output}}` — output from any named step
 - `{{steps.STEP_NAME.data}}` — structured/extracted data from any named step (compact JSON if object/array, raw string if `data` was a plain string)
 - `{{steps.STEP_NAME.data_json}}` — same data, always-serialized JSON (use when piping into an HTTP body or another JSON parser)
@@ -413,11 +413,44 @@ These shape engine behavior across the whole run.
 
 ### StepOutputFormat (Agent steps only)
 
-- **FreeText** (default) — agent produces plain text. Use for final reports, summaries.
-- **Structured** — agent must produce a JSON envelope: `{"data": ..., "status": "OK|NO_RESULTS|ERROR", "summary": "..."}`. Use for inter-step data passing when the next Agent step needs specific fields. The engine auto-injects formatting instructions.
+- **FreeText** (default) — agent produces plain text. Use for final reports, summaries. **No envelope produced** → downstream consumers can only read `{{steps.X.output}}`, not `.data` / `.summary` / `.status`.
+- **Structured** — agent must produce a JSON envelope inside the canonical Kronn shape: `---STEP_OUTPUT---\n{"data": ..., "status": "OK|NO_RESULTS|ERROR", "summary": "..."}\n---END_STEP_OUTPUT---`. Use for inter-step data passing when the next Agent step needs specific fields. The engine auto-injects formatting instructions.
 - **TypedSchema** — `{ "type": "TypedSchema", "schema": { ...JSON Schema... }, "on_invalid": "Continue" | "Fail" }`. Same envelope as Structured PLUS the `data` field is validated against the JSON Schema. On validation failure, the engine fires an auto-repair retry with the schema error embedded in the prompt. The `on_invalid` flag (0.8.3) controls what happens after the repair retry still fails:
   - `"Continue"` (default, 0.7.0 behavior) — warn, keep the raw output, downstream steps deal with it. Safe non-breaking default.
   - `"Fail"` — mark the step `Failed` with the validation error as `output`. Use for **contract steps** where downstream depends on a valid shape (e.g. the Feasibility-Gated `triage` step — see § Feasibility-Gated pattern below). Without `Fail`, a malformed manifest silently propagates and the next step receives garbage.
+
+### Canonical Kronn step-output envelope (0.8.5+)
+
+Since 0.8.5 EVERY envelope-producing step type emits exactly the same shape, byte-for-byte:
+
+```
+[optional human-readable prefix line(s)]
+---STEP_OUTPUT---
+{"data": <any JSON>, "status": "OK|ERROR|NO_RESULTS|PARTIAL|PENDING|…", "summary": "<one line>"}
+---END_STEP_OUTPUT---
+[SIGNAL: <primary>]
+[SIGNAL: <optional secondary>]
+```
+
+| Step type | Emits canonical envelope | Primary `[SIGNAL: …]` |
+|---|---|---|
+| `ApiCall`, `BatchApiCall` | yes | `OK` / `NO_RESULTS` / `ERROR` (+ `http_<code>` on HTTP failure) |
+| `Exec` | yes | `OK` / `ERROR` + `exit_<code>` |
+| `JsonData` | yes | `OK` |
+| `Notify` | yes | `OK` / `ERROR` |
+| `BatchQuickPrompt` | yes | `OK` / `PARTIAL` / `ERROR` / `PENDING` (fire-and-forget) |
+| `Agent` (Structured / TypedSchema) | yes (prompt emits the markers) | whatever you tell the agent to print |
+| `Agent` (FreeText) | **no** — raw text only | whatever the agent prints |
+| `Gate` | **no** — the rendered `gate_message` is the output | none |
+
+Consumers see the same access patterns regardless of producer:
+- `{{steps.X.data}}` → the JSON payload (compact for objects/arrays, string for scalars)
+- `{{steps.X.data.<path>}}` → nested traversal (dot-separated, numeric segments index arrays)
+- `{{steps.X.summary}}` → the one-line summary
+- `{{steps.X.status}}` → the status string
+- `{{steps.X.data_json}}` → always-serialized JSON, useful for piping into an HTTP body
+
+If a referenced field doesn't resolve, the placeholder stays literal (`{{steps.X.data}}` rendered verbatim) AND the runner's `find_unresolved_critical_refs` fails the step fast with an actionable error — no silent data loss. For `Gate` / Agent FreeText consumers, route via `{{steps.X.output}}` only.
 
 ### ConditionAction (in `on_result`)
 
@@ -433,7 +466,10 @@ These shape engine behavior across the whole run.
 | `Exec` | `[SIGNAL: OK]` on exit 0, `[SIGNAL: ERROR]` on non-zero exit, plus `[SIGNAL: exit_<code>]` for granular branching (`exit_0`, `exit_1`, `exit_2`…) |
 | `ApiCall` | `[SIGNAL: OK]` on 2xx, `[SIGNAL: NO_RESULTS]` when `api_extract` returns empty + `fail_on_empty`, `[SIGNAL: ERROR]` + `[SIGNAL: http_<code>]` on HTTP error (`http_401`, `http_503`…) |
 | `BatchApiCall` | `[SIGNAL: OK]` if every item succeeded, `[SIGNAL: PARTIAL]` if some failed, `[SIGNAL: ERROR]` if all failed. Common pattern: `contains "PARTIAL" → Goto self (max_iterations: 2)` for transient-retry. |
-| `Notify` / `Gate` / `BatchQuickPrompt` | none — branching not supported on these; rely on `on_failure` for failure handling |
+| `JsonData` | `[SIGNAL: OK]` (the payload is always emitted; nothing to fail at runtime since the payload is a constant) |
+| `Notify` | `[SIGNAL: OK]` on 2xx delivery, `[SIGNAL: ERROR]` on non-2xx. Useful when chaining `Notify → Notify` (primary webhook → fallback) via `contains "ERROR" → Goto fallback_notify` |
+| `BatchQuickPrompt` | `[SIGNAL: OK]` if all children succeeded, `[SIGNAL: PARTIAL]` if some failed, `[SIGNAL: ERROR]` if all failed, `[SIGNAL: PENDING]` in fire-and-forget mode (`wait_for_completion: false`). Same `PARTIAL → Goto self` retry pattern as `BatchApiCall` |
+| `Gate` | none — Gate is a pause, not a producer. Branch on the operator's decision via the `request_changes_target` field, not `on_result` |
 
 **`on_result` is honoured even when the step status is `Failed`** for `Exec` and `ApiCall`. This means a `Goto` rule can override the rollback chain: e.g. `cargo test` exits 1 → status `Failed`, but `contains "ERROR" → Goto implement` fires and the run continues to `implement` instead of triggering `on_failure`. If no rule matches a `Failed` step, the rollback chain fires as before.
 
@@ -526,9 +562,50 @@ This is enforced at runtime by the triage prompt addendum + the implement step's
 
 You shouldn't hand-roll the 7 steps unless the user explicitly wants a variant. **Default: tell them about the preset.**
 
-## Signal Protocol
+## Shipping protocol
 
-Kronn has **two** chat signals for shipping workflows from a discussion:
+Kronn has **three** ways to ship a workflow from a discussion. Pick by intent:
+
+| Path | When | UX |
+|---|---|---|
+| **A. `KRONN:WORKFLOW_READY` signal** | The user wants to review the JSON before deploying | Agent emits a fenced JSON + signal → frontend renders a "Create this workflow" button → user clicks → POST `/api/workflows` |
+| **B. `KRONN:BUNDLE_READY` signal** | Same as A, plus the workflow needs new QPs / QAs / Custom APIs created in the same transaction | Same review flow, button reads "Create everything (1 workflow + N supporting artifacts)" → POST `/api/workflows/bundle` |
+| **C. `workflow_create_draft` MCP tool (0.8.5+)** | The design has converged AND the user has indicated they want autonomous creation (e.g. "go ahead and create it" / explicit MCP usage) | Tool call → workflow lands in the user's Workflows page **in `enabled: false` state** (draft). User reviews + flips the toggle when ready. Zero cron firings before user enable. |
+
+**Default**: prefer **B** (`KRONN:BUNDLE_READY`) for any non-trivial workflow — the review-before-deploy flow catches mistakes the user wouldn't think to ask the agent about. Use **C** only when the user explicitly delegates autonomous creation. The two paths are complementary, not competing.
+
+### C. `workflow_create_draft` MCP tool (0.8.5+) — autonomous draft
+
+**Always list before you create.** Before drafting a brand-new workflow, call:
+- `workflow_list()` — surfaces every existing workflow (id, name, enabled, project, trigger_type, step_count, last_run_status). If a fitting one already exists, propose editing it instead of duplicating.
+- `qp_list()` — every Quick Prompt in the user's library. If a step in your draft could reuse an existing QP via `quick_prompt_id` / `batch_quick_prompt_id`, do that instead of inlining the same prompt.
+- `qa_list()` — every Quick API. Same logic for `quick_api_id` on `ApiCall` / `BatchApiCall` steps.
+- `mcp_list()` — wired MCP configs + REGISTRY servers with an `api_spec`. Use this to pick the right `api_plugin_slug` + `api_config_id` when an `ApiCall` step needs a fresh endpoint; without it the agent would have to guess slugs.
+
+Available via the `kronn-internal` MCP server (always wired). Signature:
+
+```
+workflow_create_draft({
+  name: string,             // 1-200 chars
+  trigger: WorkflowTrigger, // { "type": "Manual" } / Cron / Tracker
+  steps: WorkflowStep[],    // 1-20 items
+  project_id?: string,
+  variables?: PromptVariable[],
+  guards?: WorkflowGuards,
+  on_failure?: WorkflowStep[],
+  exec_allowlist?: string[],
+  artifacts?: Record<string, ArtifactSpec>,
+  concurrency_limit?: number,
+  safety?: WorkflowSafety,
+})
+→ { id, name, enabled: false, ... }       // the full Workflow JSON
+```
+
+**Safety contract — the tool ALWAYS forces `enabled: false`** server-side, regardless of what the agent passes. This is the property that distinguishes autonomous draft creation from "agent fired a workflow on prod". An MCP-spawned workflow CAN'T auto-fire on its cron until the user flips the toggle.
+
+After calling `workflow_create_draft`, echo the returned `id` back to the user: `Workflow drafted as <id> — review and enable in your Workflows page`. Don't also emit a `KRONN:WORKFLOW_READY` block in the same message (you'd be asking the user to deploy a workflow that's already created).
+
+If the tool returns an error (validation rejection, DB error), surface the message to the user and fall back to emitting a `KRONN:WORKFLOW_READY` signal so they can fix the issue in the wizard.
 
 ### A. `KRONN:WORKFLOW_READY` — single workflow, no supporting artifacts (0.3.3+)
 

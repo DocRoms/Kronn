@@ -109,6 +109,33 @@ KRONN:QP_IMPROVED
 
 The frontend parses the FIRST ```json block in your reply after seeing the `KRONN:QP_IMPROVED` signal, validates it against the QuickPrompt schema, and renders a "Deploy" CTA. If the JSON is malformed, the CTA stays hidden and the user has to ask you to re-emit.
 
+### Brand-new QPs (0.8.5+) — `qp_create_draft` MCP tool
+
+**Always list before you create.** Call `qp_list()` first to confirm an existing QP doesn't already cover the same use case — if it does, propose improving that one via the `KRONN:QP_IMPROVED` signal flow instead of creating a duplicate.
+
+The signal flow above **targets an existing QP** (the wizard fed you the QP id in the seed; the deploy CTA PUTs onto that id). If the user instead asks you to create a **brand-new** QP from a conversation (e.g. "save this prompt as a QP I can re-launch") AND no fitting QP exists in `qp_list()`, use the `qp_create_draft` MCP tool from the `kronn-internal` server:
+
+```
+qp_create_draft({
+  name: string,            // 1-200 chars, displayed on the QP card
+  prompt_template: string, // body with {{var}} placeholders
+  agent: AgentType,        // ClaudeCode / Codex / Vibe / GeminiCli / Kiro / CopilotCli / Ollama / Custom
+  variables?: PromptVariable[],
+  description?: string,
+  icon?: string,           // single emoji prefix shown on the QP card
+  tier?: ModelTier,        // default / economy / reasoning
+  project_id?: string,
+  skill_ids?: string[],
+  profile_ids?: string[],
+  directive_ids?: string[],
+})
+→ { id, name, prompt_template, ... }   // the full QuickPrompt JSON
+```
+
+QPs have no `enabled` flag (manual launch only, no auto-fire risk), so "draft" is semantic — the agent created it, the user reviews + launches when they want.
+
+After calling, echo the returned `id` back to the user: `Quick Prompt drafted as <id> — visible in your Quick Prompts tab, launch it whenever`. Don't combine with a `KRONN:QP_IMPROVED` signal in the same turn — the signal targets an existing QP, the MCP tool creates a fresh one.
+
 ## Hard rules
 
 - **Never invent a variable** the user didn't declare unless you also drop one — keep `variables` consistent with the body's `{{vars}}`.

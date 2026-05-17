@@ -111,12 +111,32 @@ pub async fn execute_api_call_step_core(
         Err(e) => return fail(step, start, format!("Template render error (body): {e}")),
     };
 
+    // 0.8.5 — render `{{var}}` template vars in the endpoint path FIRST.
+    // Pre-fix the endpoint only honoured the single-brace `{key}` form
+    // (resolved against `step.api_path_params`), masking and restoring
+    // any `{{...}}` runs verbatim. That left users who wrote
+    // `/rest/api/3/issue/{{issue_key}}` directly (the natural shape
+    // suggested by the AI helper) with a URL-encoded literal
+    // `%7B%7Bissue_key%7D%7D` and a confusing Jira 404. The wizard's
+    // helper had no way to know users had to detour through
+    // `api_path_params` — caught during EW-7247 AutoPilot dogfooding.
+    //
+    // Render order matters: `ctx.render()` runs first so `{{issue_key}}`
+    // becomes `EW-7247`, THEN `resolve_path_params` does its
+    // percent-encoded `{key}` pass on the result. `{{var}}` values land
+    // unescaped — workflow-step values are typically URL-safe (issue
+    // keys, project slugs, etc.); if you need percent-encoding, use the
+    // explicit `{key}` + `path_params` form which encodes per RFC 3986.
+    let templated_endpoint = match ctx.render(endpoint_path) {
+        Ok(s) => s,
+        Err(e) => return fail(step, start, format!("Endpoint template render error: {e}")),
+    };
     // Substitute `{key}` path-segment params (e.g. /repos/{owner}/{repo}).
     // Values are rendered through TemplateContext FIRST so a previous
     // step's output can drive a segment (`{owner}` = `{{steps.X.data}}`).
     // Tokens with no entry stay literal — the request will then 404,
     // which is much more actionable than silently dropping the segment.
-    let resolved_path = match resolve_path_params(endpoint_path, &step.api_path_params, ctx) {
+    let resolved_path = match resolve_path_params(&templated_endpoint, &step.api_path_params, ctx) {
         Ok(p) => p,
         Err(e) => return fail(step, start, format!("Path param render error: {e}")),
     };
@@ -215,24 +235,24 @@ pub async fn execute_api_call_step_core(
     };
     let summary = summarize(&extract_out.value, &full_url, method.as_str());
 
-    let output_envelope = serde_json::json!({
-        "data": extract_out.value,
-        "status": status_str,
-        "summary": summary,
-    });
-    // Trailing `[SIGNAL: <kw>]` lines so users can branch via `on_result.contains`
-    // without parsing the JSON envelope. NO_RESULTS gets its own signal because
-    // it's the existing convention for "API returned an empty list, skip the
-    // downstream agent" — already special-cased in the Agent path.
+    // 0.8.5 — emit the canonical Kronn step-output envelope (markers +
+    // signal) via `format_step_output`. Pre-fix this site emitted a
+    // bare JSON line + a single signal — extractable, but inconsistent
+    // with the Agent/Exec shape and a recurring source of confusion
+    // when wiring up cross-step references. Cf.
+    // [[project_step_output_homogenisation_0_9_0]] (now shipped in
+    // 0.8.5) and `workflows/step_output_format.rs`.
     let signal = if extract_out.is_empty && fail_on_empty {
-        "[SIGNAL: NO_RESULTS]"
+        "NO_RESULTS"
     } else {
-        "[SIGNAL: OK]"
+        "OK"
     };
-    let output = format!(
-        "{}\n{}",
-        serde_json::to_string(&output_envelope).unwrap_or_default(),
-        signal,
+    let output = super::step_output_format::format_step_output(
+        extract_out.value.clone(),
+        status_str,
+        &summary,
+        None,
+        &[signal],
     );
     let condition_action = super::steps::evaluate_conditions(&step.on_result, &output);
     let condition_result = condition_action.as_ref().map(|a| match a {
@@ -1169,12 +1189,10 @@ mod tests {
     }
 
     fn extract_envelope(output: &str) -> Value {
-        // The runtime output is `{json}\n[SIGNAL: ...]` (the trailing
-        // SIGNAL line lets `evaluate_conditions` branch without parsing
-        // JSON). Parse only the JSON head — split on the SIGNAL marker
-        // if present, otherwise the whole string.
-        let json_part = output.split("\n[SIGNAL:").next().unwrap_or(output);
-        serde_json::from_str(json_part).expect("output is structured JSON")
+        // 0.8.5 — outputs now go through the canonical Kronn envelope
+        // (markers + signals). Reuse the shared test helper so a future
+        // tweak in the format only touches one place.
+        super::super::step_output_format::parse_envelope_for_test(output)
     }
 
     // ─── resolve_auth ───────────────────────────────────────────────
@@ -1394,6 +1412,64 @@ mod tests {
             &ctx,
         ).unwrap();
         assert_eq!(out, "/repos/x/{repo}");
+    }
+
+    // ─── 0.8.5 regression — `{{var}}` MUST resolve in endpoint path ──
+    //
+    // Pre-fix the executor only ran `resolve_path_params` on the
+    // endpoint, which deliberately masked + restored `{{...}}` runs.
+    // Workflows that wrote `/rest/api/3/issue/{{issue_key}}` directly
+    // (the natural shape suggested by the AI helper) fired with a
+    // URL-encoded literal `%7B%7Bissue_key%7D%7D` → Jira 404. The fix
+    // runs `ctx.render()` on the endpoint BEFORE
+    // `resolve_path_params`. These tests pin the combined pipeline.
+
+    #[test]
+    fn endpoint_double_brace_var_is_substituted_by_ctx_render_then_path_params() {
+        let mut ctx = TemplateContext::new();
+        ctx.set("issue_key", "EW-7247");
+
+        // What execute_api_call_step_core now does:
+        let templated = ctx.render("/rest/api/3/issue/{{issue_key}}").unwrap();
+        let resolved = resolve_path_params(&templated, &None, &ctx).unwrap();
+        assert_eq!(resolved, "/rest/api/3/issue/EW-7247");
+    }
+
+    #[test]
+    fn endpoint_double_brace_var_works_with_step_outputs() {
+        let mut ctx = TemplateContext::new();
+        // Mimic what `inject_trigger_context` does for issue.* fields.
+        ctx.set("issue.title", "Hello world");
+        let templated = ctx.render("/api/echo/{{issue.title}}").unwrap();
+        let resolved = resolve_path_params(&templated, &None, &ctx).unwrap();
+        // No path_params → ctx.render alone is the substitution path.
+        // Note: spaces aren't percent-encoded here (caller's burden) —
+        // that's the documented trade-off in the executor comment.
+        assert_eq!(resolved, "/api/echo/Hello world");
+    }
+
+    #[test]
+    fn endpoint_double_brace_var_unknown_stays_literal_after_render() {
+        // Unknown {{var}} → ctx.render leaves it literal (existing
+        // contract); resolve_path_params then has nothing to do.
+        let ctx = TemplateContext::new();
+        let templated = ctx.render("/items/{{nope}}").unwrap();
+        let resolved = resolve_path_params(&templated, &None, &ctx).unwrap();
+        assert_eq!(resolved, "/items/{{nope}}");
+    }
+
+    #[test]
+    fn endpoint_supports_both_double_and_single_brace_forms() {
+        // Mixed form: `{{var}}` for ctx, `{key}` for path_params.
+        // ctx.render resolves the double-brace, then resolve_path_params
+        // handles the single-brace.
+        let mut ctx = TemplateContext::new();
+        ctx.set("base", "v3");
+        let mut path_params = HashMap::new();
+        path_params.insert("issue_id".to_string(), "EW-1".to_string());
+        let templated = ctx.render("/rest/api/{{base}}/issue/{issue_id}").unwrap();
+        let resolved = resolve_path_params(&templated, &Some(path_params), &ctx).unwrap();
+        assert_eq!(resolved, "/rest/api/v3/issue/EW-1");
     }
 
     #[test]

@@ -12,6 +12,10 @@ desktop/src-tauri/icons/ios/
 desktop/src-tauri/icons/appx/
 desktop/node_modules/
 
+# Python — bytecode cache (regenerated on every MCP script run)
+__pycache__/
+*.pyc
+
 # Node
 frontend/node_modules/
 frontend/node_modules_old/
