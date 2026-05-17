@@ -1054,6 +1054,74 @@ mod tests {
         assert_eq!(body["data"]["steps"].as_array().unwrap().len(), 1);
     }
 
+    /// 0.8.5 — `workflow_create_draft` MCP tool round-trip.
+    ///
+    /// Critical safety contract: when the MCP tool POSTs with
+    /// `enabled: false`, the persisted workflow MUST stay disabled.
+    /// Without this, an agent draft would fire on its cron schedule
+    /// before the user has reviewed it — exactly the failure mode the
+    /// draft path was designed to prevent.
+    #[tokio::test]
+    async fn create_workflow_with_enabled_false_persists_as_draft() {
+        let state = test_state();
+        let create_body = serde_json::json!({
+            "name": "Draft from MCP agent",
+            "trigger": { "type": "Cron", "schedule": "0 9 * * 1-5" },
+            "steps": [{
+                "name": "s1",
+                "agent": "ClaudeCode",
+                "prompt_template": "review the staging logs",
+                "mode": { "type": "Normal" }
+            }],
+            "actions": [],
+            "enabled": false,
+        });
+        let req = Request::builder()
+            .method("POST").uri("/api/workflows")
+            .header("Content-Type", "application/json")
+            .body(Body::from(create_body.to_string())).unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK, "draft create: {body}");
+        assert_eq!(body["data"]["enabled"].as_bool(), Some(false),
+            "draft workflow MUST persist with enabled=false (no auto-fire)");
+        // Round-trip GET to make sure the value didn't flip on the way
+        // through the DB serialiser.
+        let wf_id = body["data"]["id"].as_str().unwrap().to_string();
+        let req = Request::builder()
+            .method("GET").uri(format!("/api/workflows/{}", wf_id))
+            .body(Body::empty()).unwrap();
+        let (_, body) = send(state.clone(), false, req).await;
+        assert_eq!(body["data"]["enabled"].as_bool(), Some(false),
+            "draft persists as disabled across read");
+    }
+
+    /// 0.8.5 — back-compat: every UI-driven POST without `enabled`
+    /// must continue to land as `enabled: true` (the default Workflow
+    /// state since 0.5.x). The optional field can't accidentally
+    /// disable existing user flows.
+    #[tokio::test]
+    async fn create_workflow_without_enabled_field_defaults_to_true() {
+        let state = test_state();
+        let create_body = serde_json::json!({
+            "name": "UI Create",
+            "trigger": { "type": "Manual" },
+            "steps": [{
+                "name": "s1",
+                "agent": "ClaudeCode",
+                "prompt_template": "do the thing",
+                "mode": { "type": "Normal" }
+            }],
+            "actions": [],
+        });
+        let req = Request::builder()
+            .method("POST").uri("/api/workflows")
+            .header("Content-Type", "application/json")
+            .body(Body::from(create_body.to_string())).unwrap();
+        let (_, body) = send(state.clone(), false, req).await;
+        assert_eq!(body["data"]["enabled"].as_bool(), Some(true),
+            "default behaviour MUST stay enabled=true when the field is omitted (back-compat)");
+    }
+
     #[tokio::test]
     async fn workflows_update_and_delete() {
         let state = test_state();

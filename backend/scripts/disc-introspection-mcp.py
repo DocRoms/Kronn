@@ -244,6 +244,153 @@ TOOLS = [
             "required": ["disc_id"],
         },
     },
+    # ─── 0.8.5 — read-only listings of existing artifacts ───────────────
+    # Always call the relevant `*_list` tool BEFORE drafting a new
+    # artifact: if a fitting one already exists, reference its id
+    # (`quick_prompt_id`, `quick_api_id`, `api_config_id`) instead of
+    # duplicating. Compact payload (no full bodies) to keep the agent
+    # context tight; the `GET /api/<surface>/<id>` route returns the
+    # full record when the agent really needs it.
+    {
+        "name": "workflow_list",
+        "description": (
+            "List every workflow in the user's Kronn instance — compact "
+            "view (id, name, enabled, project_id, trigger_type, "
+            "step_count, step_names, last_run_status, last_run_at). "
+            "Use this to (a) avoid drafting a duplicate workflow, (b) "
+            "surface the existing workflow id when the user asks "
+            "'have I already built something like X?'."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "qp_list",
+        "description": (
+            "List every Quick Prompt in the user's library — compact "
+            "view (id, name, agent, description, variable_names, "
+            "skill_ids, project_id, tier). Use this to (a) reuse a "
+            "matching QP via `quick_prompt_id` / "
+            "`batch_quick_prompt_id` in a workflow step instead of "
+            "drafting a duplicate, (b) answer 'do I already have a QP "
+            "for X?'."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "qa_list",
+        "description": (
+            "List every Quick API in the user's library — compact view "
+            "(id, name, api_plugin_slug, api_endpoint_path, api_method, "
+            "description, project_id). Use this to reuse a matching QA "
+            "via `quick_api_id` in a workflow `ApiCall` / `BatchApiCall` "
+            "step instead of re-specifying the endpoint inline."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "mcp_list",
+        "description": (
+            "List every MCP / API plugin wired in the user's Kronn "
+            "instance. Returns `{configs, servers_with_api}` where "
+            "`configs` lists the user's instances (id + server_id + "
+            "project scoping) and `servers_with_api` lists every "
+            "REGISTRY server that exposes a REST API spec (slug + "
+            "endpoints). Use this to pick the right `api_plugin_slug` "
+            "+ `api_config_id` when drafting an `ApiCall` step — "
+            "without it the agent would have to guess plugin slugs."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    # ─── 0.8.5 — autonomous draft creation tools ────────────────────────
+    # Symmetric to the `KRONN:WORKFLOW_READY` / `KRONN:QP_IMPROVED`
+    # signal+button path: these tools let the agent CREATE the artifact
+    # directly when the conversation has converged on a clear design,
+    # at the cost of the user's one-click review. Safety: both tools
+    # force `enabled: false` on the workflow path (no auto-fire on
+    # cron), and the artifact appears in the user's Workflows / QP
+    # tab marked as a draft. The signal+button path stays the
+    # recommended default; the draft tools are for the "agent has
+    # nailed the design, let's accelerate adoption" scenario.
+    {
+        "name": "workflow_create_draft",
+        "description": (
+            "Create a Kronn workflow in DRAFT state (`enabled: false`). "
+            "The workflow appears in the user's Workflows page and can "
+            "be reviewed + enabled with one click — no cron fires until "
+            "the user explicitly enables it. Use this when the design "
+            "has converged in the conversation and the user signaled "
+            "they want autonomous creation; otherwise emit a "
+            "`KRONN:WORKFLOW_READY` block and let the user one-click "
+            "deploy via the existing UI CTA.\n\n"
+            "Payload mirrors `CreateWorkflowRequest`: name (required), "
+            "trigger (required, e.g. `{ \"type\": \"Manual\" }`), steps "
+            "(required, ≥ 1 ≤ 20 items). Optional: project_id, "
+            "actions, safety, workspace_config, concurrency_limit, "
+            "guards, artifacts, on_failure, exec_allowlist, variables.\n\n"
+            "Returns the created workflow JSON (id, all fields) so the "
+            "agent can echo the id back to the user (`Workflow drafted "
+            "as <id> — review and enable in your Workflows page`)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Workflow name (1-200 chars)."},
+                "trigger": {
+                    "type": "object",
+                    "description": "Workflow trigger spec (Manual / Cron / Tracker). E.g. `{ \"type\": \"Manual\" }` or `{ \"type\": \"Cron\", \"schedule\": \"0 9 * * 1-5\" }`.",
+                },
+                "steps": {
+                    "type": "array",
+                    "description": "Workflow steps (1-20 items). Each step matches the `WorkflowStep` shape — see the `workflow-architect` skill for the canonical schema.",
+                },
+                "project_id": {"type": "string", "description": "Optional Kronn project id to bind the workflow to."},
+                "variables": {"type": "array", "description": "Optional manual-launch variables (each `{ name, label?, placeholder?, required?, description? }`)."},
+                "guards": {"type": "object", "description": "Optional execution guards (timeout, max_llm_calls, loop_revisits)."},
+                "on_failure": {"type": "array", "description": "Optional rollback step chain (Notify / Agent / ApiCall steps)."},
+                "exec_allowlist": {"type": "array", "items": {"type": "string"}, "description": "Whitelisted binaries for any Exec steps."},
+                "artifacts": {"type": "object", "description": "Optional artifact declarations (name → spec)."},
+                "concurrency_limit": {"type": "integer", "description": "Optional max concurrent runs."},
+                "safety": {"type": "object", "description": "Optional WorkflowSafety overrides."},
+                "actions": {"type": "array", "description": "Optional actions (legacy slot)."},
+                "workspace_config": {"type": "object", "description": "Optional workspace mode (Direct / Isolated)."},
+            },
+            "required": ["name", "trigger", "steps"],
+        },
+    },
+    {
+        "name": "qp_create_draft",
+        "description": (
+            "Create a Kronn Quick Prompt (QP) in the user's QP library. "
+            "QPs are manual-launch templates; there is no enabled flag "
+            "(every QP can be launched on demand) so this is roughly "
+            "the symmetric tool to `workflow_create_draft` but without "
+            "an auto-fire risk. Use when the conversation converged on "
+            "a reusable prompt template the user will want to launch "
+            "again later (e.g. recurring audit prompt, triage prompt). "
+            "For one-off improvements to an existing QP, prefer the "
+            "`KRONN:QP_IMPROVED` signal+button flow (`qp-improver` "
+            "skill) which targets an existing QP by id.\n\n"
+            "Returns the created QP JSON (id, all fields) so the "
+            "agent can echo the id back to the user."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "QP name (1-200 chars, displayed on the QP card)."},
+                "prompt_template": {"type": "string", "description": "The template body. Use `{{var}}` for required variables."},
+                "agent": {"type": "string", "description": "Default agent: `ClaudeCode` / `Codex` / `Vibe` / `GeminiCli` / `Kiro` / `CopilotCli` / `Ollama` / `Custom`."},
+                "variables": {"type": "array", "description": "Variable definitions (each `{ name, label?, placeholder?, required?, description? }`)."},
+                "description": {"type": "string", "description": "Optional one-line description (~120 chars max) shown on the QP card."},
+                "icon": {"type": "string", "description": "Optional single-emoji prefix shown on the QP card (e.g. `⚡` / `🔍` / `📝`)."},
+                "tier": {"type": "string", "description": "Default model tier: `default` / `economy` / `reasoning`."},
+                "project_id": {"type": "string", "description": "Optional Kronn project id to bind the QP to."},
+                "skill_ids": {"type": "array", "items": {"type": "string"}, "description": "Optional skill bindings."},
+                "profile_ids": {"type": "array", "items": {"type": "string"}, "description": "Optional profile bindings."},
+                "directive_ids": {"type": "array", "items": {"type": "string"}, "description": "Optional directive bindings."},
+            },
+            "required": ["name", "prompt_template", "agent"],
+        },
+    },
 ]
 
 
@@ -258,6 +405,60 @@ def _disc_id():
     if not did:
         raise RuntimeError("KRONN_DISCUSSION_ID env var not set — Kronn auto-injection misconfigured")
     return did
+
+
+# 0.8.5 — cache the current discussion's meta once per process. Used by
+# the mutating tools (disc_create / workflow_create_draft /
+# qp_create_draft) to auto-inherit:
+#   - `project_id` — so agent artifacts land in the active project,
+#     not "Général" (flagged 2026-05-18 during MCP dogfooding).
+#   - `source_agent` + `source_session_id` — so the existing 0.8.4
+#     sidebar badge ("📥 ClaudeCode") fires on every MCP-created
+#     disc, making UI-created discs visually distinct from
+#     agent-created ones at a glance.
+# The agent can still override either by passing explicit args.
+_CURRENT_DISC_META_CACHE = {"checked": False, "value": None}
+
+
+def _current_disc_meta():
+    """Return `{id, project_id, agent}` of the parent disc, or `None`."""
+    if _CURRENT_DISC_META_CACHE["checked"]:
+        return _CURRENT_DISC_META_CACHE["value"]
+    _CURRENT_DISC_META_CACHE["checked"] = True
+    try:
+        disc_id = _disc_id()
+    except RuntimeError:
+        # KRONN_DISCUSSION_ID not set (legacy launcher, dev scaffold).
+        # No inheritance possible; return None silently.
+        return None
+    try:
+        url = f"{_backend_url()}/api/discussions/{disc_id}/meta"
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        data = payload.get("data") or {}
+        meta = {
+            "id": disc_id,
+            "project_id": data.get("project_id"),
+            "agent": data.get("agent"),
+        }
+        _CURRENT_DISC_META_CACHE["value"] = meta
+        return meta
+    except Exception as e:
+        # Lookup failed (backend unreachable, disc not found, etc.).
+        # Don't fail the caller — the artifact just lands without
+        # inheritance, same as pre-0.8.5 behaviour.
+        print(
+            f"kronn-internal: failed to resolve current disc's meta "
+            f"({e}); inheritance fields will fall back to defaults",
+            file=sys.stderr,
+        )
+        return None
+
+
+def _current_project_id():
+    meta = _current_disc_meta()
+    return meta.get("project_id") if meta else None
 
 
 def _http(method, path, body=None):
@@ -323,6 +524,31 @@ def call_disc_create(args):
         v = args.get(k)
         if v is not None:
             body[k] = v
+    # 0.8.5 — auto-inherit two fields from the current discussion when
+    # the agent doesn't pass them explicitly:
+    # - `project_id`: agent artifacts land in the active project, not
+    #   "Général" (flagged 2026-05-18).
+    # - `source_agent`: makes the existing 0.8.4 sidebar badge
+    #   ("📥 ClaudeCode") fire on every MCP-created disc so the user
+    #   can visually distinguish UI-created vs agent-created discs at
+    #   a glance. The badge only checks for `sourceAgent` truthy
+    #   (cf. `SwipeableDiscItem.tsx:147`), so we don't need
+    #   `source_session_id` to render it.
+    # We intentionally DO NOT auto-fill `source_session_id`: the
+    # `/api/disc/create` endpoint treats `(source_agent,
+    # source_session_id)` as an idempotency key (cf.
+    # `api/disc_source.rs:78`). If we always set session = parent
+    # disc id, the second MCP call from the same parent would
+    # collapse to the first child disc instead of creating a new
+    # one. Agents can still pass `source_session_id` explicitly when
+    # they actually want one-disc-per-external-session semantics.
+    # Cf. [[project_mcp_draft_creation_0_8_5]].
+    meta = _current_disc_meta()
+    if meta:
+        if "project_id" not in body and meta.get("project_id"):
+            body["project_id"] = meta["project_id"]
+        if "source_agent" not in body and meta.get("agent"):
+            body["source_agent"] = meta["agent"]
     return _unwrap(_http("POST", "/api/disc/create", body))
 
 
@@ -393,6 +619,157 @@ def call_disc_load_other(args):
     return _unwrap(_http("GET", f"/api/disc/load_other?{qs}"))
 
 
+def call_workflow_list(_args):
+    # 0.8.5 — compact list of existing workflows. `GET /api/workflows`
+    # already returns the summary shape (`WorkflowSummary` — no
+    # `steps` body, only flat `trigger_type` + `step_count`), so we
+    # pass it through verbatim minus a couple unused fields. The full
+    # body is one `GET /api/workflows/<id>` call away when the agent
+    # needs the step details — e.g. to read the prompt of an existing
+    # step before drafting a similar one.
+    data = _unwrap(_http("GET", "/api/workflows")) or []
+    out = []
+    for w in data:
+        out.append({
+            "id": w.get("id"),
+            "name": w.get("name"),
+            "enabled": w.get("enabled"),
+            "project_id": w.get("project_id"),
+            "project_name": w.get("project_name"),
+            "trigger_type": w.get("trigger_type"),
+            "step_count": w.get("step_count"),
+            "last_run_status": (w.get("last_run") or {}).get("status"),
+            "last_run_started_at": (w.get("last_run") or {}).get("started_at"),
+        })
+    return out
+
+
+def call_qp_list(_args):
+    # 0.8.5 — compact list. Keeps variable names so the agent can decide
+    # if an existing QP fits the user's use case before drafting a new
+    # one. Drops the full `prompt_template` body (the agent can call
+    # `GET /api/quick-prompts/<id>` if it really needs the body).
+    data = _unwrap(_http("GET", "/api/quick-prompts")) or []
+    out = []
+    for q in data:
+        var_names = [v.get("name") for v in (q.get("variables") or [])]
+        out.append({
+            "id": q.get("id"),
+            "name": q.get("name"),
+            "agent": q.get("agent"),
+            "description": q.get("description"),
+            "variable_names": var_names,
+            "skill_ids": q.get("skill_ids") or [],
+            "project_id": q.get("project_id"),
+            "tier": q.get("tier"),
+        })
+    return out
+
+
+def call_qa_list(_args):
+    # 0.8.5 — compact list. Keeps the plugin slug + endpoint path so the
+    # agent can decide if an existing QA can be referenced from a new
+    # workflow's `quick_api_id` slot.
+    data = _unwrap(_http("GET", "/api/quick-apis")) or []
+    out = []
+    for q in data:
+        out.append({
+            "id": q.get("id"),
+            "name": q.get("name"),
+            "api_plugin_slug": q.get("api_plugin_slug"),
+            "api_endpoint_path": q.get("api_endpoint_path"),
+            "api_method": q.get("api_method"),
+            "description": q.get("description"),
+            "project_id": q.get("project_id"),
+        })
+    return out
+
+
+def call_mcp_list(_args):
+    # 0.8.5 — wired MCP configs (the API plugin slug + config id the
+    # workflow ApiCall steps need). Drops env values (secrets) and
+    # scan diagnostics; keeps only what the agent needs to compose an
+    # ApiCall step (slug + config_id + project scoping).
+    data = _unwrap(_http("GET", "/api/mcps")) or {}
+    out_configs = []
+    for c in data.get("configs") or []:
+        out_configs.append({
+            "config_id": c.get("id"),
+            "server_id": c.get("server_id"),
+            "is_global": c.get("is_global"),
+            "project_ids": c.get("project_ids") or [],
+            "label": c.get("label"),
+        })
+    # Server registry (which slugs are KNOWN and have an api_spec) —
+    # lets the agent answer "what API plugins are available to wire?".
+    out_servers = []
+    for s in data.get("servers") or []:
+        if s.get("api_spec"):
+            out_servers.append({
+                "id": s.get("id"),
+                "name": s.get("name"),
+                "tags": s.get("tags") or [],
+                "endpoints": [
+                    {"path": e.get("path"), "method": e.get("method")}
+                    for e in ((s.get("api_spec") or {}).get("endpoints") or [])
+                ],
+            })
+    return {"configs": out_configs, "servers_with_api": out_servers}
+
+
+def call_workflow_create_draft(args):
+    # 0.8.5 — POST /api/workflows with `enabled: false` (forced
+    # client-side; the backend honours the flag since 0.8.5). The
+    # agent provides everything else; we validate name + trigger +
+    # steps presence to surface a clean error before the round-trip
+    # if the LLM forgot a required field.
+    for field in ("name", "trigger", "steps"):
+        if not args.get(field):
+            raise RuntimeError(f"workflow_create_draft: missing required '{field}'")
+    if not isinstance(args["steps"], list) or len(args["steps"]) == 0:
+        raise RuntimeError("workflow_create_draft: 'steps' must be a non-empty list")
+    if len(args["steps"]) > 20:
+        raise RuntimeError(
+            f"workflow_create_draft: too many steps ({len(args['steps'])}, max 20)"
+        )
+    # Always force enabled=false on the draft path. Even if the agent
+    # tries to override, the safety property of the tool stays
+    # ("drafts never auto-fire").
+    body = dict(args)
+    body["enabled"] = False
+    # 0.8.5 — auto-inherit project binding from the current discussion
+    # when the agent doesn't pass one explicitly. Same UX rationale as
+    # `disc_create` — an agent operating in a project's disc shouldn't
+    # silently leak its artifacts into "Général".
+    if "project_id" not in body or body.get("project_id") is None:
+        inherited = _current_project_id()
+        if inherited:
+            body["project_id"] = inherited
+    return _unwrap(_http("POST", "/api/workflows", body))
+
+
+def call_qp_create_draft(args):
+    # 0.8.5 — POST /api/quick-prompts. QPs have no enabled flag (manual
+    # launch only), so "draft" is semantic — the agent created it,
+    # the user reviews + launches when they want.
+    for field in ("name", "prompt_template", "agent"):
+        if not args.get(field):
+            raise RuntimeError(f"qp_create_draft: missing required '{field}'")
+    # Defensive: cap obviously-bad name lengths early.
+    if len(args["name"]) > 200:
+        raise RuntimeError(
+            f"qp_create_draft: 'name' too long ({len(args['name'])} chars, max 200)"
+        )
+    body = dict(args)
+    # 0.8.5 — auto-inherit project binding from the current discussion
+    # when the agent doesn't pass one explicitly.
+    if "project_id" not in body or body.get("project_id") is None:
+        inherited = _current_project_id()
+        if inherited:
+            body["project_id"] = inherited
+    return _unwrap(_http("POST", "/api/quick-prompts", body))
+
+
 DISPATCH = {
     "disc_meta": call_disc_meta,
     "disc_get_message": call_disc_get_message,
@@ -405,6 +782,18 @@ DISPATCH = {
     "disc_find_by_session": call_disc_find_by_session,
     "disc_search": call_disc_search,
     "disc_load_other": call_disc_load_other,
+    # 0.8.5 — read-only listings of existing artifacts. Lets the
+    # agent avoid duplicates + reference existing QP/QA ids from a
+    # new workflow without asking the user to paste them.
+    "workflow_list": call_workflow_list,
+    "qp_list": call_qp_list,
+    "qa_list": call_qa_list,
+    "mcp_list": call_mcp_list,
+    # 0.8.5 — autonomous draft creation. Both default to a safe state
+    # (workflow disabled / QP manually launched) so a misfire can't
+    # cascade into prod cron.
+    "workflow_create_draft": call_workflow_create_draft,
+    "qp_create_draft": call_qp_create_draft,
 }
 
 

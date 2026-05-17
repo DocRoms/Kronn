@@ -260,8 +260,19 @@ pub struct WorkflowStep {
     pub step_type: StepType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    // 0.8.5 — agent / prompt_template / mode are only meaningful for
+    // LLM-driven steps (Agent, BatchQuickPrompt). For ApiCall / Exec /
+    // Gate / Notify / JsonData / BatchApiCall steps the wizard sent
+    // empty / placeholder values just to satisfy serde, and a sloppy
+    // payload missing one of them returned a 422 with no actionable
+    // info ("missing field `prompt_template`"). With serde defaults
+    // those fields become optional in JSON; runtime validation still
+    // enforces them per step_type (see workflow runner dispatch).
+    #[serde(default)]
     pub agent: AgentType,
+    #[serde(default)]
     pub prompt_template: String,
+    #[serde(default)]
     pub mode: StepMode,
     #[serde(default)]
     pub output_format: StepOutputFormat,
@@ -655,10 +666,16 @@ pub struct NotifyConfig {
 
 fn default_notify_method() -> String { "POST".to_string() }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(tag = "type")]
 pub enum StepMode {
+    // 0.8.5 — `Normal` is the only variant today and is `Default` so
+    // `WorkflowStep` can mark `mode` as `#[serde(default)]`. Required at
+    // the type level for forward-compat (we plan a `Slash` variant for
+    // /slash-command steps in 0.9.0) but optional in JSON for clients
+    // that don't care (ApiCall, Exec, …).
+    #[default]
     Normal,
 }
 
@@ -1001,6 +1018,16 @@ pub struct CreateWorkflowRequest {
     pub exec_allowlist: Vec<String>,
     #[serde(default)]
     pub variables: Vec<PromptVariable>,
+    /// 0.8.5 — optional initial state. Default `true` for back-compat
+    /// (every UI-driven create stays enabled by default). The MCP
+    /// `workflow_create_draft` tool sets this to `false` so an
+    /// agent-spawned workflow lands in the user's Workflows page in a
+    /// disabled state, ready for review + manual enable. Avoids the
+    /// "agent just created a cron workflow that fires unattended"
+    /// failure mode while still letting agents accelerate the
+    /// adoption of Kronn by drafting common patterns autonomously.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -1173,4 +1200,85 @@ pub struct TestStepRequest {
     /// Dry run: agent describes what it would do without executing any write actions
     #[serde(default)]
     pub dry_run: bool,
+}
+
+#[cfg(test)]
+mod step_deserialization_tests {
+    use super::*;
+
+    /// 0.8.5 dogfooding regression test — JIRA helper case.
+    ///
+    /// The wizard's ApiCall step card composed a payload with `step_type:
+    /// "ApiCall"` + `api_*` fields but NO `agent` / `prompt_template` /
+    /// `mode`. Pre-fix serde rejected with `missing field
+    /// "prompt_template"` and axum returned 422 with the body as
+    /// text/plain — the frontend swallowed the body and the user saw a
+    /// bare "Server error (HTTP 422)" with no clue what was wrong. Now
+    /// the LLM-only fields default and an ApiCall step can be a minimal
+    /// JSON. The frontend api.ts also surfaces non-JSON error bodies,
+    /// so future serde rejects are at least diagnosable.
+    #[test]
+    fn workflow_step_apicall_deserialises_without_llm_fields() {
+        let json = r#"{
+            "name": "fetch_issue",
+            "step_type": { "type": "ApiCall" },
+            "api_plugin_slug": "mcp-atlassian",
+            "api_config_id": "cfg-1",
+            "api_endpoint_path": "/rest/api/3/issue/EW-7247",
+            "api_method": "GET"
+        }"#;
+        let step: WorkflowStep = serde_json::from_str(json)
+            .expect("ApiCall step with no agent/prompt/mode must deserialise");
+        assert_eq!(step.name, "fetch_issue");
+        assert!(matches!(step.step_type, StepType::ApiCall));
+        // Defaults kicked in for the LLM-only fields.
+        assert_eq!(step.prompt_template, "");
+        assert!(matches!(step.agent, crate::models::AgentType::ClaudeCode));
+        assert!(matches!(step.mode, StepMode::Normal));
+    }
+
+    /// Agent steps still require an explicit prompt at runtime, but the
+    /// JSON shape stays permissive at deserialisation — runtime
+    /// validation lives in the workflow runner dispatch, not in serde.
+    /// This test pins that a fully-populated Agent step round-trips.
+    #[test]
+    fn workflow_step_agent_roundtrips_with_explicit_fields() {
+        let json = r#"{
+            "name": "summarise",
+            "step_type": { "type": "Agent" },
+            "agent": "Codex",
+            "prompt_template": "Résume {{steps.fetch.data}}",
+            "mode": { "type": "Normal" }
+        }"#;
+        let step: WorkflowStep = serde_json::from_str(json).expect("Agent step must deserialise");
+        assert_eq!(step.prompt_template, "Résume {{steps.fetch.data}}");
+        assert!(matches!(step.agent, crate::models::AgentType::Codex));
+    }
+
+    /// 422 friendliness — the test API call endpoint payload that
+    /// frontend `workflowsApi.testApiCall()` sends. Without
+    /// `prompt_template` / `agent` / `mode` defaults this test would
+    /// blow up with the exact error the JIRA helper agent surfaced
+    /// during dogfooding ("missing field `prompt_template`").
+    #[test]
+    fn test_api_call_request_accepts_minimal_step() {
+        use crate::api::workflows::TestApiCallRequest;
+        let json = r#"{
+            "step": {
+                "name": "fetch_issue",
+                "step_type": { "type": "ApiCall" },
+                "api_plugin_slug": "mcp-atlassian",
+                "api_config_id": "cfg-1",
+                "api_endpoint_path": "/rest/api/3/issue/EW-{{ticket_number}}",
+                "api_method": "GET",
+                "api_query": { "fields": "summary,description" },
+                "api_extract": { "path": "$.fields", "fail_on_empty": false }
+            },
+            "project_id": "proj-1"
+        }"#;
+        let req: TestApiCallRequest = serde_json::from_str(json)
+            .expect("TestApiCallRequest with minimal ApiCall step must deserialise");
+        assert_eq!(req.project_id, "proj-1");
+        assert_eq!(req.step.name, "fetch_issue");
+    }
 }

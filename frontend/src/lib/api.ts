@@ -311,7 +311,19 @@ async function api<T>(
 
   const contentType = res.headers.get('content-type') ?? '';
   if (!contentType.includes('application/json')) {
-    throw new Error(`Server error (HTTP ${res.status})`);
+    // 0.8.5 — when axum's `Json<T>` extractor rejects a request
+    // (missing field, unknown enum variant, type mismatch), it
+    // returns 422 with `Content-Type: text/plain` and the actual
+    // deserialization failure in the body. Pre-fix we threw away
+    // the body and surfaced a bare "Server error (HTTP 422)" with
+    // zero actionable info — exactly what tripped the QP-Improver
+    // agent on the JIRA helper during 0.8.4 dogfooding. Same path
+    // also covers gateway-style 5xx HTML bodies; we cap at 500
+    // chars so a 10MB nginx error page doesn't drown the toast.
+    const body = await res.text().catch(() => '');
+    const trimmed = body.trim();
+    const suffix = trimmed ? ` — ${trimmed.slice(0, 500)}` : '';
+    throw new Error(`Server error (HTTP ${res.status})${suffix}`);
   }
 
   const json: ApiResponse<T> = await res.json();

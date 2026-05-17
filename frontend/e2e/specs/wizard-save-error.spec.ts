@@ -45,12 +45,13 @@ test.describe('Wizard — save error banner', () => {
     await dashboard.goto();
     await dashboard.clickWorkflows();
     await workflows.openNewWorkflowWizard();
-    await wizard.gotoStepsPage('e2e-save-error');
 
-    // Apply Ticket Autopilot to have a complete valid workflow shape.
-    // The 400 we inject targets the SAVE call, not validation, so we
-    // don't care about pre-save predicate logic here.
-    await wizard.presetTicketToPr.click();
+    // 0.8.5 — apply Ticket Autopilot via the unified QuickStart picker on
+    // step 0. Gives us a complete valid workflow shape; the 400 we inject
+    // targets the SAVE call, not validation, so we don't care about
+    // pre-save predicate logic here. The wizard auto-jumps to step 2
+    // (Steps) after applying.
+    await wizard.applyQuickStart('e2e-save-error', /🎫\s*Ticket Autopilot/i);
 
     // Steps → Config → Résumé.
     await wizard.nextButton.click();

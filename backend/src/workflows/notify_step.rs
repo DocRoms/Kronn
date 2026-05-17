@@ -97,22 +97,24 @@ pub async fn execute_notify_step(
     let is_success = status.is_success();
 
     // ── Build structured output so downstream steps can chain on data ───
-    let output_json = serde_json::json!({
-        "data": {
+    // 0.8.5 — canonical envelope via shared formatter. Always emits
+    // `[SIGNAL: OK|ERROR]` so `on_result` rules can branch on the
+    // delivery success without parsing the JSON. Cf.
+    // [[project_step_output_homogenisation_0_9_0]].
+    let status_str = if is_success { "OK" } else { "ERROR" };
+    let summary = format!("{} {} → {}", method.as_str(), url, http_status);
+    let output = super::step_output_format::format_step_output(
+        serde_json::json!({
             "http_status": http_status,
             "response_excerpt": excerpt,
             "url": url,
             "method": method.as_str(),
-        },
-        "status": if is_success { "OK" } else { "ERROR" },
-        "summary": format!(
-            "{} {} → {}",
-            method.as_str(),
-            url,
-            http_status
-        ),
-    });
-    let output = serde_json::to_string(&output_json).unwrap_or_default();
+        }),
+        status_str,
+        &summary,
+        None,
+        &[status_str],
+    );
 
     StepOutcome {
         result: StepResult {
@@ -303,7 +305,7 @@ mod tests {
         assert!(received_body.lock().await.contains(r#""stage":"plan_ready""#));
 
         // Structured output carries http_status + summary for downstream chaining
-        let parsed: serde_json::Value = serde_json::from_str(&out.result.output).unwrap();
+        let parsed = crate::workflows::step_output_format::parse_envelope_for_test(&out.result.output);
         assert_eq!(parsed["status"], "OK");
         assert_eq!(parsed["data"]["http_status"], 200);
         assert!(parsed["summary"].as_str().unwrap().contains("200"));
@@ -334,7 +336,7 @@ mod tests {
         });
         let out = execute_notify_step(&step, &TemplateContext::new()).await;
         assert_eq!(out.result.status, RunStatus::Failed);
-        let parsed: serde_json::Value = serde_json::from_str(&out.result.output).unwrap();
+        let parsed = crate::workflows::step_output_format::parse_envelope_for_test(&out.result.output);
         assert_eq!(parsed["status"], "ERROR");
         assert_eq!(parsed["data"]["http_status"], 400);
         assert!(parsed["data"]["response_excerpt"].as_str().unwrap().contains("nope, bad payload"));

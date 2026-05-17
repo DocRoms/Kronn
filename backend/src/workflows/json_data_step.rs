@@ -64,12 +64,18 @@ pub async fn execute_json_data_step(step: &WorkflowStep) -> StepOutcome {
 
     let summary = build_summary(&payload);
 
-    let output_json = serde_json::json!({
-        "data": payload,
-        "status": "OK",
-        "summary": summary,
-    });
-    let output = serde_json::to_string(&output_json).unwrap_or_else(|_| String::from("{}"));
+    // 0.8.5 — canonical envelope via shared formatter. Pre-fix this
+    // step emitted bare compact JSON, which `extract_step_envelope`
+    // absorbed via the strategy-2 fallback. The unified shape (with
+    // `---STEP_OUTPUT---` markers + `[SIGNAL: OK]`) means consumers
+    // and the run-log viewer see the same structure regardless of
+    // which step type produced the data. Cf.
+    // [[project_step_output_homogenisation_0_9_0]].
+    let output = super::step_output_format::format_step_output_simple(
+        payload,
+        "OK",
+        &summary,
+    );
 
     StepOutcome {
         result: StepResult {
@@ -204,8 +210,8 @@ mod tests {
         let outcome = execute_json_data_step(&step).await;
         assert_eq!(outcome.result.status, RunStatus::Success);
 
-        let envelope: serde_json::Value =
-            serde_json::from_str(&outcome.result.output).expect("output is JSON");
+        let envelope =
+            crate::workflows::step_output_format::parse_envelope_for_test(&outcome.result.output);
         assert_eq!(envelope["status"], "OK");
         assert_eq!(envelope["data"], payload);
         assert!(
@@ -226,8 +232,8 @@ mod tests {
         let outcome = execute_json_data_step(&step).await;
         assert_eq!(outcome.result.status, RunStatus::Success);
 
-        let envelope: serde_json::Value =
-            serde_json::from_str(&outcome.result.output).expect("output is JSON");
+        let envelope =
+            crate::workflows::step_output_format::parse_envelope_for_test(&outcome.result.output);
         assert_eq!(envelope["data"], payload);
         let summary = envelope["summary"].as_str().unwrap();
         assert!(summary.contains("3"), "summary mentions field count");
@@ -243,8 +249,8 @@ mod tests {
         let step = blank_step(Some(payload.clone()));
         let outcome = execute_json_data_step(&step).await;
         assert_eq!(outcome.result.status, RunStatus::Success);
-        let envelope: serde_json::Value =
-            serde_json::from_str(&outcome.result.output).expect("output is JSON");
+        let envelope =
+            crate::workflows::step_output_format::parse_envelope_for_test(&outcome.result.output);
         assert_eq!(envelope["data"], payload);
     }
 
@@ -259,8 +265,8 @@ mod tests {
         });
         let step = blank_step(Some(payload.clone()));
         let outcome = execute_json_data_step(&step).await;
-        let envelope: serde_json::Value =
-            serde_json::from_str(&outcome.result.output).expect("output is JSON");
+        let envelope =
+            crate::workflows::step_output_format::parse_envelope_for_test(&outcome.result.output);
         assert_eq!(
             envelope["data"]["raw_template"], "{{not_substituted}}",
             "templates are NOT rendered in JsonData payloads"

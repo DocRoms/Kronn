@@ -856,6 +856,34 @@
   cursor: help;
 }
 
+/* 0.8.5 — short disc-id pill in ChatHeader. Click → copy full UUID
+ * to clipboard. Neutral ghost colour so it doesn't compete with the
+ * introspection pill or title — but mono font for the id readability. */
+.disc-id-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-family: var(--kr-font-mono, ui-monospace, monospace);
+  font-weight: 500;
+  background: var(--kr-bg-subtle);
+  color: var(--kr-text-ghost);
+  border: 1px solid var(--kr-border-ghost);
+  flex-shrink: 0;
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+.disc-id-pill:hover {
+  color: var(--kr-text-primary);
+  border-color: var(--kr-accent-border);
+  background: var(--kr-accent-bg);
+}
+.disc-id-pill:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: 1px;
+}
+
 /* Inline notice rendered under a popover section when the active
  * agent doesn't support a feature surfaced by that section (e.g. the
  * summary-strategy section warns Vibe / Ollama users that the

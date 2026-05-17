@@ -130,8 +130,15 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
             {disc.workspace_mode === 'Isolated' && <GitBranch size={10} style={{ color: 'var(--kr-info)', flexShrink: 0 }} />}
             {disc.shared_id && <Users2 size={10} style={{ color: 'var(--kr-success)', flexShrink: 0 }} />}
             {/* Title text truncates; badge + star sit OUTSIDE the truncated
-                zone so they're always visible even on long titles. */}
-            <span className="disc-item-title-text"><MatrixText text={disc.title} /></span>
+                zone so they're always visible even on long titles.
+                0.8.5 — `title` attr exposes the disc id on hover so an
+                agent referring to `04a9c927` is one mouse-over away
+                (the full UUID is visible in the tooltip + searchable
+                via prefix in the sidebar filter). */}
+            <span
+              className="disc-item-title-text"
+              title={t('disc.titleHoverTooltip', disc.title, disc.id)}
+            ><MatrixText text={disc.title} /></span>
             {showBadge && <span className="disc-unseen-badge">{unseen}</span>}
             {/* Pinned indicator (non-interactive) — just a small star to
                 show which discs are in Favorites. The toggle lives in

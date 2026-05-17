@@ -19,7 +19,68 @@ type SseStream = Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>;
 /// minimal validation: empty path, absolute (Unix `/` or Windows drive),
 /// or any segment equal to `..`. Path canonicalisation at write-time is
 /// deferred to the runner (which knows the workspace root); this is only
-/// the save-time hard reject.
+/// 0.8.5 — pure builder for a workflow run's `trigger_context` object on
+/// manual launch. Extracted from the SSE handler so the variable
+/// injection contract can be pinned in unit tests — pre-extraction
+/// there was ZERO coverage and a regression silently dropped every
+/// auto-detected `{{var}}` from launch modals (caught during EW-7247
+/// AutoPilot dogfooding on 2026-05-17).
+///
+/// Contract:
+/// - Always seeds `type: "manual"` + `triggered_at: <RFC3339>`.
+/// - Accepts EVERY caller-provided variable, not just those declared
+///   in `wf.variables`. The frontend modal asks for declared +
+///   auto-detected `{{var}}` refs from step templates, so a legit
+///   value can arrive without being in the declared list — silently
+///   dropping it was the bug.
+/// - Filters variable names with a conservative safety check:
+///   non-empty, ≤ 64 chars, ASCII word chars + dot only. Anything
+///   else is logged + skipped to keep `{{path/../etc}}` style keys
+///   out of the template context.
+pub(crate) fn build_manual_trigger_obj(
+    provided_vars: &::std::collections::HashMap<String, String>,
+    triggered_at: chrono::DateTime<chrono::Utc>,
+) -> serde_json::Map<String, serde_json::Value> {
+    /// Names that the trigger handler owns — a user-supplied var with
+    /// one of these names is dropped (with a warning) so a launch
+    /// payload can't spoof the run's metadata or impersonate the
+    /// trigger source.
+    const RESERVED_KEYS: &[&str] = &["type", "triggered_at"];
+
+    let mut obj = serde_json::Map::new();
+    // User vars first so reserved seeds always overwrite below.
+    for (name, val) in provided_vars {
+        if !is_safe_trigger_var_name(name) {
+            tracing::warn!("Workflow trigger: dropping malformed variable name `{}`", name);
+            continue;
+        }
+        if RESERVED_KEYS.contains(&name.as_str()) {
+            tracing::warn!("Workflow trigger: dropping reserved variable name `{}`", name);
+            continue;
+        }
+        obj.insert(name.clone(), serde_json::Value::String(val.clone()));
+    }
+    // Seed reserved keys AFTER user vars so they are authoritative
+    // (defence in depth on top of the explicit RESERVED_KEYS check).
+    obj.insert("type".into(), serde_json::Value::String("manual".into()));
+    obj.insert(
+        "triggered_at".into(),
+        serde_json::Value::String(triggered_at.to_rfc3339()),
+    );
+    obj
+}
+
+/// Conservative identifier shape used by [`build_manual_trigger_obj`].
+/// Matches the convention the runner's `inject_trigger_context` expects
+/// for top-level template keys (`{{name}}` / `{{ns.field}}`).
+fn is_safe_trigger_var_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+}
+
 fn validate_artifact_specs(
     specs: &::std::collections::HashMap<String, ArtifactSpec>,
 ) -> Result<(), String> {
@@ -171,6 +232,122 @@ fn validate_json_data_steps(steps: &[WorkflowStep]) -> Result<(), String> {
                 MAX_PAYLOAD_BYTES / (1024 * 1024)
             ));
         }
+    }
+    Ok(())
+}
+
+/// 0.8.5 — enforce the per-`StepType` required-fields contract that
+/// `#[serde(default)]` on `WorkflowStep.{agent,prompt_template,mode}`
+/// stopped enforcing at the JSON layer.
+///
+/// Background. Before 0.8.5, axum's `Json<WorkflowStep>` extractor
+/// rejected any ApiCall/Exec/Gate/Notify/JsonData payload that omitted
+/// `prompt_template` or `agent` (irrelevant for non-LLM steps) with a
+/// confusing "missing field" 422. We made those fields default-able so
+/// the wizard could send minimal payloads — but that means the API
+/// will now happily accept a `step_type: Agent` with an empty
+/// `prompt_template`, deferring the failure to run-time where the user
+/// sees "step Agent emitted empty response" instead of the actual
+/// cause. This validator closes that gap at save time so the wizard
+/// can surface the real error inline.
+///
+/// Rules, per `StepType`:
+///   - `Agent` — needs `prompt_template` non-empty, UNLESS
+///     `quick_prompt_id` is set (then the prompt body comes from the
+///     referenced QP at run-time).
+///   - `ApiCall` — needs `api_endpoint_path` non-empty AND
+///     `api_plugin_slug` non-empty (or `quick_api_id` referencing a
+///     saved Quick API — same per-field override pattern as `Agent`).
+///   - `BatchQuickPrompt` — needs `batch_quick_prompt_id` AND
+///     `batch_items_from` (the array source to fan out over).
+///   - `BatchApiCall` — same as `ApiCall` PLUS `batch_items_from`.
+///   - `Notify` — needs `notify_config` populated (URL is the minimal
+///     contract — body / method have safe defaults).
+///   - `Gate`, `Exec`, `JsonData` — covered by their existing
+///     dedicated validators; this function is a no-op for them.
+fn validate_required_fields_per_type(steps: &[WorkflowStep]) -> Result<(), String> {
+    for s in steps {
+        match s.step_type {
+            StepType::Agent => {
+                let has_inline = !s.prompt_template.trim().is_empty();
+                let has_qp_ref = s.quick_prompt_id.as_deref()
+                    .map(|v| !v.trim().is_empty())
+                    .unwrap_or(false);
+                if !has_inline && !has_qp_ref {
+                    return Err(format!(
+                        "Step Agent « {} » : `prompt_template` est obligatoire (ou bien lie un Quick Prompt via `quick_prompt_id`).",
+                        s.name
+                    ));
+                }
+            }
+            StepType::ApiCall => validate_api_call_minimum(s, false)?,
+            StepType::BatchApiCall => validate_api_call_minimum(s, true)?,
+            StepType::BatchQuickPrompt => {
+                if s.batch_quick_prompt_id.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                    return Err(format!(
+                        "Step BatchQuickPrompt « {} » : `batch_quick_prompt_id` est obligatoire (le QP à fan-out).",
+                        s.name
+                    ));
+                }
+                if s.batch_items_from.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                    return Err(format!(
+                        "Step BatchQuickPrompt « {} » : `batch_items_from` est obligatoire (ex. `{{{{steps.fetch.data.items}}}}`).",
+                        s.name
+                    ));
+                }
+            }
+            StepType::Notify => {
+                let cfg = match s.notify_config.as_ref() {
+                    Some(c) => c,
+                    None => return Err(format!(
+                        "Step Notify « {} » : `notify_config` est obligatoire (URL + body).",
+                        s.name
+                    )),
+                };
+                if cfg.url.trim().is_empty() {
+                    return Err(format!(
+                        "Step Notify « {} » : `notify_config.url` ne peut pas être vide.",
+                        s.name
+                    ));
+                }
+            }
+            // Other variants have their own dedicated validators:
+            //   Exec       → validate_exec_steps
+            //   JsonData   → validate_json_data_steps
+            //   Gate       → no required fields beyond its serde defaults
+            StepType::Exec | StepType::JsonData | StepType::Gate => {}
+        }
+    }
+    Ok(())
+}
+
+/// Helper for `ApiCall` + `BatchApiCall`. `is_batch` adds the
+/// `batch_items_from` requirement on top of the shared API minimum.
+fn validate_api_call_minimum(s: &WorkflowStep, is_batch: bool) -> Result<(), String> {
+    let kind = if is_batch { "BatchApiCall" } else { "ApiCall" };
+    if s.api_endpoint_path.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        return Err(format!(
+            "Step {} « {} » : `api_endpoint_path` est obligatoire (ex. `/rest/api/3/issue/{{{{issue_key}}}}`).",
+            kind, s.name
+        ));
+    }
+    let has_plugin = s.api_plugin_slug.as_deref().map(str::trim)
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    let has_qa_ref = s.quick_api_id.as_deref().map(str::trim)
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    if !has_plugin && !has_qa_ref {
+        return Err(format!(
+            "Step {} « {} » : il faut soit `api_plugin_slug` (registry MCP) soit `quick_api_id` (Quick API saved).",
+            kind, s.name
+        ));
+    }
+    if is_batch && s.batch_items_from.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        return Err(format!(
+            "Step BatchApiCall « {} » : `batch_items_from` est obligatoire (la source d'items à itérer).",
+            s.name
+        ));
     }
     Ok(())
 }
@@ -405,6 +582,13 @@ pub async fn create(
         return Json(ApiResponse::err(e));
     }
 
+    if let Err(e) = validate_required_fields_per_type(&req.steps) {
+        return Json(ApiResponse::err(e));
+    }
+    if let Err(e) = validate_required_fields_per_type(&req.on_failure) {
+        return Json(ApiResponse::err(e));
+    }
+
     let now = Utc::now();
     let wf = Workflow {
         id: Uuid::new_v4().to_string(),
@@ -426,7 +610,11 @@ pub async fn create(
         on_failure: req.on_failure,
         exec_allowlist: req.exec_allowlist,
         variables: req.variables,
-        enabled: true,
+        // 0.8.5 — accept an `enabled: false` from the request for the
+        // MCP draft path (`workflow_create_draft`). Default stays true
+        // to preserve back-compat with every UI-driven save. Cf.
+        // [[project_mcp_draft_creation_0_8_5]].
+        enabled: req.enabled.unwrap_or(true),
         created_at: now,
         updated_at: now,
     };
@@ -557,12 +745,18 @@ pub async fn update(
         if let Err(e) = validate_json_data_steps(new_steps) {
             return Json(ApiResponse::err(e));
         }
+        if let Err(e) = validate_required_fields_per_type(new_steps) {
+            return Json(ApiResponse::err(e));
+        }
     }
     if let Some(ref new_on_failure) = req.on_failure {
         if let Err(e) = validate_exec_steps(new_on_failure, effective_allowlist) {
             return Json(ApiResponse::err(e));
         }
         if let Err(e) = validate_json_data_steps(new_on_failure) {
+            return Json(ApiResponse::err(e));
+        }
+        if let Err(e) = validate_required_fields_per_type(new_on_failure) {
             return Json(ApiResponse::err(e));
         }
     }
@@ -759,6 +953,12 @@ pub async fn import_workflow(
     if let Err(e) = validate_exec_steps(&wf.on_failure, &wf.exec_allowlist) {
         return Json(ApiResponse::err(e));
     }
+    if let Err(e) = validate_required_fields_per_type(&wf.steps) {
+        return Json(ApiResponse::err(e));
+    }
+    if let Err(e) = validate_required_fields_per_type(&wf.on_failure) {
+        return Json(ApiResponse::err(e));
+    }
 
     // Build a remap table for QP ids (source → fresh) and insert the
     // bundled QPs first. If a step references a QP that's NOT bundled,
@@ -869,14 +1069,7 @@ pub async fn trigger(
             }
         }
     }
-    let mut trigger_obj = serde_json::Map::new();
-    trigger_obj.insert("type".into(), serde_json::Value::String("manual".into()));
-    trigger_obj.insert("triggered_at".into(), serde_json::Value::String(Utc::now().to_rfc3339()));
-    for declared in &wf.variables {
-        if let Some(val) = provided_vars.get(&declared.name) {
-            trigger_obj.insert(declared.name.clone(), serde_json::Value::String(val.clone()));
-        }
-    }
+    let trigger_obj = build_manual_trigger_obj(&provided_vars, Utc::now());
 
     // Atomic concurrency check + insert in a single transaction (avoids TOCTOU race)
     let now = Utc::now();
@@ -3090,5 +3283,271 @@ mod tests {
         assert_eq!(value_type_tag(&serde_json::json!("s")), "string");
         assert_eq!(value_type_tag(&serde_json::json!([1, 2])), "array(2)");
         assert_eq!(value_type_tag(&serde_json::json!({ "k": 1 })), "object");
+    }
+
+    // ─── 0.8.5 — manual-trigger variable injection ─────────────────────
+    // Critical regression coverage. Pre-fix the SSE trigger handler only
+    // forwarded variables that appeared in `wf.variables` (the declared
+    // list), silently dropping any auto-detected `{{var}}` the launch
+    // modal had asked the user to fill. Result: workflows fired with
+    // literal `{{var}}` strings in their step prompts → 404s, broken
+    // templates, no clue why. Caught during EW-7247 AutoPilot dogfooding.
+
+    use std::collections::HashMap;
+
+    fn provided(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn build_manual_trigger_obj_seeds_type_and_timestamp() {
+        let obj = build_manual_trigger_obj(&HashMap::new(), Utc::now());
+        assert_eq!(obj.get("type").and_then(|v| v.as_str()), Some("manual"));
+        assert!(obj.get("triggered_at").and_then(|v| v.as_str()).is_some());
+    }
+
+    #[test]
+    fn build_manual_trigger_obj_passes_auto_detected_var_through() {
+        // The bug case: a workflow with `variables: null` whose step
+        // template references `{{issue_key}}`. The frontend asks the
+        // user for `issue_key` (auto-detected) and POSTs it. Pre-fix
+        // the value was dropped. Now it must land in the trigger_obj
+        // verbatim so `inject_trigger_context` can expose it.
+        let obj = build_manual_trigger_obj(&provided(&[("issue_key", "EW-7247")]), Utc::now());
+        assert_eq!(obj.get("issue_key").and_then(|v| v.as_str()), Some("EW-7247"));
+    }
+
+    #[test]
+    fn build_manual_trigger_obj_passes_multiple_vars() {
+        let obj = build_manual_trigger_obj(
+            &provided(&[("ticket", "EW-1"), ("env", "staging"), ("dry_run", "true")]),
+            Utc::now(),
+        );
+        assert_eq!(obj.get("ticket").and_then(|v| v.as_str()), Some("EW-1"));
+        assert_eq!(obj.get("env").and_then(|v| v.as_str()), Some("staging"));
+        assert_eq!(obj.get("dry_run").and_then(|v| v.as_str()), Some("true"));
+    }
+
+    #[test]
+    fn build_manual_trigger_obj_accepts_dotted_namespaced_names() {
+        // Dotted keys are legitimate — `inject_trigger_context` uses
+        // `{{issue.title}}` etc. for tracker payloads.
+        let obj = build_manual_trigger_obj(&provided(&[("issue.title", "Hello")]), Utc::now());
+        assert_eq!(obj.get("issue.title").and_then(|v| v.as_str()), Some("Hello"));
+    }
+
+    #[test]
+    fn build_manual_trigger_obj_drops_var_with_special_characters() {
+        // Path-traversal-ish keys: must NOT land in the template ctx.
+        let obj = build_manual_trigger_obj(
+            &provided(&[
+                ("../etc/passwd", "leak"),
+                ("foo bar", "spaces"),
+                ("a-b", "hyphen"),
+                ("a$b", "dollar"),
+            ]),
+            Utc::now(),
+        );
+        assert!(obj.get("../etc/passwd").is_none());
+        assert!(obj.get("foo bar").is_none());
+        assert!(obj.get("a-b").is_none());
+        assert!(obj.get("a$b").is_none());
+    }
+
+    #[test]
+    fn build_manual_trigger_obj_drops_empty_var_name() {
+        let obj = build_manual_trigger_obj(&provided(&[("", "v")]), Utc::now());
+        assert!(obj.get("").is_none());
+    }
+
+    #[test]
+    fn build_manual_trigger_obj_drops_var_name_over_64_chars() {
+        let long = "a".repeat(65);
+        let obj = build_manual_trigger_obj(&provided(&[(long.as_str(), "v")]), Utc::now());
+        assert!(obj.get(&long).is_none());
+        // A 64-char name passes (boundary).
+        let ok = "a".repeat(64);
+        let obj2 = build_manual_trigger_obj(&provided(&[(ok.as_str(), "v")]), Utc::now());
+        assert_eq!(obj2.get(&ok).and_then(|v| v.as_str()), Some("v"));
+    }
+
+    #[test]
+    fn build_manual_trigger_obj_preserves_empty_value() {
+        // Required-var validation runs upstream; here we accept the
+        // empty string so workflows can decide to fall back to a
+        // default in their template (`{{flag|default("off")}}` etc.).
+        let obj = build_manual_trigger_obj(&provided(&[("flag", "")]), Utc::now());
+        assert_eq!(obj.get("flag").and_then(|v| v.as_str()), Some(""));
+    }
+
+    #[test]
+    fn build_manual_trigger_obj_reserved_keys_cannot_be_spoofed_by_user() {
+        // A user-supplied `type` or `triggered_at` MUST NOT overwrite
+        // the trigger handler's authoritative values. Without this
+        // pin, an attacker who controls the launch payload (or a
+        // careless workflow) could impersonate a cron trigger or
+        // backdate the run.
+        let now = Utc::now();
+        let obj = build_manual_trigger_obj(
+            &provided(&[
+                ("type", "Cron"),
+                ("triggered_at", "1970-01-01T00:00:00Z"),
+            ]),
+            now,
+        );
+        assert_eq!(obj.get("type").and_then(|v| v.as_str()), Some("manual"));
+        let ts = obj.get("triggered_at").and_then(|v| v.as_str()).unwrap();
+        assert!(ts.starts_with(&now.format("%Y-%m-%d").to_string()));
+        assert_ne!(ts, "1970-01-01T00:00:00Z");
+    }
+
+    // ─── 0.8.5 — required-fields-per-StepType ────────────────────────────
+    //
+    // Gap closed: serde defaults on `WorkflowStep.{agent, prompt_template,
+    // mode}` (introduced 0.8.5 to unblock minimal ApiCall payloads) made
+    // the JSON layer permissive. Without this validator, `step_type:
+    // Agent` with an empty `prompt_template` would persist and only blow
+    // up at run-time with an unhelpful "step emitted empty response".
+
+    #[test]
+    fn required_fields_agent_rejects_empty_prompt_template() {
+        let mut s = mk_step("plan", StepType::Agent);
+        s.prompt_template = String::new();
+        let err = validate_required_fields_per_type(&[s]).expect_err("must reject");
+        assert!(err.contains("plan"), "should name the offending step, got: {}", err);
+        assert!(err.contains("prompt_template"), "should name the field, got: {}", err);
+    }
+
+    #[test]
+    fn required_fields_agent_accepts_quick_prompt_id_in_lieu_of_inline_template() {
+        // Pattern: a step that just references a saved QP — the prompt
+        // body comes from the QP at run-time, so inline `prompt_template`
+        // is allowed to be empty.
+        let mut s = mk_step("plan", StepType::Agent);
+        s.prompt_template = String::new();
+        s.quick_prompt_id = Some("qp-architect".into());
+        validate_required_fields_per_type(&[s]).expect("QP-ref Agent step should validate");
+    }
+
+    #[test]
+    fn required_fields_agent_with_whitespace_only_template_is_rejected() {
+        let mut s = mk_step("plan", StepType::Agent);
+        s.prompt_template = "   \n\t  ".into();
+        let err = validate_required_fields_per_type(&[s]).expect_err("whitespace is empty");
+        assert!(err.contains("plan"));
+    }
+
+    #[test]
+    fn required_fields_apicall_rejects_missing_endpoint_path() {
+        let mut s = mk_step("fetch_issue", StepType::ApiCall);
+        s.api_plugin_slug = Some("jira".into());
+        s.api_endpoint_path = None;
+        let err = validate_required_fields_per_type(&[s]).expect_err("must reject");
+        assert!(err.contains("fetch_issue"));
+        assert!(err.contains("api_endpoint_path"));
+    }
+
+    #[test]
+    fn required_fields_apicall_rejects_missing_plugin_and_qa() {
+        let mut s = mk_step("fetch_issue", StepType::ApiCall);
+        s.api_endpoint_path = Some("/rest/api/3/issue/EW-1".into());
+        // Neither api_plugin_slug nor quick_api_id set.
+        let err = validate_required_fields_per_type(&[s]).expect_err("must reject");
+        assert!(err.contains("fetch_issue"));
+        assert!(err.contains("api_plugin_slug") || err.contains("quick_api_id"));
+    }
+
+    #[test]
+    fn required_fields_apicall_accepts_quick_api_id_in_lieu_of_plugin_slug() {
+        let mut s = mk_step("fetch_issue", StepType::ApiCall);
+        s.api_endpoint_path = Some("/rest/api/3/issue/EW-1".into());
+        s.quick_api_id = Some("qa-jira-fetch".into());
+        validate_required_fields_per_type(&[s]).expect("QA-ref ApiCall step should validate");
+    }
+
+    #[test]
+    fn required_fields_apicall_accepts_complete_inline_payload() {
+        let mut s = mk_step("fetch_issue", StepType::ApiCall);
+        s.api_plugin_slug = Some("jira".into());
+        s.api_endpoint_path = Some("/rest/api/3/issue/{{issue_key}}".into());
+        validate_required_fields_per_type(&[s]).expect("complete inline ApiCall should validate");
+    }
+
+    #[test]
+    fn required_fields_batch_qp_rejects_missing_qp_id_and_items_from() {
+        let s = mk_step("fan_out", StepType::BatchQuickPrompt);
+        let err = validate_required_fields_per_type(std::slice::from_ref(&s)).expect_err("must reject");
+        assert!(err.contains("batch_quick_prompt_id"), "should flag qp id first, got: {}", err);
+
+        let mut s2 = s;
+        s2.batch_quick_prompt_id = Some("qp-review".into());
+        let err = validate_required_fields_per_type(&[s2]).expect_err("must reject still");
+        assert!(err.contains("batch_items_from"));
+    }
+
+    #[test]
+    fn required_fields_batch_qp_accepts_complete_payload() {
+        let mut s = mk_step("fan_out", StepType::BatchQuickPrompt);
+        s.batch_quick_prompt_id = Some("qp-review".into());
+        s.batch_items_from = Some("{{steps.fetch.data.tickets}}".into());
+        validate_required_fields_per_type(&[s]).expect("complete BatchQuickPrompt should validate");
+    }
+
+    #[test]
+    fn required_fields_batch_apicall_requires_items_from_on_top_of_apicall_minimum() {
+        let mut s = mk_step("fan_out", StepType::BatchApiCall);
+        s.api_plugin_slug = Some("github".into());
+        s.api_endpoint_path = Some("/repos/{owner}/{repo}".into());
+        // Missing batch_items_from → reject.
+        let err = validate_required_fields_per_type(std::slice::from_ref(&s)).expect_err("must reject");
+        assert!(err.contains("batch_items_from"));
+
+        s.batch_items_from = Some("{{steps.fetch.data}}".into());
+        validate_required_fields_per_type(&[s]).expect("complete BatchApiCall should validate");
+    }
+
+    #[test]
+    fn required_fields_notify_rejects_missing_config_and_empty_url() {
+        let s = mk_step("alert", StepType::Notify);
+        let err = validate_required_fields_per_type(&[s]).expect_err("must reject (no config)");
+        assert!(err.contains("notify_config"));
+
+        let mut s2 = mk_step("alert", StepType::Notify);
+        s2.notify_config = Some(NotifyConfig {
+            url: "   ".into(),
+            method: "POST".into(),
+            headers: Default::default(),
+            body_template: "{}".into(),
+        });
+        let err = validate_required_fields_per_type(&[s2]).expect_err("must reject (empty url)");
+        assert!(err.contains("url"));
+    }
+
+    #[test]
+    fn required_fields_gate_exec_jsondata_are_no_ops_here() {
+        // Those have dedicated validators (validate_exec_steps,
+        // validate_json_data_steps, validate_on_failure_steps for Gate-
+        // in-rollback). The required-fields validator must let them
+        // through so we don't double-report errors.
+        let chain = vec![
+            mk_step("approve", StepType::Gate),
+            mk_step("run_make", StepType::Exec),
+            mk_step("seed", StepType::JsonData),
+        ];
+        validate_required_fields_per_type(&chain).expect("non-API/Agent steps deferred to other validators");
+    }
+
+    #[test]
+    fn required_fields_first_offender_is_named_when_multiple_invalid() {
+        // The validator short-circuits on the first failure, which is
+        // the right UX: the wizard surfaces one error at a time and
+        // the user fixes them top-to-bottom.
+        let chain = vec![
+            mk_step("notify_ops", StepType::Notify),  // missing notify_config
+            mk_step("plan", StepType::Agent),         // missing prompt_template
+        ];
+        let err = validate_required_fields_per_type(&chain).expect_err("must reject");
+        assert!(err.contains("notify_ops"), "first offender wins, got: {}", err);
+        assert!(!err.contains("plan"), "should not mention later offenders, got: {}", err);
     }
 }

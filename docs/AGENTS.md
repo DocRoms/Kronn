@@ -249,16 +249,42 @@ Projects display 3 badges next to the title: `[FileCode] Project docs`, `[Cpu] A
 
 `GET /api/projects/:id/workflow-suggestions` — matches installed MCPs against a hardcoded catalogue of 10 workflow templates. Returns suggestions with multi-step prompts, pre-filled triggers, and audience tags (dev/pm/ops). Suggestions use structured inter-step contracts for reliable data passing between collection and synthesis steps.
 
-### Structured inter-step contract
+### Structured inter-step contract (canonical Kronn envelope, 0.8.5+)
 
-Workflow steps can declare `output_format: Structured` (default: `FreeText`). When structured:
-1. Engine auto-injects `---STEP_OUTPUT---` envelope instructions into the prompt
-2. After execution, extracts JSON envelope `{"data": ..., "status": "OK|NO_RESULTS|ERROR", "summary": "..."}`
-3. If extraction fails, sends a repair prompt (truncated to 2000 chars) for reformatting
-4. Downstream steps access `{{previous_step.data}}`, `{{previous_step.summary}}`, `{{previous_step.status}}`
-5. `status: "NO_RESULTS"` is detected by the condition system (replaces `[SIGNAL: NO_RESULTS]` for structured steps)
+**Every envelope-producing step type emits the same byte-for-byte shape via `workflows/step_output_format.rs::format_step_output`:**
 
-A third variant, `StepOutputFormat::TypedSchema { schema }` (0.7.0 Phase 2, shipped in 0.6.0), runs the same envelope extraction but additionally validates `data` against a JSON Schema. Validation failures fall back to the structured-repair prompt with the schema diagnostic appended. See `backend/src/models/mod.rs::StepOutputFormat` and `backend/src/workflows/steps.rs` (extraction + validation hook).
+```
+[optional human-readable prefix line(s)]
+---STEP_OUTPUT---
+{"data": <any JSON>, "status": "OK|NO_RESULTS|ERROR|PARTIAL|PENDING|…", "summary": "<one line>"}
+---END_STEP_OUTPUT---
+[SIGNAL: <primary>]
+[SIGNAL: <optional secondary>]
+```
+
+| Step type | Emits canonical envelope | Primary signal |
+|---|---|---|
+| `ApiCall`, `BatchApiCall` | yes | `OK` / `NO_RESULTS` / `ERROR` (+ `http_<code>` on HTTP errors) |
+| `Exec` | yes | `OK` / `ERROR` + `exit_<code>` |
+| `JsonData` | yes | `OK` |
+| `Notify` | yes (0.8.5+) | `OK` / `ERROR` (0.8.5+, pre-fix none) |
+| `BatchQuickPrompt` | yes (0.8.5+) | `OK` / `PARTIAL` / `ERROR` / `PENDING` (0.8.5+, pre-fix none) |
+| `Agent` (Structured / TypedSchema) | yes — prompt template emits markers | whatever the prompt instructs |
+| `Agent` (FreeText) | **no** — raw text only, consumers read `.output` only | whatever the agent prints |
+| `Gate` | **no** — output is the rendered `gate_message`, has no semantic data | none — Gate is a pause, branch via `request_changes_target` |
+
+For Agent steps with `output_format: Structured` or `TypedSchema`, the engine auto-injects the envelope instructions into the prompt, and `extract_step_envelope` parses the result via marker-delimited strategy-1 (preferred) or last-bare-JSON-with-`data`+`status` strategy-2 (legacy back-compat for pre-0.8.5 run records). For all other step types, the runner writes the canonical envelope directly. `TypedSchema { schema, on_invalid: Continue|Fail }` adds JSON-Schema validation on top of the same envelope — failures fall back to a repair prompt with the schema diagnostic, then optionally fail the step.
+
+Downstream consumers read the same access patterns regardless of producer:
+- `{{steps.X.data}}` — JSON payload (compact for objects/arrays, string for scalars)
+- `{{steps.X.data.<path>}}` — nested traversal (dot-separated, numeric segments index arrays). Missing fields leave the placeholder literal AND `find_unresolved_critical_refs` fails the consuming step with an actionable error.
+- `{{steps.X.summary}}` / `{{steps.X.status}}` — the one-line summary / status string
+- `{{steps.X.data_json}}` — always-serialized JSON, useful for piping into a downstream HTTP body
+- `{{steps.X.output}}` — raw output (every step type, always available — fallback for Gate / FreeText consumers)
+
+Cross-step transmission is pinned by the comprehensive matrix in `backend/src/workflows/template.rs::cross_step_transmission` (17 tests) — any step type that regresses its emitted shape fails one localised test instead of silently breaking every consumer.
+
+See `backend/src/workflows/step_output_format.rs` (the single emitter), `backend/src/workflows/template.rs` (the extractor + ctx), and `backend/src/models/mod.rs::StepOutputFormat` for the Agent-side variants.
 
 ### Workflow Engine 0.7.x features (shipped in 0.6.0)
 

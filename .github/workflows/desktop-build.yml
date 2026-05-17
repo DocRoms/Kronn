@@ -144,21 +144,37 @@ jobs:
           # write the bundle under a different target prefix than we
           # expect (happened on macos-15 / x86_64-apple-darwin where the
           # bundle landed under `release/bundle` without the target prefix).
-          BUNDLE_DIR="desktop/src-tauri/target/${{ matrix.target }}/release/bundle"
-          if [ ! -d "$BUNDLE_DIR" ]; then
-            echo "Bundle dir not found at $BUNDLE_DIR — searching alternative paths:"
-            # Fall back to the unprefixed `target/release/bundle` layout
-            # that Tauri uses when `--target` is the host-default triple.
-            ALT_DIR="desktop/src-tauri/target/release/bundle"
-            if [ -d "$ALT_DIR" ]; then
-              echo "  found at $ALT_DIR — using it"
-              BUNDLE_DIR="$ALT_DIR"
-            else
-              echo "  no alternative bundle dir either; listing target tree for diagnostics:"
-              ls -la "desktop/src-tauri/target/" 2>/dev/null || echo "  (target/ missing entirely)"
-              echo "Skipping ad-hoc sign — no bundle to sign."
-              exit 0
+          # Bundle path resolution. Two roots possible:
+          #   - LEGACY (pre-2026-05-15): `desktop/src-tauri/target/...`
+          #   - SHARED  (since `.cargo/config.toml` set `target-dir = "target"`
+          #     at the repo root to mutualise tokio/serde/reqwest between
+          #     backend/ and desktop/src-tauri/ → ~40-50% local cache savings,
+          #     cf. [[feedback_rust_target_bloat]]): `target/...` (project root).
+          # Two triple suffixes possible: `<triple>/release/bundle` when
+          # cross-compiling, plain `release/bundle` when host==target.
+          # Check all 4 combinations, use the first that exists.
+          BUNDLE_CANDIDATES=(
+            "desktop/src-tauri/target/${{ matrix.target }}/release/bundle"
+            "desktop/src-tauri/target/release/bundle"
+            "target/${{ matrix.target }}/release/bundle"
+            "target/release/bundle"
+          )
+          BUNDLE_DIR=""
+          for c in "${BUNDLE_CANDIDATES[@]}"; do
+            if [ -d "$c" ]; then
+              echo "Bundle dir found at $c"
+              BUNDLE_DIR="$c"
+              break
             fi
+          done
+          if [ -z "$BUNDLE_DIR" ]; then
+            echo "No bundle dir found in any of:"
+            printf '  - %s\n' "${BUNDLE_CANDIDATES[@]}"
+            echo "Diagnostics:"
+            ls -la "target/" 2>/dev/null || echo "  (root target/ missing)"
+            ls -la "desktop/src-tauri/target/" 2>/dev/null || echo "  (desktop/src-tauri/target/ missing)"
+            echo "Skipping ad-hoc sign — no bundle to sign."
+            exit 0
           fi
           APP_PATH=$(find "$BUNDLE_DIR" -maxdepth 3 -name "*.app" 2>/dev/null | head -1)
           if [ -n "$APP_PATH" ] && [ -z "$_APPLE_CERTIFICATE" ]; then
@@ -173,6 +189,14 @@ jobs:
 
       # ─── Upload artifacts ─────────────────────────────────────────
 
+      # Path resolution note (2026-05-18 fix): since `.cargo/config.toml`
+      # sets `target-dir = "target"` at the repo root, builds now land in
+      # `/target/...` instead of `/desktop/src-tauri/target/...`. The
+      # globs below carry BOTH roots so the workflow works whether the
+      # build was emitted under the legacy or shared target dir.
+      # `upload-artifact` silently skips missing paths so listing both
+      # is safe. Cf. [[feedback_rust_target_bloat]].
+
       - name: Upload Windows artifacts
         if: matrix.os == 'windows-latest'
         uses: actions/upload-artifact@v4
@@ -181,21 +205,23 @@ jobs:
           path: |
             desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
             desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+            target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
 
       - name: Upload macOS artifacts
         if: startsWith(matrix.os, 'macos')
         uses: actions/upload-artifact@v4
         with:
           name: kronn-${{ matrix.label }}
-          # Two candidate paths: tauri-bundler usually writes under the
-          # target-prefixed dir, but on macos-15 / x86_64-apple-darwin
-          # (cross-compile on arm64 host) it was observed writing to the
-          # unprefixed `target/release/bundle/dmg`. Globbing both — only
-          # the one that exists will produce files; the other is silently
-          # skipped by upload-artifact.
+          # Four candidate paths: legacy vs shared target root × prefixed
+          # triple vs unprefixed (Tauri uses the unprefixed `release/bundle`
+          # when --target is the host-default triple, e.g. macos-15 /
+          # x86_64-apple-darwin cross-compile on arm64 host).
           path: |
             desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
             desktop/src-tauri/target/release/bundle/dmg/*.dmg
+            target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            target/release/bundle/dmg/*.dmg
           if-no-files-found: error
 
       - name: Upload Linux artifacts
@@ -206,6 +232,8 @@ jobs:
           path: |
             desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb
             desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
+            target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb
+            target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
 
   # ─── Create GitHub Release on tag ─────────────────────────────────
 

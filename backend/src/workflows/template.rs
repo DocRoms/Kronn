@@ -1850,4 +1850,538 @@ mod tests {
         let rendered = ctx.render("{{state.last_verdict}}").unwrap();
         assert_eq!(rendered, "approved");
     }
+
+    // ════════════════════════════════════════════════════════════════════
+    // 0.8.5 — Cross-step output transmission matrix
+    //
+    // CRITICAL plumbing layer. Every step type publishes its output as a
+    // string to `set_step_output(name, output)`. Downstream steps read
+    // it via templates like `{{steps.X.data}}`, `{{steps.X.summary}}`,
+    // `{{steps.X.status}}`, `{{steps.X.data.<nested>}}`. The pin below
+    // captures, for EACH step type, a representative output sample
+    // (mirroring exactly what each step implementation emits today) and
+    // verifies the envelope extraction + the four canonical access
+    // patterns. Any regression in a step's output shape — or in the
+    // envelope extractor — fails one localised test instead of
+    // silently breaking every workflow that consumes it.
+    //
+    // Source-of-truth samples (kept verbatim with the producing impl):
+    //   - JsonData        → `json_data_step.rs::execute_json_data_step`
+    //   - ApiCall         → `api_call_executor.rs::execute_api_call_step_core`
+    //   - Notify          → `notify_step.rs::execute_notify_step`
+    //   - Exec            → `exec_step.rs::execute_exec_step`
+    //   - Agent (Struct.) → runner.rs emits `---STEP_OUTPUT---` envelope
+    //   - Agent (FreeText)→ raw text, no envelope (consumers can only
+    //                       read `.output`)
+    //   - Gate            → raw rendered gate_message, no envelope
+    //   - BatchApiCall    → `build_structured_output` (strategy-2 JSON)
+    //   - BatchQuickPrompt→ `build_structured_output` (strategy-2 JSON)
+    //
+    // If you add a new step type, add a sample + assertion block below.
+    // ════════════════════════════════════════════════════════════════════
+    mod cross_step_transmission {
+        use super::*;
+
+        // ── JsonData ────────────────────────────────────────────────────
+        fn sample_json_data_output() -> String {
+            // 0.8.5 — JsonData now emits the canonical Kronn envelope
+            // (markers + signal) via `format_step_output_simple`. The
+            // legacy bare-JSON shape is covered by the dedicated
+            // backward-compat test further down.
+            crate::workflows::step_output_format::format_step_output_simple(
+                serde_json::json!({ "key": "DEMO-1", "body": "Refactor login button" }),
+                "OK",
+                "JSON data (1 object, 2 field(s))",
+            )
+        }
+
+        #[test]
+        fn json_data_exposes_data_summary_status_and_nested_fields() {
+            let mut ctx = TemplateContext::new();
+            ctx.set_step_output("fetch", &sample_json_data_output());
+
+            // Top-level envelope fields land in ctx.
+            assert_eq!(
+                ctx.render("{{steps.fetch.status}}").unwrap(),
+                "OK",
+            );
+            assert_eq!(
+                ctx.render("{{steps.fetch.summary}}").unwrap(),
+                "JSON data (1 object, 2 field(s))",
+            );
+            // `data` (object) renders as compact JSON via stringify path.
+            assert!(ctx.render("{{steps.fetch.data}}").unwrap().contains("DEMO-1"));
+            // Nested traversal works (resolve_nested_path via data_json).
+            assert_eq!(
+                ctx.render("{{steps.fetch.data.key}}").unwrap(),
+                "DEMO-1",
+            );
+            assert_eq!(
+                ctx.render("{{steps.fetch.data.body}}").unwrap(),
+                "Refactor login button",
+            );
+            // `previous_step.*` aliases mirror the named ones.
+            assert_eq!(
+                ctx.render("{{previous_step.status}}").unwrap(),
+                "OK",
+            );
+        }
+
+        // ── ApiCall (Jira-shaped data) ──────────────────────────────────
+        fn sample_apicall_jira_output() -> String {
+            // 0.8.5 — ApiCall now goes through `format_step_output` like
+            // every other step type. The Jira-shaped data inside is the
+            // realistic AutoCode `fetch_issue` payload — what consumers
+            // see when navigating `{{steps.fetch_issue.data.<path>}}`.
+            crate::workflows::step_output_format::format_step_output(
+                serde_json::json!({
+                    "key": "EW-7247",
+                    "fields": {
+                        "summary": "Africanews → Euronews migration",
+                        "description": { "content": [], "type": "doc" },
+                    },
+                    "renderedFields": {
+                        "description": "<p>Port Africanews onto Euronews…</p>",
+                    },
+                }),
+                "OK",
+                "GET /rest/api/3/issue/EW-7247 → 1 item",
+                None,
+                &["OK"],
+            )
+        }
+
+        #[test]
+        fn apicall_exposes_nested_path_into_real_jira_payload() {
+            let mut ctx = TemplateContext::new();
+            ctx.set_step_output("fetch_issue", &sample_apicall_jira_output());
+
+            // The fix that unblocked AutoCode EW-7247 pinned: data.key reachable.
+            assert_eq!(
+                ctx.render("{{steps.fetch_issue.data.key}}").unwrap(),
+                "EW-7247",
+            );
+            // Deep nested traversal — `data.fields.summary`.
+            assert_eq!(
+                ctx.render("{{steps.fetch_issue.data.fields.summary}}").unwrap(),
+                "Africanews → Euronews migration",
+            );
+            // `data.renderedFields.description` (Jira HTML body).
+            assert_eq!(
+                ctx.render("{{steps.fetch_issue.data.renderedFields.description}}").unwrap(),
+                "<p>Port Africanews onto Euronews…</p>",
+            );
+            // Bare `.data` returns compact JSON (downstream agent can navigate).
+            let bare = ctx.render("{{steps.fetch_issue.data}}").unwrap();
+            assert!(bare.contains("EW-7247"));
+            assert!(bare.contains("Africanews"));
+        }
+
+        // ── Notify ──────────────────────────────────────────────────────
+        fn sample_notify_output() -> String {
+            // 0.8.5 — Notify now emits the canonical envelope + signal.
+            crate::workflows::step_output_format::format_step_output(
+                serde_json::json!({
+                    "http_status": 200,
+                    "response_excerpt": "{\"ok\": true}",
+                    "url": "https://hooks.example/abc",
+                    "method": "POST",
+                }),
+                "OK",
+                "POST https://hooks.example/abc → 200",
+                None,
+                &["OK"],
+            )
+        }
+
+        #[test]
+        fn notify_exposes_http_metadata_to_downstream_steps() {
+            let mut ctx = TemplateContext::new();
+            ctx.set_step_output("alert", &sample_notify_output());
+            assert_eq!(
+                ctx.render("{{steps.alert.status}}").unwrap(),
+                "OK",
+            );
+            assert_eq!(
+                ctx.render("{{steps.alert.data.http_status}}").unwrap(),
+                "200",
+            );
+            assert_eq!(
+                ctx.render("{{steps.alert.data.url}}").unwrap(),
+                "https://hooks.example/abc",
+            );
+        }
+
+        // ── Exec ────────────────────────────────────────────────────────
+        fn sample_exec_output(exit_code: i32, stdout: &str) -> String {
+            // Mirrors exec_step.rs:324-334 — Strategy-1 (`---STEP_OUTPUT---`)
+            // wrapped JSON envelope, plus trailing `[SIGNAL: …]` lines.
+            let env = serde_json::json!({
+                "data": {
+                    "exit_code": exit_code,
+                    "stdout_excerpt": stdout,
+                    "stderr_excerpt": "",
+                    "killed": false,
+                },
+                "status": if exit_code == 0 { "OK" } else { "ERROR" },
+                "summary": format!("exec exit {}", exit_code),
+            });
+            let signal_generic = if exit_code == 0 { "[SIGNAL: OK]" } else { "[SIGNAL: ERROR]" };
+            format!(
+                "summary line\n\n---STEP_OUTPUT---\n{}\n---END_STEP_OUTPUT---\n{}\n[SIGNAL: exit_{}]",
+                env, signal_generic, exit_code,
+            )
+        }
+
+        #[test]
+        fn exec_exposes_exit_code_and_stdout_excerpt() {
+            let mut ctx = TemplateContext::new();
+            ctx.set_step_output("tests", &sample_exec_output(0, "test passed"));
+            assert_eq!(
+                ctx.render("{{steps.tests.status}}").unwrap(),
+                "OK",
+            );
+            assert_eq!(
+                ctx.render("{{steps.tests.data.exit_code}}").unwrap(),
+                "0",
+            );
+            assert_eq!(
+                ctx.render("{{steps.tests.data.stdout_excerpt}}").unwrap(),
+                "test passed",
+            );
+        }
+
+        #[test]
+        fn exec_failure_envelope_still_extracts_data() {
+            // Regression: even on Failed status, set_step_output must
+            // populate ctx so downstream conditional steps can branch.
+            let mut ctx = TemplateContext::new();
+            ctx.set_step_output("tests", &sample_exec_output(2, "compile error"));
+            assert_eq!(
+                ctx.render("{{steps.tests.status}}").unwrap(),
+                "ERROR",
+            );
+            assert_eq!(
+                ctx.render("{{steps.tests.data.exit_code}}").unwrap(),
+                "2",
+            );
+        }
+
+        // ── Agent (Structured) ──────────────────────────────────────────
+        fn sample_agent_structured_output(data: serde_json::Value, summary: &str) -> String {
+            // Mirrors what the runner expects an Agent in `output_format:
+            // Structured` to emit — a `---STEP_OUTPUT---` block at the
+            // end of the response. Strategy-1 parseable.
+            format!(
+                "Here is my analysis.\n\n---STEP_OUTPUT---\n{}\n---END_STEP_OUTPUT---",
+                serde_json::json!({ "data": data, "status": "OK", "summary": summary }),
+            )
+        }
+
+        #[test]
+        fn agent_structured_exposes_typed_manifest_fields() {
+            // The AutoCode triage step emits a typed manifest. Pin the
+            // contract that `implement` can read each branch array.
+            let manifest = serde_json::json!({
+                "clear": ["sub-1", "sub-2"],
+                "decided": [{ "id": "d1", "chosen": "A" }],
+                "mocked": [],
+                "blocked": [{ "id": "b1", "needed_from": "PM" }],
+                "files_touched": ["src/foo.rs", "src/bar.rs"],
+            });
+            let mut ctx = TemplateContext::new();
+            ctx.set_step_output(
+                "triage",
+                &sample_agent_structured_output(manifest, "5 entries triaged"),
+            );
+
+            // Nested arrays render as pretty JSON (operator-friendly).
+            let clear = ctx.render("{{steps.triage.data.clear}}").unwrap();
+            assert!(clear.contains("sub-1"));
+            assert!(clear.contains("sub-2"));
+            // Nested object inside an array.
+            let decided = ctx.render("{{steps.triage.data.decided}}").unwrap();
+            assert!(decided.contains("\"id\": \"d1\""));
+            // `summary` and `status` reachable in the same envelope.
+            assert_eq!(
+                ctx.render("{{steps.triage.summary}}").unwrap(),
+                "5 entries triaged",
+            );
+            assert_eq!(
+                ctx.render("{{steps.triage.status}}").unwrap(),
+                "OK",
+            );
+            // Empty array still renders.
+            assert_eq!(
+                ctx.render("{{steps.triage.data.mocked}}").unwrap(),
+                "[]",
+            );
+        }
+
+        // ── Agent (FreeText) ────────────────────────────────────────────
+        // FreeText output has NO envelope. Downstream consumers can only
+        // read `{{steps.X.output}}` — `.data` / `.summary` / `.status`
+        // remain unresolved (intentional: validate_step_references catches
+        // mismatches at save time, find_unresolved_critical_refs at run
+        // time).
+        #[test]
+        fn agent_freetext_exposes_only_output_no_data_envelope() {
+            let mut ctx = TemplateContext::new();
+            ctx.set_step_output("brainstorm", "Three ideas:\n- A\n- B\n- C");
+
+            // `.output` works.
+            let raw = ctx.render("{{steps.brainstorm.output}}").unwrap();
+            assert!(raw.contains("Three ideas"));
+            // `.data` does NOT resolve → placeholder kept literal.
+            assert_eq!(
+                ctx.render("{{steps.brainstorm.data}}").unwrap(),
+                "{{steps.brainstorm.data}}",
+            );
+        }
+
+        // ── Gate ────────────────────────────────────────────────────────
+        // Gate steps emit only the rendered `gate_message` as `output` —
+        // no envelope. Downstream steps that need a structured "decision"
+        // should read from a sibling Agent step, not from Gate.
+        #[test]
+        fn gate_exposes_only_output_no_envelope() {
+            let mut ctx = TemplateContext::new();
+            let gate_msg = "Review the triage manifest:\n\nApprove / Reject?";
+            ctx.set_step_output("review_triage", gate_msg);
+
+            assert_eq!(
+                ctx.render("{{steps.review_triage.output}}").unwrap(),
+                gate_msg,
+            );
+            // `.data` stays unresolved — by design.
+            assert_eq!(
+                ctx.render("{{steps.review_triage.data}}").unwrap(),
+                "{{steps.review_triage.data}}",
+            );
+        }
+
+        // ── BatchApiCall + BatchQuickPrompt ─────────────────────────────
+        fn sample_batch_output() -> String {
+            // 0.8.5 — batch fan-outs now emit the canonical envelope
+            // with the status name doubling as the SIGNAL value so
+            // `on_result.contains` rules can branch on PARTIAL / ERROR.
+            crate::workflows::step_output_format::format_step_output(
+                serde_json::json!({
+                    "batch_run_id": "br-1",
+                    "total": 3,
+                    "completed": 3,
+                    "failed": 0,
+                    "discussion_ids": ["d1", "d2", "d3"],
+                }),
+                "OK",
+                "Batch 3/3 completed",
+                None,
+                &["OK"],
+            )
+        }
+
+        #[test]
+        fn batch_exposes_counters_and_discussion_ids() {
+            let mut ctx = TemplateContext::new();
+            ctx.set_step_output("triage_batch", &sample_batch_output());
+
+            assert_eq!(
+                ctx.render("{{steps.triage_batch.status}}").unwrap(),
+                "OK",
+            );
+            assert_eq!(
+                ctx.render("{{steps.triage_batch.data.completed}}").unwrap(),
+                "3",
+            );
+            assert_eq!(
+                ctx.render("{{steps.triage_batch.data.failed}}").unwrap(),
+                "0",
+            );
+            // Nested array index access.
+            assert_eq!(
+                ctx.render("{{steps.triage_batch.data.discussion_ids.0}}").unwrap(),
+                "d1",
+            );
+        }
+
+        // ── Chained source → consumer pairs ─────────────────────────────
+        //
+        // The matrix above pins each source in isolation. These tests
+        // pin canonical SOURCE → CONSUMER pairs in the order they're
+        // composed in real workflows — guards against a regression that
+        // breaks the "obvious" wiring (ApiCall→Agent, JsonData→Batch, …)
+        // even when individual envelope extractions still pass.
+
+        #[test]
+        fn pair_jsondata_to_agent_data_passes_through() {
+            // JsonData fixture → Agent reads `{{steps.fetch.data.body}}`.
+            // This is the contract of the feasibility-autopilot preset
+            // in its original (JsonData) form.
+            let mut ctx = TemplateContext::new();
+            ctx.set_step_output("fetch", &sample_json_data_output());
+            let agent_prompt = "Triage this: {{steps.fetch.data.body}}";
+            let rendered = ctx.render(agent_prompt).unwrap();
+            assert_eq!(rendered, "Triage this: Refactor login button");
+        }
+
+        #[test]
+        fn pair_apicall_to_agent_full_data_passes_through() {
+            // ApiCall (Jira) → Agent reads `{{steps.fetch_issue.data}}` —
+            // the AutoCode EW-7247 path after the 0.8.5 prompt fix.
+            let mut ctx = TemplateContext::new();
+            ctx.set_step_output("fetch_issue", &sample_apicall_jira_output());
+            let agent_prompt = "Triage: {{steps.fetch_issue.data}}";
+            let rendered = ctx.render(agent_prompt).unwrap();
+            assert!(rendered.contains("EW-7247"));
+            assert!(rendered.contains("Africanews"));
+        }
+
+        #[test]
+        fn pair_agent_to_exec_signal_only() {
+            // Agent emits the typed manifest; downstream Exec doesn't
+            // read structured data (Exec is a shell command) but its
+            // `command_template` may reference `{{steps.triage.summary}}`
+            // for logging / branching.
+            let mut ctx = TemplateContext::new();
+            ctx.set_step_output(
+                "triage",
+                &sample_agent_structured_output(
+                    serde_json::json!({ "files_touched": ["src/x.rs"] }),
+                    "1 file",
+                ),
+            );
+            let exec_log_template = "echo 'triage said: {{steps.triage.summary}}'";
+            assert_eq!(
+                ctx.render(exec_log_template).unwrap(),
+                "echo 'triage said: 1 file'",
+            );
+        }
+
+        #[test]
+        fn pair_exec_to_agent_exit_code_branching() {
+            // Real-world: run_tests Exec → pr_draft Agent reads exit code
+            // to decide tone of PR description. Pin that exit_code is
+            // reachable as a string.
+            let mut ctx = TemplateContext::new();
+            ctx.set_step_output("run_tests", &sample_exec_output(0, "ok"));
+            let pr_template =
+                "Tests: {{steps.run_tests.status}} (exit {{steps.run_tests.data.exit_code}})";
+            assert_eq!(
+                ctx.render(pr_template).unwrap(),
+                "Tests: OK (exit 0)",
+            );
+        }
+
+        #[test]
+        fn pair_apicall_to_notify_propagates_payload() {
+            // ApiCall (fetch tickets) → Notify (Slack-style webhook) uses
+            // `{{steps.fetch.data}}` as the JSON body. The data string is
+            // available verbatim for inline substitution.
+            let mut ctx = TemplateContext::new();
+            ctx.set_step_output("fetch", &sample_apicall_jira_output());
+            let notify_body = "{{steps.fetch.summary}} — see {{steps.fetch.data.key}}";
+            assert_eq!(
+                ctx.render(notify_body).unwrap(),
+                "GET /rest/api/3/issue/EW-7247 → 1 item — see EW-7247",
+            );
+        }
+
+        #[test]
+        fn pair_gate_to_following_step_only_output_visible() {
+            // Gate's output is the gate_message verbatim. A step right
+            // after a Gate (e.g. an Agent that reads "what did the gate
+            // say?") can only consume `.output`, not `.data`. This
+            // failure mode is silent (placeholder stays literal) — the
+            // save-time `validate_step_references` is what catches the
+            // mistake in the wizard.
+            let mut ctx = TemplateContext::new();
+            ctx.set_step_output("review", "Approve / Reject?");
+            assert_eq!(
+                ctx.render("{{steps.review.output}}").unwrap(),
+                "Approve / Reject?",
+            );
+            assert_eq!(
+                ctx.render("{{steps.review.data}}").unwrap(),
+                "{{steps.review.data}}",
+            );
+        }
+
+        #[test]
+        fn pair_batch_to_agent_aggregate_handover() {
+            // BatchQuickPrompt / BatchApiCall → Agent summarisation step
+            // reads the per-discussion ids + completion counters.
+            let mut ctx = TemplateContext::new();
+            ctx.set_step_output("fan_out", &sample_batch_output());
+            let summary_prompt =
+                "Out of {{steps.fan_out.data.total}}, {{steps.fan_out.data.completed}} succeeded.";
+            assert_eq!(
+                ctx.render(summary_prompt).unwrap(),
+                "Out of 3, 3 succeeded.",
+            );
+        }
+
+        // ── Backwards-compat: extractor still reads pre-0.8.5 bare JSON ─
+        //
+        // Runs persisted in DB before the canonical-envelope refactor
+        // hold the OLD shape (bare `{data,status,summary}` JSON + an
+        // optional trailing `[SIGNAL: ...]`). The extractor must keep
+        // parsing those so legacy run logs render correctly in the UI
+        // and old discussion threads still resolve `{{steps.X.data}}`.
+        // Loss of this fallback would be a silent data-loss regression
+        // on existing customer DBs.
+        #[test]
+        fn legacy_bare_json_envelope_still_extracts_correctly() {
+            let legacy = "{\"data\":{\"key\":\"EW-1\",\"body\":\"hi\"},\"status\":\"OK\",\"summary\":\"legacy run\"}\n[SIGNAL: OK]";
+            let mut ctx = TemplateContext::new();
+            ctx.set_step_output("legacy", legacy);
+            assert_eq!(ctx.render("{{steps.legacy.status}}").unwrap(), "OK");
+            assert_eq!(ctx.render("{{steps.legacy.summary}}").unwrap(), "legacy run");
+            assert_eq!(ctx.render("{{steps.legacy.data.key}}").unwrap(), "EW-1");
+            assert_eq!(ctx.render("{{steps.legacy.data.body}}").unwrap(), "hi");
+        }
+
+        // ── Catch-all: every structured step type populates the four
+        //    canonical keys (.output, .data, .summary, .status). Failure
+        //    here means a step's output_format isn't strategy-1/2
+        //    parseable — the single most damaging regression class
+        //    because it silently breaks every downstream `{{steps.X.…}}`.
+        #[test]
+        fn canonical_keys_present_for_every_envelope_producing_step_type() {
+            // Each tuple = (kind label, sample output string emitter).
+            let cases: Vec<(&str, String)> = vec![
+                ("JsonData", sample_json_data_output()),
+                ("ApiCall", sample_apicall_jira_output()),
+                ("Notify", sample_notify_output()),
+                ("Exec(success)", sample_exec_output(0, "ok")),
+                ("Exec(failure)", sample_exec_output(1, "bad")),
+                (
+                    "Agent(Structured)",
+                    sample_agent_structured_output(
+                        serde_json::json!({ "x": 1 }),
+                        "agent summary",
+                    ),
+                ),
+                ("BatchApiCall/BatchQuickPrompt", sample_batch_output()),
+            ];
+
+            for (label, output) in cases {
+                let mut ctx = TemplateContext::new();
+                ctx.set_step_output("src", &output);
+
+                // All four canonical keys must resolve to non-placeholder.
+                for field in ["output", "data", "summary", "status"] {
+                    let placeholder = format!("{{{{steps.src.{}}}}}", field);
+                    let rendered = ctx.render(&placeholder).unwrap();
+                    assert_ne!(
+                        rendered, placeholder,
+                        "{label}: `{field}` did not resolve (envelope extraction broken)",
+                    );
+                    assert!(
+                        !rendered.is_empty(),
+                        "{label}: `{field}` resolved to empty (envelope shape regressed)",
+                    );
+                }
+            }
+        }
+    }
 }

@@ -215,25 +215,26 @@ pub async fn execute_batch_apicall_step(
         else if succeeded == 0 { "ERROR" }
         else { "PARTIAL" };
     let summary = format!("BatchApiCall: {succeeded}/{total} succeeded ({failed} failed)");
-    let envelope = serde_json::json!({
-        "data": {
+    // 0.8.5 — canonical envelope via shared formatter (markers + signal).
+    // Signal name matches `aggregate_status` so `on_result.contains`
+    // rules can branch via "OK" / "PARTIAL" / "ERROR" without parsing
+    // the JSON. Cf. [[project_step_output_homogenisation_0_9_0]].
+    let signal = match aggregate_status {
+        "OK" => "OK",
+        "PARTIAL" => "PARTIAL",
+        _ => "ERROR",
+    };
+    let output = super::step_output_format::format_step_output(
+        serde_json::json!({
             "items": items_json,
             "total": total,
             "succeeded": succeeded,
             "failed": failed,
-        },
-        "status": aggregate_status,
-        "summary": summary,
-    });
-    let signal = match aggregate_status {
-        "OK" => "[SIGNAL: OK]",
-        "PARTIAL" => "[SIGNAL: PARTIAL]",
-        _ => "[SIGNAL: ERROR]",
-    };
-    let output = format!(
-        "{}\n{}",
-        serde_json::to_string(&envelope).unwrap_or_default(),
-        signal,
+        }),
+        aggregate_status,
+        &summary,
+        None,
+        &[signal],
     );
 
     let condition_action = super::steps::evaluate_conditions(&step.on_result, &output);
