@@ -1,0 +1,1848 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Kronn · Many agents. Zero chaos.</title>
+  <meta name="description" content="El control plane local-first para tus CLI de IA. Tú aportas Claude Code, Codex, Gemini, Ollama. Kronn aporta la memoria, la orquestación y la continuidad.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Russo+One&family=VT323&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #140822;
+      --bg-deep: #07031a;
+      --bg-card: #1f1140;
+      --bg-card-hi: #2b1958;
+      --text: #f5edf2;
+      --text-dim: #a08fb8;
+      --magenta: #ff1ba8;
+      --magenta-dim: #c81472;
+      --magenta-bright: #ff5bbc;
+      --lila: #c8a0ff;
+      --lila-dim: #9a6dd9;
+      --electric: #8b5cf6;
+      --electric-bright: #b692ff;
+      --silver: #d8d0e8;
+      --kronn: #c8ff00;
+      --display: 'Russo One', sans-serif;
+      --body: 'Inter', sans-serif;
+      --pixel: 'Press Start 2P', monospace;
+      --terminal: 'VT323', monospace;
+    }
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--body);
+      font-size: 16px;
+      line-height: 1.55;
+      -webkit-font-smoothing: antialiased;
+      overflow-x: hidden;
+      position: relative;
+    }
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background:
+        radial-gradient(ellipse at bottom, rgba(255, 27, 168, 0.12) 0%, transparent 50%),
+        radial-gradient(ellipse at top right, rgba(139, 92, 246, 0.10) 0%, transparent 50%);
+      pointer-events: none;
+      z-index: 1;
+    }
+    body::after {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background: repeating-linear-gradient(
+        0deg,
+        transparent 0,
+        transparent 2px,
+        rgba(0, 0, 0, 0.22) 2px,
+        rgba(0, 0, 0, 0.22) 4px
+      );
+      pointer-events: none;
+      z-index: 200;
+      mix-blend-mode: multiply;
+    }
+
+    .container { max-width: 1180px; margin: 0 auto; padding: 0 40px; position: relative; z-index: 2; }
+
+    code {
+      font-family: var(--pixel);
+      font-size: 0.78em;
+      color: var(--kronn);
+      letter-spacing: 0.05em;
+      padding: 1px 4px;
+      background: transparent;
+    }
+
+    /* Header */
+    header {
+      padding: 58px 0 24px;
+      border-bottom: 1px solid rgba(255, 27, 168, 0.3);
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 24px;
+      flex-wrap: wrap;
+      font-family: var(--terminal);
+      font-size: 18px;
+      letter-spacing: 0.08em;
+      color: var(--text-dim);
+    }
+    header .left { color: var(--lila); }
+    header .center {
+      font-family: var(--display);
+      font-size: clamp(22px, 3vw, 30px);
+      color: var(--text);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    header .center .ac { color: var(--magenta); }
+    header .right { color: var(--electric-bright); }
+    header .lang-switcher { font-family: var(--terminal); font-size: 18px; letter-spacing: 0.1em; }
+    header .lang-switcher a { color: var(--text-dim); text-decoration: none; padding: 0 2px; }
+    header .lang-switcher a:hover { color: var(--lila); }
+    header .lang-switcher .lang-active { color: var(--kronn); text-shadow: 0 0 4px rgba(200, 255, 0, 0.4); }
+
+    /* HERO */
+    .hero {
+      padding: 90px 0 80px;
+      text-align: center;
+      position: relative;
+    }
+    .insert-coin {
+      font-family: var(--pixel);
+      font-size: 10px;
+      color: var(--kronn);
+      letter-spacing: 0.18em;
+      margin-bottom: 40px;
+      animation: blink-coin 1.5s infinite;
+      text-shadow: 0 0 10px rgba(200, 255, 0, 0.55), 0 0 24px rgba(200, 255, 0, 0.25);
+    }
+    @keyframes blink-coin {
+      0%, 70% { opacity: 1; }
+      71%, 100% { opacity: 0.55; }
+    }
+    .slogan {
+      font-family: var(--display);
+      font-size: clamp(56px, 10vw, 144px);
+      line-height: 1;
+      letter-spacing: 0.01em;
+      text-transform: uppercase;
+      margin-bottom: 24px;
+    }
+    .slogan .pk {
+      color: var(--magenta);
+      text-shadow: 0 0 10px rgba(255, 27, 168, 0.65), 0 0 28px rgba(255, 91, 188, 0.35);
+    }
+    .slogan .li {
+      color: var(--lila);
+      text-shadow: 0 0 10px rgba(200, 160, 255, 0.65), 0 0 28px rgba(154, 109, 217, 0.35);
+    }
+    .baseline {
+      font-family: var(--terminal);
+      font-size: clamp(22px, 2.5vw, 28px);
+      color: var(--text-dim);
+      letter-spacing: 0.08em;
+      margin-bottom: 36px;
+    }
+    .baseline::before { content: '> '; color: var(--electric); }
+    .baseline::after { content: '_'; color: var(--electric); animation: blink-cursor 1s steps(2) infinite; }
+    @keyframes blink-cursor { 50% { opacity: 0; } }
+
+    .sub-pitch {
+      max-width: 700px;
+      margin: 0 auto;
+      font-family: var(--body);
+      font-size: 17px;
+      line-height: 1.55;
+      color: var(--text);
+      margin-bottom: 48px;
+    }
+    .sub-pitch strong { color: var(--lila); font-weight: 600; }
+    .sub-pitch em { color: var(--magenta); font-style: normal; font-weight: 500; }
+
+    .ctas {
+      display: flex;
+      gap: 16px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+    .ea-disclaimer {
+      margin-top: 22px;
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.06em;
+      color: var(--text-dim);
+      text-align: center;
+    }
+    .ea-disclaimer .ea-tag {
+      color: var(--magenta);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.15em;
+      padding: 2px 8px;
+      border: 1px solid var(--magenta);
+      border-radius: 0;
+    }
+    .btn {
+      font-family: var(--pixel);
+      font-size: 10px;
+      letter-spacing: 0.15em;
+      padding: 18px 26px;
+      background: var(--bg-deep);
+      color: var(--lila);
+      text-decoration: none;
+      transition: all 0.18s;
+      border: 2px solid var(--lila);
+      text-transform: uppercase;
+      box-shadow: 0 0 16px rgba(200, 160, 255, 0.25);
+    }
+    .btn:hover {
+      background: var(--lila);
+      color: var(--bg-deep);
+      box-shadow: 0 0 24px rgba(200, 160, 255, 0.5);
+    }
+    .btn-pink { color: var(--magenta); border-color: var(--magenta); box-shadow: 0 0 16px rgba(255, 27, 168, 0.3); }
+    .btn-pink:hover { background: var(--magenta); color: var(--bg-deep); box-shadow: 0 0 24px rgba(255, 27, 168, 0.55); }
+    .btn-electric { color: var(--electric-bright); border-color: var(--electric); box-shadow: 0 0 16px rgba(139, 92, 246, 0.3); }
+    .btn-electric:hover { background: var(--electric); color: var(--bg-deep); box-shadow: 0 0 24px rgba(139, 92, 246, 0.55); }
+
+    /* SECTIONS */
+    .section { padding: 80px 0; border-top: 1px solid rgba(200, 160, 255, 0.2); position: relative; }
+    .level-tag {
+      font-family: var(--pixel);
+      font-size: 10px;
+      letter-spacing: 0.2em;
+      color: var(--electric-bright);
+      margin-bottom: 22px;
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      text-shadow: 0 0 6px rgba(139, 92, 246, 0.5);
+      text-decoration: none;
+      cursor: pointer;
+      transition: color 0.18s, text-shadow 0.18s;
+    }
+    .level-tag::before {
+      content: '◆';
+      color: var(--kronn);
+      text-shadow: 0 0 8px rgba(200, 255, 0, 0.5);
+      transition: transform 0.2s;
+    }
+    .level-tag:hover {
+      color: var(--kronn);
+      text-shadow: 0 0 10px rgba(200, 255, 0, 0.55);
+    }
+    .level-tag:hover::before { transform: rotate(45deg); }
+    .level-tag::after {
+      content: '#';
+      color: var(--text-dim);
+      margin-left: 4px;
+      font-size: 12px;
+      opacity: 0;
+      transition: opacity 0.2s;
+    }
+    .level-tag:hover::after { opacity: 0.7; color: var(--kronn); }
+
+    /* Section anchored (clicked from level-tag) — glow burst */
+    .section:target .level-tag {
+      color: var(--kronn);
+      text-shadow: 0 0 12px rgba(200, 255, 0, 0.7), 0 0 28px rgba(200, 255, 0, 0.3);
+      animation: target-pulse 1.2s ease-out;
+    }
+    @keyframes target-pulse {
+      0% { transform: scale(1); }
+      30% { transform: scale(1.04); }
+      100% { transform: scale(1); }
+    }
+    .section-title {
+      font-family: var(--display);
+      font-size: clamp(36px, 5vw, 60px);
+      text-transform: uppercase;
+      line-height: 1.05;
+      letter-spacing: 0.01em;
+      margin-bottom: 28px;
+      color: var(--text);
+    }
+    .section-title .pk { color: var(--magenta); text-shadow: 0 0 8px rgba(255, 27, 168, 0.5); }
+    .section-title .li { color: var(--lila); text-shadow: 0 0 8px rgba(200, 160, 255, 0.5); }
+    .section-intro {
+      font-size: 17px;
+      line-height: 1.55;
+      max-width: 720px;
+      color: var(--text);
+      margin-bottom: 36px;
+    }
+    .section-intro strong { color: var(--lila); font-weight: 500; }
+
+    /* SCHEMA */
+    .schema {
+      margin-top: 24px;
+      padding: 36px 28px;
+      border: 2px solid var(--lila);
+      background: var(--bg-card);
+      box-shadow: 0 0 24px rgba(200, 160, 255, 0.18), inset 0 0 32px rgba(200, 160, 255, 0.06);
+      position: relative;
+    }
+    .schema-label {
+      position: absolute;
+      top: -10px;
+      left: 18px;
+      background: var(--bg);
+      font-family: var(--pixel);
+      font-size: 9px;
+      letter-spacing: 0.18em;
+      color: var(--lila);
+      padding: 0 10px;
+      text-shadow: 0 0 6px rgba(200, 160, 255, 0.55);
+    }
+    .cli-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+    .cli-cell {
+      border: 1.5px solid var(--magenta);
+      padding: 14px 10px;
+      text-align: center;
+      background: var(--bg-card-hi);
+      font-family: var(--display);
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--magenta-bright);
+      text-shadow: 0 0 6px rgba(255, 91, 188, 0.4);
+    }
+    .arrow-down {
+      text-align: center;
+      font-family: var(--terminal);
+      font-size: 30px;
+      color: var(--electric);
+      margin: 8px 0;
+      text-shadow: 0 0 6px rgba(139, 92, 246, 0.5);
+    }
+    .center-blob {
+      max-width: 340px;
+      margin: 0 auto;
+      background: var(--bg-deep);
+      border: 2.5px solid var(--magenta);
+      padding: 22px 28px;
+      text-align: center;
+      box-shadow: 0 0 28px rgba(255, 27, 168, 0.45), inset 0 0 32px rgba(255, 27, 168, 0.08);
+    }
+    .center-blob .name {
+      font-family: var(--display);
+      font-size: 32px;
+      color: var(--text);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      text-shadow: 0 0 10px rgba(255, 27, 168, 0.6);
+    }
+    .center-blob .name .ac {
+      color: var(--kronn);
+      text-shadow: 0 0 12px rgba(200, 255, 0, 0.5), 0 0 24px rgba(200, 255, 0, 0.25);
+    }
+    .center-blob .sub {
+      font-family: var(--terminal);
+      font-size: 16px;
+      color: var(--lila);
+      letter-spacing: 0.1em;
+      margin-top: 4px;
+      text-transform: uppercase;
+    }
+    .leaves {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      margin-top: 28px;
+    }
+    .leaf {
+      border: 1.5px solid var(--electric);
+      padding: 18px 14px;
+      text-align: center;
+      background: var(--bg-card-hi);
+      box-shadow: 0 0 12px rgba(139, 92, 246, 0.18);
+    }
+    .leaf .title {
+      font-family: var(--display);
+      font-size: 18px;
+      color: var(--electric-bright);
+      text-transform: uppercase;
+      margin-bottom: 6px;
+      text-shadow: 0 0 6px rgba(139, 92, 246, 0.4);
+    }
+    .leaf .body { font-size: 13px; line-height: 1.5; color: var(--text); }
+
+    /* COMPARE GRID (Avant/Après) */
+    .compare-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+      margin-top: 8px;
+    }
+    .compare-panel {
+      border: 2px solid var(--text-dim);
+      padding: 32px 26px 28px;
+      background: var(--bg-card);
+      position: relative;
+    }
+    .compare-panel.after {
+      border-color: var(--lila);
+      box-shadow: 0 0 22px rgba(200, 160, 255, 0.18);
+    }
+    .compare-panel .label {
+      position: absolute;
+      top: -10px;
+      left: 16px;
+      background: var(--bg);
+      font-family: var(--pixel);
+      font-size: 9px;
+      letter-spacing: 0.22em;
+      padding: 0 10px;
+      text-transform: uppercase;
+    }
+    .compare-panel.before .label { color: var(--text-dim); }
+    .compare-panel.after .label {
+      color: var(--kronn);
+      text-shadow: 0 0 6px rgba(200, 255, 0, 0.45);
+    }
+    .compare-panel ul { list-style: none; margin-top: 4px; }
+    .compare-panel li {
+      padding: 14px 0;
+      border-bottom: 1px dashed rgba(255, 255, 255, 0.08);
+      font-family: var(--body);
+      font-size: 14.5px;
+      line-height: 1.5;
+      display: flex;
+      gap: 14px;
+      align-items: baseline;
+    }
+    .compare-panel li:last-child { border-bottom: 0; }
+    .compare-panel li::before {
+      font-family: var(--pixel);
+      font-size: 11px;
+      flex-shrink: 0;
+      letter-spacing: 0;
+    }
+    .compare-panel.before li { color: var(--text-dim); }
+    .compare-panel.before li::before {
+      content: '×';
+      color: var(--magenta);
+      text-shadow: 0 0 6px rgba(255, 27, 168, 0.4);
+    }
+    .compare-panel.after li { color: var(--text); }
+    .compare-panel.after li::before {
+      content: '✓';
+      color: var(--kronn);
+      text-shadow: 0 0 6px rgba(200, 255, 0, 0.4);
+    }
+
+    /* Decomposition diagram wrap */
+    .decomp-wrap {
+      margin-top: 36px;
+      padding: 28px 22px 22px;
+      border: 2px solid var(--lila);
+      background: var(--bg-card);
+      position: relative;
+      box-shadow: 0 0 18px rgba(200, 160, 255, 0.15);
+    }
+    .decomp-wrap-label {
+      position: absolute;
+      top: -10px;
+      left: 18px;
+      background: var(--bg);
+      padding: 0 12px;
+      font-family: var(--pixel);
+      font-size: 9px;
+      letter-spacing: 0.22em;
+      color: var(--lila);
+      text-shadow: 0 0 6px rgba(200, 160, 255, 0.5);
+      text-transform: uppercase;
+    }
+    .decomp-diagram {
+      width: 100%;
+      height: auto;
+      display: block;
+    }
+
+    /* MANIFESTO pull-quote */
+    .manifesto {
+      padding: 110px 0;
+      text-align: center;
+      border-top: 1px solid rgba(200, 160, 255, 0.2);
+      border-bottom: 1px solid rgba(200, 160, 255, 0.2);
+      background: radial-gradient(ellipse at center, rgba(200, 255, 0, 0.05) 0%, transparent 60%);
+      position: relative;
+    }
+    .manifesto-mark {
+      font-family: var(--pixel);
+      font-size: 10px;
+      letter-spacing: 0.3em;
+      color: var(--kronn);
+      margin-bottom: 44px;
+      display: inline-flex;
+      align-items: center;
+      gap: 16px;
+      text-shadow: 0 0 6px rgba(200, 255, 0, 0.5);
+      text-decoration: none;
+      transition: opacity 0.18s;
+    }
+    .manifesto-mark:hover { opacity: 0.8; }
+    .manifesto-mark::before, .manifesto-mark::after {
+      content: '';
+      width: 36px;
+      height: 1px;
+      background: var(--kronn);
+    }
+    .manifesto-text {
+      font-family: var(--terminal);
+      font-size: clamp(22px, 2.5vw, 30px);
+      line-height: 1.5;
+      color: var(--text);
+      max-width: 780px;
+      margin: 0 auto;
+      letter-spacing: 0.02em;
+    }
+    .manifesto-text em {
+      color: var(--magenta);
+      font-style: italic;
+    }
+    .stop {
+      display: inline-block;
+      font-family: var(--display);
+      font-size: clamp(96px, 14vw, 180px);
+      font-weight: 400;
+      color: var(--kronn);
+      margin: 36px 0 28px;
+      line-height: 1;
+      letter-spacing: -0.04em;
+      text-shadow: 0 0 24px rgba(200, 255, 0, 0.4), 0 0 56px rgba(200, 255, 0, 0.2);
+    }
+    .manifesto-after {
+      font-family: var(--terminal);
+      font-size: clamp(20px, 2.2vw, 26px);
+      color: var(--lila);
+      max-width: 600px;
+      margin: 0 auto;
+      letter-spacing: 0.04em;
+    }
+    .manifesto-after strong {
+      color: var(--kronn);
+      font-weight: 400;
+      text-shadow: 0 0 6px rgba(200, 255, 0, 0.4);
+    }
+
+    /* HI-SCORE */
+    .scores {
+      border: 2px solid var(--silver);
+      padding: 28px 24px;
+      background: var(--bg-card);
+      box-shadow: 0 0 20px rgba(216, 208, 232, 0.12), inset 0 0 28px rgba(216, 208, 232, 0.04);
+      position: relative;
+    }
+    .scores-header {
+      position: absolute;
+      top: -12px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: var(--bg);
+      padding: 0 16px;
+      font-family: var(--pixel);
+      font-size: 10px;
+      letter-spacing: 0.2em;
+      color: var(--silver);
+    }
+    .scores-header::before, .scores-header::after { content: '◆'; color: var(--electric); margin: 0 10px; font-family: var(--body); font-size: 9px; }
+    .score-row {
+      display: grid;
+      grid-template-columns: 40px 120px 1fr 100px;
+      gap: 20px;
+      padding: 18px 0;
+      border-bottom: 1px dashed rgba(216, 208, 232, 0.2);
+      align-items: baseline;
+      font-family: var(--terminal);
+      font-size: 20px;
+    }
+    .score-row:last-child { border-bottom: 0; }
+    .score-row:first-child { padding-top: 8px; }
+    .score-row .rank {
+      font-family: var(--pixel);
+      font-size: 11px;
+      color: var(--silver);
+      letter-spacing: 0.1em;
+    }
+    .score-row .who {
+      font-family: var(--terminal);
+      font-size: 22px;
+      color: var(--lila);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .score-row .what {
+      font-family: var(--body);
+      font-size: 14px;
+      color: var(--text);
+      line-height: 1.45;
+    }
+    .score-row .num {
+      font-family: var(--display);
+      font-size: 32px;
+      color: var(--magenta);
+      text-align: right;
+      text-shadow: 0 0 8px rgba(255, 27, 168, 0.5);
+      letter-spacing: -0.02em;
+    }
+
+    /* INVENTORY (Loadout) · 2 cols desktop, 1 col mobile */
+    .inventory-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 18px;
+      margin-top: 24px;
+    }
+    @media (min-width: 760px) {
+      .inventory-grid { grid-template-columns: 1fr 1fr; }
+    }
+    .inventory-col {
+      background: var(--bg-card);
+      border: 1.5px solid var(--lila);
+      padding: 28px 26px 22px;
+      position: relative;
+    }
+    .inv-cat {
+      font-family: var(--pixel);
+      font-size: 9px;
+      letter-spacing: 0.22em;
+      color: var(--kronn);
+      margin-bottom: 16px;
+      padding-bottom: 12px;
+      border-bottom: 1px dashed rgba(200, 255, 0, 0.3);
+      text-transform: uppercase;
+      text-shadow: 0 0 6px rgba(200, 255, 0, 0.45);
+    }
+    .inv-cat .num { color: var(--lila); margin-right: 8px; }
+    .inv-list { list-style: none; }
+    .inv-list li {
+      font-family: var(--body);
+      font-size: 13.5px;
+      line-height: 1.45;
+      padding: 9px 0;
+      border-bottom: 1px dashed rgba(255, 255, 255, 0.05);
+      display: flex;
+      gap: 10px;
+      align-items: baseline;
+      color: var(--text);
+    }
+    .inv-list li:last-child { border-bottom: 0; }
+    .inv-list li::before {
+      content: '✓';
+      font-family: var(--terminal);
+      font-size: 16px;
+      line-height: 1;
+      color: var(--kronn);
+      text-shadow: 0 0 4px rgba(200, 255, 0, 0.45);
+      flex-shrink: 0;
+      letter-spacing: 0;
+    }
+    .inv-list code {
+      font-size: 0.85em;
+    }
+    .inv-list a {
+      color: var(--kronn);
+      text-decoration: underline;
+      text-decoration-thickness: 1px;
+      text-underline-offset: 3px;
+      text-shadow: 0 0 4px rgba(200, 255, 0, 0.3);
+    }
+    .inv-list a:hover { color: var(--magenta-bright); text-shadow: 0 0 4px rgba(255, 91, 188, 0.3); }
+    .inv-meta {
+      font-family: var(--pixel);
+      font-size: 8px;
+      letter-spacing: 0.2em;
+      color: var(--lila);
+      text-transform: uppercase;
+      opacity: 0.7;
+    }
+
+    /* PLUGIN FLOW callout */
+    .plugin-flow {
+      margin-top: 48px;
+      padding: 40px 32px 32px;
+      border: 2px solid var(--kronn);
+      background: var(--bg-card);
+      position: relative;
+      box-shadow: 0 0 22px rgba(200, 255, 0, 0.18), inset 0 0 28px rgba(200, 255, 0, 0.04);
+    }
+    .plugin-flow-label {
+      position: absolute;
+      top: -10px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: var(--bg);
+      padding: 0 14px;
+      font-family: var(--pixel);
+      font-size: 9px;
+      letter-spacing: 0.22em;
+      color: var(--kronn);
+      text-shadow: 0 0 6px rgba(200, 255, 0, 0.5);
+      white-space: nowrap;
+    }
+    .plugin-flow-row {
+      display: grid;
+      grid-template-columns: 1fr 50px 0.9fr 50px 1fr;
+      gap: 14px;
+      align-items: stretch;
+      margin-bottom: 28px;
+    }
+    .plugin-step {
+      border: 1.5px solid var(--lila);
+      padding: 22px 16px;
+      background: var(--bg-deep);
+      text-align: center;
+    }
+    .plugin-step.helper {
+      border-color: var(--magenta);
+      border-style: dashed;
+      background: var(--bg-card-hi);
+      box-shadow: 0 0 14px rgba(255, 27, 168, 0.18);
+    }
+    .plugin-step.helper .step-name {
+      color: var(--magenta-bright);
+      text-shadow: 0 0 8px rgba(255, 27, 168, 0.45);
+    }
+    .plugin-step.helper .step-sub {
+      color: var(--magenta);
+    }
+    .plugin-step .step-icon {
+      font-size: 26px;
+      color: var(--magenta);
+      text-shadow: 0 0 10px rgba(255, 27, 168, 0.55);
+      margin-bottom: 8px;
+      line-height: 1;
+      display: inline-block;
+    }
+    .plugin-step.helper .step-icon {
+      animation: lightning-flash 4s infinite;
+      transform-origin: center;
+    }
+    @keyframes lightning-flash {
+      0%, 47%, 53%, 70%, 73%, 100% {
+        opacity: 1;
+        transform: scale(1);
+        filter: brightness(1);
+        text-shadow: 0 0 10px rgba(255, 27, 168, 0.55);
+      }
+      48% {
+        opacity: 0.3;
+        transform: scale(0.92);
+      }
+      50% {
+        opacity: 1;
+        transform: scale(1.2);
+        filter: brightness(2.2);
+        text-shadow: 0 0 20px rgba(255, 27, 168, 0.95),
+                     0 0 40px rgba(255, 91, 188, 0.6),
+                     0 0 60px rgba(200, 255, 0, 0.3);
+      }
+      52% {
+        opacity: 0.45;
+        transform: scale(0.96);
+      }
+      71% {
+        opacity: 1;
+        transform: scale(1.1);
+        filter: brightness(1.7);
+        text-shadow: 0 0 16px rgba(255, 27, 168, 0.8), 0 0 32px rgba(255, 91, 188, 0.45);
+      }
+      72% {
+        opacity: 0.6;
+      }
+    }
+    .plugin-step .step-name {
+      font-family: var(--display);
+      font-size: 22px;
+      text-transform: uppercase;
+      color: var(--lila);
+      text-shadow: 0 0 6px rgba(200, 160, 255, 0.4);
+      letter-spacing: 0.02em;
+    }
+    .plugin-step .step-sub {
+      font-family: var(--terminal);
+      font-size: 16px;
+      color: var(--text-dim);
+      margin-top: 4px;
+      letter-spacing: 0.06em;
+    }
+    .plugin-step .step-examples {
+      font-family: var(--body);
+      font-size: 13px;
+      color: var(--text);
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px dashed rgba(255, 255, 255, 0.1);
+    }
+    .plugin-step.end {
+      border-color: var(--kronn);
+      box-shadow: 0 0 14px rgba(200, 255, 0, 0.18);
+    }
+    .plugin-step.end .step-name {
+      color: var(--kronn);
+      text-shadow: 0 0 8px rgba(200, 255, 0, 0.5), 0 0 18px rgba(200, 255, 0, 0.25);
+    }
+    .plugin-step.end .step-sub {
+      color: var(--kronn);
+      opacity: 0.8;
+    }
+    .plugin-arrow {
+      font-family: var(--terminal);
+      font-size: 44px;
+      color: var(--kronn);
+      text-shadow: 0 0 10px rgba(200, 255, 0, 0.55);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .plugin-flow-note {
+      font-family: var(--body);
+      font-size: 14.5px;
+      line-height: 1.55;
+      color: var(--text);
+      max-width: 760px;
+      margin: 0 auto;
+      text-align: center;
+    }
+    .plugin-flow-note strong { color: var(--lila); font-weight: 600; }
+    .plugin-flow-note em {
+      color: var(--kronn);
+      font-style: normal;
+      font-weight: 500;
+      text-shadow: 0 0 4px rgba(200, 255, 0, 0.3);
+    }
+    @media (max-width: 900px) {
+      .plugin-flow-row { grid-template-columns: 1fr; gap: 10px; }
+      .plugin-arrow { transform: rotate(90deg); padding: 6px 0; font-size: 30px; }
+    }
+
+    /* COMPOUND FLOW */
+    .compound-grid {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 14px;
+      margin-top: 24px;
+      border-top: 2px solid var(--kronn);
+      padding-top: 36px;
+      position: relative;
+    }
+    .compound-item {
+      position: relative;
+      padding: 26px 16px 22px;
+      background: var(--bg-card);
+      border: 1.5px solid var(--lila);
+      text-align: center;
+    }
+    .compound-item + .compound-item::before {
+      content: '→';
+      position: absolute;
+      left: -14px;
+      top: 50%;
+      transform: translateY(-50%);
+      color: var(--kronn);
+      font-family: var(--terminal);
+      font-size: 22px;
+      text-shadow: 0 0 8px rgba(200, 255, 0, 0.55);
+      z-index: 2;
+      background: var(--bg);
+      padding: 0 3px;
+      line-height: 1;
+    }
+    .compound-num {
+      font-family: var(--pixel);
+      font-size: 11px;
+      color: var(--kronn);
+      letter-spacing: 0.18em;
+      margin-bottom: 14px;
+      text-shadow: 0 0 6px rgba(200, 255, 0, 0.45);
+    }
+    .compound-title {
+      font-family: var(--display);
+      font-size: 17px;
+      text-transform: uppercase;
+      margin-bottom: 10px;
+      color: var(--lila);
+      letter-spacing: 0.02em;
+    }
+    .compound-body {
+      font-family: var(--body);
+      font-size: 12.5px;
+      line-height: 1.5;
+      color: var(--text);
+    }
+
+    /* Quickstart stages */
+    .quickstart-stages {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 18px;
+      margin-top: 24px;
+    }
+    .qs-stage {
+      background: var(--bg-card);
+      border: 1.5px solid var(--lila);
+      padding: 32px 28px 26px;
+      position: relative;
+    }
+    .qs-num {
+      font-family: var(--pixel);
+      font-size: 10px;
+      letter-spacing: 0.22em;
+      color: var(--kronn);
+      margin-bottom: 14px;
+      text-shadow: 0 0 6px rgba(200, 255, 0, 0.4);
+    }
+    .qs-title {
+      font-family: var(--display);
+      font-size: 26px;
+      text-transform: uppercase;
+      color: var(--lila);
+      margin-bottom: 14px;
+      letter-spacing: 0.02em;
+      text-shadow: 0 0 6px rgba(200, 160, 255, 0.4);
+    }
+    .qs-body {
+      font-family: var(--body);
+      font-size: 14.5px;
+      line-height: 1.55;
+      color: var(--text);
+      margin-bottom: 14px;
+    }
+    .qs-body strong { color: var(--magenta); font-weight: 600; }
+    .qs-note {
+      font-family: var(--terminal);
+      font-size: 16px;
+      color: var(--text-dim);
+      margin-top: 4px;
+      padding-top: 12px;
+      border-top: 1px dashed rgba(255, 255, 255, 0.08);
+      line-height: 1.4;
+    }
+    .qs-stage .btn { margin-top: 4px; padding: 12px 20px; font-size: 10px; }
+    .qs-btns { display: flex; gap: 10px; flex-wrap: wrap; }
+    @media (max-width: 760px) {
+      .quickstart-stages { grid-template-columns: 1fr; }
+    }
+
+    /* Concepts glossary */
+    .concepts-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 16px;
+      margin-top: 24px;
+    }
+    .concept-card {
+      background: var(--bg-card);
+      border: 1.5px solid var(--lila);
+      padding: 28px 24px 22px;
+      position: relative;
+    }
+    .concept-card::before {
+      content: 'DEFINITION';
+      position: absolute;
+      top: -10px;
+      left: 18px;
+      background: var(--bg);
+      padding: 0 10px;
+      font-family: var(--pixel);
+      font-size: 9px;
+      letter-spacing: 0.22em;
+      color: var(--text-dim);
+    }
+    .concept-term {
+      font-family: var(--display);
+      font-size: 22px;
+      text-transform: uppercase;
+      color: var(--magenta-bright);
+      margin-bottom: 14px;
+      letter-spacing: 0.02em;
+      text-shadow: 0 0 6px rgba(255, 91, 188, 0.4);
+    }
+    .concept-def {
+      font-family: var(--body);
+      font-size: 14px;
+      line-height: 1.6;
+      color: var(--text);
+    }
+    .concept-def strong { color: var(--lila); font-weight: 600; }
+    .concept-def em { color: var(--magenta); font-style: italic; font-weight: 500; }
+    @media (max-width: 760px) {
+      .concepts-grid { grid-template-columns: 1fr; }
+    }
+
+    /* Security panels */
+    .security-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 18px;
+      margin-top: 24px;
+    }
+    .sec-panel {
+      background: var(--bg-card);
+      border: 1.5px solid var(--lila);
+      padding: 30px 26px 22px;
+      position: relative;
+    }
+    .sec-panel.warn {
+      border-color: var(--magenta);
+      border-style: dashed;
+    }
+    .sec-panel::before {
+      content: 'SCOPE';
+      position: absolute;
+      top: -10px;
+      left: 18px;
+      background: var(--bg);
+      padding: 0 10px;
+      font-family: var(--pixel);
+      font-size: 9px;
+      letter-spacing: 0.22em;
+      color: var(--lila);
+    }
+    .sec-panel.warn::before {
+      content: 'HONESTY';
+      color: var(--magenta);
+    }
+    .sec-title {
+      font-family: var(--display);
+      font-size: 22px;
+      text-transform: uppercase;
+      color: var(--lila);
+      margin-bottom: 16px;
+      letter-spacing: 0.02em;
+      text-shadow: 0 0 6px rgba(200, 160, 255, 0.4);
+    }
+    .sec-panel.warn .sec-title {
+      color: var(--magenta-bright);
+      text-shadow: 0 0 6px rgba(255, 91, 188, 0.4);
+    }
+    .sec-list { list-style: none; }
+    .sec-list li {
+      padding: 11px 0;
+      border-bottom: 1px dashed rgba(255, 255, 255, 0.06);
+      font-family: var(--body);
+      font-size: 14px;
+      line-height: 1.5;
+      display: flex;
+      gap: 12px;
+      align-items: baseline;
+      color: var(--text);
+    }
+    .sec-list li:last-child { border-bottom: 0; }
+    .sec-list li::before {
+      font-family: var(--terminal);
+      font-size: 16px;
+      flex-shrink: 0;
+      line-height: 1;
+    }
+    .sec-list.good li::before {
+      content: '✓';
+      color: var(--kronn);
+      text-shadow: 0 0 4px rgba(200, 255, 0, 0.4);
+    }
+    .sec-list.warn li::before {
+      content: '⚠';
+      color: var(--magenta);
+      text-shadow: 0 0 4px rgba(255, 27, 168, 0.4);
+    }
+
+    /* VS Alternatives — table + tool cards */
+    .vs-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 18px 28px;
+      margin: 24px 0 12px;
+      padding: 14px 20px;
+      background: var(--bg-card);
+      border-left: 3px solid var(--lila);
+      font-family: var(--body);
+      font-size: 13.5px;
+      color: var(--text-dim);
+    }
+    .vs-legend > span {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 8px;
+    }
+    .vs-legend .vs-mark {
+      font-family: var(--terminal);
+      font-size: 17px;
+      flex-shrink: 0;
+    }
+    .vs-legend .vs-yes { color: var(--kronn); font-weight: 700; }
+    .vs-legend .vs-partial { color: var(--magenta-bright); }
+    .vs-legend .vs-no { color: var(--text-dim); }
+
+    .vs-table-wrap {
+      margin-top: 24px;
+      overflow-x: auto;
+      border: 1.5px solid var(--lila);
+      background: var(--bg-card);
+    }
+    .vs-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-family: var(--body);
+      min-width: 600px;
+    }
+    .vs-table thead th {
+      background: var(--bg-deep);
+      font-family: var(--pixel);
+      font-size: 10px;
+      letter-spacing: 0.18em;
+      color: var(--lila);
+      text-align: center;
+      padding: 16px 8px;
+      border-bottom: 2px solid var(--lila);
+      font-weight: 400;
+      text-transform: uppercase;
+    }
+    .vs-table thead th.kronn-col {
+      color: var(--kronn);
+      text-shadow: 0 0 8px rgba(200, 255, 0, 0.5);
+      border-bottom-color: var(--kronn);
+      background: rgba(200, 255, 0, 0.05);
+    }
+    .vs-table thead th:first-child {
+      background: transparent;
+      border-bottom-color: var(--lila);
+    }
+    .vs-table tbody td {
+      padding: 14px 10px;
+      border-bottom: 1px dashed rgba(255, 255, 255, 0.06);
+      font-size: 13.5px;
+      color: var(--text);
+      text-align: center;
+    }
+    .vs-table tbody tr:last-child td { border-bottom: 0; }
+    .vs-table tbody td:first-child {
+      text-align: left;
+      font-weight: 500;
+      color: var(--lila);
+      padding-left: 18px;
+    }
+    .vs-table tbody td.kronn-col {
+      background: rgba(200, 255, 0, 0.04);
+      color: var(--kronn);
+      font-weight: 600;
+    }
+    .vs-yes { color: var(--kronn); font-weight: 700; }
+    .vs-no { color: var(--text-dim); }
+    .vs-partial { color: var(--magenta-bright); }
+    .vs-price-paid { color: var(--magenta-bright); font-size: 12.5px; font-weight: 500; }
+    .vs-price-free { color: var(--lila); font-size: 12.5px; font-weight: 500; }
+    .vs-price-mixed { color: var(--electric-bright); font-size: 12.5px; font-weight: 500; }
+    .vs-price-kronn {
+      color: var(--kronn);
+      font-size: 12.5px;
+      font-weight: 700;
+      text-shadow: 0 0 4px rgba(200, 255, 0, 0.4);
+    }
+
+    .tool-cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 14px;
+      margin-top: 36px;
+    }
+    .tool-card {
+      background: var(--bg-card);
+      border: 1.5px solid var(--lila);
+      padding: 20px 20px 18px;
+    }
+    .tool-card.kronn-card {
+      border-color: var(--kronn);
+      box-shadow: 0 0 16px rgba(200, 255, 0, 0.18);
+    }
+    .tool-card .tool-name {
+      font-family: var(--display);
+      font-size: 18px;
+      color: var(--lila);
+      text-transform: uppercase;
+      margin-bottom: 8px;
+      letter-spacing: 0.02em;
+    }
+    .tool-card.kronn-card .tool-name {
+      color: var(--kronn);
+      text-shadow: 0 0 6px rgba(200, 255, 0, 0.4);
+    }
+    .tool-card .tool-use {
+      font-family: var(--body);
+      font-size: 13px;
+      color: var(--text);
+      line-height: 1.55;
+    }
+    @media (max-width: 760px) {
+      .security-grid { grid-template-columns: 1fr; }
+    }
+
+    /* ANTI */
+    .anti-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 16px;
+      margin-top: 24px;
+    }
+    .anti-card {
+      border: 2px solid var(--magenta-dim);
+      padding: 24px 22px;
+      background: var(--bg-card);
+      position: relative;
+    }
+    .anti-card::before {
+      content: 'NOT INCLUDED';
+      position: absolute;
+      top: -10px;
+      left: 14px;
+      background: var(--bg);
+      font-family: var(--pixel);
+      font-size: 9px;
+      letter-spacing: 0.22em;
+      color: var(--silver);
+      padding: 0 8px;
+    }
+    .anti-card .ttl {
+      font-family: var(--display);
+      font-size: 22px;
+      color: var(--magenta);
+      text-transform: uppercase;
+      margin-bottom: 8px;
+      letter-spacing: 0.02em;
+      text-shadow: 0 0 6px rgba(255, 27, 168, 0.4);
+    }
+    .anti-card .ttl .x { color: var(--text-dim); margin-right: 4px; }
+    .anti-card .body { font-size: 14px; line-height: 1.5; color: var(--text); }
+
+    /* Footer */
+    footer {
+      padding: 50px 0 70px;
+      text-align: center;
+      font-family: var(--terminal);
+      font-size: 18px;
+      color: var(--text-dim);
+      border-top: 1px solid rgba(200, 160, 255, 0.2);
+      letter-spacing: 0.08em;
+    }
+    footer .game-over {
+      font-family: var(--display);
+      font-size: clamp(36px, 6vw, 64px);
+      color: var(--magenta);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 16px;
+      text-shadow: 0 0 12px rgba(255, 27, 168, 0.55), 0 0 28px rgba(255, 27, 168, 0.25);
+    }
+    footer a {
+      color: var(--lila);
+      text-decoration: none;
+      border-bottom: 1px solid var(--lila);
+    }
+    footer a:hover { color: var(--magenta); border-color: var(--magenta); }
+    footer .credits {
+      font-family: var(--pixel);
+      font-size: 9px;
+      letter-spacing: 0.18em;
+      color: var(--electric);
+      text-transform: uppercase;
+      margin-top: 24px;
+      display: block;
+    }
+
+    /* A11Y · focus-visible */
+    .btn:focus-visible,
+    .back:focus-visible,
+    a:focus-visible {
+      outline: 2px solid var(--kronn);
+      outline-offset: 3px;
+    }
+
+    /* A11Y · honor motion preferences */
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+      }
+      .insert-coin, .baseline::after { animation: none !important; }
+    }
+
+    @media (max-width: 980px) {
+      .container { padding: 0 22px; }
+      header { flex-direction: column; align-items: flex-start; gap: 12px; }
+      .cli-grid { grid-template-columns: repeat(2, 1fr); }
+      .leaves { grid-template-columns: 1fr; }
+      .compare-grid { grid-template-columns: 1fr; }
+      .compound-grid { grid-template-columns: 1fr 1fr; }
+      .compound-item + .compound-item::before { display: none; }
+      .anti-grid { grid-template-columns: 1fr; }
+      .score-row { grid-template-columns: 40px 1fr; gap: 8px; }
+      .score-row .what { grid-column: 1 / -1; padding-left: 48px; }
+      .score-row .num { grid-column: 1 / -1; text-align: left; padding-left: 48px; }
+    }
+    @media (max-width: 560px) {
+      .compound-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+
+  <header>
+    <span class="left">1UP · KRONN</span>
+    <span class="center">KRONN</span>
+    <span class="right lang-switcher"><a href="index.html">FR</a> · <a href="en.html">EN</a> · <a class="lang-active" href="es.html">ES</a></span>
+  </header>
+
+  <!-- HERO -->
+  <section class="hero">
+    <div class="insert-coin">▶ INSERT 0 TOKENS TO START ◀</div>
+    <h1 class="slogan">
+      <span class="pk">MANY AGENTS.</span><br>
+      <span class="li">ZERO CHAOS.</span>
+    </h1>
+    <div class="baseline">muchos agentes · cero caos</div>
+    <p class="sub-pitch">
+      Manejas <strong>varios CLI de IA</strong> (Claude Code, Codex, Gemini, Ollama) en <strong>varios proyectos</strong>. Kronn aporta la <em>memoria compartida</em>, la <em>orquestación</em> y la <em>continuidad</em>. Local-first. <strong>0 tokens en los pasos mecánicos.</strong>
+    </p>
+    <div class="ctas">
+      <a class="btn btn-pink" href="#level-1">▼ How to play</a>
+      <a class="btn btn-electric" href="https://github.com/DocRoms/Kronn" target="_blank" rel="noopener">↓ Install</a>
+    </div>
+    <div class="ea-disclaimer">v0.8.5 · <span class="ea-tag">early access</span> · la API y los step types pueden cambiar antes de la v1.0</div>
+  </section>
+
+  <!-- LEVEL 1 · THE BRIDGE -->
+  <section class="section" id="level-1">
+    <a class="level-tag" href="#level-1">LEVEL 1 · THE BRIDGE</a>
+    <h2 class="section-title">Un solo <span class="pk">cerebro</span>.<br>Todos tus CLI <span class="li">conectados a él</span>.</h2>
+    <p class="section-intro">
+      Cuatro CLI de IA que se ignoran. Tres configs MCP que divergen. Catorce prompts copiados y pegados. <strong>Estado del arte aceptado.</strong> Kronn propone un cerebro compartido, local, conectado a todo.
+    </p>
+
+    <div class="schema">
+      <span class="schema-label">· SYSTEM MAP ·</span>
+      <div class="cli-grid">
+        <div class="cli-cell">Claude Code</div>
+        <div class="cli-cell">Codex</div>
+        <div class="cli-cell">Gemini</div>
+        <div class="cli-cell">Ollama</div>
+      </div>
+      <div class="arrow-down">▼</div>
+      <div class="center-blob">
+        <div class="name">KRONN <span class="ac">◆</span></div>
+        <div class="sub">shared brain · local-first</div>
+      </div>
+      <div class="arrow-down">▼</div>
+      <div class="leaves">
+        <div class="leaf">
+          <div class="title">Memoria</div>
+          <p class="body">Discusiones cross-CLI vía MCP bridge. Cero copia y pega.</p>
+        </div>
+        <div class="leaf">
+          <div class="title">Prompts</div>
+          <p class="body">Quick Prompts versionados, medidos, ✨ Improver IA.</p>
+        </div>
+        <div class="leaf">
+          <div class="title">Enrutamiento</div>
+          <p class="body">Pasos mecánicos sin agente. Coste IA = 0 tokens.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- LEVEL 2 · REALITY CHECK -->
+  <section class="section" id="level-2">
+    <a class="level-tag" href="#level-2">LEVEL 2 · REALITY CHECK</a>
+    <h2 class="section-title">El antes.<br><span class="li">El después.</span></h2>
+    <p class="section-intro">
+      Esto es lo que haces hoy, y lo que Kronn hace en tu lugar.
+    </p>
+
+    <div class="compare-grid">
+      <div class="compare-panel before">
+        <span class="label">Sin Kronn</span>
+        <ul>
+          <li>Tus prompts copiados y pegados entre tres archivos de Notion y un Markdown polvoriento.</li>
+          <li>Cambiar de Claude Code a Codex provoca un reseteo completo del contexto.</li>
+          <li>Tres configuraciones MCP mantenidas en paralelo, divergencia garantizada.</li>
+          <li>Una notificación de Slack pasa por un agente, así que consume tokens en cada envío.</li>
+          <li>Enviar un email o publicar un log también pasa por un agente (MCP mail, plugin), tokens en cada llamada.</li>
+          <li>Vuelves a explicar tu arquitectura en cada nueva discusión.</li>
+        </ul>
+      </div>
+      <div class="compare-panel after">
+        <span class="label">Con Kronn</span>
+        <ul>
+          <li>Quick Prompts versionados con <code>{{vars}}</code>, métricas por iteración.</li>
+          <li>Misma discusión, transmitida al siguiente CLI vía MCP, cero copia y pega.</li>
+          <li>Una sola interfaz, propagación automática hacia todos los CLI instalados.</li>
+          <li>Paso <code>Notify</code> ejecutado sin agente: cero tokens.</li>
+          <li>Paso <code>ApiCall</code> (Resend, Mailjet, log webhook): cero tokens, la API directa sin LLM.</li>
+          <li><code>docs/AGENTS.md</code> generado por auditoría, leído auto por cada agente.</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- Decomposition diagram : mega-prompt vs Kronn workflow -->
+    <div class="decomp-wrap">
+      <div class="decomp-wrap-label">▸ Fig. I · décomposition</div>
+      <svg viewBox="0 0 1000 460" xmlns="http://www.w3.org/2000/svg"
+           role="img" aria-labelledby="decomp-title decomp-desc"
+           class="decomp-diagram"
+           font-family="'Inter', system-ui, sans-serif">
+        <title id="decomp-title">Mega-prompt vs Kronn workflow · mismo resultado, 5× más barato</title>
+        <desc id="decomp-desc">
+          Diagrama de dos filas. Fila superior: el anti-patrón habitual, un mega-prompt que pide a un agente hacer doce cosas a la vez, alrededor de doce mil tokens, frágil, debug imposible. Fila inferior: el enfoque Kronn, cinco steps secuenciales (ApiCall, Agent, Exec, Agent, Notify), tres deterministas a cero tokens y dos steps Agent acotados. Mismo resultado, mucho más barato.
+        </desc>
+        <style>
+          .d-sub  { font-size: 13px; font-weight: 600; fill: #a08fb8; letter-spacing: 0.08em; text-transform: uppercase; }
+          .d-lbl  { font-size: 14px; font-weight: 600; fill: #f5edf2; }
+          .d-sm   { font-size: 12px; fill: #a08fb8; }
+          .d-cost { font-size: 12px; font-weight: 700; }
+          .d-good { fill: #c8ff00; }
+          .d-bad  { fill: #ff1ba8; }
+          .d-ai   { fill: #c8a0ff; }
+        </style>
+
+        <!-- Anti-pattern row -->
+        <text x="60" y="38" class="d-sub">El enfoque habitual · un mega-prompt</text>
+        <g aria-label="Anti-pattern : un mega-prompt">
+          <rect x="60" y="58" width="360" height="92" rx="8"
+                fill="#ff1ba8" fill-opacity="0.12" stroke="#ff1ba8" stroke-width="1.5"/>
+          <text x="240" y="92" text-anchor="middle" class="d-lbl">"Haz las 12 cosas"</text>
+          <text x="240" y="113" text-anchor="middle" class="d-sm">fetch + analyse + write + test + review + commit + notify…</text>
+          <text x="240" y="135" text-anchor="middle" class="d-cost d-bad">💸 muchísimos (demasiados) tokens · impredecible</text>
+
+          <path d="M 425 104 L 525 104" stroke="#ff1ba8" stroke-width="1.8" fill="none"/>
+          <polygon points="525,104 515,99 515,109" fill="#ff1ba8"/>
+
+          <rect x="530" y="58" width="180" height="92" rx="8"
+                fill="#ff1ba8" fill-opacity="0.12" stroke="#ff1ba8" stroke-width="1.5"/>
+          <text x="620" y="92" text-anchor="middle" class="d-lbl">Caja negra IA</text>
+          <text x="620" y="113" text-anchor="middle" class="d-sm">12 preocupaciones en 1 llamada</text>
+          <text x="620" y="135" text-anchor="middle" class="d-cost d-bad">❌ debug = impossible</text>
+
+          <path d="M 715 104 L 815 104" stroke="#ff1ba8" stroke-width="1.8" fill="none"/>
+          <polygon points="815,104 805,99 805,109" fill="#ff1ba8"/>
+          <text x="868" y="100" text-anchor="middle" class="d-lbl">Output</text>
+          <text x="868" y="118" text-anchor="middle" class="d-sm">¿con suerte?</text>
+        </g>
+
+        <line x1="60" y1="200" x2="940" y2="200" stroke="rgba(255,255,255,0.12)" stroke-width="1.5" stroke-dasharray="6 4"/>
+
+        <!-- Kronn way row -->
+        <text x="60" y="232" class="d-sub">El enfoque Kronn · descompón, programa cuando puedas, IA cuando debas</text>
+        <g aria-label="Workflow Kronn : 5 steps séquentiels">
+          <rect x="60" y="258" width="140" height="88" rx="8"
+                fill="#c8ff00" fill-opacity="0.10" stroke="#c8ff00" stroke-width="1.5"/>
+          <text x="130" y="284" text-anchor="middle" class="d-lbl">ApiCall</text>
+          <text x="130" y="304" text-anchor="middle" class="d-sm">fetch ticket</text>
+          <text x="130" y="327" text-anchor="middle" class="d-cost d-good">0 token</text>
+
+          <rect x="218" y="258" width="140" height="88" rx="8"
+                fill="#c8a0ff" fill-opacity="0.12" stroke="#c8a0ff" stroke-width="1.5"/>
+          <text x="288" y="284" text-anchor="middle" class="d-lbl">Agent</text>
+          <text x="288" y="304" text-anchor="middle" class="d-sm">draft impl</text>
+          <text x="288" y="327" text-anchor="middle" class="d-cost d-ai">N tokens</text>
+
+          <rect x="376" y="258" width="140" height="88" rx="8"
+                fill="#c8ff00" fill-opacity="0.10" stroke="#c8ff00" stroke-width="1.5"/>
+          <text x="446" y="284" text-anchor="middle" class="d-lbl">Exec</text>
+          <text x="446" y="304" text-anchor="middle" class="d-sm">cargo test</text>
+          <text x="446" y="327" text-anchor="middle" class="d-cost d-good">0 token</text>
+
+          <rect x="534" y="258" width="140" height="88" rx="8"
+                fill="#c8a0ff" fill-opacity="0.12" stroke="#c8a0ff" stroke-width="1.5"/>
+          <text x="604" y="284" text-anchor="middle" class="d-lbl">Agent</text>
+          <text x="604" y="304" text-anchor="middle" class="d-sm">review diff</text>
+          <text x="604" y="327" text-anchor="middle" class="d-cost d-ai">N tokens</text>
+
+          <rect x="692" y="258" width="140" height="88" rx="8"
+                fill="#c8ff00" fill-opacity="0.10" stroke="#c8ff00" stroke-width="1.5"/>
+          <text x="762" y="284" text-anchor="middle" class="d-lbl">Notify</text>
+          <text x="762" y="304" text-anchor="middle" class="d-sm">webhook</text>
+          <text x="762" y="327" text-anchor="middle" class="d-cost d-good">0 token</text>
+
+          <path d="M 200 302 L 218 302" stroke="#c8ff00" stroke-width="2" fill="none"/>
+          <polygon points="218,302 210,298 210,306" fill="#c8ff00"/>
+          <path d="M 358 302 L 376 302" stroke="#c8ff00" stroke-width="2" fill="none"/>
+          <polygon points="376,302 368,298 368,306" fill="#c8ff00"/>
+          <path d="M 516 302 L 534 302" stroke="#c8ff00" stroke-width="2" fill="none"/>
+          <polygon points="534,302 526,298 526,306" fill="#c8ff00"/>
+          <path d="M 674 302 L 692 302" stroke="#c8ff00" stroke-width="2" fill="none"/>
+          <polygon points="692,302 684,298 684,306" fill="#c8ff00"/>
+
+          <path d="M 832 302 L 850 302" stroke="#c8ff00" stroke-width="2" fill="none"/>
+          <polygon points="850,302 842,298 842,306" fill="#c8ff00"/>
+          <text x="900" y="288" text-anchor="middle" class="d-lbl">Mejor</text>
+          <text x="900" y="306" text-anchor="middle" class="d-lbl">resultado</text>
+          <text x="900" y="324" text-anchor="middle" class="d-cost d-good">menos tokens</text>
+        </g>
+
+        <text x="500" y="395" text-anchor="middle" class="d-sm">
+          5 steps · 3 deterministas (0 tokens) · la IA solo interviene en los 2 steps de razonamiento
+        </text>
+        <text x="500" y="425" text-anchor="middle" class="d-cost d-good">
+          → menos alucinaciones · más rápido · coste predecible · debuggable
+        </text>
+      </svg>
+    </div>
+  </section>
+
+  <!-- MANIFESTO pull-quote -->
+  <section class="manifesto" id="manifesto" aria-label="Kronn statement">
+    <a class="manifesto-mark" href="#manifesto">KRONN STATEMENT</a>
+    <p class="manifesto-text">
+      Sigues escribiendo tus prompts <em>al tuntún</em>.<br>
+      Copias y pegas tu contexto de un agente a otro.<br>
+      Pagas la IA para enviar un webhook de Slack.<br>
+      Mantienes tres configs MCP que divergen apenas pestañeas.
+    </p>
+    <div class="stop">Stop.</div>
+    <p class="manifesto-after">
+      Kronn <strong>pone fin a esta era</strong>.
+    </p>
+  </section>
+
+  <!-- LEVEL 3 · LOADOUT -->
+  <section class="section" id="level-3">
+    <a class="level-tag" href="#level-3">LEVEL 3 · LOADOUT</a>
+    <h2 class="section-title"><span class="li">Todo lo que viene</span><br>en la caja.</h2>
+    <p class="section-intro">
+      Sin roadmap, sin <em>soon™</em>. Todo está <strong>shippeado, en el código, verificable</strong>. Lista exhaustiva de los bloques que Kronn pone a tu disposición hoy.
+    </p>
+
+    <div class="inventory-grid">
+
+      <div class="inventory-col">
+        <div class="inv-cat"><span class="num">01</span>Memoria y contexto</div>
+        <ul class="inv-list">
+          <li>Discusiones persistidas en local (SQLite)</li>
+          <li>Continuación cross-CLI vía MCP bridge</li>
+          <li><code>docs/AGENTS.md</code> generado por auditoría</li>
+          <li>Inyección user-context <code>~/.kronn/user-context/</code></li>
+          <li>Linked repos : contexte multi-repo</li>
+          <li>Estado canónico <code>.kronn.json</code> por proyecto</li>
+          <li>Filtro anti-secretos en la auditoría</li>
+        </ul>
+      </div>
+
+      <div class="inventory-col">
+        <div class="inv-cat"><span class="num">02</span>Quick Prompts</div>
+        <ul class="inv-list">
+          <li>Variables <code>{{vars}}</code> + secciones condicionales</li>
+          <li>Versionado + métricas tokens · duración · coste</li>
+          <li>Diff visual entre versiones</li>
+          <li>✨ Improver IA : suggère et déploie en 1 clic</li>
+          <li>Compare across N agentes en paralelo</li>
+          <li>Chains: DnD reorder + <code>{{previous_qp.output}}</code></li>
+          <li>Binding profile · skill · directive</li>
+        </ul>
+      </div>
+
+      <div class="inventory-col">
+        <div class="inv-cat"><span class="num">03</span>Workflows</div>
+        <ul class="inv-list">
+          <li>7 step types: Agent · ApiCall · Batch · Notify · Exec · Gate · BatchQP</li>
+          <li>0 tokens en los pasos mecánicos (por definición)</li>
+          <li>AI Workflow Architect : dry-run + 1 clic</li>
+          <li>Batch workflows (fan-out · chaining · git worktree · diff integrado)</li>
+          <li>Loops + state scratchpad + guards</li>
+          <li>Rollback on failure</li>
+          <li>CRON-schedulable : workflows full-auto</li>
+          <li>AutoPilot loop (audit → tickets → workflow)</li>
+          <li>Feasibility-Gated implementation</li>
+          <li>Export / Import per-item</li>
+        </ul>
+      </div>
+
+      <div class="inventory-col">
+        <div class="inv-cat"><span class="num">04</span>Agentes · plugins · local</div>
+        <ul class="inv-list">
+          <li>7+ CLI soportados (Claude Code · Codex · Gemini · Ollama · Vibe…)</li>
+          <li><strong>Eco mode</strong> vía <a href="https://github.com/rtk-ai/rtk" target="_blank" rel="noopener">RTK</a>: proxy token-killer en 1 clic en agentes soportados</li>
+          <li>Ollama 100% local + TTS Piper / STT Whisper (FR · EN · ES)</li>
+          <li>Plugins <strong>MCP</strong>: Atlassian · Linear · Notion · …</li>
+          <li>Plugins <strong>API</strong>: Resend · Mailjet · webhooks</li>
+          <li>Custom API plugin · declara tus propios endpoints</li>
+          <li>Multi-usuario P2P (chat + discs compartidos)</li>
+          <li>App desktop Tauri (Mac · Windows · Linux)</li>
+          <li>AGPL-3.0 · sin telemetría · sin cookies</li>
+        </ul>
+      </div>
+
+    </div>
+
+    <!-- Plugin Pattern callout · MCP → API lifecycle -->
+    <div class="plugin-flow">
+      <div class="plugin-flow-label">▸ KRONN PATTERN · PLUGINS</div>
+      <div class="plugin-flow-row">
+        <div class="plugin-step start">
+          <div class="step-name">Plugin MCP</div>
+          <div class="step-sub">el agente explora</div>
+          <div class="step-examples">Atlassian · Linear · Notion · Confluence · Stripe …</div>
+        </div>
+        <div class="plugin-arrow">→</div>
+        <div class="plugin-step helper">
+          <div class="step-icon">⚡</div>
+          <div class="step-name">AI Helper</div>
+          <div class="step-sub">cambio MCP → API</div>
+          <div class="step-examples">agente dedicado, diálogo guiado para generar el plugin API</div>
+        </div>
+        <div class="plugin-arrow">→</div>
+        <div class="plugin-step end">
+          <div class="step-name">Plugin API</div>
+          <div class="step-sub">determinista · 0 tokens</div>
+          <div class="step-examples">Resend · Mailjet · webhooks · Custom API …</div>
+        </div>
+      </div>
+      <p class="plugin-flow-note">
+        <strong>Empiezas</strong> con un plugin MCP, el agente entiende cómo responde el vendor, prueba, itera. Cuando la secuencia se estabiliza, un <strong>AI Helper dedicado</strong> te acompaña para <strong>cambiar</strong> a un plugin API: la IA sale del bucle, la ejecución se vuelve <em>determinista</em> y <em>gratuita en tokens</em>.
+      </p>
+    </div>
+
+  </section>
+
+  <!-- LEVEL 4 · COMPOUND EFFECTS -->
+  <section class="section" id="level-4">
+    <a class="level-tag" href="#level-4">LEVEL 4 · COMPOUND EFFECTS</a>
+    <h2 class="section-title"><span class="li">Cinco mecanismos</span><br>estructurales.</h2>
+    <p class="section-intro">
+      Sin promesas en cifras, solo los <strong>bloques</strong> que permiten que un uso regular reduzca el coste y eleve la calidad. Cada uno está <em style="color:var(--kronn);font-style:normal;">en el código</em>, reproducible, verificable.
+    </p>
+
+    <div class="compound-grid">
+      <div class="compound-item">
+        <div class="compound-num">01</div>
+        <div class="compound-title">Auditoríaoría</div>
+        <p class="compound-body">Escaneo completo del proyecto: stack, convenciones, <em>deuda técnica</em>. Genera <code>docs/AGENTS.md</code> tier-loaded. AutoPilot (opt-in) convierte la deuda en tickets de Jira vía MCP y preconfigura el workflow de tratamiento <strong>en 1 clic</strong>.</p>
+      </div>
+      <div class="compound-item">
+        <div class="compound-num">02</div>
+        <div class="compound-title">Memoria</div>
+        <p class="compound-body">Discusiones persistidas en local + <strong>10 herramientas MCP</strong> <code>disc_*</code> para continuación <strong>bidireccional</strong> cross-CLI. El siguiente CLI lee Y enriquece el hilo, no solo consulta.</p>
+      </div>
+      <div class="compound-item">
+        <div class="compound-num">03</div>
+        <div class="compound-title">User-context</div>
+        <p class="compound-body">Tus preferencias globales (estilo de commit, convenciones, anti-patrones) viven en <code>~/.kronn/user-context/</code>. Todos tus proyectos se benefician automáticamente. Cada preferencia añadida → efecto en todas partes.</p>
+      </div>
+      <div class="compound-item">
+        <div class="compound-num">04</div>
+        <div class="compound-title">Quick Prompts</div>
+        <p class="compound-body">Prompts reutilizables con <code>{{vars}}</code>. Versionados y medidos (tokens · duración · coste). Iteras, comparas, eliges.</p>
+      </div>
+      <div class="compound-item">
+        <div class="compound-num">05</div>
+        <div class="compound-title">Workflows</div>
+        <p class="compound-body">Orquestación step-based: paso <code>Agent</code> + 5 mecánicos (<code>Exec</code>, <code>Gate</code>, <code>Notify</code>, <code>ApiCall</code>) a <em>0 tokens por definición</em>. <strong style="color:var(--lila);">CRON-schedulable</strong>. Patrón <strong>Feasibility-Gated</strong> para tickets grandes: triaje YAML → human Gate → código restringido.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- LEVEL 5 · NOT INCLUDED -->
+  <section class="section" id="level-5">
+    <a class="level-tag" href="#level-5">LEVEL 5 · NOT INCLUDED</a>
+    <h2 class="section-title">Ce que Kronn n'est <span class="pk">pas</span>.</h2>
+    <p class="section-intro">Decir lo que no es gana a los escépticos. Esto es lo que Kronn no pretende ser.</p>
+
+    <div class="anti-grid">
+      <div class="anti-card">
+        <div class="ttl"><span class="x">×</span>No es un IDE</div>
+        <p class="body">Sigue con Cursor, VSCode, Vim o Aider para el pair-prog CLI. Kronn orquesta por encima, no reemplaza tu editor, <em style="color:var(--kronn);font-style:italic;">aunque puedes hacer bastante desde Kronn: git worktree, acceso al diff, exec directo, gates humanos</em> ;)</p>
+      </div>
+      <div class="anti-card">
+        <div class="ttl"><span class="x">×</span>No es un LLM</div>
+        <p class="body">Tú aportas Anthropic, OpenAI, Google u Ollama 100% local. Kronn no te encierra en ninguno.</p>
+      </div>
+      <div class="anti-card">
+        <div class="ttl"><span class="x">×</span>No es un SaaS</div>
+        <p class="body">App desktop local-first. Tus datos, prompts y discusiones no salen de tu máquina.</p>
+      </div>
+      <div class="anti-card">
+        <div class="ttl"><span class="x">×</span>No es un framework</div>
+        <p class="body">Pilotas vía UI, no programas. Multi-CLI orquestado, no LangGraph en Python.</p>
+      </div>
+      <div class="anti-card">
+        <div class="ttl"><span class="x">×</span>No es un workflow tool general</div>
+        <p class="body">Para automatizar integraciones no-IA (Slack, ETL, CRM, lifecycle email), quédate con n8n o Zapier. Kronn apunta a la orquestación de <strong>agentes IA</strong> específicamente.</p>
+      </div>
+      <div class="anti-card">
+        <div class="ttl"><span class="x">×</span>No es un CI/CD</div>
+        <p class="body">Para build, deploy, lint sobre git, quédate con GitHub Actions. Kronn orquesta CLI agentes de IA <strong>local-first</strong>, no pipelines cloud atados al repo.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- LEVEL 6 · QUICKSTART -->
+  <section class="section" id="level-6">
+    <a class="level-tag" href="#level-6">LEVEL 6 · QUICKSTART</a>
+    <h2 class="section-title">5 minutos.<br><span class="li">4 etapas.</span></h2>
+    <p class="section-intro">
+      OK, ¿convencido/a? Aquí está la instalación local. Al final tienes un proyecto auditado, una Quick Prompt medida, y discusiones que sobreviven al cambio entre 2 CLI.
+    </p>
+
+    <div class="quickstart-stages">
+      <div class="qs-stage">
+        <div class="qs-num">STAGE 01</div>
+        <div class="qs-title">Install</div>
+        <p class="qs-body">Dos instalaciones posibles:<br>
+          <strong>App desktop</strong> · descarga el binario (Mac, Windows, Linux) desde las releases.<br>
+          <strong>Self-hosted</strong> · <code>git clone -b &lt;tag&gt;</code> y luego <code>kronn start</code> (CLI / headless, ideal para equipo).<br>
+          Local-first en ambos casos. Métricas de agentes en local (QPs, runs, tokens, coste) · nunca telemetría cloud.</p>
+        <a class="btn btn-pink" href="https://github.com/DocRoms/Kronn/releases/latest" target="_blank" rel="noopener">↓ Releases</a>
+      </div>
+
+      <div class="qs-stage">
+        <div class="qs-num">STAGE 02</div>
+        <div class="qs-title">Auditoría</div>
+        <p class="qs-body">Abre Kronn, añade tu proyecto, <strong>lanza la auditoría con Briefing</strong> (≈ 2 min de Q&amp;A guiado). Kronn luego escanea tu stack, detecta las convenciones, identifica la <strong>deuda técnica</strong> y genera <code>docs/AGENTS.md</code> tier-loaded.</p>
+        <p class="qs-note">Lanzamiento: 2 min. Escaneo en segundo plano: 20-30 min en un proyecto medio, más en un monorepo. AutoPilot listo después para convertir la deuda en tickets.</p>
+      </div>
+
+      <div class="qs-stage">
+        <div class="qs-num">STAGE 03</div>
+        <div class="qs-title">Quick Prompt</div>
+        <p class="qs-body">Pestaña <em>Automation</em>, crea una Quick Prompt. Pon una variable <code>{{ticket}}</code> en el template. Lánzala en un agente: Kronn registra <strong>tokens, duración, coste</strong>.</p>
+        <p class="qs-note">Puedes lanzar la misma Quick Prompt en N agentes en paralelo para comparar las salidas.</p>
+      </div>
+
+      <div class="qs-stage">
+        <div class="qs-num">STAGE 04</div>
+        <div class="qs-title">Multi-CLI</div>
+        <p class="qs-body">Pestaña <em>Plugins</em>, conecta un segundo CLI (Codex, Gemini, Ollama…). El MCP bridge se configura automáticamente: tus discusiones fluyen de un agente a otro <strong>sin copia y pega</strong>.</p>
+        <p class="qs-note">El MCP <code>kronn-internal</code> se activa desde el drawer plugin del CLI destino.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- LEVEL 7 · CONCEPTS -->
+  <section class="section" id="level-7">
+    <a class="level-tag" href="#level-7">LEVEL 7 · CONCEPTS</a>
+    <h2 class="section-title">El <span class="li">vocabulario</span><br>técnico.</h2>
+    <p class="section-intro">
+      Ocho términos que aparecen por todas partes en Kronn. Glosario rápido para descifrar el resto: qué es, para qué sirve.
+    </p>
+
+    <div class="concepts-grid">
+
+      <div class="concept-card">
+        <div class="concept-term">Quick Prompt</div>
+        <p class="concept-def">Template de prompt reutilizable con variables <code>{{ticket}}</code>, <code>{{contexto}}</code>. <strong>Versionado</strong>. Métricas registradas por versión (tokens, duración, coste). Botón <em>✨ Improver</em> para iterar con la IA.</p>
+      </div>
+
+      <div class="concept-card">
+        <div class="concept-term">QP Chain</div>
+        <p class="concept-def">Secuencia de Quick Prompts. Cada QP puede referenciar <code>{{previous_qp.output}}</code> para <strong>encadenar</strong> la salida anterior. Reordenable con drag &amp; drop.</p>
+      </div>
+
+      <div class="concept-card">
+        <div class="concept-term">MCP</div>
+        <p class="concept-def"><em>Model Context Protocol</em> · estándar abierto (de Anthropic) que permite a los agentes IA acceder a herramientas externas. Kronn se apoya en MCP para <strong>conectar los CLI</strong> y exponer sus propias herramientas vía <code>kronn-internal</code>.</p>
+      </div>
+
+      <div class="concept-card">
+        <div class="concept-term">StepType</div>
+        <p class="concept-def">Los 7 tipos de step disponibles en un workflow: 2 IA (<code>Agent</code>, <code>BatchQuickPrompt</code>) y 5 <strong>mecánicos</strong> (<code>ApiCall</code>, <code>BatchApiCall</code>, <code>Notify</code>, <code>Exec</code>, <code>Gate</code>) a 0 tokens.</p>
+      </div>
+
+      <div class="concept-card">
+        <div class="concept-term">AutoPilot</div>
+        <p class="concept-def">Bucle opt-in post-auditoría: Kronn detecta la <strong>deuda técnica</strong>, crea los tickets de Jira vía MCP, preconfigura un workflow para tratarla. Haces clic, listo.</p>
+      </div>
+
+      <div class="concept-card">
+        <div class="concept-term">Feasibility-Gated</div>
+        <p class="concept-def">Patrón de implementación para tickets grandes: Kronn genera un <em>manifest YAML</em> de viabilidad, luego un <strong>human Gate</strong> (apruebas o rechazas), <em>después</em> el agente codifica siguiendo el manifest. Cero sorpresas.</p>
+      </div>
+
+      <div class="concept-card">
+        <div class="concept-term">docs/AGENTS.md</div>
+        <p class="concept-def">La fuente canónica de doc de un proyecto Kronn. Generada por la auditoría. <strong>Tier-loaded</strong> (light siempre, secciones on-demand). Leída auto por cada CLI que abre el proyecto.</p>
+      </div>
+
+      <div class="concept-card">
+        <div class="concept-term">Plugin</div>
+        <p class="concept-def">4 sabores: <strong>MCP</strong> (vendor expone un servidor, ej. Atlassian), <strong>API</strong> (vendor API-only empaquetado, ej. Resend), <strong>Hybrid</strong> (ambos), <strong>Custom</strong> (declaras tus propios endpoints).</p>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- LEVEL 8 · SECURITY & PRIVACY -->
+  <section class="section" id="level-8">
+    <a class="level-tag" href="#level-8">LEVEL 8 · SECURITY &amp; PRIVACY</a>
+    <h2 class="section-title">Tu máquina.<br><span class="li">Tus datos.</span></h2>
+    <p class="section-intro">
+      Local-first por defecto. Sin telemetría, sin cookies, sin servidor Kronn. Esto es lo que está protegido, y lo que aún no tenemos: <em>honestidad antes que el sello de certificación</em>.
+    </p>
+
+    <div class="security-grid">
+
+      <div class="sec-panel">
+        <div class="sec-title">Local-first</div>
+        <ul class="sec-list good">
+          <li>DB SQLite local en <code>~/.kronn/</code></li>
+          <li>Discusiones, QPs, auditorías, configs: todo en tu máquina</li>
+          <li>Sin sincronización cloud, sin telemetría, sin cookies</li>
+          <li>Tus datos solo salen si TÚ lanzas un workflow que llame a un LLM cloud</li>
+        </ul>
+      </div>
+
+      <div class="sec-panel">
+        <div class="sec-title">Secretos y claves</div>
+        <ul class="sec-list good">
+          <li>API keys almacenadas en el keychain del SO (Mac/Windows/Linux)</li>
+          <li>Filtro anti-secretos en la auditoría : <code>.env</code> et prefixes vendor filtrés avant <code>docs/AGENTS.md</code></li>
+          <li>Ninguna variable env Kronn empujada hacia los CLI terceros</li>
+        </ul>
+      </div>
+
+      <div class="sec-panel">
+        <div class="sec-title">Exec y Gate</div>
+        <ul class="sec-list good">
+          <li>Paso <code>Exec</code> gated por <code>exec_allowlist</code> del workflow (argv literal, sin <code>sh -c</code>)</li>
+          <li>Paso <code>Gate</code> human-in-the-loop: el agente espera tu validación explícita</li>
+          <li>Audit log: cada run persistido con timestamp, tokens, steps ejecutados</li>
+        </ul>
+      </div>
+
+      <div class="sec-panel warn">
+        <div class="sec-title">Lo que no tenemos</div>
+        <ul class="sec-list warn">
+          <li><strong>Aún no en v1.0 estable.</strong> Versión actual v0.8.5, early access. La API, los step types y los esquemas pueden evolucionar entre versiones.</li>
+          <li>Sin certificación SOC2 ni GDPR a día de hoy</li>
+          <li>Single-user · sin RBAC ni gestión de equipos</li>
+          <li>Si usas Anthropic / OpenAI / Google, tus prompts van a ellos: su responsabilidad, no la nuestra</li>
+          <li>AGPL-3.0 → código auditable, pero sin auditoría de seguridad externa en este momento</li>
+        </ul>
+      </div>
+
+    </div>
+  </section>
+
+  <footer>
+    <div class="game-over">· Continue ? ·</div>
+    <a href="https://github.com/DocRoms/Kronn" target="_blank" rel="noopener">github.com/DocRoms/Kronn</a>
+    <span class="credits">kronn v0.8.5 · agpl-3.0 · made by d.r.</span>
+  </footer>
+
+</div>
+
+</body>
+</html>

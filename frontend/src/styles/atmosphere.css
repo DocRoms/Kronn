@@ -1,0 +1,69 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   Kronn Atmosphere — ambient effects on the dark default theme.
+   CRT scanlines + aurora drift are ON by default on dark, automatically
+   OFF on light / matrix / gotham / sakura (they have their own ambient).
+   Reduced-motion gracefully stops the drift animation.
+
+   Load order : after `neon.css`, before `components.css`.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── CRT scanlines overlay (always-on dark default) ────────────────────────
+   Body::after is unused elsewhere — body::before already carries the aurora.
+   pointer-events:none keeps clicks alive. z-index 200 puts the lines above
+   content but below modals/tooltips (which sit at 5000+).
+   Two-layer recipe : black darken bands + faint lime phosphor micro-rows
+   so the CRT feel is visible without crushing the readability.            */
+:root:not([data-theme="light"]):not([data-theme="matrix"]):not([data-theme="gotham"]):not([data-theme="sakura"]) body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 200;
+  /* Two-layer scanlines, low intensity to stay readable :
+       - Layer A : subtle dark bands (darken-only, very gentle)
+       - Layer B : magenta phosphor micro-rows (the site's signature pink
+         tint comes from this, not from lime — lime is reserved for
+         Kronn-brand interaction moments).                               */
+  background:
+    repeating-linear-gradient(
+      0deg,
+      transparent 0,
+      transparent 2px,
+      rgba(0, 0, 0, 0.14) 2px,
+      rgba(0, 0, 0, 0.14) 3px
+    ),
+    repeating-linear-gradient(
+      0deg,
+      transparent 0,
+      transparent 3px,
+      rgba(255, 27, 168, 0.035) 3px,
+      rgba(255, 27, 168, 0.035) 4px
+    );
+  opacity: 0.6;
+}
+
+/* ── Aurora drift : slow translate of body::before so the magenta+electric
+   halo breathes. 40s cycle, ease-in-out, transform-only so it composites
+   on the GPU and doesn't trigger repaint.
+
+   Active only on the dark default — all other themes get their own ambient
+   (or none). Reduced-motion stops it entirely (the `position: fixed`
+   gradient stays where it lands).                                       */
+@keyframes kr-aurora-drift {
+  0%   { transform: translate3d(0%, 0%, 0) scale(1); }
+  50%  { transform: translate3d(-2%, 1%, 0) scale(1.05); }
+  100% { transform: translate3d(0%, 0%, 0) scale(1); }
+}
+
+:root:not([data-theme="light"]):not([data-theme="matrix"]):not([data-theme="gotham"]):not([data-theme="sakura"]) body::before {
+  animation: kr-aurora-drift 40s ease-in-out infinite;
+  will-change: transform;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body::before { animation: none !important; }
+}
+
+/* ── To make scanlines optional later (Settings toggle), re-add a
+     `[data-atmosphere="crt"]` guard at the head of the selector above
+     and toggle via `document.documentElement.dataset.atmosphere`.    */

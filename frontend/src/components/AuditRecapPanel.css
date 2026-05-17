@@ -230,14 +230,14 @@
 }
 
 /* Failed/Interrupted runs — RGAA AA contrast guard.
-   Pre-fix used `--kr-error-soft` as a background, but on the dark
-   theme `--kr-error-soft = #ff9aa9` (a TEXT color), not a tint, so
-   the card became saturated pink with red text on top — contrast
-   dropped below 3:1. New approach: a very low-alpha tint based on
-   `--kr-error-rgb` for the background, paired with `--kr-text-primary`
-   for the body and a left accent bar in `--kr-error` for the status
-   marker. Body text stays primary (always AA on every theme); only
-   the kind icon + "· Interrupted" suffix shift to error red. */
+   Pre-fix used `--kr-error-soft` as a background, but `--kr-error-soft`
+   is a TEXT color, not a tint, so the card became saturated with bright
+   text on top — contrast dropped below 3:1. New approach: a very
+   low-alpha tint based on `--kr-error-rgb` for the background, paired
+   with `--kr-text-primary` for the body and a left accent bar in
+   `--kr-error` for the status marker. Body text stays primary (always
+   AA on every theme); only the kind icon + "· Interrupted" suffix shift
+   to error color. */
 .arp-run-card[data-failed="true"] {
   background: rgba(var(--kr-error-rgb), 0.06);
   border-color: rgba(var(--kr-error-rgb), 0.35);

@@ -5,11 +5,11 @@
 
 :root {
   /* ── Backgrounds ──────────────────────────────────────────────────────── */
-  --kr-bg-base: #0a0c10;
-  --kr-bg-raised: #0e1117;
-  --kr-bg-surface: #12151c;
-  --kr-bg-elevated: #161b22;
-  --kr-bg-input: #1a1d26;
+  --kr-bg-base: #140822;
+  --kr-bg-raised: #1a0c2c;
+  --kr-bg-surface: #1f1140;
+  --kr-bg-elevated: #2b1958;
+  --kr-bg-input: #321c66;
   --kr-bg-hover: rgba(255, 255, 255, 0.03);
   --kr-bg-hover-strong: rgba(255, 255, 255, 0.06);
   --kr-bg-active: rgba(255, 255, 255, 0.08);
@@ -17,7 +17,7 @@
   --kr-bg-subtle: rgba(255, 255, 255, 0.02);
   --kr-bg-overlay: rgba(0, 0, 0, 0.6);
   --kr-bg-code: rgba(0, 0, 0, 0.3);
-  --kr-bg-code-panel: #0d1017;
+  --kr-bg-code-panel: #07031a;
   --kr-bg-scrim: rgba(0, 0, 0, 0.25);
 
   /* ── Accent (lime) ────────────────────────────────────────────────────── */
@@ -60,9 +60,9 @@
   /* ── Semantic colors ──────────────────────────────────────────────────── */
   --kr-success: #34d399;
   --kr-success-rgb: 52, 211, 153;
-  --kr-error: #ff4d6a;
-  --kr-error-rgb: 255, 77, 106;
-  --kr-error-soft: #ff9aa9;
+  --kr-error: #ff1ba8;
+  --kr-error-rgb: 255, 27, 168;
+  --kr-error-soft: #ff5bbc;
   --kr-warning: #ffc800;
   --kr-warning-rgb: 255, 200, 0;
   --kr-warning-soft: #fbbf24;
@@ -73,10 +73,10 @@
   --kr-cyan-rgb: 0, 212, 255;
   --kr-purple: #8b5cf6;
   --kr-purple-rgb: 139, 92, 246;
-  --kr-purple-soft: #a78bfa;
-  --kr-purple-soft-rgb: 167, 139, 250;
-  --kr-pink: #ec4899;
-  --kr-pink-rgb: 236, 72, 153;
+  --kr-purple-soft: #c8a0ff;
+  --kr-purple-soft-rgb: 200, 160, 255;
+  --kr-pink: #ff5bbc;
+  --kr-pink-rgb: 255, 91, 188;
   --kr-warning-amber-rgb: 245, 158, 11;
   --kr-cancelled: rgba(255, 255, 255, 0.45);
   --kr-text-on-accent: #111;
@@ -145,6 +145,22 @@
   --kr-z-tour: 5000;
   --kr-z-tour-tooltip: 5001;
   --kr-z-tour-tooltip: 5001;
+
+  /* ── Neon glow tokens (dark default) ──────────────────────────────────
+     Double-stack recipe ported from the pitch site `site/index.html` :
+     inner punch + outer halo. Used selectively on accents — never on
+     body text (a11y) and never on light theme (overridden below).      */
+  --kr-glow-lime-sm: 0 0 6px rgba(200, 255, 0, 0.35), 0 0 14px rgba(200, 255, 0, 0.18);
+  --kr-glow-lime-md: 0 0 10px rgba(200, 255, 0, 0.45), 0 0 24px rgba(200, 255, 0, 0.22);
+  --kr-glow-lime-lg: 0 0 14px rgba(200, 255, 0, 0.55), 0 0 36px rgba(200, 255, 0, 0.28);
+  --kr-glow-magenta-sm: 0 0 6px rgba(255, 27, 168, 0.35), 0 0 14px rgba(255, 27, 168, 0.18);
+  --kr-glow-magenta-md: 0 0 10px rgba(255, 27, 168, 0.50), 0 0 24px rgba(255, 27, 168, 0.22);
+  --kr-glow-electric-sm: 0 0 6px rgba(139, 92, 246, 0.35), 0 0 14px rgba(139, 92, 246, 0.18);
+  --kr-glow-electric-md: 0 0 10px rgba(139, 92, 246, 0.50), 0 0 24px rgba(139, 92, 246, 0.22);
+  --kr-glow-lila-sm: 0 0 6px rgba(200, 160, 255, 0.30), 0 0 14px rgba(200, 160, 255, 0.16);
+  --kr-text-glow-lime: 0 0 8px rgba(200, 255, 0, 0.45), 0 0 18px rgba(200, 255, 0, 0.20);
+  --kr-text-glow-magenta: 0 0 8px rgba(255, 27, 168, 0.45), 0 0 18px rgba(255, 27, 168, 0.20);
+  --kr-bevel-top: inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -554,4 +570,28 @@
   --kr-shadow-xl: 0 8px 16px rgba(131, 24, 67, 0.12), 0 30px 60px rgba(131, 24, 67, 0.22);
   --kr-shadow-popover: 0 4px 12px rgba(131, 24, 67, 0.12), 0 12px 28px rgba(131, 24, 67, 0.14);
   --kr-shadow-modal: 0 8px 20px rgba(131, 24, 67, 0.14), 0 20px 40px rgba(131, 24, 67, 0.20);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Neon glow neutralization for non-arcade themes.
+   The lime/magenta/electric glow tokens belong to the Lila Arcade dark
+   default (matches `site/index.html`). Other themes carry their own
+   ambient via their own palette — overriding to `none` here prevents
+   color clashes (lime over Sakura pink, lime over Gotham yellow, etc.).
+   ═══════════════════════════════════════════════════════════════════════════ */
+:root[data-theme="light"],
+:root[data-theme="matrix"],
+:root[data-theme="gotham"],
+:root[data-theme="sakura"] {
+  --kr-glow-lime-sm: none;
+  --kr-glow-lime-md: none;
+  --kr-glow-lime-lg: none;
+  --kr-glow-magenta-sm: none;
+  --kr-glow-magenta-md: none;
+  --kr-glow-electric-sm: none;
+  --kr-glow-electric-md: none;
+  --kr-glow-lila-sm: none;
+  --kr-text-glow-lime: none;
+  --kr-text-glow-magenta: none;
+  --kr-bevel-top: none;
 }
