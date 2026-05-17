@@ -17,7 +17,7 @@ export function ProfilesSection({ toast, t }: ProfilesSectionProps) {
   const [newProfilePersonaName, setNewProfilePersonaName] = useState('');
   const [newProfileRole, setNewProfileRole] = useState('');
   const [newProfileAvatar, setNewProfileAvatar] = useState('\uD83E\uDD16');
-  const [newProfileColor, setNewProfileColor] = useState('#a78bfa');
+  const [newProfileColor, setNewProfileColor] = useState('#c8a0ff');
   const [newProfileCategory, setNewProfileCategory] = useState<'Technical' | 'Business' | 'Meta'>('Technical');
   const [newProfilePersona, setNewProfilePersona] = useState('');
   const [expandedProfileDesc, setExpandedProfileDesc] = useState<string | null>(null);
@@ -229,7 +229,7 @@ export function ProfilesSection({ toast, t }: ProfilesSectionProps) {
                     });
                     setAvailableProfiles(prev => [...prev, created]);
                     setShowCreateProfile(false);
-                    setNewProfileName(''); setNewProfilePersonaName(''); setNewProfileRole(''); setNewProfileAvatar('\uD83E\uDD16'); setNewProfileColor('#a78bfa'); setNewProfilePersona('');
+                    setNewProfileName(''); setNewProfilePersonaName(''); setNewProfileRole(''); setNewProfileAvatar('\uD83E\uDD16'); setNewProfileColor('#c8a0ff'); setNewProfilePersona('');
                     toast(t('profiles.createCustom'), 'success');
                   } catch (err) { console.warn('Settings action failed:', err); }
                 }}
@@ -239,7 +239,7 @@ export function ProfilesSection({ toast, t }: ProfilesSectionProps) {
               <button
                 className="set-icon-btn"
                 aria-label={t('common.cancel')}
-                onClick={() => { setShowCreateProfile(false); setNewProfileName(''); setNewProfilePersonaName(''); setNewProfileRole(''); setNewProfileAvatar('\uD83E\uDD16'); setNewProfileColor('#a78bfa'); setNewProfilePersona(''); }}
+                onClick={() => { setShowCreateProfile(false); setNewProfileName(''); setNewProfilePersonaName(''); setNewProfileRole(''); setNewProfileAvatar('\uD83E\uDD16'); setNewProfileColor('#c8a0ff'); setNewProfilePersona(''); }}
               >
                 <X size={12} />
               </button>

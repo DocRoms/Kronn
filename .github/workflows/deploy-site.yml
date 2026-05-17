@@ -1,0 +1,52 @@
+# ─────────────────────────────────────────────────────────────────────────
+#  Deploy the Kronn pitch site (FR / EN / ES) to GitHub Pages.
+#  Triggered on push to main when /site/ changes (or manually).
+#  Site source : /site  (root-level, NOT in /docs which holds AGENTS.md).
+#  Output URL  : https://<owner>.github.io/<repo>/  (root index.html serves FR)
+#
+#  Setup required ONCE in GitHub UI :
+#    Settings → Pages → Source : "GitHub Actions"
+#    (no branch picker — Actions feeds Pages directly via the artifact upload)
+# ─────────────────────────────────────────────────────────────────────────
+name: Deploy site to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - '.github/workflows/deploy-site.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one concurrent deploy ; in-progress run won't be cancelled so a deploy
+# that's mid-publish can complete before the next one starts.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload site artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -16,11 +16,33 @@
 /* ── Reset ──────────────────────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* ── Body + Aurora ambient ──────────────────────────────────────────────
+   The dark default carries the Lila Arcade aurora gradient (magenta from
+   bottom, electric violet from top-right) baked into the body background,
+   layered above the solid bg-base. Multi-bg approach (vs ::before fixed)
+   avoids any stacking-context drama and works regardless of how children
+   are positioned. background-attachment: fixed keeps it stable on scroll.
+   Light + secret themes override below (each carries its own ambient).  */
 body {
   font-family: var(--kr-font-sans);
-  background: var(--kr-bg-base);
+  background:
+    /* Magenta bumped from 0.14 → 0.22 so the pink/rose dominates the
+       ambient on dark default (matches the visual balance of the pitch
+       site where pink is the primary accent and lime is a signature
+       spot). Electric violet stays as a secondary tint up-right.       */
+    radial-gradient(ellipse at bottom, rgba(255, 27, 168, 0.22) 0%, transparent 55%),
+    radial-gradient(ellipse at top right, rgba(139, 92, 246, 0.14) 0%, transparent 50%),
+    var(--kr-bg-base);
+  background-attachment: fixed;
   color: var(--kr-text-primary);
   -webkit-font-smoothing: antialiased;
+}
+
+:root[data-theme="light"] body,
+:root[data-theme="matrix"] body,
+:root[data-theme="gotham"] body,
+:root[data-theme="sakura"] body {
+  background: var(--kr-bg-base);
 }
 
 code, .mono { font-family: var(--kr-font-mono); }
