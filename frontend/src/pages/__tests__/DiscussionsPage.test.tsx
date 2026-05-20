@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, screen, act, cleanup, fireEvent } from '@testing-library/react';
+import { render, screen, act, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
 
 // Mock SpeechSynthesis API
@@ -1076,6 +1076,117 @@ describe('DiscussionsPage', () => {
         language: 'fr',
       })
     );
+  });
+
+  it('0.8.6 disc-first : creating with launchAgentNow=false skips runAgent + toasts', async () => {
+    // Regression guard for the new launchAgentNow=false branch in
+    // handleCreateDiscussion. When the user unchecks "Lancer un
+    // agent tout de suite" :
+    //   - discussionsApi.create still fires (the disc is born)
+    //   - discussionsApi.runAgent MUST NOT fire (no CLI kick-off)
+    //   - a success toast surfaces with the disc-first guidance copy
+    // Without this test, a refactor that drops the early-return
+    // would silently start spawning agents on every disc-first
+    // creation in prod.
+    const createdDisc: Discussion = {
+      ...makeListDiscussion('disc-first-1', 1),
+      messages: [],
+    };
+    // Mock state leaks between tests in this file — clear both call
+    // history AND prior resolved-value bindings before re-arming.
+    vi.mocked(discussionsApi.create).mockReset();
+    vi.mocked(discussionsApi.create).mockResolvedValue(createdDisc);
+    vi.mocked(discussionsApi.get).mockResolvedValue(createdDisc);
+    vi.mocked(discussionsApi.runAgent).mockClear();
+
+    const claudeAgent: AgentDetection = {
+      name: 'Claude Code',
+      agent_type: 'ClaudeCode',
+      installed: true,
+      enabled: true,
+      path: '/usr/bin/claude',
+      version: '1.0.0',
+      latest_version: null,
+      origin: 'host',
+      install_command: null,
+      host_managed: false,
+      host_label: null,
+      runtime_available: false, rtk_available: false, rtk_hook_configured: false,
+    };
+
+    const lifted = liftedProps();
+    const localToast = vi.fn();
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[claudeAgent]}
+        allDiscussions={[]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={localToast}
+        {...lifted}
+      />
+    );
+
+    // Open the new-disc form.
+    const newBtn = screen.getAllByText(/Nouvelle/)[0];
+    await act(async () => { fireEvent.click(newBtn); });
+
+    // Uncheck the "Lancer un agent tout de suite" checkbox. Real i18n
+    // translates the aria-label to French — match it that way rather
+    // than the i18n key (the DiscussionsPage test wraps in the real
+    // I18nProvider, not the mock used by component tests).
+    const launchCheckbox = document.querySelector(
+      'input[type="checkbox"]',
+    ) as HTMLInputElement;
+    expect(launchCheckbox).toBeTruthy();
+    expect(launchCheckbox.checked).toBe(true);
+    await act(async () => { fireEvent.click(launchCheckbox); });
+    expect(launchCheckbox.checked).toBe(false);
+
+    // Fill the title. `input[placeholder]` alone matches the sidebar
+    // search input first — target the disc-form input by class.
+    const titleInput = document.querySelector(
+      'input.disc-input-styled',
+    ) as HTMLInputElement;
+    expect(titleInput).toBeTruthy();
+    await act(async () => {
+      fireEvent.change(titleInput, { target: { value: 'RGPD room for later' } });
+    });
+
+    // Submit — button label flips from "Démarrer" to "Créer la discussion"
+    // in disc-first mode (disc.createEmpty i18n key, FR translation).
+    const createBtn = screen.getByText(/Créer la discussion/);
+    expect(createBtn).toBeTruthy();
+    await act(async () => { fireEvent.click(createBtn); });
+    await waitFor(
+      () => expect(vi.mocked(discussionsApi.create)).toHaveBeenCalled(),
+      { timeout: 1000 },
+    );
+
+    // The disc was created with the title the user typed.
+    expect(vi.mocked(discussionsApi.create)).toHaveBeenCalledTimes(1);
+    const createCall = vi.mocked(discussionsApi.create).mock.calls[0][0];
+    expect(createCall.title).toBe('RGPD room for later');
+    expect(createCall.agent).toBe('ClaudeCode');
+
+    // No agent run was kicked off — disc-first promise. The
+    // assertion runs after waitFor so the handler had time to
+    // reach either the early-return OR the runAgent branch.
+    await act(async () => { await new Promise(r => setTimeout(r, 50)); });
+    expect(vi.mocked(discussionsApi.runAgent)).not.toHaveBeenCalled();
+
+    // A success toast surfaced with the disc-first guidance copy.
+    // Real i18n provider → FR translation in the toast args.
+    await waitFor(() => {
+      const successToast = localToast.mock.calls.find(c => c[1] === 'success');
+      expect(successToast, 'expected a success toast').toBeDefined();
+      expect(successToast![0]).toContain('Discussion créée');
+    }, { timeout: 1000 });
   });
 
   it('shows copy button on agent messages', async () => {

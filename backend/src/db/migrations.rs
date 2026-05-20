@@ -79,6 +79,7 @@ pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> 
         ("057_message_duration", include_str!("sql/057_message_duration.sql")),
         ("058_qp_versions_and_lineage", include_str!("sql/058_qp_versions_and_lineage.sql")),
         ("059_qp_versions_backfill", include_str!("sql/059_qp_versions_backfill.sql")),
+        ("060_discussion_sessions", include_str!("sql/060_discussion_sessions.sql")),
     ];
 
     // Check if there are pending migrations before backing up

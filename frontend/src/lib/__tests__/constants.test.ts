@@ -226,22 +226,22 @@ describe('constants', () => {
       expect(agentSupportsIntrospection('Ollama')).toBe(true);
     });
 
-    it('excludes Codex temporarily (sandbox blocks tool call — TD-20260510)', () => {
-      // Codex 0.121 sees the kronn-internal MCP entry and attempts
-      // the call, but the exec-mode sandbox cancels the spawn before
-      // the bridge runs. Treated as unsupported in the UX surface
-      // until the upstream blocker is resolved.
-      expect(agentSupportsIntrospection('Codex')).toBe(false);
+    it('includes Codex since 0.132 (upstream sandbox fix, 2026-05-20)', () => {
+      // Codex 0.121 was excluded because exec-mode sandbox cancelled
+      // the MCP tool call spawn. Codex 0.132 lifts that restriction
+      // (confirmed live via `tools/call disc_meta` smoke test). The
+      // old TD-20260510-codex-mcp-sandbox-block is closed.
+      expect(agentSupportsIntrospection('Codex')).toBe(true);
     });
 
-    it('includes every other concrete agent type', () => {
-      const supported = ALL_AGENT_TYPES.filter(t => t !== 'Codex');
-      // ClaudeCode, GeminiCli, Kiro, CopilotCli read an MCP config
-      // and successfully invoke the tools (proven E2E with
-      // ClaudeCode in `codex-real-introspection.spec.ts`). Vibe +
-      // Ollama use the slash-marker fallback.
-      expect(supported.length).toBeGreaterThan(0);
-      for (const t of supported) {
+    it('includes every concrete agent type', () => {
+      // Every `AgentType` now has at least one introspection path
+      // (MCP for the modern CLIs, slash-marker fallback for Vibe +
+      // Ollama). The predicate is a `return true` placeholder kept
+      // as a stable grep target for the day a future agent breaks
+      // the assumption.
+      expect(ALL_AGENT_TYPES.length).toBeGreaterThan(0);
+      for (const t of ALL_AGENT_TYPES) {
         expect(agentSupportsIntrospection(t), `${t} should support introspection`).toBe(true);
       }
     });

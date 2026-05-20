@@ -351,3 +351,184 @@ describe('NewDiscussionForm — re-entry guard', () => {
     expect(onSubmit).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('NewDiscussionForm — 0.8.6 disc-first refactor', () => {
+  // The checkbox "Launch an agent right away" (default ON) gates the
+  // agent picker + the auto-runAgent flow. Unchecking lets the user
+  // create an empty disc that they invite agents into later. These
+  // tests lock the contract :
+  //   * checkbox checked → agent picker visible, legacy submit
+  //   * checkbox unchecked → picker hidden, submit emits
+  //     launchAgentNow=false, prompt becomes optional
+  //   * tooltip carries the 23-word hint validated 2026-05-20
+
+  const findLaunchCheckbox = () =>
+    document.querySelector(
+      'input[aria-label="disc.launchAgentNow"]',
+    ) as HTMLInputElement | null;
+
+  it('shows the launch-agent checkbox checked by default + the legacy agent picker', async () => {
+    mount([PROJECT_WITH_REPO]);
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+    const checkbox = findLaunchCheckbox();
+    expect(checkbox).not.toBeNull();
+    expect(checkbox!.checked).toBe(true);
+
+    // Picker visible (Claude Code option).
+    const agentSelect = document.querySelector(
+      'select[aria-label="disc.agent"]',
+    );
+    expect(agentSelect).not.toBeNull();
+  });
+
+  it('hides the agent picker + shows the disc-first hint when the checkbox is unchecked', async () => {
+    mount([PROJECT_WITH_REPO]);
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+    const checkbox = findLaunchCheckbox();
+    await act(async () => { fireEvent.click(checkbox!); });
+
+    expect(checkbox!.checked).toBe(false);
+    expect(
+      document.querySelector('select[aria-label="disc.agent"]'),
+    ).toBeNull();
+    // Hint copy fragment from disc.discFirstHint is present.
+    expect(document.body.textContent).toContain('disc.discFirstHint');
+  });
+
+  it('tooltip ⓘ carries the validated 23-word hint as `title`', async () => {
+    mount([PROJECT_WITH_REPO]);
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+    const infoIcon = document.querySelector(
+      '.disc-form-info-icon',
+    ) as HTMLElement | null;
+    expect(infoIcon).not.toBeNull();
+    expect(infoIcon!.title).toBe('disc.launchAgentNowHint');
+  });
+
+  it('submit emits launchAgentNow=true with the legacy payload when checkbox stays ON', async () => {
+    const onSubmit = vi.fn();
+    render(
+      <NewDiscussionForm
+        projects={[PROJECT_WITH_REPO]}
+        agents={[AGENT]}
+        configLanguage="fr"
+        agentAccess={null}
+        onSubmit={onSubmit}
+        onClose={vi.fn()}
+        onNavigate={vi.fn()}
+        t={(key: string) => key}
+      />,
+    );
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+    const textarea = document.querySelector(
+      'textarea[aria-label="disc.prompt"]',
+    ) as HTMLTextAreaElement;
+    await act(async () => {
+      fireEvent.change(textarea, { target: { value: 'investigate the bug' } });
+    });
+    const createBtn = document.querySelector('.disc-create-btn') as HTMLButtonElement;
+    await act(async () => { fireEvent.click(createBtn); });
+    await act(async () => { await Promise.resolve(); });
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit.mock.calls[0][0].launchAgentNow).toBe(true);
+    expect(onSubmit.mock.calls[0][0].agent).toBe('ClaudeCode');
+    expect(onSubmit.mock.calls[0][0].prompt).toBe('investigate the bug');
+  });
+
+  it('submit emits launchAgentNow=false when checkbox is unchecked, even with no agent installed', async () => {
+    // Disc-first scenario : user opens the form on a fresh machine
+    // without any CLI installed, types a brief, submits → disc gets
+    // created, no runAgent kick-off. The parent (DiscussionsPage)
+    // will short-circuit the streaming flow on launchAgentNow=false.
+    const onSubmit = vi.fn();
+    render(
+      <NewDiscussionForm
+        projects={[PROJECT_WITH_REPO]}
+        agents={[]}
+        configLanguage="fr"
+        agentAccess={null}
+        onSubmit={onSubmit}
+        onClose={vi.fn()}
+        onNavigate={vi.fn()}
+        t={(key: string) => key}
+      />,
+    );
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+    const checkbox = findLaunchCheckbox();
+    await act(async () => { fireEvent.click(checkbox!); });
+
+    const textarea = document.querySelector(
+      'textarea[aria-label="disc.prompt"]',
+    ) as HTMLTextAreaElement;
+    await act(async () => {
+      fireEvent.change(textarea, { target: { value: 'topic for later' } });
+    });
+    const createBtn = document.querySelector('.disc-create-btn') as HTMLButtonElement;
+    expect(createBtn.disabled).toBe(false);
+    await act(async () => { fireEvent.click(createBtn); });
+    await act(async () => { await Promise.resolve(); });
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload.launchAgentNow).toBe(false);
+    expect(payload.prompt).toBe('topic for later');
+    // The agent field still carries a placeholder (the form doesn't
+    // know how to send `null` — it just sends the first installed
+    // agent or 'ClaudeCode'). The parent uses launchAgentNow=false
+    // to skip runAgent regardless.
+    expect(payload.agent).toBe('ClaudeCode');
+  });
+
+  it('disc-first mode lets the user submit with ONLY a title (no prompt)', async () => {
+    // The MVP intent : create an empty topic, fill in the brief later
+    // when an agent is invited. Title alone is enough.
+    const onSubmit = vi.fn();
+    render(
+      <NewDiscussionForm
+        projects={[PROJECT_WITH_REPO]}
+        agents={[AGENT]}
+        configLanguage="fr"
+        agentAccess={null}
+        onSubmit={onSubmit}
+        onClose={vi.fn()}
+        onNavigate={vi.fn()}
+        t={(key: string) => key}
+      />,
+    );
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+    const checkbox = findLaunchCheckbox();
+    await act(async () => { fireEvent.click(checkbox!); });
+
+    const titleInput = document.querySelector(
+      'input[aria-label="disc.title"]',
+    ) as HTMLInputElement;
+    await act(async () => {
+      fireEvent.change(titleInput, { target: { value: 'RGPD audit room' } });
+    });
+    const createBtn = document.querySelector('.disc-create-btn') as HTMLButtonElement;
+    expect(createBtn.disabled).toBe(false);
+    await act(async () => { fireEvent.click(createBtn); });
+    await act(async () => { await Promise.resolve(); });
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit.mock.calls[0][0].title).toBe('RGPD audit room');
+    expect(onSubmit.mock.calls[0][0].prompt).toBe('');
+  });
+
+  it('disc-first mode keeps submit DISABLED when both title AND prompt are blank', async () => {
+    mount([PROJECT_WITH_REPO]);
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+    const checkbox = findLaunchCheckbox();
+    await act(async () => { fireEvent.click(checkbox!); });
+
+    const createBtn = document.querySelector('.disc-create-btn') as HTMLButtonElement;
+    expect(createBtn.disabled).toBe(true);
+  });
+});
