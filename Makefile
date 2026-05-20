@@ -376,6 +376,12 @@ endif
 	@sed -i 's/"version": ".*"/"version": "$(V)"/' desktop/package.json
 	@sed -i 's/"version": ".*"/"version": "$(V)"/' desktop/src-tauri/tauri.conf.json
 	@sed -i 's/Kronn v[0-9]\+\.[0-9]\+\.[0-9]\+/Kronn v$(V)/' README.md
+	@# 0.8.6 — also bump the hardcoded version in the public site (FR/EN/ES).
+	@# Pre-fix `make bump` skipped these and we shipped 0.8.6 with the site
+	@# still claiming v0.8.5 on the early-access disclaimer + credits line.
+	@# Pattern: any "v<semver>" occurrence in site/*.html is the Kronn version
+	@# (no other tokens use that prefix today).
+	@sed -i 's/v[0-9]\+\.[0-9]\+\.[0-9]\+/v$(V)/g' site/index.html site/en.html site/es.html
 	@# Sync Cargo.lock workspace entries so `cargo check --locked` stays green in CI.
 	@# `cargo update --workspace --offline` only touches local package versions in the
 	@# lock file — no network, no dep bumps. Required after editing a workspace

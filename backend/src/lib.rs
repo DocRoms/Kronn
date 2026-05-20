@@ -553,6 +553,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/mcps/refresh", post(api::mcps::refresh))
         .route("/api/mcps/configs", post(api::mcps::create_config))
         .route("/api/mcps/configs/{id}", patch(api::mcps::update_config).delete(api::mcps::delete_config))
+        // 0.8.6 — Custom API plugin spec edit. Lets the user fix a
+        // typo / add endpoints / change docs_url WITHOUT delete+recreate.
+        // Server_id is preserved; configs & workflow ApiCall refs stay valid.
+        .route("/api/mcps/custom/{server_id}", put(api::mcps::update_custom_spec))
         .route("/api/mcps/configs/{id}/projects", patch(api::mcps::set_config_projects))
         .route("/api/mcps/configs/{id}/reveal", post(api::mcps::reveal_secrets))
         .route("/api/mcps/host-discovery", get(api::mcps::host_discovery))
@@ -582,6 +586,11 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // ── ApiCall step wizard endpoints (P0.5 — désagentification) ──
         .route("/api/workflow-steps/test-extract", post(api::workflows::test_extract))
         .route("/api/workflow-steps/test-api-call", post(api::workflows::test_api_call))
+        // 0.8.6 — Agent API broker. Lets the kronn-internal MCP forward
+        // an agent-driven HTTP call through the same executor as
+        // workflow ApiCall steps. Credentials never leave Kronn DB.
+        // Project scope resolved from the parent disc.
+        .route("/api/agent-api/call", post(api::agent_api::agent_api_call))
         .route("/api/workflows/{id}/trigger", post(api::workflows::trigger))
         .route("/api/workflows/{id}/runs", get(api::workflows::list_runs).delete(api::workflows::delete_all_runs))
         .route("/api/workflows/{id}/runs/{run_id}", get(api::workflows::get_run).delete(api::workflows::delete_run))

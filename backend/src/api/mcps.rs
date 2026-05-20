@@ -255,10 +255,37 @@ pub(crate) fn materialize_custom_server(payload: &CustomApiPayload) -> McpServer
         })
         .collect();
 
+    // 0.8.6 — endpoints land in ApiSpec.endpoints if the payload
+    // declared any. Path is the only required field for a useful
+    // entry; blank-path rows (likely a UI-form trailing-empty-row) are
+    // silently dropped so the spec stays clean. Method defaults to GET
+    // when blank — same forgiving stance as the form. Method casing is
+    // normalized to UPPER for consistency in the registry view.
+    let endpoints: Vec<ApiEndpoint> = payload
+        .endpoints
+        .iter()
+        .filter(|e| !e.path.trim().is_empty())
+        .map(|e| ApiEndpoint {
+            path: e.path.trim().to_string(),
+            method: {
+                let m = e.method.trim();
+                if m.is_empty() {
+                    "GET".to_string()
+                } else {
+                    m.to_uppercase()
+                }
+            },
+            description: e.description.trim().to_string(),
+        })
+        .collect();
+
     let api_spec = ApiSpec {
         base_url: payload.base_url.clone(),
-        auth: ApiAuthKind::None,
-        endpoints: vec![],
+        // 0.8.6 — propagate the user-declared auth scheme. Default
+        // (ApiAuthKind::None) preserves pre-0.8.6 behaviour for any
+        // back-compat payload that omits the field.
+        auth: payload.auth.clone(),
+        endpoints,
         docs_url: payload
             .docs_url
             .as_ref()
@@ -306,6 +333,80 @@ async fn projects_for_global(state: &AppState) -> Vec<String> {
         Ok(crate::db::projects::list_projects(conn)?
             .into_iter().map(|p| p.id).collect::<Vec<_>>())
     }).await.unwrap_or_default()
+}
+
+/// `PUT /api/mcps/custom/:server_id` — 0.8.6 — update a Custom API
+/// plugin's spec (name, base_url, description, docs_url, fields,
+/// endpoints) WITHOUT re-creating the plugin. Closes the UX gap where
+/// users had to delete-and-recreate to fix a typo or add endpoints
+/// surfaced after a doc fetch.
+///
+/// Critical invariants:
+/// - `server_id` is preserved across the update. The slug is baked
+///   into the id at creation (`custom-{slug}-{nano}`); renaming the
+///   plugin must NOT mutate it, otherwise every `McpConfig.server_id`
+///   referencing it and every workflow `ApiCall` step's
+///   `api_plugin_slug` referencing it would break silently.
+/// - `source` + `transport` are preserved from the existing row (no
+///   weird "Manual → Registry" flips through the back door).
+/// - Encrypted env stored per-config in `mcp_configs` is NOT touched
+///   here. Effects:
+///     * Add a field via this endpoint → existing configs are still
+///       OK; the user opens "edit env" to fill the new key.
+///     * Remove a field → orphan env entries persist in the
+///       `mcp_configs` row but stop being surfaced (since the spec
+///       no longer declares the key). Harmless; can be GC'd later.
+/// - Endpoint deletion = endpoint disappears from `ApiSpec.endpoints`
+///   → any existing workflow `ApiCall` step referencing it will fail
+///   at run-time with the existing "endpoint not in allowlist"
+///   diagnostic. Loud-and-clear failure, not silent corruption.
+pub async fn update_custom_spec(
+    State(state): State<AppState>,
+    Path(server_id): Path<String>,
+    Json(payload): Json<CustomApiPayload>,
+) -> Json<ApiResponse<McpServer>> {
+    // Hard prefix gate: only custom plugins are editable through this
+    // route. Registry plugins (`api-*`, `mcp-*`) are immutable by
+    // design — their spec is hard-coded in `core::registry`.
+    if !server_id.starts_with("custom-") {
+        return Json(ApiResponse::err(format!(
+            "Server `{}` is not a Custom API plugin (id must start with `custom-`).",
+            server_id
+        )));
+    }
+    // Same field validation as the create path. Surfaces the error
+    // before the DB round-trip.
+    if payload.name.trim().is_empty() {
+        return Json(ApiResponse::err("Custom API requires a name"));
+    }
+    if payload.base_url.trim().is_empty() {
+        return Json(ApiResponse::err("Custom API requires a base URL"));
+    }
+
+    let result = state.db.with_conn(move |conn| -> anyhow::Result<McpServer> {
+        // Verify the server exists. We rely on `list_servers` since
+        // there's no `get_server_by_id` helper today — N=registry+manual
+        // count, ~20 max in practice, perfectly fine.
+        let existing = db::mcps::list_servers(conn)?;
+        let prev = existing.iter().find(|s| s.id == server_id)
+            .ok_or_else(|| anyhow::anyhow!("Custom plugin `{}` not found", server_id))?;
+
+        // Re-materialize the spec from the new payload, then force the
+        // pre-existing id + source + transport so referential integrity
+        // (configs, workflow steps) is preserved.
+        let mut updated = materialize_custom_server(&payload);
+        updated.id = server_id.clone();
+        updated.source = prev.source.clone();
+        updated.transport = prev.transport.clone();
+
+        db::mcps::upsert_server(conn, &updated)?;
+        Ok(updated)
+    }).await;
+
+    match result {
+        Ok(s) => Json(ApiResponse::ok(s)),
+        Err(e) => Json(ApiResponse::err(e.to_string())),
+    }
 }
 
 /// PUT /api/mcps/configs/:id — update config
@@ -1608,10 +1709,12 @@ mod tests {
             base_url: "https://my-org.salesforce.com".into(),
             description: "Sales org REST API".into(),
             docs_url: Some("https://developer.salesforce.com".into()),
+            auth: ApiAuthKind::None,
             fields: vec![
                 CustomApiField { label: "Bearer Token".into(), value: "secret".into() },
                 CustomApiField { label: "Org ID".into(), value: "00D5g".into() },
             ],
+            endpoints: vec![],
         };
 
         let server = materialize_custom_server(&payload);
@@ -1641,11 +1744,13 @@ mod tests {
             base_url: "http://x".into(),
             description: String::new(),
             docs_url: None,
+            auth: ApiAuthKind::None,
             fields: vec![
                 CustomApiField { label: "Real".into(), value: "v".into() },
                 CustomApiField { label: "   ".into(), value: "ignored".into() },
                 CustomApiField { label: "".into(), value: "".into() },
             ],
+            endpoints: vec![],
         };
         let server = materialize_custom_server(&payload);
         let spec = server.api_spec.unwrap();
@@ -1661,10 +1766,218 @@ mod tests {
             base_url: "http://x".into(),
             description: String::new(),
             docs_url: Some("   ".into()),
+            auth: ApiAuthKind::None,
             fields: vec![],
+            endpoints: vec![],
         };
         let spec = materialize_custom_server(&payload).api_spec.unwrap();
         assert!(spec.docs_url.is_none(), "blank docs_url should be None, got {:?}", spec.docs_url);
+    }
+
+    // ─── 0.8.6 — endpoints declared at creation time ───────────────────
+    //
+    // The user creates a Custom API plugin AND provides endpoints (often
+    // via `CustomApiAiHelper` which fetches the docs and emits them in the
+    // KRONN:APPLY block). Without endpoints declared, the executor's
+    // allowlist refuses every agent-driven ApiCall — so this is the
+    // forward-fix that unblocks `api_call` MCP tool usage on custom
+    // plugins. Cf. [[project_endpoints_autodiscovery_0_8_6]].
+
+    #[test]
+    fn materialize_custom_server_persists_declared_endpoints() {
+        let payload = CustomApiPayload {
+            name: "Didomi".into(),
+            base_url: "https://api.didomi.io/v1".into(),
+            description: "Consent management".into(),
+            docs_url: Some("https://developers.didomi.io/api".into()),
+            auth: ApiAuthKind::None,
+            fields: vec![
+                CustomApiField { label: "API Key".into(), value: "k".into() },
+                CustomApiField { label: "API Secret".into(), value: "s".into() },
+            ],
+            endpoints: vec![
+                ApiEndpoint {
+                    path: "/sessions".into(),
+                    method: "POST".into(),
+                    description: "Exchange api-key for bearer token".into(),
+                },
+                ApiEndpoint {
+                    path: "/widgets/notices".into(),
+                    method: "GET".into(),
+                    description: "List consent notices".into(),
+                },
+                ApiEndpoint {
+                    path: "/consents/events".into(),
+                    method: "GET".into(),
+                    description: "List consent events for a user".into(),
+                },
+            ],
+        };
+        let server = materialize_custom_server(&payload);
+        let spec = server.api_spec.expect("api_spec set");
+        assert_eq!(spec.endpoints.len(), 3);
+        assert_eq!(spec.endpoints[0].path, "/sessions");
+        assert_eq!(spec.endpoints[0].method, "POST");
+        assert_eq!(spec.endpoints[0].description, "Exchange api-key for bearer token");
+        assert_eq!(spec.endpoints[1].path, "/widgets/notices");
+        assert_eq!(spec.endpoints[1].method, "GET");
+        assert_eq!(spec.endpoints[2].path, "/consents/events");
+    }
+
+    #[test]
+    fn materialize_custom_server_drops_blank_path_endpoints() {
+        // The form's "Add row" button can leave a trailing empty row on
+        // submit. Dropping silently keeps the spec clean and doesn't
+        // confuse the agent (an empty path would crash the executor's
+        // allowlist match anyway).
+        let payload = CustomApiPayload {
+            name: "X".into(),
+            base_url: "http://x".into(),
+            description: String::new(),
+            docs_url: None,
+            auth: ApiAuthKind::None,
+            fields: vec![],
+            endpoints: vec![
+                ApiEndpoint { path: "/real".into(), method: "GET".into(), description: "ok".into() },
+                ApiEndpoint { path: "   ".into(), method: "GET".into(), description: "blank".into() },
+                ApiEndpoint { path: "".into(), method: "POST".into(), description: "also blank".into() },
+            ],
+        };
+        let spec = materialize_custom_server(&payload).api_spec.unwrap();
+        assert_eq!(spec.endpoints.len(), 1, "blank-path rows must be dropped");
+        assert_eq!(spec.endpoints[0].path, "/real");
+    }
+
+    #[test]
+    fn materialize_custom_server_normalizes_method_case_and_blank() {
+        // Defensive normalization: agents emit lowercase methods,
+        // hand-edits emit upper, blank-method-but-path-set should
+        // default to GET (most common). Keep behaviour predictable so
+        // the allowlist match in `api_call_executor` is case-stable.
+        let payload = CustomApiPayload {
+            name: "X".into(),
+            base_url: "http://x".into(),
+            description: String::new(),
+            docs_url: None,
+            auth: ApiAuthKind::None,
+            fields: vec![],
+            endpoints: vec![
+                ApiEndpoint { path: "/a".into(), method: "post".into(), description: "".into() },
+                ApiEndpoint { path: "/b".into(), method: "  ".into(), description: "blank → GET".into() },
+                ApiEndpoint { path: "/c".into(), method: "DELETE".into(), description: "".into() },
+            ],
+        };
+        let spec = materialize_custom_server(&payload).api_spec.unwrap();
+        assert_eq!(spec.endpoints[0].method, "POST", "lowercase normalised to upper");
+        assert_eq!(spec.endpoints[1].method, "GET", "blank defaults to GET");
+        assert_eq!(spec.endpoints[2].method, "DELETE", "upper preserved");
+    }
+
+    // ─── 0.8.6 — Custom API plugin spec edit (PUT) ──────────────────────
+    //
+    // The actual HTTP handler `update_custom_spec` runs through the full
+    // `with_conn` async path, which is awkward to unit-test without a
+    // real `AppState`. The handler's invariants we DO want pinned in
+    // unit tests are:
+    //   1. `materialize_custom_server` builds a fresh server with a
+    //      fresh id every call — so when we update, we must force the
+    //      old id back onto the result. This test exercises that
+    //      stitching directly.
+    //   2. `source` + `transport` must be re-imposed from the prev row
+    //      so the edit path can't sneak Manual → Registry transitions.
+
+    #[test]
+    fn update_custom_spec_stitches_old_id_onto_freshly_materialized_server() {
+        // Simulate what the handler does post-`materialize_custom_server`.
+        // The materialize call generates a new `custom-{slug}-{nano}`
+        // suffix, but the edit MUST keep the original id frozen.
+        let new_payload = CustomApiPayload {
+            name: "Didomi Renamed".into(),
+            base_url: "https://api.didomi.io/v2".into(),
+            description: "Updated description".into(),
+            docs_url: Some("https://developers.didomi.io/api".into()),
+            auth: ApiAuthKind::None,
+            fields: vec![CustomApiField { label: "API Key".into(), value: "".into() }],
+            endpoints: vec![
+                ApiEndpoint { path: "/widgets/notices".into(), method: "GET".into(), description: "List".into() },
+            ],
+        };
+        let old_id = "custom-didomi-27c67bd7".to_string();
+        let old_source = McpSource::Manual;
+
+        let mut updated = materialize_custom_server(&new_payload);
+        assert!(updated.id.starts_with("custom-didomi-renamed-"),
+            "materialize alone generates a NEW id (different slug + nano)");
+
+        // Apply the handler's stitching.
+        updated.id = old_id.clone();
+        updated.source = old_source.clone();
+
+        assert_eq!(updated.id, "custom-didomi-27c67bd7",
+            "edit MUST preserve the original id to keep refs valid");
+        assert_eq!(updated.name, "Didomi Renamed", "name field is mutable");
+        assert!(matches!(updated.source, McpSource::Manual));
+        let spec = updated.api_spec.expect("api_spec set");
+        assert_eq!(spec.base_url, "https://api.didomi.io/v2");
+        assert_eq!(spec.endpoints.len(), 1);
+        assert_eq!(spec.endpoints[0].path, "/widgets/notices");
+        assert_eq!(spec.config_keys.len(), 1);
+        assert_eq!(spec.config_keys[0].env_key, "API_KEY");
+    }
+
+    #[test]
+    fn update_custom_spec_preserves_endpoints_added_via_ai_helper() {
+        // Real-world flow: user creates Didomi plugin with empty
+        // endpoints, runs the AI helper post-creation, the helper
+        // proposes 8 endpoints, user accepts. The PUT must persist all
+        // 8 into the ApiSpec so `mcp_list`'s hint flips
+        // `NEEDS_RESEARCH → READY`.
+        let payload = CustomApiPayload {
+            name: "Didomi".into(),
+            base_url: "https://api.didomi.io/v1".into(),
+            description: "".into(),
+            docs_url: Some("https://developers.didomi.io/api".into()),
+            auth: ApiAuthKind::None,
+            fields: vec![
+                CustomApiField { label: "API Key".into(), value: "".into() },
+                CustomApiField { label: "API Secret".into(), value: "".into() },
+            ],
+            endpoints: vec![
+                ApiEndpoint { path: "/sessions".into(), method: "POST".into(), description: "Auth".into() },
+                ApiEndpoint { path: "/organizations".into(), method: "GET".into(), description: "Orgs".into() },
+                ApiEndpoint { path: "/widgets/notices".into(), method: "GET".into(), description: "Notices".into() },
+                ApiEndpoint { path: "/widgets/notices/configs".into(), method: "GET".into(), description: "Notice configs".into() },
+                ApiEndpoint { path: "/vendors".into(), method: "GET".into(), description: "Vendors".into() },
+                ApiEndpoint { path: "/cookies".into(), method: "GET".into(), description: "Cookies".into() },
+                ApiEndpoint { path: "/consents/users".into(), method: "GET".into(), description: "User lookup".into() },
+                ApiEndpoint { path: "/consents/events".into(), method: "GET".into(), description: "Consent events".into() },
+            ],
+        };
+        let mut updated = materialize_custom_server(&payload);
+        updated.id = "custom-didomi-27c67bd7".into();  // stitched from prev
+        let spec = updated.api_spec.expect("api_spec set");
+        assert_eq!(spec.endpoints.len(), 8,
+            "the 8 endpoints proposed by the AI helper must round-trip");
+        assert_eq!(spec.endpoints[0].path, "/sessions");
+        assert_eq!(spec.endpoints[0].method, "POST");
+        assert_eq!(spec.endpoints[7].path, "/consents/events");
+    }
+
+    #[test]
+    fn custom_api_payload_deserialises_without_endpoints_field_for_backcompat() {
+        // Crucially: the frontend running BEFORE the 0.8.6 deploy still
+        // POSTs payloads without `endpoints`. The serde default MUST
+        // accept those silently so we don't 422 mid-deploy.
+        let json = r#"{
+            "name": "Legacy",
+            "base_url": "http://legacy",
+            "description": "",
+            "docs_url": null,
+            "fields": []
+        }"#;
+        let payload: CustomApiPayload =
+            serde_json::from_str(json).expect("backward-compat payload must deserialise");
+        assert!(payload.endpoints.is_empty());
     }
 
     #[test]

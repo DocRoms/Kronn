@@ -252,7 +252,12 @@ pub enum OnInvalid {
     Fail,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+// 0.8.6 — `Default` is required by the agent-API broker
+// (`src/api/agent_api.rs::agent_api_call`) which builds a synthetic
+// `WorkflowStep` for ApiCall execution from a thin agent-supplied
+// payload. Every field already has serde / type defaults so the
+// derive is a free upgrade; no nullable/Option field changed.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct WorkflowStep {
     pub name: String,

@@ -20,7 +20,15 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 COPY src ./src
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
-    touch src/main.rs src/lib.rs \
+    # 0.8.6 fix : `cargo clean -p kronn` BEFORE the build nukes the stale
+    # `kronn` artifact left over by the dummy-lib first pass (line 17).
+    # Without this, cargo's incremental cache keeps the empty-lib `.rlib`
+    # metadata and the bin's `kronn::core` / `kronn::db` / … imports fail
+    # with E0432. Cleaning only the `kronn` package preserves all deps in
+    # the BuildKit cache → no extra dep-rebuild cost. Caught 2026-05-20
+    # after adding `agent_api.rs` + `TokenExchange` variant.
+    cargo clean -p kronn 2>/dev/null || true \
+    && touch src/main.rs src/lib.rs \
     && cargo build --profile ${CARGO_PROFILE} \
     && cp target/${CARGO_PROFILE}/kronn /usr/local/bin/kronn
 

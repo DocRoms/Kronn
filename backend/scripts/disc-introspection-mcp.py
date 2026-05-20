@@ -294,10 +294,32 @@ TOOLS = [
             "instance. Returns `{configs, servers_with_api}` where "
             "`configs` lists the user's instances (id + server_id + "
             "project scoping) and `servers_with_api` lists every "
-            "REGISTRY server that exposes a REST API spec (slug + "
-            "endpoints). Use this to pick the right `api_plugin_slug` "
-            "+ `api_config_id` when drafting an `ApiCall` step — "
-            "without it the agent would have to guess plugin slugs."
+            "plugin that exposes a REST API spec, with: `description`, "
+            "`docs_url`, `is_custom`, `config_keys[]` (env keys + auth-"
+            "managed flag), `endpoints[]` (path/method/description/"
+            "side_effect), and a `hint` field.\n\n"
+            "**`config_keys[]`** — each entry is `{env_key, label, "
+            "auth_managed}`. The `env_key` (UPPER_SNAKE) is the slug "
+            "you can reference in `api_call` arguments via the "
+            "`${ENV.<env_key>}` placeholder syntax (works in "
+            "`endpoint_path`, `path_params`, `query`, `headers`, "
+            "`body`). Kronn substitutes server-side from the encrypted "
+            "config — you never see the actual value. When "
+            "`auth_managed: true`, Kronn handles that key for you via "
+            "the plugin's auth scheme (Bearer/OAuth/etc.) — DO NOT "
+            "reference it via `${ENV.X}` (it would either be redundant "
+            "or leak a secret to the prompt). Free-form identifiers "
+            "(account_id, organization_id, workspace_slug) typically "
+            "show `auth_managed: false` — that's your `${ENV.X}` "
+            "playground.\n\n"
+            "**Always read `hint` before acting** — it tells you "
+            "whether the plugin is ready for ApiCall, or whether you "
+            "need to fetch the docs first (when endpoints are empty "
+            "but `docs_url` is set), or whether to ask the user (when "
+            "neither is set). Use this to pick the right "
+            "`api_plugin_slug` + `api_config_id` when drafting an "
+            "`ApiCall` step — without it the agent would have to "
+            "guess plugin slugs."
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },
@@ -389,6 +411,109 @@ TOOLS = [
                 "directive_ids": {"type": "array", "items": {"type": "string"}, "description": "Optional directive bindings."},
             },
             "required": ["name", "prompt_template", "agent"],
+        },
+    },
+    # ─── 0.8.6 — Agent API broker (no secrets in prompt) ────────────────
+    # Lets the agent INVOKE a Kronn-configured API plugin without ever
+    # seeing the credentials. The backend decrypts the env, resolves auth
+    # per the plugin's ApiSpec, and returns the canonical envelope. Reuses
+    # the same executor as workflow ApiCall steps so behaviour is
+    # byte-identical. Cf. [[project_agent_api_broker_0_8_6]].
+    {
+        "name": "api_call",
+        "description": (
+            "Invoke a Kronn-configured API plugin (registry or custom) "
+            "WITHOUT seeing the credentials. Kronn handles auth (Bearer, "
+            "API key in header/query, OAuth, etc.) per the plugin spec "
+            "and returns the canonical envelope `{data, status, summary}`.\n\n"
+            "**Discovery first**: call `mcp_list` to find available "
+            "plugins. Each entry has a `hint` field — `READY` plugins "
+            "are directly callable; `NEEDS_RESEARCH` ones need you to "
+            "fetch their `docs_url` first to identify endpoints (then "
+            "either ask the user to declare them in the Kronn UI, OR "
+            "hand-craft the path knowing allowlist validation may "
+            "fail).\n\n"
+            "**Plugin selection** — pass EITHER:\n"
+            "  (a) `api_plugin_slug` + `api_config_id` (from `mcp_list`)\n"
+            "  (b) `quick_api_id` (from `qa_list`) — for saved Quick APIs\n\n"
+            "**Project scope** — auto-resolved server-side from 3 "
+            "sources (in priority): (1) explicit `project_id` arg if "
+            "passed, (2) the disc context if Kronn spawned you from a "
+            "disc (auto-injected), (3) the chosen `api_config_id`'s "
+            "first linked project. **Host-CLI sessions** (launched "
+            "outside Kronn) work natively via source #3 — no env var "
+            "or arg needed when you pick a config that's project-"
+            "scoped. Only pass `project_id` explicitly when the config "
+            "is global and you want to attribute the call to a "
+            "specific project.\n\n"
+            "**Auth happens server-side**: never put credentials in the "
+            "request body, headers, query, or path. Kronn injects them "
+            "from the encrypted DB config. If a plugin's auth scheme "
+            "doesn't seem to be applied, that's a plugin spec issue "
+            "(report it), not something to work around with hand-typed "
+            "Authorization headers.\n\n"
+            "**Non-secret config values via ${ENV.X}**: when a plugin "
+            "has a non-secret identifier (e.g. Didomi's `organization_id`, "
+            "an account_id, a workspace_slug) stored in its config, you "
+            "can reference it in your call using the `${ENV.KEY}` syntax "
+            "(use the env_key from `mcp_list.servers_with_api[].config_keys`). "
+            "Example: `query: { organization_id: '${ENV.ORGANIZATION_ID}' }`. "
+            "Kronn substitutes server-side — you never see the actual "
+            "value. Works in `endpoint_path`, `path_params`, `query`, "
+            "`headers`, and `body` (string leaves).\n\n"
+            "Returns `{success, data, status, summary, http_status, "
+            "error?}`. `data` is what downstream agent reasoning should "
+            "consume; `summary` is the one-liner suitable for echoing "
+            "back to the user."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_id": {
+                    "type": "string",
+                    "description": "Optional explicit project scope. Usually unnecessary — server resolves from `api_config_id`'s project_ids. Set only when calling a global config and you want to attribute the call to a specific project, OR to override the disc-derived scope.",
+                },
+                "api_plugin_slug": {
+                    "type": "string",
+                    "description": "Plugin slug from `mcp_list.servers_with_api[].id` (e.g. `mcp-atlassian`, `custom-didomi-27c67bd7`). Either this+`api_config_id`, or `quick_api_id`, MUST be provided.",
+                },
+                "api_config_id": {
+                    "type": "string",
+                    "description": "Credential set id from `mcp_list.configs[].config_id`. Required when using `api_plugin_slug`.",
+                },
+                "quick_api_id": {
+                    "type": "string",
+                    "description": "Alternative to plugin_slug+config_id: a saved Quick API id (from `qa_list`). Convenient when the user already pinned an endpoint + params.",
+                },
+                "endpoint_path": {
+                    "type": "string",
+                    "description": "Endpoint path as declared in the plugin's ApiSpec (e.g. `/rest/api/3/issue/{{issue_key}}` or `/widgets/notices`). The executor's allowlist refuses anything not in the spec.",
+                },
+                "method": {
+                    "type": "string",
+                    "description": "HTTP method override. Defaults to the method declared in the plugin spec. Uppercase: `GET | POST | PUT | PATCH | DELETE`.",
+                },
+                "path_params": {
+                    "type": "object",
+                    "description": "Path-segment substitutions (e.g. `{ \"owner\": \"DocRoms\", \"repo\": \"Kronn\" }` for `/repos/{owner}/{repo}`).",
+                },
+                "query": {
+                    "type": "object",
+                    "description": "Query-string parameters. Values are percent-encoded after substitution.",
+                },
+                "headers": {
+                    "type": "object",
+                    "description": "Extra request headers. NEVER pass auth headers here — Kronn injects them per the plugin spec.",
+                },
+                "body": {
+                    "description": "JSON body for POST/PUT/PATCH. Pass a JSON object/array directly (not a serialized string).",
+                },
+                "extract": {
+                    "type": "object",
+                    "description": "Optional JSONPath extract: `{ \"path\": \"$.items[0]\", \"fail_on_empty\": false }`. When omitted, the full response is returned in `data`.",
+                },
+            },
+            "required": ["endpoint_path"],
         },
     },
 ]
@@ -702,18 +827,152 @@ def call_mcp_list(_args):
         })
     # Server registry (which slugs are KNOWN and have an api_spec) —
     # lets the agent answer "what API plugins are available to wire?".
+    # 0.8.6 — enriched payload: includes `description`, `docs_url`, and
+    # per-endpoint `description` so the agent can decide WHICH plugin
+    # fits the user's request without having to ask back ("is there an
+    # API for Didomi?" → mcp_list now answers natively). Custom plugins
+    # (server_id starting with `api-custom-`) are included via the same
+    # shape — they ship their own docs_url + description at create-time.
     out_servers = []
     for s in data.get("servers") or []:
-        if s.get("api_spec"):
-            out_servers.append({
-                "id": s.get("id"),
-                "name": s.get("name"),
-                "tags": s.get("tags") or [],
-                "endpoints": [
-                    {"path": e.get("path"), "method": e.get("method")}
-                    for e in ((s.get("api_spec") or {}).get("endpoints") or [])
-                ],
-            })
+        spec = s.get("api_spec") or {}
+        if not spec:
+            continue
+        # api_spec.description sometimes empty (older plugins); fall
+        # back to the server-level description so the agent always
+        # has *something*.
+        desc = (spec.get("description") or "").strip() or (s.get("description") or "").strip()
+        endpoints = [
+            {
+                "path": e.get("path"),
+                "method": e.get("method"),
+                "description": (e.get("description") or "").strip() or None,
+                # Some endpoints are flagged side-effecting in the
+                # spec — surfacing the flag lets the agent (and a
+                # future agent-api-broker tool, cf.
+                # [[project_agent_api_broker_0_8_6]]) decide
+                # whether the call needs explicit allow-side-effects
+                # opt-in.
+                "side_effect": bool(e.get("side_effect")),
+            }
+            for e in (spec.get("endpoints") or [])
+        ]
+        docs_url = spec.get("docs_url")
+        # 0.8.6 — machine-actionable next-step hint. Without this, the
+        # agent has to encode the "endpoints empty → read docs"
+        # heuristic in its system prompt, which fragments across CLIs
+        # (each one has its own). Putting the instruction inline in
+        # the tool response makes the behaviour uniform across Claude
+        # Code / Codex / Gemini / Vibe and survives prompt truncation.
+        # The 3 branches map cleanly onto the agent's decision tree:
+        #   READY → call directly
+        #   NEEDS_RESEARCH → fetch docs_url FIRST
+        #   AMBIGUOUS → ask the user
+        # Use case the user surfaced 2026-05-19 on Didomi (custom
+        # plugin, docs_url set, endpoints not yet declared).
+        if endpoints:
+            hint = (
+                "READY: endpoints are declared and the ApiCall executor "
+                "will allow-list them. You can draft an ApiCall step "
+                "using one of the listed paths directly."
+            )
+        elif docs_url:
+            hint = (
+                f"NEEDS_RESEARCH: no endpoints declared yet. Fetch "
+                f"`docs_url` ({docs_url}) to learn the API surface, "
+                f"then either (a) suggest endpoints to the user so "
+                f"they add them via the Kronn MCP / API page, or "
+                f"(b) hand-craft path+method in an ApiCall step and "
+                f"warn the user that allowlist validation will fail "
+                f"until endpoints are declared."
+            )
+        else:
+            hint = (
+                "AMBIGUOUS: no endpoints AND no docs_url. Ask the user "
+                "what this plugin is meant to call before drafting "
+                "anything — Kronn has no information to act on."
+            )
+        # 0.8.6 — extract auth-managed env_keys so the agent knows
+        # which ones are credentials (injected server-side, never
+        # touch) vs which are non-secret identifiers (referenceable
+        # via ${ENV.X} in path / query / headers / body). The
+        # `auth_managed_keys` set is the union of every env_key
+        # appearing in the auth variant's slots. Anything else in
+        # `config_keys` is a free-form identifier.
+        auth_managed_keys: set[str] = set()
+        auth = spec.get("auth")
+        if isinstance(auth, dict):
+            for variant_data in auth.values():
+                if not isinstance(variant_data, dict):
+                    continue
+                for key in (
+                    "env_key", "user_env", "password_env",
+                    "client_id_env", "client_secret_env",
+                ):
+                    v = variant_data.get(key)
+                    if isinstance(v, str) and v:
+                        auth_managed_keys.add(v)
+                # TokenExchange exposes creds_env_keys list
+                creds = variant_data.get("creds_env_keys")
+                if isinstance(creds, list):
+                    for k in creds:
+                        if isinstance(k, str):
+                            auth_managed_keys.add(k)
+                # TokenExchange also references env_keys inside the
+                # body_template via ${ENV.X} placeholders. Scan
+                # recursively so creds used in the exchange body show
+                # up as auth-managed even when creds_env_keys is
+                # empty (the common case — most users don't fill the
+                # defensive field). Same `${ENV.NAME}` regex Kronn
+                # uses server-side.
+                import re
+                def _walk_for_env_refs(v):
+                    if isinstance(v, str):
+                        for m in re.finditer(r"\$\{ENV\.([A-Z0-9_]+)\}", v):
+                            auth_managed_keys.add(m.group(1))
+                    elif isinstance(v, dict):
+                        for x in v.values(): _walk_for_env_refs(x)
+                    elif isinstance(v, list):
+                        for x in v: _walk_for_env_refs(x)
+                body_tpl = variant_data.get("body_template")
+                if body_tpl is not None:
+                    _walk_for_env_refs(body_tpl)
+        config_keys = [
+            {
+                "env_key": ck.get("env_key"),
+                "label": ck.get("label") or ck.get("env_key"),
+                # `auth_managed=True` ⇒ Kronn handles this one for you,
+                # never reference it via ${ENV.X} (it would just leak
+                # the secret to the prompt). `False` ⇒ free to use as
+                # ${ENV.X} placeholder in path/query/headers/body.
+                "auth_managed": (ck.get("env_key") or "") in auth_managed_keys,
+            }
+            for ck in (spec.get("config_keys") or [])
+            if ck.get("env_key")
+        ]
+
+        out_servers.append({
+            "id": s.get("id"),
+            "name": s.get("name"),
+            "description": desc,
+            "docs_url": docs_url,
+            "tags": s.get("tags") or [],
+            # 0.8.6 — custom plugin detection. The `api-custom`
+            # sentinel id is used ONLY in the create-payload (cf.
+            # `backend/src/api/mcps.rs::CUSTOM_API_SERVER_ID`). The
+            # materialized server id is `custom-{slug}-{nano}` so two
+            # instances of e.g. "Salesforce" can coexist with distinct
+            # creds (cf. `mcps.rs:82-86`). We must match BOTH prefixes
+            # to be correct — and the `custom-` form is what 100% of
+            # persisted custom plugins use.
+            "is_custom": (
+                (s.get("id") or "").startswith("custom-")
+                or (s.get("id") or "") == "api-custom"
+            ),
+            "config_keys": config_keys,
+            "endpoints": endpoints,
+            "hint": hint,
+        })
     return {"configs": out_configs, "servers_with_api": out_servers}
 
 
@@ -770,6 +1029,80 @@ def call_qp_create_draft(args):
     return _unwrap(_http("POST", "/api/quick-prompts", body))
 
 
+def call_api_call(args):
+    """0.8.6 — Agent API broker.
+
+    Forward an agent-driven HTTP call to `POST /api/agent-api/call`.
+    The backend resolves the plugin's encrypted credentials per the
+    project scope, runs the call through the same executor as workflow
+    ApiCall steps, and returns the canonical envelope.
+
+    Project-scope resolution priority (handled server-side):
+      1. `project_id` arg if explicitly passed by the agent
+      2. `disc_id` (auto-injected from KRONN_DISCUSSION_ID when Kronn
+         spawned the agent from a disc)
+      3. The chosen `api_config_id`'s `project_ids[0]` — works for
+         host-CLI sessions launched outside Kronn (no env var needed)
+
+    Plugin selection — pass EITHER:
+      (a) `api_plugin_slug` + `api_config_id` (literal config), OR
+      (b) `quick_api_id` (saved Quick API reference; hydration happens
+          server-side)
+
+    The agent ABSOLUTELY shouldn't pass credentials of any form in this
+    tool's args — auth comes from the encrypted env in Kronn DB,
+    injected server-side per the plugin's ApiSpec.auth declaration.
+    """
+    if not args.get("endpoint_path"):
+        raise RuntimeError("api_call: missing required 'endpoint_path'")
+
+    has_plugin_pair = bool(args.get("api_plugin_slug")) and bool(args.get("api_config_id"))
+    has_qa_ref = bool(args.get("quick_api_id"))
+    if not has_plugin_pair and not has_qa_ref:
+        raise RuntimeError(
+            "api_call: provide either (api_plugin_slug + api_config_id) "
+            "OR quick_api_id. Use `mcp_list` to discover available "
+            "plugins and configs, or `qa_list` for saved Quick APIs."
+        )
+
+    body = {
+        "endpoint_path": args["endpoint_path"],
+    }
+
+    # disc_id is BEST-EFFORT now (0.8.6). Pre-fix the tool refused
+    # outright when KRONN_DISCUSSION_ID was missing → locked out every
+    # host-CLI session launched outside Kronn. The backend now derives
+    # project from disc OR config OR explicit arg, so we just forward
+    # what we have.
+    try:
+        body["disc_id"] = _disc_id()
+    except RuntimeError:
+        pass  # Host-CLI context — project will be resolved from config_id.
+
+    # Pass-through only the fields the route accepts — no leaking of
+    # extra/unknown args (which serde may reject under
+    # `deny_unknown_fields` if we add it later). `project_id` is new
+    # in 0.8.6 — the agent can pass it explicitly when it knows the
+    # scope (typically from `mcp_list.configs[].project_ids[0]`).
+    for k in (
+        "project_id",
+        "api_plugin_slug",
+        "api_config_id",
+        "quick_api_id",
+        "method",
+        "path_params",
+        "query",
+        "headers",
+        "body",
+        "extract",
+    ):
+        v = args.get(k)
+        if v is not None:
+            body[k] = v
+
+    return _unwrap(_http("POST", "/api/agent-api/call", body))
+
+
 DISPATCH = {
     "disc_meta": call_disc_meta,
     "disc_get_message": call_disc_get_message,
@@ -794,6 +1127,10 @@ DISPATCH = {
     # cascade into prod cron.
     "workflow_create_draft": call_workflow_create_draft,
     "qp_create_draft": call_qp_create_draft,
+    # 0.8.6 — Agent API broker. Lets the agent invoke a configured
+    # plugin without ever seeing the credentials (cf.
+    # [[project_agent_api_broker_0_8_6]]).
+    "api_call": call_api_call,
 }
 
 
