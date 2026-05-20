@@ -11,6 +11,8 @@ import type {
   McpOverview,
   McpConfigDisplay,
   McpEnvEntry,
+  McpServer,
+  CustomApiPayload,
   CreateMcpConfigRequest,
   UpdateMcpConfigRequest,
   LinkMcpConfigRequest,
@@ -857,6 +859,13 @@ export const mcps = {
   refresh: () => api<McpOverview>('POST', '/mcps/refresh'),
   createConfig: (req: CreateMcpConfigRequest) => api<McpConfigDisplay>('POST', '/mcps/configs', req),
   updateConfig: (id: string, req: UpdateMcpConfigRequest) => api<McpConfigDisplay>('PATCH', `/mcps/configs/${id}`, req),
+  /** 0.8.6 — update an existing Custom API plugin's spec
+   *  (name/base_url/description/docs_url/fields/endpoints). Server_id
+   *  is preserved so configs and workflow `ApiCall` refs stay valid.
+   *  Encrypted env per-config is NOT touched here — see Settings → APIs
+   *  for the env-edit drawer. Backend rejects non-custom server_ids. */
+  updateCustomSpec: (serverId: string, payload: CustomApiPayload) =>
+    api<McpServer>('PUT', `/mcps/custom/${encodeURIComponent(serverId)}`, payload),
   deleteConfig: (id: string) => api<void>('DELETE', `/mcps/configs/${id}`),
   setConfigProjects: (id: string, req: LinkMcpConfigRequest) => api<void>('PATCH', `/mcps/configs/${id}/projects`, req),
   revealSecrets: (id: string) => api<McpEnvEntry[]>('POST', `/mcps/configs/${id}/reveal`),

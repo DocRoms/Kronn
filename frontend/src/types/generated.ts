@@ -405,7 +405,29 @@ export type ApiAuthKind =
       scope: string;
       extra_headers?: OAuth2ExtraHeader[];
     } }
+  /** 0.8.6 — Generic 2-step token exchange. Generalises OAuth2 to
+   *  arbitrary body shapes (JSON / form-encoded), field names, and
+   *  token JSONPaths. Unblocks Didomi (POST /sessions with
+   *  `{type, key, secret}` JSON body → `access_token`) and similar
+   *  enterprise APIs. Token cached + refreshed transparently. */
+  | { TokenExchange: {
+      endpoint: string;
+      method: string;
+      body_template: unknown;
+      body_format: TokenExchangeBodyFormat;
+      token_jsonpath: string;
+      ttl_seconds: number;
+      inject: TokenInjection;
+      creds_env_keys?: string[];
+    } }
   | "None";
+
+export type TokenExchangeBodyFormat = "Json" | "FormUrlEncoded";
+
+export type TokenInjection =
+  | "BearerHeader"
+  | { CustomHeader: { name: string } }
+  | { QueryParam: { name: string } };
 
 export interface OAuth2ExtraHeader {
   name: string;
@@ -1319,6 +1341,17 @@ export interface CustomApiPayload {
   docs_url?: string | null;
   /** List of {label, value} pairs. Backend slugifies label → env_key. */
   fields?: CustomApiField[];
+  /** 0.8.6 — endpoints declared at create time (often filled by
+   *  `CustomApiAiHelper` after fetching `docs_url`). Without these,
+   *  the executor's allowlist refuses every agent-driven ApiCall —
+   *  declaring them flips `mcp_list`'s `hint` from `NEEDS_RESEARCH`
+   *  to `READY`. Blank-path entries are dropped server-side. */
+  endpoints?: ApiEndpoint[];
+  /** 0.8.6 — auth scheme. Default = "None" (back-compat for any
+   *  payload that omits the field). Set to Bearer / TokenExchange /
+   *  etc. to make Kronn auto-inject the right Authorization header
+   *  on every call to this plugin's endpoints. */
+  auth?: ApiAuthKind;
 }
 
 export interface CustomApiField {

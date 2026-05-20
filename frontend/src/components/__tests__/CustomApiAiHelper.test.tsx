@@ -113,6 +113,73 @@ describe('applyToCustomForm', () => {
   it('returns empty object on empty input', () => {
     expect(applyToCustomForm({})).toEqual({});
   });
+
+  // ─── 0.8.6 — endpoints from KRONN:APPLY ──────────────────────────────────
+  //
+  // The agent emits endpoints after fetching `docs_url`. The parser must
+  // preserve them, normalise method case, default missing method to GET,
+  // and drop blank-path rows so we never plant a broken entry into the
+  // form. Cf. [[project_endpoints_autodiscovery_0_8_6]].
+
+  it('extracts endpoints with path + method + description', () => {
+    const result = applyToCustomForm({
+      endpoints: [
+        { path: '/sessions', method: 'POST', description: 'Exchange creds for bearer' },
+        { path: '/widgets/notices', method: 'GET', description: 'List notices' },
+      ],
+    });
+    expect(result.endpoints).toEqual([
+      { path: '/sessions', method: 'POST', description: 'Exchange creds for bearer' },
+      { path: '/widgets/notices', method: 'GET', description: 'List notices' },
+    ]);
+  });
+
+  it('normalises method case to upper and defaults blank/missing to GET', () => {
+    // Defensive normalization mirrors what the backend's
+    // `materialize_custom_server` does — keep the form / form-submit /
+    // executor allowlist all on the same casing baseline.
+    const result = applyToCustomForm({
+      endpoints: [
+        { path: '/a', method: 'post' },
+        { path: '/b', method: '   ' },
+        { path: '/c' },  // method absent entirely
+        { path: '/d', method: 'DELETE' },
+      ],
+    });
+    expect(result.endpoints).toEqual([
+      { path: '/a', method: 'POST', description: '' },
+      { path: '/b', method: 'GET', description: '' },
+      { path: '/c', method: 'GET', description: '' },
+      { path: '/d', method: 'DELETE', description: '' },
+    ]);
+  });
+
+  it('drops blank-path endpoints (form trailing-empty-row, agent slips)', () => {
+    const result = applyToCustomForm({
+      endpoints: [
+        { path: '/real', method: 'GET', description: 'ok' },
+        { path: '', method: 'GET', description: 'blank' },
+        { path: '   ', method: 'POST', description: 'whitespace only' },
+        { method: 'GET', description: 'no path field at all' },
+      ],
+    });
+    expect(result.endpoints).toEqual([
+      { path: '/real', method: 'GET', description: 'ok' },
+    ]);
+  });
+
+  it('omits the endpoints key entirely when the agent emits an empty array', () => {
+    // If the agent decides not to propose endpoints (e.g. no WebFetch
+    // available), the form state must stay untouched — not be reset to
+    // an empty array, which would wipe any rows the user had typed.
+    const result = applyToCustomForm({ endpoints: [] });
+    expect(result.endpoints).toBeUndefined();
+  });
+
+  it('rejects non-array endpoints (hallucination guard)', () => {
+    const result = applyToCustomForm({ endpoints: 'not-an-array' });
+    expect(result.endpoints).toBeUndefined();
+  });
 });
 
 describe('buildSystemPrompt', () => {
@@ -129,13 +196,15 @@ describe('buildSystemPrompt', () => {
 describe('buildContextBlock', () => {
   it('emits "(empty)" placeholders for blank fields', () => {
     const block = buildContextBlock(
-      { name: '', base_url: '', description: '', docs_url: '', fields: [] },
+      { name: '', base_url: '', description: '', docs_url: '', fields: [], endpoints: [] },
       t,
     );
     expect(block).toContain('mcp.custom.helper.ctx.header');
     expect(block).toContain('name        : mcp.custom.helper.ctx.empty');
     expect(block).toContain('base_url    : mcp.custom.helper.ctx.empty');
     expect(block).toContain('mcp.custom.helper.ctx.noFields');
+    // 0.8.6 — endpoints line surfaces the "needs research" hint to the agent.
+    expect(block).toContain('mcp.custom.helper.ctx.noEndpoints');
   });
 
   it('lists the current fields with ✓ when filled', () => {
@@ -149,12 +218,45 @@ describe('buildContextBlock', () => {
           { label: 'Token', value: 'secret' },
           { label: 'OrgID', value: '' },
         ],
+        endpoints: [],
       },
       t,
     );
     expect(block).toContain('name        : MyAPI');
     expect(block).toContain('- Token ✓');
     expect(block).toContain('- OrgID (empty)');
+  });
+
+  it('summarises endpoints with method + path (caps at 5)', () => {
+    // 0.8.6 — keep the context block compact even when the user already
+    // has 30+ endpoints declared. The agent only needs the head of the list
+    // to know "X is already covered, don't re-emit it".
+    const block = buildContextBlock(
+      {
+        name: 'Didomi',
+        base_url: 'https://api.didomi.io',
+        description: '',
+        docs_url: 'https://developers.didomi.io/api',
+        fields: [],
+        endpoints: [
+          { path: '/sessions', method: 'POST', description: 'auth' },
+          { path: '/widgets/notices', method: 'GET', description: 'list notices' },
+          { path: '/consents/events', method: 'GET', description: 'consent events' },
+          { path: '/vendors', method: 'GET', description: 'list vendors' },
+          { path: '/cookies', method: 'GET', description: 'list cookies' },
+          { path: '/sixth-endpoint', method: 'GET', description: '' },
+          { path: '/seventh', method: 'POST', description: '' },
+        ],
+      },
+      t,
+    );
+    expect(block).toContain('POST /sessions');
+    expect(block).toContain('GET /widgets/notices');
+    expect(block).toContain('GET /cookies');
+    // The 6th onwards are summarised as "(+N)" — keeps the context block short.
+    expect(block).toContain('(+2)');
+    // The 7th MUST NOT appear verbatim — that's the whole point of the cap.
+    expect(block).not.toContain('/seventh');
   });
 });
 
@@ -166,6 +268,7 @@ const baseSnapshot = {
   description: '',
   docs_url: '',
   fields: [{ label: '', value: '' }],
+  endpoints: [],
 };
 
 const renderHelper = (
@@ -247,6 +350,7 @@ describe('CustomApiAiHelper — render', () => {
           description: '',
           docs_url: '',
           fields: [{ label: 'Token', value: 'sec' }, { label: 'OrgID', value: '' }],
+          endpoints: [],
         }}
         onApply={vi.fn()}
         installedAgents={['ClaudeCode']}

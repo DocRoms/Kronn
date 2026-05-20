@@ -19,7 +19,7 @@ import {
 import { discussions as discussionsApi } from '../lib/api';
 import { AGENT_LABELS, agentColor } from '../lib/constants';
 import { t as translate, type UILocale } from '../lib/i18n';
-import type { AgentType, CustomApiField, CustomApiPayload } from '../types/generated';
+import type { AgentType, ApiEndpoint, CustomApiField, CustomApiPayload } from '../types/generated';
 import { parseApplyBlocks } from './workflows/ApiCallAiHelper';
 import './aiHelper.css';
 
@@ -42,6 +42,12 @@ export interface CustomApiAiHelperProps {
     description: string;
     docs_url: string;
     fields: CustomApiField[];
+    /** 0.8.6 — endpoints already declared on the form, surfaced in the
+     *  agent's context so it can skip ones the user has typed in. The
+     *  agent's KRONN:APPLY may propose additions (especially after a
+     *  WebFetch of `docs_url`) without re-emitting what's already
+     *  there. */
+    endpoints: ApiEndpoint[];
   };
   /** Apply a partial Custom API spec back to the parent form state. */
   onApply: (updates: Partial<CustomApiPayload>) => void;
@@ -84,9 +90,16 @@ KRONN:APPLY
   "fields": [
     {"label": "Bearer Token", "value": ""},
     {"label": "Org ID", "value": ""}
+  ],
+  "endpoints": [
+    {"path": "/sobjects/Account", "method": "GET", "description": "List accounts"},
+    {"path": "/sobjects/Contact", "method": "POST", "description": "Create contact"},
+    {"path": "/query", "method": "GET", "description": "SOQL query"}
   ]
 }
 \`\`\`
+
+${t('mcp.custom.helper.sys.endpoints')}
 
 ${t('mcp.custom.helper.sys.partial')}
 
@@ -104,13 +117,22 @@ export function buildContextBlock(
   const fieldsLine = snapshot.fields.length === 0
     ? t('mcp.custom.helper.ctx.noFields')
     : snapshot.fields.map(f => `  - ${f.label || '(blank)'}${f.value ? ' ✓' : ' (empty)'}`).join('\n');
+  // 0.8.6 — surface the endpoint count + first few paths so the agent
+  // can skip ones already declared. We cap at 5 to keep the context
+  // block compact even for plugins with 30+ endpoints.
+  const endpointsLine = snapshot.endpoints.length === 0
+    ? t('mcp.custom.helper.ctx.noEndpoints')
+    : snapshot.endpoints.slice(0, 5).map(e => `  - ${e.method} ${e.path}`).join('\n')
+      + (snapshot.endpoints.length > 5 ? `\n  - … (+${snapshot.endpoints.length - 5})` : '');
   return `${t('mcp.custom.helper.ctx.header')}
 - name        : ${snapshot.name || t('mcp.custom.helper.ctx.empty')}
 - base_url    : ${snapshot.base_url || t('mcp.custom.helper.ctx.empty')}
 - description : ${snapshot.description || t('mcp.custom.helper.ctx.empty')}
 - docs_url    : ${snapshot.docs_url || t('mcp.custom.helper.ctx.empty')}
 - fields      :
-${fieldsLine}`;
+${fieldsLine}
+- endpoints   :
+${endpointsLine}`;
 }
 
 /** Map a parsed KRONN:APPLY object onto a `Partial<CustomApiPayload>`.
@@ -138,6 +160,31 @@ export function applyToCustomForm(parsed: Record<string, unknown>): Partial<Cust
       }
     }
     if (fields.length > 0) updates.fields = fields;
+  }
+  // 0.8.6 — endpoint extraction. The agent emits a list of `{path,
+  // method, description}` entries (typically after a WebFetch on
+  // `docs_url`). Filter to entries with a non-blank `path` — without it
+  // the executor's allowlist match has nothing to compare against.
+  // Method defaults to GET when blank/missing (most common, safe).
+  // Description is optional — falls back to empty so a future drawer
+  // can render "(undocumented)".
+  if (Array.isArray(parsed.endpoints)) {
+    const endpoints: ApiEndpoint[] = [];
+    for (const raw of parsed.endpoints) {
+      if (raw && typeof raw === 'object' && 'path' in raw) {
+        const e = raw as Record<string, unknown>;
+        if (typeof e.path === 'string' && e.path.trim()) {
+          endpoints.push({
+            path: e.path.trim(),
+            method: (typeof e.method === 'string' && e.method.trim()
+              ? e.method.trim().toUpperCase()
+              : 'GET'),
+            description: typeof e.description === 'string' ? e.description : '',
+          });
+        }
+      }
+    }
+    if (endpoints.length > 0) updates.endpoints = endpoints;
   }
   return updates;
 }

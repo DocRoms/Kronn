@@ -97,16 +97,23 @@ pub async fn execute_api_call_step_core(
         Err(msg) => return fail(step, start, msg),
     };
 
-    // Render parameter templates.
-    let query = match render_map(&step.api_query, ctx) {
+    // Render parameter templates. 0.8.6 — both `{{var}}` (workflow
+    // template) AND `${ENV.X}` (plugin env) substitution happen here
+    // so plugin specs can declare path/query/headers using either
+    // family. `${ENV.X}` is resolved AFTER `{{var}}` so a `{{steps.X}}`
+    // value that itself contains `${ENV.X}` gets both expansions.
+    let query = match render_map(&step.api_query, ctx).and_then(|m| substitute_env_in_map(m, env)) {
         Ok(q) => q,
         Err(e) => return fail(step, start, format!("Template render error (query): {e}")),
     };
-    let extra_headers = match render_map(&step.api_headers, ctx) {
+    let extra_headers = match render_map(&step.api_headers, ctx).and_then(|m| substitute_env_in_map(m, env)) {
         Ok(h) => h,
         Err(e) => return fail(step, start, format!("Template render error (headers): {e}")),
     };
-    let body = match render_body(&step.api_body, ctx) {
+    let body = match render_body(&step.api_body, ctx).and_then(|b| match b {
+        None => Ok(None),
+        Some(v) => substitute_env_in_value(&v, env).map(Some),
+    }) {
         Ok(b) => b,
         Err(e) => return fail(step, start, format!("Template render error (body): {e}")),
     };
@@ -130,6 +137,19 @@ pub async fn execute_api_call_step_core(
     let templated_endpoint = match ctx.render(endpoint_path) {
         Ok(s) => s,
         Err(e) => return fail(step, start, format!("Endpoint template render error: {e}")),
+    };
+    // 0.8.6 — also substitute `${ENV.X}` placeholders so plugin specs
+    // can reference encrypted config values directly in the endpoint
+    // path (e.g. Didomi's `/consents/users/${ENV.ORGANIZATION_ID}`)
+    // without forcing the agent to know the value. The agent calls
+    // the path as-declared, Kronn injects. Same pattern in query +
+    // headers + body below. Missing env var surfaces a clean error
+    // naming the missing key (no silent `undefined` strings hitting
+    // the vendor API — caught 2026-05-20 on Didomi 403 "organization
+    // undefined").
+    let templated_endpoint = match crate::core::oauth2_cache::substitute_env_in_string(&templated_endpoint, env) {
+        Ok(s) => s,
+        Err(e) => return fail(step, start, format!("Endpoint env-substitution error: {e}")),
     };
     // Substitute `{key}` path-segment params (e.g. /repos/{owner}/{repo}).
     // Values are rendered through TemplateContext FIRST so a previous
@@ -418,6 +438,29 @@ pub async fn execute_api_call_step_with_db(
                     env.insert("__token_error__".into(), e.to_string());
                 }
             }
+        } else if matches!(spec.auth, ApiAuthKind::TokenExchange { .. }) {
+            // 0.8.6 — Generic token-exchange (Didomi-shape, etc.). Same
+            // upstream pattern as OAuth2: mint or fetch-cached token,
+            // stash in `__access_token__` for resolve_auth to route per
+            // the spec's `inject` field. Reuses the same `oauth2_cache`
+            // store — both auth kinds produce CachedToken values keyed
+            // by config_id and share TTL/refresh semantics.
+            match crate::core::oauth2_cache::resolve_token_exchange(
+                &state.oauth2_cache,
+                config_id,
+                &spec.auth,
+                &spec.base_url,
+                &env,
+            )
+            .await
+            {
+                Ok(token) => {
+                    env.insert("__access_token__".into(), token);
+                }
+                Err(e) => {
+                    env.insert("__token_error__".into(), e.to_string());
+                }
+            }
         }
     }
 
@@ -529,6 +572,38 @@ pub fn resolve_auth(
                 out.headers.insert(eh.name.clone(), rendered);
             }
         }
+        ApiAuthKind::TokenExchange { inject, .. } => {
+            // 0.8.6 — Same upstream contract as OAuth2: the
+            // `resolve_token_exchange` call has already minted the
+            // token and stashed it in `__access_token__`. Here we just
+            // route it into the right slot (Bearer header / custom
+            // header / query) per the spec's `inject` field. The
+            // `__token_error__` virtual key carries actionable errors
+            // (e.g. "missing env var", "JSONPath miss").
+            match env.get("__access_token__") {
+                Some(tok) => {
+                    use crate::models::TokenInjection;
+                    match inject {
+                        TokenInjection::BearerHeader => {
+                            out.bearer = Some(tok.clone());
+                        }
+                        TokenInjection::CustomHeader { name } => {
+                            out.headers.insert(name.clone(), tok.clone());
+                        }
+                        TokenInjection::QueryParam { name } => {
+                            out.query.insert(name.clone(), tok.clone());
+                        }
+                    }
+                }
+                None => {
+                    let err = env
+                        .get("__token_error__")
+                        .cloned()
+                        .unwrap_or_else(|| "unknown token-exchange failure".into());
+                    return Err(format!("TokenExchange token unavailable: {err}"));
+                }
+            }
+        }
         ApiAuthKind::None => {
             // Public endpoint — leave ResolvedAuth empty.
         }
@@ -578,6 +653,51 @@ fn render_map(
         out.insert(k.clone(), ctx.render(v)?);
     }
     Ok(out)
+}
+
+/// 0.8.6 — substitute `${ENV.X}` placeholders in every value of a
+/// `<String, String>` map. Used post-`render_map` so both `{{var}}` and
+/// `${ENV.X}` work in query params + extra headers. Reuses the same
+/// substitution function as token-exchange body templates for
+/// consistency (one syntax, one impl).
+fn substitute_env_in_map(
+    map: HashMap<String, String>,
+    env: &HashMap<String, String>,
+) -> anyhow::Result<HashMap<String, String>> {
+    let mut out = HashMap::with_capacity(map.len());
+    for (k, v) in map {
+        let resolved = crate::core::oauth2_cache::substitute_env_in_string(&v, env)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        out.insert(k, resolved);
+    }
+    Ok(out)
+}
+
+/// 0.8.6 — substitute `${ENV.X}` placeholders in every string leaf of
+/// a JSON value. Walks arrays/objects recursively. Non-string leaves
+/// pass through.
+fn substitute_env_in_value(
+    value: &Value,
+    env: &HashMap<String, String>,
+) -> anyhow::Result<Value> {
+    match value {
+        Value::String(s) => {
+            let resolved = crate::core::oauth2_cache::substitute_env_in_string(s, env)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            Ok(Value::String(resolved))
+        }
+        Value::Array(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for it in items { out.push(substitute_env_in_value(it, env)?); }
+            Ok(Value::Array(out))
+        }
+        Value::Object(map) => {
+            let mut out = serde_json::Map::with_capacity(map.len());
+            for (k, v) in map { out.insert(k.clone(), substitute_env_in_value(v, env)?); }
+            Ok(Value::Object(out))
+        }
+        _ => Ok(value.clone()),
+    }
 }
 
 fn render_body(body: &Option<Value>, ctx: &TemplateContext) -> anyhow::Result<Option<Value>> {
@@ -2226,5 +2346,203 @@ mod tests {
             other => panic!("expected Goto on http_401, got {:?}", other),
         }
         assert_eq!(outcome.result.condition_result.as_deref(), Some("Goto:refresh_auth"));
+    }
+
+    // ─── ${ENV.X} substitution helpers (0.8.6) ──────────────────────
+    //
+    // These wrap `oauth2_cache::substitute_env_in_string` so the
+    // ApiCall executor can apply the same syntax to query params,
+    // headers, and JSON body leaves. Regression guards for the live
+    // Didomi bug 2026-05-20 (lowercase `${env.x}` was percent-encoded
+    // into the URL because substitution was uppercase-only).
+
+    #[test]
+    fn substitute_env_in_map_resolves_all_values() {
+        let mut env = HashMap::new();
+        env.insert("ORG_ID".into(), "euronews".into());
+        env.insert("KEY".into(), "k123".into());
+        let mut input = HashMap::new();
+        input.insert("organization_id".to_string(), "${ENV.ORG_ID}".to_string());
+        input.insert("token".to_string(), "${env.key}".to_string());
+        input.insert("static".to_string(), "literal".to_string());
+
+        let out = substitute_env_in_map(input, &env).unwrap();
+        assert_eq!(out.get("organization_id"), Some(&"euronews".to_string()));
+        assert_eq!(out.get("token"), Some(&"k123".to_string()));
+        assert_eq!(out.get("static"), Some(&"literal".to_string()));
+    }
+
+    #[test]
+    fn substitute_env_in_map_missing_var_bubbles_error() {
+        let env = HashMap::new();
+        let mut input = HashMap::new();
+        input.insert("x".to_string(), "${ENV.SECRET}".to_string());
+        let err = substitute_env_in_map(input, &env).unwrap_err();
+        assert!(err.to_string().contains("SECRET"));
+    }
+
+    #[test]
+    fn substitute_env_in_value_walks_nested_json() {
+        let mut env = HashMap::new();
+        env.insert("USER_ID".into(), "u-42".into());
+        env.insert("ROLE".into(), "admin".into());
+
+        let input = json!({
+            "user": "${ENV.USER_ID}",
+            "meta": {
+                "role": "${env.role}",
+                "score": 99,
+                "active": true,
+            },
+            "tags": ["${ENV.USER_ID}", "literal"],
+        });
+        let out = substitute_env_in_value(&input, &env).unwrap();
+        assert_eq!(out["user"], "u-42");
+        assert_eq!(out["meta"]["role"], "admin");
+        assert_eq!(out["meta"]["score"], 99);
+        assert_eq!(out["meta"]["active"], true);
+        assert_eq!(out["tags"][0], "u-42");
+        assert_eq!(out["tags"][1], "literal");
+    }
+
+    #[test]
+    fn substitute_env_in_value_non_string_leaves_passthrough() {
+        let env = HashMap::new();
+        let input = json!({ "n": 1, "b": true, "v": null });
+        let out = substitute_env_in_value(&input, &env).unwrap();
+        assert_eq!(out, input);
+    }
+
+    // ─── TokenExchange injection paths (0.8.6) ─────────────────────
+    //
+    // Contract: the outer `execute_api_call_step` resolves the token
+    // upstream (via `core::oauth2_cache::resolve_token_exchange`,
+    // already tested) and stashes it under `__access_token__`. The
+    // `_core` path here just routes the cached token into Bearer /
+    // custom header / query per the spec's `inject` field. These three
+    // tests cover each `TokenInjection` variant end-to-end through a
+    // real HTTP call — guards against the case where the spec drifts
+    // but `resolve_auth` for TokenExchange forgets one variant.
+
+    fn make_token_exchange_auth(inject: crate::models::TokenInjection) -> ApiAuthKind {
+        use crate::models::TokenExchangeBodyFormat;
+        ApiAuthKind::TokenExchange {
+            endpoint: "/sessions".into(),
+            method: "POST".into(),
+            body_template: json!({"type":"api-key"}),
+            body_format: TokenExchangeBodyFormat::Json,
+            token_jsonpath: "$.access_token".into(),
+            ttl_seconds: 3600,
+            inject,
+            creds_env_keys: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn token_exchange_bearer_header_injection() {
+        use crate::models::TokenInjection;
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/properties"))
+            .and(header("authorization", "Bearer tx-bearer-xyz"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{ "id": "prop-1" }]
+            })))
+            .mount(&server)
+            .await;
+
+        let auth = make_token_exchange_auth(TokenInjection::BearerHeader);
+        let plugin = mk_plugin(&server.uri(), auth, vec![mk_endpoint("GET", "/properties")]);
+
+        // Pre-populate __access_token__ as the outer wrapper would.
+        let mut env = HashMap::new();
+        env.insert("__access_token__".into(), "tx-bearer-xyz".into());
+
+        let step = mk_step("/properties");
+        let outcome = execute_api_call_step_core(
+            &step, &plugin, &env, &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        ).await;
+        assert_eq!(outcome.result.status, RunStatus::Success, "got: {}", outcome.result.output);
+        assert!(outcome.result.output.contains("prop-1"));
+    }
+
+    #[tokio::test]
+    async fn token_exchange_custom_header_injection() {
+        use crate::models::TokenInjection;
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/data"))
+            .and(header("x-session-token", "tx-custom-abc"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .mount(&server)
+            .await;
+
+        let auth = make_token_exchange_auth(TokenInjection::CustomHeader {
+            name: "X-Session-Token".into(),
+        });
+        let plugin = mk_plugin(&server.uri(), auth, vec![mk_endpoint("GET", "/data")]);
+
+        let mut env = HashMap::new();
+        env.insert("__access_token__".into(), "tx-custom-abc".into());
+
+        let step = mk_step("/data");
+        let outcome = execute_api_call_step_core(
+            &step, &plugin, &env, &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        ).await;
+        assert_eq!(outcome.result.status, RunStatus::Success, "got: {}", outcome.result.output);
+    }
+
+    #[tokio::test]
+    async fn token_exchange_query_param_injection() {
+        use crate::models::TokenInjection;
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/items"))
+            .and(query_param("token", "tx-query-tok"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .mount(&server)
+            .await;
+
+        let auth = make_token_exchange_auth(TokenInjection::QueryParam {
+            name: "token".into(),
+        });
+        let plugin = mk_plugin(&server.uri(), auth, vec![mk_endpoint("GET", "/items")]);
+
+        let mut env = HashMap::new();
+        env.insert("__access_token__".into(), "tx-query-tok".into());
+
+        let step = mk_step("/items");
+        let outcome = execute_api_call_step_core(
+            &step, &plugin, &env, &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        ).await;
+        assert_eq!(outcome.result.status, RunStatus::Success, "got: {}", outcome.result.output);
+    }
+
+    #[tokio::test]
+    async fn token_exchange_missing_token_surfaces_error_with_token_error_reason() {
+        use crate::models::TokenInjection;
+        let server = MockServer::start().await;
+        // No mock — the call must fail before any HTTP attempt.
+
+        let auth = make_token_exchange_auth(TokenInjection::BearerHeader);
+        let plugin = mk_plugin(&server.uri(), auth, vec![mk_endpoint("GET", "/x")]);
+
+        let mut env = HashMap::new();
+        env.insert("__token_error__".into(), "JSONPath `$.access_token` miss".into());
+
+        let step = mk_step("/x");
+        let outcome = execute_api_call_step_core(
+            &step, &plugin, &env, &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        ).await;
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        assert!(
+            outcome.result.output.contains("JSONPath"),
+            "error must carry the upstream reason: {}",
+            outcome.result.output,
+        );
     }
 }

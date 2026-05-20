@@ -108,6 +108,23 @@
 .input:focus { border-color: var(--kr-accent-border-light); }
 .input::placeholder { color: var(--kr-text-dim); }
 
+/* Native <select> option items: browser-default = black-on-white on
+ * most OS dropdowns, illegible on the Lila Arcade dark theme. Tokenize
+ * them to match the input's own background + text colour so the dropdown
+ * panel stays readable when expanded. Caught 2026-05-19 on the 0.8.6
+ * Custom plugin auth picker. Applies globally to any `.input` select,
+ * fixes the existing endpoint method picker too. */
+.input option,
+select.input option {
+  background: var(--kr-bg-surface);
+  color: var(--kr-text-primary);
+}
+.input option:checked,
+.input option:hover {
+  background: var(--kr-bg-elevated);
+  color: var(--kr-text-primary);
+}
+
 .input-sm {
   padding: var(--kr-sp-3) var(--kr-sp-4);
   font-size: var(--kr-fs-xs);

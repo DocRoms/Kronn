@@ -73,7 +73,7 @@ pub struct ApiSpec {
     pub config_keys: Vec<ApiConfigKey>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub enum ApiAuthKind {
     /// API key passed as a query parameter, e.g. `?apikey=...` (Chartbeat).
@@ -113,8 +113,89 @@ pub enum ApiAuthKind {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         extra_headers: Vec<OAuth2ExtraHeader>,
     },
+    /// 0.8.6 — generic token-exchange auth. Generalises
+    /// `OAuth2ClientCredentials` to support APIs that ship a custom
+    /// 2-step auth flow with non-standard body shape, field names, or
+    /// token JSON path. Use when the vendor doesn't conform to RFC 6749
+    /// client-credentials but DOES follow the "POST creds → get
+    /// access_token → Authorization: Bearer …" pattern. Reference
+    /// implementation: Didomi's `POST /sessions` with JSON body
+    /// `{type, key, secret}` and response `{access_token}`. Also fits
+    /// many enterprise auth-0/Salesforce-flavored APIs.
+    ///
+    /// Token cache is reused from `OAuth2ClientCredentials` (same
+    /// `AppState.oauth2_cache` Mutex<HashMap<config_id, CachedToken>>)
+    /// so refresh / TTL semantics are identical.
+    TokenExchange {
+        /// Endpoint relative to the plugin's `base_url`. Examples:
+        /// `/sessions`, `/oauth/token`, `/v1/auth/exchange`.
+        endpoint: String,
+        /// HTTP method — typically `POST`, occasionally `PUT`.
+        #[serde(default = "default_token_exchange_method")]
+        method: String,
+        /// Request body template. String leaves support `${ENV.KEY}`
+        /// substitution from the decrypted env (e.g. `"${ENV.API_KEY}"`).
+        /// Non-string leaves pass through as-is.
+        /// Didomi example:
+        /// ```json
+        /// {"type": "api-key", "key": "${ENV.API_KEY}", "secret": "${ENV.API_SECRET}"}
+        /// ```
+        body_template: serde_json::Value,
+        /// Body serialization format on the wire.
+        #[serde(default)]
+        body_format: TokenExchangeBodyFormat,
+        /// JSONPath to extract the token from the response. Examples:
+        /// `$.access_token`, `$.data.token`, `$.session.bearer`.
+        token_jsonpath: String,
+        /// Cached-token TTL in seconds. Kronn refreshes at T-30s
+        /// safety margin. `0` disables caching (re-exchange every call,
+        /// only useful for testing).
+        #[serde(default = "default_token_exchange_ttl")]
+        ttl_seconds: u64,
+        /// How to inject the resulting token into subsequent calls on
+        /// THIS plugin's endpoints.
+        #[serde(default)]
+        inject: TokenInjection,
+        /// Defensive: env_keys the spec needs the user to fill. Empty
+        /// is permitted but the form/validator can use this to flag
+        /// missing creds before the exchange fires.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        creds_env_keys: Vec<String>,
+    },
     /// No auth (public endpoints).
+    #[default]
     None,
+}
+
+fn default_token_exchange_method() -> String { "POST".to_string() }
+fn default_token_exchange_ttl() -> u64 { 3600 }
+
+/// 0.8.6 — Body serialization format for `TokenExchange`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS, PartialEq)]
+#[ts(export)]
+pub enum TokenExchangeBodyFormat {
+    /// JSON body (`Content-Type: application/json`). Didomi, Auth0,
+    /// most modern API platforms.
+    #[default]
+    Json,
+    /// Form URL-encoded body (`application/x-www-form-urlencoded`).
+    /// Matches the canonical OAuth2 RFC 6749 wire format.
+    FormUrlEncoded,
+}
+
+/// 0.8.6 — How to inject a freshly-exchanged token into the actual API
+/// call. The 90% case is Bearer header — but some vendors (Anthropic
+/// itself, some legacy SOAP gateways) put it elsewhere.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub enum TokenInjection {
+    /// `Authorization: Bearer <token>` — the default and most common.
+    #[default]
+    BearerHeader,
+    /// Custom header — `<name>: <token>` (no `Bearer ` prefix).
+    CustomHeader { name: String },
+    /// Query string param — `?<name>=<token>`.
+    QueryParam { name: String },
 }
 
 /// Static header rendered alongside the `Authorization: Bearer` from an
@@ -328,11 +409,29 @@ pub struct CustomApiPayload {
     pub description: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub docs_url: Option<String>,
+    /// 0.8.6 — auth scheme. `ApiAuthKind: Default = None`, so the field
+    /// is back-compat for any payload that omits it (pre-0.8.6 Custom
+    /// plugins keep working unchanged). When set, the materialized
+    /// `ApiSpec.auth` carries it instead of hardcoding `None` — which
+    /// is what made Custom plugins muets côté auth pre-fix (caught
+    /// 2026-05-19 on Didomi audit).
+    #[serde(default)]
+    pub auth: ApiAuthKind,
     /// List of `{label, value}` pairs. The backend slugifies each label
     /// into an `env_key` (UPPER_SNAKE_CASE) and stores the value in the
     /// encrypted env blob alongside the rest.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<CustomApiField>,
+    /// 0.8.6 — endpoints the user (often via the `CustomApiAiHelper`
+    /// fetching the docs) wants declared on this plugin. Without these,
+    /// the executor's allowlist refuses any agent-driven ApiCall — so
+    /// declaring them at create time is what flips `mcp_list`'s hint
+    /// from `NEEDS_RESEARCH` to `READY`. Blank-path entries are
+    /// silently dropped at materialize time. Each entry: `{path,
+    /// method, description}` (matches the existing `ApiEndpoint`
+    /// shape).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<ApiEndpoint>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

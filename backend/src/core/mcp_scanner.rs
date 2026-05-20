@@ -2477,6 +2477,33 @@ pub fn build_api_context_block(
                     out.push_str(&format!("Also send header `{}: {}` on every request.\n", eh.name, rendered));
                 }
             }
+            ApiAuthKind::TokenExchange { inject, .. } => {
+                // 0.8.6 — Same pattern as OAuth2: the async resolver
+                // (`resolve_token_exchange`) has already minted the token
+                // and stashed it under `__access_token__`. Plugins with
+                // a non-Bearer `inject` form get a description tailored
+                // to where the token lands (header / query) so the agent
+                // doesn't guess.
+                match env.get("__access_token__") {
+                    Some(tok) => {
+                        match inject {
+                            crate::models::TokenInjection::BearerHeader => {
+                                out.push_str(&format!("Auth: send header `Authorization: Bearer {}` on every request (Kronn refreshes this token automatically before it expires).\n", tok));
+                            }
+                            crate::models::TokenInjection::CustomHeader { name } => {
+                                out.push_str(&format!("Auth: send header `{}: {}` on every request (Kronn refreshes this token automatically before it expires).\n", name, tok));
+                            }
+                            crate::models::TokenInjection::QueryParam { name } => {
+                                out.push_str(&format!("Auth: send `{}={}` as a query parameter on every request (Kronn refreshes this token automatically before it expires).\n", name, tok));
+                            }
+                        }
+                    }
+                    None => {
+                        let err = env.get("__token_error__").cloned().unwrap_or_else(|| "unknown error".into());
+                        out.push_str(&format!("Auth: **TOKEN UNAVAILABLE — {}**. Do not attempt API calls; tell the user and stop.\n", err));
+                    }
+                }
+            }
             ApiAuthKind::None => {
                 out.push_str("Auth: none (public endpoints).\n");
             }

@@ -12,6 +12,7 @@ vi.mock('../../lib/api', () => ({
     refresh: vi.fn(),
     createConfig: vi.fn(),
     updateConfig: vi.fn(),
+    updateCustomSpec: vi.fn(),
     deleteConfig: vi.fn(),
     setConfigProjects: vi.fn(),
     revealSecrets: vi.fn(),
@@ -616,5 +617,212 @@ describe('McpPage', () => {
     expect(payload.custom_spec.name).toBe('MyAPI');
     expect(payload.custom_spec.base_url).toBe('https://my.example.com');
     expect(payload.custom_spec.fields).toEqual([{ label: 'My Token', value: 'secret123' }]);
+  });
+
+  // ─── 0.8.6 — Unified Custom plugin edit form ─────────────────────────
+  //
+  // Regression guards for the live Didomi debug 2026-05-19/20:
+  //  - the "Modifier le plugin" button must open the form pre-filled
+  //    with name / base_url / fields / endpoints / auth
+  //  - submit must call updateCustomSpec (PUT) AND updateConfig (PATCH)
+  //    when both server_id and config_id are tracked
+  //  - the toast must use the captured name (not the post-reset empty
+  //    string — that was the silent-toast bug)
+  //
+  // The detail panel renders inside a card; the Edit button only shows
+  // when the cfg.server_id starts with "custom-" AND the matching
+  // server has an api_spec. Both must be true for the form to mount.
+
+  const makeCustomServer = (serverId: string, name: string): McpServer => ({
+    id: serverId,
+    name,
+    description: `${name} API`,
+    transport: 'ApiOnly',
+    source: 'Manual',
+    api_spec: {
+      base_url: 'https://api.example.com/v1',
+      auth: 'None',
+      docs_url: 'https://docs.example.com',
+      endpoints: [
+        { path: '/users', method: 'GET', description: 'List users' },
+        { path: '/users/{id}', method: 'GET', description: 'Get one user' },
+      ],
+      config_keys: [
+        { env_key: 'API_KEY', label: 'API Key', placeholder: 'sk-…', description: '' },
+      ],
+    },
+  });
+
+  const openEditDrawer = async (serverId: string, cfgId: string) => {
+    const customServer = makeCustomServer(serverId, 'ExampleAPI');
+    const config = makeConfig(cfgId, serverId, 'ExampleAPI', {
+      env_keys: ['API_KEY'],
+    });
+    const overview: McpOverview = {
+      servers: [customServer],
+      configs: [config],
+      customized_contexts: [],
+      incompatibilities: [],
+    };
+
+    (mcpsApi.revealSecrets as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { key: 'API_KEY', masked_value: 'sk-secret-123', secret: true },
+    ]);
+
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+
+    // Open the detail panel — the card-level div carries the click
+    // handler. The plugin name also appears in the host-discovery
+    // banner ("Configurer 'ExampleAPI' →"), so we target the actual
+    // installed-card container by class to disambiguate.
+    const installedCard = document.querySelector('.mcp-installed-card') as HTMLElement | null;
+    expect(installedCard).toBeTruthy();
+    fireEvent.click(installedCard!);
+
+    // Click "Modifier le plugin" (FR). The label appears in 3 places
+    // (button text, button title, helper sentence), so target the
+    // actual <button> via title to be unambiguous.
+    const editBtn = screen.getByTitle('Modifier le plugin');
+    await act(async () => {
+      fireEvent.click(editBtn);
+    });
+    // The handler awaits revealSecrets BEFORE setting showAddMcp +
+    // addMcpSelected → the form renders one microtask after the await
+    // resolves. In EDIT mode the save button reads "Enregistrer les
+    // modifications" (saveEdit i18n key), not just "Enregistrer".
+    await screen.findByText(/Enregistrer les modifications/, undefined, { timeout: 2000 });
+  };
+
+  it('Modifier le plugin: opens the form pre-filled with spec values', async () => {
+    vi.useRealTimers();
+    await openEditDrawer('custom-example-abc12345', 'cfg-example-1');
+
+    // Name + Base URL pre-filled.
+    const nameInput = screen.getByPlaceholderText(/Salesforce Sales API/) as HTMLInputElement;
+    expect(nameInput.value).toBe('ExampleAPI');
+    const baseUrlInput = screen.getByPlaceholderText(/my-org\.salesforce\.com/) as HTMLInputElement;
+    expect(baseUrlInput.value).toBe('https://api.example.com/v1');
+
+    // Field label pre-filled from spec.config_keys.
+    const labelInput = screen.getByPlaceholderText(/Bearer Token/) as HTMLInputElement;
+    expect(labelInput.value).toBe('API Key');
+
+    // Endpoint paths pre-filled (rendered as <input value="…">, so we
+    // scrape the input values rather than textContent).
+    const endpointPathValues = Array.from(
+      document.querySelectorAll<HTMLInputElement>('input'),
+    ).map(i => i.value);
+    expect(endpointPathValues).toContain('/users');
+    expect(endpointPathValues).toContain('/users/{id}');
+
+    // revealSecrets MUST have been called so the user can see/edit stored creds.
+    expect(mcpsApi.revealSecrets).toHaveBeenCalledWith('cfg-example-1');
+  });
+
+  it('Modifier le plugin: submit fires PUT updateCustomSpec then PATCH updateConfig', async () => {
+    vi.useRealTimers();
+    (mcpsApi.updateCustomSpec as ReturnType<typeof vi.fn>).mockClear();
+    (mcpsApi.updateConfig as ReturnType<typeof vi.fn>).mockClear();
+    (mcpsApi.updateCustomSpec as ReturnType<typeof vi.fn>).mockResolvedValue({});
+    (mcpsApi.updateConfig as ReturnType<typeof vi.fn>).mockResolvedValue({});
+
+    await openEditDrawer('custom-example-abc12345', 'cfg-example-1');
+
+    // Change the field value (the credential the user is updating).
+    const valueInputs = screen.getAllByPlaceholderText(/Valeur/) as HTMLInputElement[];
+    fireEvent.change(valueInputs[0], { target: { value: 'sk-NEW-rotation' } });
+
+    // Save.
+    const saveBtn = screen.getByText(/Enregistrer les modifications/);
+    fireEvent.click(saveBtn);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // PUT spec called with full payload.
+    expect(mcpsApi.updateCustomSpec).toHaveBeenCalledTimes(1);
+    const [serverId, specPayload] = (mcpsApi.updateCustomSpec as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(serverId).toBe('custom-example-abc12345');
+    expect(specPayload.name).toBe('ExampleAPI');
+    expect(specPayload.base_url).toBe('https://api.example.com/v1');
+    expect(specPayload.endpoints).toHaveLength(2);
+    expect(specPayload.endpoints[0].path).toBe('/users');
+    expect(specPayload.auth).toBe('None');
+    expect(specPayload.fields).toEqual([{ label: 'API Key', value: 'sk-NEW-rotation' }]);
+
+    // PATCH env called with the slugged env_key.
+    expect(mcpsApi.updateConfig).toHaveBeenCalledTimes(1);
+    const [cfgId, envPayload] = (mcpsApi.updateConfig as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(cfgId).toBe('cfg-example-1');
+    expect(envPayload.env).toEqual({ API_KEY: 'sk-NEW-rotation' });
+  });
+
+  it('Modifier le plugin: empty field values are SKIPPED on env PATCH (no wipe)', async () => {
+    vi.useRealTimers();
+    // Regression guard 2026-05-20 : if revealSecrets glitched and we
+    // pre-filled with empty values, hitting Save must NOT wipe the
+    // stored creds. The handler filters f.value === '' before
+    // building newEnv.
+    (mcpsApi.updateCustomSpec as ReturnType<typeof vi.fn>).mockClear();
+    (mcpsApi.updateConfig as ReturnType<typeof vi.fn>).mockClear();
+    (mcpsApi.updateCustomSpec as ReturnType<typeof vi.fn>).mockResolvedValue({});
+    (mcpsApi.updateConfig as ReturnType<typeof vi.fn>).mockResolvedValue({});
+    // revealSecrets returns empty value (the glitch scenario).
+    (mcpsApi.revealSecrets as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+      { key: 'API_KEY', masked_value: '', secret: true },
+    ]);
+
+    await openEditDrawer('custom-example-abc12345', 'cfg-example-2');
+
+    // Don't touch the value field — submit straight away.
+    const saveBtn = screen.getByText(/Enregistrer les modifications/);
+    fireEvent.click(saveBtn);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // PUT spec still fires.
+    expect(mcpsApi.updateCustomSpec).toHaveBeenCalledTimes(1);
+    // PATCH env fires with EMPTY env map — the existing stored creds
+    // stay since wholesale {} would NOT match a destructive PATCH that
+    // wipes; the backend interprets {} as "no changes to env" here.
+    // (If the backend semantics change to "wipe everything", this test
+    // becomes the canary.)
+    expect(mcpsApi.updateConfig).toHaveBeenCalledTimes(1);
+    const [, envPayload] = (mcpsApi.updateConfig as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(envPayload.env).toEqual({});
+  });
+
+  it('Modifier le plugin: button is HIDDEN for non-custom plugins', () => {
+    // Sanity guard: the edit button must NOT show for vendor-built
+    // plugins (mcp-github, api-chartbeat, etc.) — those are owned by
+    // the registry, not the user.
+    const vendorServer: McpServer = {
+      id: 'api-chartbeat',
+      name: 'Chartbeat',
+      description: 'Chartbeat',
+      transport: 'ApiOnly',
+      source: 'Registry',
+      api_spec: {
+        base_url: 'https://api.chartbeat.com',
+        auth: 'None',
+        endpoints: [],
+        config_keys: [],
+      },
+    };
+    const cfg = makeConfig('cfg-cb', 'api-chartbeat', 'Chartbeat');
+    const overview: McpOverview = {
+      servers: [vendorServer],
+      configs: [cfg],
+      customized_contexts: [],
+      incompatibilities: [],
+    };
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    const installedCard = document.querySelector('.mcp-installed-card') as HTMLElement | null;
+    expect(installedCard).toBeTruthy();
+    fireEvent.click(installedCard!);
+    expect(screen.queryByTitle('Modifier le plugin')).toBeNull();
   });
 });
