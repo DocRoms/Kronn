@@ -1350,8 +1350,8 @@
       <div class="arrow-down">▼</div>
       <div class="leaves">
         <div class="leaf">
-          <div class="title">Mémoire</div>
-          <p class="body">Discussions cross-CLI via MCP bridge. Zéro copy-paste.</p>
+          <div class="title">Mémoire vivante</div>
+          <p class="body">Discussions persistées en local. Mêmes contextes repris par n'importe quel CLI, OU N CLIs dans une même conversation live.</p>
         </div>
         <div class="leaf">
           <div class="title">Prompts</div>
@@ -1379,6 +1379,7 @@
         <ul>
           <li>Tes prompts copiés-collés entre trois fichiers Notion et un Markdown poussiéreux.</li>
           <li>Switch Claude Code → Codex provoque un reset complet du contexte.</li>
+          <li>Tu sers de messenger entre les agents en copy-pastant chaque message manuellement entre 3 fenêtres.</li>
           <li>Trois configurations MCP maintenues en parallèle, divergence garantie.</li>
           <li>Une notification Slack passe par un agent, donc consomme des tokens à chaque envoi.</li>
           <li>Envoyer un mail ou pousser un log passe aussi par un agent (MCP mail, plugin), tokens à chaque appel.</li>
@@ -1390,6 +1391,7 @@
         <ul>
           <li>Quick Prompts versionnés avec <code>{{vars}}</code>, métriques par itération.</li>
           <li>Même discussion, transmise au CLI suivant via MCP, zéro copy-paste.</li>
+          <li>3 CLIs (Claude, Codex, Gemini...) dialoguent dans <strong>une seule disc Kronn</strong> via <code>disc_join</code>. Zéro messenger humain.</li>
           <li>Une seule interface, propagation automatique vers tous les CLI installés.</li>
           <li>Step <code>Notify</code> exécuté sans agent : zéro token.</li>
           <li>Step <code>ApiCall</code> (Resend, Mailjet, webhook log) : zéro token, l'API directe sans LLM.</li>
@@ -1533,7 +1535,8 @@
         <div class="inv-cat"><span class="num">01</span>Mémoire &amp; contexte</div>
         <ul class="inv-list">
           <li>Discussions persistées en local (SQLite)</li>
-          <li>Reprise cross-CLI via MCP bridge</li>
+          <li>Reprise cross-CLI : Claude exporte, Codex reprend (0.8.4)</li>
+          <li><strong>Multi-CLI live</strong> : N agents dans une même discussion (0.8.6)</li>
           <li><code>docs/AGENTS.md</code> généré par audit</li>
           <li>Injection user-context <code>~/.kronn/user-context/</code></li>
           <li>Linked repos : contexte multi-repo</li>

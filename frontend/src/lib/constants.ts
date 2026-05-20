@@ -63,23 +63,24 @@ export function getProjectGroup(p: { repo_url: string | null }, localLabel = 'Lo
  *  Two paths exist on the backend (cf. `disc_prompts.rs` —
  *  `agent_speaks_mcp` / `agent_uses_slash_markers` gates):
  *    - MCP tools (single-turn, fast) for Claude Code, Kiro, Gemini,
- *      Copilot — see `mcp_scanner::inject_kronn_internal`.
+ *      Copilot, Codex (since 0.132) — see
+ *      `mcp_scanner::inject_kronn_internal`.
  *    - Slash markers (multi-turn: agent emits `KRONN:DISC_*`, Kronn
  *      resolves on next turn) for Vibe + Ollama — see
  *      `slash_markers.rs`.
  *
- *  Returns `false` only when the agent has NEITHER path:
- *    - **Codex (0.121)**: reads `~/.codex/config.toml` and *attempts*
- *      the MCP tool call but its exec-mode sandbox cancels the spawn
- *      before the bridge runs. Slash-marker fallback would also work
- *      but exec-mode strips the verbose stdout we'd need to parse.
- *      Tracked in TD-20260510-codex-mcp-sandbox-block — flip back
- *      when the upstream sandbox/approval gate is fixed.
+ *  Every concrete `AgentType` now has at least one path → returns
+ *  `true` unconditionally. Kept as a function rather than inlined
+ *  so we still have a single canonical name to grep for when a
+ *  future agent breaks the assumption.
  *
- *  Custom agents are treated as supporting — the user knows their
- *  setup. */
-export function agentSupportsIntrospection(agentType: AgentType): boolean {
-  return agentType !== 'Codex';
+ *  History — 0.8.6 (2026-05-20) : Codex flipped to supporting after
+ *  upstream Codex 0.132 fixed the exec-mode sandbox that cancelled
+ *  MCP tool calls in 0.121. Confirmed by a `tools/call` smoke test
+ *  through Codex itself. The earlier `TD-20260510-codex-mcp-sandbox-
+ *  block` is closed. */
+export function agentSupportsIntrospection(_agentType: AgentType): boolean {
+  return true;
 }
 
 /** Check if an agent has full_access enabled. */

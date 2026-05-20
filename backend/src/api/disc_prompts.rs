@@ -327,20 +327,20 @@ pub fn build_agent_prompt(
     // Mirror of `frontend/src/lib/constants.ts::agentSupportsIntrospection` —
     // keep them in sync.
     //
-    //   - Vibe + Ollama: no MCP layer at all (Vibe via `vibe-runner.py`
-    //     direct API, Ollama via HTTP streaming). Slash-marker fallback
-    //     planned in TD-20260510-introspection-vibe.
-    //   - Codex (0.121): wiring lands (`~/.codex/config.toml` gets the
-    //     entry, `codex mcp list` confirms it) but Codex's exec-mode
-    //     sandbox cancels the bridge subprocess before the call lands
-    //     (`mcp: kronn-internal/disc_meta started → (failed) user
-    //     cancelled MCP tool call`). Including the notice would have
-    //     Codex try and fail on every prompt, polluting replies.
-    //     TD-20260510-codex-mcp-sandbox-block — flip back when the
-    //     upstream gate is fixed.
+    //   - Vibe + Ollama (Kronn-launched): the runner bypasses MCP-stdio
+    //     for these two (Vibe hangs on stdin, Ollama has no MCP client
+    //     at all). The agent sees the tool LIST in the prompt but
+    //     cannot call them bidirectionally. Slash-marker fallback
+    //     planned for Vibe in TD-20260510-introspection-vibe.
+    //
+    // History — 0.8.6 (2026-05-20) : Codex flipped back to supporting
+    // after Codex 0.132 fixed the exec-mode sandbox that cancelled
+    // MCP tool calls in 0.121. Confirmed live by a `tools/call` smoke
+    // test through Codex itself. The TD-20260510-codex-mcp-sandbox-
+    // block is closed.
     let agent_speaks_mcp = !matches!(
         agent_type,
-        AgentType::Vibe | AgentType::Ollama | AgentType::Codex,
+        AgentType::Vibe | AgentType::Ollama,
     );
     let introspection_notice = match disc.language.as_str() {
         "fr" => "Outils d'historique disponibles via le MCP `kronn-internal` : \

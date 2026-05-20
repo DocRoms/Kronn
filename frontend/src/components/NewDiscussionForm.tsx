@@ -25,6 +25,11 @@ export interface NewDiscConfig {
   branchName: string;
   baseBranch: string;
   pendingFiles?: File[];
+  /** 0.8.6 phase 2 — when `false`, the parent should create the disc
+   *  WITHOUT auto-launching an agent (CLI run skipped). The user is
+   *  expected to invite agents later via the `[+ Inviter]` header
+   *  button. Default `true` preserves the legacy behaviour. */
+  launchAgentNow: boolean;
 }
 
 export interface NewDiscussionFormProps {
@@ -70,6 +75,11 @@ export function NewDiscussionForm({
   const [availableDirectives, setAvailableDirectives] = useState<Directive[]>([]);
   const [newDiscWorkspaceMode, setNewDiscWorkspaceMode] = useState<'Direct' | 'Isolated'>('Direct');
   const [newDiscTier, setNewDiscTier] = useState<'economy' | 'default' | 'reasoning'>('default');
+  // 0.8.6 phase 2 — disc-first refactor. When `false`, the disc is
+  // created without launching a CLI ; the user invites agents later
+  // via the `[+ Inviter]` header button. Default `true` keeps the
+  // legacy "create + run" flow for the 80% common case.
+  const [launchAgentNow, setLaunchAgentNow] = useState(true);
   const [newDiscBranchName, setNewDiscBranchName] = useState('');
   const [newDiscBaseBranch, setNewDiscBaseBranch] = useState('main');
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
@@ -140,7 +150,17 @@ export function NewDiscussionForm({
   const creatingRef = useRef(false);
 
   const handleCreate = async () => {
-    if (!newDiscPrompt.trim() || !newDiscAgent || creatingRef.current) return;
+    // Submit gate :
+    //   - launch mode  → prompt + agent both required (legacy contract)
+    //   - no-launch    → prompt OR title required so the empty disc has
+    //                    SOMETHING to display in the list. We default
+    //                    the title to a placeholder when both blank.
+    if (creatingRef.current) return;
+    if (launchAgentNow) {
+      if (!newDiscPrompt.trim() || !newDiscAgent) return;
+    } else {
+      if (!newDiscPrompt.trim() && !newDiscTitle.trim()) return;
+    }
     creatingRef.current = true;
     setCreating(true);
     try {
@@ -148,9 +168,18 @@ export function NewDiscussionForm({
       // async — await it through Promise.resolve so failures unblock the
       // button. Without this, if `discussions.create` throws, `creating`
       // stays true forever and the form is wedged until close+reopen.
+      const fallbackTitle = launchAgentNow
+        ? newDiscPrompt.trim().slice(0, 60)
+        : (newDiscPrompt.trim().slice(0, 60) || t('disc.discFirstDefaultTitle'));
       await Promise.resolve(onSubmit({
-        title: newDiscTitle.trim() || newDiscPrompt.trim().slice(0, 60),
-        agent: newDiscAgent as AgentType,
+        title: newDiscTitle.trim() || fallbackTitle,
+        // Even when `launchAgentNow=false`, the backend `CreateDiscussionRequest`
+        // still requires an agent_type field (legacy `discussions.agent`
+        // column NOT NULL). We send the currently-selected agent as a
+        // placeholder ; the parent skips `runAgent` so no CLI runs.
+        // The new `discussion_sessions` table is the source of truth for
+        // actual participants from 0.8.6 onward.
+        agent: (newDiscAgent || installedAgentsList[0]?.agent_type || 'ClaudeCode') as AgentType,
         projectId: newDiscProjectId || null,
         prompt: newDiscPrompt.trim(),
         skillIds: newDiscSkillIds,
@@ -161,6 +190,7 @@ export function NewDiscussionForm({
         branchName: newDiscBranchName,
         baseBranch: newDiscBaseBranch,
         pendingFiles: pendingFiles.length > 0 ? pendingFiles : undefined,
+        launchAgentNow,
       }));
     } catch (e) {
       // Parent (`handleCreateDiscussion` in DiscussionsPage) already toasts
@@ -225,15 +255,43 @@ export function NewDiscussionForm({
             </select>
           </div>
           <div>
-            <label className="disc-form-label">{t('disc.agent')}</label>
-            <select className="disc-select-styled" aria-label={t('disc.agent')} value={newDiscAgent} onChange={e => setNewDiscAgent(e.target.value as AgentType)}>
-              {installedAgentsList.map(a => (
-                <option key={a.name} value={a.agent_type}>{a.name}</option>
-              ))}
-              {installedAgentsList.length === 0 && (
-                <option value="" disabled>{t('disc.noAgent')}</option>
-              )}
-            </select>
+            <label className="disc-form-label">
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                <input
+                  type="checkbox"
+                  checked={launchAgentNow}
+                  onChange={e => setLaunchAgentNow(e.target.checked)}
+                  aria-label={t('disc.launchAgentNow')}
+                  style={{ margin: 0 }}
+                />
+                {t('disc.launchAgentNow')}
+                {/* 0.8.6 phase 2 — tooltip via native `title` keeps the
+                    info discoverable without inflating the form. Copy is
+                    23 words, validated user-side 2026-05-20. */}
+                <span
+                  className="disc-form-info-icon"
+                  title={t('disc.launchAgentNowHint')}
+                  aria-label={t('disc.launchAgentNowHint')}
+                  style={{ cursor: 'help', opacity: 0.7, fontSize: '0.85em' }}
+                >
+                  ⓘ
+                </span>
+              </span>
+            </label>
+            {launchAgentNow ? (
+              <select className="disc-select-styled" aria-label={t('disc.agent')} value={newDiscAgent} onChange={e => setNewDiscAgent(e.target.value as AgentType)}>
+                {installedAgentsList.map(a => (
+                  <option key={a.name} value={a.agent_type}>{a.name}</option>
+                ))}
+                {installedAgentsList.length === 0 && (
+                  <option value="" disabled>{t('disc.noAgent')}</option>
+                )}
+              </select>
+            ) : (
+              <div className="disc-form-hint" style={{ fontSize: '0.85em', opacity: 0.7, padding: '6px 0' }}>
+                {t('disc.discFirstHint')}
+              </div>
+            )}
           </div>
         </div>
 
@@ -550,11 +608,19 @@ export function NewDiscussionForm({
 
         <button
           className="disc-create-btn"
-          data-ready={!!newDiscPrompt.trim()}
+          data-ready={launchAgentNow ? !!newDiscPrompt.trim() : (!!newDiscPrompt.trim() || !!newDiscTitle.trim())}
           onClick={handleCreate}
-          disabled={!newDiscPrompt.trim() || !newDiscAgent || creating}
+          // 0.8.6 phase 2 — disc-first mode allows submitting WITHOUT a
+          // prompt (just a title) since the agent will be invited later.
+          // Launch mode keeps the legacy gates.
+          disabled={
+            creating ||
+            (launchAgentNow
+              ? !newDiscPrompt.trim() || !newDiscAgent
+              : !newDiscPrompt.trim() && !newDiscTitle.trim())
+          }
         >
-          <MessageSquare size={14} /> {t('disc.start')}
+          <MessageSquare size={14} /> {launchAgentNow ? t('disc.start') : t('disc.createEmpty')}
           <span className="disc-create-shortcut">Ctrl+Enter</span>
         </button>
       </div>

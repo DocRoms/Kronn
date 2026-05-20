@@ -295,17 +295,27 @@ export function DiscussionsPage({
   const [loadedDiscussions, setLoadedDiscussions] = useState<Record<string, Discussion>>({});
 
   // Fetch full discussion (with messages) when active discussion changes
-  // or when sending finishes (to pick up the agent's response)
+  // or when sending finishes (to pick up the agent's response).
+  // 0.8.6 phase 3 — also poll every 5 s so messages posted by OTHER
+  // agents (via the multi-agent collab `disc_append` flow) show up
+  // without the user having to switch discussions and back. Cheap :
+  // a single SELECT on the indexed messages table. Will be replaced
+  // by SSE when DiscMessageAppended events are plumbed through the
+  // existing ws_broadcast pipeline.
   const activeSending = activeDiscussionId ? !!sendingMap[activeDiscussionId] : false;
   useEffect(() => {
     if (!activeDiscussionId) return;
     let cancelled = false;
-    discussionsApi.get(activeDiscussionId).then(disc => {
-      if (!cancelled && disc) {
-        setLoadedDiscussions(prev => ({ ...prev, [disc.id]: disc }));
-      }
-    }).catch(() => { /* ignore fetch errors */ });
-    return () => { cancelled = true; };
+    const fetchActive = () => {
+      discussionsApi.get(activeDiscussionId).then(disc => {
+        if (!cancelled && disc) {
+          setLoadedDiscussions(prev => ({ ...prev, [disc.id]: disc }));
+        }
+      }).catch(() => { /* ignore fetch errors */ });
+    };
+    fetchActive();
+    const id = setInterval(fetchActive, 5000);
+    return () => { cancelled = true; clearInterval(id); };
   }, [activeDiscussionId, activeSending]);
 
   // Clear worktree error when switching discussions
@@ -925,6 +935,18 @@ export function DiscussionsPage({
     }
 
     const discId = disc.id;
+
+    // 0.8.6 phase 2 — disc-first refactor. When the user explicitly
+    // chose NOT to launch an agent, the disc is created empty and
+    // becomes a waiting room for invited peers ([+ Inviter] in the
+    // header). Skip the CLI kick-off entirely — no streaming, no
+    // tokens, no worktree setup. The first message (`initial_prompt`)
+    // is already stored as part of `discussions.create`.
+    if (!config.launchAgentNow) {
+      toast(t('disc.discFirstCreatedToast'), 'success');
+      return;
+    }
+
     const controller = new AbortController();
     abortControllers.current[discId] = controller;
     setSendingMap(prev => ({ ...prev, [discId]: true }));

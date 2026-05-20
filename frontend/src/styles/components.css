@@ -297,3 +297,168 @@ select.input option {
 .mcp-load-ok { color: var(--kr-success); }
 .mcp-load-warn { color: var(--kr-warning); }
 .mcp-load-danger { color: var(--kr-error); }
+
+/* ── 0.8.6 phase 2 — Disc participants header + invite modal ───────────
+ * Tokens used (all defined in styles/tokens.css across themes) :
+ *   --kr-bg-elevated, --kr-bg-code, --kr-bg-hover, --kr-border,
+ *   --kr-accent, --kr-accent-rgb, --kr-text-primary, --kr-text-secondary,
+ *   --kr-text-ghost, --kr-text-on-accent.
+ * Bug 2026-05-21 : the first version used inline styles with two
+ * invented tokens (`--kr-on-accent`, `--kr-bg-muted`) AND missed the
+ * modal foreground color → black-on-black in dark theme. Locking the
+ * theming via classes here.
+ */
+
+.disc-participants-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-right: 8px;
+}
+
+.disc-participants-empty {
+  font-size: 0.85em;
+  color: var(--kr-text-ghost);
+}
+
+.disc-participant-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  font-size: 0.8em;
+  color: var(--kr-text-primary);
+  border: 1px solid var(--kr-border);
+  border-radius: 4px;
+  background: transparent;
+}
+
+.disc-participant-chip[data-status="paused"] {
+  background: var(--kr-bg-hover);
+  opacity: 0.6;
+}
+
+.disc-participants-invite-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  font-size: 0.8em;
+  border: 1px solid var(--kr-accent);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--kr-accent);
+  cursor: pointer;
+}
+
+.disc-participants-invite-btn:hover:not(:disabled) {
+  background: rgba(var(--kr-accent-rgb), 0.08);
+}
+
+.disc-participants-invite-btn:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.disc-invite-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.disc-invite-modal {
+  background: var(--kr-bg-elevated);
+  color: var(--kr-text-primary);
+  border: 1px solid var(--kr-border);
+  border-radius: 8px;
+  padding: 16px;
+  max-width: 520px;
+  width: 90%;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+.disc-invite-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.disc-invite-modal-header h3 {
+  margin: 0;
+  font-size: 1em;
+  color: var(--kr-text-primary);
+}
+
+.disc-invite-modal-close {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--kr-text-ghost);
+}
+
+.disc-invite-modal-close:hover {
+  color: var(--kr-text-primary);
+}
+
+.disc-invite-modal-intro {
+  font-size: 0.9em;
+  color: var(--kr-text-secondary);
+  margin: 0 0 8px 0;
+}
+
+.disc-invite-instruction {
+  /* `--kr-bg-code-panel` is intentionally dark in EVERY theme (IDE
+     convention, cf. tokens.css comments). But `--kr-text-primary`
+     flips to a DARK value in light theme — that combo renders the
+     copy-paste instruction black-on-black. Pin the text tokens to
+     their dark-theme values inside this panel, mirroring the
+     pattern used by `.git-panel-container` in GitPanel.css. */
+  background: var(--kr-bg-code-panel);
+  --kr-text-primary: #e8eaed;
+  --kr-text-secondary: rgba(255, 255, 255, 0.7);
+  --kr-text-ghost: rgba(255, 255, 255, 0.5);
+  color: var(--kr-text-primary);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  padding: 10px 12px;
+  border-radius: 4px;
+  font-size: 0.85em;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 8px 0;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.disc-invite-modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.disc-invite-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border: 1px solid var(--kr-accent);
+  border-radius: 4px;
+  background: var(--kr-accent);
+  color: var(--kr-text-on-accent);
+  cursor: pointer;
+}
+
+.disc-invite-copy-btn:hover {
+  filter: brightness(1.1);
+}
+
+.disc-invite-expires-hint {
+  font-size: 0.8em;
+  color: var(--kr-text-ghost);
+  margin: 8px 0 0 0;
+}

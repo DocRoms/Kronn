@@ -11,6 +11,7 @@ pub mod discussions;
 pub mod disc_git;
 pub mod disc_helpers;
 pub mod disc_introspection;
+pub mod disc_invite;
 pub mod disc_prompts;
 pub mod disc_source;
 pub mod agent_api;

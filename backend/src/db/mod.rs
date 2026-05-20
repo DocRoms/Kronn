@@ -2,6 +2,7 @@ pub mod agent_decisions;
 pub mod audit_runs;
 pub mod contacts;
 pub mod disc_source;
+pub mod discussion_sessions;
 pub mod discussions;
 pub mod mcps;
 pub mod migrations;

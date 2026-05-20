@@ -765,5 +765,658 @@ class ApiCallBrokerTests(unittest.TestCase):
         self.assertEqual(result["data"], {"items": [{"id": "EW-1"}]})
 
 
+class RuntimeDiscBindingTests(unittest.TestCase):
+    """0.8.6 phase 2 — `_CURRENT_DISC_ID` mutable binding.
+
+    Before phase 2 the bridge could only learn its disc via the
+    `KRONN_DISCUSSION_ID` env at boot. Phase 2 adds a runtime setter
+    so `disc_join({token})` can bind a host-launched CLI to a Kronn
+    disc without restarting the process. These tests lock the new
+    contract :
+
+      * env present at boot → `_CURRENT_DISC_ID` reflects it
+      * env absent → `_disc_id()` raises an actionable error mentioning
+        BOTH the env-var path AND the `disc_join` path
+      * `_set_current_disc_id(x)` mutates the binding live + invalidates
+        the meta cache so the next read goes to the new disc
+      * `_set_current_disc_id(None)` clears the binding (used by
+        `disc_leave`)
+    """
+
+    def test_boot_with_env_sets_current_disc_id(self):
+        with mock.patch.dict(os.environ, {"KRONN_DISCUSSION_ID": "disc-from-env"}):
+            mod = _load_module()
+        self.assertEqual(mod._CURRENT_DISC_ID, "disc-from-env")
+        # And `_disc_id()` returns it.
+        self.assertEqual(mod._disc_id(), "disc-from-env")
+
+    def test_boot_without_env_leaves_current_disc_id_none(self):
+        # Strip the env var explicitly even if the host shell has one set.
+        env_clean = {k: v for k, v in os.environ.items() if k != "KRONN_DISCUSSION_ID"}
+        with mock.patch.dict(os.environ, env_clean, clear=True):
+            mod = _load_module()
+        self.assertIsNone(mod._CURRENT_DISC_ID)
+
+    def test_disc_id_raises_actionable_error_when_unbound(self):
+        env_clean = {k: v for k, v in os.environ.items() if k != "KRONN_DISCUSSION_ID"}
+        with mock.patch.dict(os.environ, env_clean, clear=True):
+            mod = _load_module()
+        with self.assertRaises(RuntimeError) as cm:
+            mod._disc_id()
+        msg = str(cm.exception)
+        # The error MUST surface both ways to bind (env + disc_join), so the
+        # caller (or the agent inspecting the error) knows the fix.
+        self.assertIn("KRONN_DISCUSSION_ID", msg)
+        self.assertIn("disc_join", msg)
+
+    def test_set_current_disc_id_mutates_binding_at_runtime(self):
+        env_clean = {k: v for k, v in os.environ.items() if k != "KRONN_DISCUSSION_ID"}
+        with mock.patch.dict(os.environ, env_clean, clear=True):
+            mod = _load_module()
+        # Initially unbound.
+        self.assertIsNone(mod._CURRENT_DISC_ID)
+        # Runtime bind.
+        mod._set_current_disc_id("disc-runtime-joined")
+        self.assertEqual(mod._CURRENT_DISC_ID, "disc-runtime-joined")
+        self.assertEqual(mod._disc_id(), "disc-runtime-joined")
+
+    def test_set_current_disc_id_invalidates_meta_cache(self):
+        with mock.patch.dict(os.environ, {"KRONN_DISCUSSION_ID": "disc-old"}):
+            mod = _load_module()
+        # Pre-populate the cache as if we already looked up disc-old.
+        mod._CURRENT_DISC_META_CACHE["checked"] = True
+        mod._CURRENT_DISC_META_CACHE["value"] = {
+            "id": "disc-old",
+            "project_id": "p-old",
+            "agent": "ClaudeCode",
+        }
+        # Switching disc must clear the stale meta — otherwise the next
+        # `_current_project_id()` would return p-old for the new disc.
+        mod._set_current_disc_id("disc-new")
+        self.assertFalse(mod._CURRENT_DISC_META_CACHE["checked"])
+        self.assertIsNone(mod._CURRENT_DISC_META_CACHE["value"])
+
+    def test_set_current_disc_id_none_clears_binding(self):
+        with mock.patch.dict(os.environ, {"KRONN_DISCUSSION_ID": "disc-X"}):
+            mod = _load_module()
+        self.assertEqual(mod._CURRENT_DISC_ID, "disc-X")
+        # disc_leave path (later wave) clears.
+        mod._set_current_disc_id(None)
+        self.assertIsNone(mod._CURRENT_DISC_ID)
+        with self.assertRaises(RuntimeError):
+            mod._disc_id()
+
+
+class DiscJoinTests(unittest.TestCase):
+    """0.8.6 phase 2 — `disc_join` MCP tool.
+
+    The tool POSTs to `/api/discussions/peer-join`, validates the
+    invite token, and (on success) mutates `_CURRENT_DISC_ID` so
+    every subsequent `disc_*` tool resolves to the joined disc. We
+    mock the `_http` boundary so the test is pure — no live backend
+    required.
+
+    These lock the contract :
+      * happy path : `_CURRENT_DISC_ID` bound + response returned
+      * missing token → typed RuntimeError before any HTTP call
+      * backend error response → `_CURRENT_DISC_ID` left UNCHANGED
+      * env override : KRONN_AGENT_TYPE / KRONN_SESSION_ID surface
+        in the POST body
+    """
+
+    def setUp(self):
+        # Start every test with no disc bound — covers the host-launched
+        # CLI scenario (no env injection).
+        env_clean = {
+            k: v for k, v in os.environ.items()
+            if k not in ("KRONN_DISCUSSION_ID", "KRONN_AGENT_TYPE", "KRONN_SESSION_ID")
+        }
+        self.env_patch = mock.patch.dict(os.environ, env_clean, clear=True)
+        self.env_patch.start()
+        self.mod = _load_module()
+        # Sanity : the module starts unbound.
+        self.assertIsNone(self.mod._CURRENT_DISC_ID)
+
+    def tearDown(self):
+        self.env_patch.stop()
+
+    def test_happy_path_binds_disc_and_returns_payload(self):
+        # Mock the parent-process cmdline lookup — the 2026-05-21
+        # fallback would otherwise pick up the test runner's parent
+        # (claude/pytest/etc) and inject a real agent_type, defeating
+        # the "no useful detection → Unknown" intent of this test.
+        with mock.patch.object(self.mod, "_parent_process_cmdline", return_value=None), \
+             mock.patch.object(self.mod, "_http") as mock_http:
+            mock_http.return_value = {
+                "success": True,
+                "data": {
+                    "disc_id": "d-from-token",
+                    "session_pk": 42,
+                    "peer_count": 1,
+                    "disc_title": "RGPD audit",
+                    "recent_messages": [],
+                },
+            }
+            result = self.mod.call_disc_join({"token": "kr-join-abc"})
+
+        # Bound.
+        self.assertEqual(self.mod._CURRENT_DISC_ID, "d-from-token")
+        # Now `_disc_id()` returns the joined disc.
+        self.assertEqual(self.mod._disc_id(), "d-from-token")
+        # Returned payload matches the data field.
+        self.assertEqual(result["disc_id"], "d-from-token")
+        self.assertEqual(result["peer_count"], 1)
+        # Backend was called with the token + synthesised agent_type / session_id.
+        called_path = mock_http.call_args[0][1]
+        called_body = mock_http.call_args[0][2]
+        self.assertEqual(called_path, "/api/discussions/peer-join")
+        self.assertEqual(called_body["token"], "kr-join-abc")
+        self.assertEqual(called_body["agent_type"], "Unknown")
+        self.assertTrue(called_body["session_id"].startswith("adhoc-"))
+
+    def test_missing_token_raises_before_any_http_call(self):
+        with mock.patch.object(self.mod, "_http") as mock_http:
+            with self.assertRaises(RuntimeError) as cm:
+                self.mod.call_disc_join({})
+            mock_http.assert_not_called()
+        msg = str(cm.exception)
+        self.assertIn("token", msg)
+        self.assertIn("kr-join", msg, "error should hint at the token format")
+        # Still unbound.
+        self.assertIsNone(self.mod._CURRENT_DISC_ID)
+
+    def test_backend_rejection_leaves_current_disc_unbound(self):
+        # _unwrap raises on `success=false`. The disc binding must NOT
+        # change if the backend rejects the token.
+        with mock.patch.object(self.mod, "_http") as mock_http:
+            mock_http.return_value = {
+                "success": False,
+                "error": "invite token already used",
+            }
+            with self.assertRaises(RuntimeError):
+                self.mod.call_disc_join({"token": "kr-join-stale"})
+        self.assertIsNone(
+            self.mod._CURRENT_DISC_ID,
+            "rejected join must not leave a phantom binding",
+        )
+
+    def test_env_overrides_propagate_to_post_body(self):
+        # When the agent supplies its own identity via env (Kronn-launched
+        # case or a wrapper script setting these vars), the bridge MUST
+        # forward them so the `discussion_sessions` row carries the right
+        # agent_type / session_id.
+        with mock.patch.dict(os.environ, {
+            "KRONN_AGENT_TYPE": "Codex",
+            "KRONN_SESSION_ID": "sess-codex-real",
+        }):
+            mod2 = _load_module()
+            with mock.patch.object(mod2, "_http") as mock_http:
+                mock_http.return_value = {
+                    "success": True,
+                    "data": {"disc_id": "d", "session_pk": 1, "peer_count": 1, "disc_title": "x", "recent_messages": []},
+                }
+                mod2.call_disc_join({"token": "kr-join-z"})
+            body = mock_http.call_args[0][2]
+            self.assertEqual(body["agent_type"], "Codex")
+            self.assertEqual(body["session_id"], "sess-codex-real")
+
+
+class DiscAppendSimpleModeTests(unittest.TestCase):
+    """0.8.6 fix 2026-05-21 — ergonomic simple-mode for `disc_append`.
+
+    Before this, the tool only accepted `messages: [{source_msg_id,
+    role, content, agent_type}, …]` (heavy mode for transcript
+    import). The simple `disc_append({content: "Hi"})` form that the
+    multi-agent collab UX guides agents toward FAILED with "missing
+    required 'messages'". These tests lock the new simple-mode :
+      - content alone → bridge wraps it + auto-fills the rest
+      - disc_id defaults to runtime-bound disc
+      - agent_type derives from clientInfo
+      - heavy mode (messages array) still works for back-compat
+      - role override + agent_type override propagate
+      - missing both content AND messages → clear error
+    """
+
+    def setUp(self):
+        self.env_patch = mock.patch.dict(
+            os.environ,
+            {"KRONN_DISCUSSION_ID": "disc-chat"},
+            clear=False,
+        )
+        self.env_patch.start()
+        self.addCleanup(self.env_patch.stop)
+        self.mod = _load_module()
+        # Pretend Codex is the calling CLI via the captured clientInfo.
+        self.mod._CLIENT_INFO["name"] = "codex-cli"
+
+    def test_simple_mode_content_alone_succeeds(self):
+        with mock.patch.object(self.mod, "_http") as mock_http:
+            mock_http.return_value = {
+                "success": True,
+                "data": {"appended": 1, "skipped_as_duplicates": 0, "diverged": False},
+            }
+            result = self.mod.call_disc_append({"content": "ready to play"})
+        body = mock_http.call_args[0][2]
+        self.assertEqual(body["disc_id"], "disc-chat")
+        self.assertEqual(len(body["messages"]), 1)
+        msg = body["messages"][0]
+        self.assertEqual(msg["content"], "ready to play")
+        self.assertEqual(msg["role"], "Agent")
+        self.assertEqual(msg["agent_type"], "Codex")
+        # source_msg_id auto-generated with `live-` prefix for traceability.
+        self.assertTrue(msg["source_msg_id"].startswith("live-"))
+        self.assertEqual(result["appended"], 1)
+
+    def test_simple_mode_role_and_agent_type_overrides_propagate(self):
+        with mock.patch.object(self.mod, "_http") as mock_http:
+            mock_http.return_value = {"success": True, "data": {}}
+            self.mod.call_disc_append({
+                "content": "hi",
+                "role": "User",
+                "agent_type": "ManualOverride",
+            })
+        msg = mock_http.call_args[0][2]["messages"][0]
+        self.assertEqual(msg["role"], "User")
+        self.assertEqual(msg["agent_type"], "ManualOverride")
+
+    def test_heavy_mode_messages_array_still_works(self):
+        # Back-compat : the 0.8.4 cross-agent-memory transcript import
+        # path MUST keep working. Agents that pass an explicit messages
+        # array bypass the auto-fill.
+        with mock.patch.object(self.mod, "_http") as mock_http:
+            mock_http.return_value = {"success": True, "data": {}}
+            self.mod.call_disc_append({
+                "disc_id": "disc-other",
+                "messages": [
+                    {"source_msg_id": "abc-1", "role": "Agent", "content": "first"},
+                    {"source_msg_id": "abc-2", "role": "User", "content": "second"},
+                ],
+            })
+        body = mock_http.call_args[0][2]
+        self.assertEqual(body["disc_id"], "disc-other")
+        self.assertEqual(len(body["messages"]), 2)
+        self.assertEqual(body["messages"][0]["source_msg_id"], "abc-1")
+
+    def test_neither_content_nor_messages_errors_with_clear_hint(self):
+        with mock.patch.object(self.mod, "_http") as mock_http:
+            with self.assertRaises(RuntimeError) as cm:
+                self.mod.call_disc_append({})
+            mock_http.assert_not_called()
+        msg = str(cm.exception)
+        # Error must mention BOTH modes so the agent knows how to fix.
+        self.assertIn("content", msg)
+        self.assertIn("messages", msg)
+
+
+class DiscLeaveTests(unittest.TestCase):
+    """0.8.6 phase 3 — `disc_leave` MCP tool."""
+
+    def setUp(self):
+        self.env_patch = mock.patch.dict(
+            os.environ,
+            {
+                "KRONN_DISCUSSION_ID": "disc-bye",
+                "KRONN_AGENT_TYPE": "Codex",
+                "KRONN_SESSION_ID": "sess-bye",
+            },
+            clear=False,
+        )
+        self.env_patch.start()
+        self.addCleanup(self.env_patch.stop)
+        self.mod = _load_module()
+
+    def test_clears_local_binding_and_posts_leave(self):
+        with mock.patch.object(self.mod, "_http") as mock_http:
+            mock_http.return_value = {
+                "success": True,
+                "data": {"left": True},
+            }
+            # Sanity : we start bound.
+            self.assertEqual(self.mod._CURRENT_DISC_ID, "disc-bye")
+            result = self.mod.call_disc_leave({})
+
+        self.assertEqual(result, {"left": True})
+        # Bridge cleared its local binding.
+        self.assertIsNone(self.mod._CURRENT_DISC_ID)
+        # Body forwarded the agent identity.
+        called_body = mock_http.call_args[0][2]
+        self.assertEqual(called_body["agent_type"], "Codex")
+        self.assertEqual(called_body["session_id"], "sess-bye")
+
+    def test_clears_local_binding_even_when_backend_unreachable(self):
+        # If the backend is down or 500s, the bridge MUST still clear
+        # its local `_CURRENT_DISC_ID` so the next `disc_*` tool isn't
+        # stuck targeting a disc the user wanted to leave. The error
+        # bubbles up so the caller knows the leave wasn't recorded
+        # server-side.
+        with mock.patch.object(self.mod, "_http", side_effect=RuntimeError("network down")):
+            with self.assertRaises(RuntimeError):
+                self.mod.call_disc_leave({})
+        self.assertIsNone(self.mod._CURRENT_DISC_ID)
+
+
+class ClientInfoAutoDetectTests(unittest.TestCase):
+    """0.8.6 fix 2026-05-21 — auto-derive agent_type from MCP clientInfo.
+
+    Without this, peers showed up as 'Unknown' in the header because
+    host-launched CLIs don't naturally set `KRONN_AGENT_TYPE` env.
+    The fix captures `clientInfo.name` from the initialize handshake
+    and maps it to the canonical AgentType.
+    """
+
+    def setUp(self):
+        env_clean = {
+            k: v for k, v in os.environ.items()
+            if k not in ("KRONN_AGENT_TYPE", "KRONN_CALLER_AGENT")
+        }
+        self.env_patch = mock.patch.dict(os.environ, env_clean, clear=True)
+        self.env_patch.start()
+        self.addCleanup(self.env_patch.stop)
+        self.mod = _load_module()
+
+    def test_infer_agent_type_from_known_clients(self):
+        cases = {
+            "claude-code": "ClaudeCode",
+            "Claude Code": "ClaudeCode",
+            "codex-cli": "Codex",
+            "codex": "Codex",
+            "gemini-cli": "GeminiCli",
+            "Kiro": "Kiro",
+            "kiro-cli": "Kiro",
+            "copilot-cli": "CopilotCli",
+            "vibe": "Vibe",
+            "vibe-cli": "Vibe",
+            "cursor": "Custom",
+            "cline": "Custom",
+            "totally-unknown-cli": "Unknown",
+            "": "Unknown",
+            None: "Unknown",
+        }
+        for client_name, expected in cases.items():
+            got = self.mod._infer_agent_type_from_client_name(client_name)
+            self.assertEqual(
+                got, expected,
+                f"clientInfo.name={client_name!r} → expected {expected}, got {got}",
+            )
+
+    def test_initialize_captures_client_info(self):
+        # Replay the initialize request the way a real CLI would.
+        resp = self.mod._handle({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "clientInfo": {"name": "claude-code", "version": "1.2.3"},
+            },
+        })
+        self.assertEqual(resp["result"]["serverInfo"]["name"], "kronn-internal")
+        # And the side-effect : clientInfo stashed for downstream tools.
+        self.assertEqual(self.mod._CLIENT_INFO["name"], "claude-code")
+        self.assertEqual(self.mod._CLIENT_INFO["version"], "1.2.3")
+
+    def test_agent_type_for_session_explicit_env_wins_over_inferred(self):
+        # When KRONN_AGENT_TYPE is set explicitly (wrapper script, test
+        # harness, etc.), it overrides the auto-detection — useful for
+        # advanced users who want to surface a Custom subtype.
+        with mock.patch.dict(os.environ, {"KRONN_AGENT_TYPE": "OverriddenAgent"}):
+            self.mod._CLIENT_INFO["name"] = "claude-code"
+            self.assertEqual(self.mod._agent_type_for_session(), "OverriddenAgent")
+
+    def test_agent_type_for_session_uses_client_info_when_no_env(self):
+        # The headline fix : no env vars + clientInfo from handshake
+        # → derives ClaudeCode (was returning Unknown before 2026-05-21).
+        self.mod._CLIENT_INFO["name"] = "claude-code"
+        self.assertEqual(self.mod._agent_type_for_session(), "ClaudeCode")
+
+    def test_agent_type_for_session_falls_through_to_unknown(self):
+        # No env, no clientInfo, no useful parent cmdline → Unknown.
+        # The peer still joins (the backend doesn't reject Unknown),
+        # the header just shows a generic chip. Better than crashing.
+        # We mock _parent_process_cmdline because the test runner's
+        # parent process (Claude Code Bash, pytest, etc.) might
+        # contain a matchable name and accidentally pass.
+        self.mod._CLIENT_INFO["name"] = None
+        with mock.patch.object(
+            self.mod, "_parent_process_cmdline",
+            return_value=None,
+        ):
+            self.assertEqual(self.mod._agent_type_for_session(), "Unknown")
+
+    def test_parent_cmdline_fallback_kicks_in_when_clientinfo_useless(self):
+        # 2026-05-21 fix : Vibe's MCP client doesn't always send a
+        # name we can match → fall back to /proc/<PPID>/cmdline. Mock
+        # `_parent_process_cmdline` to simulate a Vibe parent process.
+        self.mod._CLIENT_INFO["name"] = None  # clientInfo gave us nothing
+        with mock.patch.object(
+            self.mod, "_parent_process_cmdline",
+            return_value="/usr/local/bin/vibe --some-flag",
+        ):
+            self.assertEqual(self.mod._agent_type_for_session(), "Vibe")
+
+    def test_unknown_fallback_when_neither_clientinfo_nor_cmdline_helps(self):
+        # Final guard : nothing we can do, return Unknown rather than
+        # crashing. The session row still gets created server-side.
+        self.mod._CLIENT_INFO["name"] = "totally-mystery-cli"
+        with mock.patch.object(
+            self.mod, "_parent_process_cmdline",
+            return_value="/usr/bin/totally-mystery-cli --foo",
+        ):
+            self.assertEqual(self.mod._agent_type_for_session(), "Unknown")
+
+    def test_disc_join_uses_inferred_agent_type_when_env_absent(self):
+        # End-to-end : initialize handshake → clientInfo captured →
+        # disc_join body carries the right agent_type without
+        # KRONN_AGENT_TYPE being set.
+        self.mod._handle({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"clientInfo": {"name": "codex-cli", "version": "0.132.0"}},
+        })
+        with mock.patch.object(self.mod, "_http") as mock_http:
+            mock_http.return_value = {
+                "success": True,
+                "data": {"disc_id": "d", "session_pk": 1, "peer_count": 1, "disc_title": "x", "recent_messages": []},
+            }
+            self.mod.call_disc_join({"token": "kr-join-test"})
+        body = mock_http.call_args[0][2]
+        self.assertEqual(
+            body["agent_type"], "Codex",
+            "disc_join should derive 'Codex' from clientInfo.name='codex-cli'",
+        )
+
+
+class StableSessionIdAcrossCallsTests(unittest.TestCase):
+    """0.8.6 fix 2026-05-21 — `_session_id_for_caller` returns the
+    same id for the entire bridge process lifetime.
+
+    Before the fix, `disc_join` and `disc_leave` each generated a
+    fresh `adhoc-<uuid>` so `find_active_session(agent_type,
+    session_id)` missed and `disc_leave` returned `left: false`.
+    Caught live on the 3-agent tennis match (Claude + Codex both
+    surfaced `left: false` in their transcripts). These tests lock
+    the stability contract.
+    """
+
+    def setUp(self):
+        env_clean = {
+            k: v for k, v in os.environ.items()
+            if k not in ("KRONN_SESSION_ID", "KRONN_CALLER_SESSION_ID")
+        }
+        self.env_patch = mock.patch.dict(os.environ, env_clean, clear=True)
+        self.env_patch.start()
+        self.addCleanup(self.env_patch.stop)
+        self.mod = _load_module()
+
+    def test_session_id_is_identical_across_calls(self):
+        # Hammer the helper a few times — same value every call.
+        first = self.mod._session_id_for_caller()
+        for _ in range(5):
+            self.assertEqual(self.mod._session_id_for_caller(), first)
+
+    def test_session_id_starts_with_adhoc_when_no_env(self):
+        sid = self.mod._session_id_for_caller()
+        self.assertTrue(
+            sid.startswith("adhoc-"),
+            f"host-launched bridge should fall back to adhoc- prefix, got {sid!r}",
+        )
+
+    def test_session_id_picks_up_env_when_set_at_module_load(self):
+        with mock.patch.dict(os.environ, {"KRONN_SESSION_ID": "kronn-launched-123"}):
+            mod2 = _load_module()
+        self.assertEqual(mod2._session_id_for_caller(), "kronn-launched-123")
+
+    def test_disc_join_and_disc_leave_send_the_same_session_id(self):
+        # The headline regression : the two tool calls MUST forward
+        # the same `session_id` so the backend's find_active_session
+        # query hits on disc_leave.
+        with mock.patch.dict(os.environ, {"KRONN_DISCUSSION_ID": "disc-stable"}):
+            mod = _load_module()
+            mod._CLIENT_INFO["name"] = "codex-cli"
+            with mock.patch.object(mod, "_http") as mock_http:
+                mock_http.return_value = {
+                    "success": True,
+                    "data": {
+                        "disc_id": "d", "session_pk": 1, "peer_count": 1,
+                        "disc_title": "x", "recent_messages": [],
+                    },
+                }
+                mod.call_disc_join({"token": "kr-join-x"})
+                join_sid = mock_http.call_args[0][2]["session_id"]
+
+                mock_http.return_value = {"success": True, "data": {"left": True}}
+                mod.call_disc_leave({})
+                leave_sid = mock_http.call_args[0][2]["session_id"]
+
+            self.assertEqual(
+                join_sid, leave_sid,
+                "disc_join and disc_leave must share the same session_id, "
+                "otherwise find_active_session misses and left=false",
+            )
+
+
+class DiscWaitForPeerTests(unittest.TestCase):
+    """0.8.6 phase 3 — `disc_wait_for_peer` MCP tool.
+
+    Bridge-side mechanics : forwards `since_sort_order` + `timeout_secs`
+    in the query string, derives `exclude_agent_type` from the
+    `KRONN_AGENT_TYPE` (or `KRONN_CALLER_AGENT`) env so the agent
+    doesn't wake itself, hits `_disc_id()` so an unbound bridge
+    raises before any HTTP attempt.
+    """
+
+    def setUp(self):
+        self.env_patch = mock.patch.dict(
+            os.environ,
+            {
+                "KRONN_DISCUSSION_ID": "disc-poll",
+                "KRONN_AGENT_TYPE": "Codex",
+            },
+            clear=False,
+        )
+        self.env_patch.start()
+        self.addCleanup(self.env_patch.stop)
+        self.mod = _load_module()
+
+    def test_forwards_since_and_timeout_in_query_string(self):
+        with mock.patch.object(self.mod, "_http") as mock_http:
+            mock_http.return_value = {
+                "success": True,
+                "data": {"timed_out": True, "messages": [], "latest_sort_order": 12},
+            }
+            self.mod.call_disc_wait_for_peer({
+                "since_sort_order": 12,
+                "timeout_secs": 30,
+            })
+        called_method, called_path = mock_http.call_args[0][:2]
+        self.assertEqual(called_method, "GET")
+        self.assertIn("/api/discussions/disc-poll/wait?", called_path)
+        self.assertIn("since_sort_order=12", called_path)
+        self.assertIn("timeout_secs=30", called_path)
+        # Exclude propagated from KRONN_AGENT_TYPE so we don't wake self.
+        self.assertIn("exclude_agent_type=Codex", called_path)
+
+    def test_no_query_params_when_args_omitted(self):
+        # When the agent calls disc_wait_for_peer() with no args, the
+        # endpoint applies its own defaults (since=-1, timeout=60). The
+        # tool MUST still forward `exclude_agent_type` though.
+        with mock.patch.object(self.mod, "_http") as mock_http:
+            mock_http.return_value = {
+                "success": True,
+                "data": {"timed_out": True, "messages": [], "latest_sort_order": -1},
+            }
+            self.mod.call_disc_wait_for_peer({})
+        path = mock_http.call_args[0][1]
+        self.assertNotIn("since_sort_order", path)
+        self.assertNotIn("timeout_secs", path)
+        self.assertIn("exclude_agent_type=Codex", path)
+
+    def test_happy_path_returns_messages_envelope(self):
+        # Verify the bridge correctly unwraps the backend envelope and
+        # returns `{timed_out, messages, latest_sort_order}` to the agent.
+        # Without this, an envelope-shape change server-side would slip
+        # through silently.
+        with mock.patch.object(self.mod, "_http") as mock_http:
+            mock_http.return_value = {
+                "success": True,
+                "data": {
+                    "timed_out": False,
+                    "messages": [
+                        {
+                            "sort_order": 3,
+                            "role": "Agent",
+                            "agent_type": "ClaudeCode",
+                            "content": "hello peer",
+                            "timestamp": "2026-05-20T10:00:00Z",
+                        }
+                    ],
+                    "latest_sort_order": 3,
+                },
+            }
+            result = self.mod.call_disc_wait_for_peer({
+                "since_sort_order": 0,
+                "timeout_secs": 5,
+            })
+        self.assertEqual(result["timed_out"], False)
+        self.assertEqual(result["latest_sort_order"], 3)
+        self.assertEqual(len(result["messages"]), 1)
+        self.assertEqual(result["messages"][0]["content"], "hello peer")
+        self.assertEqual(result["messages"][0]["agent_type"], "ClaudeCode")
+
+    def test_happy_path_timed_out_returns_empty_messages(self):
+        # The other terminal state : the long-poll fired the timeout
+        # without any new peer activity. The agent gets timed_out=true
+        # and can either retry or surface "no activity" to the user.
+        with mock.patch.object(self.mod, "_http") as mock_http:
+            mock_http.return_value = {
+                "success": True,
+                "data": {
+                    "timed_out": True,
+                    "messages": [],
+                    "latest_sort_order": 7,
+                },
+            }
+            result = self.mod.call_disc_wait_for_peer({
+                "since_sort_order": 7,
+                "timeout_secs": 5,
+            })
+        self.assertTrue(result["timed_out"])
+        self.assertEqual(result["messages"], [])
+        # latest_sort_order echoes the input on timeout so the agent
+        # can keep calling without losing its cursor.
+        self.assertEqual(result["latest_sort_order"], 7)
+
+    def test_unbound_disc_raises_before_http(self):
+        with mock.patch.dict(os.environ, {
+            k: v for k, v in os.environ.items() if k != "KRONN_DISCUSSION_ID"
+        }, clear=True):
+            mod = _load_module()
+            with mock.patch.object(mod, "_http") as mock_http:
+                with self.assertRaises(RuntimeError):
+                    mod.call_disc_wait_for_peer({})
+                mock_http.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

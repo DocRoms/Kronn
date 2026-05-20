@@ -888,6 +888,18 @@ export const discussions = {
   delete: (id: string) => api<void>('DELETE', `/discussions/${id}`),
   update: (id: string, body: { title?: string; archived?: boolean; pinned?: boolean; skill_ids?: string[]; profile_ids?: string[]; directive_ids?: string[]; project_id?: string | null; tier?: ModelTier; agent?: AgentType; summary_strategy?: 'Auto' | 'OnDemand' | 'Off' }) => api<void>('PATCH', `/discussions/${id}`, body),
   share: (id: string, contactIds: string[]) => api<string>('POST', `/discussions/${id}/share`, { contact_ids: contactIds }),
+  /** 0.8.6 phase 2 — list active+paused participants of a disc.
+   *  Powers the header chips + `[+ Inviter]` button. `left` sessions
+   *  are excluded server-side (audit history only). */
+  participants: (id: string) =>
+    api<Array<{ id: number; disc_id: string; agent_type: string; session_id: string | null; role: string; status: string; joined_at: string; left_at: string | null }>>('GET', `/discussions/${id}/participants`),
+  /** 0.8.6 phase 2 — mint a one-shot invite token bound to this disc.
+   *  Returns the PLAIN token (only place it ever appears outside the
+   *  agent's tool-call wire) + the human-readable instruction the
+   *  copy-paste modal displays. Each call yields a fresh token, so
+   *  inviting N peers = N calls. TTL 10 min. */
+  invitePeer: (id: string) =>
+    api<{ token: string; disc_id: string; expires_at: string; ttl_seconds: number; instruction_text: string }>('POST', `/discussions/${id}/invite-peer`, {}),
   /** Abort the currently-running agent on this discussion. Backend kills the
    *  child process and saves a partial response with an "⏹️ Interrompu" footer. */
   stop: (id: string) => api<{ cancelled: boolean }>('POST', `/discussions/${id}/stop`, {}),

@@ -35,6 +35,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 
 
 # ─── Tool catalogue ────────────────────────────────────────────────────────
@@ -132,19 +133,36 @@ TOOLS = [
     {
         "name": "disc_append",
         "description": (
-            "Append messages to an existing Kronn discussion. Idempotent "
-            "on (disc_id, source_msg_id) — re-pushing the same exported "
-            "transcript does NOT duplicate. Returns `{appended, "
-            "skipped_as_duplicates, diverged}`. `diverged=true` means the "
-            "Kronn UI was edited after a previous import; the agent "
-            "should warn the user before applying more updates."
+            "Post a message in the currently-bound Kronn discussion. "
+            "⚠ THIS IS HOW YOU TALK TO OTHER AGENTS IN A MULTI-AGENT "
+            "ROOM (after `disc_join`). Replying only in your own "
+            "terminal is INVISIBLE to peers. \n\n"
+            "TWO USAGE MODES :\n"
+            "  • SIMPLE (recommended for live chat) — pass just "
+            "`content` : `disc_append({content: \"Hi, I'm Codex. "
+            "Ready to play.\"})`. The bridge auto-fills disc_id "
+            "(from disc_join binding), generates a fresh message id, "
+            "defaults role=Agent, and stamps your agent_type from "
+            "the MCP clientInfo handshake.\n"
+            "  • BULK (for cross-agent-memory transcript import, "
+            "0.8.4) — pass `messages: [{source_msg_id, role, "
+            "content, agent_type}, …]` to push a whole conversation "
+            "history at once. Idempotent on (disc_id, source_msg_id) "
+            "— re-pushing the same transcript does NOT duplicate.\n\n"
+            "Returns `{appended, skipped_as_duplicates, diverged}`. "
+            "`diverged=true` means the Kronn UI was edited after a "
+            "previous import — warn the user before more updates."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "disc_id": {"type": "string"},
+                "content": {"type": "string", "description": "Simple mode : the text to post. Bridge wraps it into a messages[]."},
+                "role": {"type": "string", "description": "Simple mode : role override (default Agent). Use User if you're echoing the user's words."},
+                "agent_type": {"type": "string", "description": "Simple mode : explicit author override (default = auto from clientInfo)."},
+                "disc_id": {"type": "string", "description": "Defaults to the runtime-bound disc from disc_join. Override only when you need to post to a DIFFERENT disc."},
                 "messages": {
                     "type": "array",
+                    "description": "Bulk mode : explicit array of messages (used for transcript import).",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -157,7 +175,11 @@ TOOLS = [
                     },
                 },
             },
-            "required": ["disc_id", "messages"],
+            # Either `content` (simple) OR `messages` (bulk) is required.
+            # The bridge enforces the OR at runtime ; we leave `required`
+            # empty here so MCP clients with strict schema validation
+            # don't reject the simple-mode call shape.
+            "required": [],
         },
     },
     {
@@ -223,6 +245,82 @@ TOOLS = [
                 "limit": {"type": "integer", "description": "Max hits (1-50, default 20)."},
             },
             "required": ["q"],
+        },
+    },
+    # ─── 0.8.6 phase 2 — disc-first / cross-agent collab ──────────────
+    # `disc_join` is the key that unlocks host-launched cross-agent
+    # use cases : without it, only Kronn-launched agents (env-injected
+    # `KRONN_DISCUSSION_ID`) could use the `disc_*` tools. With it, an
+    # agent launched directly in a terminal can rebind itself to a
+    # Kronn disc at runtime by consuming an invite token.
+    {
+        "name": "disc_join",
+        "description": (
+            "Join a Kronn shared discussion using an invite token "
+            "(the `kr-join-…` string the disc owner gave you). On "
+            "success, binds THIS bridge process to the resolved "
+            "disc so every subsequent `disc_meta`, `disc_append`, "
+            "`disc_load_other`, `disc_wait_for_peer`, etc. operates "
+            "on it. ⚠ AFTER JOINING : you are now in a MULTI-AGENT "
+            "ROOM. Other CLI agents (Claude, Codex, Gemini, Vibe, …) "
+            "are listening. To talk to them you MUST call "
+            "`disc_append({content: \"...\"})` — anything you reply "
+            "only in your own terminal is INVISIBLE to peers. The "
+            "response includes a `next_steps` field with the full "
+            "protocol; READ AND FOLLOW IT before doing anything "
+            "else. Tokens are single-use and expire after 10 min."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "token": {
+                    "type": "string",
+                    "description": "Invite token (kr-join-… form).",
+                }
+            },
+            "required": ["token"],
+        },
+    },
+    {
+        "name": "disc_leave",
+        "description": (
+            "Leave the current Kronn discussion : marks the calling "
+            "session as `left` server-side and clears this bridge's "
+            "disc binding. Idempotent — calling twice doesn't error. "
+            "Use at the end of a multi-agent collab session, or when "
+            "the user explicitly tells you to disconnect. Other "
+            "participants will see you disappear from the header on "
+            "next refresh."
+        ),
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "disc_wait_for_peer",
+        "description": (
+            "Long-poll the current Kronn discussion for new messages "
+            "from OTHER agents. Blocks server-side (up to 90 s) until "
+            "either a new message appears (newer than `since_sort_order`, "
+            "from an agent type different from this CLI's) or the "
+            "timeout fires. Cheap on tokens — replaces polling loops "
+            "where the agent kept calling `disc_meta` every few "
+            "seconds. Returns `{timed_out, messages, "
+            "latest_sort_order}`. Pass back `latest_sort_order` as "
+            "the next `since_sort_order` to chain calls without "
+            "re-receiving the same messages."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "since_sort_order": {
+                    "type": "integer",
+                    "description": "Highest sort_order already seen (default -1 = from the start).",
+                },
+                "timeout_secs": {
+                    "type": "integer",
+                    "description": "Max blocking seconds (default 60, clamped server-side to [1, 90]).",
+                },
+            },
+            "required": [],
         },
     },
     {
@@ -525,11 +623,183 @@ def _backend_url():
     return os.environ.get("KRONN_BACKEND_URL", "http://127.0.0.1:3140").rstrip("/")
 
 
+# 0.8.6 phase 2 — Captured MCP `clientInfo` from initialize handshake.
+#
+# Every MCP client sends `{name, version}` in its `initialize` request.
+# Claude Code → "claude-code", Codex → "codex-cli", etc. We capture
+# this once and use it to derive the AgentType for `disc_join` /
+# `disc_leave` server calls — way better UX than asking the user to
+# set `KRONN_AGENT_TYPE` env before launching each CLI.
+_CLIENT_INFO = {"name": None, "version": None}
+
+
+def _infer_agent_type_from_client_name(name):
+    """Map an MCP `clientInfo.name` to the canonical Kronn `AgentType`.
+
+    Substring match (lowercase) — clients vary on hyphenation and
+    suffixes (`claude-code`, `Claude Code`, `codex-cli`, `codex`…).
+    Falls back to `Unknown` so the backend's `discussion_sessions`
+    row still gets created — better than rejecting the join."""
+    if not name:
+        return "Unknown"
+    lower = name.lower()
+    # Order matters : check `claude` before `copilot` so the
+    # `claude-code-with-copilot-bridge` edge case (if it ever
+    # happens) doesn't mis-route.
+    if "claude" in lower:
+        return "ClaudeCode"
+    if "codex" in lower:
+        return "Codex"
+    if "gemini" in lower:
+        return "GeminiCli"
+    if "kiro" in lower:
+        return "Kiro"
+    if "copilot" in lower:
+        return "CopilotCli"
+    if "vibe" in lower:
+        return "Vibe"
+    if "cursor" in lower or "cline" in lower:
+        # No dedicated AgentType yet; surface them as Custom so the
+        # header still shows something useful, and we know which
+        # client connected via the version string.
+        return "Custom"
+    return "Unknown"
+
+
+# 0.8.6 fix 2026-05-21 — stable session_id across the bridge lifetime.
+#
+# Previously each tool call regenerated `f"adhoc-{uuid.uuid4()}"` ;
+# `disc_join` got UUID A, `disc_leave` got UUID B, the backend's
+# `find_active_session` query missed → `left: false` even though the
+# user did join. Caught live on the 3-agent tennis match (Claude +
+# Codex both got `left: false` on the final disc_leave call).
+#
+# Resolution order, evaluated ONCE at module load :
+#   1. `KRONN_SESSION_ID` env (Kronn-launched agents inherit this)
+#   2. `KRONN_CALLER_SESSION_ID` env (older alias)
+#   3. Random `adhoc-<uuid4>` (host-launched, no Kronn env injection)
+#
+# Stays stable for the entire bridge process lifetime so every tool
+# call from the same CLI session uses the same row in
+# `discussion_sessions`.
+_BRIDGE_SESSION_ID = (
+    os.environ.get("KRONN_SESSION_ID")
+    or os.environ.get("KRONN_CALLER_SESSION_ID")
+    or f"adhoc-{uuid.uuid4()}"
+)
+
+
+def _session_id_for_caller():
+    """Stable per-process session id. See `_BRIDGE_SESSION_ID` rationale."""
+    return _BRIDGE_SESSION_ID
+
+
+def _parent_process_cmdline():
+    """Read the parent process's cmdline on Linux/WSL — best-effort
+    fallback for CLIs that don't send a useful `clientInfo.name` in
+    the MCP initialize handshake (e.g. Vibe, some Codex builds).
+    Returns `None` on non-Linux systems or if /proc is unavailable.
+    """
+    try:
+        ppid = os.getppid()
+        with open(f"/proc/{ppid}/cmdline", "rb") as fh:
+            raw = fh.read()
+        # `cmdline` is NUL-separated argv ; we only care about the
+        # combined string for a substring match.
+        return raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").lower()
+    except Exception:
+        return None
+
+
+def _agent_type_for_session():
+    """Resolve the agent_type to use in disc_join / disc_leave / wait
+    server calls. Priority :
+      1. Explicit `KRONN_AGENT_TYPE` env (legacy / wrapper overrides)
+      2. Inferred from MCP `clientInfo.name` (auto-detect, 0.8.6)
+      3. Inferred from parent-process cmdline (Vibe fallback, 2026-05-21)
+      4. `KRONN_CALLER_AGENT` env (older alias)
+      5. `Unknown` (server still accepts the join, the header just
+         shows a generic chip)
+    """
+    explicit = os.environ.get("KRONN_AGENT_TYPE")
+    if explicit:
+        return explicit
+
+    inferred = _infer_agent_type_from_client_name(_CLIENT_INFO.get("name"))
+    if inferred != "Unknown":
+        return inferred
+
+    # 2026-05-21 fallback : Vibe was showing as "Unknown" in the header
+    # because its MCP client doesn't send a name we recognise (or any
+    # name at all). Peek at the parent process's cmdline — `vibe`,
+    # `codex`, `claude`, etc. usually appear there in plain text.
+    cmdline = _parent_process_cmdline()
+    if cmdline:
+        inferred_ppid = _infer_agent_type_from_client_name(cmdline)
+        if inferred_ppid != "Unknown":
+            print(
+                f"kronn-internal: agent_type inferred from parent cmdline "
+                f"({inferred_ppid}) — clientInfo.name was {_CLIENT_INFO.get('name')!r}",
+                file=sys.stderr,
+            )
+            return inferred_ppid
+
+    legacy = os.environ.get("KRONN_CALLER_AGENT")
+    if legacy:
+        return legacy
+
+    # Log so user can see what was received and we can extend the
+    # matcher map in a future release if a new CLI emerges.
+    print(
+        f"kronn-internal: could not infer agent_type — clientInfo={_CLIENT_INFO!r} "
+        f"cmdline={cmdline!r} ; falling back to 'Unknown'",
+        file=sys.stderr,
+    )
+    return "Unknown"
+
+
+# 0.8.6 phase 2 — Runtime disc binding.
+#
+# Before phase 2 the bridge could ONLY be told which disc to operate
+# on via `KRONN_DISCUSSION_ID` set in the process env at boot. That
+# works fine for Kronn-launched agents (the Rust runner injects the
+# env), but locks out host-launched CLIs (user types `codex` in their
+# own terminal) — they had to relaunch the bridge with the env to use
+# any `disc_*` tool.
+#
+# Phase 2 adds a module-level mutable binding initialised from env,
+# settable at runtime by `disc_join({token})`. Same `_disc_id()`
+# entry point for all downstream tools = zero changes elsewhere.
+_CURRENT_DISC_ID = os.environ.get("KRONN_DISCUSSION_ID") or None
+
+
+def _set_current_disc_id(disc_id):
+    """Mutate the disc binding (used by `disc_join`). Pass `None` to
+    clear (used by `disc_leave`). Side-effect : invalidates the cached
+    disc meta so the next read goes to the new disc."""
+    global _CURRENT_DISC_ID
+    _CURRENT_DISC_ID = disc_id
+    _CURRENT_DISC_META_CACHE["checked"] = False
+    _CURRENT_DISC_META_CACHE["value"] = None
+
+
 def _disc_id():
-    did = os.environ.get("KRONN_DISCUSSION_ID")
-    if not did:
-        raise RuntimeError("KRONN_DISCUSSION_ID env var not set — Kronn auto-injection misconfigured")
-    return did
+    global _CURRENT_DISC_ID
+    if not _CURRENT_DISC_ID:
+        # Re-check env at runtime in case `KRONN_DISCUSSION_ID` was set
+        # AFTER boot (legacy wrappers, late-init launchers, tests that
+        # patch env in setUp). Preserves backward compat with the pre-
+        # phase-2 contract while still surfacing the new disc_join path
+        # in the error message.
+        env_did = os.environ.get("KRONN_DISCUSSION_ID")
+        if env_did:
+            _CURRENT_DISC_ID = env_did
+            return _CURRENT_DISC_ID
+        raise RuntimeError(
+            "no disc bound — set KRONN_DISCUSSION_ID env (Kronn-launched) "
+            "or call disc_join({token: \"kr-join-...\"}) first (host-launched)"
+        )
+    return _CURRENT_DISC_ID
 
 
 # 0.8.5 — cache the current discussion's meta once per process. Used by
@@ -678,12 +948,45 @@ def call_disc_create(args):
 
 
 def call_disc_append(args):
-    disc_id = args.get("disc_id")
+    """0.8.6 fix 2026-05-21 — ergonomic shorthand for multi-agent chat.
+
+    Two call styles accepted :
+      1. Heavy (0.8.4 cross-agent-memory) :
+         `disc_append({disc_id, messages: [{source_msg_id, role, content,
+         agent_type}, …]})` — used to bulk-import a CLI transcript.
+      2. Light (NEW, multi-agent collab) :
+         `disc_append({content: "Hello peers"})` — used when an agent
+         wants to say one thing in the live discussion. `disc_id`
+         defaults to the runtime-bound disc from `disc_join`,
+         `source_msg_id` is auto-generated (UUIDv4),
+         `role` defaults to "Agent",
+         `agent_type` is inferred from the MCP clientInfo handshake.
+
+    The bridge normalises both into the heavy shape before POSTing
+    so the backend route stays simple.
+    """
+    disc_id = args.get("disc_id") or _disc_id()
     messages = args.get("messages")
-    if not disc_id:
-        raise RuntimeError("disc_append: missing required 'disc_id'")
+
+    # Light shorthand : an agent passed `content` directly.
+    if not messages and args.get("content"):
+        messages = [{
+            "source_msg_id": f"live-{uuid.uuid4()}",
+            "role": args.get("role") or "Agent",
+            "content": args["content"],
+            "agent_type": (
+                args.get("agent_type")
+                or _agent_type_for_session()
+                or None
+            ),
+        }]
+
     if not isinstance(messages, list) or not messages:
-        raise RuntimeError("disc_append: 'messages' must be a non-empty array")
+        raise RuntimeError(
+            "disc_append: pass either `content: \"...\"` (single message, "
+            "easiest for multi-agent chat) OR `messages: [{source_msg_id, "
+            "role, content}, …]` (bulk transcript import)"
+        )
     return _unwrap(_http("POST", "/api/disc/append", {
         "disc_id": disc_id,
         "messages": messages,
@@ -729,6 +1032,104 @@ def call_disc_search(args):
         params["limit"] = args["limit"]
     qs = urllib.parse.urlencode(params)
     return _unwrap(_http("GET", f"/api/disc/search?{qs}"))
+
+
+def call_disc_join(args):
+    """0.8.6 phase 2 — bind this bridge to a Kronn disc via invite token.
+
+    On success, mutates `_CURRENT_DISC_ID` so every subsequent
+    `_disc_id()`-needing tool resolves to the joined disc. Without
+    this tool, host-launched CLIs (codex/claude run directly in a
+    terminal, not via Kronn's UI) couldn't use any `disc_*` tool
+    because their process env never gets `KRONN_DISCUSSION_ID`.
+
+    The companion route is `POST /api/discussions/peer-join` in
+    `backend/src/api/disc_invite.rs`. It atomically validates the
+    token + creates a `discussion_sessions` peer row + returns the
+    disc context — single round trip.
+    """
+    token = args.get("token")
+    if not token:
+        raise RuntimeError("disc_join: missing required 'token' (kr-join-…)")
+
+    # 0.8.6 phase 2 — derive agent_type from the MCP `clientInfo`
+    # captured at initialize time (Claude Code → ClaudeCode, Codex
+    # → Codex, …) rather than requiring the user to pre-set
+    # `KRONN_AGENT_TYPE`. Without this fix the header showed every
+    # peer as "Unknown" (reported live 2026-05-21).
+    agent_type = _agent_type_for_session()
+    session_id = _session_id_for_caller()
+
+    body = {
+        "token": token,
+        "agent_type": agent_type,
+        "session_id": session_id,
+    }
+    result = _unwrap(_http("POST", "/api/discussions/peer-join", body))
+
+    # Bind THIS process to the joined disc so subsequent tool calls
+    # operate on it without the agent having to thread the disc_id
+    # through every call.
+    disc_id = result.get("disc_id") if isinstance(result, dict) else None
+    if disc_id:
+        _set_current_disc_id(disc_id)
+
+    return result
+
+
+def call_disc_leave(_args):
+    """0.8.6 phase 3 — leave the current disc + clear runtime binding.
+
+    Mirrors `disc_join` : sends the bridge's (agent_type, session_id)
+    to `/api/discussions/peer-leave` so the backend marks the right
+    `discussion_sessions` row left. Then clears `_CURRENT_DISC_ID`
+    locally so subsequent `disc_*` tools require a fresh `disc_join`.
+    Idempotent : safe to call even if never joined.
+    """
+    # If unbound, the leave is a no-op locally — still hit the backend
+    # in case the env var path bound a disc we don't remember.
+    # Same (agent_type, session_id) pair as disc_join — the stable
+    # `_session_id_for_caller` helper ensures the leave matches the
+    # session row created at join time (fix 2026-05-21).
+    agent_type = _agent_type_for_session()
+    session_id = _session_id_for_caller()
+    body = {"agent_type": agent_type, "session_id": session_id}
+    try:
+        result = _unwrap(_http("POST", "/api/discussions/peer-leave", body))
+    except Exception:
+        # Backend unreachable — still clear local binding so the agent
+        # can rebind via `disc_join` next time.
+        _set_current_disc_id(None)
+        raise
+    _set_current_disc_id(None)
+    return result
+
+
+def call_disc_wait_for_peer(args):
+    """0.8.6 phase 3 — long-poll for new peer messages.
+
+    Hits `GET /api/discussions/:id/wait` server-side. Excludes the
+    caller's own `agent_type` (env-derived, same way as `disc_join`)
+    so an agent doesn't wake itself on its own `disc_append`.
+    """
+    disc_id = _disc_id()
+    since = args.get("since_sort_order")
+    timeout_secs = args.get("timeout_secs")
+    params = {}
+    if since is not None:
+        params["since_sort_order"] = since
+    if timeout_secs is not None:
+        params["timeout_secs"] = timeout_secs
+    # Exclude THIS CLI's own agent_type so disc_append from self
+    # doesn't wake the wait. Same clientInfo-derived resolution
+    # as disc_join. Only forward if resolved (avoids accidentally
+    # filtering out everything if `Unknown` somehow matched a peer).
+    exclude = _agent_type_for_session()
+    if exclude and exclude != "Unknown":
+        params["exclude_agent_type"] = exclude
+    qs = urllib.parse.urlencode(params)
+    sep = "?" if qs else ""
+    return _unwrap(_http("GET", f"/api/discussions/{disc_id}/wait{sep}{qs}"))
 
 
 def call_disc_load_other(args):
@@ -1115,6 +1516,12 @@ DISPATCH = {
     "disc_find_by_session": call_disc_find_by_session,
     "disc_search": call_disc_search,
     "disc_load_other": call_disc_load_other,
+    # 0.8.6 phase 2 — cross-agent collab via shared disc.
+    "disc_join": call_disc_join,
+    # 0.8.6 phase 3 — long-poll for peer messages.
+    "disc_wait_for_peer": call_disc_wait_for_peer,
+    # 0.8.6 phase 3 — leave the current disc + clear local binding.
+    "disc_leave": call_disc_leave,
     # 0.8.5 — read-only listings of existing artifacts. Lets the
     # agent avoid duplicates + reference existing QP/QA ids from a
     # new workflow without asking the user to paste them.
@@ -1145,6 +1552,15 @@ def _handle(req):
     method = req.get("method") or ""
     rid = req.get("id")
     if method == "initialize":
+        # 0.8.6 phase 2 — capture the client's identity. Used by
+        # `_agent_type_for_session` so `disc_join` knows whether the
+        # caller is Claude Code / Codex / Gemini / etc. without
+        # requiring the user to pre-set `KRONN_AGENT_TYPE` env.
+        params = req.get("params") or {}
+        client_info = params.get("clientInfo") or {}
+        if isinstance(client_info, dict):
+            _CLIENT_INFO["name"] = client_info.get("name")
+            _CLIENT_INFO["version"] = client_info.get("version")
         return {
             "jsonrpc": "2.0",
             "id": rid,

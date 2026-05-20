@@ -15,9 +15,10 @@
 > - Getting it right matters more than answering fast — hallucinations waste everyone's time.
 
 > **CRITICAL — MCP tool usage.**
-> Before calling any MCP tool, **read the matching context file** in `docs/operations/mcp-servers/<mcp-name>.md`.
+> Before calling any MCP tool, **read the matching context file** in `docs/operations/mcp-servers/<mcp-name>.md` **if it exists**.
 > These files contain project-specific rules, constraints, and examples that prevent hallucinations and misuse.
-> If no context file exists for an MCP you need to use, ask the user before proceeding.
+> If no context file exists for an MCP, **proceed normally** — do not block on a missing doc.
+> (Each MCP tool ships its own `description` field via JSON-RPC `tools/list` ; that's the in-band contract. Context files are an additional, optional layer of project-specific guidance.)
 
 **Unknown term?** → `docs/glossary.md` first.
 

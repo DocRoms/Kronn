@@ -643,6 +643,19 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/discussions/{id}/dismiss-partial", post(api::discussions::dismiss_partial))
         .route("/api/discussions/{id}/orchestrate", post(api::discussions::orchestrate))
         .route("/api/discussions/{id}/share", post(api::discussions::share))
+        // 0.8.6 phase 2 — cross-agent collab : invite a peer agent.
+        .route("/api/discussions/{id}/invite-peer", post(api::disc_invite::invite_peer))
+        // List the active participants of a disc — header rendering.
+        .route("/api/discussions/{id}/participants", get(api::disc_invite::list_participants))
+        // 0.8.6 phase 3 — long-poll for new peer messages.
+        .route("/api/discussions/{id}/wait", get(api::disc_invite::wait_for_peer))
+        // Companion : the bridge calls this from `disc_join({token})`
+        // to validate the token and bind itself to the resolved disc.
+        // Not scoped by id — the disc identity is what the token resolves to.
+        .route("/api/discussions/peer-join", post(api::disc_invite::peer_join))
+        // 0.8.6 phase 3 — `disc_leave` MCP tool's companion route.
+        // Marks the caller's active session as `left` (idempotent).
+        .route("/api/discussions/peer-leave", post(api::disc_invite::peer_leave))
         // Introspection endpoints — surface the conversation as a queryable
         // resource for the agent (see api::disc_introspection). The
         // `kronn-internal` MCP bridge calls these via HTTP from the

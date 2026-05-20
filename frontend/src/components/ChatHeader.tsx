@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { MatrixText } from './MatrixText';
 import { ProfileTooltip } from './ProfileTooltip';
+import { DiscParticipantsHeader } from './DiscParticipantsHeader';
 
 export interface ChatHeaderProps {
   discussion: Discussion;
@@ -198,6 +199,12 @@ export function ChatHeader({
            *  the history — useful both as a "the agent is using its
            *  context tools" reassurance and as an anomaly signal if the
            *  number balloons unexpectedly. */}
+          {/* 0.8.6 phase 2 — disc-first refactor. Participants row +
+              [+ Inviter] button. Sits at the top of the header so the
+              user sees who is in the room at a glance. Empty for a
+              freshly-created disc (no agent launched) until the user
+              clicks `+ Inviter`. */}
+          <DiscParticipantsHeader discId={discussion.id} toast={toast} t={t} />
           {(discussion.introspection_call_count ?? 0) > 0 && (
             <span
               className="disc-introspection-pill"
