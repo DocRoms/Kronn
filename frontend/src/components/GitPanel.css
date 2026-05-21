@@ -149,6 +149,34 @@
   padding: 2px 0;
 }
 
+/* Committed-on-branch section: read-only listing of files already saved
+   on this branch but not yet merged. Subtle separator from the uncommitted
+   list above. */
+.git-committed-section {
+  margin-top: var(--kr-sp-3);
+  border-top: 1px dashed var(--kr-border-medium);
+  padding-top: var(--kr-sp-2);
+}
+
+.git-file-row-committed {
+  opacity: 0.85;
+}
+
+.git-file-btn-readonly {
+  background: none;
+  border: none;
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-base);
+  text-align: left;
+  flex: 1;
+  font-family: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px 0;
+  cursor: default;
+}
+
 /* ── Form row (branch creation) ──────────────────────── */
 .git-form-row {
   display: flex;

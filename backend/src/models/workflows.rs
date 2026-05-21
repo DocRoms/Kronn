@@ -504,6 +504,30 @@ pub struct WorkflowStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate_notify_url: Option<String>,
 
+    /// 0.8.6 (#25) — `true` means create a git commit checkpoint before
+    /// pausing the run on this Gate. The SHA is stored in
+    /// `WorkflowRun.state["checkpoint:<step.name>"]`. On Goto from this
+    /// gate's `gate_request_changes_target`, the runner `git reset
+    /// --hard` to that SHA before re-running the target — makes
+    /// Gate→implement loops idempotent (re-implement on a clean tree,
+    /// not on top of the previous cycle's noise). Defaults to `false`
+    /// (no behaviour change for existing workflows). Skipped silently
+    /// in `Isolated` worktree mode (the worktree already has its own
+    /// branch). Skipped + warned on non-git project_path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_checkpoint_before: Option<bool>,
+
+    /// 0.8.6 (#26) — opt-in countdown in seconds. When set on a Gate
+    /// step and the run enters `WaitingApproval`, the runner spawns a
+    /// background task that auto-approves the gate after this delay
+    /// if no human has decided. `None` = manual forever (default).
+    /// Valid range : `1..=86400` (1s to 24h). Out-of-range values are
+    /// rejected at workflow save time. Use cases : low-stakes
+    /// validation gates, nocturnal AutoPilot runs. NEVER set on a
+    /// destructive merge / deploy gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_auto_approve_after_secs: Option<u32>,
+
     // ─── Exec fields (0.7.0 Phase 5 — direct shell, no LLM) ──────────────
     // Only meaningful when `step_type == Exec`. Defence in depth:
     //   1. `command` is the binary name verbatim — match-tested against

@@ -54,6 +54,7 @@ export const API_NAMESPACES = [
   'rtk',
   'userContext',
   'version',
+  'apiCallLogs',
 ] as const;
 
 /** Flat top-level helpers (non-namespace exports). */
@@ -95,6 +96,7 @@ interface DefaultMock {
   rtk: Record<string, AnyFn>;
   userContext: Record<string, AnyFn>;
   version: Record<string, AnyFn>;
+  apiCallLogs: Record<string, AnyFn>;
 }
 
 /**
@@ -350,6 +352,13 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       // hidden in tests that don't explicitly opt in. Tests that want
       // to render the banner can override with `up_to_date: false`.
       check: resolve({ current: '0.7.1', latest: null, release_url: null, up_to_date: true }),
+    },
+
+    apiCallLogs: {
+      // 0.8.6 (#24) — unified API call audit log surface.
+      list: resolve([]),
+      get: resolve(null),
+      purge: resolve(0),
     },
   };
 

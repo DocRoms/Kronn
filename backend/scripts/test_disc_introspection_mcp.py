@@ -1418,5 +1418,141 @@ class DiscWaitForPeerTests(unittest.TestCase):
                 mock_http.assert_not_called()
 
 
+class DiscInvitePeerTests(unittest.TestCase):
+    """0.8.6 (#56) — `disc_invite_peer` mints an invite via the existing
+    `/api/discussions/:id/invite-peer` route. The MCP tool just forwards;
+    the bridge contract is:
+
+      * disc_id auto-pulled from the runtime binding (no agent-supplied id)
+      * single round trip, body empty, returns the route's payload as-is
+      * unbound disc → raise BEFORE any HTTP call so the agent's error
+        message points at `disc_join`/`disc_create_room` rather than at
+        a 404 from the backend.
+    """
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.env_patch = mock.patch.dict(
+            os.environ, {"KRONN_DISCUSSION_ID": "disc-room-1"}
+        )
+        self.env_patch.start()
+        self.addCleanup(self.env_patch.stop)
+        self.fake_http = mock.MagicMock(return_value={
+            "success": True,
+            "data": {
+                "token": "kr-join-fixture-abc",
+                "instruction_text": "Lance `disc_join(token=\"kr-join-fixture-abc\")`",
+                "expires_at": "2026-05-21T10:00:00Z",
+                "ttl_seconds": 600,
+            },
+        })
+        self.http_patch = mock.patch.object(self.mod, "_http", self.fake_http)
+        self.http_patch.start()
+        self.addCleanup(self.http_patch.stop)
+
+    def test_forwards_to_invite_peer_route_for_current_disc(self):
+        result = self.mod.call_disc_invite_peer({})
+        method, path, body = self.fake_http.call_args.args
+        self.assertEqual(method, "POST")
+        self.assertEqual(path, "/api/discussions/disc-room-1/invite-peer")
+        self.assertEqual(body, {})
+        self.assertEqual(result["token"], "kr-join-fixture-abc")
+        self.assertEqual(result["ttl_seconds"], 600)
+
+    def test_unbound_disc_raises_before_http(self):
+        with mock.patch.dict(os.environ, {
+            k: v for k, v in os.environ.items() if k != "KRONN_DISCUSSION_ID"
+        }, clear=True):
+            mod = _load_module()
+            with mock.patch.object(mod, "_http") as mock_http:
+                with self.assertRaises(RuntimeError):
+                    mod.call_disc_invite_peer({})
+                mock_http.assert_not_called()
+
+
+class DiscCreateRoomTests(unittest.TestCase):
+    """0.8.6 (#56) — `disc_create_room` chains disc_create + invite-peer
+    so an agent can bootstrap a multi-agent room in a single tool call.
+
+    Locked guarantees :
+      * missing `title` raises immediately (no HTTP, clear message)
+      * happy path returns a flat payload exposing both disc_id and
+        token + instruction_text from the second hop
+      * uses `_agent_type_for_session()` for the `agent` field (so the
+        Kronn UI shows the right CLI in the participants header from t0)
+      * invite-peer is hit at the disc_id RETURNED by disc_create, not
+        at any agent-passed id — closes a tampering surface.
+    """
+
+    def setUp(self):
+        self.mod = _load_module()
+        # Ensure a stable agent_type for the auto-fill.
+        self.atype_patch = mock.patch.object(
+            self.mod, "_agent_type_for_session", return_value="ClaudeCode"
+        )
+        self.atype_patch.start()
+        self.addCleanup(self.atype_patch.stop)
+        # Two-call sequence: disc_create then invite-peer.
+        self.responses = [
+            # disc_create → wrapper used inside call_disc_create.
+            {
+                "success": True,
+                "data": {
+                    "disc_id": "disc-newly-spawned",
+                    "title": "Live multi-agent room",
+                    "agent": "ClaudeCode",
+                },
+            },
+            # invite-peer → second hop.
+            {
+                "success": True,
+                "data": {
+                    "token": "kr-join-spawn-xyz",
+                    "instruction_text": "Lance `disc_join(token=\"kr-join-spawn-xyz\")`",
+                    "expires_at": "2026-05-21T10:00:00Z",
+                    "ttl_seconds": 600,
+                },
+            },
+        ]
+        self.fake_http = mock.MagicMock(side_effect=self.responses)
+        self.http_patch = mock.patch.object(self.mod, "_http", self.fake_http)
+        self.http_patch.start()
+        self.addCleanup(self.http_patch.stop)
+
+    def test_missing_title_raises_before_http(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            self.mod.call_disc_create_room({})
+        self.assertIn("title", str(ctx.exception))
+        self.fake_http.assert_not_called()
+
+    def test_happy_path_returns_flat_disc_id_token_payload(self):
+        result = self.mod.call_disc_create_room({
+            "title": "Live multi-agent room",
+            "language": "en",
+        })
+        self.assertEqual(self.fake_http.call_count, 2)
+        # Step 1 — disc_create route.
+        create_call = self.fake_http.call_args_list[0]
+        self.assertEqual(create_call.args[0], "POST")
+        # Step 2 — invite-peer at the RETURNED disc_id (not user-supplied).
+        invite_call = self.fake_http.call_args_list[1]
+        self.assertEqual(invite_call.args[0], "POST")
+        self.assertEqual(
+            invite_call.args[1],
+            "/api/discussions/disc-newly-spawned/invite-peer",
+        )
+        # Flat output shape: disc_id + token + instruction_text in one place.
+        self.assertEqual(result["disc_id"], "disc-newly-spawned")
+        self.assertEqual(result["title"], "Live multi-agent room")
+        self.assertEqual(result["token"], "kr-join-spawn-xyz")
+        self.assertIn("disc_join", result["instruction_text"])
+
+    def test_auto_fills_agent_from_session(self):
+        self.mod.call_disc_create_room({"title": "x"})
+        create_body = self.fake_http.call_args_list[0].args[2]
+        self.assertEqual(create_body["agent"], "ClaudeCode")
+        self.assertEqual(create_body["title"], "x")
+
+
 if __name__ == "__main__":
     unittest.main()

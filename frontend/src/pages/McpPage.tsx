@@ -4,12 +4,13 @@ import { useT } from '../lib/I18nContext';
 import { useToast } from '../hooks/useToast';
 import { userError } from '../lib/userError';
 import { isHiddenPath } from '../lib/constants';
-import type { AgentType, ApiAuthKind, ApiEndpoint, Project, McpConfigDisplay, McpDefinition, McpOverview, HostSyncMode, ApiSpec, CustomApiPayload } from '../types/generated';
+import type { AgentType, ApiAuthKind, ApiEndpoint, Project, McpConfigDisplay, McpDefinition, McpOverview, HostSyncMode, ApiSpec, CustomApiPayload, McpServer } from '../types/generated';
 import { CustomApiAiHelper } from '../components/CustomApiAiHelper';
+import { Dropdown } from '../components/Dropdown';
 import {
   Puzzle, Plus, Trash2, Eye, Check, RefreshCw, Square, CheckSquare,
   X, Key, Pencil, FileText, ExternalLink, Save, Search, ArrowDownAZ, ArrowDownZA,
-  Plug, Globe,
+  Plug, Globe, Info, Sparkles, Upload, Download,
 } from 'lucide-react';
 import { HostSyncChip } from '../components/HostSyncChip';
 import { HostSyncPreview } from '../components/HostSyncPreview';
@@ -217,9 +218,26 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
   // the 7 supported by the runtime: None (default), Bearer (simple
   // static token), TokenExchange (Didomi-shape: POST creds → access
   // token → Bearer). The other 4 (ApiKeyQuery / ApiKeyHeader / Basic /
-  // BasicApiKey / OAuth2) come in 0.8.7 Layer A — they all work in
+  // BasicApiKey / OAuth2) come in 0.8.6 Layer A — they all work in
   // the runtime, just no UI yet. Cf. [[project_custom_plugin_auth_0_8_7]].
   const [customAuth, setCustomAuth] = useState<ApiAuthKind>('None');
+  // 0.8.6 (#33) — Import-from-JSON state. Inline textarea, no modal,
+  // mirrors the Add-MCP "registry → form" flip pattern. Set when the
+  // user clicks the "Importer depuis JSON" tile; cleared on reset.
+  const [importJsonText, setImportJsonText] = useState('');
+  const [importJsonError, setImportJsonError] = useState<string | null>(null);
+  const [importJsonLoading, setImportJsonLoading] = useState(false);
+  // 0.8.6 (#33 fix 2026-05-21) — Tauri's webview silently swallows
+  // `navigator.clipboard.writeText` in some configs (no permission +
+  // no exception). Pre-fix `handleExportCustomPlugin` looked dead :
+  // no toast, no fallback, "STRICTEMENT rien" reported live by user.
+  // Now we ALWAYS render an inline export modal with the JSON in a
+  // readonly textarea (auto-selected on open) + a best-effort copy
+  // button. Even if the clipboard fails the user can ctrl+C the
+  // pre-selected text.
+  const [exportPayload, setExportPayload] = useState<{ name: string; json: string } | null>(null);
+  const [exportCopyState, setExportCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  const exportTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   // Edit secrets
   const [editingEnvId, setEditingEnvId] = useState<string | null>(null);
   const [editingEnv, setEditingEnv] = useState<Record<string, string>>({});
@@ -290,6 +308,9 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
     setEditingCustomConfigId(null);
     setCustomAuth('None');
     setCustomFieldsVisible(new Set());
+    setImportJsonText('');
+    setImportJsonError(null);
+    setImportJsonLoading(false);
   };
 
   /** 0.8.6 — Discriminated-union helpers for the auth picker. The
@@ -300,7 +321,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
     if (a === 'None') return 'None';
     if (typeof a === 'object' && 'Bearer' in a) return 'Bearer';
     if (typeof a === 'object' && 'TokenExchange' in a) return 'TokenExchange';
-    return 'Other';  // ApiKeyQuery / ApiKeyHeader / Basic / BasicApiKey / OAuth2 — exposed in 0.8.7 Layer A
+    return 'Other';  // ApiKeyQuery / ApiKeyHeader / Basic / BasicApiKey / OAuth2 — exposed in 0.8.6 Layer A
   };
   const setAuthKindBy = (kind: 'None' | 'Bearer' | 'TokenExchange') => {
     if (kind === 'None') setCustomAuth('None');
@@ -338,6 +359,206 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
     }
     out = out.replace(/_+$/, '');
     return out || 'FIELD';
+  };
+
+  // 0.8.6 (#33) — Custom plugin import/export, clipboard-JSON MVP.
+  //
+  // EXPORT contract: spec-only. We DELIBERATELY exclude all secret values
+  // (fields[].value = ''). Sharing a plugin = sharing its shape, never its
+  // credentials. The recipient fills env on their end via "Edit env".
+  type CustomPluginExport = {
+    name: string;
+    base_url: string;
+    description: string;
+    docs_url: string | null;
+    fields: Array<{ label: string; value: string }>;
+    endpoints: ApiEndpoint[];
+    auth: ApiAuthKind;
+  };
+
+  const buildCustomPluginExport = (server: McpServer): CustomPluginExport | null => {
+    if (!server.api_spec) return null;
+    const spec = server.api_spec;
+    return {
+      name: server.name,
+      base_url: spec.base_url,
+      description: server.description,
+      docs_url: spec.docs_url ?? null,
+      fields: (spec.config_keys ?? []).map(ck => ({ label: ck.label, value: '' })),
+      endpoints: spec.endpoints ?? [],
+      auth: spec.auth ?? 'None',
+    };
+  };
+
+  // Try the modern clipboard API, then fall back to the legacy
+  // execCommand path (still works in Tauri webviews where the
+  // permission-gated clipboard rejects silently). Returns whether
+  // the write actually landed somewhere.
+  const writeToClipboard = async (text: string): Promise<boolean> => {
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch (e) {
+        console.warn('navigator.clipboard.writeText failed:', e);
+      }
+    }
+    // Legacy fallback: stage a hidden textarea + execCommand('copy').
+    // Doesn't need permissions and works in old Chrome / webviews.
+    try {
+      const el = document.createElement('textarea');
+      el.value = text;
+      el.setAttribute('readonly', '');
+      el.style.position = 'absolute';
+      el.style.left = '-9999px';
+      document.body.appendChild(el);
+      el.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(el);
+      return ok;
+    } catch (e) {
+      console.warn('execCommand("copy") failed:', e);
+      return false;
+    }
+  };
+
+  const handleExportCustomPlugin = async (server: McpServer) => {
+    const payload = buildCustomPluginExport(server);
+    if (!payload) {
+      toast(t('mcp.custom.exportError'), 'error');
+      return;
+    }
+    const json = JSON.stringify(payload, null, 2);
+    // Pre-fix : a silent clipboard call left the user with no signal
+    // at all. Now we surface the JSON in an inline modal regardless
+    // of clipboard outcome, AND attempt to copy in the background.
+    setExportPayload({ name: payload.name, json });
+    const ok = await writeToClipboard(json);
+    setExportCopyState(ok ? 'copied' : 'failed');
+    if (ok) {
+      toast(t('mcp.custom.copied'), 'success');
+    }
+  };
+
+  const closeExportModal = () => {
+    setExportPayload(null);
+    setExportCopyState('idle');
+  };
+
+  const handleExportRetryCopy = async () => {
+    if (!exportPayload) return;
+    const ok = await writeToClipboard(exportPayload.json);
+    setExportCopyState(ok ? 'copied' : 'failed');
+    if (ok) toast(t('mcp.custom.copied'), 'success');
+  };
+
+  // Parse + validate an import payload. Returns the typed spec or a
+  // user-facing error message. Validation mirrors the backend contract
+  // for `custom_spec`: name + base_url are required; everything else is
+  // optional and defaults to a sane empty value.
+  const parseCustomPluginImport = (raw: string): { ok: true; spec: CustomPluginExport } | { ok: false; error: string } => {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return { ok: false, error: t('mcp.custom.importErrorParse') };
+    }
+    if (!parsed || typeof parsed !== 'object') {
+      return { ok: false, error: t('mcp.custom.importErrorShape') };
+    }
+    const p = parsed as Record<string, unknown>;
+    const name = typeof p.name === 'string' ? p.name.trim() : '';
+    const base_url = typeof p.base_url === 'string' ? p.base_url.trim() : '';
+    if (!name) return { ok: false, error: t('mcp.custom.importErrorName') };
+    if (!base_url) return { ok: false, error: t('mcp.custom.importErrorBaseUrl') };
+    const fields = Array.isArray(p.fields)
+      ? p.fields
+          .filter((f): f is { label: unknown } => !!f && typeof f === 'object')
+          .map(f => ({
+            label: typeof (f as { label?: unknown }).label === 'string' ? (f as { label: string }).label : '',
+            // 0.8.6 contract: values are NEVER imported. Even if an
+            // ill-meaning peer included them, we wipe to '' to avoid
+            // silently planting their creds in the user's env.
+            value: '',
+          }))
+          .filter(f => f.label.trim() !== '')
+      : [];
+    const endpoints = Array.isArray(p.endpoints)
+      ? (p.endpoints as ApiEndpoint[]).filter(e => !!e && typeof (e as ApiEndpoint).path === 'string')
+      : [];
+    // ApiAuthKind is a discriminated union: bare 'None' OR a single-key
+    // object whose key names the variant ({Bearer:{…}}, {TokenExchange:{…}}, …).
+    // Accept whatever shape the import advertises if it matches the wire
+    // contract; default to 'None' otherwise. Backend re-validates on POST.
+    const isValidAuth = (v: unknown): v is ApiAuthKind => {
+      if (v === 'None') return true;
+      if (!v || typeof v !== 'object' || Array.isArray(v)) return false;
+      const keys = Object.keys(v as Record<string, unknown>);
+      if (keys.length !== 1) return false;
+      const allowedVariants = ['Bearer', 'ApiKeyHeader', 'ApiKeyQuery', 'Basic', 'BasicApiKey', 'OAuth2', 'TokenExchange'];
+      return allowedVariants.includes(keys[0]);
+    };
+    const auth: ApiAuthKind = isValidAuth(p.auth) ? p.auth : 'None';
+    return {
+      ok: true,
+      spec: {
+        name,
+        base_url,
+        description: typeof p.description === 'string' ? p.description : '',
+        docs_url: typeof p.docs_url === 'string' && p.docs_url.trim() !== '' ? p.docs_url : null,
+        fields,
+        endpoints,
+        auth,
+      },
+    };
+  };
+
+  const handlePasteImportJson = async () => {
+    try {
+      const txt = await navigator.clipboard.readText();
+      setImportJsonText(txt);
+      setImportJsonError(null);
+    } catch (e) {
+      console.warn('Clipboard read failed:', e);
+      toast(t('mcp.custom.importPasteUnavailable'), 'error');
+    }
+  };
+
+  const handleImportCustomPlugin = async () => {
+    setImportJsonError(null);
+    const res = parseCustomPluginImport(importJsonText);
+    if (!res.ok) {
+      setImportJsonError(res.error);
+      return;
+    }
+    setImportJsonLoading(true);
+    try {
+      await mcpsApi.createConfig({
+        server_id: 'api-custom',
+        label: res.spec.name,
+        env: {},
+        args_override: null,
+        is_global: false,
+        project_ids: [],
+        custom_spec: {
+          name: res.spec.name,
+          base_url: res.spec.base_url,
+          description: res.spec.description,
+          docs_url: res.spec.docs_url,
+          fields: res.spec.fields,
+          endpoints: res.spec.endpoints,
+          auth: res.spec.auth,
+        },
+      });
+      toast(t('mcp.custom.imported', res.spec.name), 'success');
+      resetAddMcp();
+      refetchMcps();
+    } catch (e) {
+      console.warn('Failed to import Custom API:', e);
+      setImportJsonError(userError(e));
+    } finally {
+      setImportJsonLoading(false);
+    }
   };
 
   const handleAddMcpFromRegistry = async () => {
@@ -655,6 +876,74 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
 
   return (
     <div>
+      {/* 0.8.6 (#33 fix 2026-05-21) — Custom plugin export modal.
+          Renders unconditionally at the top so it survives navigation
+          inside McpPage (detail panel state can flip while the modal
+          is open). Surfaces the JSON in a readonly textarea + best-
+          effort clipboard write, with a copy-retry button when the
+          auto-copy failed (Tauri / sandboxed webview case). */}
+      {exportPayload && (
+        <div
+          className="mcp-export-modal-backdrop"
+          data-testid="mcp-export-modal"
+          onClick={closeExportModal}
+        >
+          <div
+            className="mcp-export-modal"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="mcp-export-modal-header">
+              <span>
+                <Upload size={13} style={{ marginRight: 6 }} />
+                {t('mcp.custom.exportTitle', exportPayload.name)}
+              </span>
+              <button
+                className="mcp-icon-btn"
+                onClick={closeExportModal}
+                aria-label="Close export modal"
+                data-testid="mcp-export-modal-close"
+              >
+                <X size={14} />
+              </button>
+            </div>
+            <p className="mcp-export-modal-hint">
+              {exportCopyState === 'copied'
+                ? t('mcp.custom.copied')
+                : exportCopyState === 'failed'
+                  ? t('mcp.custom.copyManualInstruction')
+                  : t('mcp.custom.exportHint')}
+            </p>
+            <textarea
+              ref={exportTextareaRef}
+              className="input mcp-input-mono"
+              data-testid="mcp-export-modal-textarea"
+              value={exportPayload.json}
+              readOnly
+              rows={14}
+              autoFocus
+              onFocus={e => e.currentTarget.select()}
+            />
+            <div className="flex-row gap-3 mt-3">
+              <button
+                type="button"
+                className="mcp-btn-action mcp-btn-action-primary"
+                onClick={handleExportRetryCopy}
+                data-testid="mcp-export-modal-copy"
+              >
+                <Upload size={12} /> {t('mcp.custom.copyAsJson')}
+              </button>
+              <button
+                type="button"
+                className="mcp-btn-action"
+                onClick={closeExportModal}
+              >
+                {t('mcp.back')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="mcp-page-header">
         <div>
           <h1 className="mcp-h1"><MatrixText text={t('mcp.title')} /> <span className="mcp-subtitle"><MatrixText text={t('mcp.subtitle')} /></span></h1>
@@ -799,6 +1088,36 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                     <div className="mcp-registry-grid">
                       {customApiVisible && (!kindFilter || kindFilter === 'api') && !selectedCategory ? (
                         <div
+                          key="api-import"
+                          className="mcp-registry-card mcp-registry-card-custom"
+                          onClick={() => {
+                            setAddMcpSelected('api-import');
+                            setAddMcpLabel('');
+                          }}
+                          data-testid="mcp-import-json-tile"
+                        >
+                          <div className="mcp-registry-card-top">
+                            <div className="mcp-registry-card-icon">
+                              <Download size={16} />
+                            </div>
+                            <div className="flex-1">
+                              <div className="mcp-registry-card-name">{t('mcp.custom.importTileTitle')}</div>
+                              <div className="mcp-registry-card-cat">{t('mcp.custom.tileCat')}</div>
+                            </div>
+                          </div>
+                          <div className="mcp-registry-card-desc">{t('mcp.custom.importTileDesc')}</div>
+                          <div className="mcp-registry-card-meta">
+                            <span className="mcp-kind-badge mcp-kind-badge-api" title={t('mcp.kind.apiTooltip')}>
+                              <Globe size={9} /> {t('mcp.kind.api')}
+                            </span>
+                            <span className="mcp-origin-badge mcp-origin-community">
+                              {t('mcp.custom.tileBadge')}
+                            </span>
+                          </div>
+                        </div>
+                      ) : null}
+                      {customApiVisible && (!kindFilter || kindFilter === 'api') && !selectedCategory ? (
+                        <div
                           key="custom-api"
                           className="mcp-registry-card mcp-registry-card-custom"
                           onClick={() => {
@@ -901,6 +1220,50 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                   </>
                 );
               })()}
+            </>
+          ) : addMcpSelected === 'api-import' ? (
+            <>
+              {/* 0.8.6 (#33) — Import-from-JSON form. Paste the export
+                  payload from another Kronn install, validate light
+                  (name + base_url required), then POST. Credentials are
+                  NEVER imported even if the JSON contains values. */}
+              <div className="mb-5" data-testid="mcp-import-json-form">
+                <label className="mcp-field-label">{t('mcp.custom.importPasteLabel')} *</label>
+                <textarea
+                  className="input mcp-input-mono"
+                  rows={12}
+                  value={importJsonText}
+                  onChange={e => { setImportJsonText(e.target.value); if (importJsonError) setImportJsonError(null); }}
+                  placeholder={t('mcp.custom.importPlaceholder')}
+                  autoFocus
+                  data-testid="mcp-import-json-textarea"
+                />
+              </div>
+              <div className="flex-row gap-3 mb-5">
+                <button
+                  type="button"
+                  className="mcp-btn-action"
+                  onClick={handlePasteImportJson}
+                  data-testid="mcp-import-paste-clipboard"
+                >
+                  <Download size={12} /> {t('mcp.custom.importPasteFromClipboard')}
+                </button>
+                <button
+                  type="button"
+                  className="mcp-btn-action mcp-btn-action-primary"
+                  onClick={handleImportCustomPlugin}
+                  disabled={importJsonLoading || !importJsonText.trim()}
+                  data-testid="mcp-import-submit"
+                >
+                  <Plus size={12} /> {t('mcp.custom.importSubmit')}
+                </button>
+              </div>
+              {importJsonError && (
+                <div className="mcp-form-error" data-testid="mcp-import-error">
+                  {importJsonError}
+                </div>
+              )}
+              <p className="mcp-form-hint">{t('mcp.custom.importSecretsHint')}</p>
             </>
           ) : addMcpSelected === 'api-custom' ? (
             <>
@@ -1075,7 +1438,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
               </div>
               {/* 0.8.6 — Auth section. MVP exposes 3 of the 7 runtime
                   variants (None, Bearer, TokenExchange) — others (Header,
-                  Query, Basic, OAuth2) come in 0.8.7 Layer A. The
+                  Query, Basic, OAuth2) come in 0.8.6 Layer A. The
                   TokenExchange option specifically unblocks Didomi-shape
                   APIs (POST /sessions with JSON body → access_token →
                   Bearer). Cf. [[project_token_exchange_generic_0_9_0]]. */}
@@ -1205,22 +1568,23 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                     </div>
                     <div className="mb-3">
                       <label className="mcp-field-label">{t('mcp.custom.auth.tokenExchange.inject')}</label>
-                      <select
-                        className="input mcp-input-mono"
-                        value={typeof customAuth.TokenExchange.inject === 'string' ? customAuth.TokenExchange.inject : Object.keys(customAuth.TokenExchange.inject)[0]}
-                        onChange={(e) => {
-                          const kind = e.target.value;
+                      <Dropdown<'BearerHeader' | 'CustomHeader' | 'QueryParam'>
+                        value={typeof customAuth.TokenExchange.inject === 'string' ? customAuth.TokenExchange.inject : (Object.keys(customAuth.TokenExchange.inject)[0] as 'CustomHeader' | 'QueryParam')}
+                        options={[
+                          { value: 'BearerHeader', label: 'Bearer header (Authorization: Bearer ...)' },
+                          { value: 'CustomHeader', label: 'Custom header' },
+                          { value: 'QueryParam', label: 'Query param' },
+                        ]}
+                        onChange={(kind) => {
                           let inject: ApiAuthKind extends infer T ? T extends { TokenExchange: { inject: infer I } } ? I : never : never;
                           if (kind === 'BearerHeader') inject = 'BearerHeader' as typeof inject;
                           else if (kind === 'CustomHeader') inject = { CustomHeader: { name: 'X-Auth-Token' } } as typeof inject;
                           else inject = { QueryParam: { name: 'token' } } as typeof inject;
                           setCustomAuth({ TokenExchange: { ...customAuth.TokenExchange, inject } });
                         }}
-                      >
-                        <option value="BearerHeader">Bearer header (Authorization: Bearer ...)</option>
-                        <option value="CustomHeader">Custom header</option>
-                        <option value="QueryParam">Query param</option>
-                      </select>
+                        ariaLabel={t('mcp.custom.auth.tokenExchange.inject')}
+                        testId="mcp-token-exchange-inject"
+                      />
                     </div>
                   </div>
                 )}
@@ -1514,6 +1878,58 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
               const def = mcpRegistry.find(m => m.id === cfg.server_id);
               const isEditingLabel = editingLabelId === cfg.id;
               const serverIncomp = mcpOverview.incompatibilities.filter(i => i.server_id === cfg.server_id);
+
+              // 0.8.6 (#29) — open the edit form pre-filled with the
+              // current Custom plugin's spec. Shared between the Edit
+              // button (header) and the autodiscovery banner (body)
+              // that surfaces on plugins with empty endpoints.
+              const openEditCustomPlugin = async () => {
+                if (!cfgServer?.api_spec) return;
+                const spec = cfgServer.api_spec;
+                setEditingCustomServerId(cfg.server_id);
+                setEditingCustomConfigId(cfg.id);
+                setCustomName(cfgServer.name);
+                setCustomBaseUrl(spec.base_url);
+                setCustomDescription(cfgServer.description);
+                setCustomDocsUrl(spec.docs_url ?? '');
+                const ck = spec.config_keys ?? [];
+                let revealedEnv: Record<string, string> = {};
+                try {
+                  const entries = await mcpsApi.revealSecrets(cfg.id);
+                  entries.forEach(e => { revealedEnv[e.key] = e.masked_value; });
+                } catch (e) {
+                  console.warn('Failed to reveal secrets for edit prefill:', e);
+                }
+                setCustomFields(
+                  ck.length > 0
+                    ? ck.map(k => ({
+                        label: k.label,
+                        value: revealedEnv[k.env_key] ?? '',
+                      }))
+                    : [{ label: '', value: '' }],
+                );
+                setCustomEndpoints(spec.endpoints ?? []);
+                setCustomAuth(spec.auth ?? 'None');
+                setShowAddMcp(true);
+                setAddMcpSelected('api-custom');
+                setSelectedConfigId(null);
+                requestAnimationFrame(() => {
+                  window.scrollTo({ top: 0, behavior: 'smooth' });
+                });
+              };
+
+              // 0.8.6 (#29) — surface a banner on legacy Custom plugins
+              // (created before 0.8.6, OR after but with no endpoints
+              // declared yet) prompting the user to ask the AI helper
+              // to fill them. Detection : the plugin's `server_id`
+              // starts with `custom-` AND the api_spec has zero
+              // declared endpoints. Banner CTA reuses
+              // `openEditCustomPlugin` so the AI helper is one click
+              // away (cf. [[project_endpoints_autodiscovery_0_8_6]]).
+              const isLegacyCustomNoEndpoints =
+                cfg.server_id.startsWith('custom-')
+                && cfgServer?.api_spec
+                && (cfgServer.api_spec.endpoints?.length ?? 0) === 0;
               const detail = (
                 <div key={`detail-${cfg.id}`} ref={detailRef} className="mcp-detail-inline" onClick={e => e.stopPropagation()}>
                   <div className="mcp-detail-header">
@@ -1542,64 +1958,23 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                       {cfg.server_id.startsWith('custom-') && cfgServer?.api_spec && (
                         <button
                           className="mcp-btn-action"
-                          onClick={async () => {
-                            const spec = cfgServer.api_spec!;
-                            setEditingCustomServerId(cfg.server_id);
-                            setEditingCustomConfigId(cfg.id);
-                            setCustomName(cfgServer.name);
-                            setCustomBaseUrl(spec.base_url);
-                            setCustomDescription(cfgServer.description);
-                            setCustomDocsUrl(spec.docs_url ?? '');
-                            // 0.8.6 unified edit (2026-05-20) — pre-fill
-                            // field VALUES via revealSecrets so the user
-                            // edits structure + credentials in ONE form.
-                            // Fallback to empty values on reveal failure
-                            // (network glitch, permission issue) — the
-                            // user can still edit structure + retype
-                            // credentials manually. Per-label match: an
-                            // existing config_key whose slug matches the
-                            // current label gets its stored value;
-                            // orphans (slug from an old name) are skipped.
-                            const ck = spec.config_keys ?? [];
-                            let revealedEnv: Record<string, string> = {};
-                            try {
-                              const entries = await mcpsApi.revealSecrets(cfg.id);
-                              entries.forEach(e => { revealedEnv[e.key] = e.masked_value; });
-                            } catch (e) {
-                              console.warn('Failed to reveal secrets for edit prefill:', e);
-                            }
-                            setCustomFields(
-                              ck.length > 0
-                                ? ck.map(k => ({
-                                    label: k.label,
-                                    value: revealedEnv[k.env_key] ?? '',
-                                  }))
-                                : [{ label: '', value: '' }],
-                            );
-                            setCustomEndpoints(spec.endpoints ?? []);
-                            // 0.8.6 — pre-fill auth from existing spec
-                            // (default None for legacy plugins that
-                            // pre-date the auth field).
-                            setCustomAuth(spec.auth ?? 'None');
-                            // CRITICAL: the form is gated by `showAddMcp &&` at
-                            // its render site (line ~583). Without flipping it
-                            // on, setting `addMcpSelected` alone is a no-op for
-                            // the user — the page just closes the detail
-                            // panel and the form never appears. Caught
-                            // 2026-05-19 on first live test of the Edit flow.
-                            setShowAddMcp(true);
-                            setAddMcpSelected('api-custom');
-                            setSelectedConfigId(null);
-                            // Auto-scroll the form into view — without this,
-                            // discs further down the list make the user think
-                            // the click did nothing.
-                            requestAnimationFrame(() => {
-                              window.scrollTo({ top: 0, behavior: 'smooth' });
-                            });
-                          }}
+                          onClick={openEditCustomPlugin}
                           title={t('mcp.custom.editSpec')}
                         >
                           <Pencil size={12} /> {t('mcp.custom.editSpec')}
+                        </button>
+                      )}
+                      {/* 0.8.6 (#33) — Export as JSON. Spec-only, no
+                          credentials. Sharing the resulting payload is
+                          safe. */}
+                      {cfg.server_id.startsWith('custom-') && cfgServer?.api_spec && (
+                        <button
+                          className="mcp-btn-action"
+                          onClick={() => handleExportCustomPlugin(cfgServer as McpServer)}
+                          title={t('mcp.custom.copyAsJson')}
+                          data-testid="mcp-custom-export-json"
+                        >
+                          <Upload size={12} /> {t('mcp.custom.copyAsJson')}
                         </button>
                       )}
                       <button className="mcp-btn-action" style={{ color: 'var(--kr-error)', borderColor: 'rgba(var(--kr-error-rgb), 0.3)' }} onClick={() => { handleDeleteMcpConfig(cfg.id); setSelectedConfigId(null); }}><Trash2 size={12} /> {t('mcp.deleteConfig')}</button>
@@ -1607,6 +1982,28 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                     </div>
                   </div>
                   <div className="mcp-detail-body">
+                    {/* 0.8.6 (#29) — autodiscovery banner for legacy
+                        Custom plugins with no endpoints declared. CTA
+                        opens the same edit form as the header button,
+                        where the CustomApiAiHelper (0.8.6 Part B) is
+                        wired to fetch the docs_url + propose endpoints
+                        via KRONN:APPLY. */}
+                    {isLegacyCustomNoEndpoints && (
+                      <div className="mcp-autodiscovery-banner" data-testid="mcp-autodiscovery-banner">
+                        <Info size={14} className="mcp-autodiscovery-banner-icon" />
+                        <div className="mcp-autodiscovery-banner-body">
+                          <strong>{t('mcp.custom.autodiscoveryTitle')}</strong>
+                          <p>{t('mcp.custom.autodiscoveryHint')}</p>
+                        </div>
+                        <button
+                          type="button"
+                          className="mcp-btn-action mcp-autodiscovery-banner-cta"
+                          onClick={openEditCustomPlugin}
+                        >
+                          <Sparkles size={12} /> {t('mcp.custom.autodiscoveryCta')}
+                        </button>
+                      </div>
+                    )}
                     {(() => {
                       // 0.8.6 — for Custom plugins, the SPEC's config_keys is
                       // the forward-looking source of truth (follows rename via

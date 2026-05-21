@@ -15,6 +15,7 @@ pub mod disc_invite;
 pub mod disc_prompts;
 pub mod disc_source;
 pub mod agent_api;
+pub mod api_call_logs;
 pub mod workflows;
 pub mod stats;
 pub mod skills;

@@ -583,6 +583,95 @@ pub async fn set_linked_repos(
     }
 }
 
+/// 0.8.6 (#27) — One row in the linked-repos picker. Surfaces the
+/// minimum needed for autocomplete : project id (for stable React
+/// keys), human name, path, and a `proximity_hint` (`'same-parent'` |
+/// `'other'`) so the UI can render a "Companion projects" group at
+/// the top of the dropdown vs an "Other projects" group at the bottom.
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct LinkedRepoCandidate {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub proximity_hint: String,
+}
+
+/// 0.8.6 (#27) — extract the proximity-sort logic so the test
+/// module can lock it independently of the DB layer. Takes a slice
+/// of `(id, name, path)` tuples + the current project's path ;
+/// returns `LinkedRepoCandidate[]` sorted same-parent-first, then
+/// alphabetical (case-insensitive). The current project is filtered
+/// out of the output regardless of its position.
+pub fn rank_linked_repos_candidates(
+    projects: &[(String, String, String)], // (id, name, path)
+    current_project_id: &str,
+    current_project_path: &str,
+) -> Vec<LinkedRepoCandidate> {
+    let current_parent = std::path::Path::new(current_project_path)
+        .parent()
+        .map(|x| x.to_path_buf());
+
+    let mut candidates: Vec<LinkedRepoCandidate> = projects
+        .iter()
+        .filter(|(id, _, _)| id != current_project_id)
+        .map(|(id, name, path)| {
+            let parent = std::path::Path::new(path).parent().map(|x| x.to_path_buf());
+            let proximity = match (&current_parent, &parent) {
+                (Some(a), Some(b)) if a == b => "same-parent",
+                _ => "other",
+            };
+            LinkedRepoCandidate {
+                id: id.clone(),
+                name: name.clone(),
+                path: path.clone(),
+                proximity_hint: proximity.to_string(),
+            }
+        })
+        .collect();
+
+    candidates.sort_by(|a, b| {
+        // bool < bool : false < true → "not same-parent" goes last.
+        let prox_order = (a.proximity_hint != "same-parent")
+            .cmp(&(b.proximity_hint != "same-parent"));
+        prox_order.then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    candidates
+}
+
+/// `GET /api/projects/:id/linked-repos/candidates`
+///
+/// 0.8.6 (#27) — returns the list of OTHER Kronn-known projects the
+/// user could plausibly link to the current one as a companion. Sorted
+/// by proximity : same-parent dir first (the typical "monorepo of
+/// repos" pattern : `~/Repositories/front_apollo` linking to
+/// `~/Repositories/front_euronews`), then alphabetical fallback.
+///
+/// The frontend's linked-repos drawer uses this for an autocomplete
+/// picker. Manual path entry (off-Kronn repos, remote URLs) stays
+/// supported via a free-text fallback.
+pub async fn linked_repos_candidates(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<Vec<LinkedRepoCandidate>>> {
+    let pid = id.clone();
+    let res = state.db.with_conn(move |conn| {
+        let all = crate::db::projects::list_projects(conn)?;
+        let current = all.iter().find(|p| p.id == pid).cloned();
+        let current_path = current.map(|p| p.path).unwrap_or_default();
+        let tuples: Vec<(String, String, String)> = all
+            .into_iter()
+            .map(|p| (p.id, p.name, p.path))
+            .collect();
+        Ok::<_, anyhow::Error>(rank_linked_repos_candidates(&tuples, &pid, &current_path))
+    }).await;
+
+    match res {
+        Ok(list) => Json(ApiResponse::ok(list)),
+        Err(e) => Json(ApiResponse::err(format!("DB error: {e}"))),
+    }
+}
+
 /// PUT /api/projects/:id/default-profile
 pub async fn set_default_profile(
     State(state): State<AppState>,
@@ -640,5 +729,76 @@ pub async fn remap_path(
         Ok(true) => Json(ApiResponse::ok(())),
         Ok(false) => Json(ApiResponse::err("Project not found".to_string())),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
+#[cfg(test)]
+mod linked_repos_candidates_tests {
+    use super::*;
+
+    fn proj(id: &str, name: &str, path: &str) -> (String, String, String) {
+        (id.to_string(), name.to_string(), path.to_string())
+    }
+
+    #[test]
+    fn filters_out_the_current_project() {
+        let projects = vec![
+            proj("p1", "ProjAlpha", "/repos/alpha"),
+            proj("p2", "ProjBeta", "/repos/beta"),
+        ];
+        let result = rank_linked_repos_candidates(&projects, "p1", "/repos/alpha");
+        assert_eq!(result.len(), 1, "current project must be excluded");
+        assert_eq!(result[0].id, "p2");
+    }
+
+    #[test]
+    fn ranks_same_parent_companions_first() {
+        let projects = vec![
+            proj("p-far", "FarRepo", "/elsewhere/far"),
+            proj("p-near", "NearRepo", "/repos/near"),
+            proj("p-current", "Current", "/repos/current"),
+        ];
+        let result = rank_linked_repos_candidates(&projects, "p-current", "/repos/current");
+        assert_eq!(result.len(), 2);
+        // /repos/near shares the parent /repos with /repos/current → first.
+        assert_eq!(result[0].id, "p-near");
+        assert_eq!(result[0].proximity_hint, "same-parent");
+        // /elsewhere/far is unrelated → second, tagged "other".
+        assert_eq!(result[1].id, "p-far");
+        assert_eq!(result[1].proximity_hint, "other");
+    }
+
+    #[test]
+    fn alphabetical_tiebreaker_within_same_proximity_bucket() {
+        // 3 same-parent companions — sorted case-insensitive alpha.
+        let projects = vec![
+            proj("p1", "zeta-app", "/repos/zeta-app"),
+            proj("p2", "Alpha-API", "/repos/alpha-api"),
+            proj("p3", "mid-tier", "/repos/mid-tier"),
+            proj("p-cur", "Current", "/repos/current"),
+        ];
+        let result = rank_linked_repos_candidates(&projects, "p-cur", "/repos/current");
+        let names: Vec<&str> = result.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["Alpha-API", "mid-tier", "zeta-app"]);
+    }
+
+    #[test]
+    fn empty_input_returns_empty_list() {
+        let result = rank_linked_repos_candidates(&[], "p1", "/repos/p1");
+        assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn current_project_with_no_parent_dir_treats_all_as_other() {
+        // Pathological case : a project at "/" — parent is None.
+        // Everything else falls in the "other" bucket.
+        let projects = vec![
+            proj("p1", "Alpha", "/repos/alpha"),
+            proj("p-root", "Root", "/"),
+        ];
+        let result = rank_linked_repos_candidates(&projects, "p-root", "/");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, "p1");
+        assert_eq!(result[0].proximity_hint, "other");
     }
 }

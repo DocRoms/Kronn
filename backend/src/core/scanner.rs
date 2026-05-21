@@ -496,6 +496,22 @@ pub fn detect_audit_status(project_path: &str) -> crate::models::AiAuditStatus {
     // this release keep their badge — but we no longer fall through to
     // `Audited` based on filesystem heuristics alone (the old bug:
     // any project with a pre-existing `docs/AGENTS.md` was tagged green).
+    //
+    // 0.8.6 (#28) — Auto-backfill `.kronn.json` from legacy markers /
+    // checksums on first scan. Without this, projects audited in 0.7.x
+    // → 0.8.3 stay flagged as TemplateInstalled until the user re-runs
+    // a full audit (wasteful : ~30k tokens, rewrites AGENTS.md). The
+    // backfill is one-shot, idempotent, no-ops when there's nothing
+    // to migrate. Errors (e.g. read-only FS) fall through to the
+    // legacy detection paths below — never block scan.
+    if let Err(e) = crate::core::kronn_state::backfill_from_legacy_state(&path) {
+        tracing::warn!(
+            project = ?path,
+            error = %e,
+            "kronn_state backfill failed — falling through to legacy detection",
+        );
+    }
+
     if let Some(state) = crate::core::kronn_state::read(&path) {
         if state.validated_at.is_some() {
             return AiAuditStatus::Validated;

@@ -16,6 +16,7 @@ pub mod quick_prompt_hydrate;
 pub mod json_data_step;
 pub mod notify_step;
 pub mod gate_step;
+pub mod gate_checkpoint;
 pub mod exec_step;
 pub mod api_call_step;
 pub mod api_call_security;
@@ -332,6 +333,8 @@ mod tests {
             gate_message: None,
             gate_request_changes_target: None,
             gate_notify_url: None,
+            gate_checkpoint_before: None,
+            gate_auto_approve_after_secs: None,
             exec_command: None,
             exec_args: vec![],
             exec_timeout_secs: None,

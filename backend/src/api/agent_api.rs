@@ -319,6 +319,10 @@ pub async fn agent_api_call(
         ),
     };
 
+    // 0.8.6 (#24) — clone the raw output BEFORE it's moved into `error`
+    // so the audit-log emit below sees the full response excerpt even
+    // on the success-with-bad-envelope path.
+    let raw_output_for_log = outcome.result.output.clone();
     let error = if success && !envelope_parse_failed_despite_success {
         None
     } else {
@@ -327,6 +331,45 @@ pub async fn agent_api_call(
         // raw output so the agent can act on what Didomi actually said).
         Some(outcome.result.output)
     };
+
+    // 0.8.6 (#24) — persist the call into `api_call_logs` so the user
+    // has a unified audit/debug surface for ALL agent-broker calls.
+    // Best-effort: a logging failure must NOT short-circuit the agent's
+    // response, so we just `tracing::warn!` and move on.
+    {
+        use crate::db::api_call_logs::{self, ApiCallSource, ApiCallStatus, NewApiCallLog};
+        let plugin = req.api_plugin_slug.clone().unwrap_or_else(|| "quick-api".to_string());
+        let project_for_log = project_id.clone();
+        let disc_for_log = req.disc_id.clone();
+        let endpoint = req.endpoint_path.clone();
+        let method = req.method.clone().unwrap_or_else(|| "GET".to_string());
+        let body_excerpt = req.body.as_ref().map(|v| v.to_string());
+        let outcome_output = raw_output_for_log;
+        let outcome_status = if success { ApiCallStatus::Ok } else { ApiCallStatus::Error };
+        let duration_ms = outcome.result.duration_ms;
+        let cfg_id = req.api_config_id.clone();
+        let _ = state.db.with_conn(move |conn| {
+            api_call_logs::record(conn, NewApiCallLog {
+                source: ApiCallSource::AgentBroker,
+                project_id: project_for_log.as_deref(),
+                run_id: None,
+                disc_id: disc_for_log.as_deref(),
+                agent: None,
+                plugin_slug: &plugin,
+                config_id: cfg_id.as_deref(),
+                endpoint_path: &endpoint,
+                method: &method,
+                http_status,
+                status: outcome_status,
+                duration_ms,
+                request_excerpt: body_excerpt.as_deref(),
+                response_excerpt: Some(&outcome_output),
+                error_message: if success { None } else { Some(&outcome_output) },
+            })
+            .map_err(|e| anyhow::anyhow!("api_call_logs::record failed: {e}"))
+        }).await
+            .map_err(|e| tracing::warn!("api_call_logs.record (broker): {e}"));
+    }
 
     Json(ApiResponse::ok(AgentApiCallResponse {
         success,

@@ -866,3 +866,106 @@
   border-radius: 3px;
   font-weight: 500;
 }
+
+/* ── 0.8.6 (#29) Autodiscovery banner ────────────────────
+ * Shown on Custom plugins with no `api_spec.endpoints[]` to
+ * push the user toward the AI helper. Info-colored (less
+ * alarming than the warning banner used for incomplete
+ * config). Sits inside `.mcp-detail-body` as the first
+ * child so it grabs attention before the env section.
+ */
+.mcp-autodiscovery-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--kr-sp-3);
+  background: rgba(var(--kr-info-rgb, 96, 165, 250), 0.07);
+  border: 1px solid rgba(var(--kr-info-rgb, 96, 165, 250), 0.30);
+  border-radius: var(--kr-r-md);
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  margin-bottom: var(--kr-sp-5);
+}
+.mcp-autodiscovery-banner-icon {
+  color: var(--kr-info, #60a5fa);
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.mcp-autodiscovery-banner-body {
+  flex: 1;
+  min-width: 0;
+}
+.mcp-autodiscovery-banner-body strong {
+  display: block;
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-info, #60a5fa);
+  margin-bottom: var(--kr-sp-1);
+}
+.mcp-autodiscovery-banner-body p {
+  margin: 0;
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-secondary);
+  line-height: 1.5;
+}
+.mcp-autodiscovery-banner-cta {
+  flex-shrink: 0;
+  align-self: center;
+  color: var(--kr-info, #60a5fa);
+  border-color: rgba(var(--kr-info-rgb, 96, 165, 250), 0.35);
+}
+
+/* ── 0.8.6 (#33 fix 2026-05-21) Export-as-JSON modal ──────
+ * Inline modal so we have a guaranteed user-visible surface for the
+ * exported spec — clipboard alone is unreliable inside Tauri webviews
+ * (silent permission denial). Textarea is readonly + auto-selected. */
+.mcp-export-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+  padding: var(--kr-sp-4);
+}
+.mcp-export-modal {
+  background: var(--kr-bg-surface);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-lg);
+  padding: var(--kr-sp-5);
+  width: min(640px, 100%);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-3);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+.mcp-export-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 600;
+  font-size: var(--kr-fs-base);
+  color: var(--kr-text-primary);
+}
+.mcp-export-modal-hint {
+  margin: 0;
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-secondary);
+  line-height: 1.5;
+}
+
+/* ── 0.8.6 (#33) Import-from-JSON form helpers ──────────── */
+.mcp-form-error {
+  margin-top: var(--kr-sp-2);
+  padding: var(--kr-sp-2) var(--kr-sp-3);
+  border-radius: var(--kr-r-md);
+  background: rgba(var(--kr-error-rgb, 239, 68, 68), 0.10);
+  border: 1px solid rgba(var(--kr-error-rgb, 239, 68, 68), 0.35);
+  color: var(--kr-error, #ef4444);
+  font-size: var(--kr-fs-sm);
+}
+.mcp-form-hint {
+  margin-top: var(--kr-sp-3);
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-faint);
+  line-height: 1.5;
+}

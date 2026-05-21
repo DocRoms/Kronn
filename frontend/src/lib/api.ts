@@ -605,6 +605,12 @@ export const projects = {
    *  non-empty name + location, max 20 entries. Atomic replace —
    *  no per-row CRUD. */
   setLinkedRepos: (id: string, repos: LinkedRepo[]) => api<boolean>('PUT', `/projects/${id}/linked-repos`, repos),
+  /** 0.8.6 (#27) — autocomplete picker source. Returns OTHER
+   *  Kronn-known projects (excluding the current one) sorted by
+   *  proximity (same-parent dir first, then alphabetical). Free-text
+   *  location entry stays supported for off-Kronn repos. */
+  linkedReposCandidates: (id: string) =>
+    api<Array<{ id: string; name: string; path: string; proximity_hint: string }>>('GET', `/projects/${id}/linked-repos/candidates`),
   listAiFiles: (id: string) => api<AiFileNode[]>('GET', `/projects/${id}/ai-files`),
   readAiFile: (id: string, path: string) => api<AiFileContent>('GET', `/projects/${id}/ai-file?path=${encodeURIComponent(path)}`),
   searchAiFiles: (id: string, q: string) => api<AiSearchResult[]>('GET', `/projects/${id}/ai-search?q=${encodeURIComponent(q)}`),
@@ -1508,6 +1514,48 @@ export const rtk = {
 export const ollama = {
   health: () => api<OllamaHealthResponse>('GET', '/ollama/health'),
   models: () => api<OllamaModelsResponse>('GET', '/ollama/models'),
+};
+
+// 0.8.6 (#24) — Unified API call logs.
+export interface ApiCallLogRow {
+  id: string;
+  source: string;
+  project_id: string | null;
+  run_id: string | null;
+  disc_id: string | null;
+  agent: string | null;
+  plugin_slug: string;
+  config_id: string | null;
+  endpoint_path: string;
+  method: string;
+  http_status: number | null;
+  status: string;
+  duration_ms: number;
+  request_excerpt: string | null;
+  response_excerpt: string | null;
+  error_message: string | null;
+  called_at: string;
+}
+
+export interface ApiCallLogsFilter {
+  source?: 'workflow' | 'agent_broker' | 'manual_test';
+  project_id?: string;
+  plugin_slug?: string;
+  status?: 'OK' | 'ERROR' | 'RateLimited' | 'TimedOut';
+  limit?: number;
+}
+
+export const apiCallLogs = {
+  list: (filter?: ApiCallLogsFilter) => {
+    const qs = filter ? '?' + new URLSearchParams(
+      Object.entries(filter)
+        .filter(([, v]) => v !== undefined && v !== null && v !== '')
+        .map(([k, v]) => [k, String(v)]),
+    ).toString() : '';
+    return api<ApiCallLogRow[]>('GET', `/api-call-logs${qs}`);
+  },
+  get: (id: string) => api<ApiCallLogRow | null>('GET', `/api-call-logs/${id}`),
+  purge: (days?: number) => api<number>('POST', '/api-call-logs/purge', { days }),
 };
 
 /** Shape returned by `GET /api/debug/logs`. Not a `ts-rs`-generated type

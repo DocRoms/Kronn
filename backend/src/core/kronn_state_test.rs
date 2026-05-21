@@ -96,3 +96,145 @@ fn write_resolves_to_legacy_ai_dir_when_only_ai_exists() {
         "state file should land under ai/ when that's the only docs dir");
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+// ─── 0.8.6 (#28) — backfill_from_legacy_state ──────────────────────────
+
+/// Seed the checksums-only legacy state : `docs/checksums.json` present,
+/// no marker. Expected backfill : 1 audit entry, no `validated_at` /
+/// `bootstrapped_at`.
+#[test]
+fn backfill_seeds_audit_entry_from_checksums_alone() {
+    let tmp = fresh_tmp("backfill-checksums");
+    // Create a minimal checksums.json (the scanner's reader is tolerant).
+    // Minimal valid checksums file (the structural reader requires
+    // `audited_at` + `mappings[]` per ChecksumsFile).
+    std::fs::write(
+        tmp.join("docs/checksums.json"),
+        r#"{"audited_at": "2026-01-01", "mappings": []}"#,
+    ).unwrap();
+
+    let did = backfill_from_legacy_state(&tmp).unwrap();
+    assert!(did, "backfill should fire when checksums.json exists");
+
+    let state = read(&tmp).expect("file should exist after backfill");
+    assert_eq!(state.audits.len(), 1);
+    assert_eq!(state.audits[0].audit_type, "legacy");
+    assert_eq!(state.audits[0].kronn_version, "legacy");
+    assert!(state.validated_at.is_none());
+    assert!(state.bootstrapped_at.is_none());
+    cleanup(&tmp);
+}
+
+#[test]
+fn backfill_seeds_validated_when_marker_present() {
+    let tmp = fresh_tmp("backfill-validated");
+    std::fs::write(
+        tmp.join("docs/AGENTS.md"),
+        "# my project\n<!-- KRONN:VALIDATED -->\n",
+    ).unwrap();
+
+    let did = backfill_from_legacy_state(&tmp).unwrap();
+    assert!(did);
+    let state = read(&tmp).unwrap();
+    assert_eq!(state.audits.len(), 1, "audit entry seeded as side-effect");
+    assert!(state.validated_at.is_some(), "validated_at must be set");
+    assert!(state.bootstrapped_at.is_none());
+    cleanup(&tmp);
+}
+
+#[test]
+fn backfill_seeds_bootstrapped_when_marker_present() {
+    let tmp = fresh_tmp("backfill-bootstrapped");
+    std::fs::write(
+        tmp.join("docs/AGENTS.md"),
+        "# bootstrap\n<!-- KRONN:BOOTSTRAPPED -->\n",
+    ).unwrap();
+
+    let did = backfill_from_legacy_state(&tmp).unwrap();
+    assert!(did);
+    let state = read(&tmp).unwrap();
+    assert!(state.bootstrapped_at.is_some());
+    cleanup(&tmp);
+}
+
+#[test]
+fn backfill_combines_validated_and_bootstrapped_markers() {
+    let tmp = fresh_tmp("backfill-both");
+    std::fs::write(
+        tmp.join("docs/AGENTS.md"),
+        "# project\n<!-- KRONN:BOOTSTRAPPED -->\n<!-- KRONN:VALIDATED -->\n",
+    ).unwrap();
+    // Minimal valid checksums file (the structural reader requires
+    // `audited_at` + `mappings[]` per ChecksumsFile).
+    std::fs::write(
+        tmp.join("docs/checksums.json"),
+        r#"{"audited_at": "2026-01-01", "mappings": []}"#,
+    ).unwrap();
+
+    backfill_from_legacy_state(&tmp).unwrap();
+    let state = read(&tmp).unwrap();
+    assert_eq!(state.audits.len(), 1);
+    assert!(state.validated_at.is_some());
+    assert!(state.bootstrapped_at.is_some());
+    cleanup(&tmp);
+}
+
+#[test]
+fn backfill_skips_when_kronn_json_already_exists() {
+    // Idempotency : a project that ALREADY has .kronn.json must not be
+    // touched, no matter what legacy state is also present.
+    let tmp = fresh_tmp("backfill-skip-existing");
+    record_audit(&tmp, "full").unwrap();
+    // Drop a checksums.json that WOULD have triggered backfill on a
+    // fresh project — must still be ignored because state already exists.
+    // Minimal valid checksums file (the structural reader requires
+    // `audited_at` + `mappings[]` per ChecksumsFile).
+    std::fs::write(
+        tmp.join("docs/checksums.json"),
+        r#"{"audited_at": "2026-01-01", "mappings": []}"#,
+    ).unwrap();
+
+    let did = backfill_from_legacy_state(&tmp).unwrap();
+    assert!(!did, "backfill must skip when .kronn.json already exists");
+
+    let state = read(&tmp).unwrap();
+    assert_eq!(state.audits.len(), 1, "audits not overwritten");
+    assert_eq!(state.audits[0].audit_type, "full", "must keep the 'full' from record_audit, not 'legacy'");
+    cleanup(&tmp);
+}
+
+#[test]
+fn backfill_skips_when_no_legacy_signal() {
+    // A pristine project with neither checksums nor markers → backfill
+    // returns false and no file is written. Avoids polluting fresh
+    // projects with a stale "legacy" audit row.
+    let tmp = fresh_tmp("backfill-skip-pristine");
+    // No checksums.json, no AGENTS.md.
+    let did = backfill_from_legacy_state(&tmp).unwrap();
+    assert!(!did, "backfill must skip when no legacy signal present");
+    assert!(read(&tmp).is_none(), "no .kronn.json created");
+    cleanup(&tmp);
+}
+
+#[test]
+fn backfill_is_idempotent_on_repeated_calls() {
+    // Even with the same legacy state, calling backfill twice must NOT
+    // double-write the audits array. Second call short-circuits via the
+    // "kronn.json already exists" branch.
+    let tmp = fresh_tmp("backfill-idempotent");
+    // Minimal valid checksums file (the structural reader requires
+    // `audited_at` + `mappings[]` per ChecksumsFile).
+    std::fs::write(
+        tmp.join("docs/checksums.json"),
+        r#"{"audited_at": "2026-01-01", "mappings": []}"#,
+    ).unwrap();
+
+    let first = backfill_from_legacy_state(&tmp).unwrap();
+    let second = backfill_from_legacy_state(&tmp).unwrap();
+
+    assert!(first);
+    assert!(!second);
+    let state = read(&tmp).unwrap();
+    assert_eq!(state.audits.len(), 1);
+    cleanup(&tmp);
+}

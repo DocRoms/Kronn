@@ -311,11 +311,31 @@ fn validate_required_fields_per_type(steps: &[WorkflowStep]) -> Result<(), Strin
                     ));
                 }
             }
+            StepType::Gate => {
+                // 0.8.6 (#26) — bound the auto-approve countdown. 0
+                // would skip the gate instantly (doesn't pass smell
+                // test) and > 24h is almost always a typo. Refuse at
+                // save time so the user catches it before a run goes
+                // sideways.
+                if let Some(secs) = s.gate_auto_approve_after_secs {
+                    if secs == 0 {
+                        return Err(format!(
+                            "Step Gate « {} » : `gate_auto_approve_after_secs` doit être > 0 (un 0 reviendrait à supprimer la gate).",
+                            s.name
+                        ));
+                    }
+                    if secs > 86400 {
+                        return Err(format!(
+                            "Step Gate « {} » : `gate_auto_approve_after_secs` ne peut pas dépasser 86400s (24h). Reçu : {}s.",
+                            s.name, secs
+                        ));
+                    }
+                }
+            }
             // Other variants have their own dedicated validators:
             //   Exec       → validate_exec_steps
             //   JsonData   → validate_json_data_steps
-            //   Gate       → no required fields beyond its serde defaults
-            StepType::Exec | StepType::JsonData | StepType::Gate => {}
+            StepType::Exec | StepType::JsonData => {}
         }
     }
     Ok(())
@@ -2416,6 +2436,8 @@ pub async fn suggestions(
                 gate_message: None,
                 gate_request_changes_target: None,
                 gate_notify_url: None,
+                gate_checkpoint_before: None,
+                gate_auto_approve_after_secs: None,
                 exec_command: None,
                 exec_args: vec![],
                 exec_timeout_secs: None,
@@ -2698,6 +2720,8 @@ mod tests {
             gate_message: None,
             gate_request_changes_target: None,
             gate_notify_url: None,
+            gate_checkpoint_before: None,
+            gate_auto_approve_after_secs: None,
             exec_command: None,
             exec_args: vec![],
             exec_timeout_secs: None,
@@ -3549,5 +3573,50 @@ mod tests {
         let err = validate_required_fields_per_type(&chain).expect_err("must reject");
         assert!(err.contains("notify_ops"), "first offender wins, got: {}", err);
         assert!(!err.contains("plan"), "should not mention later offenders, got: {}", err);
+    }
+
+    // ─── 0.8.6 (#26) gate_auto_approve_after_secs bounds ─────────────
+
+    #[test]
+    fn gate_auto_approve_rejects_zero() {
+        // 0 = "auto-approve instantly", which defeats the gate. Refuse
+        // at save time so the user catches the typo before runtime.
+        let mut s = mk_step("review", StepType::Gate);
+        s.gate_auto_approve_after_secs = Some(0);
+        let err = validate_required_fields_per_type(&[s]).expect_err("0 must be rejected");
+        assert!(err.contains("review"));
+        assert!(err.contains("gate_auto_approve_after_secs"));
+    }
+
+    #[test]
+    fn gate_auto_approve_rejects_more_than_24h() {
+        let mut s = mk_step("review", StepType::Gate);
+        s.gate_auto_approve_after_secs = Some(86401);
+        let err = validate_required_fields_per_type(&[s]).expect_err(">24h must be rejected");
+        assert!(err.contains("86400") || err.contains("24h"));
+    }
+
+    #[test]
+    fn gate_auto_approve_accepts_30_seconds() {
+        // Plumbing-test use case : a gate fires for 30s then auto-
+        // approves so the rest of the pipeline runs.
+        let mut s = mk_step("dev_mode_gate", StepType::Gate);
+        s.gate_auto_approve_after_secs = Some(30);
+        validate_required_fields_per_type(&[s]).expect("30s must validate");
+    }
+
+    #[test]
+    fn gate_auto_approve_accepts_24_hours_exact_boundary() {
+        let mut s = mk_step("nightly_gate", StepType::Gate);
+        s.gate_auto_approve_after_secs = Some(86400);
+        validate_required_fields_per_type(&[s]).expect("24h boundary must validate");
+    }
+
+    #[test]
+    fn gate_auto_approve_none_leaves_gate_manual_forever() {
+        let s = mk_step("review", StepType::Gate);
+        // gate_auto_approve_after_secs defaults to None — no validation
+        // applies. Manual-forever is the default, preserved here.
+        validate_required_fields_per_type(&[s]).expect("None must validate");
     }
 }

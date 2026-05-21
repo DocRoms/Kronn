@@ -4,7 +4,13 @@ import { GitPanel } from '../GitPanel';
 
 // ─── Mock API ────────────────────────────────────────────────────────────────
 
-function makeMockGitStatus() {
+let gitStatusOverride: ReturnType<typeof makeMockGitStatus> | null = null;
+
+function makeMockGitStatus(extra?: Partial<ReturnType<typeof baseGitStatus>>) {
+  return { ...baseGitStatus(), ...(extra || {}) };
+}
+
+function baseGitStatus() {
   return {
     branch: 'feat/new-feature',
     default_branch: 'main',
@@ -13,7 +19,8 @@ function makeMockGitStatus() {
       { path: 'src/main.rs', status: 'modified', staged: false },
       { path: 'src/lib.rs', status: 'added', staged: false },
       { path: 'old.txt', status: 'deleted', staged: true },
-    ],
+    ] as Array<{ path: string; status: string; staged: boolean }>,
+    committed_files: [] as Array<{ path: string; status: string; staged: boolean }>,
     ahead: 2,
     behind: 0,
     has_upstream: true,
@@ -24,7 +31,7 @@ function makeMockGitStatus() {
 
 vi.mock('../../lib/api', () => ({
   projects: {
-    gitStatus: vi.fn().mockImplementation(() => Promise.resolve(makeMockGitStatus())),
+    gitStatus: vi.fn().mockImplementation(() => Promise.resolve(gitStatusOverride ?? makeMockGitStatus())),
     gitDiff: vi.fn().mockResolvedValue({ diff: '@@ -1,3 +1,4 @@\n+new line' }),
     gitCommit: vi.fn().mockResolvedValue({}),
     gitPush: vi.fn().mockResolvedValue({}),
@@ -33,7 +40,7 @@ vi.mock('../../lib/api', () => ({
     prTemplate: vi.fn().mockResolvedValue({ title: '', body: '' }),
   },
   discussions: {
-    gitStatus: vi.fn().mockImplementation(() => Promise.resolve(makeMockGitStatus())),
+    gitStatus: vi.fn().mockImplementation(() => Promise.resolve(gitStatusOverride ?? makeMockGitStatus())),
     gitDiff: vi.fn().mockResolvedValue({ diff: '@@ diff content @@' }),
     gitCommit: vi.fn().mockResolvedValue({}),
     gitPush: vi.fn().mockResolvedValue({}),
@@ -52,6 +59,7 @@ describe('GitPanel', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    gitStatusOverride = null;
   });
 
   it('renders loading state initially', () => {
@@ -123,6 +131,44 @@ describe('GitPanel', () => {
       const checkboxes = screen.getAllByRole('checkbox');
       expect(checkboxes.length).toBeGreaterThan(0);
     });
+  });
+
+  it('shows committed-on-branch section when committed_files present', async () => {
+    gitStatusOverride = makeMockGitStatus({
+      committed_files: [
+        { path: 'committed-feature.rs', status: 'added', staged: true },
+        { path: 'lib.rs', status: 'modified', staged: true },
+      ],
+    });
+    render(<GitPanel projectId="p1" onClose={onClose} />);
+    await waitFor(() => {
+      expect(screen.getByTestId('git-committed-section')).toBeDefined();
+      expect(screen.getByText('committed-feature.rs')).toBeDefined();
+      expect(screen.getByText('lib.rs')).toBeDefined();
+    });
+  });
+
+  it('hides committed section when committed_files is empty', async () => {
+    gitStatusOverride = makeMockGitStatus({ committed_files: [] });
+    render(<GitPanel projectId="p1" onClose={onClose} />);
+    await waitFor(() => {
+      expect(screen.getByText('feat/new-feature')).toBeDefined();
+    });
+    expect(screen.queryByTestId('git-committed-section')).toBeNull();
+  });
+
+  it('shows committed section even when uncommitted files list is empty', async () => {
+    gitStatusOverride = makeMockGitStatus({
+      files: [],
+      committed_files: [{ path: 'only-committed.md', status: 'added', staged: true }],
+    });
+    render(<GitPanel projectId="p1" onClose={onClose} />);
+    await waitFor(() => {
+      expect(screen.getByTestId('git-committed-section')).toBeDefined();
+      expect(screen.getByText('only-committed.md')).toBeDefined();
+    });
+    // git.noChanges (empty-state for uncommitted) should NOT appear when committed_files has items.
+    expect(screen.queryByText('git.noChanges')).toBeNull();
   });
 
   it('does not show terminal by default', async () => {

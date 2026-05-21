@@ -23,6 +23,7 @@ interface GitStatus {
   default_branch: string;
   is_default_branch: boolean;
   files: GitFile[];
+  committed_files?: GitFile[];
   ahead: number;
   behind: number;
   has_upstream: boolean;
@@ -518,9 +519,10 @@ export function GitPanel({ projectId, discussionId, onClose, terminalEnabled = f
           )}
 
           {/* File list */}
-          {status.files.length === 0 ? (
+          {status.files.length === 0 && (!status.committed_files || status.committed_files.length === 0) && (
             <div className="git-empty">{t('git.noChanges')}</div>
-          ) : (
+          )}
+          {status.files.length > 0 && (
             <>
               <div className="git-file-header">
                 <span className="git-file-count">
@@ -602,6 +604,36 @@ export function GitPanel({ projectId, discussionId, onClose, terminalEnabled = f
                 })}
               </div>
             </>
+          )}
+
+          {/* Committed-on-branch section (vs default branch).
+              Surfaces work that's saved on this branch but not yet merged
+              — critical for worktree-isolated discs where the agent has
+              committed but the working tree is clean. */}
+          {status.committed_files && status.committed_files.length > 0 && (
+            <div className="git-committed-section" data-testid="git-committed-section">
+              <div className="git-file-header">
+                <span className="git-file-count">
+                  <GitCommit size={11} style={{ marginRight: 4 }} />
+                  {t('git.committedOnBranch', String(status.committed_files.length), status.default_branch || 'main')}
+                </span>
+              </div>
+              <div className="git-file-list">
+                {status.committed_files.map(file => {
+                  const Icon = STATUS_ICONS[file.status] || FileX;
+                  const color = STATUS_COLORS[file.status] || 'var(--kr-text-faint)';
+                  return (
+                    <div key={`committed-${file.path}`} className="git-file-row git-file-row-committed">
+                      <Icon size={12} style={{ color }} className="flex-shrink-0" />
+                      <span className="git-file-btn git-file-btn-readonly" title={file.path}>
+                        {file.path}
+                      </span>
+                      <span className="git-file-status" style={{ color }}>{file.status}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
           )}
         </div>
       )}
