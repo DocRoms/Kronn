@@ -281,6 +281,49 @@ TOOLS = [
             "required": ["token"],
         },
     },
+    # ─── 0.8.6 (#56) Full-MCP cross-agent bootstrap ────────────────
+    # Two convenience tools so an agent can spin up a multi-agent
+    # room WITHOUT bouncing the user through the Kronn UI. Both reuse
+    # the existing `POST /api/discussions/:id/invite-peer` route the
+    # UI calls; just exposed at the MCP surface for full-MCP flows.
+    {
+        "name": "disc_invite_peer",
+        "description": (
+            "Mint an invite token for the discussion currently bound "
+            "to this bridge (the one you joined via `disc_join` or "
+            "created via `disc_create` upstream). Returns "
+            "`{token, instruction_text, expires_at, ttl_seconds}`. "
+            "`instruction_text` is a ready-to-share message the user "
+            "can paste into another CLI to bring it into the room. "
+            "Tokens are multi-use within their TTL (10 min) so the "
+            "same invite can onboard multiple peers."
+        ),
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "disc_create_room",
+        "description": (
+            "One-shot bootstrap of a multi-agent room from the MCP "
+            "surface : creates a fresh discussion, binds THIS bridge "
+            "to it, and mints an invite token in a single call. "
+            "Returns `{disc_id, title, token, instruction_text, "
+            "expires_at}`. Use this when an agent wants to spin up a "
+            "collaboration on its own (e.g. spawning a reviewer, "
+            "delegating a sub-task) without asking the user to click "
+            "anywhere in the Kronn UI. After this call you can "
+            "immediately `disc_append` to greet, then "
+            "`disc_wait_for_peer` to wait for the invitee to join."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Room title shown in the Kronn UI."},
+                "language": {"type": "string", "description": "Locale (fr/en/es). Default 'en'."},
+                "project_id": {"type": "string", "description": "Bind to a Kronn project, optional."},
+            },
+            "required": ["title"],
+        },
+    },
     {
         "name": "disc_leave",
         "description": (
@@ -1077,6 +1120,68 @@ def call_disc_join(args):
     return result
 
 
+def call_disc_invite_peer(_args):
+    """0.8.6 (#56) — mint an invite for the currently-bound disc.
+
+    Reuses `POST /api/discussions/:id/invite-peer` (route already
+    serving the UI [+ Inviter] button). Letting an agent call this
+    directly closes the last "user must click in Kronn UI" gap for
+    multi-agent collab bootstrap.
+    """
+    disc_id = _disc_id()
+    return _unwrap(_http("POST", f"/api/discussions/{disc_id}/invite-peer", {}))
+
+
+def call_disc_create_room(args):
+    """0.8.6 (#56) — create disc + mint invite in one call.
+
+    Sequence:
+      1. `disc_create` (existing route) — fresh discussion, optionally
+         bound to a Kronn project. The created disc is auto-bound to
+         this bridge process so subsequent `disc_*` calls land on it.
+      2. `disc_invite_peer` (same as standalone tool above) — mint
+         a token + instruction text the agent can hand to the user.
+
+    The two-step is wrapped so the agent can do `disc_create_room` →
+    `disc_append` → `disc_wait_for_peer` without ever leaving the MCP
+    surface. If invite-minting fails after disc creation, the disc
+    still exists (intentional: the user can click [+ Inviter] in the
+    UI as a fallback).
+    """
+    title = args.get("title")
+    if not title:
+        raise RuntimeError("disc_create_room: missing required 'title'")
+
+    # Forward to existing disc_create logic — it already binds the
+    # process via _set_current_disc_id and idempotency-on-source
+    # protections still apply if the agent retries.
+    create_args = {"title": title, "agent": _agent_type_for_session() or "Unknown"}
+    if args.get("language"):
+        create_args["language"] = args["language"]
+    if args.get("project_id"):
+        create_args["project_id"] = args["project_id"]
+    created = call_disc_create(create_args)
+
+    disc_id = created.get("disc_id") if isinstance(created, dict) else None
+    if not disc_id:
+        # Surfaces a clear error if the backend response shape is unexpected.
+        raise RuntimeError(
+            "disc_create_room: backend returned no disc_id — cannot mint invite"
+        )
+
+    invite = _unwrap(_http("POST", f"/api/discussions/{disc_id}/invite-peer", {}))
+    out = {
+        "disc_id": disc_id,
+        "title": created.get("title", title),
+    }
+    if isinstance(invite, dict):
+        out["token"] = invite.get("token")
+        out["instruction_text"] = invite.get("instruction_text")
+        out["expires_at"] = invite.get("expires_at")
+        out["ttl_seconds"] = invite.get("ttl_seconds")
+    return out
+
+
 def call_disc_leave(_args):
     """0.8.6 phase 3 — leave the current disc + clear runtime binding.
 
@@ -1522,6 +1627,12 @@ DISPATCH = {
     "disc_wait_for_peer": call_disc_wait_for_peer,
     # 0.8.6 phase 3 — leave the current disc + clear local binding.
     "disc_leave": call_disc_leave,
+    # 0.8.6 (#56) — full-MCP cross-agent bootstrap (mint invite +
+    # combined create-room helper). Closes the last UI-required gap
+    # for an agent that wants to spin up a multi-agent room on its
+    # own.
+    "disc_invite_peer": call_disc_invite_peer,
+    "disc_create_room": call_disc_create_room,
     # 0.8.5 — read-only listings of existing artifacts. Lets the
     # agent avoid duplicates + reference existing QP/QA ids from a
     # new workflow without asking the user to paste them.

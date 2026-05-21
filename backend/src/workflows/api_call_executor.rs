@@ -1298,6 +1298,8 @@ mod tests {
             gate_message: None,
             gate_request_changes_target: None,
             gate_notify_url: None,
+            gate_checkpoint_before: None,
+            gate_auto_approve_after_secs: None,
             exec_command: None,
             exec_args: vec![],
             exec_timeout_secs: None,

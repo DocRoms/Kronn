@@ -652,6 +652,73 @@ pub async fn execute_run(
                     // The run loop breaks below when it sees this status, and
                     // the operator's decision (POST /runs/:id/decide) calls
                     // `resume_run` to continue from the next step.
+                    //
+                    // 0.8.6 (#25) — checkpoint commit. When the step has
+                    // `gate_checkpoint_before: Some(true)`, snapshot the
+                    // working tree FIRST so a future "Request Changes" Goto
+                    // can `git reset --hard` to this SHA before re-running
+                    // the target. Skipped silently in Isolated worktree
+                    // mode (the worktree manages its own branch lifecycle).
+                    if step.gate_checkpoint_before.unwrap_or(false) {
+                        // Isolated workspace = the run has its own
+                        // worktree path. Skip checkpoint there — the
+                        // worktree manages its own branch lifecycle.
+                        let is_isolated = run.workspace_path.is_some();
+                        if is_isolated {
+                            tracing::info!(
+                                run_id = %run.id,
+                                step = %step.name,
+                                "gate_checkpoint_before skipped — workflow uses Isolated worktree mode",
+                            );
+                        } else if let Some(pid) = workflow.project_id.as_ref() {
+                            let project_path_opt = state.db.with_conn({
+                                let pid2 = pid.clone();
+                                move |conn| crate::db::projects::get_project(conn, &pid2)
+                            }).await.ok().flatten();
+                            if let Some(proj) = project_path_opt {
+                                let ckp = super::gate_checkpoint::commit_checkpoint(
+                                    std::path::Path::new(&proj.path),
+                                    &step.name,
+                                    &run.id,
+                                );
+                                match ckp {
+                                    super::gate_checkpoint::CheckpointOutcome::Committed { sha } => {
+                                        let key = format!("{}{}", super::gate_checkpoint::CHECKPOINT_STATE_PREFIX, step.name);
+                                        run.state.insert(key, sha.clone());
+                                        tracing::info!(
+                                            run_id = %run.id,
+                                            step = %step.name,
+                                            sha = %sha,
+                                            "gate_checkpoint_before committed",
+                                        );
+                                    }
+                                    super::gate_checkpoint::CheckpointOutcome::NotAGitRepo => {
+                                        tracing::warn!(
+                                            run_id = %run.id,
+                                            step = %step.name,
+                                            project_path = %proj.path,
+                                            "gate_checkpoint_before requested but project_path is not a git repo — skipping",
+                                        );
+                                    }
+                                    super::gate_checkpoint::CheckpointOutcome::StagedChangesPresent => {
+                                        tracing::warn!(
+                                            run_id = %run.id,
+                                            step = %step.name,
+                                            "gate_checkpoint_before refused — index has staged changes (user WIP)",
+                                        );
+                                    }
+                                    super::gate_checkpoint::CheckpointOutcome::GitCommandFailed { stderr } => {
+                                        tracing::warn!(
+                                            run_id = %run.id,
+                                            step = %step.name,
+                                            stderr = %stderr,
+                                            "gate_checkpoint_before commit failed — continuing without checkpoint",
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
                     super::gate_step::execute_gate_step(step, &ctx)
                 }
                 StepType::Exec => {
@@ -988,6 +1055,62 @@ pub async fn execute_run(
                             }
                         });
                     }
+                }
+            }
+            // 0.8.6 (#26) — opt-in auto-approve timer. If the gate
+            // step has `gate_auto_approve_after_secs: Some(n)`,
+            // spawn a background task that POSTs an Approve decision
+            // to our own /decide endpoint after `n` seconds. Failures
+            // are logged but don't block the run — the user can
+            // still manually decide. Race-safe : the /decide
+            // handler refuses to decide a run that's no longer in
+            // WaitingApproval, so a human Approve before the timer
+            // fires simply wins. Cancellation across backend
+            // restart is out of scope for the MVP (the timer
+            // resets ; user re-decides).
+            if let Some(delay_secs) = step.gate_auto_approve_after_secs {
+                if delay_secs > 0 {
+                    let run_id_for_timer = run.id.clone();
+                    let port = std::env::var("KRONN_BACKEND_PORT")
+                        .ok()
+                        .and_then(|s| s.parse::<u16>().ok())
+                        .unwrap_or(3140);
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(delay_secs as u64)).await;
+                        let client = match reqwest::Client::builder()
+                            .timeout(std::time::Duration::from_secs(15))
+                            .build() {
+                            Ok(c) => c,
+                            Err(e) => {
+                                tracing::warn!(
+                                    target: "kronn::gate_auto_approve",
+                                    run_id = %run_id_for_timer,
+                                    "auto-approve client build failed: {}", e,
+                                );
+                                return;
+                            }
+                        };
+                        let url = format!(
+                            "http://127.0.0.1:{}/api/workflows/runs/{}/decide",
+                            port, run_id_for_timer,
+                        );
+                        let body = serde_json::json!({
+                            "decision": "Approve",
+                            "comment": format!("[auto-approved after {delay_secs}s — no human action]"),
+                        });
+                        match client.post(&url).json(&body).send().await {
+                            Ok(resp) => tracing::info!(
+                                target: "kronn::gate_auto_approve",
+                                run_id = %run_id_for_timer, status = resp.status().as_u16(),
+                                "auto-approve POST sent",
+                            ),
+                            Err(e) => tracing::warn!(
+                                target: "kronn::gate_auto_approve",
+                                run_id = %run_id_for_timer,
+                                "auto-approve POST failed: {}", e,
+                            ),
+                        }
+                    });
                 }
             }
             break;
@@ -1440,6 +1563,50 @@ pub async fn resume_run(
         // Truncate step_results to the target step's index. The next
         // `execute_run` invocation starts at step_results.len() == target_idx.
         run.step_results.truncate(target_idx);
+
+        // 0.8.6 (#25) — checkpoint reset. If the gate captured a
+        // checkpoint SHA on its way in, `git reset --hard` to it
+        // BEFORE re-running the target step. Makes Goto loops
+        // idempotent : the agent re-implements on the same tree
+        // state the previous iteration started on, not on top of
+        // its own previous output.
+        let checkpoint_key = format!(
+            "{}{}",
+            super::gate_checkpoint::CHECKPOINT_STATE_PREFIX,
+            gate_step_name,
+        );
+        if let Some(sha) = run.state.get(&checkpoint_key).cloned() {
+            if let Some(pid) = workflow.project_id.as_ref() {
+                let pid2 = pid.clone();
+                let project = state.db.with_conn(move |conn| {
+                    crate::db::projects::get_project(conn, &pid2)
+                }).await.ok().flatten();
+                if let Some(proj) = project {
+                    match super::gate_checkpoint::reset_to_checkpoint(
+                        std::path::Path::new(&proj.path),
+                        &sha,
+                    ) {
+                        Ok(()) => {
+                            tracing::info!(
+                                run_id = %run.id,
+                                gate = %gate_step_name,
+                                sha = %sha,
+                                "checkpoint reset applied before Goto",
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                run_id = %run.id,
+                                gate = %gate_step_name,
+                                sha = %sha,
+                                error = %e,
+                                "checkpoint reset failed — continuing Goto without reset",
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Approve and RequestChanges both flow into execute_run.
@@ -1638,6 +1805,8 @@ mod tests {
             gate_message: None,
             gate_request_changes_target: None,
             gate_notify_url: None,
+            gate_checkpoint_before: None,
+            gate_auto_approve_after_secs: None,
             exec_command: None,
             exec_args: vec![],
             exec_timeout_secs: None,
@@ -1872,6 +2041,8 @@ mod tests {
             gate_message: None,
             gate_request_changes_target: None,
             gate_notify_url: None,
+            gate_checkpoint_before: None,
+            gate_auto_approve_after_secs: None,
             exec_command: None,
             exec_args: vec![],
             exec_timeout_secs: None,

@@ -825,4 +825,364 @@ describe('McpPage', () => {
     fireEvent.click(installedCard!);
     expect(screen.queryByTitle('Modifier le plugin')).toBeNull();
   });
+
+  // ─── 0.8.6 (#29) — Endpoints autodiscovery banner ─────────────────────
+  //
+  // On legacy Custom plugins (`server_id` startsWith `custom-`) whose
+  // `api_spec.endpoints[]` is empty, the detail panel surfaces a banner
+  // pushing the user toward the AI helper (re-uses the existing edit
+  // form which embeds the CustomApiAiHelper). For registry plugins OR
+  // for Custom plugins with declared endpoints, the banner stays hidden.
+
+  it('autodiscovery banner: shown for Custom plugins with no endpoints', async () => {
+    const server: McpServer = {
+      id: 'custom-legacy-abc12345',
+      name: 'LegacyAPI',
+      description: 'A legacy custom plugin',
+      transport: 'ApiOnly',
+      source: 'Manual',
+      api_spec: {
+        base_url: 'https://api.legacy.com',
+        auth: 'None',
+        docs_url: 'https://docs.legacy.com',
+        endpoints: [], // ← the trigger
+        config_keys: [],
+      },
+    };
+    const cfg = makeConfig('cfg-legacy', 'custom-legacy-abc12345', 'LegacyAPI');
+    const overview: McpOverview = {
+      servers: [server],
+      configs: [cfg],
+      customized_contexts: [],
+      incompatibilities: [],
+    };
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    fireEvent.click(screen.getByText('LegacyAPI'));
+    const banner = document.querySelector('[data-testid="mcp-autodiscovery-banner"]');
+    expect(banner).not.toBeNull();
+    // Banner has the CTA button (uses Sparkles icon + i18n key).
+    const ctaBtn = banner!.querySelector('.mcp-autodiscovery-banner-cta');
+    expect(ctaBtn).not.toBeNull();
+  });
+
+  it('autodiscovery banner: HIDDEN for Custom plugins WITH endpoints declared', async () => {
+    const server: McpServer = {
+      id: 'custom-good-xyz98765',
+      name: 'GoodAPI',
+      description: 'Custom plugin already enriched',
+      transport: 'ApiOnly',
+      source: 'Manual',
+      api_spec: {
+        base_url: 'https://api.good.com',
+        auth: 'None',
+        endpoints: [
+          { path: '/things', method: 'GET', description: 'List things' },
+        ],
+        config_keys: [],
+      },
+    };
+    const cfg = makeConfig('cfg-good', 'custom-good-xyz98765', 'GoodAPI');
+    const overview: McpOverview = {
+      servers: [server],
+      configs: [cfg],
+      customized_contexts: [],
+      incompatibilities: [],
+    };
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    fireEvent.click(screen.getByText('GoodAPI'));
+    expect(
+      document.querySelector('[data-testid="mcp-autodiscovery-banner"]'),
+    ).toBeNull();
+  });
+
+  // ─── 0.8.6 (#33) — Custom plugin clipboard-JSON import/export ─────────
+  //
+  // Export: on a Custom plugin detail panel, a "Copier comme JSON" button
+  // serializes the spec (no credentials) to the clipboard.
+  // Import: an "Importer depuis JSON" tile in the registry grid switches
+  // the Add panel to a paste-area; on submit it POSTs the parsed spec via
+  // `createConfig({ server_id: 'api-custom', custom_spec: …, env: {} })`.
+
+  it('export button: writes spec-only JSON to clipboard on Custom plugins', async () => {
+    const server: McpServer = {
+      id: 'custom-exportme-aaa11111',
+      name: 'ExportMe',
+      description: 'A custom plugin to export',
+      transport: 'ApiOnly',
+      source: 'Manual',
+      api_spec: {
+        base_url: 'https://api.exportme.com',
+        auth: 'None',
+        docs_url: 'https://docs.exportme.com',
+        endpoints: [{ path: '/things', method: 'GET', description: 'List' }],
+        config_keys: [
+          { label: 'API Key', env_key: 'EXPORTME_API_KEY', placeholder: '', description: '' },
+        ],
+      },
+    };
+    const cfg = makeConfig('cfg-exportme', 'custom-exportme-aaa11111', 'ExportMe');
+    const overview: McpOverview = {
+      servers: [server],
+      configs: [cfg],
+      customized_contexts: [],
+      incompatibilities: [],
+    };
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    fireEvent.click(screen.getByText('ExportMe'));
+    const exportBtn = document.querySelector('[data-testid="mcp-custom-export-json"]') as HTMLButtonElement | null;
+    expect(exportBtn).not.toBeNull();
+    await act(async () => {
+      fireEvent.click(exportBtn!);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // 0.8.6 fix 2026-05-21 — export now ALSO renders an inline modal
+    // with the JSON in a readonly textarea, regardless of clipboard
+    // outcome. Pre-fix the export was clipboard-only and silently
+    // dead in Tauri webviews ("STRICTEMENT rien" — user, 2026-05-21).
+    const modal = document.querySelector('[data-testid="mcp-export-modal"]');
+    expect(modal).not.toBeNull();
+    const textarea = document.querySelector('[data-testid="mcp-export-modal-textarea"]') as HTMLTextAreaElement | null;
+    expect(textarea).not.toBeNull();
+    const parsedFromTextarea = JSON.parse(textarea!.value);
+    expect(parsedFromTextarea.name).toBe('ExportMe');
+    expect(parsedFromTextarea.base_url).toBe('https://api.exportme.com');
+    expect(parsedFromTextarea.endpoints).toEqual([
+      { path: '/things', method: 'GET', description: 'List' },
+    ]);
+    // Critical contract: fields[].value MUST be '' so credentials never leak.
+    expect(parsedFromTextarea.fields).toEqual([{ label: 'API Key', value: '' }]);
+    // Clipboard write IS still attempted in the background (best-effort).
+    // Same shape goes to the clipboard helper as into the modal.
+    expect(writeText).toHaveBeenCalled();
+    expect(JSON.parse(writeText.mock.calls[0][0])).toEqual(parsedFromTextarea);
+  });
+
+  it('export modal: closes via the X button without leaking state', async () => {
+    const server: McpServer = {
+      id: 'custom-modal-bbb22222',
+      name: 'ModalMe',
+      description: 'For the close-button test',
+      transport: 'ApiOnly',
+      source: 'Manual',
+      api_spec: {
+        base_url: 'https://api.modalme.com',
+        auth: 'None',
+        endpoints: [],
+        config_keys: [],
+      },
+    };
+    const cfg = makeConfig('cfg-modal', 'custom-modal-bbb22222', 'ModalMe');
+    const overview: McpOverview = {
+      servers: [server],
+      configs: [cfg],
+      customized_contexts: [],
+      incompatibilities: [],
+    };
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText: vi.fn().mockResolvedValue(undefined) }, configurable: true });
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    fireEvent.click(screen.getByText('ModalMe'));
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="mcp-custom-export-json"]') as HTMLButtonElement);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(document.querySelector('[data-testid="mcp-export-modal"]')).not.toBeNull();
+    fireEvent.click(document.querySelector('[data-testid="mcp-export-modal-close"]') as HTMLButtonElement);
+    expect(document.querySelector('[data-testid="mcp-export-modal"]')).toBeNull();
+  });
+
+  it('export modal: survives a clipboard failure (still renders the JSON)', async () => {
+    const server: McpServer = {
+      id: 'custom-failclip-ccc33333',
+      name: 'FailClip',
+      description: 'Clipboard always rejects',
+      transport: 'ApiOnly',
+      source: 'Manual',
+      api_spec: {
+        base_url: 'https://api.failclip.com',
+        auth: 'None',
+        endpoints: [],
+        config_keys: [],
+      },
+    };
+    const cfg = makeConfig('cfg-failclip', 'custom-failclip-ccc33333', 'FailClip');
+    const overview: McpOverview = {
+      servers: [server],
+      configs: [cfg],
+      customized_contexts: [],
+      incompatibilities: [],
+    };
+    // Clipboard rejects (Tauri sandboxed webview case).
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText: vi.fn().mockRejectedValue(new Error('permission denied')) },
+      configurable: true,
+    });
+    // Also force execCommand fallback to fail so we exercise the "failed" UI state.
+    const origExec = document.execCommand;
+    document.execCommand = vi.fn().mockReturnValue(false) as unknown as typeof document.execCommand;
+    try {
+      wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+      fireEvent.click(screen.getByText('FailClip'));
+      await act(async () => {
+        fireEvent.click(document.querySelector('[data-testid="mcp-custom-export-json"]') as HTMLButtonElement);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      // Modal MUST still render — that's the whole point of the fix.
+      expect(document.querySelector('[data-testid="mcp-export-modal"]')).not.toBeNull();
+      const textarea = document.querySelector('[data-testid="mcp-export-modal-textarea"]') as HTMLTextAreaElement;
+      expect(JSON.parse(textarea.value).name).toBe('FailClip');
+    } finally {
+      document.execCommand = origExec;
+    }
+  });
+
+  it('export button: HIDDEN on registry (non-custom) plugins', async () => {
+    const server: McpServer = {
+      id: 'api-chartbeat',
+      name: 'Chartbeat',
+      description: 'Chartbeat (registry)',
+      transport: 'ApiOnly',
+      source: 'Registry',
+      api_spec: { base_url: 'https://api.chartbeat.com', auth: 'None', endpoints: [], config_keys: [] },
+    };
+    const cfg = makeConfig('cfg-cb2', 'api-chartbeat', 'Chartbeat');
+    const overview: McpOverview = {
+      servers: [server],
+      configs: [cfg],
+      customized_contexts: [],
+      incompatibilities: [],
+    };
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    fireEvent.click(screen.getByText('Chartbeat'));
+    expect(document.querySelector('[data-testid="mcp-custom-export-json"]')).toBeNull();
+  });
+
+  it('import tile: switches Add panel to JSON paste form', async () => {
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [] };
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    // Open the Add MCP panel (button labeled with FR "Ajouter un plugin").
+    const addBtn = Array.from(document.querySelectorAll('button')).find(b =>
+      (b.textContent ?? '').toLowerCase().includes('ajouter')
+    );
+    expect(addBtn).toBeTruthy();
+    fireEvent.click(addBtn!);
+    const importTile = document.querySelector('[data-testid="mcp-import-json-tile"]') as HTMLElement | null;
+    expect(importTile).not.toBeNull();
+    fireEvent.click(importTile!);
+    expect(document.querySelector('[data-testid="mcp-import-json-form"]')).not.toBeNull();
+    expect(document.querySelector('[data-testid="mcp-import-json-textarea"]')).not.toBeNull();
+  });
+
+  it('import: POSTs createConfig with parsed custom_spec on valid JSON', async () => {
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [] };
+    (mcpsApi.createConfig as ReturnType<typeof vi.fn>).mockClear();
+    (mcpsApi.createConfig as ReturnType<typeof vi.fn>).mockResolvedValueOnce({});
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    const addBtn = Array.from(document.querySelectorAll('button')).find(b =>
+      (b.textContent ?? '').toLowerCase().includes('ajouter')
+    );
+    fireEvent.click(addBtn!);
+    fireEvent.click(document.querySelector('[data-testid="mcp-import-json-tile"]') as HTMLElement);
+    const textarea = document.querySelector('[data-testid="mcp-import-json-textarea"]') as HTMLTextAreaElement;
+    const validJson = JSON.stringify({
+      name: 'ImportedAPI',
+      base_url: 'https://api.imported.test',
+      description: 'Imported plugin',
+      docs_url: 'https://docs.imported.test',
+      fields: [
+        { label: 'API Key', value: 'should-be-discarded' },
+      ],
+      endpoints: [
+        { path: '/items', method: 'GET', description: 'List items' },
+      ],
+      auth: 'None',
+    });
+    fireEvent.change(textarea, { target: { value: validJson } });
+    const submitBtn = document.querySelector('[data-testid="mcp-import-submit"]') as HTMLButtonElement;
+    await act(async () => {
+      fireEvent.click(submitBtn);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mcpsApi.createConfig).toHaveBeenCalledTimes(1);
+    const payload = (mcpsApi.createConfig as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(payload.server_id).toBe('api-custom');
+    expect(payload.label).toBe('ImportedAPI');
+    expect(payload.custom_spec.name).toBe('ImportedAPI');
+    expect(payload.custom_spec.endpoints).toHaveLength(1);
+    // Critical contract: imported values must be stripped (never planted).
+    expect(payload.custom_spec.fields).toEqual([{ label: 'API Key', value: '' }]);
+  });
+
+  it('import: surfaces a parse error for invalid JSON', async () => {
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [] };
+    const callsBefore = (mcpsApi.createConfig as ReturnType<typeof vi.fn>).mock.calls.length;
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    const addBtn = Array.from(document.querySelectorAll('button')).find(b =>
+      (b.textContent ?? '').toLowerCase().includes('ajouter')
+    );
+    fireEvent.click(addBtn!);
+    fireEvent.click(document.querySelector('[data-testid="mcp-import-json-tile"]') as HTMLElement);
+    const textarea = document.querySelector('[data-testid="mcp-import-json-textarea"]') as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: '{ not valid json' } });
+    fireEvent.click(document.querySelector('[data-testid="mcp-import-submit"]') as HTMLButtonElement);
+    expect(document.querySelector('[data-testid="mcp-import-error"]')).not.toBeNull();
+    // Note: createConfig may have been called by earlier tests; we only
+    // assert that the parse-error branch did NOT trigger a new call.
+    expect((mcpsApi.createConfig as ReturnType<typeof vi.fn>).mock.calls.length).toBe(callsBefore);
+  });
+
+  it('import: rejects JSON missing required fields (name)', async () => {
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [] };
+    const callsBefore = (mcpsApi.createConfig as ReturnType<typeof vi.fn>).mock.calls.length;
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    const addBtn = Array.from(document.querySelectorAll('button')).find(b =>
+      (b.textContent ?? '').toLowerCase().includes('ajouter')
+    );
+    fireEvent.click(addBtn!);
+    fireEvent.click(document.querySelector('[data-testid="mcp-import-json-tile"]') as HTMLElement);
+    const textarea = document.querySelector('[data-testid="mcp-import-json-textarea"]') as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: JSON.stringify({ base_url: 'https://x.test' }) } });
+    fireEvent.click(document.querySelector('[data-testid="mcp-import-submit"]') as HTMLButtonElement);
+    expect(document.querySelector('[data-testid="mcp-import-error"]')).not.toBeNull();
+    // Note: createConfig may have been called by earlier tests; we only
+    // assert that the parse-error branch did NOT trigger a new call.
+    expect((mcpsApi.createConfig as ReturnType<typeof vi.fn>).mock.calls.length).toBe(callsBefore);
+  });
+
+  it('autodiscovery banner: HIDDEN for registry (non-custom) plugins', async () => {
+    // Registry plugins (mcp-github, api-chartbeat...) are owned by the
+    // registry, not by the user — the banner has no business surfacing
+    // on them, even when they have no endpoints (which would be a
+    // registry catalog bug, not a user-actionable state).
+    const server: McpServer = {
+      id: 'api-chartbeat',
+      name: 'Chartbeat',
+      description: 'Chartbeat (registry)',
+      transport: 'ApiOnly',
+      source: 'Registry',
+      api_spec: {
+        base_url: 'https://api.chartbeat.com',
+        auth: 'None',
+        endpoints: [], // hypothetically empty
+        config_keys: [],
+      },
+    };
+    const cfg = makeConfig('cfg-cb', 'api-chartbeat', 'Chartbeat');
+    const overview: McpOverview = {
+      servers: [server],
+      configs: [cfg],
+      customized_contexts: [],
+      incompatibilities: [],
+    };
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    fireEvent.click(screen.getByText('Chartbeat'));
+    expect(
+      document.querySelector('[data-testid="mcp-autodiscovery-banner"]'),
+    ).toBeNull();
+  });
 });

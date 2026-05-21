@@ -460,6 +460,8 @@ mod tests {
             gate_message: None,
             gate_request_changes_target: None,
             gate_notify_url: None,
+            gate_checkpoint_before: None,
+            gate_auto_approve_after_secs: None,
             exec_command: command.map(String::from),
             exec_args: args.into_iter().map(String::from).collect(),
             exec_timeout_secs: timeout_secs,

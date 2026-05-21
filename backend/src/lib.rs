@@ -504,6 +504,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // 0.8.3 — companion repos. Body = full Vec<LinkedRepo>;
         // atomic replace (no partial CRUD per row).
         .route("/api/projects/{id}/linked-repos", put(api::projects::set_linked_repos))
+        // 0.8.6 (#27) — autocomplete picker source for the
+        // linked-repos drawer. Returns other Kronn-known projects
+        // sorted by proximity.
+        .route("/api/projects/{id}/linked-repos/candidates", get(api::projects::linked_repos_candidates))
         .route("/api/projects/{id}/briefing", get(api::audit::get_briefing).put(api::audit::set_briefing))
         .route("/api/projects/{id}/start-briefing", post(api::audit::start_briefing))
         // 0.8.4 (#285) — désagentified briefing form. POST the 6 answers
@@ -591,6 +595,11 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // workflow ApiCall steps. Credentials never leave Kronn DB.
         // Project scope resolved from the parent disc.
         .route("/api/agent-api/call", post(api::agent_api::agent_api_call))
+        // 0.8.6 (#24) — unified API-call logs read surface. Lists / shows
+        // / purges rows from `api_call_logs` (workflow + broker + manual).
+        .route("/api/api-call-logs", get(api::api_call_logs::list_api_call_logs))
+        .route("/api/api-call-logs/purge", post(api::api_call_logs::purge_api_call_logs))
+        .route("/api/api-call-logs/{id}", get(api::api_call_logs::get_api_call_log))
         .route("/api/workflows/{id}/trigger", post(api::workflows::trigger))
         .route("/api/workflows/{id}/runs", get(api::workflows::list_runs).delete(api::workflows::delete_all_runs))
         .route("/api/workflows/{id}/runs/{run_id}", get(api::workflows::get_run).delete(api::workflows::delete_run))

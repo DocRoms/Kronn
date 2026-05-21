@@ -1,0 +1,119 @@
+/* Reusable theme-aware dropdown — replaces native <select> because
+   Firefox / Safari ignore CSS on native <option> chrome. All tokens
+   come from the global `--kr-*` palette so dark / light / neon
+   themes work without per-theme overrides here. */
+
+.kr-dropdown {
+  position: relative;
+  display: inline-block;
+  width: 100%;
+}
+
+.kr-dropdown-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--kr-sp-3);
+  width: 100%;
+  min-height: 36px;
+  padding: var(--kr-sp-2) var(--kr-sp-3);
+  background: var(--kr-bg-hover);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-md);
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-base);
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: background 120ms, border-color 120ms;
+}
+
+.kr-dropdown-trigger:hover:not(.kr-dropdown-trigger-disabled) {
+  background: var(--kr-bg-surface);
+  border-color: var(--kr-border-strong, var(--kr-border-medium));
+}
+
+.kr-dropdown-trigger:focus-visible {
+  outline: 2px solid var(--kr-accent-ink, var(--kr-cyan, #5eead4));
+  outline-offset: 1px;
+}
+
+.kr-dropdown-trigger-disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.kr-dropdown-trigger-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kr-dropdown-trigger-chev {
+  flex-shrink: 0;
+  color: var(--kr-text-faint);
+}
+
+.kr-dropdown-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  max-height: 280px;
+  overflow-y: auto;
+  background: var(--kr-bg-surface);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-md);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+  z-index: 50;
+  padding: var(--kr-sp-1, 4px) 0;
+}
+
+.kr-dropdown-option {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--kr-sp-2) var(--kr-sp-3);
+  cursor: pointer;
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-base);
+  line-height: 1.4;
+}
+
+.kr-dropdown-option-main {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+}
+
+.kr-dropdown-option-check {
+  color: var(--kr-accent-ink, var(--kr-cyan, #5eead4));
+  flex-shrink: 0;
+}
+
+.kr-dropdown-option-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kr-dropdown-option-desc {
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-faint);
+  padding-left: 18px;
+}
+
+.kr-dropdown-option-highlight {
+  background: var(--kr-bg-hover);
+}
+
+.kr-dropdown-option-selected {
+  color: var(--kr-accent-ink, var(--kr-cyan, #5eead4));
+}
+
+.kr-dropdown-option-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}

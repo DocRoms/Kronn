@@ -1,4 +1,5 @@
 pub mod agent_decisions;
+pub mod api_call_logs;
 pub mod audit_runs;
 pub mod contacts;
 pub mod disc_source;

@@ -10,11 +10,20 @@
 // otherwise add ~60 lines of useState to ProjectCard, which is
 // already pushing 1500 LoC.
 
-import { useState } from 'react';
-import { Plus, Trash2, ExternalLink, Folder, AlertCircle } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { Plus, Trash2, ExternalLink, Folder, AlertCircle, Sparkles } from 'lucide-react';
 import { useT } from '../lib/I18nContext';
 import { projects as projectsApi } from '../lib/api';
 import type { LinkedRepo } from '../types/generated';
+
+// 0.8.6 (#27) — autocomplete picker. Shape mirrors the backend
+// `LinkedRepoCandidate` exposed by /api/projects/:id/linked-repos/candidates.
+interface LinkedRepoCandidate {
+  id: string;
+  name: string;
+  path: string;
+  proximity_hint: string;
+}
 
 /** Browser-native UUID (no dep needed). Modern browsers + Node 19+. */
 function newId(): string {
@@ -56,12 +65,41 @@ export interface ProjectLinkedReposProps {
 export function ProjectLinkedRepos({ projectId, currentRepos, onUpdate }: ProjectLinkedReposProps) {
   const { t } = useT();
   const [drafting, setDrafting] = useState(false);
+  // 0.8.6 (#27 fix 2026-05-21) — toggle "+ N autres" expansion. Pre-fix
+  // the overflow label was a static `<span>` → user reported "+7 autres
+  // ne sert à rien, je ne peux PAS cliquer dessus". Now an explicit
+  // button flips this flag; collapsed view still caps at 12 to keep
+  // the draft compact.
+  const [showAllCandidates, setShowAllCandidates] = useState(false);
   const [draftName, setDraftName] = useState('');
   const [draftKind, setDraftKind] = useState<string>('api');
   const [draftLocation, setDraftLocation] = useState('');
   const [draftDescription, setDraftDescription] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 0.8.6 (#27) — candidates list fed by the autocomplete picker.
+  // Fetched lazily when the drawer expands the draft form.
+  const [candidates, setCandidates] = useState<LinkedRepoCandidate[]>([]);
+
+  // Fetch candidates once on first draft-mode entry — they don't
+  // change often enough to warrant a refresh on every key press.
+  useEffect(() => {
+    if (!drafting) return;
+    let cancelled = false;
+    projectsApi.linkedReposCandidates(projectId)
+      .then(list => { if (!cancelled) setCandidates(list); })
+      .catch(e => {
+        // Picker is a nice-to-have ; if the endpoint fails we
+        // silently fall back to the manual entry path. No toast.
+        console.warn('[ProjectLinkedRepos] candidates fetch failed:', e);
+      });
+    return () => { cancelled = true; };
+  }, [drafting, projectId]);
+
+  // Filter out repos already linked so the user doesn't see them in
+  // the picker (avoids accidental duplicates).
+  const alreadyLinkedPaths = new Set(currentRepos.map(r => r.location));
+  const availableCandidates = candidates.filter(c => !alreadyLinkedPaths.has(c.path));
 
   function resetDraft() {
     setDrafting(false);
@@ -69,6 +107,17 @@ export function ProjectLinkedRepos({ projectId, currentRepos, onUpdate }: Projec
     setDraftKind('api');
     setDraftLocation('');
     setDraftDescription('');
+    setError(null);
+    setShowAllCandidates(false);
+  }
+
+  /** 0.8.6 (#27) — fill the draft from a clicked candidate.
+   *  Name defaults to the project name, location to its path, kind
+   *  stays user-controlled (the picker doesn't know whether the
+   *  companion is an api / iac / shared-lib). */
+  function pickCandidate(c: LinkedRepoCandidate) {
+    setDraftName(c.name);
+    setDraftLocation(c.path);
     setError(null);
   }
 
@@ -160,6 +209,77 @@ export function ProjectLinkedRepos({ projectId, currentRepos, onUpdate }: Projec
 
       {drafting && (
         <div style={{ padding: '8px 0', borderTop: currentRepos.length > 0 ? '1px solid var(--kr-border-soft)' : 'none', marginTop: 6 }}>
+          {/* 0.8.6 (#27) — pick-from-Kronn-projects picker. Surfaces
+              when the candidates endpoint returned at least one
+              project that isn't already linked. Same-parent companions
+              come first (sorted server-side). Clicking pre-fills the
+              form ; the user still picks the `kind` and can edit the
+              path before saving. */}
+          {availableCandidates.length > 0 && (
+            <div
+              className="linked-repos-picker"
+              data-testid="linked-repos-picker"
+              style={{
+                marginBottom: 8,
+                padding: 8,
+                borderRadius: 4,
+                background: 'var(--kr-bg-hover)',
+                border: '1px solid var(--kr-border-soft)',
+              }}
+            >
+              <div className="text-xs text-muted" style={{ marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 }}>
+                <Sparkles size={11} /> {t('linkedRepos.pickerLabel')}
+              </div>
+              <div className="flex-row" style={{ flexWrap: 'wrap', gap: 4 }}>
+                {(showAllCandidates ? availableCandidates : availableCandidates.slice(0, 12)).map(c => (
+                  <button
+                    key={c.id}
+                    type="button"
+                    className="dash-icon-btn text-xs"
+                    onClick={() => pickCandidate(c)}
+                    disabled={saving}
+                    title={c.path}
+                    style={{
+                      padding: '2px 8px',
+                      borderColor: c.proximity_hint === 'same-parent' ? 'var(--kr-accent)' : 'var(--kr-border)',
+                    }}
+                  >
+                    {c.proximity_hint === 'same-parent' && '✦ '}{c.name}
+                  </button>
+                ))}
+                {availableCandidates.length > 12 && !showAllCandidates && (
+                  <button
+                    type="button"
+                    className="dash-icon-btn text-xs"
+                    onClick={() => setShowAllCandidates(true)}
+                    data-testid="linked-repos-picker-show-more"
+                    style={{
+                      padding: '2px 8px',
+                      borderColor: 'var(--kr-border)',
+                      color: 'var(--kr-text-faint)',
+                    }}
+                  >
+                    + {t('linkedRepos.pickerMoreHint', availableCandidates.length - 12)}
+                  </button>
+                )}
+                {availableCandidates.length > 12 && showAllCandidates && (
+                  <button
+                    type="button"
+                    className="dash-icon-btn text-xs"
+                    onClick={() => setShowAllCandidates(false)}
+                    data-testid="linked-repos-picker-show-less"
+                    style={{
+                      padding: '2px 8px',
+                      borderColor: 'var(--kr-border)',
+                      color: 'var(--kr-text-faint)',
+                    }}
+                  >
+                    {t('linkedRepos.pickerShowLess')}
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
           <div className="flex-row gap-3" style={{ marginBottom: 6 }}>
             <input
               className="dash-input text-sm"

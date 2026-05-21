@@ -23,6 +23,38 @@ pub fn resolve_github_token(conn: &Connection, secret: &str) -> Option<String> {
     None
 }
 
+/// Parse `git diff --name-status <base>...HEAD` output into structured file
+/// statuses. Each non-rename line is `<code>\t<path>`; rename/copy lines are
+/// `R<score>\t<old>\t<new>` (we keep the destination path).
+pub(crate) fn parse_committed_diff(diff_output: &str) -> Vec<GitFileStatus> {
+    diff_output
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            let code = parts.next()?;
+            let status_char = code.chars().next()?;
+            let status = match status_char {
+                'A' => "added",
+                'D' => "deleted",
+                'M' => "modified",
+                'R' => "renamed",
+                'C' => "copied",
+                'T' => "modified",
+                _ => return None,
+            };
+            let path = parts.next_back()?.trim_matches('"').to_string();
+            if path.is_empty() {
+                return None;
+            }
+            Some(GitFileStatus {
+                path,
+                status: status.to_string(),
+                staged: true,
+            })
+        })
+        .collect()
+}
+
 /// Run `git status` in the given repo directory and return structured status.
 pub fn run_git_status(repo_path: &Path) -> Result<GitStatusResponse, String> {
     let run = |args: &[&str]| -> Result<String, String> {
@@ -111,6 +143,18 @@ pub fn run_git_status(repo_path: &Path) -> Result<GitStatusResponse, String> {
         })
         .collect();
 
+    // Committed-on-branch (vs default_branch). Empty on default branch or when
+    // we couldn't resolve a default branch. Use `<default>...HEAD` triple-dot
+    // to compare against the merge-base, so unrelated commits on default don't
+    // appear as "deleted" here.
+    let committed_files = if !is_default_branch && !default_branch.is_empty() {
+        let range = format!("{}...HEAD", default_branch);
+        let (diff_out, ok) = run_with_status(&["diff", "--name-status", &range]);
+        if ok { parse_committed_diff(&diff_out) } else { Vec::new() }
+    } else {
+        Vec::new()
+    };
+
     // Ahead/behind upstream
     let (ahead, behind) = {
         let (ab_output, ab_ok) = run_with_status(&["rev-list", "--count", "--left-right", "@{upstream}...HEAD"]);
@@ -159,6 +203,7 @@ pub fn run_git_status(repo_path: &Path) -> Result<GitStatusResponse, String> {
         default_branch,
         is_default_branch,
         files,
+        committed_files,
         ahead,
         behind,
         has_upstream,
@@ -814,6 +859,98 @@ mod tests {
             .unwrap();
         let msg = String::from_utf8_lossy(&log.stdout);
         assert!(msg.contains("Signed-off-by:"), "Commit should have Signed-off-by, got: {}", msg);
+    }
+
+    // ── parse_committed_diff tests ───────────────────────────────────────────
+
+    #[test]
+    fn parse_committed_diff_handles_modified_added_deleted() {
+        let out = "M\tsrc/lib.rs\nA\tdocs/new.md\nD\told.txt";
+        let parsed = parse_committed_diff(out);
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0].path, "src/lib.rs");
+        assert_eq!(parsed[0].status, "modified");
+        assert!(parsed[0].staged);
+        assert_eq!(parsed[1].path, "docs/new.md");
+        assert_eq!(parsed[1].status, "added");
+        assert_eq!(parsed[2].path, "old.txt");
+        assert_eq!(parsed[2].status, "deleted");
+    }
+
+    #[test]
+    fn parse_committed_diff_renames_use_destination_path() {
+        let out = "R100\told/path.rs\tnew/path.rs";
+        let parsed = parse_committed_diff(out);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].path, "new/path.rs");
+        assert_eq!(parsed[0].status, "renamed");
+    }
+
+    #[test]
+    fn parse_committed_diff_ignores_empty_and_garbage() {
+        let out = "\n\nZ\tweird\nM\tok.rs\n";
+        let parsed = parse_committed_diff(out);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].path, "ok.rs");
+    }
+
+    #[test]
+    fn parse_committed_diff_type_change_treated_as_modified() {
+        let out = "T\tsymlink.txt";
+        let parsed = parse_committed_diff(out);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].status, "modified");
+    }
+
+    // ── run_git_status committed_files integration tests ─────────────────────
+
+    fn make_branch_repo(name: &str) -> tempfile::TempDir {
+        let repo = make_test_repo(name);
+        // Create a feature branch with two commits worth of changes.
+        std::process::Command::new("git").args(["checkout", "-b", "feature/x"]).current_dir(repo.path()).output().unwrap();
+        std::fs::write(repo.path().join("added.txt"), "added").unwrap();
+        std::fs::write(repo.path().join("init.txt"), "modified").unwrap();
+        std::process::Command::new("git").args(["add", "."]).current_dir(repo.path()).output().unwrap();
+        std::process::Command::new("git").args(["commit", "-m", "feature changes"]).current_dir(repo.path()).output().unwrap();
+        repo
+    }
+
+    #[test]
+    fn run_git_status_exposes_committed_files_on_feature_branch() {
+        let repo = make_branch_repo("committed-feature");
+        let status = run_git_status(repo.path()).unwrap();
+        assert_eq!(status.branch, "feature/x");
+        assert_eq!(status.default_branch, "main");
+        assert!(!status.is_default_branch);
+        let paths: Vec<&str> = status.committed_files.iter().map(|f| f.path.as_str()).collect();
+        assert!(paths.contains(&"added.txt"), "expected added.txt in {:?}", paths);
+        assert!(paths.contains(&"init.txt"), "expected init.txt in {:?}", paths);
+        for f in &status.committed_files {
+            assert!(f.staged, "committed files should be marked staged: {:?}", f);
+        }
+    }
+
+    #[test]
+    fn run_git_status_committed_files_empty_on_default_branch() {
+        let repo = make_test_repo("on-main");
+        let status = run_git_status(repo.path()).unwrap();
+        assert!(status.is_default_branch);
+        assert!(status.committed_files.is_empty(), "expected no committed_files on default branch, got {:?}", status.committed_files);
+    }
+
+    #[test]
+    fn run_git_status_committed_and_uncommitted_are_disjoint_sections() {
+        let repo = make_branch_repo("disjoint");
+        // Add an uncommitted change on top of the committed work.
+        std::fs::write(repo.path().join("untracked.txt"), "wip").unwrap();
+        let status = run_git_status(repo.path()).unwrap();
+        let committed_paths: Vec<&str> = status.committed_files.iter().map(|f| f.path.as_str()).collect();
+        let uncommitted_paths: Vec<&str> = status.files.iter().map(|f| f.path.as_str()).collect();
+        assert!(committed_paths.contains(&"added.txt"));
+        assert!(uncommitted_paths.contains(&"untracked.txt"));
+        // The committed section must NOT leak the uncommitted file (and vice versa for committed-only paths).
+        assert!(!committed_paths.contains(&"untracked.txt"));
+        assert!(!uncommitted_paths.contains(&"added.txt"));
     }
 
     #[test]

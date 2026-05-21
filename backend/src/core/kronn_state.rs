@@ -140,6 +140,82 @@ pub fn mark_bootstrapped(project_path: &Path) -> Result<(), String> {
     write(project_path, &mut state)
 }
 
+/// 0.8.6 (#28) — Backfill `.kronn.json` from legacy state markers.
+///
+/// **Why:** projects audited in 0.7.x → 0.8.3 don't have `.kronn.json` even
+/// when they were validated multiple times. Without backfill they appear
+/// as `TemplateInstalled` to the audit-status badge — confusing for users
+/// (front_euronews case 2026-05-17 : audited many times yet showed as
+/// never-touched). Forcing a full re-audit to "fix" the badge is wasteful
+/// (~30k tokens, rewrites `docs/AGENTS.md`). This function does the
+/// migration cheaply.
+///
+/// **What it inspects** (cf. `scanner::analyze_audit_state` legacy
+/// fallbacks for the exact same set) :
+///   - `docs/checksums.json` present → seed one `AuditEntry` with type
+///     `"legacy"` + date `today` (we don't try to recover the original
+///     audit date from the file mtime — too fragile across `git clone`).
+///   - `KRONN:VALIDATED` HTML marker in `docs/AGENTS.md` → set
+///     `validated_at = today` (markers don't carry their own date).
+///   - `KRONN:BOOTSTRAPPED` marker → set `bootstrapped_at = today`.
+///
+/// **No-ops** : if `.kronn.json` already exists, OR no legacy signal
+/// present. Returns `Ok(true)` when a backfill happened, `Ok(false)` when
+/// skipped. Write errors propagate as `Err(String)` — caller decides
+/// whether to log + fall through to legacy detection (read-only FS, etc.).
+pub fn backfill_from_legacy_state(project_path: &Path) -> Result<bool, String> {
+    // Skip if already present — backfill is one-shot.
+    if read(project_path).is_some() {
+        return Ok(false);
+    }
+
+    let has_checksums =
+        crate::core::checksums::read_checksums_file(project_path).is_some();
+
+    // Read AGENTS.md (or whatever the project's docs entry is) once to
+    // probe for the two legacy HTML markers. Tolerant : missing file
+    // → no markers detected.
+    let docs_entry = crate::core::scanner::detect_docs_entry(project_path);
+    let agents_content = std::fs::read_to_string(&docs_entry).unwrap_or_default();
+    let has_validated = agents_content.contains("KRONN:VALIDATED");
+    let has_bootstrapped = agents_content.contains("KRONN:BOOTSTRAPPED");
+
+    // No legacy signal at all → nothing to backfill from. Return false so
+    // the caller can fall through to default state.
+    if !has_checksums && !has_validated && !has_bootstrapped {
+        return Ok(false);
+    }
+
+    let now = today_iso();
+    let mut state = KronnState::default();
+
+    // Always seed at least one audit entry so `has_any_audit()` is true
+    // and the project surfaces as `Audited` (or `Validated` /
+    // `Bootstrapped`) rather than `TemplateInstalled` on next scan.
+    state.audits.push(AuditEntry {
+        date: now.clone(),
+        kronn_version: "legacy".to_string(),
+        audit_type: "legacy".to_string(),
+    });
+
+    if has_validated {
+        state.validated_at = Some(now.clone());
+    }
+    if has_bootstrapped {
+        state.bootstrapped_at = Some(now);
+    }
+
+    write(project_path, &mut state)?;
+    tracing::info!(
+        project = ?project_path,
+        checksums = has_checksums,
+        validated_marker = has_validated,
+        bootstrapped_marker = has_bootstrapped,
+        "Kronn state backfilled from legacy markers",
+    );
+    Ok(true)
+}
+
 #[cfg(test)]
 #[path = "kronn_state_test.rs"]
 mod tests;

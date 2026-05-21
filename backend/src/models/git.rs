@@ -11,6 +11,12 @@ pub struct GitStatusResponse {
     pub default_branch: String,
     pub is_default_branch: bool,
     pub files: Vec<GitFileStatus>,
+    /// Files committed on this branch but not yet on default branch.
+    /// Empty when on the default branch or when no default branch resolves.
+    /// Lets the "Fichiers" panel surface the disc's cumulative work
+    /// (what would land in the next merge), not just the uncommitted slice.
+    #[serde(default)]
+    pub committed_files: Vec<GitFileStatus>,
     pub ahead: u32,
     pub behind: u32,
     pub has_upstream: bool,
