@@ -529,12 +529,17 @@ pub async fn execute_run(
                     // here, as intended. Rate-limiting lands in P0.5b. Project
                     // id comes from the parent workflow, not the run row, since
                     // `WorkflowRun` doesn't carry it (only `workflow_id`).
-                    super::api_call_executor::execute_api_call_step_with_db(
+                    //
+                    // 0.8.6 (#59) — stamp source=workflow + run_id on the
+                    // api_call_logs row so the audit table can filter by
+                    // run.
+                    super::api_call_executor::execute_api_call_step_with_db_as(
                         step,
                         workflow.project_id.as_deref(),
                         &state,
                         &ctx,
                         super::api_call_executor::SecurityPolicy::production(),
+                        super::api_call_executor::ApiCallLogContext::workflow_for_run(run.id.clone()),
                     ).await
                 }
                 StepType::Agent => {
@@ -744,6 +749,7 @@ pub async fn execute_run(
                         workflow.project_id.as_deref(),
                         &state,
                         &ctx,
+                        super::api_call_executor::ApiCallLogContext::workflow_for_run(run.id.clone()),
                     ).await
                 }
                 StepType::JsonData => {
@@ -1243,12 +1249,16 @@ pub async fn execute_run(
                     super::notify_step::execute_notify_step(rb_step, &ctx).await
                 }
                 StepType::ApiCall => {
-                    super::api_call_executor::execute_api_call_step_with_db(
+                    // 0.8.6 (#59) — same audit stamping as the primary
+                    // step dispatch above. This is the rollback / branch
+                    // step replay path.
+                    super::api_call_executor::execute_api_call_step_with_db_as(
                         rb_step,
                         workflow.project_id.as_deref(),
                         &state,
                         &ctx,
                         super::api_call_executor::SecurityPolicy::production(),
+                        super::api_call_executor::ApiCallLogContext::workflow_for_run(run.id.clone()),
                     ).await
                 }
                 StepType::Agent => {
@@ -1285,6 +1295,7 @@ pub async fn execute_run(
                         workflow.project_id.as_deref(),
                         &state,
                         &ctx,
+                        super::api_call_executor::ApiCallLogContext::workflow_for_run(run.id.clone()),
                     ).await
                 }
                 StepType::JsonData => {

@@ -51,7 +51,9 @@ use crate::models::*;
 
 use super::steps::StepOutcome;
 use super::template::TemplateContext;
-use super::api_call_executor::{execute_api_call_step_with_db, SecurityPolicy};
+use super::api_call_executor::{
+    execute_api_call_step_with_db_as, ApiCallLogContext, SecurityPolicy,
+};
 
 /// Default concurrent fan-out cap. HTTP can scale higher than agents (no
 /// LLM, just network), but providers rate-limit — Jira/GitHub typically
@@ -72,6 +74,7 @@ pub async fn execute_batch_apicall_step(
     project_id: Option<&str>,
     state: &crate::AppState,
     ctx: &TemplateContext,
+    log_ctx: ApiCallLogContext,
 ) -> StepOutcome {
     let start = Instant::now();
 
@@ -149,14 +152,19 @@ pub async fn execute_batch_apicall_step(
         let project_id = project_id.map(String::from);
         let state_clone = state.clone();
 
+        let log_ctx_clone = log_ctx.clone();
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire_owned().await;
-            let outcome = execute_api_call_step_with_db(
+            // 0.8.6 (#59) — one api_call_logs row per batch item.
+            // The fan-out happens at the executor level, so each spawned
+            // task records independently.
+            let outcome = execute_api_call_step_with_db_as(
                 &child_step,
                 project_id.as_deref(),
                 &state_clone,
                 &child_ctx,
                 SecurityPolicy::production(),
+                log_ctx_clone,
             ).await;
             (idx, item, outcome)
         }));

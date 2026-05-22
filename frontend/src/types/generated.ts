@@ -1267,7 +1267,7 @@ export interface Discussion {
    *  `OnDemand` waits for the agent to ask via the kronn-internal MCP tools,
    *  `Off` disables summarisation entirely. Per-disc override of the global
    *  per-agent default. Backward-compatible — pre-existing rows default to Auto. */
-  summary_strategy?: 'Auto' | 'OnDemand' | 'Off';
+  summary_strategy?: SummaryStrategy;
   /** Cumulative count of `kronn-internal` MCP tool calls made by the agent
    *  on this discussion (disc_meta + disc_get_message + disc_summarize).
    *  Surfaces as a small "🔧 N" pill on the ChatHeader. */
@@ -1283,6 +1283,11 @@ export interface Discussion {
   created_at: string; // ISO 8601
   updated_at: string;
 }
+
+/** Auto-summary policy. 0.8.6 phase 4 — used both per-discussion
+ *  (Discussion.summary_strategy) and as the global default for new
+ *  discussions (ServerConfigPublic.default_summary_strategy). */
+export type SummaryStrategy = 'Auto' | 'OnDemand' | 'Off';
 
 export interface DiscussionMessage {
   id: string;
@@ -1366,6 +1371,27 @@ export interface UpdateMcpConfigRequest {
   is_global?: boolean;
   include_general?: boolean;
   host_sync?: HostSyncMode;
+}
+
+/** 0.8.6 (#60) — PUT /api/mcps/custom/:server_id response wrapper.
+ *  Surfaces orphan env keys (slugs that vanished from
+ *  `api_spec.config_keys` but still exist in at least one linked
+ *  config's encrypted env). UI offers a one-click cleanup. */
+export interface UpdateCustomSpecResponse {
+  server: McpServer;
+  orphan_env_keys: string[];
+}
+
+/** 0.8.6 (#60) — POST /api/mcps/custom/:server_id/cleanup-orphan-env.
+ *  Removes the listed env keys from every config linked to this
+ *  server. Returns counts so the UI can confirm the cleanup landed. */
+export interface CleanupOrphanEnvRequest {
+  keys: string[];
+}
+
+export interface CleanupOrphanEnvResponse {
+  configs_updated: number;
+  total_keys_removed: number;
 }
 
 export interface AdoptHostMcpRequest {
@@ -1467,6 +1493,10 @@ export interface ServerConfigPublic {
   avatar_email: string | null;
   bio: string | null;
   debug_mode: boolean;
+  /** 0.8.6 phase 4 — default model tier for new disc/QP/WF Agent steps. */
+  default_model_tier: ModelTier;
+  /** 0.8.6 phase 4 — default summary strategy for new discussions. */
+  default_summary_strategy: SummaryStrategy;
 }
 
 export interface DbInfo {

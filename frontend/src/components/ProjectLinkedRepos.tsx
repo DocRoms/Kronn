@@ -13,6 +13,7 @@
 import { useState, useEffect } from 'react';
 import { Plus, Trash2, ExternalLink, Folder, AlertCircle, Sparkles } from 'lucide-react';
 import { useT } from '../lib/I18nContext';
+import { Dropdown } from './Dropdown';
 import { projects as projectsApi } from '../lib/api';
 import type { LinkedRepo } from '../types/generated';
 
@@ -289,17 +290,18 @@ export function ProjectLinkedRepos({ projectId, currentRepos, onUpdate }: Projec
               onChange={e => setDraftName(e.target.value)}
               disabled={saving}
             />
-            <select
-              className="dash-input text-sm"
-              style={{ width: 130 }}
-              value={draftKind}
-              onChange={e => setDraftKind(e.target.value)}
-              disabled={saving}
-            >
-              {KINDS.map(k => (
-                <option key={k.value} value={k.value}>{k.emoji} {k.label}</option>
-              ))}
-            </select>
+            {/* 0.8.6 (#62) — Dropdown migration: native <select> ignored
+                page CSS on Firefox/Safari, options leaked OS chrome. */}
+            <div style={{ width: 160 }}>
+              <Dropdown<string>
+                value={draftKind}
+                options={KINDS.map(k => ({ value: k.value, label: `${k.emoji} ${k.label}` }))}
+                onChange={v => setDraftKind(v)}
+                disabled={saving}
+                ariaLabel="kind"
+                testId="linked-repos-kind-picker"
+              />
+            </div>
           </div>
           <input
             className="dash-input text-sm"

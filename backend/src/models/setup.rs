@@ -129,6 +129,42 @@ pub struct ServerConfig {
     /// the duration of that run).
     #[serde(default)]
     pub debug_mode: bool,
+    /// 0.8.6 phase 4 — default model tier applied to NEW creations
+    /// (discussions, QP drafts, workflow Agent steps) when the user
+    /// doesn't explicitly pick one in the form. STRICT semantic :
+    /// only consulted by creation flows on `componentDidMount` ; never
+    /// applied retroactively to existing items at execution time
+    /// (otherwise a user flipping the default to `Reasoning` would
+    /// silently 10x the cost of every legacy QP they launch).
+    ///
+    /// Persisted in `config.toml`. Defaults to `Default` for
+    /// backwards-compat — existing configs without the field keep
+    /// the prior hardcoded behaviour.
+    #[serde(default)]
+    pub default_model_tier: ModelTier,
+    /// 0.8.6 phase 4 — default summary strategy applied to NEW
+    /// discussions. Flipped from `Auto` to `Off` because most modern
+    /// agents (Claude Code, Codex, Gemini-Pro) have large context
+    /// windows AND can pull older history on-demand via the
+    /// `disc_load_other` MCP tool — auto-summary just burns Economy
+    /// tokens for no win in those cases. The `Off` default makes
+    /// Kronn cheaper out of the box.
+    ///
+    /// Re-enable `Auto` (Settings) when running small-context agents
+    /// (Ollama 8B / Vibe / older models) that lack MCP access and
+    /// can't ask Kronn for older history themselves.
+    ///
+    /// Strict semantic — only consulted on NEW disc creation. Existing
+    /// discs keep their saved value (no retroactive change).
+    #[serde(default = "default_summary_strategy_off")]
+    pub default_summary_strategy: crate::models::SummaryStrategy,
+}
+
+/// Serde default for [`ServerConfig::default_summary_strategy`].
+/// Returns `Off` so a missing field in config.toml means "auto-summary
+/// disabled" — the new safer default shipped 0.8.6 phase 4.
+fn default_summary_strategy_off() -> crate::models::SummaryStrategy {
+    crate::models::SummaryStrategy::Off
 }
 
 fn default_global_context_mode() -> String { "always".to_string() }
@@ -483,6 +519,16 @@ pub struct ServerConfigPublic {
     pub avatar_email: Option<String>,
     pub bio: Option<String>,
     pub debug_mode: bool,
+    /// 0.8.6 phase 4 — default model tier for new disc/QP/WF agent steps.
+    /// Mirrored from `ServerConfig.default_model_tier` so the frontend
+    /// can pre-fill the tier picker on creation forms without an extra
+    /// round-trip. Strict semantic — never retroactive (see backing field
+    /// rustdoc).
+    pub default_model_tier: ModelTier,
+    /// 0.8.6 phase 4 — default summary strategy for new discussions.
+    /// `Off` by default in 0.8.6 onwards. UI surfaces an explanation of
+    /// when to re-enable (small-context agents without MCP access).
+    pub default_summary_strategy: crate::models::SummaryStrategy,
 }
 
 #[derive(Debug, Deserialize)]
@@ -494,4 +540,13 @@ pub struct UpdateServerConfigRequest {
     pub avatar_email: Option<String>,
     pub bio: Option<String>,
     pub debug_mode: Option<bool>,
+    /// 0.8.6 phase 4 — `Some(tier)` writes the new default ; `None`
+    /// keeps the existing value (standard PATCH semantic across this
+    /// struct).
+    #[serde(default)]
+    pub default_model_tier: Option<ModelTier>,
+    /// 0.8.6 phase 4 — `Some(strategy)` writes the new default ;
+    /// `None` keeps the existing value.
+    #[serde(default)]
+    pub default_summary_strategy: Option<crate::models::SummaryStrategy>,
 }

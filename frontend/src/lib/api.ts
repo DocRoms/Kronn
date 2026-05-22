@@ -11,8 +11,9 @@ import type {
   McpOverview,
   McpConfigDisplay,
   McpEnvEntry,
-  McpServer,
   CustomApiPayload,
+  UpdateCustomSpecResponse,
+  CleanupOrphanEnvResponse,
   CreateMcpConfigRequest,
   UpdateMcpConfigRequest,
   LinkMcpConfigRequest,
@@ -419,7 +420,7 @@ export const config = {
     return json.data;
   },
   getServerConfig: () => api<ServerConfigPublic>('GET', '/config/server'),
-  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean }) => api<void>('POST', '/config/server', req),
+  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'Auto' | 'OnDemand' | 'Off' }) => api<void>('POST', '/config/server', req),
   regenerateAuthToken: () => api<string>('POST', '/config/auth-token/regenerate'),
 };
 
@@ -871,7 +872,24 @@ export const mcps = {
    *  Encrypted env per-config is NOT touched here — see Settings → APIs
    *  for the env-edit drawer. Backend rejects non-custom server_ids. */
   updateCustomSpec: (serverId: string, payload: CustomApiPayload) =>
-    api<McpServer>('PUT', `/mcps/custom/${encodeURIComponent(serverId)}`, payload),
+    api<UpdateCustomSpecResponse>('PUT', `/mcps/custom/${encodeURIComponent(serverId)}`, payload),
+  /** 0.8.6 (#60) — remove orphan env keys (left behind by a field
+   *  rename / removal) from every config linked to this server. The
+   *  list of keys to remove comes from the response of a preceding
+   *  `updateCustomSpec` call. */
+  cleanupOrphanEnv: (serverId: string, keys: string[]) =>
+    api<CleanupOrphanEnvResponse>('POST', `/mcps/custom/${encodeURIComponent(serverId)}/cleanup-orphan-env`, { keys }),
+  /** 0.8.6 (#63) — Path B export. Returns the path to call directly via
+   *  `<a href="...">` for download — the route emits Content-Disposition
+   *  attachment, the browser handles the rest. Auth header is added by
+   *  the global `api()` helper, so callers should fetch + blob if they
+   *  need to thread the token; here we return the URL for a direct link. */
+  exportFileUrl: (serverId: string) =>
+    `/api/mcps/custom/${encodeURIComponent(serverId)}/export-file`,
+  /** 0.8.6 (#63) — Path B import. Frontend reads the user's `.json` file
+   *  via `FileReader`, parses to JSON, POSTs the parsed payload. */
+  importPluginFile: (payload: CustomApiPayload) =>
+    api<McpConfigDisplay>('POST', '/mcps/custom/import-file', payload),
   deleteConfig: (id: string) => api<void>('DELETE', `/mcps/configs/${id}`),
   setConfigProjects: (id: string, req: LinkMcpConfigRequest) => api<void>('PATCH', `/mcps/configs/${id}/projects`, req),
   revealSecrets: (id: string) => api<McpEnvEntry[]>('POST', `/mcps/configs/${id}/reveal`),

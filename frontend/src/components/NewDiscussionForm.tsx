@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
 import '../pages/DiscussionsPage.css';
 import { ProfileTooltip } from './ProfileTooltip';
-import { skills as skillsApi, profiles as profilesApi, directives as directivesApi } from '../lib/api';
+import { Dropdown } from './Dropdown';
+import { skills as skillsApi, profiles as profilesApi, directives as directivesApi, config as configApi } from '../lib/api';
 import type { Project, AgentDetection, AgentType, AgentsConfig, Skill, AgentProfile, Directive } from '../types/generated';
 import { AGENT_LABELS, isAgentRestricted as isAgentRestrictedUtil, isUsable, isHiddenPath } from '../lib/constants';
 import {
@@ -74,6 +75,9 @@ export function NewDiscussionForm({
   const [newDiscDirectiveIds, setNewDiscDirectiveIds] = useState<string[]>([]);
   const [availableDirectives, setAvailableDirectives] = useState<Directive[]>([]);
   const [newDiscWorkspaceMode, setNewDiscWorkspaceMode] = useState<'Direct' | 'Isolated'>('Direct');
+  // Initialised to 'default' for back-compat ; the effect below replaces it
+  // with the user's `ServerConfig.default_model_tier` on mount (0.8.6 phase 4).
+  // Strict semantic — only applied at form-open time, never retroactively.
   const [newDiscTier, setNewDiscTier] = useState<'economy' | 'default' | 'reasoning'>('default');
   // 0.8.6 phase 2 — disc-first refactor. When `false`, the disc is
   // created without launching a CLI ; the user invites agents later
@@ -113,6 +117,26 @@ export function NewDiscussionForm({
       setNewDiscAgent(installedAgentsList[0].agent_type);
     }
   }, [installedAgentsList.length, newDiscAgent]);
+
+  // 0.8.6 phase 4 — apply the user's saved default model tier ONCE on
+  // form mount. The user can still override per-disc by clicking another
+  // tier button before submit ; the saved default just changes the
+  // initial selection. Strict semantic — re-mounting the form (e.g.
+  // re-opening it for a new disc) picks the LATEST default, which is
+  // the intuitive behaviour. We skip when the form is prefilled-locked
+  // (validation audit / continuation flows) so prefilled tier stays
+  // authoritative.
+  useEffect(() => {
+    if (prefill?.locked) return;
+    configApi.getServerConfig()
+      .then(cfg => {
+        if (cfg?.default_model_tier) {
+          setNewDiscTier(cfg.default_model_tier);
+        }
+      })
+      .catch(() => { /* keep 'default' fallback */ });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Handle prefill from parent (e.g. "validate audit" button on Projects page)
   useEffect(() => {
@@ -279,14 +303,19 @@ export function NewDiscussionForm({
               </span>
             </label>
             {launchAgentNow ? (
-              <select className="disc-select-styled" aria-label={t('disc.agent')} value={newDiscAgent} onChange={e => setNewDiscAgent(e.target.value as AgentType)}>
-                {installedAgentsList.map(a => (
-                  <option key={a.name} value={a.agent_type}>{a.name}</option>
-                ))}
-                {installedAgentsList.length === 0 && (
-                  <option value="" disabled>{t('disc.noAgent')}</option>
-                )}
-              </select>
+              // 0.8.6 (#62) — Dropdown migration : native <select>
+              // ignored page CSS for <option> rows on Firefox/Safari.
+              <Dropdown<string>
+                value={newDiscAgent}
+                options={
+                  installedAgentsList.length === 0
+                    ? [{ value: '', label: t('disc.noAgent'), disabled: true }]
+                    : installedAgentsList.map(a => ({ value: a.agent_type, label: a.name }))
+                }
+                onChange={v => setNewDiscAgent(v as AgentType)}
+                ariaLabel={t('disc.agent')}
+                testId="new-disc-agent-picker"
+              />
             ) : (
               <div className="disc-form-hint" style={{ fontSize: '0.85em', opacity: 0.7, padding: '6px 0' }}>
                 {t('disc.discFirstHint')}

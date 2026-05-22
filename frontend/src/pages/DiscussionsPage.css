@@ -1525,7 +1525,13 @@
 }
 
 .disc-msg-bubble {
-  max-width: 70%;
+  /* 0.8.6 — bubble width refresh. Was 70% which left too much
+     dead space on the right at every density. Bumped to 88% so
+     long agent replies breathe. The `min(...)` with 90ch keeps
+     the absolute width readable on Large mode (32"+ screens) :
+     past ~85ch, line lengths become tiring per typography
+     conventions. So small/medium fill more, large stays capped. */
+  max-width: min(88%, 90ch);
   padding: 10px 14px;
   border-radius: 12px;
   color: var(--kr-text-primary);

@@ -603,6 +603,8 @@ pub async fn get_server_config(
         avatar_email: config.server.avatar_email.clone(),
         bio: config.server.bio.clone(),
         debug_mode: config.server.debug_mode,
+        default_model_tier: config.server.default_model_tier,
+        default_summary_strategy: config.server.default_summary_strategy,
     }))
 }
 
@@ -641,6 +643,17 @@ pub async fn set_server_config(
                 debug_mode
             );
         }
+    }
+    // 0.8.6 phase 4 — default model tier. PATCH-semantic : only update
+    // when explicitly passed (None keeps existing). No clamp / validation
+    // beyond the enum's deserialise step ; ModelTier has only 3 variants
+    // so an unknown value would already 422 at deserialize.
+    if let Some(tier) = req.default_model_tier {
+        config.server.default_model_tier = tier;
+    }
+    // 0.8.6 phase 4 — default summary strategy. Same PATCH semantic.
+    if let Some(strategy) = req.default_summary_strategy {
+        config.server.default_summary_strategy = strategy;
     }
     match config::save(&config).await {
         Ok(_) => Json(ApiResponse::ok(())),
@@ -1494,5 +1507,121 @@ mod tests {
         let (extracted_data, extracted_config) = extract_zip(&bytes).unwrap();
         assert_eq!(extracted_data.version, 3);
         assert!(extracted_config.is_none(), "config.toml should be optional");
+    }
+
+    // ─── 0.8.6 phase 4 — default_model_tier ───────────────────────────
+
+    #[test]
+    fn default_config_seeds_default_model_tier_to_default_variant() {
+        // Backwards-compat guard : the new field defaults to `Default`
+        // (no behaviour change for users who never visit the new
+        // dropdown). If a refactor moves the seed to `Reasoning` or
+        // `Economy` by accident, every existing install would silently
+        // start using a different tier on next disc create. Critical.
+        let cfg = config::default_config();
+        assert_eq!(cfg.server.default_model_tier, crate::models::ModelTier::Default);
+    }
+
+    #[test]
+    fn server_config_default_model_tier_round_trips_through_toml() {
+        // Serializing → deserializing → re-serializing must preserve
+        // the chosen tier. The serde rename_all = "snake_case" on the
+        // enum makes the wire format `economy` / `default` / `reasoning`
+        // ; this test pins that contract.
+        let mut cfg = config::default_config();
+        cfg.server.default_model_tier = crate::models::ModelTier::Reasoning;
+        let serialised = toml::to_string_pretty(&cfg).unwrap();
+        assert!(
+            serialised.contains("default_model_tier = \"reasoning\""),
+            "expected snake_case 'reasoning' in TOML, got: {}",
+            serialised,
+        );
+        let parsed: crate::models::AppConfig = toml::from_str(&serialised).unwrap();
+        assert_eq!(parsed.server.default_model_tier, crate::models::ModelTier::Reasoning);
+    }
+
+    // ── 0.8.6 phase 4 — default_summary_strategy ─────────────
+
+    #[test]
+    fn default_config_seeds_default_summary_strategy_to_off() {
+        // 0.8.6 phase 4 flipped the out-of-the-box default from `Auto`
+        // (every disc auto-summarises after N msgs) to `Off`. Rationale :
+        // modern agents have large context + MCP access to fetch older
+        // history on demand, so auto-summary just burns Economy tokens.
+        // Critical regression guard — a refactor that re-sets the seed
+        // back to Auto would re-introduce the cost regression on every
+        // new install.
+        let cfg = config::default_config();
+        assert_eq!(
+            cfg.server.default_summary_strategy,
+            crate::models::SummaryStrategy::Off,
+            "0.8.6 baseline : auto-summary OFF out of the box. Re-seeding \
+             to Auto regresses token cost on every new install.",
+        );
+    }
+
+    #[test]
+    fn server_config_default_summary_strategy_round_trips_through_toml() {
+        let mut cfg = config::default_config();
+        cfg.server.default_summary_strategy = crate::models::SummaryStrategy::Auto;
+        let serialised = toml::to_string_pretty(&cfg).unwrap();
+        assert!(
+            serialised.contains("default_summary_strategy = \"Auto\""),
+            "expected serialised summary strategy in TOML, got: {}",
+            serialised,
+        );
+        let parsed: crate::models::AppConfig = toml::from_str(&serialised).unwrap();
+        assert_eq!(parsed.server.default_summary_strategy, crate::models::SummaryStrategy::Auto);
+    }
+
+    #[test]
+    fn missing_default_summary_strategy_in_toml_falls_back_to_off() {
+        // Backwards-compat with PRE-0.8.6-phase-4 config.toml files.
+        // serde must default to `Off` (new safer default) — NOT `Auto`
+        // (the historical hardcoded value). If we ever silently bump
+        // legacy users back to Auto, they'd suddenly pay for summaries
+        // they didn't opt into. This pins the asymmetry.
+        let legacy_server_toml = r#"
+host = "127.0.0.1"
+port = 3140
+max_concurrent_agents = 5
+agent_stall_timeout_min = 5
+global_context_mode = "always"
+debug_mode = false
+"#;
+        let parsed: crate::models::ServerConfig =
+            toml::from_str(legacy_server_toml).unwrap();
+        assert_eq!(
+            parsed.default_summary_strategy,
+            crate::models::SummaryStrategy::Off,
+            "missing default_summary_strategy MUST serde-default to Off — \
+             flipping legacy users to Auto silently would regress cost.",
+        );
+    }
+
+    #[test]
+    fn missing_default_model_tier_in_toml_falls_back_to_default_variant() {
+        // Backwards-compat with config.toml files written BEFORE
+        // 0.8.6 phase 4. Those don't have the field at all ; serde's
+        // `#[serde(default)]` must kick in cleanly and seed `Default`.
+        // If this test breaks, every legacy install will silently
+        // re-default at restart. Scope kept to `ServerConfig` (not
+        // the full `AppConfig`) so we don't have to mirror every
+        // unrelated nested struct's required fields here.
+        let legacy_server_toml = r#"
+host = "127.0.0.1"
+port = 3140
+max_concurrent_agents = 5
+agent_stall_timeout_min = 5
+global_context_mode = "always"
+debug_mode = false
+"#;
+        let parsed: crate::models::ServerConfig =
+            toml::from_str(legacy_server_toml).unwrap();
+        assert_eq!(
+            parsed.default_model_tier,
+            crate::models::ModelTier::Default,
+            "missing default_model_tier must serde-default to Default",
+        );
     }
 }

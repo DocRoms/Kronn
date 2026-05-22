@@ -109,6 +109,16 @@ impl Database {
             Err(e) => tracing::warn!("Failed to reconcile stale audit_runs: {}", e),
         }
 
+        // 0.8.6 — auto-purge api_call_logs older than 90 days at boot.
+        // Generous default : keeps a quarter of audit trail for debug
+        // while preventing unbounded growth. User can manually trigger
+        // a tighter purge via the Settings → API audit "Purge" button.
+        match api_call_logs::purge_older_than(&conn, 90) {
+            Ok(0) => {}
+            Ok(n) => tracing::info!("Purged {} api_call_logs rows older than 90 days", n),
+            Err(e) => tracing::warn!("Failed to auto-purge api_call_logs: {}", e),
+        }
+
         Ok(Self { conn: Arc::new(Mutex::new(conn)), path: path.clone() })
     }
 

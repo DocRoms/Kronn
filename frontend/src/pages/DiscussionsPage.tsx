@@ -1,6 +1,8 @@
 import { useState, useRef, useEffect, useCallback, useMemo, useDeferredValue } from 'react';
 import './DiscussionsPage.css';
 import { MessageBubble, MarkdownContent } from '../components/MessageBubble';
+import { ToolCallsGroup } from '../components/ToolCallsGroup';
+import { groupMessagesWithToolFold } from '../lib/discussionMessageGrouping';
 import { ChatInput } from '../components/ChatInput';
 import { discussions as discussionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, contacts as contactsApi, workflows as workflowsApi, quickPrompts as quickPromptsApi } from '../lib/api';
 import { GitPanel } from '../components/GitPanel';
@@ -15,6 +17,7 @@ import { AgentQuestionForm } from '../components/AgentQuestionForm';
 import { parseAgentQuestions } from '../lib/agent-question-parse';
 import { userError } from '../lib/userError';
 import { getDeployedVersion, setDeployedVersion } from '../lib/qp-improver-banner';
+import { sanitizeQpImproverPayload } from '../lib/qp-improver-sanitize';
 import type { Project, AgentDetection, Discussion, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile, BatchRunSummary } from '../types/generated';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useQpChain } from '../hooks/useQpChain';
@@ -1778,42 +1781,64 @@ export function DiscussionsPage({
                   isValidationDisc(activeDiscussion.title) ||
                   isBootstrapDisc(activeDiscussion.title)
                 );
-                return msgs.map((msg, idx) => {
-                if (isAutoPrompt(idx)) return null;
-                return (
-                  <MessageBubble
-                    key={msg.id}
-                    msg={msg}
-                    idx={idx}
-                    isLastUser={msg.role === 'User' && idx === lastUserIdx}
-                    isLastAgent={msg.role === 'Agent' && idx === lastAgentIdx}
-                    isEditing={editingMsgId === msg.id}
-                    isCopied={copiedMsgId === msg.id}
-                    isTtsActive={ttsPlayingMsgId === msg.id}
-                    ttsState={ttsState}
-                    isExpandedSummary={expandedSummaryMsgId === msg.id}
-                    prevUserTs={prevUserTs[idx]}
-                    defaultAgent={activeDiscussion.agent}
-                    summaryCache={activeDiscussion.summary_cache ?? null}
-                    language={activeDiscussion.language || 'fr'}
-                    sending={sending}
-                    editingText={editingMsgId === msg.id ? editingText : ''}
-                    hasFullAccess={hasFullAccess(msg.agent_type ?? activeDiscussion.agent)}
-                    onCopy={handleMsgCopy}
-                    onTts={handleMsgTts}
-                    onEditStart={handleMsgEditStart}
-                    onEditCancel={handleMsgEditCancel}
-                    onEditSubmit={handleEditMessage}
-                    onEditTextChange={setEditingText}
-                    onRetry={handleRetry}
-                    onExpandSummary={handleMsgExpandSummary}
-                    onNavigate={onNavigate}
-                    discussionId={activeDiscussion.id}
-                    projectId={activeDiscussion.project_id ?? null}
-                    t={t}
-                  />
-                );
-              });
+
+                // 0.8.6 phase 4 — group consecutive `[kronn-internal: …]`
+                // / `[agent-native: …]` System messages into ONE collapsible
+                // banner above the next non-tool message. Pre-fix, a QP
+                // that fired 8 tool calls produced 8 separate bubbles
+                // between the user prompt and the agent reply ; with this
+                // fold the user sees a single "🔧 Outils appelés (8)"
+                // line, click to expand. Q1 answer 2026-05-22.
+                //
+                // The algorithm itself lives in `groupMessagesWithToolFold`
+                // (pure fn, unit-tested in discussionMessageGrouping.test.ts) ;
+                // here we just map render items to React elements.
+                const items = groupMessagesWithToolFold(msgs, { isAutoPrompt });
+                return items.map(item => {
+                  if (item.kind === 'tool-group') {
+                    return (
+                      <ToolCallsGroup
+                        key={`tools-${item.messages[0].id}`}
+                        messages={item.messages}
+                        t={t}
+                      />
+                    );
+                  }
+                  const { msg, idx } = item;
+                  return (
+                    <MessageBubble
+                      key={msg.id}
+                      msg={msg}
+                      idx={idx}
+                      isLastUser={msg.role === 'User' && idx === lastUserIdx}
+                      isLastAgent={msg.role === 'Agent' && idx === lastAgentIdx}
+                      isEditing={editingMsgId === msg.id}
+                      isCopied={copiedMsgId === msg.id}
+                      isTtsActive={ttsPlayingMsgId === msg.id}
+                      ttsState={ttsState}
+                      isExpandedSummary={expandedSummaryMsgId === msg.id}
+                      prevUserTs={prevUserTs[idx]}
+                      defaultAgent={activeDiscussion.agent}
+                      summaryCache={activeDiscussion.summary_cache ?? null}
+                      language={activeDiscussion.language || 'fr'}
+                      sending={sending}
+                      editingText={editingMsgId === msg.id ? editingText : ''}
+                      hasFullAccess={hasFullAccess(msg.agent_type ?? activeDiscussion.agent)}
+                      onCopy={handleMsgCopy}
+                      onTts={handleMsgTts}
+                      onEditStart={handleMsgEditStart}
+                      onEditCancel={handleMsgEditCancel}
+                      onEditSubmit={handleEditMessage}
+                      onEditTextChange={setEditingText}
+                      onRetry={handleRetry}
+                      onExpandSummary={handleMsgExpandSummary}
+                      onNavigate={onNavigate}
+                      discussionId={activeDiscussion.id}
+                      projectId={activeDiscussion.project_id ?? null}
+                      t={t}
+                    />
+                  );
+                });
               })()}
 
               {/* Streaming: single agent mode */}
@@ -2238,8 +2263,12 @@ export function DiscussionsPage({
                   if (v && typeof v === 'object') parsedPayload = v as Record<string, unknown>;
                 } catch { return null; }
                 if (!parsedPayload) return null;
-                // Strip any `id` the agent emitted — the URL drives PUT identity.
-                delete parsedPayload.id;
+                // 0.8.6 — sanitize the agent-emitted payload before
+                // the PUT. Strips `id`, coerces `null` to backend
+                // defaults on non-Option fields, normalises `tier`.
+                // Cf. lib/qp-improver-sanitize.ts for the full
+                // contract + unit tests.
+                sanitizeQpImproverPayload(parsedPayload);
 
                 const isDeploying = deployingQpDiscId === activeDiscussion.id;
 
@@ -2290,6 +2319,13 @@ export function DiscussionsPage({
                           // (agent-emitted JSON missing required fields,
                           // invalid agent enum, etc.) looked to the user
                           // like "click does nothing".
+                          //
+                          // 0.8.6 — also log the FULL error to DevTools
+                          // for power-user debug. userError now surfaces
+                          // "Server error (HTTP 422) — …" verbatim in
+                          // the toast, but the agent-emitted payload
+                          // itself is worth keeping in the console too.
+                          console.error('Deploy QP improver failed:', e, 'payload:', parsedPayload);
                           toast(t('qp.deployFailed', userError(e)), 'error');
                         } finally {
                           deployingQpRef.current = false;

@@ -15,13 +15,26 @@ import {
 import { HostSyncChip } from '../components/HostSyncChip';
 import { HostSyncPreview } from '../components/HostSyncPreview';
 
-/** Derive plugin kind from transport + api_spec presence. */
-type PluginKind = 'mcp' | 'api' | 'hybrid';
-function pluginKind(m: { transport: McpDefinition['transport']; api_spec?: ApiSpec | null }): PluginKind {
+/** Derive plugin kind from transport + tags + api_spec presence.
+ *
+ *  0.8.6 phase 4 — `cli` added : plugins that speak MCP BUT shell out
+ *  to a local CLI binary (Fastly via `fastly-mcp`, GitLab via `glab
+ *  mcp serve`). From the user's install standpoint they have the
+ *  same prereq as a CLI agent (binary on the host), so we surface
+ *  them as a separate category instead of lumping them with pure-MCP
+ *  servers. Detection : the registry entry carries a `cli` tag.
+ *
+ *  `cli` is checked FIRST so it wins over both `api`/`hybrid` detection
+ *  — e.g. a future CLI wrapper that ALSO exposes a REST API stays
+ *  bucketed as CLI (the prereq is what matters to the user). */
+type PluginKind = 'mcp' | 'api' | 'hybrid' | 'cli';
+function pluginKind(m: { transport: McpDefinition['transport']; api_spec?: ApiSpec | null; tags?: string[] }): PluginKind {
   const hasApi = !!m.api_spec;
+  const hasCliTag = Array.isArray(m.tags) && m.tags.includes('cli');
   // McpTransport is a discriminated union; the API-only sentinel is the
   // string literal "ApiOnly" (not a { tag: ... } object).
   const isApiOnly = (m.transport as unknown) === 'ApiOnly';
+  if (hasCliTag) return 'cli';
   if (isApiOnly) return 'api';
   if (hasApi) return 'hybrid';
   return 'mcp';
@@ -37,7 +50,9 @@ function pluginKind(m: { transport: McpDefinition['transport']; api_spec?: ApiSp
  * transports are synced; API-only plugins live in prompts).
  */
 function PluginKindBadge({ kind }: { kind: PluginKind }) {
-  const meta = kind === 'api'
+  const meta = kind === 'cli'
+    ? { label: '⌨ CLI wrapper', tooltip: 'Wraps a local CLI binary. The agent talks to it via MCP, BUT the binary (fastly, glab, …) MUST be installed on the host first. Bucketed separately from pure MCP because the install prereq is different.' }
+    : kind === 'api'
     ? { label: '🌐 API', tooltip: 'API plugin — endpoints injected in the agent\'s system prompt (curl). Not synced to ~/.claude.json or other CLI config files.' }
     : kind === 'hybrid'
     ? { label: '🔌🌐 MCP + API', tooltip: 'Hybrid plugin — both an MCP transport (synced to .mcp.json) and a REST API (injected in prompt). The "Portée CLI locale" toggle only affects the MCP side.' }
@@ -164,11 +179,14 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
   const [editingLabelText, setEditingLabelText] = useState('');
   const [showAddMcp, setShowAddMcp] = useState(false);
   const [addMcpSearch, setAddMcpSearch] = useState('');
+  // 0.8.6 phase 4 — top-level type filter (audit feedback 2026-05-22).
+  // Lets the user narrow the discovery dropdown to a specific TRANSPORT
+  // kind (MCP / API / CLI). Defaults to 'all' so the existing behaviour
+  // (every plugin visible) is preserved when nothing is selected. The
+  // category-by-tag grouping below continues to apply within the
+  // filtered subset.
+  const [addMcpKindFilter, setAddMcpKindFilter] = useState<'all' | PluginKind>('all');
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
-  // Plugin-kind filter (MCP / API / all). Sits next to the category pills so
-  // the user can quickly narrow to API plugins when Chartbeat-style HTTP
-  // plugins are what they want, without scrolling through 50+ MCP tiles.
-  const [kindFilter, setKindFilter] = useState<PluginKind | null>(null);
   const [addMcpSelected, setAddMcpSelected] = useState<string | null>(null);
   const [addMcpLabel, setAddMcpLabel] = useState('');
   const [addMcpEnv, setAddMcpEnv] = useState<Record<string, string>>({});
@@ -452,6 +470,76 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
     if (ok) toast(t('mcp.custom.copied'), 'success');
   };
 
+  // 0.8.6 (#63) — Path B file download. Blob the JSON, trigger a
+  // download. Filename sanitised similar to the backend's
+  // `sanitize_filename` helper. Works in Tauri webview (no Auth headers
+  // required, no server round-trip).
+  const handleExportDownloadFile = (name: string, json: string) => {
+    const safeName = name
+      .replace(/[^A-Za-z0-9_-]+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '');
+    const filename = `${safeName || 'plugin'}.kronn-plugin.json`;
+    try {
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      // Defer revoke so the browser's download UI has time to grab the blob.
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      toast(t('mcp.custom.downloaded', filename), 'success');
+    } catch (e) {
+      console.warn('download blob failed:', e);
+      toast(t('mcp.custom.downloadFailed'), 'error');
+    }
+  };
+
+  // 0.8.6 (#63) — Path B file upload. User picks a .json file ; we
+  // read it client-side and POST as JSON. Same secret-strip contract
+  // as the paste-textarea path applies server-side.
+  const handleImportFromFile = async (file: File) => {
+    setImportJsonError(null);
+    let text = '';
+    try {
+      text = await file.text();
+    } catch (e) {
+      console.warn('read file failed:', e);
+      setImportJsonError(t('mcp.custom.importFileReadFailed'));
+      return;
+    }
+    setImportJsonText(text);
+    const res = parseCustomPluginImport(text);
+    if (!res.ok) {
+      setImportJsonError(res.error);
+      return;
+    }
+    setImportJsonLoading(true);
+    try {
+      await mcpsApi.importPluginFile({
+        name: res.spec.name,
+        base_url: res.spec.base_url,
+        description: res.spec.description,
+        docs_url: res.spec.docs_url,
+        fields: res.spec.fields,
+        endpoints: res.spec.endpoints,
+        auth: res.spec.auth,
+      });
+      toast(t('mcp.custom.imported', res.spec.name), 'success');
+      resetAddMcp();
+      refetchMcps();
+    } catch (e) {
+      console.warn('Failed to import Custom API from file:', e);
+      setImportJsonError(userError(e));
+    } finally {
+      setImportJsonLoading(false);
+    }
+  };
+
   // Parse + validate an import payload. Returns the typed spec or a
   // user-facing error message. Validation mirrors the backend contract
   // for `custom_spec`: name + base_url are required; everything else is
@@ -592,7 +680,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
         try {
           // Step 1 — update the spec (name / base_url / docs_url /
           // fields[].label / endpoints / auth). Server row touched here.
-          await mcpsApi.updateCustomSpec(editingCustomServerId, {
+          const updateResp = await mcpsApi.updateCustomSpec(editingCustomServerId, {
             name: savedName,
             base_url: customBaseUrl.trim(),
             description: customDescription.trim(),
@@ -601,6 +689,12 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
             endpoints: customEndpoints.filter(e => e.path.trim() !== ''),
             auth: customAuth,
           });
+          // 0.8.6 (#60) — detect orphan env keys left behind by a rename
+          // / removal across all OTHER configs of this server (the
+          // current config's env gets wholesale-replaced in step 2 so
+          // its orphans clean up automatically, but multi-project configs
+          // need an explicit cleanup pass).
+          const orphanKeys = updateResp.orphan_env_keys ?? [];
           // Step 2 — 0.8.6 unified edit : ALSO patch the encrypted env
           // for this config so a single form save persists BOTH spec
           // and credential values. Pre-fix the user typed values in
@@ -628,6 +722,30 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
             }
           }
           toast(t('mcp.custom.updated', savedName), 'success');
+          // 0.8.6 (#60) — surface orphan-env warning AFTER the success
+          // toast so the success path stays visible. The cleanup button
+          // lives in the toast itself; if the user dismisses we keep
+          // the warning visible until next render (or they reopen the
+          // plugin and see the unchanged env_keys).
+          if (orphanKeys.length > 0) {
+            const proceed = confirm(
+              t('mcp.custom.orphanEnvWarning', String(orphanKeys.length), orphanKeys.join(', ')),
+            );
+            if (proceed) {
+              try {
+                const cleanup = await mcpsApi.cleanupOrphanEnv(editingCustomServerId, orphanKeys);
+                toast(
+                  t('mcp.custom.orphanEnvCleaned',
+                    String(cleanup.total_keys_removed),
+                    String(cleanup.configs_updated)),
+                  'success',
+                );
+              } catch (cleanupErr) {
+                console.warn('cleanup_orphan_env failed:', cleanupErr);
+                toast(t('mcp.custom.orphanEnvCleanFailed', userError(cleanupErr)), 'error');
+              }
+            }
+          }
           resetAddMcp();
           refetchMcps();
         } catch (e) {
@@ -843,7 +961,18 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
     // Pinned separately at the top of the grid — keep it out of the
     // categorized list to avoid duplicating it under "Other".
     m.id !== 'api-custom' &&
-    (!addMcpSearch || m.name.toLowerCase().includes(addMcpSearch.toLowerCase()) || m.tags.some(tag => tag.toLowerCase().includes(addMcpSearch.toLowerCase())))
+    (!addMcpSearch || m.name.toLowerCase().includes(addMcpSearch.toLowerCase()) || m.tags.some(tag => tag.toLowerCase().includes(addMcpSearch.toLowerCase()))) &&
+    // 0.8.6 phase 4 — type filter. `'all'` lets every plugin through,
+    // otherwise we narrow to exactly that PluginKind. `'mcp'` is the
+    // permissive default that ALSO matches `hybrid` (a hybrid plugin
+    // is still primarily an MCP transport from the user's standpoint).
+    (
+      addMcpKindFilter === 'all'
+        ? true
+        : addMcpKindFilter === 'mcp'
+          ? (pluginKind(m) === 'mcp' || pluginKind(m) === 'hybrid')
+          : pluginKind(m) === addMcpKindFilter
+    )
   );
   const selectedDef = mcpRegistry.find(m => m.id === addMcpSelected);
   // Whether the pinned Custom API tile should be visible. Hide it when the
@@ -932,6 +1061,17 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
               >
                 <Upload size={12} /> {t('mcp.custom.copyAsJson')}
               </button>
+              {/* 0.8.6 (#63) — Path B file download. Blob the JSON
+                  locally and trigger a download — no server round-trip,
+                  no Auth headers to plumb. Works inside Tauri too. */}
+              <button
+                type="button"
+                className="mcp-btn-action"
+                onClick={() => handleExportDownloadFile(exportPayload.name, exportPayload.json)}
+                data-testid="mcp-export-modal-download"
+              >
+                <Download size={12} /> {t('mcp.custom.downloadAsFile')}
+              </button>
               <button
                 type="button"
                 className="mcp-btn-action"
@@ -1008,6 +1148,57 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
 
           {!addMcpSelected ? (
             <>
+              {/* 0.8.6 phase 4 — top-level type filter (MCP / API / CLI).
+                  Distinct from the per-tag category filter below : this
+                  one narrows by TRANSPORT KIND so the user can isolate
+                  "show me only CLI wrappers" (gitlab, fastly) without
+                  scrolling through MCP servers. `all` is the default. */}
+              <div
+                className="mcp-kind-filter-row"
+                role="radiogroup"
+                aria-label={t('mcp.kindFilter.label')}
+                data-testid="mcp-kind-filter"
+                style={{
+                  display: 'flex',
+                  gap: 6,
+                  marginBottom: 10,
+                  flexWrap: 'wrap',
+                }}
+              >
+                {(['all', 'mcp', 'api', 'cli'] as const).map(kind => {
+                  const labelKey = `mcp.kindFilter.${kind}`;
+                  const icons: Record<typeof kind, string> = { all: '✱', mcp: '🔌', api: '🌐', cli: '⌨' };
+                  const active = addMcpKindFilter === kind;
+                  return (
+                    <button
+                      key={kind}
+                      type="button"
+                      role="radio"
+                      aria-checked={active}
+                      className="mcp-kind-filter-btn"
+                      data-active={active}
+                      data-testid={`mcp-kind-filter-${kind}`}
+                      onClick={() => setAddMcpKindFilter(kind)}
+                      style={{
+                        padding: '4px 10px',
+                        borderRadius: 6,
+                        border: active
+                          ? '1px solid var(--kr-accent, #c8a0ff)'
+                          : '1px solid var(--kr-border-subtle, rgba(255,255,255,0.1))',
+                        background: active
+                          ? 'var(--kr-bg-accent-subtle, rgba(200,160,255,0.15))'
+                          : 'transparent',
+                        color: active ? 'var(--kr-text-primary)' : 'var(--kr-text-secondary)',
+                        cursor: 'pointer',
+                        fontSize: 12,
+                      }}
+                    >
+                      <span style={{ marginRight: 4 }}>{icons[kind]}</span>
+                      {t(labelKey)}
+                    </button>
+                  );
+                })}
+              </div>
               <input
                 className="input mb-5"
                 placeholder={t('mcp.searchRegistry')}
@@ -1018,6 +1209,12 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
               {/* Category filter pills */}
               {(() => {
                 const categoryMap: Record<string, string> = {
+                  // 0.8.6 phase 4 — `cli` first so plugins that WRAP a
+                  // local CLI binary (Fastly, GitLab via glab, …) land in
+                  // their own bucket rather than the generic Git/Code or
+                  // Cloud groups. Same prereq surface as a CLI agent —
+                  // the user must install the binary on the host first.
+                  cli: t('mcp.cat.cli'),
                   git: t('mcp.cat.gitCode'), code: t('mcp.cat.gitCode'),
                   database: t('mcp.cat.databases'), sql: t('mcp.cat.databases'), cache: t('mcp.cat.databases'), embedded: t('mcp.cat.databases'),
                   cloud: t('mcp.cat.cloud'), containers: t('mcp.cat.cloud'), devops: t('mcp.cat.cloud'),
@@ -1032,7 +1229,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                   for (const tag of tags) { if (categoryMap[tag]) return categoryMap[tag]; }
                   return t('mcp.cat.other');
                 };
-                const categoryOrder = [t('mcp.cat.gitCode'), t('mcp.cat.databases'), t('mcp.cat.cloud'), t('mcp.cat.search'), t('mcp.cat.monitoring'), t('mcp.cat.communication'), t('mcp.cat.projectMgmt'), t('mcp.cat.design'), t('mcp.cat.utilities'), t('mcp.cat.other')];
+                const categoryOrder = [t('mcp.cat.cli'), t('mcp.cat.gitCode'), t('mcp.cat.databases'), t('mcp.cat.cloud'), t('mcp.cat.search'), t('mcp.cat.monitoring'), t('mcp.cat.communication'), t('mcp.cat.projectMgmt'), t('mcp.cat.design'), t('mcp.cat.utilities'), t('mcp.cat.other')];
                 const grouped = new Map<string, typeof availableRegistry>();
                 for (const m of availableRegistry) {
                   const cat = getCategory(m.tags);
@@ -1047,28 +1244,6 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                 return (
                   <>
                     <div className="mcp-cat-pills">
-                      <button
-                        className={`mcp-cat-pill${!kindFilter ? ' mcp-cat-pill-active' : ''}`}
-                        onClick={() => setKindFilter(null)}
-                        title={t('mcp.kind.allTooltip')}
-                      >
-                        {t('mcp.kind.all')}
-                      </button>
-                      <button
-                        className={`mcp-cat-pill${kindFilter === 'mcp' ? ' mcp-cat-pill-active' : ''}`}
-                        onClick={() => setKindFilter(kindFilter === 'mcp' ? null : 'mcp')}
-                        title={t('mcp.kind.mcpTooltip')}
-                      >
-                        <Plug size={10} /> {t('mcp.kind.mcp')}
-                      </button>
-                      <button
-                        className={`mcp-cat-pill${kindFilter === 'api' ? ' mcp-cat-pill-active' : ''}`}
-                        onClick={() => setKindFilter(kindFilter === 'api' ? null : 'api')}
-                        title={t('mcp.kind.apiTooltip')}
-                      >
-                        <Globe size={10} /> {t('mcp.kind.api')}
-                      </button>
-                      <span className="mcp-cat-pill-sep">·</span>
                       <button
                         className={`mcp-cat-pill${!selectedCategory ? ' mcp-cat-pill-active' : ''}`}
                         onClick={() => setSelectedCategory(null)}
@@ -1086,7 +1261,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                       ))}
                     </div>
                     <div className="mcp-registry-grid">
-                      {customApiVisible && (!kindFilter || kindFilter === 'api') && !selectedCategory ? (
+                      {customApiVisible && (addMcpKindFilter === 'all' || addMcpKindFilter === 'api') && !selectedCategory ? (
                         <div
                           key="api-import"
                           className="mcp-registry-card mcp-registry-card-custom"
@@ -1116,7 +1291,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                           </div>
                         </div>
                       ) : null}
-                      {customApiVisible && (!kindFilter || kindFilter === 'api') && !selectedCategory ? (
+                      {customApiVisible && (addMcpKindFilter === 'all' || addMcpKindFilter === 'api') && !selectedCategory ? (
                         <div
                           key="custom-api"
                           className="mcp-registry-card mcp-registry-card-custom"
@@ -1149,18 +1324,9 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                       {catsWithItems.flatMap(cat =>
                         (grouped.get(cat) ?? [])
                           .filter(m => {
-                            // Category filter
+                            // Category filter (kind filtering already applied
+                            // upstream via `availableRegistry` / addMcpKindFilter).
                             if (selectedCategory && selectedCategory !== cat) return false;
-                            // Kind filter (MCP / API): `mcp` keeps pure MCP +
-                            // hybrid (since hybrid *is* an MCP too); `api`
-                            // keeps pure API + hybrid. Rationale: a user
-                            // looking for "plugins with API" shouldn't miss
-                            // Jira if Jira has both.
-                            if (kindFilter) {
-                              const k = pluginKind(m);
-                              if (kindFilter === 'mcp' && k === 'api') return false;
-                              if (kindFilter === 'api' && k === 'mcp') return false;
-                            }
                             // Text search filter
                             if (addMcpSearch && !m.name.toLowerCase().includes(addMcpSearch.toLowerCase()) && !m.tags.some(tag => tag.toLowerCase().includes(addMcpSearch.toLowerCase()))) return false;
                             return true;
@@ -1248,6 +1414,24 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                 >
                   <Download size={12} /> {t('mcp.custom.importPasteFromClipboard')}
                 </button>
+                {/* 0.8.6 (#63) — Path B file upload. Hidden input
+                    triggered by a styled button so the UX matches the
+                    other action buttons. */}
+                <label className="mcp-btn-action" style={{ cursor: 'pointer', display: 'inline-flex' }}>
+                  <Upload size={12} /> {t('mcp.custom.importFromFile')}
+                  <input
+                    type="file"
+                    accept=".json,application/json"
+                    style={{ display: 'none' }}
+                    onChange={e => {
+                      const f = e.target.files?.[0];
+                      if (f) handleImportFromFile(f);
+                      // Reset so re-picking the same file fires onChange again.
+                      e.target.value = '';
+                    }}
+                    data-testid="mcp-import-file-input"
+                  />
+                </label>
                 <button
                   type="button"
                   className="mcp-btn-action mcp-btn-action-primary"

@@ -1,5 +1,6 @@
 pub mod checksums;
 pub mod kronn_state;
+pub mod redact;
 pub mod cmd;
 pub mod context_files;
 pub mod env;
@@ -30,6 +31,7 @@ pub mod ws_client;
 pub mod log_buffer;
 pub mod rtk_detect;
 pub mod versions;
+pub mod run_eta;
 
 #[cfg(test)]
 #[path = "crypto_test.rs"]

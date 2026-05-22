@@ -46,6 +46,50 @@ export function AgentsSection({
 
   const { data: tokenConfig, refetch: refetchTokens } = useApi(() => configApi.getTokens(), []);
 
+  // 0.8.6 phase 4 — global default tier + summary strategy (applied to
+  // NEW disc / QP / WF agent steps when the form doesn't explicitly
+  // pick one). Strict semantic (cf. backend `ServerConfig.
+  // default_model_tier` rustdoc) — never retroactive. Loaded once on
+  // mount, written back on every change via setServerConfig PATCH.
+  const [defaultTier, setDefaultTier] = useState<'economy' | 'default' | 'reasoning' | null>(null);
+  const [defaultSummaryStrategy, setDefaultSummaryStrategy] = useState<'Auto' | 'OnDemand' | 'Off' | null>(null);
+  useEffect(() => {
+    configApi.getServerConfig().then(cfg => {
+      if (cfg) {
+        setDefaultTier(cfg.default_model_tier ?? 'default');
+        setDefaultSummaryStrategy(cfg.default_summary_strategy ?? 'Off');
+      }
+    }).catch(() => {
+      setDefaultTier('default');
+      setDefaultSummaryStrategy('Off');
+    });
+  }, []);
+
+  const saveDefaultTier = async (tier: 'economy' | 'default' | 'reasoning') => {
+    // Optimistic update so the dropdown feels snappy ; revert on error.
+    const previous = defaultTier;
+    setDefaultTier(tier);
+    try {
+      await configApi.setServerConfig({ default_model_tier: tier });
+      toast(t('config.saved'), 'success');
+    } catch {
+      setDefaultTier(previous);
+      toast(t('config.saveError'), 'error');
+    }
+  };
+
+  const saveDefaultSummary = async (strategy: 'Auto' | 'OnDemand' | 'Off') => {
+    const previous = defaultSummaryStrategy;
+    setDefaultSummaryStrategy(strategy);
+    try {
+      await configApi.setServerConfig({ default_summary_strategy: strategy });
+      toast(t('config.saved'), 'success');
+    } catch {
+      setDefaultSummaryStrategy(previous);
+      toast(t('config.saveError'), 'error');
+    }
+  };
+
   // Load model tiers once. Pre-fix the loop only seeded 5 of the 7 agents
   // (copilot_cli + ollama were missing), so when the user opened the
   // tier dropdowns for those two agents the inputs showed empty even
@@ -130,6 +174,111 @@ export function AgentsSection({
         })()}
 
         <CompressionSection agents={agents} onActivated={refetchAgents} toast={toast} t={t} />
+
+        {/* 0.8.6 phase 4 — Default model tier for new disc / QP / WF
+            agent steps. Strict semantic — never retroactive. Sibling of
+            the RTK CompressionSection above ; both live in the "Mode IA"
+            card because they're the two cross-cutting agent-cost knobs. */}
+        <div
+          className="set-default-tier-section"
+          data-testid="default-tier-section"
+          style={{
+            padding: '14px 16px',
+            marginBottom: 12,
+            borderRadius: 'var(--kr-radius-md, 8px)',
+            background: 'var(--kr-bg-card-subtle, transparent)',
+            border: '1px solid var(--kr-border-subtle, transparent)',
+          }}
+        >
+          <div className="flex-row gap-2 mb-2">
+            <span style={{ fontSize: 14 }}>🎯</span>
+            <span className="font-semibold text-sm">{t('config.defaultTierLabel')}</span>
+          </div>
+          <p className="text-xs text-muted mb-2" style={{ marginTop: 0 }}>
+            {t('config.defaultTierHint')}
+          </p>
+          <div className="flex-row gap-1" role="radiogroup" aria-label={t('config.defaultTierLabel')}>
+            {(['economy', 'default', 'reasoning'] as const).map(tier => {
+              const tierIcons: Record<typeof tier, string> = { economy: '⚡', default: '🎯', reasoning: '🧠' };
+              const tierLabels: Record<typeof tier, string> = {
+                economy: t('disc.tier.economy'),
+                default: t('disc.tier.default'),
+                reasoning: t('disc.tier.reasoning'),
+              };
+              const active = defaultTier === tier;
+              return (
+                <button
+                  key={tier}
+                  type="button"
+                  role="radio"
+                  aria-checked={active}
+                  className="disc-tier-btn"
+                  data-active={active}
+                  data-testid={`default-tier-btn-${tier}`}
+                  onClick={() => saveDefaultTier(tier)}
+                  disabled={defaultTier === null}
+                  title={tierLabels[tier]}
+                >
+                  <span style={{ marginRight: 4 }}>{tierIcons[tier]}</span>
+                  {tierLabels[tier]}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* 0.8.6 phase 4 — Default summary strategy. Auto-summary used
+            to fire after every reply ; flipped to OFF by default in
+            0.8.6 since modern agents have large context + MCP access
+            to fetch older history on demand. Re-enable for small-
+            context agents that can't ask Kronn for context themselves. */}
+        <div
+          className="set-default-summary-section"
+          data-testid="default-summary-section"
+          style={{
+            padding: '14px 16px',
+            marginBottom: 12,
+            borderRadius: 'var(--kr-radius-md, 8px)',
+            background: 'var(--kr-bg-card-subtle, transparent)',
+            border: '1px solid var(--kr-border-subtle, transparent)',
+          }}
+        >
+          <div className="flex-row gap-2 mb-2">
+            <span style={{ fontSize: 14 }}>📝</span>
+            <span className="font-semibold text-sm">{t('config.defaultSummaryLabel')}</span>
+          </div>
+          <p className="text-xs text-muted mb-2" style={{ marginTop: 0 }}>
+            {t('config.defaultSummaryHint')}
+          </p>
+          <div className="flex-row gap-1" role="radiogroup" aria-label={t('config.defaultSummaryLabel')}>
+            {(['Off', 'Auto', 'OnDemand'] as const).map(strategy => {
+              const icons: Record<typeof strategy, string> = { Off: '🚫', Auto: '🔄', OnDemand: '👋' };
+              const labels: Record<typeof strategy, string> = {
+                Off: t('config.summaryOff'),
+                Auto: t('config.summaryAuto'),
+                OnDemand: t('config.summaryOnDemand'),
+              };
+              const active = defaultSummaryStrategy === strategy;
+              return (
+                <button
+                  key={strategy}
+                  type="button"
+                  role="radio"
+                  aria-checked={active}
+                  className="disc-tier-btn"
+                  data-active={active}
+                  data-testid={`default-summary-btn-${strategy.toLowerCase()}`}
+                  onClick={() => saveDefaultSummary(strategy)}
+                  disabled={defaultSummaryStrategy === null}
+                  title={labels[strategy]}
+                >
+                  <span style={{ marginRight: 4 }}>{icons[strategy]}</span>
+                  {labels[strategy]}
+                </button>
+              );
+            })}
+          </div>
+        </div>
 
         {agents.map(agent => {
           // Ollama gets its own dedicated card with health check + model picker

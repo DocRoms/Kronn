@@ -3,6 +3,7 @@ import { config as configApi, contacts as contactsApi } from '../../lib/api';
 import { gravatarUrl } from '../../lib/gravatar';
 import type { NetworkInfo } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
+import { Dropdown } from '../Dropdown';
 import { UserCircle, Copy } from 'lucide-react';
 import '../../pages/SettingsPage.css';
 
@@ -113,20 +114,23 @@ export function IdentitySection({ toast, t }: IdentitySectionProps) {
             <div style={{ marginTop: 16 }}>
               <div className="flex-row gap-4 mb-3" style={{ alignItems: 'baseline', flexWrap: 'wrap' }}>
                 <span className="label mb-0">{t('settings.globalContext')}</span>
-                <select
-                  className="set-input cursor-pointer"
-                  style={{ width: 'auto', flex: 'none' }}
-                  value={globalContextMode}
-                  onChange={e => {
-                    setGlobalContextMode(e.target.value);
-                    configApi.saveGlobalContextMode(e.target.value);
-                  }}
-                  aria-label={t('settings.globalContext')}
-                >
-                  <option value="always">{t('settings.gcModeAlways')}</option>
-                  <option value="no_project">{t('settings.gcModeNoProject')}</option>
-                  <option value="never">{t('settings.gcModeNever')}</option>
-                </select>
+                {/* 0.8.6 (#62) — Dropdown migration for theme parity. */}
+                <div style={{ width: 220 }}>
+                  <Dropdown<'always' | 'no_project' | 'never'>
+                    value={globalContextMode as 'always' | 'no_project' | 'never'}
+                    options={[
+                      { value: 'always', label: t('settings.gcModeAlways') },
+                      { value: 'no_project', label: t('settings.gcModeNoProject') },
+                      { value: 'never', label: t('settings.gcModeNever') },
+                    ]}
+                    onChange={v => {
+                      setGlobalContextMode(v);
+                      configApi.saveGlobalContextMode(v);
+                    }}
+                    ariaLabel={t('settings.globalContext')}
+                    testId="settings-global-context-mode"
+                  />
+                </div>
               </div>
               <textarea
                 value={globalContext}

@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useT } from '../../lib/I18nContext';
 import { AGENT_LABELS } from '../../lib/constants';
+import { config as configApi } from '../../lib/api';
 import type {
   QuickPrompt,
   PromptVariable,
@@ -10,6 +11,7 @@ import type {
   Skill,
   AgentProfile,
   Directive,
+  ModelTier,
 } from '../../types/generated';
 import { Plus, Save, X, Check, Zap, UserCircle, FileText, ChevronRight } from 'lucide-react';
 
@@ -53,6 +55,11 @@ export function QuickPromptForm({
   const [variables, setVariables] = useState<PromptVariable[]>(editPrompt?.variables ?? []);
   const [agent, setAgent] = useState<AgentType>(editPrompt?.agent ?? 'ClaudeCode');
   const [projectId, setProjectId] = useState(editPrompt?.project_id ?? '');
+  // 0.8.6 phase 4 — tier carried through across edits. New QPs start
+  // with 'default' then the effect below replaces it with the user's
+  // `ServerConfig.default_model_tier` on mount (strict semantic — only
+  // applied to new QPs, never overwrites an editPrompt's saved tier).
+  const [tier, setTier] = useState<ModelTier>(editPrompt?.tier ?? 'default');
   // 0.8.5 — three binding axes mirroring the Discussion form.
   const [skillIds, setSkillIds] = useState<string[]>(editPrompt?.skill_ids ?? []);
   const [profileIds, setProfileIds] = useState<string[]>(editPrompt?.profile_ids ?? []);
@@ -65,6 +72,19 @@ export function QuickPromptForm({
   // QuickPrompt twice (`quickPromptsApi.create` is not idempotent).
   const savingRef = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // 0.8.6 phase 4 — for NEW QPs (no editPrompt), pre-fill `tier` from
+  // the user's saved default. For edits we keep the existing tier so a
+  // settings change doesn't silently bump every legacy QP into Reasoning.
+  useEffect(() => {
+    if (editPrompt) return;
+    configApi.getServerConfig()
+      .then(cfg => {
+        if (cfg?.default_model_tier) setTier(cfg.default_model_tier);
+      })
+      .catch(() => { /* keep 'default' fallback */ });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Auto-sync variables from template. We preserve any description /
   // required flag / label the user already set — only the `name` field
@@ -111,7 +131,7 @@ export function QuickPromptForm({
         skill_ids: skillIds,
         profile_ids: profileIds,
         directive_ids: directiveIds,
-        tier: editPrompt?.tier ?? 'default',
+        tier,
         description,
       });
     } finally {

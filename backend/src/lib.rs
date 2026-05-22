@@ -561,6 +561,23 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // typo / add endpoints / change docs_url WITHOUT delete+recreate.
         // Server_id is preserved; configs & workflow ApiCall refs stay valid.
         .route("/api/mcps/custom/{server_id}", put(api::mcps::update_custom_spec))
+        // 0.8.6 (#60) — cleanup orphan env keys left behind by a field
+        // rename / removal. Body: { keys: ["OLD_KEY", …] }.
+        .route(
+            "/api/mcps/custom/{server_id}/cleanup-orphan-env",
+            post(api::mcps::cleanup_orphan_env),
+        )
+        // 0.8.6 (#63) — Path B file-based plugin import/export.
+        // GET returns a .kronn-plugin.json attachment ; POST accepts the
+        // same JSON shape (frontend reads File → text → POST).
+        .route(
+            "/api/mcps/custom/{server_id}/export-file",
+            get(api::mcps::export_custom_plugin_file),
+        )
+        .route(
+            "/api/mcps/custom/import-file",
+            post(api::mcps::import_custom_plugin_file),
+        )
         .route("/api/mcps/configs/{id}/projects", patch(api::mcps::set_config_projects))
         .route("/api/mcps/configs/{id}/reveal", post(api::mcps::reveal_secrets))
         .route("/api/mcps/host-discovery", get(api::mcps::host_discovery))
@@ -595,6 +612,14 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // workflow ApiCall steps. Credentials never leave Kronn DB.
         // Project scope resolved from the parent disc.
         .route("/api/agent-api/call", post(api::agent_api::agent_api_call))
+        // 0.8.6 phase 4 — MCP remote control (workflow_trigger / workflow_run_status / qp_run).
+        // JSON wrappers around the SSE-based trigger/run/batch routes,
+        // enriched with smart-polling `next_check` hints so an MCP-driven
+        // agent on mobile can launch + track without burning tokens on
+        // SSE chunks it can't easily consume.
+        .route("/api/mcp/workflow-trigger", post(api::mcp_remote::workflow_trigger))
+        .route("/api/mcp/workflow-run-status/{run_id}", get(api::mcp_remote::workflow_run_status))
+        .route("/api/mcp/qp-run", post(api::mcp_remote::qp_run))
         // 0.8.6 (#24) — unified API-call logs read surface. Lists / shows
         // / purges rows from `api_call_logs` (workflow + broker + manual).
         .route("/api/api-call-logs", get(api::api_call_logs::list_api_call_logs))

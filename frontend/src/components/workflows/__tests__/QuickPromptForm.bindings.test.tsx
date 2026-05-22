@@ -10,7 +10,7 @@
 // Mocks the api module + uses I18nProvider so the picker labels resolve.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { I18nProvider } from '../../../lib/I18nContext';
 import type { ReactElement } from 'react';
 import type { Skill, AgentProfile, Directive } from '../../../types/generated';
@@ -147,5 +147,101 @@ describe('QuickPromptForm bindings (0.8.5)', () => {
     expect(skillsToggle.textContent).toMatch(/1/);
     expect(profilesToggle.textContent).toMatch(/1/);
     expect(directivesToggle.textContent).toMatch(/1/);
+  });
+});
+
+// 0.8.6 phase 4 — Default model tier consumption (audit gap #2, 2026-05-22).
+// Pin the strict-semantic contract :
+//   - NEW QPs (no editPrompt) pre-fill from ServerConfig.default_model_tier
+//   - EDITED QPs keep their saved tier (NEVER auto-bump on settings change)
+// Without these tests, a refactor that swaps the order of the two effects
+// could silently break either path : new QPs always-default, or edited QPs
+// retroactively bumped to the new settings tier.
+
+describe('QuickPromptForm — default model tier (0.8.6 phase 4)', () => {
+  it('NEW QP : reads default_model_tier from ServerConfig and passes it on save', async () => {
+    const apiMod = await import('../../../lib/api');
+    (apiMod.config.getServerConfig as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      default_model_tier: 'reasoning',
+    });
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    wrap(
+      <QuickPromptForm
+        projects={[]}
+        skills={sampleSkills}
+        profiles={sampleProfiles}
+        directives={sampleDirectives}
+        onSave={onSave}
+        onCancel={() => {}}
+      />
+    );
+    // Wait for the mount effect (configApi.getServerConfig) to resolve.
+    await new Promise(r => setTimeout(r, 0));
+
+    // Fill the minimum to enable the Save button. The form has 2
+    // `.wf-input`s : [0] = icon (width 50), [1] = name. And 2
+    // textareas : [0] = description, [1] = prompt template. The Save
+    // button is `disabled` until both name + template are non-empty.
+    const inputs = document.querySelectorAll('input.wf-input');
+    const nameInput = inputs[1] as HTMLInputElement;
+    const textareas = document.querySelectorAll('textarea');
+    const templateTextarea = textareas[1] as HTMLTextAreaElement;
+    await act(async () => {
+      fireEvent.change(nameInput, { target: { value: 'My QP' } });
+      fireEvent.change(templateTextarea, { target: { value: 'do the thing' } });
+    });
+    // Wait for the disabled state to clear.
+    await waitFor(() => {
+      const btn = document.querySelector('.wf-create-btn') as HTMLButtonElement;
+      expect(btn.disabled).toBe(false);
+    });
+
+    const saveBtn = document.querySelector('.wf-create-btn') as HTMLButtonElement;
+    await act(async () => { fireEvent.click(saveBtn); });
+
+    await waitFor(() => {
+      expect(onSave).toHaveBeenCalled();
+    });
+    // The payload carries the saved default tier — proves the form
+    // consumed `default_model_tier` instead of falling back to 'default'.
+    expect(onSave.mock.calls[0][0].tier).toBe('reasoning');
+  });
+
+  it('EDIT mode : keeps editPrompt.tier even if default_model_tier disagrees (strict semantic)', async () => {
+    // The user might set default to 'reasoning' tomorrow ; existing QPs
+    // saved with tier='economy' MUST keep that. No silent retroactive
+    // bump (would 10x cost on legacy QPs).
+    const apiMod = await import('../../../lib/api');
+    (apiMod.config.getServerConfig as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      default_model_tier: 'reasoning',
+    });
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    wrap(
+      <QuickPromptForm
+        editPrompt={{
+          id: 'qp-legacy', name: 'Old QP', icon: '', prompt_template: 'do x',
+          variables: [], agent: 'ClaudeCode', project_id: null,
+          skill_ids: [], profile_ids: [], directive_ids: [],
+          tier: 'economy', description: '',
+          created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+        }}
+        projects={[]}
+        skills={sampleSkills}
+        profiles={sampleProfiles}
+        directives={sampleDirectives}
+        onSave={onSave}
+        onCancel={() => {}}
+      />
+    );
+    await new Promise(r => setTimeout(r, 0));
+
+    const saveBtn = document.querySelector('.wf-create-btn') as HTMLButtonElement;
+    if (!saveBtn) throw new Error('Save button not found');
+    fireEvent.click(saveBtn);
+
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    // Critical : the saved tier is the ORIGINAL economy, not the new
+    // server default reasoning. Strict semantic enforced.
+    expect(onSave.mock.calls[0][0].tier).toBe('economy');
   });
 });

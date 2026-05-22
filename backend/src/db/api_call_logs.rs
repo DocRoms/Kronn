@@ -128,32 +128,10 @@ pub fn truncate_excerpt(s: Option<&str>) -> Option<String> {
     Some(out)
 }
 
-/// Best-effort secret redaction for log excerpts. Mirrors the regex set
-/// used by `frontend/src/lib/bug-report.ts` for the bug-report flow.
-/// Conservative: false positives just hide real text, false negatives
-/// leak credentials — we err toward hiding.
-pub fn redact_secrets(input: &str) -> String {
-    // Order matters: Bearer/Basic must match BEFORE generic vendor
-    // prefixes so the WHOLE header line collapses to one redaction.
-    let patterns: &[(&str, &str)] = &[
-        // Authorization headers (case-insensitive header name, value to EOL).
-        (r#"(?i)(authorization\s*:\s*)(bearer|basic|token)\s+\S+"#, "$1$2 ***REDACTED***"),
-        // Common vendor prefixes — accept token chars [A-Za-z0-9_-] up to 80 chars.
-        (r#"(p8e-[A-Za-z0-9_-]{8,})"#, "***REDACTED***"),
-        (r#"(AIzaSy[A-Za-z0-9_-]{20,})"#, "***REDACTED***"),
-        (r#"(sk-[A-Za-z0-9_-]{20,})"#, "***REDACTED***"),
-        (r#"(ghp_[A-Za-z0-9_-]{20,})"#, "***REDACTED***"),
-        (r#"(xoxb-[A-Za-z0-9_-]{20,})"#, "***REDACTED***"),
-        (r#"(eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)"#, "***REDACTED***"),
-    ];
-    let mut out = input.to_string();
-    for (pat, repl) in patterns {
-        if let Ok(re) = regex_lite::Regex::new(pat) {
-            out = re.replace_all(&out, *repl).to_string();
-        }
-    }
-    out
-}
+/// Re-export of `core::redact::redact_secrets` for backwards compat
+/// inside this module. 0.8.6 (#57) promoted the regex set to a shared
+/// module so `learning_candidates` (0.9.0) can reuse it.
+pub use crate::core::redact::redact_secrets;
 
 /// Insert one row. Never panics — on DB errors we log and swallow so an
 /// audit-trail failure cannot abort a successful API call.

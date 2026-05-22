@@ -7,6 +7,10 @@ vi.mock('../../lib/api', () => ({
   skills: { list: vi.fn().mockResolvedValue([]) },
   profiles: { list: vi.fn().mockResolvedValue([]) },
   directives: { list: vi.fn().mockResolvedValue([]) },
+  // 0.8.6 phase 4 — NewDiscussionForm reads the saved default tier on
+  // mount. Tests don't care about the value (the form still passes its
+  // 'default' fallback if the API throws), but the import must resolve.
+  config: { getServerConfig: vi.fn().mockResolvedValue({ default_model_tier: 'default' }) },
 }));
 
 vi.mock('../../lib/I18nContext', () => ({
@@ -375,11 +379,11 @@ describe('NewDiscussionForm — 0.8.6 disc-first refactor', () => {
     expect(checkbox).not.toBeNull();
     expect(checkbox!.checked).toBe(true);
 
-    // Picker visible (Claude Code option).
-    const agentSelect = document.querySelector(
-      'select[aria-label="disc.agent"]',
+    // 0.8.6 (#62) — picker migrated to <Dropdown>: query by testId.
+    const agentPicker = document.querySelector(
+      '[data-testid="new-disc-agent-picker"]',
     );
-    expect(agentSelect).not.toBeNull();
+    expect(agentPicker).not.toBeNull();
   });
 
   it('hides the agent picker + shows the disc-first hint when the checkbox is unchecked', async () => {
@@ -391,7 +395,7 @@ describe('NewDiscussionForm — 0.8.6 disc-first refactor', () => {
 
     expect(checkbox!.checked).toBe(false);
     expect(
-      document.querySelector('select[aria-label="disc.agent"]'),
+      document.querySelector('[data-testid="new-disc-agent-picker"]'),
     ).toBeNull();
     // Hint copy fragment from disc.discFirstHint is present.
     expect(document.body.textContent).toContain('disc.discFirstHint');
@@ -530,5 +534,104 @@ describe('NewDiscussionForm — 0.8.6 disc-first refactor', () => {
 
     const createBtn = document.querySelector('.disc-create-btn') as HTMLButtonElement;
     expect(createBtn.disabled).toBe(true);
+  });
+});
+
+// 0.8.6 phase 4 — Default model tier consumption (audit gap #1, 2026-05-22).
+// Pre-existing tests confirm the form RENDERS the tier picker, but none
+// asserted it actually picks up `ServerConfig.default_model_tier` from the
+// config endpoint on mount. A refactor of the load effect could silently
+// fall back to the hardcoded 'default', and the feature would be invisibly
+// broken (no error, just wrong initial state).
+describe('NewDiscussionForm — default model tier (0.8.6 phase 4)', () => {
+  // Stage a skill so the advanced toggle button renders (it's gated
+  // on `availableSkills.length > 0 || profiles > 0 || directives > 0`).
+  // Without ONE of these, the tier picker stays off-DOM and we can't
+  // assert against it.
+  const mountWithSkills = (defaultTier: 'economy' | 'default' | 'reasoning') => {
+    return import('../../lib/api').then(apiMod => {
+      (apiMod.skills.list as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+        { id: 'sk-test', name: 'Security', description: 's',
+          icon: '🔒', category: 'Domain', content: '', is_builtin: true,
+          token_estimate: 100, license: null } as never,
+      ]);
+      (apiMod.config.getServerConfig as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        default_model_tier: defaultTier,
+      });
+      const onSubmit = vi.fn();
+      render(
+        <NewDiscussionForm
+          projects={[PROJECT_WITH_REPO]}
+          agents={[AGENT]}
+          configLanguage="fr"
+          agentAccess={null}
+          onSubmit={onSubmit}
+          onClose={vi.fn()}
+          onNavigate={vi.fn()}
+          t={(key: string) => key}
+        />
+      );
+    });
+  };
+
+  it('initial tier matches ServerConfig.default_model_tier on mount', async () => {
+    await mountWithSkills('reasoning');
+    // Wait for both effects : skills.list + getServerConfig.
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+    const advancedToggle = await waitFor(() => {
+      const el = document.querySelector('.disc-advanced-toggle') as HTMLElement | null;
+      if (!el) throw new Error('advanced toggle not rendered yet');
+      return el;
+    });
+    await act(async () => { fireEvent.click(advancedToggle); });
+
+    await waitFor(() => {
+      const reasoningBtn = document.querySelector('[data-tier="reasoning"]') as HTMLElement;
+      expect(reasoningBtn).toBeTruthy();
+      expect(reasoningBtn.getAttribute('data-active')).toBe('true');
+    });
+    const defaultBtn = document.querySelector('[data-tier="default"]') as HTMLElement;
+    expect(defaultBtn.getAttribute('data-active')).toBe('false');
+  });
+
+  it('falls back to "default" tier when ServerConfig fetch fails (network error)', async () => {
+    // Defensive : the user offline / backend booting / network blip MUST
+    // NOT crash the form — we silently keep the 'default' fallback so
+    // the user can still create a disc.
+    const apiMod = await import('../../lib/api');
+    (apiMod.skills.list as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+      { id: 'sk-test', name: 'Security', description: 's',
+        icon: '🔒', category: 'Domain', content: '', is_builtin: true,
+        token_estimate: 100, license: null } as never,
+    ]);
+    (apiMod.config.getServerConfig as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error('network down'),
+    );
+    render(
+      <NewDiscussionForm
+        projects={[PROJECT_WITH_REPO]}
+        agents={[AGENT]}
+        configLanguage="fr"
+        agentAccess={null}
+        onSubmit={vi.fn()}
+        onClose={vi.fn()}
+        onNavigate={vi.fn()}
+        t={(key: string) => key}
+      />
+    );
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+    const advancedToggle = await waitFor(() => {
+      const el = document.querySelector('.disc-advanced-toggle') as HTMLElement | null;
+      if (!el) throw new Error('advanced toggle not rendered yet');
+      return el;
+    });
+    await act(async () => { fireEvent.click(advancedToggle); });
+
+    await waitFor(() => {
+      const defaultBtn = document.querySelector('[data-tier="default"]') as HTMLElement;
+      expect(defaultBtn.getAttribute('data-active')).toBe('true');
+    });
   });
 });

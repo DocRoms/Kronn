@@ -1,4 +1,9 @@
-use axum::{extract::{Path, Query, State}, Json};
+use axum::{
+    extract::{Path, Query, State},
+    http::{header, StatusCode},
+    response::{IntoResponse, Response},
+    Json,
+};
 use rusqlite::{params, Connection};
 use serde::Deserialize;
 use uuid::Uuid;
@@ -360,11 +365,76 @@ async fn projects_for_global(state: &AppState) -> Vec<String> {
 ///   → any existing workflow `ApiCall` step referencing it will fail
 ///   at run-time with the existing "endpoint not in allowlist"
 ///   diagnostic. Loud-and-clear failure, not silent corruption.
+///
+/// 0.8.6 (#60) — response wrapper that surfaces orphan env keys (slugs
+/// that vanished from `api_spec.config_keys` but still exist in at
+/// least one linked config's encrypted env). The frontend reads this
+/// and offers a one-click cleanup so the user doesn't ship orphan
+/// secrets to disk via the next host_sync pass.
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct UpdateCustomSpecResponse {
+    pub server: McpServer,
+    /// Keys that were removed from the spec (or renamed) but still
+    /// exist in at least one linked config's stored env. Sorted alpha
+    /// for deterministic UI rendering. Empty when no rename / removal
+    /// happened (most common case).
+    pub orphan_env_keys: Vec<String>,
+}
+
+/// 0.8.6 (#60) — pure orphan diff: given the previous server spec, the
+/// new payload, the list of configs to inspect, and the target server_id,
+/// returns the sorted list of env keys that:
+///   1. Existed in `prev.api_spec.config_keys` but no longer appear in
+///      `payload.fields` (after slug normalisation), AND
+///   2. Are still present in at least one of `configs[i].env_keys`
+///      where `configs[i].server_id == server_id`.
+///
+/// Secret-safe by construction: only key NAMES are read; values stay
+/// encrypted at the DB layer. Pure fn = unit-testable without a DB.
+pub(crate) fn compute_orphan_env_keys(
+    prev: &McpServer,
+    payload: &CustomApiPayload,
+    configs: &[McpConfigDisplay],
+    server_id: &str,
+) -> Vec<String> {
+    let prev_slugs: std::collections::HashSet<String> = prev
+        .api_spec
+        .as_ref()
+        .map(|s| s.config_keys.iter().map(|k| k.env_key.clone()).collect())
+        .unwrap_or_default();
+    let new_slugs: std::collections::HashSet<String> = payload
+        .fields
+        .iter()
+        .filter(|f| !f.label.trim().is_empty())
+        .map(|f| slug_env_key(&f.label))
+        .collect();
+    let removed: std::collections::HashSet<String> = prev_slugs
+        .difference(&new_slugs)
+        .cloned()
+        .collect();
+    if removed.is_empty() {
+        return Vec::new();
+    }
+    let mut orphans: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for cfg in configs {
+        if cfg.server_id != server_id {
+            continue;
+        }
+        for key in &cfg.env_keys {
+            if removed.contains(key) {
+                orphans.insert(key.clone());
+            }
+        }
+    }
+    orphans.into_iter().collect()
+}
+
 pub async fn update_custom_spec(
     State(state): State<AppState>,
     Path(server_id): Path<String>,
     Json(payload): Json<CustomApiPayload>,
-) -> Json<ApiResponse<McpServer>> {
+) -> Json<ApiResponse<UpdateCustomSpecResponse>> {
     // Hard prefix gate: only custom plugins are editable through this
     // route. Registry plugins (`api-*`, `mcp-*`) are immutable by
     // design — their spec is hard-coded in `core::registry`.
@@ -383,13 +453,20 @@ pub async fn update_custom_spec(
         return Json(ApiResponse::err("Custom API requires a base URL"));
     }
 
-    let result = state.db.with_conn(move |conn| -> anyhow::Result<McpServer> {
+    let result = state.db.with_conn(move |conn| -> anyhow::Result<UpdateCustomSpecResponse> {
         // Verify the server exists. We rely on `list_servers` since
         // there's no `get_server_by_id` helper today — N=registry+manual
         // count, ~20 max in practice, perfectly fine.
         let existing = db::mcps::list_servers(conn)?;
         let prev = existing.iter().find(|s| s.id == server_id)
             .ok_or_else(|| anyhow::anyhow!("Custom plugin `{}` not found", server_id))?;
+
+        // 0.8.6 (#60) — compute orphan env keys BEFORE upsert so we can
+        // diff old vs new slugs. The mcp_configs rows for this server
+        // may still carry encrypted values keyed by slugs that just got
+        // renamed / removed from the spec.
+        let configs_for_diff = db::mcps::list_configs_display(conn, None)?;
+        let orphan_env_keys = compute_orphan_env_keys(prev, &payload, &configs_for_diff, &server_id);
 
         // Re-materialize the spec from the new payload, then force the
         // pre-existing id + source + transport so referential integrity
@@ -400,13 +477,120 @@ pub async fn update_custom_spec(
         updated.transport = prev.transport.clone();
 
         db::mcps::upsert_server(conn, &updated)?;
-        Ok(updated)
+
+        Ok(UpdateCustomSpecResponse {
+            server: updated,
+            orphan_env_keys,
+        })
     }).await;
 
     match result {
-        Ok(s) => Json(ApiResponse::ok(s)),
+        Ok(resp) => Json(ApiResponse::ok(resp)),
         Err(e) => Json(ApiResponse::err(e.to_string())),
     }
+}
+
+/// 0.8.6 (#60) — `POST /api/mcps/custom/:server_id/cleanup-orphan-env`.
+/// Removes the orphan env keys (those returned by the previous
+/// `update_custom_spec` call) from every config of this server. Re-
+/// encrypts the trimmed env and persists. Surfaces a count of removed
+/// keys per config for the UI to confirm.
+pub async fn cleanup_orphan_env(
+    State(state): State<AppState>,
+    Path(server_id): Path<String>,
+    Json(req): Json<CleanupOrphanEnvRequest>,
+) -> Json<ApiResponse<CleanupOrphanEnvResponse>> {
+    if !server_id.starts_with("custom-") {
+        return Json(ApiResponse::err(format!(
+            "Server `{}` is not a Custom API plugin.", server_id
+        )));
+    }
+    if req.keys.is_empty() {
+        return Json(ApiResponse::ok(CleanupOrphanEnvResponse {
+            configs_updated: 0,
+            total_keys_removed: 0,
+        }));
+    }
+    let secret_opt = { state.config.read().await.encryption_secret.clone() };
+    let Some(secret) = secret_opt else {
+        return Json(ApiResponse::err("No encryption secret configured"));
+    };
+    let keys_to_remove: std::collections::HashSet<String> =
+        req.keys.into_iter().collect();
+    let keys_for_logging = keys_to_remove.clone();
+    let server_id_for_closure = server_id.clone();
+
+    let result = state.db.with_conn(move |conn| -> anyhow::Result<CleanupOrphanEnvResponse> {
+        let configs = db::mcps::list_configs(conn)?;
+        let mut configs_updated = 0usize;
+        let mut total_keys_removed = 0usize;
+        for cfg in configs {
+            if cfg.server_id != server_id_for_closure {
+                continue;
+            }
+            let env = match db::mcps::decrypt_env(&cfg.env_encrypted, &secret) {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!("decrypt_env failed for config {}: {}", cfg.id, e);
+                    continue;
+                }
+            };
+            let removed_here: Vec<String> = env
+                .keys()
+                .filter(|k| keys_to_remove.contains(k.as_str()))
+                .cloned()
+                .collect();
+            if removed_here.is_empty() {
+                continue;
+            }
+            let trimmed: std::collections::HashMap<String, String> = env
+                .into_iter()
+                .filter(|(k, _)| !keys_to_remove.contains(k))
+                .collect();
+            let new_encrypted = db::mcps::encrypt_env(&trimmed, &secret)
+                .map_err(|e| anyhow::anyhow!("encrypt_env: {e}"))?;
+            let new_keys: Vec<String> = trimmed.keys().cloned().collect();
+            db::mcps::update_config(
+                conn,
+                &cfg.id,
+                None,
+                Some(&new_encrypted),
+                Some(&new_keys),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )?;
+            total_keys_removed += removed_here.len();
+            configs_updated += 1;
+        }
+        Ok(CleanupOrphanEnvResponse { configs_updated, total_keys_removed })
+    }).await;
+
+    match result {
+        Ok(resp) => {
+            tracing::info!(
+                "cleanup_orphan_env on server {}: removed {} keys from {} configs (keys: {:?})",
+                server_id, resp.total_keys_removed, resp.configs_updated, keys_for_logging,
+            );
+            Json(ApiResponse::ok(resp))
+        }
+        Err(e) => Json(ApiResponse::err(e.to_string())),
+    }
+}
+
+#[derive(Debug, serde::Deserialize, ts_rs::TS)]
+#[ts(export)]
+pub struct CleanupOrphanEnvRequest {
+    pub keys: Vec<String>,
+}
+
+#[derive(Debug, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct CleanupOrphanEnvResponse {
+    pub configs_updated: usize,
+    pub total_keys_removed: usize,
 }
 
 /// PUT /api/mcps/configs/:id — update config
@@ -1601,6 +1785,170 @@ fn trigger_mcp_drift(state: &AppState, project_ids: Vec<String>) {
     });
 }
 
+// ── 0.8.6 (#63) Path B — file-based Custom plugin import/export ──────
+
+/// Shape of the JSON file written by `export_custom_plugin_file` and
+/// accepted by `import_custom_plugin_file`. Strict superset of
+/// `CustomApiPayload` so the import path can reuse `materialize_custom_server`
+/// — we keep the file format flat (no nesting under a `payload` key) so a
+/// human eyeballing the .json sees plain plugin shape. Secrets are NEVER
+/// written here (the export strips `fields[].value` to ""); the import
+/// path defensively re-strips in case someone hand-crafted a file with
+/// values inside.
+pub fn build_custom_plugin_export(server: &McpServer) -> Option<CustomApiPayload> {
+    let spec = server.api_spec.as_ref()?;
+    Some(CustomApiPayload {
+        name: server.name.clone(),
+        base_url: spec.base_url.clone(),
+        description: server.description.clone(),
+        docs_url: spec.docs_url.clone(),
+        // CRITICAL : `value: ""`. The export NEVER carries credentials,
+        // even if the user's currently-stored env has them.
+        fields: spec.config_keys.iter().map(|k| CustomApiField {
+            label: k.label.clone(),
+            value: String::new(),
+        }).collect(),
+        endpoints: spec.endpoints.clone(),
+        auth: spec.auth.clone(),
+    })
+}
+
+/// Normalise any payload (from JSON body or multipart upload) into a
+/// safe-to-create `CustomApiPayload`: strips `fields[].value` defensively,
+/// validates required fields. Returns Err message on invalid input.
+pub fn sanitize_imported_payload(mut payload: CustomApiPayload) -> Result<CustomApiPayload, String> {
+    if payload.name.trim().is_empty() {
+        return Err("Imported plugin: `name` is required".into());
+    }
+    if payload.base_url.trim().is_empty() {
+        return Err("Imported plugin: `base_url` is required".into());
+    }
+    // Defensive: an imported file MIGHT carry credentials if someone
+    // hand-crafted it. Always strip — the user fills env via the
+    // "Edit secrets" drawer afterwards.
+    for f in &mut payload.fields {
+        f.value.clear();
+    }
+    Ok(payload)
+}
+
+/// `GET /api/mcps/custom/:server_id/export-file`
+///
+/// Streams a `<plugin-slug>.kronn-plugin.json` download with
+/// `Content-Disposition: attachment`. Spec-only — no credentials.
+pub async fn export_custom_plugin_file(
+    State(state): State<AppState>,
+    Path(server_id): Path<String>,
+) -> Response {
+    if !server_id.starts_with("custom-") {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("Server `{}` is not a Custom API plugin.", server_id),
+        ).into_response();
+    }
+    let result = state.db.with_conn(move |conn| -> anyhow::Result<(McpServer, CustomApiPayload)> {
+        let servers = db::mcps::list_servers(conn)?;
+        let server = servers.into_iter().find(|s| s.id == server_id)
+            .ok_or_else(|| anyhow::anyhow!("Custom plugin `{}` not found", server_id))?;
+        let payload = build_custom_plugin_export(&server)
+            .ok_or_else(|| anyhow::anyhow!("Plugin has no exportable spec"))?;
+        Ok((server, payload))
+    }).await;
+    let (server, payload) = match result {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::NOT_FOUND, e.to_string()).into_response(),
+    };
+    let json = match serde_json::to_string_pretty(&payload) {
+        Ok(s) => s,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize: {e}")).into_response(),
+    };
+    let filename = format!("{}.kronn-plugin.json", sanitize_filename(&server.name));
+    let mut response = (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/json; charset=utf-8".to_string()),
+            (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{}\"", filename)),
+        ],
+        json,
+    ).into_response();
+    response
+        .headers_mut()
+        .insert("X-Kronn-Export-Kind", "custom-plugin".parse().unwrap());
+    response
+}
+
+/// Strip any character that would break a `Content-Disposition` filename
+/// or the host filesystem. Keep ASCII letters / digits / `-` / `_`.
+fn sanitize_filename(input: &str) -> String {
+    let mut out: String = input
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    while out.contains("--") {
+        out = out.replace("--", "-");
+    }
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() { "plugin".to_string() } else { trimmed.to_string() }
+}
+
+/// `POST /api/mcps/custom/import-file`
+///
+/// Accepts an `application/json` body with the same shape as the
+/// export file (`CustomApiPayload`). Frontend reads the user's `.json`
+/// file via `FileReader`, then POSTs the text as JSON — keeps the
+/// server side dependency-light (no multipart parser needed). Strips
+/// secrets defensively even if the file was hand-crafted with values.
+pub async fn import_custom_plugin_file(
+    State(state): State<AppState>,
+    Json(payload): Json<CustomApiPayload>,
+) -> Json<ApiResponse<McpConfigDisplay>> {
+    let payload = match sanitize_imported_payload(payload) {
+        Ok(p) => p,
+        Err(e) => return Json(ApiResponse::err(e)),
+    };
+
+    // Create the config via the standard path so referential integrity
+    // matches the existing /api/mcps/configs creation flow.
+    let label = payload.name.clone();
+    let server = materialize_custom_server(&payload);
+    let server_id = server.id.clone();
+    let server_id_for_log = server_id.clone();
+    let result = state.db.with_conn(move |conn| -> anyhow::Result<McpConfigDisplay> {
+        db::mcps::upsert_server(conn, &server)?;
+        let config_id = Uuid::new_v4().to_string();
+        let env_keys: Vec<String> = server.api_spec
+            .as_ref()
+            .map(|s| s.config_keys.iter().map(|k| k.env_key.clone()).collect())
+            .unwrap_or_default();
+        let config_hash = db::mcps::compute_config_hash(&server, &std::collections::HashMap::new(), None);
+        let config = McpConfig {
+            id: config_id.clone(),
+            server_id: server_id.clone(),
+            label: label.clone(),
+            env_encrypted: String::new(),
+            env_keys,
+            args_override: None,
+            is_global: false,
+            config_hash,
+            include_general: false,
+            host_sync: HostSyncMode::None,
+            project_ids: vec![],
+        };
+        db::mcps::insert_config(conn, &config)?;
+        let configs = db::mcps::list_configs_display(conn, None)?;
+        configs.into_iter().find(|c| c.id == config_id)
+            .ok_or_else(|| anyhow::anyhow!("Config not found after import"))
+    }).await;
+
+    match result {
+        Ok(cfg) => {
+            tracing::info!("Imported custom plugin via file: server={}, config={}", server_id_for_log, cfg.id);
+            Json(ApiResponse::ok(cfg))
+        }
+        Err(e) => Json(ApiResponse::err(e.to_string())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1985,5 +2333,200 @@ mod tests {
         assert_eq!(name_slug("Salesforce Sales API"), "salesforce-sales-api");
         assert_eq!(name_slug("3rd-party CRM!!"), "3rd-party-crm");
         assert_eq!(name_slug(""), "api");
+    }
+
+    // ── 0.8.6 (#60) orphan env diff ─────────────────────────────────
+
+    fn mk_prev_server(server_id: &str, env_keys: &[&str]) -> McpServer {
+        McpServer {
+            id: server_id.into(),
+            name: "Prev".into(),
+            description: "".into(),
+            transport: McpTransport::ApiOnly,
+            source: McpSource::Manual,
+            api_spec: Some(ApiSpec {
+                base_url: "https://api.example.com".into(),
+                auth: ApiAuthKind::None,
+                docs_url: None,
+                endpoints: vec![],
+                config_keys: env_keys.iter().map(|k| ApiConfigKey {
+                    env_key: k.to_string(),
+                    label: k.to_string(),
+                    placeholder: String::new(),
+                    description: String::new(),
+                }).collect(),
+            }),
+        }
+    }
+
+    fn mk_payload(labels: &[&str]) -> CustomApiPayload {
+        CustomApiPayload {
+            name: "MyAPI".into(),
+            base_url: "https://api.example.com".into(),
+            description: "".into(),
+            docs_url: None,
+            fields: labels.iter().map(|l| CustomApiField { label: l.to_string(), value: String::new() }).collect(),
+            endpoints: vec![],
+            auth: ApiAuthKind::None,
+        }
+    }
+
+    fn mk_cfg_display(id: &str, server_id: &str, env_keys: &[&str]) -> McpConfigDisplay {
+        McpConfigDisplay {
+            id: id.into(),
+            server_id: server_id.into(),
+            server_name: "Prev".into(),
+            label: id.into(),
+            env_keys: env_keys.iter().map(|s| s.to_string()).collect(),
+            env_masked: vec![],
+            args_override: None,
+            is_global: false,
+            include_general: false,
+            config_hash: "h".into(),
+            project_ids: vec![],
+            project_names: vec![],
+            secrets_broken: false,
+            host_sync: HostSyncMode::None,
+        }
+    }
+
+    #[test]
+    fn orphan_diff_returns_empty_when_no_rename() {
+        // Same labels (different cases that slugify to the same key)
+        // → no orphan.
+        let prev = mk_prev_server("custom-x-abc", &["API_KEY"]);
+        let payload = mk_payload(&["API_KEY"]);
+        let configs = vec![mk_cfg_display("cfg-1", "custom-x-abc", &["API_KEY"])];
+        let orphans = compute_orphan_env_keys(&prev, &payload, &configs, "custom-x-abc");
+        assert!(orphans.is_empty(), "got: {orphans:?}");
+    }
+
+    #[test]
+    fn orphan_diff_flags_renamed_field_still_in_env() {
+        // Field renamed from "API_KEY" → "TOKEN" : old key still in env.
+        let prev = mk_prev_server("custom-x-abc", &["API_KEY"]);
+        let payload = mk_payload(&["TOKEN"]);
+        let configs = vec![mk_cfg_display("cfg-1", "custom-x-abc", &["API_KEY"])];
+        let orphans = compute_orphan_env_keys(&prev, &payload, &configs, "custom-x-abc");
+        assert_eq!(orphans, vec!["API_KEY".to_string()]);
+    }
+
+    #[test]
+    fn orphan_diff_flags_multiple_removed_keys_sorted_alpha() {
+        let prev = mk_prev_server("custom-x-abc", &["BETA_KEY", "ALPHA_KEY", "GAMMA_KEY"]);
+        let payload = mk_payload(&["NEW_NAME"]);
+        let configs = vec![mk_cfg_display(
+            "cfg-1",
+            "custom-x-abc",
+            &["BETA_KEY", "ALPHA_KEY", "GAMMA_KEY"],
+        )];
+        let orphans = compute_orphan_env_keys(&prev, &payload, &configs, "custom-x-abc");
+        // Sorted alpha (BTreeSet ordering).
+        assert_eq!(orphans, vec![
+            "ALPHA_KEY".to_string(),
+            "BETA_KEY".to_string(),
+            "GAMMA_KEY".to_string(),
+        ]);
+    }
+
+    #[test]
+    fn orphan_diff_ignores_configs_of_other_servers() {
+        let prev = mk_prev_server("custom-x-abc", &["API_KEY"]);
+        let payload = mk_payload(&["RENAMED"]);
+        // Two configs: one for our server, one for a different server.
+        // The other-server config has the same orphan key name — must
+        // be ignored (not our problem).
+        let configs = vec![
+            mk_cfg_display("cfg-other", "custom-y-other", &["API_KEY"]),
+        ];
+        let orphans = compute_orphan_env_keys(&prev, &payload, &configs, "custom-x-abc");
+        assert!(orphans.is_empty(), "got: {orphans:?}");
+    }
+
+    #[test]
+    fn orphan_diff_skips_removed_keys_absent_from_all_configs() {
+        // Field removed at spec level but never had a stored value in
+        // env → no orphan to report.
+        let prev = mk_prev_server("custom-x-abc", &["UNUSED_KEY"]);
+        let payload = mk_payload(&["NEW_NAME"]);
+        // Config exists for our server but env_keys is empty (user
+        // never filled in the field).
+        let configs = vec![mk_cfg_display("cfg-1", "custom-x-abc", &[])];
+        let orphans = compute_orphan_env_keys(&prev, &payload, &configs, "custom-x-abc");
+        assert!(orphans.is_empty(), "got: {orphans:?}");
+    }
+
+    #[test]
+    fn export_strips_field_values_even_when_payload_carries_them() {
+        // Build a server with a spec that already has fields. The export
+        // helper MUST emit fields with empty `value` regardless of any
+        // stored env state — credentials never travel inside the file.
+        let server = mk_prev_server("custom-test-aaa11111", &["API_KEY"]);
+        let exported = build_custom_plugin_export(&server)
+            .expect("custom plugin must export");
+        assert_eq!(exported.fields.len(), 1);
+        assert_eq!(exported.fields[0].label, "API_KEY");
+        assert_eq!(exported.fields[0].value, "", "value MUST be empty in export");
+    }
+
+    #[test]
+    fn export_returns_none_for_server_without_api_spec() {
+        let mut server = mk_prev_server("custom-no-spec-bbb22222", &[]);
+        server.api_spec = None;
+        assert!(build_custom_plugin_export(&server).is_none());
+    }
+
+    #[test]
+    fn sanitize_strips_values_defensively_on_import() {
+        // Imported file carries values (someone hand-crafted it) →
+        // sanitize_imported_payload MUST wipe.
+        let payload = mk_payload(&["API_KEY", "WEBHOOK_SECRET"]);
+        let mut tainted = payload.clone();
+        for f in &mut tainted.fields {
+            f.value = "sk-leaked-credential-123".to_string();
+        }
+        let sanitized = sanitize_imported_payload(tainted).unwrap();
+        assert!(
+            sanitized.fields.iter().all(|f| f.value.is_empty()),
+            "sanitize must strip all values",
+        );
+    }
+
+    #[test]
+    fn sanitize_rejects_empty_name() {
+        let mut payload = mk_payload(&[]);
+        payload.name = "  ".into();
+        let err = sanitize_imported_payload(payload).unwrap_err();
+        assert!(err.contains("name"));
+    }
+
+    #[test]
+    fn sanitize_rejects_empty_base_url() {
+        let mut payload = mk_payload(&[]);
+        payload.base_url = "".into();
+        let err = sanitize_imported_payload(payload).unwrap_err();
+        assert!(err.contains("base_url"));
+    }
+
+    #[test]
+    fn sanitize_filename_strips_dangerous_chars() {
+        assert_eq!(sanitize_filename("My API / v2.1"), "My-API-v2-1");
+        assert_eq!(sanitize_filename("../../etc/passwd"), "etc-passwd");
+        assert_eq!(sanitize_filename(""), "plugin");
+        assert_eq!(sanitize_filename("simple-name_42"), "simple-name_42");
+    }
+
+    #[test]
+    fn orphan_diff_dedup_across_multiple_configs() {
+        // Same orphan key across 2 configs of the same server → return
+        // once (deduplicated by the BTreeSet).
+        let prev = mk_prev_server("custom-x-abc", &["API_KEY"]);
+        let payload = mk_payload(&["RENAMED"]);
+        let configs = vec![
+            mk_cfg_display("cfg-1", "custom-x-abc", &["API_KEY"]),
+            mk_cfg_display("cfg-2", "custom-x-abc", &["API_KEY"]),
+        ];
+        let orphans = compute_orphan_env_keys(&prev, &payload, &configs, "custom-x-abc");
+        assert_eq!(orphans, vec!["API_KEY".to_string()]);
     }
 }

@@ -1027,12 +1027,13 @@ describe('ApiCallStepCard', () => {
       />,
     );
     fireEvent.click(screen.getByRole('button', { expanded: false }));
-    // The method <select> sits next to outputVar / timeout — find by its
-    // list of options (POST is unique enough).
-    const methodSelect = Array.from(document.querySelectorAll('select'))
-      .find(s => Array.from(s.options).some(o => o.value === 'POST'));
-    expect(methodSelect, 'method picker should be in DOM').toBeTruthy();
-    fireEvent.change(methodSelect!, { target: { value: 'POST' } });
+    // 0.8.6 (#62) — migrated to <Dropdown>: query by testId, click
+    // trigger, click the POST option in the listbox.
+    const methodTrigger = screen.getByTestId('wf-apicall-method-picker');
+    expect(methodTrigger, 'method picker should be in DOM').toBeTruthy();
+    fireEvent.click(methodTrigger);
+    const postOption = screen.getByTestId('wf-apicall-method-picker-option-POST');
+    fireEvent.click(postOption);
     expect(onChange).toHaveBeenCalledWith({ api_method: 'POST' });
   });
 

@@ -4,6 +4,7 @@ import './styles/index.css';
 import { App } from './App';
 import { I18nProvider } from './lib/I18nContext';
 import { ThemeProvider } from './lib/ThemeContext';
+import { LayoutDensityProvider } from './lib/LayoutDensityContext';
 import { ThemeEffects } from './components/ThemeEffects';
 import { setApiBase } from './lib/api';
 
@@ -27,10 +28,12 @@ initApiBase().then(() => {
   ReactDOM.createRoot(rootEl).render(
     <React.StrictMode>
       <ThemeProvider>
-        <I18nProvider>
-          <ThemeEffects />
-          <App />
-        </I18nProvider>
+        <LayoutDensityProvider>
+          <I18nProvider>
+            <ThemeEffects />
+            <App />
+          </I18nProvider>
+        </LayoutDensityProvider>
       </ThemeProvider>
     </React.StrictMode>,
   );

@@ -5,6 +5,46 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Kronn · Many agents. Zero chaos.</title>
   <meta name="description" content="Le control plane local-first pour tes CLI IA. Tu apportes Claude Code, Codex, Gemini, Ollama. Kronn apporte la mémoire, l'orchestration et la continuité.">
+
+  <!-- 0.8.6 phase 4 — Open Graph + Twitter card. The og:image path
+       is a placeholder ; replace with a 1200x630 PNG when ready.
+       Until then, social previews fall back to og:title + og:description.
+       Canonical URL points to GitHub Pages (the site's deployment target). -->
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Kronn">
+  <meta property="og:title" content="Kronn · Many agents. Zero chaos.">
+  <meta property="og:description" content="Local-first control plane for your AI CLIs. You bring Claude Code, Codex, Gemini, Ollama. Kronn brings memory, orchestration & continuity — token-cost zero on mechanical steps.">
+  <meta property="og:url" content="https://docroms.github.io/Kronn/">
+  <meta property="og:image" content="https://docroms.github.io/Kronn/og-image.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Kronn — the control plane orchestrating Claude, Codex, Gemini and Ollama from one screen.">
+  <meta property="og:locale" content="fr_FR">
+  <meta property="og:locale:alternate" content="en_US">
+  <meta property="og:locale:alternate" content="es_ES">
+
+  <!-- Twitter card mirrors the OG fields with the `summary_large_image`
+       layout (full-width preview rather than thumbnail-only). No
+       @site/@creator handles yet — add when an official account exists. -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Kronn · Many agents. Zero chaos.">
+  <meta name="twitter:description" content="Local-first control plane for your AI CLIs. Memory, orchestration & continuity across Claude Code, Codex, Gemini, Ollama.">
+  <meta name="twitter:image" content="https://docroms.github.io/Kronn/og-image.png">
+  <meta name="twitter:image:alt" content="Kronn — the control plane orchestrating Claude, Codex, Gemini and Ollama from one screen.">
+
+  <!-- Canonical URL so search engines don't index every locale as
+       a duplicate. Each locale page also declares its own canonical. -->
+  <link rel="canonical" href="https://docroms.github.io/Kronn/">
+
+  <!-- Hreflang : tells Google about the locale variants. Mandatory
+       for the multi-language landing page to surface the right one
+       per user. `x-default` falls back to the FR (index.html) page
+       since that's the primary author-language. -->
+  <link rel="alternate" hreflang="fr" href="https://docroms.github.io/Kronn/">
+  <link rel="alternate" hreflang="en" href="https://docroms.github.io/Kronn/en.html">
+  <link rel="alternate" hreflang="es" href="https://docroms.github.io/Kronn/es.html">
+  <link rel="alternate" hreflang="x-default" href="https://docroms.github.io/Kronn/">
+
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Russo+One&family=VT323&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
@@ -1295,6 +1335,84 @@
     }
     @media (max-width: 560px) {
       .compound-grid { grid-template-columns: 1fr; }
+    }
+
+    /* 0.8.6 phase 4 — Mobile defense pack (≤ 768px).
+       Pre-fix, several grids stayed multi-column at narrow widths and
+       cards with `nowrap` / fixed-width content forced horizontal page
+       scrolling. This block enforces single-column layout for every
+       grid still standing at 768px AND adds defensive guards against
+       any cell content trying to push beyond the viewport. */
+    @media (max-width: 768px) {
+      /* Reduce container padding so the cards have room to breathe.
+         The 980px breakpoint already drops to 22px ; on tight phones
+         we go further. */
+      .container { padding: 0 16px; }
+
+      /* Force every known grid layout to single column. Cleaner than
+         hunting them one by one — any future grid added to the page
+         automatically inherits the mobile-safe default. */
+      .cli-grid,
+      .leaves,
+      .compare-grid,
+      .compound-grid,
+      .quickstart-stages,
+      .concepts-grid,
+      .security-grid,
+      .anti-grid,
+      .inventory-grid,
+      .plugin-flow-row,
+      .tool-cards {
+        grid-template-columns: 1fr !important;
+        gap: 12px;
+      }
+
+      /* Grid items can refuse to shrink below their content's intrinsic
+         min-width (long strings, code blocks, etc.) and force horizontal
+         overflow even when the parent is single-column. Setting min-width:
+         0 on every direct grid child opts back into normal flex/grid
+         shrinking. The cascade hits every card-style class on the page. */
+      .cli-card,
+      .compound-item,
+      .qs-stage,
+      .concept-def,
+      .sec-panel,
+      .anti-card,
+      .tool-card,
+      .compare-panel,
+      .decomp-wrap,
+      .leaf,
+      .plugin-card {
+        min-width: 0;
+        max-width: 100%;
+        box-sizing: border-box;
+      }
+      /* `ul` inside compare-panel inherits the default 40px browser
+         padding-left — combined with the panel's own 26px padding,
+         the bullet content gets pushed unevenly toward the right at
+         narrow widths. Reset the list padding so the visual centre
+         of each card stays aligned with the section's content gutter. */
+      .compare-panel ul {
+        padding-left: 0;
+      }
+
+      /* Hide the directional arrows that lose their meaning in a
+         single column. They were positioned absolutely on a multi-col
+         row ; on mobile they become decorative noise. */
+      .plugin-arrow { display: none; }
+      .compound-item + .compound-item::before { display: none; }
+
+      /* Tighten typography so dense cards don't blow up — the larger
+         pixel/display fonts overshoot 380px viewports. */
+      .slogan { font-size: 38px; }
+      .qs-title { font-size: 22px; }
+      .compound-title { font-size: 15px; }
+
+      /* Final defensive net : nothing in the page body should ever
+         force the document to scroll horizontally. If a single nested
+         element overflows (rare — e.g. a `pre` of raw JSON output),
+         it gets its own scroll within its container. */
+      html, body { overflow-x: hidden; max-width: 100%; }
     }
   </style>
 </head>

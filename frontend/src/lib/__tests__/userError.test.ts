@@ -112,4 +112,25 @@ describe('userError', () => {
       expect(userError('DB error: column missing')).toBe('DB error: column missing');
     });
   });
+
+  describe('0.8.6 regression — server error from api() helper stays visible', () => {
+    // Pre-fix : axum's Json deserialize error contains `at line N column M`
+    // which tripped the "looks like stack trace" guard → user saw generic
+    // "Une erreur est survenue. Réessayez." with zero debug signal. The
+    // QP improver deploy flow hit this when the agent emitted `null` for
+    // a non-Optional field. Fix: prefix `Server error (HTTP` joins
+    // BACKEND_PREFIXES.
+    it('keeps "Server error (HTTP 422)" verbatim even with "at line X column Y" in body', () => {
+      const raw = "Server error (HTTP 422) — Failed to deserialize the JSON body into the target type: description: invalid type: null, expected a string at line 1 column 234";
+      const out = userError(new Error(raw));
+      expect(out).toContain('Server error (HTTP 422)');
+      expect(out).toContain('description');
+    });
+
+    it('keeps "Server error (HTTP 500)" body verbatim too', () => {
+      expect(userError(new Error('Server error (HTTP 500) — internal DB error'))).toBe(
+        'Server error (HTTP 500) — internal DB error',
+      );
+    });
+  });
 });

@@ -32,8 +32,15 @@ use super::{
     AGENT_GLOBAL_TIMEOUT, DEFAULT_STALL_TIMEOUT_MIN, MAX_AGENT_RESPONSE_BYTES,
 };
 
-/// Shared SSE stream builder
-pub(super) async fn make_agent_stream(
+/// Shared SSE stream builder.
+///
+/// 0.8.6 phase 4 — visibility bumped to `pub(crate)` so the MCP-remote
+/// route `qp_run` can fire-and-forget the agent in a background
+/// `tokio::spawn`. The spawned task drops the returned `Sse` handle ;
+/// the internal channel's senders use `let _ = tx.send(...)` so a
+/// dropped receiver does NOT cancel the agent — the message still
+/// gets persisted to DB.
+pub(crate) async fn make_agent_stream(
     state: AppState,
     discussion_id: String,
     agent_override: Option<AgentType>,
@@ -433,6 +440,15 @@ pub(super) async fn make_agent_stream(
                 // the UI shows a uniform `[kronn-internal: …]` badge regardless
                 // of which agent path triggered the introspection.
                 let mut kronn_tool_calls: Vec<String> = Vec::new();
+                // 0.8.6 phase 4 — also capture EVERY OTHER tool call (Claude
+                // Code natives like `Read` / `Bash` / `Edit` / `Grep`, plus
+                // third-party MCP servers wired in the project). Same shape
+                // but with the `[agent-native: …]` prefix so the frontend
+                // can render them in a SEPARATE banner from Kronn-MCP calls.
+                // User feedback 2026-05-22 : the live in-stream tool log
+                // disappears when the stream ends, leaving no trace for
+                // post-hoc debug. Persisting them keeps the audit trail.
+                let mut native_tool_calls: Vec<String> = Vec::new();
                 let global_deadline = tokio::time::Instant::now() + AGENT_GLOBAL_TIMEOUT;
 
                 // Periodic checkpoint of full_response → discussions.partial_response
@@ -629,17 +645,36 @@ pub(super) async fn make_agent_stream(
                                     if !client_gone {
                                         let _ = tx.send(AgentStreamEvent::Log { text: log }).await;
                                     }
-                                    // Persist kronn-internal calls so the
-                                    // disc transcript carries a uniform
-                                    // tool-call trace (UI badge in
-                                    // MessageBubble). Format mirrors
-                                    // `slash_markers.rs`: `[kronn-internal:
-                                    // disc_get_message(4)]`.
+                                    // Persist tool calls in the disc transcript
+                                    // so the UI banner can render them after the
+                                    // agent reply lands. Two source buckets so
+                                    // the frontend can split them visually :
+                                    //   - `mcp__kronn-internal__*` → kronn-internal
+                                    //     (the deagentified MCP exposed by Kronn)
+                                    //   - everything else → agent-native (Claude
+                                    //     Code's own Read/Bash/Edit, third-party
+                                    //     MCP servers, etc.).
                                     if let Some(name) = tool.strip_prefix("mcp__kronn-internal__") {
                                         let pretty_args = pretty_kronn_args(name, &current_tool_input);
                                         kronn_tool_calls.push(format!(
                                             "[kronn-internal: {}({})]",
                                             name, pretty_args
+                                        ));
+                                    } else {
+                                        // Args : keep concise — large file
+                                        // contents (Edit, Write) would bloat
+                                        // the disc transcript. Truncate at
+                                        // ~120 chars to fit the banner without
+                                        // sacrificing the key signal (which
+                                        // file, what command).
+                                        let args = if current_tool_input.is_empty() {
+                                            String::new()
+                                        } else {
+                                            truncate_tool_args(&current_tool_input, 120)
+                                        };
+                                        native_tool_calls.push(format!(
+                                            "[agent-native: {}({})]",
+                                            tool, args
                                         ));
                                     }
                                 }
@@ -936,6 +971,42 @@ pub(super) async fn make_agent_stream(
                     tracing::info!(
                         "Persisted {} kronn-internal MCP tool-call(s) for disc {}",
                         kronn_tool_calls.len(), disc_id
+                    );
+                }
+
+                // 0.8.6 phase 4 — also persist native tool calls (Claude
+                // Code's Read/Bash/Edit, third-party MCP servers). Same
+                // shape as kronn-internal but with `[agent-native: …]`
+                // prefix so the frontend banner can split them out.
+                // Limits the audit-trail gap user flagged 2026-05-22 :
+                // live tool log disappears on stream end, leaving no
+                // post-hoc trace for debug.
+                if !native_tool_calls.is_empty() {
+                    for body in native_tool_calls.iter() {
+                        let sys_msg = DiscussionMessage {
+                            id: Uuid::new_v4().to_string(),
+                            role: MessageRole::System,
+                            content: body.clone(),
+                            agent_type: None,
+                            timestamp: Utc::now(),
+                            tokens_used: 0,
+                            auth_mode: None,
+                            model_tier: None,
+                            cost_usd: None,
+                            author_pseudo: None,
+                            author_avatar_email: None, source_msg_id: None, duration_ms: None,
+                        };
+                        let did_sys = disc_id.clone();
+                        let m = sys_msg.clone();
+                        if let Err(e) = state.db.with_conn(move |conn| {
+                            crate::db::discussions::insert_message(conn, &did_sys, &m)
+                        }).await {
+                            tracing::warn!("Failed to insert agent-native tool-call system message: {e}");
+                        }
+                    }
+                    tracing::info!(
+                        "Persisted {} agent-native tool-call(s) for disc {}",
+                        native_tool_calls.len(), disc_id
                     );
                 }
 
@@ -1371,6 +1442,26 @@ pub(super) async fn run_agent_collect(mut process: runner::AgentProcess) -> Stri
 ///
 /// Falls through to the raw JSON when the shape is unfamiliar — better
 /// to render `{"foo":"bar"}` than to drop the call from the trace.
+/// 0.8.6 phase 4 — truncate raw tool args for the `[agent-native: ...]`
+/// trace. Some native tools (`Edit`, `Write`) carry large file contents
+/// as args — persisting them verbatim would blow up the disc transcript
+/// and the banner would be unusable. We keep the start of the JSON, cut
+/// on a char boundary (defensive for French / emoji / multi-byte file
+/// paths), and append `…` to signal the truncation.
+///
+/// Single-line collapse : agent stream-JSON sometimes serialises multi-
+/// line code blocks with literal `\n` ; we replace those with a space
+/// so the persisted trace stays one-line-per-call.
+fn truncate_tool_args(raw: &str, max_chars: usize) -> String {
+    let collapsed = raw.replace('\n', " ");
+    if collapsed.chars().count() <= max_chars {
+        return collapsed;
+    }
+    let mut out: String = collapsed.chars().take(max_chars).collect();
+    out.push('…');
+    out
+}
+
 fn pretty_kronn_args(tool_name: &str, raw_json: &str) -> String {
     let val: serde_json::Value = match serde_json::from_str(raw_json) {
         Ok(v) => v,
@@ -1441,5 +1532,55 @@ mod pretty_kronn_args_tests {
         // System message still says `[kronn-internal: tool()]` which
         // tells the user the call happened even if we can't show args.
         assert_eq!(pretty_kronn_args("disc_get_message", "not-json"), "");
+    }
+}
+
+#[cfg(test)]
+mod truncate_tool_args_tests {
+    use super::truncate_tool_args;
+
+    #[test]
+    fn short_input_passes_through_unchanged() {
+        assert_eq!(truncate_tool_args("hello", 120), "hello");
+        assert_eq!(truncate_tool_args(r#"{"file":"a.rs"}"#, 120), r#"{"file":"a.rs"}"#);
+    }
+
+    #[test]
+    fn long_input_truncates_with_ellipsis() {
+        let raw = "x".repeat(200);
+        let out = truncate_tool_args(&raw, 50);
+        // 50 chars + 1 ellipsis = 51
+        assert_eq!(out.chars().count(), 51);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn collapses_newlines_to_spaces() {
+        // Native tools like `Edit` or `Write` carry multi-line content
+        // in their JSON args. We persist as a one-liner so the disc
+        // transcript stays readable.
+        let raw = "line1\nline2\nline3";
+        assert_eq!(truncate_tool_args(raw, 120), "line1 line2 line3");
+    }
+
+    #[test]
+    fn char_boundary_safe_with_multibyte() {
+        // French accents + emoji are multi-byte ; naive [..N] slicing
+        // would panic. .chars().take() is boundary-safe by definition.
+        let raw = "écoute 🦀 ".repeat(30);
+        let out = truncate_tool_args(&raw, 20);
+        assert_eq!(out.chars().count(), 21);  // 20 + ellipsis
+    }
+
+    #[test]
+    fn empty_input_returns_empty() {
+        assert_eq!(truncate_tool_args("", 120), "");
+    }
+
+    #[test]
+    fn input_exactly_at_limit_not_truncated() {
+        // Boundary case : input length == max chars → no ellipsis.
+        let raw = "x".repeat(50);
+        assert_eq!(truncate_tool_args(&raw, 50), "x".repeat(50));
     }
 }

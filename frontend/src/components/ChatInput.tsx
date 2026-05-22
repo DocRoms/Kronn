@@ -278,7 +278,11 @@ export function ChatInput({
 
   const [dragOver, setDragOver] = useState(false);
 
-  const [sttState, setSttState] = useState<'idle' | 'recording' | 'transcribing'>('idle');
+  // 0.8.6 fix — 'loading' surfaces the worker's first-time model
+  // download (~40MB from HF). Pre-fix the user saw a blank "transcribing"
+  // banner during the 30s-2min download, with no indication of progress
+  // vs a silent failure.
+  const [sttState, setSttState] = useState<'idle' | 'recording' | 'loading' | 'transcribing'>('idle');
   const [voiceMode, setVoiceMode] = useState(false);
   const [voiceCountdown, setVoiceCountdown] = useState<number | null>(null);
   const voiceCountdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -410,7 +414,7 @@ export function ChatInput({
       mediaRecorderRef.current?.stop();
       return;
     }
-    if (sttState === 'transcribing') return;
+    if (sttState === 'transcribing' || sttState === 'loading') return;
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -437,6 +441,15 @@ export function ChatInput({
 
         try {
           const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+          // 0.8.6 fix — guard against empty audio (recorder didn't fire
+          // ondataavailable, very fast click-record-stop, etc.). Without
+          // this, decodeAudioData throws a cryptic error and the toast
+          // misleads the user about what happened.
+          if (blob.size === 0) {
+            toast(t('disc.sttEmptyAudio'), 'error');
+            setSttState('idle');
+            return;
+          }
           const arrayBuf = await blob.arrayBuffer();
           const audioCtx = new AudioContext({ sampleRate: 16000 });
           let decoded;
@@ -448,13 +461,28 @@ export function ChatInput({
           const float32 = audioBufferToFloat32(decoded);
 
           const lang = discussion?.language || 'fr';
-          const text = await transcribeAudio(getSttWorker(), float32, lang);
+          // 0.8.6 fix — wire the worker's `status` messages so the UI
+          // can show "Téléchargement du modèle…" on the first call
+          // (Whisper-tiny is ~40MB from HF, takes 30s-2min). Pre-fix
+          // the user saw a silent transcribing banner for up to 2 min
+          // before either getting text or hitting the 120s timeout.
+          const text = await transcribeAudio(getSttWorker(), float32, lang, {
+            onStatus: (status) => {
+              if (status === 'loading') setSttState('loading');
+              else if (status === 'transcribing') setSttState('transcribing');
+            },
+          });
 
-          if (text) {
+          const cleaned = text.trim();
+          if (cleaned) {
             if (voiceMode) {
               voiceAutoSendRef.current = true;
             }
-            updateChatInput(chatInputValueRef.current ? chatInputValueRef.current + ' ' + text : text);
+            // 0.8.6 fix — trim the existing-input trailing space before
+            // concatenation so we don't end up with double-spaces. Also
+            // ensure a single separator between old and new text.
+            const prev = chatInputValueRef.current.trimEnd();
+            updateChatInput(prev ? `${prev} ${cleaned}` : cleaned);
             setTimeout(() => {
               if (chatInputRef.current) {
                 chatInputRef.current.focus();
@@ -462,9 +490,19 @@ export function ChatInput({
                 chatInputRef.current.style.height = Math.min(chatInputRef.current.scrollHeight, 160) + 'px';
               }
             }, 0);
+          } else {
+            // 0.8.6 fix — silent empty-text was a confusing UX (user
+            // recorded, transcribed, and saw nothing happen). Surface
+            // that no speech was detected.
+            toast(t('disc.sttNoSpeech'), 'error');
           }
         } catch (err) {
+          // 0.8.6 fix — pre-fix this was console.error only ; the user
+          // got no UI signal that anything went wrong. Now we toast the
+          // error so they can either retry or report it.
           console.error('STT transcription failed:', err);
+          const msg = err instanceof Error ? err.message : String(err);
+          toast(t('disc.sttFailed', msg), 'error');
         }
         setSttState('idle');
       };
@@ -475,7 +513,7 @@ export function ChatInput({
       console.error('Microphone access denied:', err);
       setSttState('idle');
     }
-  }, [sttState, discussion?.language, voiceMode, updateChatInput]);
+  }, [sttState, discussion?.language, voiceMode, updateChatInput, toast, t]);
 
   // ─── Voice mode effects ──────────────────────────────────────────────────
 
@@ -590,6 +628,12 @@ export function ChatInput({
           <button className="disc-recording-stop-btn" onClick={handleMicToggle}>
             <StopCircle size={10} /> {voiceMode ? t('disc.sendVoice') : t('disc.stopRecording')}
           </button>
+        </div>
+      )}
+      {sttState === 'loading' && (
+        <div className="disc-transcribing-banner">
+          <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} className="text-accent" />
+          <span className="disc-transcribing-text">{t('disc.sttModelLoading')}</span>
         </div>
       )}
       {sttState === 'transcribing' && (
@@ -859,7 +903,7 @@ export function ChatInput({
               data-active={sttState === 'recording'}
               data-color="red"
               onClick={handleMicToggle}
-              disabled={sending || sttState === 'transcribing'}
+              disabled={sending || sttState === 'transcribing' || sttState === 'loading'}
               title={sttState === 'recording' ? t('disc.micStop') : t('disc.micDictate')}
               aria-label={sttState === 'recording' ? t('disc.micStop') : t('disc.micDictate')}
             >

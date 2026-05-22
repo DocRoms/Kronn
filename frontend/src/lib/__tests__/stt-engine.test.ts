@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { WHISPER_LANGS, audioBufferToFloat32 } from '../stt-engine';
+import { describe, it, expect, vi } from 'vitest';
+import { WHISPER_LANGS, audioBufferToFloat32, transcribeAudio } from '../stt-engine';
 
 describe('WHISPER_LANGS', () => {
   it('maps fr, en, es to whisper language names', () => {
@@ -68,5 +68,72 @@ describe('audioBufferToFloat32', () => {
     for (const v of result) {
       expect(v).toBeCloseTo(0.5);
     }
+  });
+});
+
+describe('transcribeAudio (0.8.6 fix — onStatus propagation)', () => {
+  // Minimal Worker double : postMessage records the request, onmessage is
+  // settable, and we manually inject responses to drive the promise.
+  function makeFakeWorker() {
+    let onmessage: ((e: { data: unknown }) => void) | null = null;
+    let onerror: ((e: unknown) => void) | null = null;
+    return {
+      postMessage: vi.fn(),
+      get onmessage() { return onmessage; },
+      set onmessage(fn: typeof onmessage) { onmessage = fn; },
+      get onerror() { return onerror; },
+      set onerror(fn: typeof onerror) { onerror = fn; },
+      emit: (data: unknown) => onmessage?.({ data }),
+      emitError: (err: unknown) => onerror?.(err),
+    };
+  }
+
+  it('forwards status messages to onStatus callback', async () => {
+    const w = makeFakeWorker();
+    const statuses: string[] = [];
+    const p = transcribeAudio(w as unknown as Worker, new Float32Array(0), 'fr', {
+      onStatus: (s) => statuses.push(s),
+    });
+    // Simulate worker progress sequence: loading → ready → transcribing → text.
+    w.emit({ status: 'loading' });
+    w.emit({ status: 'ready' });
+    w.emit({ status: 'transcribing' });
+    w.emit({ text: 'bonjour' });
+    const text = await p;
+    expect(text).toBe('bonjour');
+    expect(statuses).toEqual(['loading', 'ready', 'transcribing']);
+  });
+
+  it('rejects on worker error message', async () => {
+    const w = makeFakeWorker();
+    const p = transcribeAudio(w as unknown as Worker, new Float32Array(0), 'fr');
+    w.emit({ error: 'model not found' });
+    await expect(p).rejects.toThrow('model not found');
+  });
+
+  it('rejects on worker onerror', async () => {
+    const w = makeFakeWorker();
+    const p = transcribeAudio(w as unknown as Worker, new Float32Array(0), 'fr');
+    w.emitError(new Error('worker crashed'));
+    await expect(p).rejects.toBeTruthy();
+  });
+
+  it('passes language + model to worker', () => {
+    const w = makeFakeWorker();
+    transcribeAudio(w as unknown as Worker, new Float32Array(4), 'en');
+    expect(w.postMessage).toHaveBeenCalledTimes(1);
+    const call = w.postMessage.mock.calls[0][0] as { language: string; audio: Float32Array };
+    expect(call.language).toBe('english');
+    expect(call.audio.length).toBe(4);
+  });
+
+  it('does not require onStatus (back-compat with old callers)', async () => {
+    // Pre-0.8.6 callers that don't pass options must keep working.
+    const w = makeFakeWorker();
+    const p = transcribeAudio(w as unknown as Worker, new Float32Array(0), 'fr');
+    // status messages should just be silently dropped.
+    w.emit({ status: 'loading' });
+    w.emit({ text: 'hi' });
+    await expect(p).resolves.toBe('hi');
   });
 });

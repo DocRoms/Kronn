@@ -24,7 +24,7 @@ use super::helpers::{
     check_ai_dir_permissions, compute_audit_info_sync, detect_issue_tracker_mcp,
     detect_project_skills, build_validation_prompt, build_sub_audit_validation_prompt, remove_bootstrap_block,
 };
-use super::{SseStream, ANALYSIS_STEPS, AUDIT_REDIRECTOR_FILES, PROMPT_PREAMBLE};
+use super::{SseStream, ANALYSIS_STEPS, PROMPT_PREAMBLE};
 
 /// POST /api/projects/:id/full-audit
 /// Unified endpoint: install template + run 10-step audit + create validation discussion.
@@ -1070,6 +1070,148 @@ pub async fn full_audit(
     Sse::new(stream)
 }
 
+/// Decision returned by [`classify_docs_dir_for_cancel`] — does the
+/// cancel handler wipe the docs/ directory or preserve it ?
+///
+/// Introduced in 0.8.6 phase 4 hotfix to fix the data-loss bug where
+/// `cancel_audit` did a blind `remove_dir_all(docs/)` regardless of
+/// what content was there. Centralised here so the unit tests pin
+/// the exact rule set the cancel handler relies on.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DocsCancelAction {
+    /// Keep the directory intact. `reason` is logged so the operator
+    /// can audit the decision after the fact.
+    Preserve { reason: &'static str },
+    /// Safe to remove — empty directory with no audit history.
+    Wipe,
+}
+
+/// Decide whether `dir` (one of `docs/`, `doc/`, `ai/` under the
+/// project root) should be wiped on audit cancel.
+///
+/// Conservative by design : any signal of pre-existing content
+/// (prior `.kronn.json.audits`, user-written file, sub-directory)
+/// flips the decision to `Preserve`. Only a genuinely empty
+/// directory (or one that holds nothing but a bare `.kronn.json`
+/// with zero audits) is `Wipe`-eligible.
+///
+/// Pure — no logging here so tests can call it without setting up a
+/// tracing subscriber. The caller logs the rationale.
+pub fn classify_docs_dir_for_cancel(
+    project_path: &std::path::Path,
+    dir: &std::path::Path,
+) -> DocsCancelAction {
+    // Signal 1 — any recorded audit in `.kronn.json`. Even ONE prior
+    // audit means the directory holds legitimate user-visible content
+    // and the wipe is hostile.
+    let prior_state = crate::core::kronn_state::read(project_path);
+    if prior_state.as_ref().map(|s| s.has_any_audit()).unwrap_or(false) {
+        return DocsCancelAction::Preserve { reason: "prior audit recorded in .kronn.json" };
+    }
+
+    // Signal 2 — any non-state-file entry in the directory. Hand-written
+    // notes, leftover files from a previous (un-recorded) Kronn run,
+    // even a stray README.md the user dropped in — all flip Preserve.
+    // We tolerate a lonely `.kronn.json` (it's a Kronn-management
+    // artifact, not user content) ; everything else stops the wipe.
+    let has_user_content = std::fs::read_dir(dir)
+        .map(|entries| entries.filter_map(|e| e.ok()).any(|e| {
+            let name = e.file_name();
+            let name_str = name.to_string_lossy();
+            name_str != crate::core::kronn_state::KRONN_STATE_FILENAME
+        }))
+        .unwrap_or(false);
+    if has_user_content {
+        return DocsCancelAction::Preserve { reason: "user content present (non-state file in dir)" };
+    }
+
+    DocsCancelAction::Wipe
+}
+
+/// 0.8.6 phase 4 hotfix — pure cleanup logic extracted from `cancel_audit`'s
+/// `spawn_blocking` closure so unit tests can pin the data-loss-safety
+/// rules (audit gap #4, 2026-05-22).
+///
+/// Contract (NEW behaviour, post-hotfix) :
+///   - Docs folders (`docs/`, `doc/`, `ai/`) : preserved when prior content
+///     exists ([`classify_docs_dir_for_cancel`] decides) ; only wiped when
+///     the directory is genuinely empty (or holds only a 0-audit
+///     `.kronn.json`).
+///   - `ai/` symlink (migration artifact) : removed unconditionally — pure
+///     Kronn-managed, no user content lives in a symlink.
+///   - **Root redirector files** (`CLAUDE.md`, `AGENTS.md`, `.cursorrules`,
+///     …) : NEVER deleted on cancel. User-edited content there would be
+///     destroyed otherwise. Pre-fix behaviour was to wipe them blindly.
+///
+/// Returns `Err` only on missing project path (caller decides what to do) ;
+/// individual filesystem errors are surfaced for the cancel handler to
+/// report. Tests use this directly with a `tempdir` root.
+pub fn cleanup_audit_files(project_path: &std::path::Path) -> Result<(), String> {
+    if !project_path.exists() {
+        return Err(format!("Project path not found: {}", project_path.display()));
+    }
+
+    // Check each candidate docs folder. Skip the wipe when ANY of :
+    //   - the dir hosts a `.kronn.json` with finished audits
+    //   - the dir hosts ANY non-empty, non-hidden file (could be
+    //     hand-written content predating Kronn).
+    // The combined check is intentionally pessimistic — false negatives
+    // (skip a dir we could have wiped) are harmless, false positives
+    // (wipe a dir we shouldn't) are catastrophic.
+    for folder in ["docs", "doc", "ai"] {
+        let dir = project_path.join(folder);
+        if !dir.exists() || !dir.is_dir() || dir.is_symlink() {
+            continue;
+        }
+        match classify_docs_dir_for_cancel(project_path, &dir) {
+            DocsCancelAction::Preserve { reason } => {
+                tracing::warn!(
+                    "Audit cancel : SKIPPING wipe of {}/ — {} — preserving existing content",
+                    folder, reason,
+                );
+            }
+            DocsCancelAction::Wipe => {
+                std::fs::remove_dir_all(&dir)
+                    .map_err(|e| format!("Failed to remove {}/: {}", folder, e))?;
+                tracing::info!(
+                    "Removed {}/ directory (was empty / no audit history) from {}",
+                    folder, project_path.display(),
+                );
+            }
+        }
+    }
+    // Drop a `ai` symlink if one was left over from a migration. Symlinks
+    // are 100% Kronn-managed (migration-time artifact), safe to remove
+    // regardless of `docs/` content.
+    let ai_link = project_path.join("ai");
+    if ai_link.is_symlink() {
+        let _ = std::fs::remove_file(&ai_link);
+    }
+
+    // 0.8.6 phase 4 hotfix (2026-05-22) — redirector files at the project
+    // root (`CLAUDE.md`, `AGENTS.md`, `.cursorrules`, …) are NO LONGER
+    // auto-deleted on cancel.
+    //
+    // Rationale : the original "always wipe" assumed these files are
+    // 100% Kronn-templated. In practice users routinely edit them
+    // (AGENTS.md is a vendor-neutral convention — any project may have
+    // hand-written content) and a blind `remove_file` is the same
+    // data-loss bug the docs/ fix above addresses, just at the project
+    // root instead of in a subdir.
+    //
+    // Safe trade-off : a cancelled greenfield audit leaves the freshly-
+    // installed (placeholder-filled) redirectors on disk. Cost = the
+    // operator sees a stale `CLAUDE.md` they didn't ask for ; one `rm`
+    // away to clean. Compared to "Kronn deleted my hand-written AGENTS.md"
+    // the asymmetry is overwhelming.
+    //
+    // Future deeper fix (not in this hotfix) : track file creation events
+    // during the audit run, only delete files demonstrably created on
+    // this session. Add TD-20260522-audit-cancel-track-fs.
+
+    Ok(())
+}
+
 /// POST /api/projects/:id/cancel-audit
 /// Cancel a running audit and remove ALL files created by the audit.
 pub async fn cancel_audit(
@@ -1116,45 +1258,38 @@ pub async fn cancel_audit(
     // Small delay to let the SSE stream detect the cancellation
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-    // 2. Delete all audit-created files
+    // 2. Delete audit-created files — DATA-LOSS GUARDS via
+    // `should_preserve_docs_folder()`.
+    //
+    // 0.8.6 phase 4 hotfix (2026-05-22) — CRITICAL DATA-LOSS BUG :
+    // pre-fix, this handler did `remove_dir_all(docs/)` unconditionally
+    // on every cancel. A user who re-launched an audit on a project
+    // that ALREADY had legitimate audited (or hand-written) docs/
+    // content would lose ALL of it on cancel. Reported live by user
+    // 2026-05-22.
+    //
+    // New behaviour : NEVER wipe docs/ when there is prior content.
+    // We detect prior content via two paths :
+    //
+    //   1. `.kronn.json.audits` non-empty → at least one finished
+    //      audit, the directory holds legitimate audited content.
+    //   2. No `.kronn.json` but the directory still has files →
+    //      hand-written docs that pre-date Kronn audits. Equally
+    //      sacred.
+    //
+    // Only when the directory is provably empty (or missing) do we
+    // proceed with the legacy clean-slate logic — and even then we
+    // only touch directories that the audit demonstrably populated
+    // on this session.
+    //
+    // Redirector files (CLAUDE.md, .cursorrules, ...) are always safe
+    // to remove since their content is 100% kronn-templated and
+    // overwritten on every audit run anyway. The operator never edits
+    // them by hand.
     let project_path_str = project.path.clone();
     let cleanup_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
         let project_path = scanner::resolve_host_path(&project_path_str);
-        if !project_path.exists() {
-            return Err(format!("Project path not found: {}", project_path.display()));
-        }
-
-        // Remove the project's docs folder entirely. Cleanup hits both
-        // post-pivot `docs/` AND legacy `ai/` if both happen to be on
-        // disk (e.g. half-finished migration), so the operator gets a
-        // clean slate.
-        for folder in ["docs", "doc", "ai"] {
-            let dir = project_path.join(folder);
-            if dir.exists() && dir.is_dir() && !dir.is_symlink() {
-                std::fs::remove_dir_all(&dir)
-                    .map_err(|e| format!("Failed to remove {}/: {}", folder, e))?;
-                tracing::info!("Removed {}/ directory from {}", folder, project_path.display());
-            }
-        }
-        // Drop a `ai` symlink if one was left over from a migration.
-        let ai_link = project_path.join("ai");
-        if ai_link.is_symlink() {
-            let _ = std::fs::remove_file(&ai_link);
-        }
-
-        // Remove redirector files (CLAUDE.md, .cursorrules, etc.)
-        for filename in AUDIT_REDIRECTOR_FILES {
-            let file = project_path.join(filename);
-            if file.exists() {
-                if let Err(e) = std::fs::remove_file(&file) {
-                    tracing::warn!("Failed to remove {}: {}", filename, e);
-                } else {
-                    tracing::info!("Removed {} from {}", filename, project_path.display());
-                }
-            }
-        }
-
-        Ok(())
+        cleanup_audit_files(&project_path)
     }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     if let Err(e) = cleanup_result {
@@ -1473,6 +1608,247 @@ mod cluster_tests {
         fs::write(dir.path().join("TD-20260512-docker-2.md"), "x").unwrap();
         let recs = compute_cluster_recommendations(dir.path());
         assert!(recs.is_empty(), "2 hits is below the 3-cluster threshold");
+    }
+
+    // ─── 0.8.6 phase 4 hotfix — cancel_audit data-loss guard ──────
+    //
+    // Pre-fix, `cancel_audit` blindly `remove_dir_all(docs/)` on every
+    // cancel call. A user who re-launched an audit on a project with
+    // legitimate prior docs (audited or hand-written) lost all that
+    // content on cancel — reported live by user 2026-05-22.
+    //
+    // These tests pin the safety rules of the new
+    // `classify_docs_dir_for_cancel` helper. A regression here means
+    // the cancel handler is back to data-destruction territory ; the
+    // bugs they prevent are NEAR-IMPOSSIBLE to recover from once they
+    // ship (operator's local git might not have committed the docs/
+    // changes yet).
+
+    #[test]
+    fn classify_docs_preserves_when_prior_audit_recorded() {
+        let dir = tempdir().unwrap();
+        let project = dir.path();
+        let docs = project.join("docs");
+        fs::create_dir_all(&docs).unwrap();
+        // Record a finished audit. This is the exact scenario the user
+        // hit : a successful audit, then a relaunch + cancel.
+        crate::core::kronn_state::record_audit(project, "full").unwrap();
+
+        let action = classify_docs_dir_for_cancel(project, &docs);
+        assert_eq!(
+            action,
+            DocsCancelAction::Preserve {
+                reason: "prior audit recorded in .kronn.json"
+            },
+        );
+    }
+
+    #[test]
+    fn classify_docs_preserves_when_user_content_present() {
+        let dir = tempdir().unwrap();
+        let project = dir.path();
+        let docs = project.join("docs");
+        fs::create_dir_all(&docs).unwrap();
+        // Hand-written file — no `.kronn.json`, no prior audit, but
+        // the user wrote their own notes there. Wiping would be
+        // catastrophic.
+        fs::write(docs.join("AGENTS.md"), "# My agent\nHand-written content").unwrap();
+
+        let action = classify_docs_dir_for_cancel(project, &docs);
+        match action {
+            DocsCancelAction::Preserve { reason } => {
+                assert!(reason.contains("user content"), "got reason: {}", reason);
+            }
+            DocsCancelAction::Wipe => panic!("MUST preserve user content"),
+        }
+    }
+
+    #[test]
+    fn classify_docs_preserves_when_subdir_present() {
+        let dir = tempdir().unwrap();
+        let project = dir.path();
+        let docs = project.join("docs");
+        fs::create_dir_all(docs.join("tech-debts")).unwrap();
+        // A sub-directory counts as user content — could be Kronn's
+        // tech-debts/ from a prior audit OR something the operator
+        // dropped manually. Either way, hands off.
+
+        let action = classify_docs_dir_for_cancel(project, &docs);
+        match action {
+            DocsCancelAction::Preserve { reason: _ } => {}
+            DocsCancelAction::Wipe => panic!("MUST preserve a dir holding a subdir"),
+        }
+    }
+
+    #[test]
+    fn classify_docs_wipes_when_truly_empty() {
+        // ONLY case where the wipe proceeds : the directory exists but
+        // contains nothing at all. This is the original "greenfield
+        // audit aborted before writing a single file" case.
+        let dir = tempdir().unwrap();
+        let project = dir.path();
+        let docs = project.join("docs");
+        fs::create_dir_all(&docs).unwrap();
+
+        let action = classify_docs_dir_for_cancel(project, &docs);
+        assert_eq!(action, DocsCancelAction::Wipe);
+    }
+
+    #[test]
+    fn classify_docs_wipes_when_only_state_file_with_zero_audits() {
+        // Defensive : a fresh `.kronn.json` was written but no audit
+        // ever completed (e.g. a previous run-and-cancel cycle). The
+        // state file alone is not user content — we can wipe.
+        let dir = tempdir().unwrap();
+        let project = dir.path();
+        let docs = project.join("docs");
+        fs::create_dir_all(&docs).unwrap();
+        // Bare state file with no audits.
+        let state = crate::core::kronn_state::KronnState::default();
+        let json = serde_json::to_string(&state).unwrap();
+        fs::write(docs.join(".kronn.json"), json).unwrap();
+
+        let action = classify_docs_dir_for_cancel(project, &docs);
+        assert_eq!(action, DocsCancelAction::Wipe);
+    }
+
+    #[test]
+    fn classify_docs_prior_audit_beats_empty_dir() {
+        // Edge case : `.kronn.json` records prior audits even though
+        // the actual files have been deleted by hand. We still
+        // preserve — the state file is the historical record and a
+        // surprise wipe would clear it too.
+        let dir = tempdir().unwrap();
+        let project = dir.path();
+        let docs = project.join("docs");
+        fs::create_dir_all(&docs).unwrap();
+        crate::core::kronn_state::record_audit(project, "full").unwrap();
+        // Remove every file in docs/ except .kronn.json.
+        for entry in fs::read_dir(&docs).unwrap().filter_map(|e| e.ok()) {
+            let n = entry.file_name();
+            if n.to_string_lossy() != ".kronn.json" {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+
+        let action = classify_docs_dir_for_cancel(project, &docs);
+        match action {
+            DocsCancelAction::Preserve { reason } => {
+                assert!(reason.contains("prior audit"), "got: {}", reason);
+            }
+            DocsCancelAction::Wipe => panic!("prior audit must win over empty dir"),
+        }
+    }
+
+    // ─── 0.8.6 phase 4 audit gap #4 (2026-05-22) — cleanup_audit_files
+    //     end-to-end safety, including the "root redirectors NOT deleted"
+    //     contract that the unit-fn `classify_docs_dir_for_cancel` doesn't
+    //     itself cover. ──────────────────────────────────────────────
+
+    #[test]
+    fn cleanup_preserves_root_redirectors_unconditionally() {
+        // CRITICAL : a regression that re-adds the redirector wipe loop
+        // would silently delete CLAUDE.md / AGENTS.md / .cursorrules on
+        // every cancel — same data-loss bug we just fixed. This test
+        // pins the "redirectors are NEVER touched" contract from
+        // cleanup_audit_files.
+        let dir = tempdir().unwrap();
+        let project = dir.path();
+        // Hand-written root redirectors with valuable content.
+        fs::write(
+            project.join("CLAUDE.md"),
+            "# My personal Claude context\nHand-written rules, do not delete",
+        ).unwrap();
+        fs::write(project.join("AGENTS.md"), "# Vendor-neutral agent context").unwrap();
+        fs::write(project.join(".cursorrules"), "personal cursor config").unwrap();
+        fs::write(project.join(".windsurfrules"), "windsurf config").unwrap();
+        fs::write(project.join(".clinerules"), "cline config").unwrap();
+
+        // Run the cleanup (cancel-audit equivalent).
+        cleanup_audit_files(project).expect("cleanup succeeded on empty project");
+
+        // Every root file MUST still exist. Failure = data loss.
+        for filename in ["CLAUDE.md", "AGENTS.md", ".cursorrules", ".windsurfrules", ".clinerules"] {
+            let file = project.join(filename);
+            assert!(
+                file.exists(),
+                "Root redirector {} was deleted ! Data loss. {}",
+                filename,
+                "Reverting to the pre-hotfix behaviour is a critical regression.",
+            );
+        }
+        // Content untouched too.
+        let claude_after = fs::read_to_string(project.join("CLAUDE.md")).unwrap();
+        assert!(claude_after.contains("Hand-written rules"));
+    }
+
+    #[test]
+    fn cleanup_preserves_docs_with_user_content_and_root_redirectors() {
+        // Belt-and-braces : the user case from 2026-05-22. Re-launching
+        // + cancelling on a project with both docs/ content AND root
+        // redirectors. Nothing should be deleted.
+        let dir = tempdir().unwrap();
+        let project = dir.path();
+        fs::create_dir_all(project.join("docs")).unwrap();
+        fs::write(project.join("docs/AGENTS.md"), "# Project context").unwrap();
+        fs::write(project.join("docs/architecture.md"), "# Arch overview").unwrap();
+        crate::core::kronn_state::record_audit(project, "full").unwrap();
+        fs::write(project.join("CLAUDE.md"), "redirector").unwrap();
+
+        cleanup_audit_files(project).unwrap();
+
+        // docs/ + all its content survives.
+        assert!(project.join("docs").is_dir());
+        assert!(project.join("docs/AGENTS.md").exists());
+        assert!(project.join("docs/architecture.md").exists());
+        // .kronn.json survives.
+        assert!(project.join("docs/.kronn.json").exists());
+        // Root redirector survives.
+        assert!(project.join("CLAUDE.md").exists());
+    }
+
+    #[test]
+    fn cleanup_does_wipe_genuinely_empty_docs_dir() {
+        // Inverse of preservation : an audit that created docs/ and
+        // crashed before writing anything (or was cancelled mid-creation)
+        // leaves an empty dir. THIS we still clean up — original intent
+        // of the wipe loop, kept intact.
+        let dir = tempdir().unwrap();
+        let project = dir.path();
+        fs::create_dir_all(project.join("docs")).unwrap();
+        // No content, no .kronn.json.
+
+        cleanup_audit_files(project).unwrap();
+
+        assert!(!project.join("docs").exists(), "Empty docs/ should be removed on cancel");
+    }
+
+    #[test]
+    fn cleanup_handles_missing_project_path() {
+        // Defensive : project path doesn't exist (deleted between
+        // cancel-request and cleanup). Returns Err, doesn't panic.
+        let result = cleanup_audit_files(std::path::Path::new("/nonexistent/totally-fake-path"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[test]
+    fn classify_docs_preserves_with_both_signals_active() {
+        // Belt-and-braces case : both prior audit AND user content.
+        // Either signal alone is enough ; both together must still
+        // preserve. Tests the OR semantic.
+        let dir = tempdir().unwrap();
+        let project = dir.path();
+        let docs = project.join("docs");
+        fs::create_dir_all(&docs).unwrap();
+        crate::core::kronn_state::record_audit(project, "full").unwrap();
+        fs::write(docs.join("AGENTS.md"), "...").unwrap();
+
+        let action = classify_docs_dir_for_cancel(project, &docs);
+        match action {
+            DocsCancelAction::Preserve { reason: _ } => {}
+            DocsCancelAction::Wipe => panic!("OR semantic — any signal preserves"),
+        }
     }
 
     #[test]

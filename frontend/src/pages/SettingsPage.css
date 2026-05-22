@@ -2144,7 +2144,14 @@
 .user-context-textarea {
   width: 100%;
   padding: var(--kr-sp-3) var(--kr-sp-4);
+  /* 0.8.6 — pin text tokens because `--kr-bg-code-panel` is dark in
+     EVERY theme but `--kr-text-primary` flips to dark in light theme
+     → dark-on-dark unreadable. Same fix as the API logs excerpt,
+     GitPanel and disc-invite-instruction (cf. memory feedback). */
   background: var(--kr-bg-code-panel);
+  --kr-text-primary: #e8eaed;
+  --kr-text-secondary: rgba(255, 255, 255, 0.7);
+  --kr-text-ghost: rgba(255, 255, 255, 0.5);
   border: 1px solid var(--kr-border-light);
   border-radius: var(--kr-r-sm);
   color: var(--kr-text-primary);

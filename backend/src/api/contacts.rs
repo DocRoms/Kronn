@@ -239,6 +239,8 @@ mod tests {
             global_context: None,
             global_context_mode: "always".into(),
             debug_mode: false,
+            default_model_tier: crate::models::ModelTier::Default,
+            default_summary_strategy: crate::models::SummaryStrategy::Off,
         }
     }
 
