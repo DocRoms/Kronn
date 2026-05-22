@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo } from 'react';
+import { useState, useRef, useEffect, useMemo, Fragment } from 'react';
 import { useT } from '../../lib/I18nContext';
 import { workflows as workflowsApi, quickPrompts as quickPromptsApi } from '../../lib/api';
 import type { BatchPreview } from '../../lib/api';
@@ -6,10 +6,10 @@ import { AGENT_COLORS, AGENT_LABELS, isAgentRestricted } from '../../lib/constan
 import { extractLikelyOutput } from '../../lib/extractLikelyOutput';
 import type { Workflow, WorkflowRun, StepResult, AgentsConfig, WorkflowStep, QuickPrompt, BatchRunSummary, AgentType } from '../../types/generated';
 import {
-  Trash2, Play, Loader2, Check, X, ChevronRight,
+  Trash2, Play, Loader2, Check, X, ChevronRight, ChevronDown,
   Settings, RefreshCw, AlertTriangle, FlaskConical,
   Layers, GitBranch, MessageSquare, Plug, Send,
-  Download, Square, Hand, Terminal, Braces,
+  Download, Square, Hand, Terminal, Braces, Sparkles, Zap,
 } from 'lucide-react';
 import { RunDetail } from './RunDetail';
 import '../../pages/WorkflowsPage.css';
@@ -1015,9 +1015,32 @@ export function LiveFinishedBanner({
   );
 }
 
+/** Compact per-step descriptor for the collapsed pipeline view. The `kind`
+ *  drives the chip color (mirrors the full StepCard badge vocabulary) and
+ *  `usesTokens` splits steps into "agent" (LLM, costs tokens) vs the
+ *  mechanical/deterministic ones (0 token) — the headline distinction Kronn
+ *  sells. Agent + BatchQuickPrompt both run an LLM. */
+function compactStepMeta(step: WorkflowStep): { kind: string; Icon: typeof Plug; usesTokens: boolean } {
+  switch (step.step_type?.type) {
+    case 'ApiCall': return { kind: 'api', Icon: Plug, usesTokens: false };
+    case 'BatchApiCall': return { kind: 'batch-api', Icon: Layers, usesTokens: false };
+    case 'Notify': return { kind: 'notify', Icon: Send, usesTokens: false };
+    case 'Gate': return { kind: 'gate', Icon: Hand, usesTokens: false };
+    case 'Exec': return { kind: 'exec', Icon: Terminal, usesTokens: false };
+    case 'JsonData': return { kind: 'json-data', Icon: Braces, usesTokens: false };
+    case 'BatchQuickPrompt': return { kind: 'batch-qp', Icon: Layers, usesTokens: true };
+    default: return { kind: 'agent', Icon: Sparkles, usesTokens: true }; // Agent (or legacy undefined)
+  }
+}
+
 export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onExport, onGateDecided }: WorkflowDetailProps) {
   const { t } = useT();
   const [showRuns, setShowRuns] = useState(true);
+  // Steps panel collapses to a compact pipeline by default — the full
+  // per-step cards (with prompts + Test buttons) are heavy and rarely what
+  // you want at a glance, especially while a run is in flight. "Voir en
+  // détails" expands the legacy card list.
+  const [stepsExpanded, setStepsExpanded] = useState(false);
   // Per-step expand state for the live run view. Keyed by step name (not
   // index — order can shift if Goto loops re-fire a step). The user
   // clicks a completed step to inspect its output without leaving the
@@ -1200,11 +1223,90 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
         </div>
       )}
 
-      {/* Steps */}
-      <h3 className="wf-section-title">Steps ({workflow.steps.length})</h3>
-      {workflow.steps.map((step, i) => (
-        <StepCard key={i} step={step} index={i} agentAccess={agentAccess} projectId={workflow.project_id} t={t} quickPromptsById={quickPromptsById} workflowId={workflow.id} allSteps={workflow.steps} />
-      ))}
+      {/* Steps — collapsed compact pipeline by default; "Voir en détails"
+          reveals the full per-step cards. */}
+      {(() => {
+        const agentCount = workflow.steps.filter(s => compactStepMeta(s).usesTokens).length;
+        const determCount = workflow.steps.length - agentCount;
+        return (
+          <div className="wf-steps-section" data-testid="wf-steps-section">
+            <div className="wf-steps-head">
+              <h3 className="wf-section-title" style={{ margin: 0 }}>
+                {t('wf.stepsTitle', workflow.steps.length)}
+              </h3>
+              <span className="wf-steps-count" data-kind="agent" title={t('wf.stepsAgentHint')}>
+                <Sparkles size={11} /> {t('wf.stepsAgentCount', agentCount)}
+              </span>
+              <span className="wf-steps-count" data-kind="determ" title={t('wf.stepsDetermHint')}>
+                <Zap size={11} /> {t('wf.stepsDetermCount', determCount)}
+              </span>
+              <button
+                type="button"
+                className="wf-steps-toggle"
+                data-testid="wf-steps-toggle"
+                aria-expanded={stepsExpanded}
+                onClick={() => setStepsExpanded(v => !v)}
+              >
+                <ChevronDown
+                  size={13}
+                  style={{ transform: stepsExpanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }}
+                />
+                {stepsExpanded ? t('wf.stepsHideDetails') : t('wf.stepsShowDetails')}
+              </button>
+            </div>
+
+            {/* Compact horizontal pipeline — number + kind icon + name. Click
+                any chip to open the full detail. */}
+            <div className="wf-steps-pipeline" role="list">
+              {workflow.steps.map((step, i) => {
+                const meta = compactStepMeta(step);
+                const Icon = meta.Icon;
+                // Show the agent identity (name + brand color) only on genuine
+                // Agent steps — same whitelist as the detail card's `isAgentLike`
+                // so both views read the same label. Batch/Exec/etc. delegate
+                // and don't run `step.agent` directly.
+                const isAgentStep = !step.step_type || step.step_type.type === 'Agent';
+                return (
+                  <Fragment key={i}>
+                    {i > 0 && <ChevronRight size={13} className="wf-pipe-arrow" aria-hidden />}
+                    <button
+                      type="button"
+                      className="wf-pipe-chip"
+                      data-kind={meta.kind}
+                      data-class={meta.usesTokens ? 'agent' : 'determ'}
+                      role="listitem"
+                      title={`${i + 1}. ${step.name}`}
+                      onClick={() => setStepsExpanded(true)}
+                    >
+                      <span className="wf-pipe-chip-row">
+                        <span className="wf-pipe-chip-num">{i + 1}</span>
+                        <Icon size={11} />
+                        <span className="wf-pipe-chip-name">{step.name}</span>
+                      </span>
+                      {isAgentStep && (
+                        <span
+                          className="wf-pipe-chip-agent"
+                          style={{ color: AGENT_COLORS[step.agent] ?? 'var(--kr-text-faint)' }}
+                        >
+                          {AGENT_LABELS[step.agent] ?? step.agent}
+                        </span>
+                      )}
+                    </button>
+                  </Fragment>
+                );
+              })}
+            </div>
+
+            {stepsExpanded && (
+              <div className="wf-steps-detail" data-testid="wf-steps-detail">
+                {workflow.steps.map((step, i) => (
+                  <StepCard key={i} step={step} index={i} agentAccess={agentAccess} projectId={workflow.project_id} t={t} quickPromptsById={quickPromptsById} workflowId={workflow.id} allSteps={workflow.steps} />
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Live run progress — driven by SSE when active in the current tab,
           or synthesized from `runs[]` when the user navigated away and

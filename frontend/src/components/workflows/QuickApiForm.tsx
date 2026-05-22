@@ -9,6 +9,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Save, X, Plus } from 'lucide-react';
 import { useT } from '../../lib/I18nContext';
+import { Dropdown } from '../Dropdown';
 import type {
   AgentType,
   CreateQuickApiRequest,
@@ -269,10 +270,18 @@ export function QuickApiForm({
       </div>
 
       <div className="flex-row gap-4 mb-4">
-        <select className="wf-select" value={projectId} onChange={e => setProjectId(e.target.value)}>
-          <option value="">{t('wiz.noProject')}</option>
-          {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-        </select>
+        {/* 0.8.6 (#62) — Dropdown migration: theme parity (Firefox/Safari
+            previously rendered <option> with OS chrome ignoring page CSS). */}
+        <Dropdown<string>
+          value={projectId}
+          options={[
+            { value: '', label: t('wiz.noProject') },
+            ...projects.map(p => ({ value: p.id, label: p.name })),
+          ]}
+          onChange={v => setProjectId(v)}
+          ariaLabel={t('wiz.noProject')}
+          testId="qa-project-picker"
+        />
       </div>
 
       <label className="wf-label">{t('qa.descriptionLabel')}</label>

@@ -1553,6 +1553,878 @@ class DiscCreateRoomTests(unittest.TestCase):
         self.assertEqual(create_body["agent"], "ClaudeCode")
         self.assertEqual(create_body["title"], "x")
 
+    def test_next_step_warns_when_bridge_already_bound(self):
+        # 0.8.6 fix 2026-05-22 — when the caller is already bound to
+        # a disc (typical Kronn-launched session via KRONN_DISCUSSION_ID
+        # env var), the response MUST include a next_step that warns
+        # the room is NOT auto-joined + tells the agent what to do.
+        # Pre-fix, agents silently created the room and never told the
+        # user → easy to lose context.
+        self.mod._CURRENT_DISC_ID = "disc-original-context"
+        result = self.mod.call_disc_create_room({"title": "New room"})
+        self.assertIn("next_step", result)
+        ns = result["next_step"]
+        # Hint MUST mention the current binding is preserved (we
+        # truncate the disc id to 8 chars in the hint to keep it
+        # readable — "disc-original-context"[:8] = "disc-ori").
+        self.assertIn("disc-ori", ns)
+        # MUST tell the agent the room is NOT auto-joined.
+        self.assertTrue("NOT" in ns or "not" in ns)
+        # MUST suggest both paths (share token / explicit disc_join).
+        self.assertIn("instruction_text", ns)
+        self.assertIn("disc_join", ns)
+
+    def test_next_step_invites_join_when_bridge_unbound(self):
+        # Host-launched session : no current disc binding → safe to
+        # encourage joining the new room directly.
+        self.mod._CURRENT_DISC_ID = None
+        result = self.mod.call_disc_create_room({"title": "New room"})
+        self.assertIn("next_step", result)
+        ns = result["next_step"]
+        # No active binding → call out the unbound state.
+        self.assertIn("no active disc binding", ns)
+        # Direct path : recommend disc_join.
+        self.assertIn("disc_join", ns)
+
+
+# ─── 0.8.6 phase 4 — MCP Remote Control wrappers (workflow_trigger, ──────
+# workflow_run_status, qp_run). These tools turn Kronn into a fully
+# MCP-driveable backend ; a regression in the contract here breaks
+# Claude Code mobile flows that depend on a stable JSON shape.
+
+class WorkflowTriggerTests(unittest.TestCase):
+    """`workflow_trigger` MCP wrapper forwards to `POST /api/mcp/workflow-trigger`.
+
+    Contract:
+      - missing `workflow_id` → RuntimeError, no HTTP call
+      - `variables` coerced to {str: str} (defensive against LLM-typed ints)
+      - response is the unwrapped backend `data` payload
+    """
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.fake_http = mock.MagicMock(return_value={
+            "success": True,
+            "data": {
+                "run_id": "run-abc",
+                "workflow_id": "wf-1",
+                "workflow_name": "Audit + AutoPilot",
+                "status": "Pending",
+                "started_at": "2026-05-22T14:30:00Z",
+                "expected_duration_ms": 145_000,
+                "samples": 8,
+                "next_check": {
+                    "wait_seconds": 30,
+                    "reason": "sanity check — confirm the run actually started",
+                    "confidence": "baseline",
+                },
+            },
+        })
+        self.http_patch = mock.patch.object(self.mod, "_http", self.fake_http)
+        self.http_patch.start()
+        self.addCleanup(self.http_patch.stop)
+
+    def test_missing_workflow_id_raises_before_http(self):
+        with self.assertRaises(RuntimeError):
+            self.mod.call_workflow_trigger({})
+        self.fake_http.assert_not_called()
+
+    def test_forwards_workflow_id_to_mcp_trigger_route(self):
+        out = self.mod.call_workflow_trigger({"workflow_id": "wf-1"})
+        method, path, body = self.fake_http.call_args.args
+        self.assertEqual(method, "POST")
+        self.assertEqual(path, "/api/mcp/workflow-trigger")
+        self.assertEqual(body, {"workflow_id": "wf-1"})
+        # The wrapper unwraps the envelope ; agent reads `run_id` directly.
+        self.assertEqual(out["run_id"], "run-abc")
+        self.assertEqual(out["next_check"]["wait_seconds"], 30)
+
+    def test_coerces_variables_to_str_str_map(self):
+        # An LLM might emit `{count: 3}` (int) — the backend's
+        # HashMap<String,String> would reject this. Coerce in the wrapper
+        # so the agent doesn't have to remember the constraint.
+        self.mod.call_workflow_trigger({
+            "workflow_id": "wf-1",
+            "variables": {"count": 3, "name": "PeerAlpha"},
+        })
+        _, _, body = self.fake_http.call_args.args
+        self.assertEqual(body["variables"], {"count": "3", "name": "PeerAlpha"})
+
+    def test_drops_non_dict_variables_silently(self):
+        # A misbehaving LLM passing `variables: "foo"` shouldn't crash —
+        # we just drop it. Matches defensive-input philosophy elsewhere.
+        self.mod.call_workflow_trigger({
+            "workflow_id": "wf-1",
+            "variables": "not a dict",
+        })
+        _, _, body = self.fake_http.call_args.args
+        self.assertNotIn("variables", body)
+
+
+class WorkflowRunStatusTests(unittest.TestCase):
+    """`workflow_run_status` MCP wrapper.
+
+    Contract:
+      - missing `run_id` → RuntimeError, no HTTP call
+      - GET (not POST) so the route is cache-friendly + idempotent
+      - response is the unwrapped backend payload, including
+        `next_check: null` for terminal runs.
+    """
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.fake_http = mock.MagicMock(return_value={
+            "success": True,
+            "data": {
+                "run_id": "run-abc",
+                "workflow_id": "wf-1",
+                "status": "Running",
+                "started_at": "2026-05-22T14:30:00Z",
+                "elapsed_ms": 32_000,
+                "current_step": "audit-tech-debt",
+                "step_count": 3,
+                "tokens_used": 1240,
+                "steps": [],
+                "expected_duration_ms": 145_000,
+                "samples": 8,
+                "next_check": {
+                    "wait_seconds": 113,
+                    "reason": "expected ~113s left + 15s buffer",
+                    "confidence": "baseline",
+                },
+            },
+        })
+        self.http_patch = mock.patch.object(self.mod, "_http", self.fake_http)
+        self.http_patch.start()
+        self.addCleanup(self.http_patch.stop)
+
+    def test_missing_run_id_raises_before_http(self):
+        with self.assertRaises(RuntimeError):
+            self.mod.call_workflow_run_status({})
+        self.fake_http.assert_not_called()
+
+    def test_forwards_get_request_with_run_id_in_path(self):
+        self.mod.call_workflow_run_status({"run_id": "run-abc"})
+        # `_http(method, path)` — no body positional for GET. The
+        # default param defaults to None, which the wrapper omits
+        # entirely to keep the call site clean.
+        args = self.fake_http.call_args.args
+        self.assertEqual(args[0], "GET")
+        self.assertEqual(args[1], "/api/mcp/workflow-run-status/run-abc")
+        # No body positional → 2-arg signature.
+        self.assertEqual(len(args), 2)
+
+    def test_returns_unwrapped_payload(self):
+        out = self.mod.call_workflow_run_status({"run_id": "run-abc"})
+        self.assertEqual(out["status"], "Running")
+        self.assertEqual(out["next_check"]["wait_seconds"], 113)
+
+    def test_terminal_run_response_passes_through_null_next_check(self):
+        # Terminal runs have next_check=None. Make sure the wrapper
+        # doesn't fabricate one — the agent uses null to stop polling.
+        self.fake_http.return_value = {
+            "success": True,
+            "data": {
+                "run_id": "run-done",
+                "workflow_id": "wf-1",
+                "status": "Success",
+                "started_at": "2026-05-22T14:30:00Z",
+                "finished_at": "2026-05-22T14:32:25Z",
+                "elapsed_ms": 145_000,
+                "step_count": 5,
+                "tokens_used": 5840,
+                "steps": [],
+                "expected_duration_ms": 145_000,
+                "samples": 8,
+                "next_check": None,
+            },
+        }
+        out = self.mod.call_workflow_run_status({"run_id": "run-done"})
+        self.assertEqual(out["status"], "Success")
+        self.assertIsNone(out["next_check"])
+
+
+class QpRunTests(unittest.TestCase):
+    """`qp_run` MCP wrapper forwards to `POST /api/mcp/qp-run`.
+
+    Contract:
+      - missing `qp_id` → RuntimeError, no HTTP call
+      - `vars` coerced to {str: str} (same defensive coercion as
+        workflow_trigger's `variables`)
+      - `project_id` auto-inherited from current disc when absent
+      - `agent` / `title` / explicit `project_id` pass through unchanged
+    """
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.fake_http = mock.MagicMock(return_value={
+            "success": True,
+            "data": {
+                "disc_id": "disc-new",
+                "qp_id": "qp-audit",
+                "qp_name": "Audit Quick Prompt",
+                "agent": "ClaudeCode",
+                "expected_duration_ms": 60_000,
+                "samples": 4,
+                "next_check": {
+                    "wait_seconds": 30,
+                    "reason": "sanity check — confirm started (expected ~60s)",
+                    "confidence": "baseline",
+                },
+            },
+        })
+        self.http_patch = mock.patch.object(self.mod, "_http", self.fake_http)
+        self.http_patch.start()
+        self.addCleanup(self.http_patch.stop)
+        # No current disc by default — sub-tests override when needed.
+        self.mod._CURRENT_DISC_META_CACHE.update({
+            "checked": True,
+            "value": None,
+        })
+
+    def test_missing_qp_id_raises_before_http(self):
+        with self.assertRaises(RuntimeError):
+            self.mod.call_qp_run({})
+        self.fake_http.assert_not_called()
+
+    def test_forwards_minimal_body_with_qp_id(self):
+        out = self.mod.call_qp_run({"qp_id": "qp-audit"})
+        method, path, body = self.fake_http.call_args.args
+        self.assertEqual(method, "POST")
+        self.assertEqual(path, "/api/mcp/qp-run")
+        self.assertEqual(body["qp_id"], "qp-audit")
+        self.assertEqual(out["disc_id"], "disc-new")
+
+    def test_coerces_vars_values_to_strings(self):
+        # Same defensive coercion as workflow_trigger.variables.
+        self.mod.call_qp_run({
+            "qp_id": "qp-audit",
+            "vars": {"count": 5, "label": "TestUser"},
+        })
+        _, _, body = self.fake_http.call_args.args
+        self.assertEqual(body["vars"], {"count": "5", "label": "TestUser"})
+
+    def test_passes_through_agent_project_id_and_title(self):
+        # All 3 optional override fields land in the body verbatim.
+        self.mod.call_qp_run({
+            "qp_id": "qp-audit",
+            "agent": "Codex",
+            "project_id": "proj-explicit",
+            "title": "Custom title",
+        })
+        _, _, body = self.fake_http.call_args.args
+        self.assertEqual(body["agent"], "Codex")
+        self.assertEqual(body["project_id"], "proj-explicit")
+        self.assertEqual(body["title"], "Custom title")
+
+    def test_auto_inherits_project_id_from_current_disc_when_absent(self):
+        # The current disc lives in project `proj-inherited` — the wrapper
+        # should auto-fill that into the body so the new disc doesn't
+        # accidentally land in "Général".
+        self.mod._CURRENT_DISC_META_CACHE.update({
+            "checked": True,
+            "value": {"id": "disc-parent", "project_id": "proj-inherited"},
+        })
+        self.mod.call_qp_run({"qp_id": "qp-audit"})
+        _, _, body = self.fake_http.call_args.args
+        self.assertEqual(body["project_id"], "proj-inherited")
+
+    def test_explicit_project_id_wins_over_inheritance(self):
+        # Explicit > inherited — matches disc_create / workflow_create_draft.
+        self.mod._CURRENT_DISC_META_CACHE.update({
+            "checked": True,
+            "value": {"id": "disc-parent", "project_id": "proj-inherited"},
+        })
+        self.mod.call_qp_run({
+            "qp_id": "qp-audit",
+            "project_id": "proj-explicit",
+        })
+        _, _, body = self.fake_http.call_args.args
+        self.assertEqual(body["project_id"], "proj-explicit")
+
+
+class QaRunTests(unittest.TestCase):
+    """`qa_run` MCP wrapper forwards to `POST /api/quick-apis/:id/run`.
+
+    Contract :
+      - missing `qa_id` → RuntimeError, no HTTP call
+      - `vars` coerced to {str: str} (same defensive coercion pattern)
+      - synchronous — returns the parsed envelope inline, NO next_check
+        (QAs are fast — sub-second to a few seconds)
+      - missing `vars` is legal (a QA with zero variables)
+    """
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.fake_http = mock.MagicMock(return_value={
+            "success": True,
+            "data": {
+                "success": True,
+                "duration_ms": 142,
+                "envelope": {
+                    "data": {"items": [{"id": "EW-1", "key": "EW-1"}]},
+                    "status": "OK",
+                    "summary": "GET /search → 1 result",
+                },
+                "error": None,
+            },
+        })
+        self.http_patch = mock.patch.object(self.mod, "_http", self.fake_http)
+        self.http_patch.start()
+        self.addCleanup(self.http_patch.stop)
+
+    def test_missing_qa_id_raises_before_http(self):
+        with self.assertRaises(RuntimeError):
+            self.mod.call_qa_run({})
+        self.fake_http.assert_not_called()
+
+    def test_forwards_qa_id_to_run_route_with_empty_vars(self):
+        # A QA with zero variables is legal — the wrapper must still
+        # forward `variables: {}` so the backend's serde default kicks
+        # in cleanly.
+        self.mod.call_qa_run({"qa_id": "qa-jira-fetch"})
+        method, path, body = self.fake_http.call_args.args
+        self.assertEqual(method, "POST")
+        self.assertEqual(path, "/api/quick-apis/qa-jira-fetch/run")
+        self.assertEqual(body, {"variables": {}})
+
+    def test_forwards_vars_renamed_to_variables_at_the_wire(self):
+        # The MCP tool exposes `vars` (short, ergonomic) but the backend
+        # accepts `variables` (matches the workflow shape). The wrapper
+        # bridges the two without leaking the rename to the agent.
+        self.mod.call_qa_run({
+            "qa_id": "qa-jira-fetch",
+            "vars": {"ticket_id": "EW-7247"},
+        })
+        _, _, body = self.fake_http.call_args.args
+        self.assertEqual(body["variables"], {"ticket_id": "EW-7247"})
+        # `vars` itself must NOT leak to the body — the backend would 422.
+        self.assertNotIn("vars", body)
+
+    def test_coerces_vars_values_to_strings(self):
+        # Same defensive coercion as workflow_trigger / qp_run.
+        self.mod.call_qa_run({
+            "qa_id": "qa-jira-fetch",
+            "vars": {"sprint_id": 42, "label": "blocker"},
+        })
+        _, _, body = self.fake_http.call_args.args
+        self.assertEqual(body["variables"], {"sprint_id": "42", "label": "blocker"})
+
+    def test_returns_unwrapped_envelope(self):
+        # Caller reads `envelope.data` directly — agents shouldn't have
+        # to walk the outer `{success, data}` ApiResponse shape.
+        out = self.mod.call_qa_run({"qa_id": "qa-jira-fetch"})
+        self.assertEqual(out["envelope"]["data"]["items"][0]["id"], "EW-1")
+        self.assertEqual(out["duration_ms"], 142)
+
+    def test_backend_error_propagates_via_envelope_field(self):
+        # A QA that fails (HTTP error, extract failed, required var
+        # missing) returns success=false at the inner level. The wrapper
+        # passes that through ; only success=false on the OUTER envelope
+        # raises (per `_unwrap`).
+        self.fake_http.return_value = {
+            "success": True,
+            "data": {
+                "success": False,
+                "duration_ms": 12,
+                "envelope": None,
+                "error": "Variable obligatoire manquante : `ticket_id`",
+            },
+        }
+        out = self.mod.call_qa_run({"qa_id": "qa-jira-fetch"})
+        self.assertFalse(out["success"])
+        self.assertIn("ticket_id", out["error"])
+        self.assertIsNone(out["envelope"])
+
+
+class QaListEnrichedOutputTests(unittest.TestCase):
+    """`qa_list` was extended in phase 4 to expose the `variables[]`
+    field so agents calling `qa_run` know what to pass without an
+    extra `GET /api/quick-apis/<id>` round-trip."""
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.fake_http = mock.MagicMock(return_value={
+            "success": True,
+            "data": [
+                {
+                    "id": "qa-jira-fetch",
+                    "name": "Fetch Jira ticket",
+                    "api_plugin_slug": "mcp-atlassian",
+                    "api_endpoint_path": "/rest/api/3/issue/{ticket_id}",
+                    "api_method": "GET",
+                    "description": "Fetch a Jira ticket by key",
+                    "project_id": None,
+                    "variables": [
+                        {
+                            "name": "ticket_id",
+                            "label": "Ticket ID",
+                            "placeholder": "EW-7247",
+                            "description": "JIRA issue key",
+                            "required": True,
+                        },
+                        {
+                            "name": "expand",
+                            "label": "Expand",
+                            "placeholder": "comments",
+                            "description": None,
+                            "required": False,
+                        },
+                    ],
+                },
+                {
+                    # A QA with no variables — defensive : empty list,
+                    # not missing key.
+                    "id": "qa-jira-myself",
+                    "name": "Who am I",
+                    "api_plugin_slug": "mcp-atlassian",
+                    "api_endpoint_path": "/rest/api/3/myself",
+                    "api_method": "GET",
+                    "description": "",
+                    "project_id": None,
+                    "variables": [],
+                },
+            ],
+        })
+        self.http_patch = mock.patch.object(self.mod, "_http", self.fake_http)
+        self.http_patch.start()
+        self.addCleanup(self.http_patch.stop)
+
+    def test_exposes_variables_per_entry(self):
+        out = self.mod.call_qa_list({})
+        first = next(q for q in out if q["id"] == "qa-jira-fetch")
+        # The agent reads `variables[].name` directly to know what to
+        # pass to `qa_run.vars`. Pin the exact shape.
+        self.assertEqual(len(first["variables"]), 2)
+        ticket_id_var = next(v for v in first["variables"] if v["name"] == "ticket_id")
+        self.assertEqual(ticket_id_var["label"], "Ticket ID")
+        self.assertTrue(ticket_id_var["required"])
+        self.assertEqual(ticket_id_var["description"], "JIRA issue key")
+
+    def test_normalises_empty_description_to_none(self):
+        # When the underlying QA stores `description: ""`, the wrapper
+        # emits `None` so agents can branch on truthiness without
+        # special-casing empty strings.
+        out = self.mod.call_qa_list({})
+        first = next(q for q in out if q["id"] == "qa-jira-fetch")
+        expand_var = next(v for v in first["variables"] if v["name"] == "expand")
+        self.assertIsNone(expand_var["description"])
+
+    def test_handles_qa_with_zero_variables(self):
+        # Empty list — not missing, not None. Lets the agent infer
+        # "this QA needs no input, call `qa_run({qa_id})` directly".
+        out = self.mod.call_qa_list({})
+        myself = next(q for q in out if q["id"] == "qa-jira-myself")
+        self.assertEqual(myself["variables"], [])
+
+    def test_preserves_legacy_fields_alongside_variables(self):
+        # Defensive : the variables addition MUST NOT drop any
+        # previously-exposed field — that would break agents that
+        # consumed the old shape.
+        out = self.mod.call_qa_list({})
+        first = next(q for q in out if q["id"] == "qa-jira-fetch")
+        for field in ("id", "name", "api_plugin_slug", "api_endpoint_path",
+                      "api_method", "description", "project_id"):
+            self.assertIn(field, first)
+
+
+class QaCreateDraftTests(unittest.TestCase):
+    """`qa_create_draft` MCP wrapper closes the symmetry gap with
+    `workflow_create_draft` + `qp_create_draft`. Pin the contract :
+      - required fields validated client-side (cleaner error than 422)
+      - project_id auto-inherited from current disc when absent
+      - explicit project_id wins over inheritance
+      - name length cap mirrors qp_create_draft (200 chars)
+      - POSTs to /api/quick-apis (the existing create route)
+    """
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.fake_http = mock.MagicMock(return_value={
+            "success": True,
+            "data": {
+                "id": "qa-new-123",
+                "name": "Fetch active sprint",
+                "api_plugin_slug": "mcp-atlassian",
+                "api_config_id": "cfg-jira",
+                "api_endpoint_path": "/rest/api/3/search/jql",
+                "api_method": "GET",
+                "variables": [],
+            },
+        })
+        self.http_patch = mock.patch.object(self.mod, "_http", self.fake_http)
+        self.http_patch.start()
+        self.addCleanup(self.http_patch.stop)
+        # No current disc by default — sub-tests override when needed.
+        self.mod._CURRENT_DISC_META_CACHE.update({
+            "checked": True,
+            "value": None,
+        })
+
+    def test_rejects_missing_required_fields_before_http(self):
+        # Each of the 4 required fields → RuntimeError before any HTTP call.
+        for missing in ("name", "api_plugin_slug", "api_config_id", "api_endpoint_path"):
+            args = {
+                "name": "QA",
+                "api_plugin_slug": "mcp-atlassian",
+                "api_config_id": "cfg-jira",
+                "api_endpoint_path": "/foo",
+            }
+            args.pop(missing)
+            with self.assertRaises(RuntimeError) as cm:
+                self.mod.call_qa_create_draft(args)
+            self.assertIn(missing, str(cm.exception))
+        self.fake_http.assert_not_called()
+
+    def test_rejects_excessively_long_name(self):
+        # Mirrors qp_create_draft's 200-char cap.
+        with self.assertRaises(RuntimeError):
+            self.mod.call_qa_create_draft({
+                "name": "x" * 201,
+                "api_plugin_slug": "mcp-atlassian",
+                "api_config_id": "cfg-jira",
+                "api_endpoint_path": "/foo",
+            })
+
+    def test_posts_to_quick_apis_create_route(self):
+        out = self.mod.call_qa_create_draft({
+            "name": "Fetch active sprint",
+            "api_plugin_slug": "mcp-atlassian",
+            "api_config_id": "cfg-jira",
+            "api_endpoint_path": "/rest/api/3/search/jql",
+            "api_method": "GET",
+            "api_query": {"jql": "sprint in openSprints()"},
+        })
+        method, path, body = self.fake_http.call_args.args
+        self.assertEqual(method, "POST")
+        self.assertEqual(path, "/api/quick-apis")
+        # Pass-through of the QA spec — same shape as the UI create form.
+        self.assertEqual(body["name"], "Fetch active sprint")
+        self.assertEqual(body["api_plugin_slug"], "mcp-atlassian")
+        self.assertEqual(body["api_endpoint_path"], "/rest/api/3/search/jql")
+        self.assertEqual(body["api_query"], {"jql": "sprint in openSprints()"})
+        # Caller sees the unwrapped created QA, can echo back the id.
+        self.assertEqual(out["id"], "qa-new-123")
+
+    def test_auto_inherits_project_id_from_current_disc(self):
+        # An agent operating inside a project's disc should NOT see its
+        # QA created in "Général". Same UX rationale as qp_create_draft.
+        self.mod._CURRENT_DISC_META_CACHE.update({
+            "checked": True,
+            "value": {"id": "disc-parent", "project_id": "proj-inherited"},
+        })
+        self.mod.call_qa_create_draft({
+            "name": "QA",
+            "api_plugin_slug": "mcp-atlassian",
+            "api_config_id": "cfg-jira",
+            "api_endpoint_path": "/foo",
+        })
+        _, _, body = self.fake_http.call_args.args
+        self.assertEqual(body["project_id"], "proj-inherited")
+
+    def test_explicit_project_id_wins_over_inheritance(self):
+        # Explicit > inherited — matches the cluster (disc_create,
+        # workflow_create_draft, qp_create_draft, qp_run).
+        self.mod._CURRENT_DISC_META_CACHE.update({
+            "checked": True,
+            "value": {"id": "disc-parent", "project_id": "proj-inherited"},
+        })
+        self.mod.call_qa_create_draft({
+            "name": "QA",
+            "api_plugin_slug": "mcp-atlassian",
+            "api_config_id": "cfg-jira",
+            "api_endpoint_path": "/foo",
+            "project_id": "proj-explicit",
+        })
+        _, _, body = self.fake_http.call_args.args
+        self.assertEqual(body["project_id"], "proj-explicit")
+
+    def test_listed_in_TOOLS_with_required_fields_pinned(self):
+        # Discovery contract — agents enumerate TOOLS, must find
+        # qa_create_draft alongside workflow_create_draft + qp_create_draft.
+        tool = next(t for t in self.mod.TOOLS if t["name"] == "qa_create_draft")
+        for required in ("name", "api_plugin_slug", "api_config_id", "api_endpoint_path"):
+            self.assertIn(required, tool["inputSchema"]["required"])
+
+    def test_dispatched_in_DISPATCH(self):
+        # Tools listed in TOOLS must be wired in DISPATCH — else
+        # tools/call returns 'unknown method'. Defensive pin.
+        self.assertIn("qa_create_draft", self.mod.DISPATCH)
+
+
+class QaUpdateTests(unittest.TestCase):
+    """`qa_update` MCP wrapper — partial-update semantics on top of the
+    bare PUT route. The wrapper MUST preserve every field the agent
+    doesn't pass, otherwise the bare PUT would reset
+    variables/profile_ids/directive_ids to empty.
+    """
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.existing_qa = {
+            "id": "qa-jira-fetch",
+            "name": "Fetch Jira ticket",
+            "icon": "🎫",
+            "description": "Fetch a ticket by key",
+            "project_id": "proj-jira",
+            "api_plugin_slug": "mcp-atlassian",
+            "api_config_id": "cfg-jira",
+            "api_endpoint_path": "/rest/api/3/issue/{ticket_id}",
+            "api_method": "GET",
+            "api_query": {"expand": "renderedFields,changelog"},
+            "api_path_params": None,
+            "api_headers": None,
+            "api_body": None,
+            "api_extract": None,
+            "api_pagination": None,
+            "api_timeout_ms": 10_000,
+            "api_max_retries": 2,
+            "variables": [
+                {
+                    "name": "ticket_id",
+                    "label": "Ticket ID",
+                    "placeholder": "EW-7308",
+                    "description": "JIRA issue key",
+                    "required": True,
+                },
+            ],
+            "profile_ids": ["profile-eng"],
+            "directive_ids": [],
+        }
+        # _http : first call (GET /api/quick-apis) returns the list ;
+        # subsequent calls (PUT) return the updated QA. Use side_effect.
+        self.updated_qa_response = dict(self.existing_qa)
+        self.fake_http = mock.MagicMock(side_effect=[
+            {"success": True, "data": [self.existing_qa]},  # GET list
+            {"success": True, "data": self.updated_qa_response},  # PUT
+        ])
+        self.http_patch = mock.patch.object(self.mod, "_http", self.fake_http)
+        self.http_patch.start()
+        self.addCleanup(self.http_patch.stop)
+
+    def test_rejects_missing_qa_id(self):
+        with self.assertRaises(RuntimeError) as cm:
+            self.mod.call_qa_update({})
+        self.assertIn("qa_id", str(cm.exception))
+        # Crucially, NO HTTP call when validation fails.
+        self.fake_http.assert_not_called()
+
+    def test_rejects_unknown_qa_id_with_actionable_hint(self):
+        # Existing list returns no matching QA → wrapper raises with a
+        # hint that points the agent to qa_list. Better UX than a 404
+        # from the PUT route mid-flow.
+        self.fake_http.side_effect = [
+            {"success": True, "data": [self.existing_qa]},
+        ]
+        with self.assertRaises(RuntimeError) as cm:
+            self.mod.call_qa_update({"qa_id": "qa-does-not-exist"})
+        self.assertIn("not found", str(cm.exception))
+        self.assertIn("qa_list", str(cm.exception))
+
+    def test_extract_only_patch_preserves_everything_else(self):
+        # The flagship use case : agent realises payload is verbose,
+        # patches ONLY api_extract. variables / profile_ids /
+        # api_query / etc. MUST survive intact (the bare PUT would
+        # wipe variables ; the wrapper merges).
+        self.mod.call_qa_update({
+            "qa_id": "qa-jira-fetch",
+            "api_extract": {"path": "$.fields", "fail_on_empty": True},
+        })
+        # 1st _http call : GET list (already asserted via side_effect setup).
+        # 2nd _http call : PUT with merged body.
+        put_method, put_path, put_body = self.fake_http.call_args_list[1].args
+        self.assertEqual(put_method, "PUT")
+        self.assertEqual(put_path, "/api/quick-apis/qa-jira-fetch")
+        # The patch landed :
+        self.assertEqual(put_body["api_extract"], {"path": "$.fields", "fail_on_empty": True})
+        # Everything else is intact :
+        self.assertEqual(put_body["name"], "Fetch Jira ticket")
+        self.assertEqual(put_body["api_endpoint_path"], "/rest/api/3/issue/{ticket_id}")
+        self.assertEqual(put_body["api_query"], {"expand": "renderedFields,changelog"})
+        self.assertEqual(put_body["api_method"], "GET")
+        self.assertEqual(put_body["api_max_retries"], 2)
+        # Critically : the bare PUT would wipe these to empty without merge.
+        self.assertEqual(len(put_body["variables"]), 1)
+        self.assertEqual(put_body["variables"][0]["name"], "ticket_id")
+        self.assertEqual(put_body["profile_ids"], ["profile-eng"])
+
+    def test_explicit_empty_list_clears_field(self):
+        # Passing `variables: []` explicitly should clear them (agent
+        # asked for it). Distinguish from "field absent" (preserve).
+        self.mod.call_qa_update({
+            "qa_id": "qa-jira-fetch",
+            "variables": [],
+        })
+        _, _, put_body = self.fake_http.call_args_list[1].args
+        self.assertEqual(put_body["variables"], [])
+        # Other fields still preserved.
+        self.assertEqual(put_body["profile_ids"], ["profile-eng"])
+
+    def test_multi_field_patch_applies_all_overrides(self):
+        # A more realistic patch : add api_extract, tighten api_query
+        # (vendor-side filter), bump retries. All three apply, nothing
+        # else moves.
+        self.mod.call_qa_update({
+            "qa_id": "qa-jira-fetch",
+            "api_extract": {"path": "$.fields"},
+            "api_query": {"fields": "summary,status,assignee"},
+            "api_max_retries": 5,
+        })
+        _, _, put_body = self.fake_http.call_args_list[1].args
+        self.assertEqual(put_body["api_extract"], {"path": "$.fields"})
+        self.assertEqual(put_body["api_query"], {"fields": "summary,status,assignee"})
+        self.assertEqual(put_body["api_max_retries"], 5)
+        # Untouched fields still there.
+        self.assertEqual(put_body["name"], "Fetch Jira ticket")
+        self.assertEqual(len(put_body["variables"]), 1)
+
+    def test_rejects_excessively_long_name_after_merge(self):
+        # Defense : if an agent patches with name="x"*201, the merge
+        # produces a too-long name. Reject BEFORE the PUT round-trip.
+        with self.assertRaises(RuntimeError):
+            self.mod.call_qa_update({
+                "qa_id": "qa-jira-fetch",
+                "name": "x" * 201,
+            })
+
+    def test_listed_in_TOOLS_with_only_qa_id_required(self):
+        # Discovery contract : agents discover qa_update alongside
+        # qa_create_draft + qa_run. ONLY qa_id is required — every
+        # other field is optional (the merge fills the gaps).
+        tool = next(t for t in self.mod.TOOLS if t["name"] == "qa_update")
+        self.assertEqual(tool["inputSchema"]["required"], ["qa_id"])
+        # Each patchable field exposed in properties.
+        for f in ("api_extract", "api_query", "variables", "name"):
+            self.assertIn(f, tool["inputSchema"]["properties"])
+
+    def test_dispatched_in_DISPATCH(self):
+        self.assertIn("qa_update", self.mod.DISPATCH)
+
+
+class QaCreateDraftProbeFirstGuidanceTests(unittest.TestCase):
+    """The `qa_create_draft` description was rewritten in PR 1.8 to push
+    the PROBE-then-PERSIST workflow. Pin the key teaching points so a
+    future description refactor doesn't accidentally drop them.
+    """
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.tool = next(t for t in self.mod.TOOLS if t["name"] == "qa_create_draft")
+
+    def test_description_recommends_probe_first(self):
+        # The PROBE keyword + the recommendation to do an `api_call`
+        # first MUST be present — without them the description reads
+        # like "create + hope" and agents will repeat the 12k-token boo-boo.
+        desc = self.tool["description"]
+        self.assertIn("PROBE", desc)
+        self.assertIn("api_call", desc)
+
+    def test_description_mentions_vendor_payload_sizes(self):
+        # Concrete numbers anchor the lesson — a future agent reading
+        # the description sees that the "12k tokens" warning is real.
+        desc = self.tool["description"]
+        # Loose check : the word "tokens" + a "10-40k"-ish range must appear.
+        self.assertIn("tokens", desc.lower())
+        self.assertIn("10-40k", desc)
+
+    def test_description_points_to_qa_update_for_iteration(self):
+        # Agents who DID skip the probe should know they can recover
+        # via qa_update without UI friction.
+        desc = self.tool["description"]
+        self.assertIn("qa_update", desc)
+
+
+class CreateDraftClusterSymmetryTests(unittest.TestCase):
+    """The 3 *_create_draft tools must form a coherent cluster — same
+    discovery surface, same auto-inheritance, same project-id passthrough.
+    A new draft tool that breaks one of these contracts in the future
+    will be caught here."""
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.cluster = ("workflow_create_draft", "qp_create_draft", "qa_create_draft")
+
+    def test_all_three_drafts_present_in_TOOLS(self):
+        names = {t["name"] for t in self.mod.TOOLS}
+        for required in self.cluster:
+            self.assertIn(required, names,
+                f"`{required}` missing — cluster symmetry broken")
+
+    def test_all_three_drafts_dispatched(self):
+        for required in self.cluster:
+            self.assertIn(required, self.mod.DISPATCH,
+                f"`{required}` listed but not dispatched")
+
+    def test_all_three_drafts_accept_project_id_property(self):
+        # Auto-inheritance from current disc requires the schema accept
+        # project_id even when not in `required`. Defensive pin.
+        for name in self.cluster:
+            tool = next(t for t in self.mod.TOOLS if t["name"] == name)
+            self.assertIn("project_id", tool["inputSchema"]["properties"],
+                f"`{name}` schema missing project_id property")
+
+
+class McpRemoteControlToolListingTests(unittest.TestCase):
+    """The 3 new tools must be discoverable via the standard tools/list
+    surface — without this, agents can't find them even if the routes
+    are wired. Pin the contract here so a TOOLS list refactor doesn't
+    silently drop them."""
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.tool_names = {t["name"] for t in self.mod.TOOLS}
+
+    def test_workflow_trigger_listed_with_workflow_id_required(self):
+        tool = next(t for t in self.mod.TOOLS if t["name"] == "workflow_trigger")
+        self.assertIn("workflow_id", tool["inputSchema"]["required"])
+
+    def test_workflow_run_status_listed_with_run_id_required(self):
+        tool = next(t for t in self.mod.TOOLS if t["name"] == "workflow_run_status")
+        self.assertIn("run_id", tool["inputSchema"]["required"])
+
+    def test_qp_run_listed_with_qp_id_required(self):
+        tool = next(t for t in self.mod.TOOLS if t["name"] == "qp_run")
+        self.assertIn("qp_id", tool["inputSchema"]["required"])
+
+    def test_qa_run_listed_with_qa_id_required(self):
+        tool = next(t for t in self.mod.TOOLS if t["name"] == "qa_run")
+        self.assertIn("qa_id", tool["inputSchema"]["required"])
+
+    def test_all_four_tools_present(self):
+        # Single assertion for the discovery contract — agents need
+        # all four to drive the full launch+track flow + QA exec.
+        for required in ("workflow_trigger", "workflow_run_status", "qp_run", "qa_run"):
+            self.assertIn(required, self.tool_names,
+                f"`{required}` missing from TOOLS — agents can't discover it")
+
+    def test_async_tool_descriptions_mention_next_check_smart_polling(self):
+        # The smart-polling hint is the whole point of the async tools ;
+        # description MUST explain it so agents honour the wait_seconds.
+        # `qa_run` is synchronous — explicitly excluded (it would be
+        # actively misleading to mention next_check on a tool that
+        # never returns one).
+        for name in ("workflow_trigger", "workflow_run_status", "qp_run"):
+            tool = next(t for t in self.mod.TOOLS if t["name"] == name)
+            self.assertIn("next_check", tool["description"],
+                f"`{name}` description must reference next_check")
+
+    def test_qa_run_description_excludes_next_check_and_explains_sync(self):
+        # `qa_run` is synchronous — calling out the absence of
+        # next_check (NO `next_check`) prevents agents from waiting
+        # for a hint that will never come.
+        tool = next(t for t in self.mod.TOOLS if t["name"] == "qa_run")
+        self.assertIn("synchronous", tool["description"].lower())
+        # Must mention NO next_check so an agent migrating from qp_run
+        # doesn't blindly look for the field.
+        self.assertIn("NO `next_check`", tool["description"])
+
+    def test_all_four_tools_dispatched(self):
+        # Tools listed in TOOLS must be wired in DISPATCH — else
+        # tools/call returns 'unknown method'. Defensive pin.
+        for required in ("workflow_trigger", "workflow_run_status", "qp_run", "qa_run"):
+            self.assertIn(required, self.mod.DISPATCH,
+                f"`{required}` listed but not dispatched")
+
 
 if __name__ == "__main__":
     unittest.main()

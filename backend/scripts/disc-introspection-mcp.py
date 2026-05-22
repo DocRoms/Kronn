@@ -304,15 +304,27 @@ TOOLS = [
         "name": "disc_create_room",
         "description": (
             "One-shot bootstrap of a multi-agent room from the MCP "
-            "surface : creates a fresh discussion, binds THIS bridge "
-            "to it, and mints an invite token in a single call. "
-            "Returns `{disc_id, title, token, instruction_text, "
-            "expires_at}`. Use this when an agent wants to spin up a "
-            "collaboration on its own (e.g. spawning a reviewer, "
-            "delegating a sub-task) without asking the user to click "
-            "anywhere in the Kronn UI. After this call you can "
-            "immediately `disc_append` to greet, then "
-            "`disc_wait_for_peer` to wait for the invitee to join."
+            "surface : creates a fresh discussion AND mints an invite "
+            "token in a single call. Returns `{disc_id, title, token, "
+            "instruction_text, expires_at, next_step}`.\n\n"
+            "⚠ IMPORTANT — this tool does NOT switch your current "
+            "bridge binding. Your existing disc (the one you are "
+            "currently talking in) stays the active one. The new room "
+            "is created server-side and the token lets a peer join "
+            "it, but YOU stay where you were. This is intentional : "
+            "silent context-switch would risk losing the thread of "
+            "the conversation that asked for the room.\n\n"
+            "After this call, decide explicitly :\n"
+            "  (a) Stay in the current disc → share `instruction_text` "
+            "with the user (paste it in another CLI to bring it in).\n"
+            "  (b) Switch your own bridge to the new room → call "
+            "`disc_join({token})` with the returned token. Your "
+            "previous disc binding is replaced ; calling `disc_leave` "
+            "first is cleanest if you want to formally leave.\n\n"
+            "The `next_step` field in the response is a plain-text "
+            "hint about what makes sense given the current context — "
+            "follow it OR explicitly diverge with a one-line rationale "
+            "so the user knows what's happening."
         ),
         "inputSchema": {
             "type": "object",
@@ -422,9 +434,13 @@ TOOLS = [
         "description": (
             "List every Quick API in the user's library — compact view "
             "(id, name, api_plugin_slug, api_endpoint_path, api_method, "
-            "description, project_id). Use this to reuse a matching QA "
-            "via `quick_api_id` in a workflow `ApiCall` / `BatchApiCall` "
-            "step instead of re-specifying the endpoint inline."
+            "description, project_id, variables[]). The `variables[]` "
+            "entries are `{name, label, required, description}` — pass "
+            "values matching those names to `qa_run`. Use this to (a) "
+            "discover the right QA for an action via `qa_run`, (b) "
+            "reuse a matching QA via `quick_api_id` in a workflow "
+            "`ApiCall` / `BatchApiCall` step instead of re-specifying "
+            "the endpoint inline."
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },
@@ -554,6 +570,158 @@ TOOLS = [
             "required": ["name", "prompt_template", "agent"],
         },
     },
+    {
+        "name": "qa_create_draft",
+        "description": (
+            "Create a Kronn Quick API (QA) in the user's QA library. "
+            "Closes the symmetry gap with `workflow_create_draft` + "
+            "`qp_create_draft` — agents can now SAVE a reusable API "
+            "request shape (endpoint + method + query + body + extract "
+            "+ pagination) for later one-shot invocation via `qa_run`. "
+            "Use this when the conversation has converged on a "
+            "recurring API call the user will want to launch again "
+            "later (e.g. \"fetch active sprint tickets\", \"check "
+            "domain config\", \"trigger a webhook\"). Saves token cost "
+            "on every future invocation : `qa_run(id, vars)` instead "
+            "of rebuilding the `api_call` payload from scratch.\n\n"
+            "**⚠ Recommended workflow — PROBE then PERSIST** :\n"
+            "  1. **Probe** : do ONE `api_call` to the target endpoint "
+            "WITHOUT `extract` (or with `extract: null`). Read the "
+            "response shape — many vendors (JIRA, Confluence, AWS, "
+            "GitHub) return verbose payloads with `changelog`, "
+            "`renderedFields`, ADF nodes, ARN-heavy refs that bloat "
+            "an agent's context (10-40k tokens for a single ticket).\n"
+            "  2. **Decide** : pick the JSONPath that keeps only what "
+            "downstream agents need (often `$.fields`, `$.data`, or "
+            "`$.items[*].{id,title,status}`). When in doubt, ask the "
+            "user what they care about.\n"
+            "  3. **Persist** : call `qa_create_draft` with the "
+            "optimised `api_extract` AND vendor-side filters in "
+            "`api_query` (e.g. `fields=summary,status` for JIRA, "
+            "`expand=` knobs for Confluence). Persist both for "
+            "max token economy — server-side filtering AND client-side "
+            "extraction stack.\n\n"
+            "Persisting a QA without `api_extract` is fine for "
+            "small-payload vendors (Resend, Mailjet, simple webhooks) "
+            "but ALWAYS measure first — the next `qa_update` call to "
+            "add `api_extract` post-hoc is just MCP friction the user "
+            "can avoid by getting it right at create time.\n\n"
+            "**Discovery first** : call `mcp_list` to find the right "
+            "`api_plugin_slug` + `api_config_id`. The QA's endpoint "
+            "must match one of the plugin's allow-listed endpoints "
+            "(or the executor will refuse it at run time).\n\n"
+            "**Templating** : `endpoint_path`, `api_query`, "
+            "`api_path_params`, `api_headers`, `api_body` string "
+            "leaves can contain `{{var_name}}` placeholders that "
+            "match `variables[].name`. At `qa_run` time the user "
+            "(or `qa_run`'s `vars` arg) provides the values.\n\n"
+            "**Variables** : each entry is "
+            "`{name, label?, placeholder?, required?, description?}`. "
+            "Required defaults to true. `name` must be a "
+            "UPPER_SNAKE_CASE or lower_snake_case identifier matching "
+            "the `{{var_name}}` placeholders in the API config.\n\n"
+            "**Safety** : QAs have no `enabled` flag — every QA can "
+            "be launched on demand. No auto-fire risk. The user "
+            "reviews the QA in the Quick APIs page before invoking. "
+            "Same safety profile as `qp_create_draft`.\n\n"
+            "**Iteration** : if you realise after testing that the "
+            "QA needs tweaking (heavier payload than expected, missing "
+            "query param, wrong extract path), use `qa_update({qa_id, "
+            "...patch})` — it merges your patch on top of the existing "
+            "QA so you only specify what changed. No need to ask the "
+            "user to click through the Quick APIs page UI.\n\n"
+            "Returns the created QA JSON (id, all fields) so the "
+            "agent can echo the id back to the user "
+            "(`Quick API created as <id> — try it with qa_run({qa_id, vars})`)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "QA name (1-200 chars, displayed on the QA card)."},
+                "api_plugin_slug": {"type": "string", "description": "Plugin slug from `mcp_list` (e.g. `mcp-atlassian`, `api-resend`, `api-custom-foo`)."},
+                "api_config_id": {"type": "string", "description": "Plugin config id from `mcp_list.configs[].config_id`. Pin the QA to a specific config (per-project or global)."},
+                "api_endpoint_path": {"type": "string", "description": "Endpoint path matching one of the plugin's declared endpoints (e.g. `/rest/api/3/issue/{ticket_id}`). May contain `{{var}}` placeholders OR `{path_param}` segments."},
+                "api_method": {"type": "string", "description": "HTTP method override : `GET | POST | PUT | PATCH | DELETE`. Defaults to the plugin endpoint's declared method when omitted."},
+                "api_query": {"type": "object", "description": "Query-string parameters as key→value map. Values may contain `{{var}}` placeholders."},
+                "api_path_params": {"type": "object", "description": "Path-segment substitutions for `{name}` segments in the endpoint path."},
+                "api_headers": {"type": "object", "description": "Extra request headers. NEVER pass auth — Kronn injects per the plugin spec."},
+                "api_body": {"description": "JSON body for POST/PUT/PATCH (object/array). String leaves can contain `{{var}}` placeholders."},
+                "api_extract": {"type": "object", "description": "Optional JSONPath extract spec: `{path: \"$.items\", fail_on_empty: false}`."},
+                "api_pagination": {"type": "object", "description": "Optional pagination spec (page/offset/cursor strategies)."},
+                "api_timeout_ms": {"type": "integer", "description": "Optional per-call timeout in ms. Defaults to plugin default."},
+                "api_max_retries": {"type": "integer", "description": "Optional retry count on transient HTTP errors."},
+                "variables": {
+                    "type": "array",
+                    "description": "Variable definitions (each `{ name, label?, placeholder?, required?, description? }`).",
+                },
+                "description": {"type": "string", "description": "Optional one-line description shown on the QA card."},
+                "icon": {"type": "string", "description": "Optional single-emoji prefix (e.g. `🎫` / `📧` / `🔍`)."},
+                "project_id": {"type": "string", "description": "Optional Kronn project id to bind the QA to (auto-inherited from current disc when absent)."},
+                "profile_ids": {"type": "array", "items": {"type": "string"}, "description": "Optional profile bindings (used when QA result feeds an agent)."},
+                "directive_ids": {"type": "array", "items": {"type": "string"}, "description": "Optional directive bindings."},
+            },
+            "required": ["name", "api_plugin_slug", "api_config_id", "api_endpoint_path"],
+        },
+    },
+    {
+        "name": "qa_update",
+        "description": (
+            "Patch an existing Quick API (QA). Loads the current QA, "
+            "merges your patch on top of it field-by-field, and writes "
+            "the result back via `PUT /api/quick-apis/<id>`. You only "
+            "specify what CHANGES — every field you don't pass keeps "
+            "its existing value (variables / profile_ids / "
+            "directive_ids included, which the bare PUT route would "
+            "reset to empty).\n\n"
+            "**Typical iterations** :\n"
+            "  - Adding `api_extract` to a verbose-payload QA after "
+            "  probing showed 12k+ token responses\n"
+            "  - Adding `fields=summary,status` to `api_query` for "
+            "  vendor-side filtering\n"
+            "  - Fixing a typo in `name` / `description`\n"
+            "  - Adding a missing `variables[]` entry after realising "
+            "  the endpoint needed a path param\n"
+            "  - Bumping `api_max_retries` after a flaky vendor "
+            "  surfaced\n\n"
+            "**Pure additive — no need to re-supply existing fields**. "
+            "Pass `{qa_id, api_extract: {path: \"$.fields\"}}` and the "
+            "rest of the QA stays exactly as it was. Inverse of "
+            "`qa_create_draft` — only `qa_id` is required; every other "
+            "field is optional and skipped when absent.\n\n"
+            "**Returns the updated QA** so the agent can confirm the "
+            "patch applied as intended. If you intend further calls "
+            "(e.g. test the change with `qa_run` right after), the "
+            "returned shape lets you do so without an extra `qa_list` "
+            "round-trip."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "qa_id": {"type": "string", "description": "Quick API id (from `qa_list`)."},
+                # Every QA field can be patched. None required beyond qa_id.
+                "name": {"type": "string", "description": "New name. Omit to keep existing."},
+                "icon": {"type": "string", "description": "New icon. Omit to keep existing."},
+                "description": {"type": "string", "description": "New description. Omit to keep existing."},
+                "api_plugin_slug": {"type": "string", "description": "Re-target to a different plugin (rare)."},
+                "api_config_id": {"type": "string", "description": "Re-target to a different config id."},
+                "api_endpoint_path": {"type": "string", "description": "Change the endpoint."},
+                "api_method": {"type": "string"},
+                "api_query": {"type": "object", "description": "Replace the query map. Pass `{}` to clear."},
+                "api_path_params": {"type": "object"},
+                "api_headers": {"type": "object"},
+                "api_body": {"description": "Replace the body JSON."},
+                "api_extract": {"type": "object", "description": "Replace the extract spec (the most common patch)."},
+                "api_pagination": {"type": "object"},
+                "api_timeout_ms": {"type": "integer"},
+                "api_max_retries": {"type": "integer"},
+                "variables": {"type": "array", "description": "Replace the variables list. Pass `[]` to clear all."},
+                "profile_ids": {"type": "array", "items": {"type": "string"}},
+                "directive_ids": {"type": "array", "items": {"type": "string"}},
+                "project_id": {"type": "string", "description": "Re-bind to a different project. Omit to keep existing."},
+            },
+            "required": ["qa_id"],
+        },
+    },
     # ─── 0.8.6 — Agent API broker (no secrets in prompt) ────────────────
     # Lets the agent INVOKE a Kronn-configured API plugin without ever
     # seeing the credentials. The backend decrypts the env, resolves auth
@@ -655,6 +823,173 @@ TOOLS = [
                 },
             },
             "required": ["endpoint_path"],
+        },
+    },
+    # ─── 0.8.6 phase 4 — MCP Remote Control (launch + track) ────────────
+    # Three tools that turn Kronn into a fully MCP-driveable backend :
+    # an agent (typically Claude Code mobile linked to a PC session) can
+    # LAUNCH a workflow or QP, then TRACK its progress without ever
+    # opening the desktop UI. Every response carries a `next_check`
+    # field — a smart-polling hint computed from historical averages
+    # (workflow_runs.total_duration_ms / qp_versions.avg_duration_ms).
+    # Honour it to slash mobile token cost ~80% vs naïve polling.
+    {
+        "name": "workflow_trigger",
+        "description": (
+            "Launch a Kronn workflow run from MCP — same effect as the "
+            "UI's Trigger button, but JSON-only (no SSE). Returns "
+            "`{run_id, workflow_id, workflow_name, status, started_at, "
+            "expected_duration_ms?, samples, next_check}`.\n\n"
+            "**Workflow discovery first** : call `workflow_list` to "
+            "find the right `workflow_id`. The workflow MUST be enabled "
+            "(`enabled: true`) — disabled drafts are refused with a "
+            "clear error.\n\n"
+            "**`next_check`** — a hint of the form `{wait_seconds, "
+            "reason, confidence}`. After the trigger, wait that many "
+            "seconds then call `workflow_run_status({run_id})`. The "
+            "first wait is always at least 30s (sanity check that the "
+            "run actually started). Honour it — naïve 10s polling on a "
+            "2-min workflow burns ~13× more tokens than this hint "
+            "schedules. `confidence: baseline` ⇒ the average is "
+            "reliable. `confidence: no_baseline` ⇒ first time we run "
+            "this workflow, just check every 60s.\n\n"
+            "**Variables** : when the workflow declares manual launch "
+            "variables, pass them as `variables: {name: value, ...}`. "
+            "Required ones must be non-empty — same validation as the "
+            "UI form."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "workflow_id": {
+                    "type": "string",
+                    "description": "Kronn workflow id (from `workflow_list`).",
+                },
+                "variables": {
+                    "type": "object",
+                    "description": "Manual-launch variables as a flat key→value map (string values only).",
+                },
+            },
+            "required": ["workflow_id"],
+        },
+    },
+    {
+        "name": "workflow_run_status",
+        "description": (
+            "Read the current state of a workflow run launched via "
+            "`workflow_trigger` (or via the UI). Returns "
+            "`{run_id, workflow_id, status, started_at, finished_at?, "
+            "elapsed_ms, current_step?, step_count, tokens_used, "
+            "steps[], expected_duration_ms?, samples, next_check?}`. "
+            "`steps[]` has each step's name + status + duration_ms + "
+            "tokens_used + 200-char output excerpt + step_type.\n\n"
+            "**Terminal vs in-flight** : when `status` is one of "
+            "`Success`, `Failed`, `Cancelled`, `StoppedByGuard`, "
+            "`next_check` is `null` — no further polling needed. "
+            "Otherwise, wait `next_check.wait_seconds` then call again. "
+            "The hint adapts : projection-anchored while within the "
+            "average duration, fixed backoff after overshoot.\n\n"
+            "**For batch workflows** : individual child discussions are "
+            "not listed here in PR1 — use `workflow_run_discussions` "
+            "(0.8.6 phase 4 PR2) when shipped, or read the disc list "
+            "from the Kronn DB directly. For linear workflows the "
+            "`steps[]` array is enough."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "run_id": {"type": "string", "description": "Run id (from `workflow_trigger`)."},
+            },
+            "required": ["run_id"],
+        },
+    },
+    {
+        "name": "qp_run",
+        "description": (
+            "Launch a Quick Prompt as a fresh disc — one-shot mode. "
+            "Returns `{disc_id, qp_id, qp_name, agent, "
+            "expected_duration_ms?, samples, next_check}`. The QP's "
+            "default agent is used unless `agent` is overridden.\n\n"
+            "**Discovery first** : call `qp_list` to find the right "
+            "`qp_id` + see required variables. Pass them as "
+            "`vars: {name: value, ...}` — same `{{var}}` substitution "
+            "as the UI form. Required vars must be non-empty.\n\n"
+            "**Track the run** : the agent is kicked off automatically "
+            "in the background. After `next_check.wait_seconds`, read "
+            "the result via `disc_load_other(disc_id)` — same tool used "
+            "for any other disc. `next_check` here uses the QP's "
+            "weighted-average first-reply duration across all versions "
+            "(`qp_versions` metrics).\n\n"
+            "**Optional project scope** : if you don't pass "
+            "`project_id`, the QP's declared project (or no project) "
+            "is used. Pass `project_id` explicitly to override.\n\n"
+            "**vs `qp_create_draft`** : draft creates a NEW QP "
+            "definition ; `qp_run` LAUNCHES an existing QP."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "qp_id": {"type": "string", "description": "Quick Prompt id (from `qp_list`)."},
+                "vars": {
+                    "type": "object",
+                    "description": "Variable values for `{{var}}` placeholders, as a flat key→value map (string values).",
+                },
+                "agent": {
+                    "type": "string",
+                    "description": "Optional agent override : `ClaudeCode | Codex | Vibe | GeminiCli | Kiro | CopilotCli | Ollama | Custom`. Defaults to the QP's declared agent.",
+                },
+                "project_id": {
+                    "type": "string",
+                    "description": "Optional project override. Defaults to the QP's declared project.",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Optional disc title. Defaults to `<qp_name> — MCP run`.",
+                },
+            },
+            "required": ["qp_id"],
+        },
+    },
+    {
+        "name": "qa_run",
+        "description": (
+            "Execute a saved Quick API (QA) by id — fully synchronous. "
+            "Returns the parsed envelope `{success, duration_ms, "
+            "envelope: {data, status, summary}, error?}` inline. NO "
+            "`next_check` (QAs are fast, sub-second to a few seconds) "
+            "— just await the response.\n\n"
+            "**Why use this over `api_call`** :\n"
+            "  - Zero token cost on request construction — the QA "
+            "already encodes endpoint, method, headers, query, body, "
+            "extract, pagination. You only pass the `vars`.\n"
+            "  - Same result across agents — Claude / Codex / Vibe / "
+            "Ollama all call the same QA → identical request shape, "
+            "identical result. Pure mechanical work, deagentified.\n"
+            "  - Maintenance centralised — if the endpoint changes, "
+            "the user updates the QA once ; every consumer benefits.\n"
+            "  - Audited — every call lands in `api_call_logs` with "
+            "the QA id as `caller_id`, so the user can mesure ROI.\n\n"
+            "**Discovery** : call `qa_list` to find the right `qa_id` "
+            "+ see required variable names. Pass values matching those "
+            "names via `vars`. Required variables that are missing or "
+            "empty → 400 with a clear error.\n\n"
+            "**vs `api_call`** : `api_call` is the low-level broker "
+            "for one-shot calls where no saved QA fits. `qa_run` is "
+            "the high-level wrapper for recurring patterns. Always "
+            "prefer `qa_run` when a matching QA exists ; fall back "
+            "to `api_call` only when the user has no QA for this "
+            "use case yet (and consider suggesting they save one)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "qa_id": {"type": "string", "description": "Quick API id (from `qa_list`)."},
+                "vars": {
+                    "type": "object",
+                    "description": "Variable values for the QA's `{{var}}` placeholders, as a flat key→value map (string values). Keys must match the `variables[].name` returned by `qa_list`.",
+                },
+            },
+            "required": ["qa_id"],
         },
     },
 ]
@@ -1152,9 +1487,18 @@ def call_disc_create_room(args):
     if not title:
         raise RuntimeError("disc_create_room: missing required 'title'")
 
-    # Forward to existing disc_create logic — it already binds the
-    # process via _set_current_disc_id and idempotency-on-source
-    # protections still apply if the agent retries.
+    # 0.8.6 fix 2026-05-22 — pre-fix the comment claimed "disc_create
+    # already binds the process via _set_current_disc_id" but that's
+    # NOT true (verified). The result was that disc_create_room created
+    # the room server-side without switching the caller's bridge to
+    # it. The caller stayed bound to the original disc (KRONN_DISCUSSION_ID
+    # at boot, OR the previously joined disc) — easy to lose track of
+    # what's happening if the user wasn't paying attention.
+    #
+    # The 0.8.6 fix keeps the non-binding behaviour (silent context-
+    # switch would be even worse) but adds a `next_step` field in the
+    # response that explicitly tells the agent what to do : stay in
+    # the current disc + share the token, OR switch via disc_join.
     create_args = {"title": title, "agent": _agent_type_for_session() or "Unknown"}
     if args.get("language"):
         create_args["language"] = args["language"]
@@ -1170,9 +1514,34 @@ def call_disc_create_room(args):
         )
 
     invite = _unwrap(_http("POST", f"/api/discussions/{disc_id}/invite-peer", {}))
+
+    # Determine the next-step hint based on the current bridge binding.
+    # If we ARE currently bound (the common case from a Kronn-launched
+    # session), advise staying put + sharing the token. If we are NOT
+    # bound (host-launched, no disc context), advise joining the new
+    # room since there's no risk of losing context.
+    current_disc = _CURRENT_DISC_ID
+    if current_disc and current_disc != disc_id:
+        next_step = (
+            f"Your bridge is still bound to disc {current_disc[:8]}… — the new "
+            f"room {disc_id[:8]}… is NOT auto-joined. Default behaviour : keep "
+            f"talking here and SHARE `instruction_text` with the user so they "
+            f"can bring a peer in. If you actually want to switch your own "
+            f"context to the new room, call `disc_join({{token: \"<token>\"}})` "
+            f"explicitly — your current binding will be replaced."
+        )
+    else:
+        next_step = (
+            f"Your bridge has no active disc binding. To start posting in the "
+            f"new room {disc_id[:8]}…, call `disc_join({{token: \"<token>\"}})` "
+            f"with the returned token. Or share `instruction_text` with the "
+            f"user to bring a peer CLI in instead."
+        )
+
     out = {
         "disc_id": disc_id,
         "title": created.get("title", title),
+        "next_step": next_step,
     }
     if isinstance(invite, dict):
         out["token"] = invite.get("token")
@@ -1301,9 +1670,23 @@ def call_qa_list(_args):
     # 0.8.5 — compact list. Keeps the plugin slug + endpoint path so the
     # agent can decide if an existing QA can be referenced from a new
     # workflow's `quick_api_id` slot.
+    # 0.8.6 phase 4 — also surface `variables[]` so the agent knows
+    # what to pass to the new `qa_run` tool without an extra round-trip
+    # to `GET /api/quick-apis/<id>`. Each entry is
+    # `{name, label, required, description}` — strictly the shape
+    # `qa_run.vars` accepts as keys.
     data = _unwrap(_http("GET", "/api/quick-apis")) or []
     out = []
     for q in data:
+        variables = [
+            {
+                "name": v.get("name"),
+                "label": v.get("label"),
+                "required": bool(v.get("required", True)),
+                "description": v.get("description") or None,
+            }
+            for v in (q.get("variables") or [])
+        ]
         out.append({
             "id": q.get("id"),
             "name": q.get("name"),
@@ -1312,6 +1695,7 @@ def call_qa_list(_args):
             "api_method": q.get("api_method"),
             "description": q.get("description"),
             "project_id": q.get("project_id"),
+            "variables": variables,
         })
     return out
 
@@ -1535,6 +1919,96 @@ def call_qp_create_draft(args):
     return _unwrap(_http("POST", "/api/quick-prompts", body))
 
 
+def call_qa_update(args):
+    """0.8.6 phase 4 — partial-update wrapper around `PUT /api/quick-apis/<id>`.
+
+    The bare PUT route resets `variables` / `profile_ids` / `directive_ids`
+    to empty when those fields aren't in the body — defensive design on
+    the backend side, but hostile UX for an MCP agent that just wants to
+    tweak `api_extract`. We avoid the footgun by loading the existing
+    QA first, applying the agent's patch on top of every field, and
+    PUTting the full merged body back.
+
+    Returns the updated QA JSON so the agent can confirm + chain straight
+    into `qa_run` if needed.
+    """
+    qa_id = args.get("qa_id")
+    if not qa_id:
+        raise RuntimeError("qa_update: missing required 'qa_id'")
+
+    # The list endpoint is the only GET route exposing the full QA shape
+    # (no /api/quick-apis/<id> GET today). It returns every field so the
+    # merge is lossless ; cost is the same as `qa_list` (~1 small query).
+    existing_list = _unwrap(_http("GET", "/api/quick-apis")) or []
+    existing = next((q for q in existing_list if q.get("id") == qa_id), None)
+    if not existing:
+        raise RuntimeError(
+            f"qa_update: quick API {qa_id!r} not found — call qa_list to "
+            "see what exists"
+        )
+
+    # Field-by-field merge : every field present in args overrides the
+    # existing value (incl. an explicit `None` if the agent wants to
+    # clear an optional field). Fields the agent didn't pass come from
+    # the existing QA, preserved verbatim.
+    patchable_fields = (
+        "name", "icon", "description",
+        "api_plugin_slug", "api_config_id", "api_endpoint_path",
+        "api_method", "api_query", "api_path_params", "api_headers",
+        "api_body", "api_extract", "api_pagination",
+        "api_timeout_ms", "api_max_retries",
+        "variables", "profile_ids", "directive_ids", "project_id",
+    )
+    body = {}
+    for field in patchable_fields:
+        if field in args:
+            body[field] = args[field]
+        elif field in existing:
+            body[field] = existing[field]
+
+    # Defensive : the merged body MUST have non-empty required fields,
+    # else the backend update route falls back to existing — works fine
+    # in practice but the explicit check surfaces inconsistencies early.
+    for required in ("name", "api_plugin_slug", "api_config_id", "api_endpoint_path"):
+        if not body.get(required):
+            raise RuntimeError(
+                f"qa_update: merged body has empty '{required}' — "
+                "existing QA is corrupt OR you passed an empty string "
+                "explicitly. Re-check qa_list output."
+            )
+    if len(body["name"]) > 200:
+        raise RuntimeError(
+            f"qa_update: 'name' too long ({len(body['name'])} chars, max 200)"
+        )
+
+    return _unwrap(_http("PUT", f"/api/quick-apis/{qa_id}", body))
+
+
+def call_qa_create_draft(args):
+    """0.8.6 phase 4 — POST /api/quick-apis.
+
+    Closes the symmetry gap with workflow_create_draft + qp_create_draft.
+    QAs have no `enabled` flag (manual launch only via `qa_run`), so the
+    "draft" semantic mirrors qp_create_draft — the agent created it,
+    the user reviews + launches when they want. No auto-fire surface.
+    """
+    for field in ("name", "api_plugin_slug", "api_config_id", "api_endpoint_path"):
+        if not args.get(field):
+            raise RuntimeError(f"qa_create_draft: missing required '{field}'")
+    if len(args["name"]) > 200:
+        raise RuntimeError(
+            f"qa_create_draft: 'name' too long ({len(args['name'])} chars, max 200)"
+        )
+    body = dict(args)
+    # Same auto-inheritance pattern as qp_create_draft : if the agent is
+    # operating inside a project's disc, the QA defaults to that project.
+    if "project_id" not in body or body.get("project_id") is None:
+        inherited = _current_project_id()
+        if inherited:
+            body["project_id"] = inherited
+    return _unwrap(_http("POST", "/api/quick-apis", body))
+
+
 def call_api_call(args):
     """0.8.6 — Agent API broker.
 
@@ -1609,6 +2083,110 @@ def call_api_call(args):
     return _unwrap(_http("POST", "/api/agent-api/call", body))
 
 
+# ─── 0.8.6 phase 4 — MCP Remote Control (workflow_trigger / workflow_run_status / qp_run) ──
+
+def call_workflow_trigger(args):
+    """0.8.6 phase 4 — launch a workflow run via the JSON wrapper route.
+
+    The backend `POST /api/mcp/workflow-trigger` :
+      1. Validates the workflow + variables (same as UI trigger)
+      2. Creates the run row + spawns the runner task in background
+      3. Returns `{run_id, status, expected_duration_ms?, samples,
+         next_check}` synchronously
+
+    The agent should honour `next_check.wait_seconds` before calling
+    `workflow_run_status({run_id})`. Without that, naïve polling burns
+    ~13× more tokens for nothing.
+    """
+    workflow_id = args.get("workflow_id")
+    if not workflow_id:
+        raise RuntimeError("workflow_trigger: missing required 'workflow_id'")
+    body = {"workflow_id": workflow_id}
+    variables = args.get("variables")
+    if isinstance(variables, dict):
+        # Coerce all values to strings — the backend's TriggerWorkflowRequest
+        # uses HashMap<String, String> ; non-string LLM outputs get
+        # str()'d here so a {{count}}-typed-as-int doesn't 400.
+        body["variables"] = {str(k): str(v) for k, v in variables.items()}
+    return _unwrap(_http("POST", "/api/mcp/workflow-trigger", body))
+
+
+def call_workflow_run_status(args):
+    """0.8.6 phase 4 — read a workflow run's current state + next_check hint.
+
+    Pure pass-through to `GET /api/mcp/workflow-run-status/<run_id>`.
+    """
+    run_id = args.get("run_id")
+    if not run_id:
+        raise RuntimeError("workflow_run_status: missing required 'run_id'")
+    return _unwrap(_http("GET", f"/api/mcp/workflow-run-status/{run_id}"))
+
+
+def call_qa_run(args):
+    """0.8.6 phase 4 — execute a saved Quick API by id, synchronously.
+
+    Thin pass-through to `POST /api/quick-apis/<qa_id>/run`. The backend
+    hydrates the QA's endpoint/method/path_params/query/body, applies
+    the user-supplied `vars`, runs the call through the same executor
+    as workflow `ApiCall` steps, and returns the parsed envelope.
+
+    No `next_check` — QAs are typically sub-second to a few seconds,
+    the agent just awaits the response.
+
+    Failure modes :
+      - missing `qa_id` → RuntimeError before HTTP
+      - required-variable missing → backend returns `success=false` with
+        a clear French error like `Variable obligatoire manquante : foo`
+      - HTTP failure / extract failure → `envelope=None` + `error="…"`
+    """
+    qa_id = args.get("qa_id")
+    if not qa_id:
+        raise RuntimeError("qa_run: missing required 'qa_id'")
+    body = {}
+    vars_obj = args.get("vars")
+    if isinstance(vars_obj, dict):
+        # Same coercion as workflow_trigger.variables / qp_run.vars —
+        # the backend's RunQuickApiRequest uses HashMap<String, String>,
+        # so int-typed LLM outputs need str() to avoid a 400.
+        body["variables"] = {str(k): str(v) for k, v in vars_obj.items()}
+    else:
+        body["variables"] = {}
+    return _unwrap(_http("POST", f"/api/quick-apis/{qa_id}/run", body))
+
+
+def call_qp_run(args):
+    """0.8.6 phase 4 — launch a Quick Prompt as a fresh disc.
+
+    The backend `POST /api/mcp/qp-run` :
+      1. Renders the QP template with the passed `vars`
+      2. Creates a single-item batch (= 1 disc) via `create_batch_run`
+      3. Spawns the agent in background (no SSE consumer needed)
+      4. Returns `{disc_id, expected_duration_ms?, samples, next_check}`
+
+    The agent reads the result via `disc_load_other(disc_id)` once
+    `next_check.wait_seconds` elapsed.
+    """
+    qp_id = args.get("qp_id")
+    if not qp_id:
+        raise RuntimeError("qp_run: missing required 'qp_id'")
+    body = {"qp_id": qp_id}
+    vars_obj = args.get("vars")
+    if isinstance(vars_obj, dict):
+        # Same coercion as workflow_trigger — the backend expects strings.
+        body["vars"] = {str(k): str(v) for k, v in vars_obj.items()}
+    for k in ("agent", "project_id", "title"):
+        v = args.get(k)
+        if v is not None:
+            body[k] = v
+    # Auto-inherit current disc's project when the agent doesn't pass
+    # one explicitly — same UX pattern as disc_create / workflow_create_draft.
+    if "project_id" not in body:
+        inherited = _current_project_id()
+        if inherited:
+            body["project_id"] = inherited
+    return _unwrap(_http("POST", "/api/mcp/qp-run", body))
+
+
 DISPATCH = {
     "disc_meta": call_disc_meta,
     "disc_get_message": call_disc_get_message,
@@ -1645,10 +2223,27 @@ DISPATCH = {
     # cascade into prod cron.
     "workflow_create_draft": call_workflow_create_draft,
     "qp_create_draft": call_qp_create_draft,
+    # 0.8.6 phase 4 — symmetry fix : QA drafting was missing from the
+    # *_create_draft cluster. QAs have no enabled flag — drafting = creation.
+    "qa_create_draft": call_qa_create_draft,
+    # 0.8.6 phase 4 — partial-update for QAs (load-merge-write).
+    # Closes the post-test iteration loop : agent probes, persists,
+    # tests, then patches `api_extract` / `api_query` without UI clicks.
+    "qa_update": call_qa_update,
     # 0.8.6 — Agent API broker. Lets the agent invoke a configured
     # plugin without ever seeing the credentials (cf.
     # [[project_agent_api_broker_0_8_6]]).
     "api_call": call_api_call,
+    # 0.8.6 phase 4 — MCP remote control. Launches + tracks workflows
+    # and Quick Prompts from MCP, with smart-polling next_check hints
+    # to cut mobile token cost ~80% (cf. [[project_mcp_remote_control_0_8_6]]).
+    "workflow_trigger": call_workflow_trigger,
+    "workflow_run_status": call_workflow_run_status,
+    "qp_run": call_qp_run,
+    # 0.8.6 phase 4 — synchronous QA execution. The deagentified twin
+    # of `api_call` : same end-result, zero token cost on request
+    # construction. Always prefer when a matching QA exists.
+    "qa_run": call_qa_run,
 }
 
 

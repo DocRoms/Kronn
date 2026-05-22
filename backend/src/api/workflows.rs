@@ -2605,32 +2605,49 @@ pub async fn test_api_call(
     Json(req): Json<TestApiCallRequest>,
 ) -> Json<ApiResponse<TestApiCallResponse>> {
     use crate::workflows::api_call_executor::{
-        execute_api_call_step_with_db, SecurityPolicy,
+        execute_api_call_step_with_db_as, ApiCallLogContext, SecurityPolicy,
     };
     use crate::workflows::template::TemplateContext;
 
     let ctx = TemplateContext::new();
-    let outcome = execute_api_call_step_with_db(
+    // 0.8.6 (#59) — record source=manual_test in api_call_logs so the
+    // audit table separates wizard test calls from real workflow runs.
+    let outcome = execute_api_call_step_with_db_as(
         &req.step,
         Some(&req.project_id),
         &state,
         &ctx,
         SecurityPolicy::production(),
+        ApiCallLogContext::manual_test(),
     )
     .await;
 
     let success = outcome.result.status == RunStatus::Success;
-    // The output now has a trailing `\n[SIGNAL: ...]` line so workflows can
-    // branch on the result via `on_result.contains`. Strip that suffix before
-    // parsing the JSON envelope — without this, `serde_json::from_str` chokes
-    // on the trailing line and the wizard's "Test the call" panel showed
-    // success-but-no-envelope, which the UI rendered as a generic Failure.
+    // 0.8.6 fix — use the canonical `extract_step_envelope` (the same
+    // helper the broker uses). The pre-fix strip-then-parse approach
+    // worked for raw-JSON outputs but FAILS on the 0.8.5+ canonical
+    // `---STEP_OUTPUT---` marker format — the split returned the
+    // marker block instead of the JSON, and `serde_json::from_str`
+    // came back None → UI rendered "Failure" despite a 200 OK upstream.
     let envelope: Option<serde_json::Value> = if success {
-        let json_part = outcome.result.output
-            .split("\n[SIGNAL:")
-            .next()
-            .unwrap_or(&outcome.result.output);
-        serde_json::from_str(json_part).ok()
+        crate::workflows::template::extract_step_envelope(&outcome.result.output)
+            .map(|e| {
+                let data_value: serde_json::Value = serde_json::from_str(&e.data_json)
+                    .unwrap_or(serde_json::Value::Null);
+                serde_json::json!({
+                    "data": data_value,
+                    "status": e.status,
+                    "summary": e.summary,
+                })
+            })
+            // Last-resort fallback: pre-0.8.5 bare-JSON envelopes.
+            .or_else(|| {
+                let json_part = outcome.result.output
+                    .split("\n[SIGNAL:")
+                    .next()
+                    .unwrap_or(&outcome.result.output);
+                serde_json::from_str(json_part).ok()
+            })
     } else {
         None
     };
@@ -2675,6 +2692,32 @@ mod tests {
         let json_part = envelope_json.split("\n[SIGNAL:").next().unwrap();
         let parsed: serde_json::Value = serde_json::from_str(json_part).unwrap();
         assert_eq!(parsed.pointer("/data/x").and_then(|v| v.as_i64()), Some(1));
+    }
+
+    // 0.8.6 fix — regression guard: the 0.8.5+ canonical output format
+    // (`---STEP_OUTPUT---` markers) breaks the legacy split-then-parse
+    // approach. `extract_step_envelope` must successfully parse it.
+    // Pre-fix Quick API `/run`, `/test-api-call`, and `/batch` all
+    // returned `envelope: null` despite a successful upstream call —
+    // because they were re-parsing the wrapper, not the inner JSON.
+    #[test]
+    fn test_api_call_extract_step_envelope_parses_canonical_format() {
+        use crate::workflows::template::extract_step_envelope;
+        // Build a canonical step output exactly as `format_step_output` emits.
+        let canonical = crate::workflows::step_output_format::format_step_output(
+            serde_json::json!({"key": "EW-1"}),
+            "OK",
+            "GET /search → 1 issue",
+            None,
+            &["OK"],
+        );
+        let env = extract_step_envelope(&canonical)
+            .expect("canonical format must parse via extract_step_envelope");
+        assert_eq!(env.status, "OK");
+        assert!(env.summary.contains("EW-1") || env.summary.contains("issue"));
+        // `data_json` is the JSON-serialised data field — parse back to verify.
+        let data: serde_json::Value = serde_json::from_str(&env.data_json).unwrap();
+        assert_eq!(data.get("key").and_then(|v| v.as_str()), Some("EW-1"));
     }
 
     fn mk_step(name: &str, kind: StepType) -> WorkflowStep {

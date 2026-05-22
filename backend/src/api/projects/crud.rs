@@ -575,12 +575,185 @@ pub async fn set_linked_repos(
                         project.name, id, e
                     );
                 }
+
+                // 0.8.6 phase 4 — bidirectional linking. Pre-fix, linking
+                // A → B only created the forward link ; B stayed unaware
+                // of the relationship until the user manually added the
+                // reverse. Now we compute + apply the reverse updates
+                // automatically. Idempotent (no-op when B already links
+                // back), so no infinite loop even when this triggers a
+                // re-sync on B's side.
+                let payload_clone = payload.clone();
+                let project_for_bidir = project.clone();
+                let bidir_result = state.db.with_conn(move |conn| {
+                    let all = crate::db::projects::list_projects(conn)?;
+                    let updates = compute_bidirectional_link_updates(
+                        &project_for_bidir, &payload_clone, &all,
+                    );
+                    for upd in &updates {
+                        crate::db::projects::update_project_linked_repos(
+                            conn, &upd.target_project_id, &upd.new_linked_repos,
+                        )?;
+                    }
+                    Ok::<_, anyhow::Error>(updates)
+                }).await;
+                if let Ok(updates) = bidir_result {
+                    // Push→pull : also refresh docs/linked-repos.md on
+                    // each touched reverse-target so the agent there
+                    // sees the new sister-project reference on its
+                    // next audit / disc.
+                    for upd in &updates {
+                        let target_id = upd.target_project_id.clone();
+                        let target_proj = state.db.with_conn(move |conn| {
+                            crate::db::projects::get_project(conn, &target_id)
+                        }).await;
+                        if let Ok(Some(target)) = target_proj {
+                            let target_path = crate::core::scanner::resolve_host_path(&target.path);
+                            if let Err(e) = super::sync_linked_repos_doc(
+                                &target_path, &upd.new_linked_repos,
+                            ) {
+                                tracing::warn!(
+                                    "Failed to sync docs/linked-repos.md on reverse target {} ({}): {}",
+                                    target.name, upd.target_project_id, e,
+                                );
+                            }
+                        }
+                    }
+                    if !updates.is_empty() {
+                        tracing::info!(
+                            "Bidirectional link : {} reverse update(s) applied for source project {}",
+                            updates.len(), project.id,
+                        );
+                    }
+                } else if let Err(e) = bidir_result {
+                    tracing::warn!(
+                        "Bidirectional link compute failed for project {} : {} — forward link still saved, reverse skipped",
+                        project.id, e,
+                    );
+                }
             }
             Json(ApiResponse::ok(true))
         }
         Ok(false) => Json(ApiResponse::err("Project not found")),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
+}
+
+/// 0.8.6 phase 4 — one reverse-link update to apply after a primary
+/// `set_linked_repos` write. Returned by [`compute_bidirectional_link_updates`]
+/// so the handler can batch them via DB calls.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BidirectionalLinkUpdate {
+    pub target_project_id: String,
+    pub new_linked_repos: Vec<LinkedRepo>,
+}
+
+/// 0.8.6 phase 4 — compute the reverse-link updates that should be
+/// applied after `set_linked_repos` writes project A's new list. For
+/// every LinkedRepo in A's payload whose `location` matches another
+/// Kronn project B's `path` or `repo_url`, this returns an update
+/// adding A as a LinkedRepo on B (if not already present).
+///
+/// Pure (no DB, no IO) — caller provides the snapshot of all projects.
+/// Idempotent : a LinkedRepo from A to B that already has its reverse
+/// in B produces NO update (avoids duplicates + breaks the A→B→A loop).
+///
+/// Semantic decisions :
+///   - Reverse-link `kind` defaults to `"other"` (neutral). The user
+///     can rename it later in the picker. Source kind isn't copied
+///     because the semantic isn't symmetric (an "api" companion for
+///     a frontend is a "frontend" companion for the API, not "api").
+///   - Reverse-link `description` is empty by default. Same rationale.
+///   - Reverse-link `location` is A's `path` if available, else A's
+///     `repo_url`. We prefer the path because it works for local-only
+///     projects + agents can `cd` to it.
+///   - The match in B's existing list checks both `path` and `repo_url`
+///     of A — covers projects linked via either form.
+pub fn compute_bidirectional_link_updates(
+    source_project: &Project,
+    source_payload: &[LinkedRepo],
+    all_projects: &[Project],
+) -> Vec<BidirectionalLinkUpdate> {
+    let source_locations: Vec<String> = [
+        Some(source_project.path.clone()),
+        source_project.repo_url.clone(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|s| !s.is_empty())
+    .collect();
+    if source_locations.is_empty() {
+        return vec![];
+    }
+
+    let mut updates = Vec::new();
+    for link in source_payload {
+        // Find the Kronn project this link points to (if any).
+        let target = all_projects.iter().find(|p| {
+            if p.id == source_project.id {
+                // A linking to itself : ignore (defensive guard).
+                return false;
+            }
+            // Match against the project's path OR its repo_url. Either
+            // form is what the user might have typed in the link picker.
+            (!p.path.is_empty() && p.path == link.location)
+                || p.repo_url.as_ref().is_some_and(|u| u == &link.location)
+        });
+        let Some(target) = target else { continue };
+
+        // Already linked back ? Skip — avoids duplicates AND avoids
+        // any chance of an infinite ping-pong on subsequent saves.
+        let already_linked = target.linked_repos.iter().any(|existing| {
+            source_locations.iter().any(|loc| loc == &existing.location)
+        });
+        if already_linked {
+            continue;
+        }
+
+        // Build the reverse link.
+        let reverse_location = source_locations[0].clone(); // path-first preference
+        // 0.8.6 phase 4 audit feedback (2026-05-22) : populate the
+        // reverse-link description with provenance so the user / agent
+        // on B's side can tell :
+        //   1. This link wasn't typed by hand (`↩ Auto-linked from`)
+        //   2. Where it came from (source project name)
+        //   3. What semantic role B plays in A's universe (source kind
+        //      — "api" / "iac" / "design" / etc.). B's user sees
+        //      "Backend is the api for Frontend" without ambiguity.
+        //   4. The original description if any (kept verbatim under
+        //      "Original:" so context isn't lost).
+        let mut description = format!(
+            "↩ Auto-linked from {} (original kind: {})",
+            source_project.name, link.kind,
+        );
+        if !link.description.is_empty() {
+            description.push_str(&format!(" — original note: \"{}\"", link.description));
+        }
+        let reverse_link = LinkedRepo {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: source_project.name.clone(),
+            kind: "other".into(),
+            location: reverse_location,
+            description,
+        };
+        let mut new_list = target.linked_repos.clone();
+        new_list.push(reverse_link);
+
+        // If we already accumulated an update for this same target
+        // (e.g. A's payload referenced B twice via path AND repo_url),
+        // we'd double-add. Avoid by merging.
+        if let Some(existing) = updates.iter_mut().find(
+            |u: &&mut BidirectionalLinkUpdate| u.target_project_id == target.id,
+        ) {
+            existing.new_linked_repos = new_list;
+        } else {
+            updates.push(BidirectionalLinkUpdate {
+                target_project_id: target.id.clone(),
+                new_linked_repos: new_list,
+            });
+        }
+    }
+    updates
 }
 
 /// 0.8.6 (#27) — One row in the linked-repos picker. Surfaces the
@@ -800,5 +973,242 @@ mod linked_repos_candidates_tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id, "p1");
         assert_eq!(result[0].proximity_hint, "other");
+    }
+}
+
+#[cfg(test)]
+mod bidirectional_link_tests {
+    use super::*;
+    use crate::models::{AiConfigStatus, AiAuditStatus};
+
+    fn make_project(id: &str, name: &str, path: &str, repo_url: Option<&str>) -> Project {
+        Project {
+            id: id.into(),
+            name: name.into(),
+            path: path.into(),
+            repo_url: repo_url.map(String::from),
+            token_override: None,
+            ai_config: AiConfigStatus { detected: false, configs: vec![] },
+            audit_status: AiAuditStatus::NoTemplate,
+            ai_todo_count: 0,
+            tech_debt_count: 0,
+            needs_docs_migration: false,
+            default_skill_ids: vec![],
+            default_profile_id: None,
+            briefing_notes: None,
+            linked_repos: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    fn make_link(name: &str, location: &str, kind: &str) -> LinkedRepo {
+        LinkedRepo {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: name.into(),
+            kind: kind.into(),
+            location: location.into(),
+            description: String::new(),
+        }
+    }
+
+    #[test]
+    fn no_update_when_link_does_not_match_any_kronn_project() {
+        // Linking to an external repo (Github URL, off-disk path) :
+        // the helper finds no Kronn project to update → empty.
+        let a = make_project("a", "Frontend", "/repos/frontend", None);
+        let payload = vec![make_link("Vendor API", "https://github.com/vendor/api", "api")];
+        let updates = compute_bidirectional_link_updates(&a, &payload, std::slice::from_ref(&a));
+        assert_eq!(updates, vec![]);
+    }
+
+    #[test]
+    fn creates_reverse_link_when_target_is_a_kronn_project_matched_by_path() {
+        // Canonical scenario : A's link.location matches B's path.
+        // → B gains a reverse link back to A.
+        let a = make_project("a", "Frontend", "/repos/frontend", None);
+        let b = make_project("b", "Backend", "/repos/backend", None);
+        let payload = vec![make_link("Backend API", "/repos/backend", "api")];
+        let updates = compute_bidirectional_link_updates(&a, &payload, &[a.clone(), b.clone()]);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].target_project_id, "b");
+        // Reverse link points back to A's path with neutral kind.
+        let reverse = &updates[0].new_linked_repos[0];
+        assert_eq!(reverse.location, "/repos/frontend");
+        assert_eq!(reverse.name, "Frontend");
+        assert_eq!(reverse.kind, "other");
+        // Description encodes provenance so the user/agent on B's side
+        // can tell it's auto-created + what role they play for A.
+        assert!(reverse.description.contains("Auto-linked from"));
+        assert!(reverse.description.contains("Frontend"));
+        assert!(reverse.description.contains("api"),
+            "reverse description must surface the original kind so B's user knows their role for A");
+    }
+
+    #[test]
+    fn reverse_description_includes_source_link_note_when_provided() {
+        // User wrote a meaningful description on A's side
+        // ("GraphQL schema lives here") ; the reverse link on B's
+        // side preserves it under "original note" so context isn't
+        // lost. Without this, B's user sees just "Auto-linked from A".
+        let a = make_project("a", "Frontend", "/repos/frontend", None);
+        let b = make_project("b", "Backend", "/repos/backend", None);
+        let mut link = make_link("Backend API", "/repos/backend", "api");
+        link.description = "GraphQL schema lives here".into();
+        let payload = vec![link];
+        let updates = compute_bidirectional_link_updates(&a, &payload, &[a.clone(), b.clone()]);
+        let reverse = &updates[0].new_linked_repos[0];
+        assert!(reverse.description.contains("GraphQL schema lives here"),
+            "original description must be preserved verbatim on the reverse, got: {}",
+            reverse.description);
+        assert!(reverse.description.contains("original note"),
+            "reverse description must call out the preserved note explicitly");
+    }
+
+    #[test]
+    fn reverse_description_omits_note_section_when_source_link_has_none() {
+        // No description on A's side → the reverse description stays
+        // compact (no dangling "original note:" with empty content).
+        let a = make_project("a", "Frontend", "/repos/frontend", None);
+        let b = make_project("b", "Backend", "/repos/backend", None);
+        let payload = vec![make_link("Backend", "/repos/backend", "api")];
+        let updates = compute_bidirectional_link_updates(&a, &payload, &[a.clone(), b.clone()]);
+        let reverse = &updates[0].new_linked_repos[0];
+        assert!(!reverse.description.contains("original note"),
+            "should not show empty 'original note' when source had no description");
+    }
+
+    #[test]
+    fn matches_target_by_repo_url_when_path_does_not_match() {
+        // User types a Github URL in the picker ; B is registered in
+        // Kronn with that same repo_url. The helper matches and
+        // creates the reverse.
+        let a = make_project("a", "Frontend", "/repos/frontend", None);
+        let mut b = make_project("b", "Backend", "/repos/backend", Some("git@github.com:org/backend.git"));
+        b.path = "/different/path/backend".into();  // path doesn't match the link
+        let payload = vec![make_link("Backend", "git@github.com:org/backend.git", "api")];
+        let updates = compute_bidirectional_link_updates(&a, &payload, &[a.clone(), b.clone()]);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].target_project_id, "b");
+    }
+
+    #[test]
+    fn idempotent_when_reverse_link_already_exists() {
+        // Critical : if B already links back to A (manual add by user
+        // OR result of a previous bidirectional pass), the helper
+        // MUST skip — otherwise every save would duplicate the entry,
+        // and the A→B→A→B chain could ping-pong forever.
+        let a = make_project("a", "Frontend", "/repos/frontend", None);
+        let mut b = make_project("b", "Backend", "/repos/backend", None);
+        b.linked_repos = vec![make_link("Frontend", "/repos/frontend", "other")];
+        let payload = vec![make_link("Backend", "/repos/backend", "api")];
+        let updates = compute_bidirectional_link_updates(&a, &payload, &[a.clone(), b.clone()]);
+        assert!(updates.is_empty(),
+            "MUST not duplicate when reverse already present — got: {:?}", updates);
+    }
+
+    #[test]
+    fn idempotent_when_reverse_link_uses_repo_url_form() {
+        // Variant of the above : B links back via A's repo_url
+        // instead of path. Still no duplicate.
+        let a = make_project("a", "Frontend", "/repos/frontend",
+            Some("git@github.com:org/front.git"));
+        let mut b = make_project("b", "Backend", "/repos/backend", None);
+        b.linked_repos = vec![make_link("Frontend", "git@github.com:org/front.git", "other")];
+        let payload = vec![make_link("Backend", "/repos/backend", "api")];
+        let updates = compute_bidirectional_link_updates(&a, &payload, &[a.clone(), b.clone()]);
+        assert!(updates.is_empty());
+    }
+
+    #[test]
+    fn skips_self_reference_defensively() {
+        // If a user types their OWN path in the picker, the link
+        // would match "themselves". Defensive guard refuses to
+        // create a self-reverse (silly + would infinite-loop on save).
+        let a = make_project("a", "Self", "/repos/me", None);
+        let payload = vec![make_link("Me", "/repos/me", "other")];
+        let updates = compute_bidirectional_link_updates(&a, &payload, std::slice::from_ref(&a));
+        assert_eq!(updates, vec![]);
+    }
+
+    #[test]
+    fn multi_targets_create_multi_updates() {
+        // A links to B AND C — both Kronn projects → 2 separate
+        // updates, each adding A on the respective target.
+        let a = make_project("a", "Frontend", "/repos/frontend", None);
+        let b = make_project("b", "Backend", "/repos/backend", None);
+        let c = make_project("c", "Designs", "/repos/designs", None);
+        let payload = vec![
+            make_link("Backend", "/repos/backend", "api"),
+            make_link("Designs", "/repos/designs", "design"),
+        ];
+        let updates = compute_bidirectional_link_updates(
+            &a, &payload, &[a.clone(), b.clone(), c.clone()],
+        );
+        assert_eq!(updates.len(), 2);
+        let target_ids: Vec<&str> = updates.iter().map(|u| u.target_project_id.as_str()).collect();
+        assert!(target_ids.contains(&"b"));
+        assert!(target_ids.contains(&"c"));
+    }
+
+    #[test]
+    fn source_path_preferred_over_repo_url_for_reverse_location() {
+        // When A has both a path AND repo_url, the reverse link uses
+        // the path (works for local + remote ; agents can `cd` to it).
+        let a = make_project("a", "Frontend", "/repos/frontend",
+            Some("git@github.com:org/front.git"));
+        let b = make_project("b", "Backend", "/repos/backend", None);
+        let payload = vec![make_link("Backend", "/repos/backend", "api")];
+        let updates = compute_bidirectional_link_updates(&a, &payload, &[a.clone(), b.clone()]);
+        let reverse = &updates[0].new_linked_repos[0];
+        assert_eq!(reverse.location, "/repos/frontend",
+            "path-first preference broken — reverse link should use path when available");
+    }
+
+    #[test]
+    fn fallbacks_to_repo_url_when_source_has_no_path() {
+        // Edge : A is a virtual / cloud-only project with no on-disk
+        // path. Reverse uses the repo_url so the link still points
+        // somewhere meaningful.
+        let mut a = make_project("a", "Cloud", "", Some("git@github.com:org/cloud.git"));
+        a.path = String::new();
+        let b = make_project("b", "Backend", "/repos/backend", None);
+        let payload = vec![make_link("Backend", "/repos/backend", "api")];
+        let updates = compute_bidirectional_link_updates(&a, &payload, &[a.clone(), b.clone()]);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].new_linked_repos[0].location,
+            "git@github.com:org/cloud.git");
+    }
+
+    #[test]
+    fn no_update_when_source_has_neither_path_nor_repo_url() {
+        // Degenerate case : nothing to link back TO. Returns empty
+        // rather than creating a link with an empty location (which
+        // would be invalid against the picker's allowlist).
+        let mut a = make_project("a", "Ghost", "", None);
+        a.path = String::new();
+        let b = make_project("b", "Backend", "/repos/backend", None);
+        let payload = vec![make_link("Backend", "/repos/backend", "api")];
+        let updates = compute_bidirectional_link_updates(&a, &payload, &[a.clone(), b.clone()]);
+        assert!(updates.is_empty());
+    }
+
+    #[test]
+    fn preserves_existing_links_on_the_target() {
+        // B already has a link to C unrelated to A. When A links to
+        // B, the reverse update PRESERVES B's existing link to C +
+        // appends A. Never wipes.
+        let a = make_project("a", "Frontend", "/repos/frontend", None);
+        let mut b = make_project("b", "Backend", "/repos/backend", None);
+        b.linked_repos = vec![make_link("Designs", "/repos/designs", "design")];
+        let payload = vec![make_link("Backend", "/repos/backend", "api")];
+        let updates = compute_bidirectional_link_updates(&a, &payload, &[a.clone(), b.clone()]);
+        assert_eq!(updates.len(), 1);
+        let new_list = &updates[0].new_linked_repos;
+        assert_eq!(new_list.len(), 2);
+        assert!(new_list.iter().any(|l| l.location == "/repos/designs"),
+            "existing C link must be preserved");
+        assert!(new_list.iter().any(|l| l.location == "/repos/frontend"),
+            "new A link must be appended");
     }
 }

@@ -393,5 +393,6 @@ endif
 		{ echo "$(YELLOW)  desktop: offline failed, retrying online$(RESET)"; cd ../../desktop/src-tauri && cargo update --workspace >/dev/null; }
 	@echo "$(GREEN)✓ Version bumped to $(V) in all files$(RESET)"
 	@echo "  Files updated: VERSION, backend/Cargo.toml, desktop/src-tauri/Cargo.toml,"
-	@echo "  frontend/package.json, desktop/package.json, desktop/src-tauri/tauri.conf.json, README.md"
+	@echo "  frontend/package.json, desktop/package.json, desktop/src-tauri/tauri.conf.json, README.md,"
+	@echo "  site/index.html, site/en.html, site/es.html (v-prefixed mentions only — historical (0.8.x) refs preserved)"
 	@echo "  + Cargo.lock (backend, desktop/src-tauri) synced via cargo update --workspace"

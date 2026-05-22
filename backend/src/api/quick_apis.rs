@@ -317,24 +317,45 @@ pub async fn run_qa(
         json_data_payload: None,
     };
 
-    let outcome = crate::workflows::api_call_executor::execute_api_call_step_with_db(
+    // 0.8.6 (#59) — record as manual_test : Quick API standalone runs
+    // are user-direct invocations (not part of a workflow). Same audit
+    // category as wizard "Test the call".
+    let outcome = crate::workflows::api_call_executor::execute_api_call_step_with_db_as(
         &step,
         qa.project_id.as_deref(),
         &state,
         &ctx,
         crate::workflows::api_call_executor::SecurityPolicy::production(),
+        crate::workflows::api_call_executor::ApiCallLogContext::manual_test(),
     )
     .await;
 
     let success = outcome.result.status == RunStatus::Success;
-    // Same strip-then-parse trick as `/test-api-call`: the executor now
-    // appends `\n[SIGNAL: OK]` after the JSON envelope.
+    // 0.8.6 fix — same canonical envelope extraction as the broker (see
+    // `agent_api::agent_api_call`). The executor's output uses the
+    // `---STEP_OUTPUT---` marker format since 0.8.5 ; raw split-by-
+    // `\n[SIGNAL:` returns the marker-wrapped block which `from_str`
+    // can't parse. Caught here when Quick API runs surfaced `envelope:
+    // null` despite a 200 OK from upstream.
     let envelope: Option<serde_json::Value> = if success {
-        let json_part = outcome.result.output
-            .split("\n[SIGNAL:")
-            .next()
-            .unwrap_or(&outcome.result.output);
-        serde_json::from_str(json_part).ok()
+        crate::workflows::template::extract_step_envelope(&outcome.result.output)
+            .map(|e| {
+                let data_value: serde_json::Value = serde_json::from_str(&e.data_json)
+                    .unwrap_or(serde_json::Value::Null);
+                serde_json::json!({
+                    "data": data_value,
+                    "status": e.status,
+                    "summary": e.summary,
+                })
+            })
+            // Last-resort fallback: pre-0.8.5 bare-JSON envelopes.
+            .or_else(|| {
+                let json_part = outcome.result.output
+                    .split("\n[SIGNAL:")
+                    .next()
+                    .unwrap_or(&outcome.result.output);
+                serde_json::from_str(json_part).ok()
+            })
     } else {
         None
     };
@@ -435,20 +456,36 @@ pub async fn batch_run_qa(
     };
 
     let ctx = crate::workflows::template::TemplateContext::new();
+    // 0.8.6 (#59) — standalone batch-QA run is user-initiated, classify
+    // as manual_test (same as the single Quick API run path).
     let outcome = crate::workflows::batch_apicall_step::execute_batch_apicall_step(
         &step,
         qa.project_id.as_deref(),
         &state,
         &ctx,
+        crate::workflows::api_call_executor::ApiCallLogContext::manual_test(),
     ).await;
 
-    // Strip the trailing `\n[SIGNAL: ...]` line before parsing — same trick
-    // as /test-api-call and /run.
-    let json_part = outcome.result.output
-        .split("\n[SIGNAL:")
-        .next()
-        .unwrap_or(&outcome.result.output);
-    let envelope: Option<serde_json::Value> = serde_json::from_str(json_part).ok();
+    // 0.8.6 fix — canonical envelope extraction (same fix as
+    // /test-api-call and /run). Pre-fix split-by-`\n[SIGNAL:` returned
+    // the `---STEP_OUTPUT---` marker block, not the JSON.
+    let envelope: Option<serde_json::Value> = crate::workflows::template::extract_step_envelope(&outcome.result.output)
+        .map(|e| {
+            let data_value: serde_json::Value = serde_json::from_str(&e.data_json)
+                .unwrap_or(serde_json::Value::Null);
+            serde_json::json!({
+                "data": data_value,
+                "status": e.status,
+                "summary": e.summary,
+            })
+        })
+        .or_else(|| {
+            let json_part = outcome.result.output
+                .split("\n[SIGNAL:")
+                .next()
+                .unwrap_or(&outcome.result.output);
+            serde_json::from_str(json_part).ok()
+        });
     // Pull the "status" field from the envelope (OK/PARTIAL/ERROR). Falls
     // back to the run status when the envelope didn't parse.
     let status = envelope.as_ref()

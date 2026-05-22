@@ -96,9 +96,17 @@ pub async fn create(
     };
 
     // Read user identity for first message attribution
-    let (author_pseudo, author_avatar_email) = {
+    let (author_pseudo, author_avatar_email, default_summary_strategy) = {
         let config = state.config.read().await;
-        (config.server.pseudo.clone(), config.server.avatar_email.clone())
+        (
+            config.server.pseudo.clone(),
+            config.server.avatar_email.clone(),
+            // 0.8.6 phase 4 — apply the user's saved default summary
+            // strategy on every new disc. Defaults to `Off` (auto-summary
+            // disabled out of the box) ; user opts back to `Auto` from
+            // Settings when running small-context agents without MCP.
+            config.server.default_summary_strategy,
+        )
     };
 
     let now = Utc::now();
@@ -138,7 +146,7 @@ pub async fn create(
         worktree_branch: None,
         summary_cache: None,
         summary_up_to_msg_idx: None,
-        summary_strategy: crate::models::SummaryStrategy::Auto,
+        summary_strategy: default_summary_strategy,
         introspection_call_count: 0,
         shared_id: None,
         shared_with: vec![],

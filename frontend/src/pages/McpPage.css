@@ -293,13 +293,6 @@
   flex-wrap: wrap;
 }
 
-/* Separator dot between MCP/API kind pills and category pills. */
-.mcp-cat-pill-sep {
-  color: var(--kr-text-faint);
-  margin: 0 2px;
-  opacity: 0.5;
-}
-
 /* Inline description rendered under an API plugin's config key field.
    Sourced from `api_spec.config_keys.description` — gives the user a
    one-line explanation of what the field is for without cluttering

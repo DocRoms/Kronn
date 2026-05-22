@@ -67,6 +67,8 @@ vi.mock('../../lib/api', () => ({
   config: {
     getUiLanguage: vi.fn().mockResolvedValue('fr'),
     saveUiLanguage: vi.fn().mockResolvedValue(undefined),
+    // 0.8.6 phase 4 — WorkflowWizard reads default tier on mount.
+    getServerConfig: vi.fn().mockResolvedValue({ default_model_tier: 'default' }),
   },
   // WorkflowWizard loads the MCP overview at mount (ApiCall plugin picker).
   mcps: {

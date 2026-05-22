@@ -1,0 +1,344 @@
+/* 0.8.6 (#61) — API Call Logs page. Audit + debug surface for every
+   workflow / broker / manual_test API call recorded in api_call_logs. */
+
+.api-call-logs-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-6);
+  padding: var(--kr-sp-6);
+}
+
+.api-call-logs-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+}
+
+.api-call-logs-title {
+  display: flex;
+  align-items: center;
+  font-size: var(--kr-fs-2xl);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin: 0;
+  color: var(--kr-text-primary);
+}
+
+.api-call-logs-subtitle {
+  margin: 0;
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-muted);
+}
+
+/* ── Filter bar ──────────────────────────────────────────── */
+
+.api-call-logs-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--kr-sp-4);
+  padding: var(--kr-sp-4);
+  background: var(--kr-bg-surface);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-md);
+}
+
+.api-call-logs-filter-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+}
+
+.api-call-logs-filter-label {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.api-call-logs-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--kr-sp-1);
+}
+
+.api-call-logs-chip {
+  padding: 4px 10px;
+  border-radius: 12px;
+  border: 1px solid var(--kr-border-medium);
+  background: transparent;
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-xs);
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+
+.api-call-logs-chip:hover {
+  border-color: var(--kr-accent-border);
+  color: var(--kr-text-primary);
+}
+
+.api-call-logs-chip-active {
+  background: rgba(var(--kr-accent-rgb, 94, 234, 212), 0.12);
+  border-color: var(--kr-accent-ink, var(--kr-accent, #5eead4));
+  color: var(--kr-accent-ink, var(--kr-accent, #5eead4));
+}
+
+.api-call-logs-input {
+  padding: 6px 10px;
+  border-radius: var(--kr-r-md);
+  border: 1px solid var(--kr-border-medium);
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-sm);
+  font-family: var(--kr-font-mono);
+}
+
+.api-call-logs-controls {
+  flex-direction: row;
+  align-items: end;
+  gap: var(--kr-sp-3);
+}
+
+.api-call-logs-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-primary);
+  cursor: pointer;
+}
+
+.api-call-logs-refresh-btn {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  padding: 6px 12px;
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-sm);
+  cursor: pointer;
+}
+
+.api-call-logs-refresh-btn:hover {
+  border-color: var(--kr-accent-border);
+}
+
+/* ── Table ───────────────────────────────────────────────── */
+
+.api-call-logs-body {
+  background: var(--kr-bg-surface);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-md);
+  overflow: hidden;
+}
+
+.api-call-logs-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--kr-fs-sm);
+}
+
+.api-call-logs-table thead {
+  background: var(--kr-bg-hover);
+}
+
+.api-call-logs-table th,
+.api-call-logs-table td {
+  text-align: left;
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  border-bottom: 1px solid var(--kr-border-soft);
+}
+
+.api-call-logs-table th {
+  font-size: var(--kr-fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--kr-text-secondary);
+  font-weight: 600;
+}
+
+.api-call-logs-row {
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.api-call-logs-row:hover {
+  background: var(--kr-bg-hover);
+}
+
+.api-call-logs-mono {
+  font-family: var(--kr-font-mono);
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-primary);
+}
+
+.api-call-logs-source-pill,
+.api-call-logs-status-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: var(--kr-fs-2xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.api-call-logs-source-workflow {
+  background: rgba(var(--kr-info-rgb, 96, 165, 250), 0.15);
+  color: var(--kr-info, #60a5fa);
+}
+
+.api-call-logs-source-agent_broker {
+  background: rgba(var(--kr-accent-rgb, 94, 234, 212), 0.15);
+  color: var(--kr-accent-ink, var(--kr-accent, #5eead4));
+}
+
+.api-call-logs-source-manual_test {
+  background: rgba(var(--kr-warning-rgb, 251, 191, 36), 0.15);
+  color: var(--kr-warning, #fbbf24);
+}
+
+.api-call-logs-status-ok {
+  background: rgba(var(--kr-success-rgb, 34, 197, 94), 0.15);
+  color: var(--kr-success, #22c55e);
+}
+
+.api-call-logs-status-error {
+  background: rgba(var(--kr-error-rgb, 239, 68, 68), 0.18);
+  color: var(--kr-error, #ef4444);
+}
+
+.api-call-logs-status-ratelimited,
+.api-call-logs-status-timedout {
+  background: rgba(var(--kr-warning-rgb, 251, 191, 36), 0.2);
+  color: var(--kr-warning, #fbbf24);
+}
+
+.api-call-logs-empty,
+.api-call-logs-error {
+  padding: var(--kr-sp-8);
+  text-align: center;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-base);
+}
+
+.api-call-logs-error {
+  color: var(--kr-error, #ef4444);
+}
+
+/* ── Drawer ──────────────────────────────────────────────── */
+
+.api-call-logs-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  justify-content: flex-end;
+  z-index: 200;
+}
+
+.api-call-logs-drawer {
+  width: min(640px, 100%);
+  height: 100%;
+  background: var(--kr-bg-surface);
+  border-left: 1px solid var(--kr-border-medium);
+  padding: var(--kr-sp-5);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-4);
+}
+
+.api-call-logs-drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.api-call-logs-drawer-header h2 {
+  margin: 0;
+  font-size: var(--kr-fs-lg);
+  font-family: var(--kr-font-mono);
+  color: var(--kr-text-primary);
+}
+
+.api-call-logs-drawer-close {
+  background: none;
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-sm);
+  padding: 4px 8px;
+  color: var(--kr-text-secondary);
+  cursor: pointer;
+}
+
+.api-call-logs-drawer-meta {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--kr-sp-2) var(--kr-sp-4);
+  margin: 0;
+  padding: var(--kr-sp-4);
+  border: 1px solid var(--kr-border-soft);
+  border-radius: var(--kr-r-md);
+  font-size: var(--kr-fs-sm);
+}
+
+.api-call-logs-drawer-meta dt {
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.api-call-logs-drawer-meta dd {
+  margin: 0;
+  color: var(--kr-text-primary);
+  word-break: break-all;
+}
+
+.api-call-logs-drawer-section {
+  margin: 0;
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.api-call-logs-excerpt {
+  margin: 0;
+  padding: var(--kr-sp-3);
+  /* `--kr-bg-code-panel` is intentionally dark in EVERY theme (IDE
+     convention, cf. tokens.css). But `--kr-text-primary` flips to a
+     DARK value in light theme → text-on-bg is black-on-black and
+     unreadable. Pin the text tokens to their dark-theme values
+     inside the excerpt block. Mirrors the `disc-invite-instruction`
+     + `git-panel-container` fix for the same root cause. */
+  background: var(--kr-bg-code-panel);
+  --kr-text-primary: #e8eaed;
+  --kr-text-secondary: rgba(255, 255, 255, 0.7);
+  --kr-text-ghost: rgba(255, 255, 255, 0.5);
+  color: var(--kr-text-primary);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--kr-r-md);
+  font-family: var(--kr-font-mono);
+  font-size: var(--kr-fs-xs);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.api-call-logs-error-block {
+  border: 1px solid rgba(var(--kr-error-rgb, 239, 68, 68), 0.35);
+}
+
+.api-call-logs-drawer-redaction-hint {
+  margin: 0;
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-faint);
+  font-style: italic;
+}

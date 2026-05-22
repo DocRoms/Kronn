@@ -33,3 +33,4 @@ pub mod rtk;
 pub mod openapi;
 pub mod user_context;
 pub mod version;
+pub mod mcp_remote;

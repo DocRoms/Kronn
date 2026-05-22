@@ -5,6 +5,34 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Kronn · Many agents. Zero chaos.</title>
   <meta name="description" content="El control plane local-first para tus CLI de IA. Tú aportas Claude Code, Codex, Gemini, Ollama. Kronn aporta la memoria, la orquestación y la continuidad.">
+
+  <!-- 0.8.6 phase 4 — Open Graph + Twitter card, ES locale primary. -->
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Kronn">
+  <meta property="og:title" content="Kronn · Many agents. Zero chaos.">
+  <meta property="og:description" content="Control plane local-first para tus CLI de IA. Tú aportas Claude Code, Codex, Gemini, Ollama. Kronn aporta memoria, orquestación y continuidad — coste de tokens cero en pasos mecánicos.">
+  <meta property="og:url" content="https://docroms.github.io/Kronn/es.html">
+  <meta property="og:image" content="https://docroms.github.io/Kronn/og-image.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Kronn — the control plane orchestrating Claude, Codex, Gemini and Ollama from one screen.">
+  <meta property="og:locale" content="es_ES">
+  <meta property="og:locale:alternate" content="fr_FR">
+  <meta property="og:locale:alternate" content="en_US">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Kronn · Many agents. Zero chaos.">
+  <meta name="twitter:description" content="Control plane local-first para tus CLI de IA. Memoria, orquestación y continuidad en Claude Code, Codex, Gemini, Ollama.">
+  <meta name="twitter:image" content="https://docroms.github.io/Kronn/og-image.png">
+  <meta name="twitter:image:alt" content="Kronn — the control plane orchestrating Claude, Codex, Gemini and Ollama from one screen.">
+
+  <link rel="canonical" href="https://docroms.github.io/Kronn/es.html">
+
+  <link rel="alternate" hreflang="fr" href="https://docroms.github.io/Kronn/">
+  <link rel="alternate" hreflang="en" href="https://docroms.github.io/Kronn/en.html">
+  <link rel="alternate" hreflang="es" href="https://docroms.github.io/Kronn/es.html">
+  <link rel="alternate" hreflang="x-default" href="https://docroms.github.io/Kronn/">
+
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Russo+One&family=VT323&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
@@ -1295,6 +1323,49 @@
     }
     @media (max-width: 560px) {
       .compound-grid { grid-template-columns: 1fr; }
+    }
+
+    /* 0.8.6 phase 4 — Mobile defense pack (≤ 768px). See index.html
+       for the full rationale ; cloned verbatim across locales since
+       the 3 pages share the same DOM + grid class set. */
+    @media (max-width: 768px) {
+      .container { padding: 0 16px; }
+      .cli-grid,
+      .leaves,
+      .compare-grid,
+      .compound-grid,
+      .quickstart-stages,
+      .concepts-grid,
+      .security-grid,
+      .anti-grid,
+      .inventory-grid,
+      .plugin-flow-row,
+      .tool-cards {
+        grid-template-columns: 1fr !important;
+        gap: 12px;
+      }
+      .cli-card,
+      .compound-item,
+      .qs-stage,
+      .concept-def,
+      .sec-panel,
+      .anti-card,
+      .tool-card,
+      .compare-panel,
+      .decomp-wrap,
+      .leaf,
+      .plugin-card {
+        min-width: 0;
+        max-width: 100%;
+        box-sizing: border-box;
+      }
+      .compare-panel ul { padding-left: 0; }
+      .plugin-arrow { display: none; }
+      .compound-item + .compound-item::before { display: none; }
+      .slogan { font-size: 38px; }
+      .qs-title { font-size: 22px; }
+      .compound-title { font-size: 15px; }
+      html, body { overflow-x: hidden; max-width: 100%; }
     }
   </style>
 </head>

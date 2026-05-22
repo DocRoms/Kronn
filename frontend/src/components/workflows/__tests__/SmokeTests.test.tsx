@@ -221,4 +221,97 @@ describe('Workflow smoke tests', () => {
     expect(structured?.getAttribute('data-selected')).toBe('true');
     expect(free?.getAttribute('data-selected')).toBe('false');
   });
+
+  // 0.8.6 regression — Agent → ApiCall → Agent crashed with
+  // "Cannot read properties of undefined (reading 'trim')" because
+  // `swapStepType` wiped `prompt_template` when entering the new type
+  // but the Agent renderer dereferenced `step.prompt_template.trim()`
+  // without optional-chaining. Fix : seed `prompt_template: ''` when
+  // swapping INTO Agent + defensive optional-chaining at the render.
+  it('Step type swap Agent → ApiCall → Agent does not crash', () => {
+    const editWorkflow: Workflow = {
+      id: 'test-swap',
+      name: 'swap-test',
+      project_id: null,
+      trigger: { type: 'Cron', schedule: '*/5 * * * *' },
+      steps: [
+        {
+          name: 'step1',
+          step_type: { type: 'Agent' },
+          description: null,
+          agent: 'ClaudeCode',
+          prompt_template: 'something',
+          mode: { type: 'Normal' },
+          output_format: { type: 'Structured' },
+          mcp_config_ids: [],
+          agent_settings: null,
+          on_result: [],
+          stall_timeout_secs: null,
+          retry: null,
+          skill_ids: [],
+          directive_ids: [],
+          profile_ids: [],
+          delay_after_secs: null,
+          batch_quick_prompt_id: null,
+          batch_items_from: null,
+          batch_wait_for_completion: null,
+          batch_max_items: null,
+          batch_workspace_mode: null,
+          batch_chain_prompt_ids: [],
+          notify_config: null,
+        },
+      ],
+      actions: [],
+      safety: { sandbox: false, max_files: null, max_lines: null, require_approval: false },
+      workspace_config: null,
+      concurrency_limit: null,
+      enabled: true,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    // The "destructive swap" prompts a confirm — bypass it in tests so
+    // the swap is unconditional. happy-dom may not ship `confirm` but
+    // we stub it to TRUE to be explicit.
+    const origConfirm = window.confirm;
+    window.confirm = () => true;
+
+    const { container } = render(
+      <WorkflowWizard
+        projects={[]}
+        editWorkflow={editWorkflow}
+        onDone={noop}
+        onCancel={noop}
+        installedAgentTypes={['ClaudeCode']}
+      />
+    );
+
+    try {
+      // Walk to the Steps pane.
+      const nextButton = () => Array.from(container.querySelectorAll('button'))
+        .find(b => b.textContent?.includes('wiz.next')) as HTMLButtonElement | undefined;
+      for (let i = 0; i < 2; i++) {
+        const btn = nextButton();
+        if (!btn || btn.disabled) break;
+        fireEvent.click(btn);
+      }
+
+      // Click the ApiCall type button.
+      const apiBtn = container.querySelector('button[data-type="api"]') as HTMLButtonElement;
+      expect(apiBtn).toBeTruthy();
+      fireEvent.click(apiBtn);
+
+      // Click back to Agent — pre-fix this re-rendered the Agent UI
+      // with `prompt_template: undefined` and crashed on `.trim()`.
+      const agentBtn = container.querySelector('button[data-type="agent"]') as HTMLButtonElement;
+      expect(agentBtn).toBeTruthy();
+      fireEvent.click(agentBtn);
+
+      // If we reach here without throwing, the fix is in place.
+      // Also assert the Agent buttons are now selected to confirm swap landed.
+      expect(agentBtn.getAttribute('data-selected')).toBe('true');
+    } finally {
+      window.confirm = origConfirm;
+    }
+  });
 });

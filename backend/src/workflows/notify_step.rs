@@ -159,7 +159,6 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use std::net::TcpListener;
 
     fn make_step(config: NotifyConfig) -> WorkflowStep {
         WorkflowStep {
@@ -256,9 +255,10 @@ mod tests {
     #[tokio::test]
     async fn notify_renders_templates_in_url_and_body() {
         // Spin up a tiny local echo server; capture the request body.
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
+        // 0.8.6 (#58) — bind directly with tokio's TcpListener (no std
+        // bind + drop + rebind race). Pre-fix this flaked under
+        // `--test-threads=8` because another test could grab the port
+        // between the std listener drop and the tokio re-bind.
         let received_body = std::sync::Arc::new(tokio::sync::Mutex::new(String::new()));
         let received_path = std::sync::Arc::new(tokio::sync::Mutex::new(String::new()));
         let body_clone = received_body.clone();
@@ -276,8 +276,8 @@ mod tests {
                     }
                 }
             ));
-        let addr = format!("127.0.0.1:{}", port);
-        let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
@@ -315,16 +315,13 @@ mod tests {
 
     #[tokio::test]
     async fn notify_marks_non_2xx_as_failed_with_excerpt() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-
+        // 0.8.6 (#58) — same race fix as notify_renders_templates_in_url_and_body.
         let app = axum::Router::new()
             .route("/fail", axum::routing::post(|| async {
                 (axum::http::StatusCode::BAD_REQUEST, "nope, bad payload")
             }));
-        let addr = format!("127.0.0.1:{}", port);
-        let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });

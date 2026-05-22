@@ -4,7 +4,7 @@ use directories::ProjectDirs;
 use tokio::fs;
 
 use crate::models::{
-    AgentConfig, AgentsConfig, ApiKey, AppConfig, ScanConfig, ServerConfig, TokensConfig,
+    AgentConfig, AgentsConfig, ApiKey, AppConfig, ModelTier, ScanConfig, ServerConfig, TokensConfig,
 };
 
 const CONFIG_FILE: &str = "config.toml";
@@ -155,6 +155,11 @@ pub fn default_config() -> AppConfig {
             global_context: None,
             global_context_mode: "always".into(),
             debug_mode: false,
+            default_model_tier: ModelTier::Default,
+            // 0.8.6 phase 4 — auto-summary off out of the box. See
+            // ServerConfig field docs for rationale (modern agents
+            // have large context + MCP access, no auto-summary needed).
+            default_summary_strategy: crate::models::SummaryStrategy::Off,
         },
         tokens: TokensConfig {
             anthropic: None,

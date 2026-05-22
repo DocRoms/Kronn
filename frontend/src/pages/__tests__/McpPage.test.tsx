@@ -13,6 +13,7 @@ vi.mock('../../lib/api', () => ({
     createConfig: vi.fn(),
     updateConfig: vi.fn(),
     updateCustomSpec: vi.fn(),
+    cleanupOrphanEnv: vi.fn(),
     deleteConfig: vi.fn(),
     setConfigProjects: vi.fn(),
     revealSecrets: vi.fn(),
@@ -795,6 +796,95 @@ describe('McpPage', () => {
     expect(envPayload.env).toEqual({});
   });
 
+  // ─── 0.8.6 (#60) Orphan env warning ──────────────────────────────────
+
+  it('Modifier le plugin: prompts the user when updateCustomSpec reports orphan env keys', async () => {
+    vi.useRealTimers();
+    (mcpsApi.updateCustomSpec as ReturnType<typeof vi.fn>).mockClear();
+    (mcpsApi.updateConfig as ReturnType<typeof vi.fn>).mockClear();
+    (mcpsApi.cleanupOrphanEnv as ReturnType<typeof vi.fn>).mockClear();
+    // Backend reports an orphan (e.g. another config of the same plugin
+    // still carries OLD_API_KEY after the rename).
+    (mcpsApi.updateCustomSpec as ReturnType<typeof vi.fn>).mockResolvedValue({
+      server: {},
+      orphan_env_keys: ['OLD_API_KEY'],
+    });
+    (mcpsApi.updateConfig as ReturnType<typeof vi.fn>).mockResolvedValue({});
+    (mcpsApi.cleanupOrphanEnv as ReturnType<typeof vi.fn>).mockResolvedValue({
+      configs_updated: 2,
+      total_keys_removed: 2,
+    });
+    // User confirms the cleanup prompt.
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+    await openEditDrawer('custom-example-abc12345', 'cfg-example-1');
+    fireEvent.click(screen.getByText(/Enregistrer les modifications/));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(mcpsApi.cleanupOrphanEnv).toHaveBeenCalledWith(
+      'custom-example-abc12345',
+      ['OLD_API_KEY'],
+    );
+    confirmSpy.mockRestore();
+  });
+
+  it('Modifier le plugin: cleanup is SKIPPED when user dismisses the orphan prompt', async () => {
+    vi.useRealTimers();
+    (mcpsApi.updateCustomSpec as ReturnType<typeof vi.fn>).mockClear();
+    (mcpsApi.updateConfig as ReturnType<typeof vi.fn>).mockClear();
+    (mcpsApi.cleanupOrphanEnv as ReturnType<typeof vi.fn>).mockClear();
+    (mcpsApi.updateCustomSpec as ReturnType<typeof vi.fn>).mockResolvedValue({
+      server: {},
+      orphan_env_keys: ['OLD_API_KEY'],
+    });
+    (mcpsApi.updateConfig as ReturnType<typeof vi.fn>).mockResolvedValue({});
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+
+    await openEditDrawer('custom-example-abc12345', 'cfg-example-1');
+    fireEvent.click(screen.getByText(/Enregistrer les modifications/));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(confirmSpy).toHaveBeenCalled();
+    // Dismissed → cleanup NEVER called.
+    expect(mcpsApi.cleanupOrphanEnv).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+
+  it('Modifier le plugin: no orphan keys → no prompt at all', async () => {
+    vi.useRealTimers();
+    (mcpsApi.updateCustomSpec as ReturnType<typeof vi.fn>).mockClear();
+    (mcpsApi.updateConfig as ReturnType<typeof vi.fn>).mockClear();
+    (mcpsApi.cleanupOrphanEnv as ReturnType<typeof vi.fn>).mockClear();
+    (mcpsApi.updateCustomSpec as ReturnType<typeof vi.fn>).mockResolvedValue({
+      server: {},
+      orphan_env_keys: [],
+    });
+    (mcpsApi.updateConfig as ReturnType<typeof vi.fn>).mockResolvedValue({});
+    const confirmSpy = vi.spyOn(window, 'confirm');
+
+    await openEditDrawer('custom-example-abc12345', 'cfg-example-1');
+    fireEvent.click(screen.getByText(/Enregistrer les modifications/));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // Happy path : empty orphan list → no confirm + no cleanup call.
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(mcpsApi.cleanupOrphanEnv).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+
   it('Modifier le plugin: button is HIDDEN for non-custom plugins', () => {
     // Sanity guard: the edit button must NOT show for vendor-built
     // plugins (mcp-github, api-chartbeat, etc.) — those are owned by
@@ -1184,5 +1274,131 @@ describe('McpPage', () => {
     expect(
       document.querySelector('[data-testid="mcp-autodiscovery-banner"]'),
     ).toBeNull();
+  });
+
+  // ── 0.8.6 phase 4 — type filter (MCP / API / CLI) on the Add MCP
+  //    discovery panel (audit feedback 2026-05-22). Pins the contract :
+  //    user can narrow the registry to one transport kind, the `cli`
+  //    bucket isolates the wrapper plugins (Fastly, GitLab) that look
+  //    like MCP but require a local CLI binary install.
+  describe('Add MCP discovery — type filter (0.8.6 phase 4)', () => {
+    const mcpServer: McpDefinition = {
+      id: 'mcp-postgres', name: 'PostgreSQL',
+      description: 'SQL',
+      transport: { Stdio: { command: 'npx', args: ['-y', '@mcp/postgres'] } },
+      env_keys: [], tags: ['database', 'sql'],
+      token_url: null, token_help: null,
+      publisher: 'Anthropic', official: false,
+      api_spec: null,
+    };
+    const apiServer: McpDefinition = {
+      id: 'api-resend', name: 'Resend',
+      description: 'Transactional email',
+      transport: 'ApiOnly',
+      env_keys: [], tags: ['email', 'communication'],
+      token_url: null, token_help: null,
+      publisher: 'Resend', official: true,
+      api_spec: { base_url: 'https://api.resend.com', auth: 'None',
+        endpoints: [], config_keys: [] },
+    };
+    const cliServer: McpDefinition = {
+      id: 'mcp-fastly', name: 'Fastly',
+      description: 'CDN management',
+      transport: { Stdio: { command: 'fastly-mcp', args: [] } },
+      env_keys: [], tags: ['cli', 'cdn', 'cache'],
+      token_url: null, token_help: null,
+      publisher: 'Fastly', official: true,
+      api_spec: null,
+    };
+
+    const openAddMcpPanel = async () => {
+      // Locate the "Ajouter" / "Add" CTA via its stable test attribute :
+      // `data-tour-id="add-plugin-btn"` was added for the onboarding
+      // tour and survives localisation changes.
+      const addBtn = document.querySelector('[data-tour-id="add-plugin-btn"]') as HTMLElement | null;
+      if (!addBtn) throw new Error('Add MCP button not found in DOM');
+      await act(async () => { fireEvent.click(addBtn); });
+    };
+
+    it('renders 4 filter pills (All / MCP / API / CLI) with All active by default', async () => {
+      const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [] };
+      wrap(<McpPage projects={[]} mcpOverview={overview}
+        mcpRegistry={[mcpServer, apiServer, cliServer]} refetchMcps={noop} />);
+      await openAddMcpPanel();
+      const all = document.querySelector('[data-testid="mcp-kind-filter-all"]');
+      const mcp = document.querySelector('[data-testid="mcp-kind-filter-mcp"]');
+      const api = document.querySelector('[data-testid="mcp-kind-filter-api"]');
+      const cli = document.querySelector('[data-testid="mcp-kind-filter-cli"]');
+      expect(all).toBeTruthy();
+      expect(mcp).toBeTruthy();
+      expect(api).toBeTruthy();
+      expect(cli).toBeTruthy();
+      expect(all?.getAttribute('data-active')).toBe('true');
+      expect(cli?.getAttribute('data-active')).toBe('false');
+    });
+
+    it('CLI filter narrows registry to only plugins with the cli tag', async () => {
+      const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [] };
+      wrap(<McpPage projects={[]} mcpOverview={overview}
+        mcpRegistry={[mcpServer, apiServer, cliServer]} refetchMcps={noop} />);
+      await openAddMcpPanel();
+      // Click CLI filter.
+      const cliBtn = document.querySelector('[data-testid="mcp-kind-filter-cli"]') as HTMLElement;
+      await act(async () => { fireEvent.click(cliBtn); });
+      // Fastly visible.
+      expect(document.body.textContent).toContain('Fastly');
+      // PostgreSQL (pure MCP) + Resend (API) hidden.
+      expect(document.body.textContent).not.toContain('PostgreSQL');
+      expect(document.body.textContent).not.toContain('Resend');
+    });
+
+    it('API filter narrows to ApiOnly plugins', async () => {
+      const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [] };
+      wrap(<McpPage projects={[]} mcpOverview={overview}
+        mcpRegistry={[mcpServer, apiServer, cliServer]} refetchMcps={noop} />);
+      await openAddMcpPanel();
+      const apiBtn = document.querySelector('[data-testid="mcp-kind-filter-api"]') as HTMLElement;
+      await act(async () => { fireEvent.click(apiBtn); });
+      expect(document.body.textContent).toContain('Resend');
+      expect(document.body.textContent).not.toContain('PostgreSQL');
+      expect(document.body.textContent).not.toContain('Fastly');
+    });
+
+    it('MCP filter narrows to non-CLI non-API plugins (pure MCP + hybrid)', async () => {
+      const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [] };
+      wrap(<McpPage projects={[]} mcpOverview={overview}
+        mcpRegistry={[mcpServer, apiServer, cliServer]} refetchMcps={noop} />);
+      await openAddMcpPanel();
+      const mcpBtn = document.querySelector('[data-testid="mcp-kind-filter-mcp"]') as HTMLElement;
+      await act(async () => { fireEvent.click(mcpBtn); });
+      expect(document.body.textContent).toContain('PostgreSQL');
+      // CLI wrapper (Fastly) is bucketed separately and MUST NOT appear
+      // under MCP filter — the whole point of the new type split.
+      expect(document.body.textContent).not.toContain('Fastly');
+      // API-only also excluded.
+      expect(document.body.textContent).not.toContain('Resend');
+    });
+
+    it('pinned Custom API tile follows the kind filter (visible under All/API, hidden under MCP/CLI)', async () => {
+      const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [] };
+      wrap(<McpPage projects={[]} mcpOverview={overview}
+        mcpRegistry={[mcpServer, apiServer, cliServer]} refetchMcps={noop} />);
+      await openAddMcpPanel();
+      const tile = () => document.querySelector('[data-tour-id="custom-api-tile"]');
+      const click = async (kind: string) => {
+        const btn = document.querySelector(`[data-testid="mcp-kind-filter-${kind}"]`) as HTMLElement;
+        await act(async () => { fireEvent.click(btn); });
+      };
+      // Default (All): the Custom API tile is an API-only plugin → shown.
+      expect(tile()).toBeTruthy();
+      // MCP / CLI: it is NOT an MCP nor a CLI wrapper → hidden.
+      await click('mcp');
+      expect(tile()).toBeNull();
+      await click('cli');
+      expect(tile()).toBeNull();
+      // API: shown again.
+      await click('api');
+      expect(tile()).toBeTruthy();
+    });
   });
 });

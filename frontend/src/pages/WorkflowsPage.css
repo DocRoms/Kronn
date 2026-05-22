@@ -2218,6 +2218,154 @@
   border-color: rgba(var(--kr-cyan-rgb), 0.3);
 }
 
+/* ── Collapsed steps pipeline (WorkflowDetail) ──────────────────────────── */
+.wf-steps-section {
+  margin-bottom: 14px;
+}
+
+.wf-steps-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 16px 0 10px;
+}
+
+.wf-steps-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+
+.wf-steps-count[data-kind='agent'] {
+  color: var(--kr-accent);
+  background: rgba(var(--kr-accent-rgb), 0.1);
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.3);
+}
+
+.wf-steps-count[data-kind='determ'] {
+  color: var(--kr-success, rgb(var(--kr-success-rgb)));
+  background: rgba(var(--kr-success-rgb), 0.1);
+  border: 1px solid rgba(var(--kr-success-rgb), 0.3);
+}
+
+.wf-steps-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  padding: 3px 10px;
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  color: var(--kr-text-secondary);
+  background: transparent;
+  border: 1px solid var(--kr-border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.wf-steps-toggle:hover {
+  color: var(--kr-text-primary);
+  border-color: rgba(var(--kr-accent-rgb), 0.4);
+  background: rgba(var(--kr-accent-rgb), 0.06);
+}
+
+.wf-steps-pipeline {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid var(--kr-border-light);
+  border-radius: 10px;
+  background: rgba(var(--kr-accent-rgb), 0.02);
+}
+
+.wf-pipe-arrow {
+  color: var(--kr-text-faint);
+  flex-shrink: 0;
+}
+
+.wf-pipe-chip {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  max-width: 220px;
+  padding: 4px 11px;
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  color: var(--kr-accent);
+  background: rgba(var(--kr-accent-rgb), 0.08);
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.28);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: filter 0.12s, transform 0.12s;
+}
+
+.wf-pipe-chip-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+}
+
+.wf-pipe-chip-agent {
+  font-size: 9.5px;
+  font-weight: 700;
+  line-height: 1.1;
+  padding-left: 19px; /* aligns under the name, past the number + icon */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.wf-pipe-chip:hover {
+  filter: brightness(1.15);
+  transform: translateY(-1px);
+}
+
+.wf-pipe-chip-num {
+  font-size: 10px;
+  font-weight: 800;
+  opacity: 0.85;
+}
+
+.wf-pipe-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+/* Binary color = the only distinction that matters at a glance: a step
+   either runs an LLM (agent → costs tokens) or it's mechanical (0 token).
+   The per-step *type* is carried by the chip's icon, not its color, so the
+   pipeline reads as two clean lanes instead of a 6-color rainbow. Mirrors
+   the agent/determ count chips in the header. */
+.wf-pipe-chip[data-class='agent'] {
+  color: var(--kr-accent);
+  background: rgba(var(--kr-accent-rgb), 0.1);
+  border-color: rgba(var(--kr-accent-rgb), 0.32);
+}
+
+.wf-pipe-chip[data-class='determ'] {
+  color: var(--kr-success, rgb(var(--kr-success-rgb)));
+  background: rgba(var(--kr-success-rgb), 0.09);
+  border-color: rgba(var(--kr-success-rgb), 0.3);
+}
+
+.wf-steps-detail {
+  margin-top: 10px;
+}
+
 /* B5 (0.7.0 UX pass) — distinct status badge + paused-since counter
    for runs in WaitingApproval. The badge uses warning tint (consistent
    with the GatePanel below), the counter is muted to keep the focus

@@ -21,6 +21,13 @@ const BACKEND_PREFIXES = [
   'Unsupported',
   'Message too long',
   'partial_pending',
+  // 0.8.6 — `api()` throws `Error("Server error (HTTP 422) — <body>")`
+  // when axum's Json extractor rejects a payload (missing field, null
+  // where non-Option, type mismatch). Pre-fix the `at line N column M`
+  // substring tripped the "looks like stack trace" guard and the user
+  // saw a generic "Une erreur est survenue. Réessayez." Keep these
+  // verbatim so debugging is possible from the toast alone.
+  'Server error (HTTP',
 ];
 
 /** Extract a user-friendly error message from any thrown value. */

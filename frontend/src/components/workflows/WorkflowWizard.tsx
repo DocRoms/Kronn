@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { useT } from '../../lib/I18nContext';
-import { workflows as workflowsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, mcps as mcpsApi } from '../../lib/api';
+import { workflows as workflowsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, mcps as mcpsApi, config as configApi } from '../../lib/api';
 import { ApiCallStepCard, type ApiPluginOption } from './ApiCallStepCard';
 import { STARTER_TEMPLATES, cloneTemplateSteps } from '../../lib/workflow-templates/chartbeat-top5';
 import { buildV07Presets } from '../../lib/workflow-templates/v07-presets';
@@ -70,6 +70,42 @@ function parseCronExpr(expr: string): { every: number; unit: 'minutes' | 'hours'
 
   // Complex expression (e.g. "0 7,10,13,16,19 * * 1-5") — preserve raw
   return { every: 1, unit: 'days', at: `${hour.padStart(2, '0')}:${min.padStart(2, '0')}`, weekdays: [], raw: expr };
+}
+
+/**
+ * 0.8.6 phase 4 — pure builder for a fresh blank workflow step.
+ *
+ * Extracted from the wizard's internal `blankStep` closure so unit
+ * tests can pin the default-tier semantic directly :
+ *   - `defaultTier === 'default' | null` → step JSON unchanged (no
+ *     `agent_settings` field set ; the runner uses its built-in
+ *     default model)
+ *   - `defaultTier === 'economy' | 'reasoning'` → step gains
+ *     `agent_settings: { tier: <chosen> }` so the runner overrides
+ *     the model.
+ *
+ * Caller's `existingCount` becomes the step number in `step-{N+1}`,
+ * so `addStep` (append) and `insertStep` (insert at index) both pass
+ * `steps.length` and get a sensible auto-name.
+ */
+export function buildBlankStep(
+  existingCount: number,
+  defaultTier: 'economy' | 'default' | 'reasoning' | null,
+): WorkflowStep {
+  const step: WorkflowStep = {
+    name: `step-${existingCount + 1}`,
+    agent: 'ClaudeCode',
+    prompt_template: '',
+    mode: { type: 'Normal' },
+    // Default to Structured so chained steps can read `.data` / `.summary`
+    // from the very first save. Users can switch to Free text on terminal
+    // steps that don't feed anything downstream.
+    output_format: { type: 'Structured' },
+  };
+  if (defaultTier && defaultTier !== 'default') {
+    step.agent_settings = { tier: defaultTier };
+  }
+  return step;
 }
 
 export interface WorkflowWizardProps {
@@ -143,6 +179,18 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
 
   // Config page: show/hide expert options (hooks, concurrency)
   const [showExpertConfig, setShowExpertConfig] = useState(false);
+  // 0.8.6 phase 4 — user's saved default tier (loaded once, applied
+  // to new Agent steps via blankStep). `null` = not yet loaded → fall
+  // back to legacy behaviour (no tier set). Strict semantic — does NOT
+  // overwrite existing steps when editing an existing workflow.
+  const [defaultModelTier, setDefaultModelTier] = useState<'economy' | 'default' | 'reasoning' | null>(null);
+  useEffect(() => {
+    configApi.getServerConfig()
+      .then(cfg => {
+        if (cfg?.default_model_tier) setDefaultModelTier(cfg.default_model_tier);
+      })
+      .catch(() => { /* keep null — blankStep stays legacy-shaped */ });
+  }, []);
 
   // Workspace config state
   const initHooks = editWorkflow?.workspace_config?.hooks;
@@ -521,18 +569,11 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     }
   };
 
-  /** Build a fresh blank step. Centralised so `addStep` (append) and
-   *  `insertStep` (insert-at-position) share the same defaults. */
-  const blankStep = (existingCount: number): WorkflowStep => ({
-    name: `step-${existingCount + 1}`,
-    agent: 'ClaudeCode',
-    prompt_template: '',
-    mode: { type: 'Normal' },
-    // Default to Structured so chained steps can read `.data` / `.summary`
-    // from the very first save. Users can switch to Free text on terminal
-    // steps that don't feed anything downstream.
-    output_format: { type: 'Structured' },
-  });
+  /** Build a fresh blank step — calls the exported pure builder below
+   *  so unit tests can pin the default-tier semantic without spinning
+   *  up the whole wizard. */
+  const blankStep = (existingCount: number): WorkflowStep =>
+    buildBlankStep(existingCount, defaultModelTier);
 
   const addStep = () => setSteps([...steps, blankStep(steps.length)]);
 
@@ -624,7 +665,17 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
       // Keep `agent` field present (the type allows AgentType only) — the
       // backend ignores it for non-Agent steps but the model field is
       // non-nullable. Mirror the default the form uses on new steps.
-      return { ...universal, agent: s.agent } as WorkflowStep;
+      //
+      // 0.8.6 — seed type-specific defaults so the destination renderer
+      // doesn't crash on undefined fields it expects (e.g. Agent's
+      // `prompt_template.trim()`). Without this, swapping Agent → other
+      // → Agent left `prompt_template` undefined → render crash. Adding
+      // the empty defaults here keeps optional-chaining at the UI level
+      // a defense-in-depth measure rather than the sole guard.
+      const typeDefaults: Partial<WorkflowStep> = newType === 'Agent'
+        ? { prompt_template: '' }
+        : {};
+      return { ...universal, ...typeDefaults, agent: s.agent } as WorkflowStep;
     }));
     return true;
   };
@@ -2291,7 +2342,14 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                   const selectedQp = step.quick_prompt_id
                     ? availableQuickPrompts.find(qp => qp.id === step.quick_prompt_id) ?? null
                     : null;
-                  const hasInlineOverride = !!step.prompt_template.trim();
+                  // 0.8.6 — defensive: `prompt_template` may be undefined
+                  // right after a step-type swap (Agent → other → Agent
+                  // wipes type-specific fields in `swapStepType`). Pre-fix
+                  // crashed "Cannot read properties of undefined (reading
+                  // 'trim')". Optional-chaining + nullish-coalesce keeps
+                  // the render safe ; `swapStepType` also now seeds the
+                  // default `''` when entering Agent.
+                  const hasInlineOverride = !!step.prompt_template?.trim();
                   return (
                   <>
                     {availableQuickPrompts.length > 0 && (

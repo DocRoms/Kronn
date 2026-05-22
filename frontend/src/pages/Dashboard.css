@@ -145,10 +145,24 @@
 }
 
 /* ── Main content ──────────────────────────────────────── */
+/* 0.8.6 — layout density picker. `data-density` on <html> flips the
+   max-width here so the same Kronn instance can run focused (1000px)
+   on a 13" laptop AND full-width on a 32" desktop without changing
+   anything else. See `lib/LayoutDensityContext.tsx`. */
 .dash-main {
   max-width: 1000px;
   margin: 0 auto;
   padding: var(--kr-sp-9) var(--kr-sp-8);
+}
+html[data-density="medium"] .dash-main {
+  max-width: 1400px;
+}
+html[data-density="large"] .dash-main {
+  max-width: none;
+  /* Slightly tighter side padding at full width — at 2000px+, the
+     default 32px feels cramped vs 48px which breathes properly. */
+  padding-left: var(--kr-sp-9);
+  padding-right: var(--kr-sp-9);
 }
 
 .dash-loading-bar {

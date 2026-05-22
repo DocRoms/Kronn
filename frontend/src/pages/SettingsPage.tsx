@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useKonamiCode } from '../hooks/useKonamiCode';
 import { version as appVersion } from '../../package.json';
+import { ApiCallLogsPage } from './ApiCallLogsPage';
 import { config as configApi, skills as skillsApi, directives as directivesApi, autoTriggersApi } from '../lib/api';
 import { useApi } from '../hooks/useApi';
 import { useT } from '../lib/I18nContext';
@@ -14,11 +15,13 @@ import {
   Layers, FolderSearch, Filter, FileText,
   Shield, Globe, Copy, Server, Mic, Volume2, HelpCircle, ChevronRight,
   Sun, Moon, Monitor, Terminal, Heart, Key, ExternalLink,
+  Minimize2, Maximize2, Maximize,
 } from 'lucide-react';
 import { STT_MODELS, getSttModelId, setSttModelId } from '../lib/stt-models';
 import { TTS_VOICES, getTtsVoiceId, setTtsVoiceId } from '../lib/tts-models';
 import { setAuthToken } from '../lib/api';
 import { useTheme, type ThemeMode } from '../lib/ThemeContext';
+import { useLayoutDensity } from '../lib/LayoutDensityContext';
 import { AgentsSection } from '../components/settings/AgentsSection';
 import { HostDiscoverySection } from '../components/settings/HostDiscoverySection';
 
@@ -83,6 +86,10 @@ interface SettingsPageProps {
   onReset: () => void;
   onNavigateDiscussion?: (discussionId: string) => void;
   toast: ToastFn;
+  // 0.8.6 — render the API audit section only if at least one API
+  // plugin has a config in this instance. Avoids surfacing a debug
+  // panel for users who don't use APIs yet.
+  hasConfiguredApi?: boolean;
 }
 
 export function SettingsPage({
@@ -97,9 +104,11 @@ export function SettingsPage({
   onReset,
   onNavigateDiscussion,
   toast,
+  hasConfiguredApi = false,
 }: SettingsPageProps) {
   const { t, locale, setLocale } = useT();
   const { theme, setTheme, unlockedThemes, unlockTheme } = useTheme();
+  const { density, setDensity } = useLayoutDensity();
 
   // Secret-code state — local to the appearance card. The code is never
   // stored (UX: if the user refreshes, they can re-enter — keeps codes
@@ -284,6 +293,10 @@ export function SettingsPage({
           { id: 'settings-usage', label: t('config.usage') },
           { id: 'settings-server', label: t('config.server') },
           { id: 'settings-debug', label: t('settings.debugSection'), live: serverDebugMode },
+          // 0.8.6 — API audit panel. Conditional : only shows if the
+          // user actually has an API plugin configured. Pure debug
+          // surface — sits next to `settings-debug` deliberately.
+          ...(hasConfiguredApi ? [{ id: 'settings-api-audit', label: t('apiCallLogs.title') }] : []),
           { id: 'settings-database', label: 'Database' },
         ].map(s => (
           <button
@@ -301,6 +314,7 @@ export function SettingsPage({
       {/* Appearance / Theme */}
       <div id="settings-appearance" className="set-card">
         <div className="set-section">
+          {/* Card header (lg) — common to all `set-card` blocks. */}
           <div className="flex-row gap-4 mb-4">
             <Sun size={14} className="text-accent" />
             <span className="font-semibold text-lg">{t('config.appearance')}</span>
@@ -308,12 +322,21 @@ export function SettingsPage({
           <p className="set-hint">
             {t('config.appearanceHint')}
           </p>
-          <div className="flex-row gap-4" style={{ flexWrap: 'wrap' }}>
+
+          {/* 0.8.6 — 3 sub-sections, all with the same visual weight :
+              icon (size 12) + bold label + small hint paragraph + content.
+              This homogenises Theme / Density / Secret-code so they read
+              as siblings under the card header instead of one being
+              prominent and the others inline. */}
+
+          {/* Sub-section 1 — Thème */}
+          <div className="flex-row gap-3 mb-2" style={{ alignItems: 'center' }}>
+            <Sun size={12} className="text-faint flex-shrink-0" />
+            <span className="font-semibold text-sm">{t('config.themeLabel')}</span>
+          </div>
+          <p className="set-hint-sm">{t('config.themeHint')}</p>
+          <div className="flex-row gap-4 mb-6" style={{ flexWrap: 'wrap' }}>
             {(() => {
-              // Always-available themes first; unlocked secret themes append
-              // in the order the user unlocked them. The secret block is
-              // only rendered when at least one is unlocked — the picker
-              // stays identical to before for users who never entered a code.
               const base: { mode: ThemeMode; label: string; icon: React.ReactNode }[] = [
                 { mode: 'system', label: t('config.themeSystem'), icon: <Monitor size={14} /> },
                 { mode: 'light', label: t('config.themeLight'), icon: <Sun size={14} /> },
@@ -340,40 +363,67 @@ export function SettingsPage({
             })()}
           </div>
 
-          {/* Secret Code — hidden by default; revealed by the Konami
-              code (see useKonamiCode above). The input itself trades a
-              code for a hidden theme via POST /api/themes/unlock.
-              The whole row is mounted only when `secretRevealed` is
-              true, so pre-Konami users never even see it in the DOM. */}
-          {secretRevealed && (
-            <div
-              className="flex-row gap-3 mt-4"
-              style={{ alignItems: 'center', flexWrap: 'wrap' }}
-            >
-              <Key size={12} className="text-faint flex-shrink-0" />
-              <span className="text-xs text-muted">{t('config.secretLabel')}</span>
-              <input
-                type="password"
-                className="input"
-                style={{ flex: '0 1 180px', fontSize: 'var(--kr-fs-sm)' }}
-                placeholder={t('config.secretPlaceholder')}
-                aria-label={t('config.secretLabel')}
-                value={secretCode}
-                onChange={e => setSecretCode(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter') handleUnlockSubmit(); }}
-                disabled={secretSubmitting}
-                autoComplete="off"
-                spellCheck={false}
-              />
+          {/* Sub-section 2 — Mode d'affichage */}
+          <div className="flex-row gap-3 mb-2" style={{ alignItems: 'center' }}>
+            <Maximize2 size={12} className="text-faint flex-shrink-0" />
+            <span className="font-semibold text-sm">{t('config.layoutDensity')}</span>
+          </div>
+          <p className="set-hint-sm">{t('config.layoutDensityHint')}</p>
+          <div className="flex-row gap-4 mb-6" style={{ flexWrap: 'wrap' }}>
+            {([
+              { mode: 'small' as const,  label: t('config.densitySmall'),  icon: <Minimize2 size={14} /> },
+              { mode: 'medium' as const, label: t('config.densityMedium'), icon: <Maximize2 size={14} /> },
+              { mode: 'large' as const,  label: t('config.densityLarge'),  icon: <Maximize size={14} /> },
+            ]).map(opt => (
               <button
-                type="button"
+                key={opt.mode}
                 className="set-choice-btn"
-                onClick={handleUnlockSubmit}
-                disabled={secretSubmitting || !secretCode.trim()}
+                data-active={density === opt.mode}
+                onClick={() => setDensity(opt.mode)}
+                data-testid={`density-${opt.mode}`}
               >
-                {t('config.secretSubmit')}
+                {opt.icon} {opt.label}
               </button>
-            </div>
+            ))}
+          </div>
+
+          {/* Sub-section 3 — Code secret (revealed by Konami).
+              Hidden by default ; mounts only after the Konami code is
+              entered so pre-Konami users never see it in the DOM. */}
+          {secretRevealed && (
+            <>
+              <div className="flex-row gap-3 mb-2" style={{ alignItems: 'center' }}>
+                <Key size={12} className="text-faint flex-shrink-0" />
+                <span className="font-semibold text-sm">{t('config.secretSectionLabel')}</span>
+              </div>
+              <p className="set-hint-sm">{t('config.secretSectionHint')}</p>
+              <div
+                className="flex-row gap-3"
+                style={{ alignItems: 'center', flexWrap: 'wrap' }}
+              >
+                <input
+                  type="password"
+                  className="input"
+                  style={{ flex: '0 1 180px', fontSize: 'var(--kr-fs-sm)' }}
+                  placeholder={t('config.secretPlaceholder')}
+                  aria-label={t('config.secretLabel')}
+                  value={secretCode}
+                  onChange={e => setSecretCode(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') handleUnlockSubmit(); }}
+                  disabled={secretSubmitting}
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                <button
+                  type="button"
+                  className="set-choice-btn"
+                  onClick={handleUnlockSubmit}
+                  disabled={secretSubmitting || !secretCode.trim()}
+                >
+                  {t('config.secretSubmit')}
+                </button>
+              </div>
+            </>
           )}
         </div>
       </div>
@@ -1392,6 +1442,17 @@ export function SettingsPage({
         setDebugModeNeedsRestart={setDebugModeNeedsRestart}
         t={t}
       />
+
+      {/* 0.8.6 — API audit log panel (filters + table + drawer).
+          Conditional : only renders when at least one API plugin has a
+          config (computed upstream in Dashboard from mcpOverview). Sits
+          between Debug and Database — it's a debug/audit surface, not
+          something to bury or hoist into the nav. */}
+      {hasConfiguredApi && (
+        <div id="settings-api-audit" className="set-card">
+          <ApiCallLogsPage />
+        </div>
+      )}
 
       {/* Database */}
       <div id="settings-database" className="set-card">

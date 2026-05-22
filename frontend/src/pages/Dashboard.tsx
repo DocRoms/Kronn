@@ -554,6 +554,12 @@ export function Dashboard({ onReset }: DashboardProps) {
           ['discussions', MessageSquare, t('nav.discussions')],
           ['mcps', Puzzle, t('nav.mcps')],
           ['workflows', Workflow, t('nav.workflows')],
+          // 0.8.6 (#61 follow-up 2026-05-21) — API call logs moved from a
+          // top-level tab to a Settings sub-section (`#settings-api-audit`).
+          // It's a debug/audit surface, not a daily-use tab — clutters the
+          // nav for users who don't use API plugins. Section is also
+          // conditional : only renders if at least one API plugin has a
+          // config in this Kronn instance.
           ['settings', Settings, t('nav.config')],
         ] as [string, typeof Folder, string][]).map(([id, Icon, label]) => {
           const btn = (
@@ -1293,6 +1299,13 @@ export function Dashboard({ onReset }: DashboardProps) {
             onReset={onReset}
             onNavigateDiscussion={(id) => { setOpenDiscussionId(id); setPage('discussions'); }}
             toast={toast}
+            // 0.8.6 — API audit section visibility : only show if at
+            // least one API plugin (registry or custom) has a config
+            // in this Kronn instance. Computed from mcpOverview so the
+            // section disappears for users who don't use APIs yet.
+            hasConfiguredApi={mcpOverview.configs.some(cfg =>
+              mcpOverview.servers.some(s => s.id === cfg.server_id && s.api_spec != null)
+            )}
           />
           </Suspense>
           </ErrorBoundary>

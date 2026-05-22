@@ -57,7 +57,7 @@ vi.mock('../../lib/api', () => ({
   directives: { list: vi.fn().mockResolvedValue([]), create: vi.fn(), update: vi.fn(), delete: vi.fn() },
   quickPrompts: mockQuickPromptsApi,
   quickApis: { list: vi.fn().mockResolvedValue([]), create: vi.fn(), update: vi.fn(), delete: vi.fn(), runQa: vi.fn(), exportQa: vi.fn(), importQa: vi.fn(), batchRunQa: vi.fn() },
-  config: { getUiLanguage: vi.fn().mockResolvedValue('fr'), saveUiLanguage: vi.fn().mockResolvedValue(undefined) },
+  config: { getUiLanguage: vi.fn().mockResolvedValue('fr'), saveUiLanguage: vi.fn().mockResolvedValue(undefined), getServerConfig: vi.fn().mockResolvedValue({ default_model_tier: 'default' }) },
   mcps: {
     overview: vi.fn().mockResolvedValue({ servers: [], configs: [], customized_contexts: [], incompatibilities: [] }),
     registry: vi.fn().mockResolvedValue([]),

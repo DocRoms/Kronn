@@ -3,6 +3,7 @@ import { Plug, Play, Loader2, ChevronDown, ChevronRight as ChevRight, KeyRound, 
 import { workflows as workflowsApi } from '../../lib/api';
 import type { AgentType, McpConfigDisplay, McpServer, WorkflowStep, ExtractSpec, StepType, QuickApi } from '../../types/generated';
 import { ApiCallAiHelper } from './ApiCallAiHelper';
+import { Dropdown } from '../Dropdown';
 import { authSlotsForServer, type AuthSlot } from './apiCallAuth';
 import { suggestPaths, type PathSuggestion } from './apiCallSuggestions';
 import { collectPlaceholders, substitutePlaceholders } from './apiCallPlaceholders';
@@ -593,20 +594,24 @@ export function ApiCallStepCard({
           <div className="wf-apicall-advanced wf-apicall-http-advanced">
             <label className="wf-apicall-field">
               <span>{t('wf.apicall.methodLabel')}</span>
-              <select
-                value={step.api_method ?? ''}
-                onChange={e => onChange({ api_method: e.target.value || null })}
-              >
-                {/* Empty = use the endpoint's spec method (recommended). The
-                    plugin registry already declared it; only override if you
-                    really know why. */}
-                <option value="">— {t('wf.apicall.endpointPicker').toLowerCase()} —</option>
-                <option value="GET">GET</option>
-                <option value="POST">POST</option>
-                <option value="PUT">PUT</option>
-                <option value="PATCH">PATCH</option>
-                <option value="DELETE">DELETE</option>
-              </select>
+              {/* 0.8.6 (#62) — migrated from <select> to <Dropdown> so the
+                  options render with the page CSS (Firefox/Safari ignore
+                  native <option> styling). Empty value = use the
+                  endpoint's spec method (recommended). */}
+              <Dropdown<'' | 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'>
+                value={(step.api_method as '' | 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE') ?? ''}
+                options={[
+                  { value: '', label: `— ${t('wf.apicall.endpointPicker').toLowerCase()} —` },
+                  { value: 'GET', label: 'GET' },
+                  { value: 'POST', label: 'POST' },
+                  { value: 'PUT', label: 'PUT' },
+                  { value: 'PATCH', label: 'PATCH' },
+                  { value: 'DELETE', label: 'DELETE' },
+                ]}
+                onChange={v => onChange({ api_method: v === '' ? null : v })}
+                ariaLabel={t('wf.apicall.methodLabel')}
+                testId="wf-apicall-method-picker"
+              />
             </label>
           </div>
 

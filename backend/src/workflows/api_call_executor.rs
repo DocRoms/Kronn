@@ -22,11 +22,51 @@ use std::time::{Duration, Instant};
 use reqwest::{Method, StatusCode, Url};
 use serde_json::Value;
 
+use crate::db::api_call_logs::{self, ApiCallSource, ApiCallStatus, NewApiCallLog};
 use crate::models::*;
 
 use super::api_call_security::{
     assert_host_matches_base, assert_public_ip, redact_url_query, ResolvedAuth,
 };
+
+/// Logging context plumbed through `execute_api_call_step_with_db` so the
+/// audit table (`api_call_logs`) can attribute each call to its source +
+/// optional workflow run / disc context. Default = workflow run with no
+/// extra IDs.
+#[derive(Debug, Clone, Default)]
+pub struct ApiCallLogContext {
+    pub source: ApiCallLogSource,
+    pub run_id: Option<String>,
+    pub disc_id: Option<String>,
+    pub agent: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ApiCallLogSource {
+    #[default]
+    Workflow,
+    ManualTest,
+    AgentBroker,
+}
+
+impl ApiCallLogContext {
+    pub fn workflow() -> Self {
+        Self::default()
+    }
+    pub fn workflow_for_run(run_id: impl Into<String>) -> Self {
+        Self { source: ApiCallLogSource::Workflow, run_id: Some(run_id.into()), ..Self::default() }
+    }
+    pub fn manual_test() -> Self {
+        Self { source: ApiCallLogSource::ManualTest, ..Self::default() }
+    }
+    fn to_db_source(&self) -> ApiCallSource {
+        match self.source {
+            ApiCallLogSource::Workflow => ApiCallSource::Workflow,
+            ApiCallLogSource::ManualTest => ApiCallSource::ManualTest,
+            ApiCallLogSource::AgentBroker => ApiCallSource::AgentBroker,
+        }
+    }
+}
 use super::api_call_step::{apply_extract, ExtractError, ExtractionOutcome};
 use super::steps::StepOutcome;
 use super::template::TemplateContext;
@@ -311,6 +351,52 @@ pub async fn execute_api_call_step_core(
 /// URL that hits localhost MUST fail in the wizard too, otherwise
 /// users happily test a workflow that'll then refuse to run.
 pub async fn execute_api_call_step_with_db(
+    step: &WorkflowStep,
+    project_id: Option<&str>,
+    state: &crate::AppState,
+    ctx: &TemplateContext,
+    policy: SecurityPolicy,
+) -> StepOutcome {
+    // 0.8.6 (#59) — default entry point logs as a workflow call. For
+    // wizard "Test the call" + standalone Quick API runs, callers use
+    // `execute_api_call_step_with_db_as` with a different source.
+    execute_api_call_step_with_db_as(
+        step,
+        project_id,
+        state,
+        ctx,
+        policy,
+        ApiCallLogContext::workflow(),
+    )
+    .await
+}
+
+/// Same as [`execute_api_call_step_with_db`] but lets the caller stamp a
+/// source on the audit-log row + propagate optional run_id / disc_id /
+/// agent context. The outcome is identical; only the log row metadata
+/// differs.
+///
+/// Sources:
+/// - `Workflow` (default) — called from the workflow runner / batch fan-out.
+/// - `ManualTest` — called from `/api/workflow-steps/test-api-call` (wizard)
+///   AND `/api/quick-apis/:id/run` (standalone Quick API execution).
+/// - `AgentBroker` — called from `/api/agent-api/call` (the MCP `api_call`
+///   tool that agents invoke directly). Currently logs from the broker
+///   route itself, NOT via this path — left here for future unification.
+pub async fn execute_api_call_step_with_db_as(
+    step: &WorkflowStep,
+    project_id: Option<&str>,
+    state: &crate::AppState,
+    ctx: &TemplateContext,
+    policy: SecurityPolicy,
+    log_ctx: ApiCallLogContext,
+) -> StepOutcome {
+    let outcome = execute_api_call_step_with_db_inner(step, project_id, state, ctx, policy).await;
+    record_api_call_log(state, step, project_id, &outcome, &log_ctx).await;
+    outcome
+}
+
+async fn execute_api_call_step_with_db_inner(
     step: &WorkflowStep,
     project_id: Option<&str>,
     state: &crate::AppState,
@@ -1164,6 +1250,83 @@ fn truncate(s: &str, max_chars: usize) -> String {
         end = i + s[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(0);
     }
     s[..end.min(s.len())].to_string()
+}
+
+// ─── api_call_logs recording ────────────────────────────────────────────
+
+/// Parse the `[SIGNAL: http_NNN]` line emitted by both success and
+/// failure paths (see `execute_api_call_step_core` + `fail()`). Returns
+/// None when no HTTP code is encoded (transport error, config error).
+fn extract_http_status_from_output(output: &str) -> Option<u16> {
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("[SIGNAL: http_") {
+            if let Some(code_str) = rest.strip_suffix(']') {
+                if let Ok(code) = code_str.parse::<u16>() {
+                    return Some(code);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Record the call into `api_call_logs`. Best-effort: any DB error is
+/// logged via `tracing::warn` but NEVER propagated — an audit-trail
+/// failure must not abort an otherwise-successful API call.
+///
+/// Pulls the request excerpt from `step.api_body` (the template, not
+/// the rendered form — substitution happens inside the core executor
+/// and isn't surfaced here). For workflow runs, that's still useful
+/// audit material: it shows what shape of body the step intended to
+/// send. For manual tests / quick API runs, same.
+async fn record_api_call_log(
+    state: &crate::AppState,
+    step: &WorkflowStep,
+    project_id: Option<&str>,
+    outcome: &StepOutcome,
+    log_ctx: &ApiCallLogContext,
+) {
+    let plugin_slug = step.api_plugin_slug.clone().unwrap_or_else(|| "unknown".into());
+    let config_id = step.api_config_id.clone();
+    let endpoint_path = step.api_endpoint_path.clone().unwrap_or_default();
+    let method = step.api_method.clone().unwrap_or_else(|| "GET".into());
+    let success = outcome.result.status == RunStatus::Success;
+    let status = if success { ApiCallStatus::Ok } else { ApiCallStatus::Error };
+    let http_status = extract_http_status_from_output(&outcome.result.output);
+    let request_excerpt = step.api_body.as_ref().map(serde_json::Value::to_string);
+    let response_excerpt = outcome.result.output.clone();
+    let duration_ms = outcome.result.duration_ms;
+    let project_id_for_log = project_id.map(|s| s.to_string());
+    let source = log_ctx.to_db_source();
+    let run_id = log_ctx.run_id.clone();
+    let disc_id = log_ctx.disc_id.clone();
+    let agent = log_ctx.agent.clone();
+    let error_message = if success { None } else { Some(outcome.result.output.clone()) };
+
+    let record_result = state.db.with_conn(move |conn| {
+        api_call_logs::record(conn, NewApiCallLog {
+            source,
+            project_id: project_id_for_log.as_deref(),
+            run_id: run_id.as_deref(),
+            disc_id: disc_id.as_deref(),
+            agent: agent.as_deref(),
+            plugin_slug: &plugin_slug,
+            config_id: config_id.as_deref(),
+            endpoint_path: &endpoint_path,
+            method: &method,
+            http_status,
+            status,
+            duration_ms,
+            request_excerpt: request_excerpt.as_deref(),
+            response_excerpt: Some(&response_excerpt),
+            error_message: error_message.as_deref(),
+        })
+        .map_err(|e| anyhow::anyhow!("api_call_logs::record: {e}"))
+    }).await;
+    if let Err(e) = record_result {
+        tracing::warn!("api_call_logs.record (workflow): {e}");
+    }
 }
 
 // ─── Summaries & failure helpers ────────────────────────────────────────
@@ -2546,5 +2709,156 @@ mod tests {
             "error must carry the upstream reason: {}",
             outcome.result.output,
         );
+    }
+
+    // ─── 0.8.6 (#59) api_call_logs wiring ───────────────────────────
+
+    #[test]
+    fn extract_http_status_parses_success_envelope() {
+        let output = "{\"data\":{}}\n---STEP_OUTPUT---\n[SIGNAL: OK]\n[SIGNAL: http_200]";
+        assert_eq!(extract_http_status_from_output(output), Some(200));
+    }
+
+    #[test]
+    fn extract_http_status_parses_error_envelope() {
+        let output = "HTTP 503 on POST /widgets — service unavailable\n[SIGNAL: ERROR]\n[SIGNAL: http_503]";
+        assert_eq!(extract_http_status_from_output(output), Some(503));
+    }
+
+    #[test]
+    fn extract_http_status_returns_none_on_transport_error() {
+        // Config errors / transport failures don't carry the http_NNN
+        // signal — only HTTP-level failures do.
+        let output = "ApiCall step missing `api_plugin_slug`";
+        assert_eq!(extract_http_status_from_output(output), None);
+    }
+
+    #[test]
+    fn extract_http_status_handles_4xx() {
+        let output = "HTTP 401 on GET /me — unauthorized\n[SIGNAL: ERROR]\n[SIGNAL: http_401]";
+        assert_eq!(extract_http_status_from_output(output), Some(401));
+    }
+
+    #[test]
+    fn extract_http_status_ignores_unrelated_signals() {
+        let output = "ok\n[SIGNAL: BATCH_DONE]\n[SIGNAL: OK]";
+        assert_eq!(extract_http_status_from_output(output), None);
+    }
+
+    #[test]
+    fn log_context_workflow_defaults_to_workflow_source() {
+        let ctx = ApiCallLogContext::workflow();
+        assert_eq!(ctx.source, ApiCallLogSource::Workflow);
+        assert!(ctx.run_id.is_none());
+        assert!(ctx.disc_id.is_none());
+        assert!(ctx.agent.is_none());
+        assert_eq!(ctx.to_db_source().as_db_str(), "workflow");
+    }
+
+    #[test]
+    fn log_context_manual_test_carries_manual_test_source() {
+        let ctx = ApiCallLogContext::manual_test();
+        assert_eq!(ctx.source, ApiCallLogSource::ManualTest);
+        assert_eq!(ctx.to_db_source().as_db_str(), "manual_test");
+    }
+
+    #[test]
+    fn log_context_workflow_for_run_includes_run_id() {
+        let ctx = ApiCallLogContext::workflow_for_run("run-abc-123");
+        assert_eq!(ctx.source, ApiCallLogSource::Workflow);
+        assert_eq!(ctx.run_id.as_deref(), Some("run-abc-123"));
+    }
+
+    // ─── 0.8.6 (#59) end-to-end logging integration ─────────────────
+
+    fn test_app_state() -> crate::AppState {
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+        let db = Arc::new(crate::db::Database::open_in_memory().expect("in-memory DB"));
+        let config = Arc::new(RwLock::new(crate::core::config::default_config()));
+        crate::AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS)
+    }
+
+    fn invalid_step() -> WorkflowStep {
+        WorkflowStep {
+            name: "missing-plugin-step".into(),
+            step_type: StepType::ApiCall,
+            // Intentionally missing api_plugin_slug → executor returns fail()
+            // immediately. We exercise the logging wrapper independently
+            // of any real HTTP plumbing.
+            api_plugin_slug: None,
+            api_config_id: Some("cfg-test".into()),
+            api_endpoint_path: Some("/items".into()),
+            api_method: Some("GET".into()),
+            api_body: None,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn workflow_apicall_records_log_row_on_early_failure() {
+        let state = test_app_state();
+        let outcome = execute_api_call_step_with_db_as(
+            &invalid_step(),
+            Some("proj-1"),
+            &state,
+            &TemplateContext::new(),
+            SecurityPolicy::production(),
+            ApiCallLogContext::workflow_for_run("run-001"),
+        ).await;
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        // Verify a row was persisted with source=workflow + run_id.
+        let rows = state.db.with_conn(|conn| {
+            crate::db::api_call_logs::list(conn, Default::default())
+                .map_err(|e| anyhow::anyhow!("list: {e}"))
+        }).await.unwrap();
+        assert_eq!(rows.len(), 1, "expected exactly 1 audit row");
+        assert_eq!(rows[0].source, "workflow");
+        assert_eq!(rows[0].run_id.as_deref(), Some("run-001"));
+        assert_eq!(rows[0].project_id.as_deref(), Some("proj-1"));
+        assert_eq!(rows[0].status, "ERROR");
+    }
+
+    #[tokio::test]
+    async fn manual_test_apicall_records_with_manual_test_source() {
+        let state = test_app_state();
+        let _ = execute_api_call_step_with_db_as(
+            &invalid_step(),
+            Some("proj-1"),
+            &state,
+            &TemplateContext::new(),
+            SecurityPolicy::production(),
+            ApiCallLogContext::manual_test(),
+        ).await;
+        let rows = state.db.with_conn(|conn| {
+            crate::db::api_call_logs::list(conn, Default::default())
+                .map_err(|e| anyhow::anyhow!("list: {e}"))
+        }).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source, "manual_test");
+        // run_id stays None for manual_test path.
+        assert!(rows[0].run_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn default_entry_point_logs_as_workflow_source() {
+        // The unparameterised `execute_api_call_step_with_db` MUST default
+        // to source=workflow so any existing caller that hasn't migrated
+        // still attributes correctly.
+        let state = test_app_state();
+        let _ = execute_api_call_step_with_db(
+            &invalid_step(),
+            None,
+            &state,
+            &TemplateContext::new(),
+            SecurityPolicy::production(),
+        ).await;
+        let rows = state.db.with_conn(|conn| {
+            crate::db::api_call_logs::list(conn, Default::default())
+                .map_err(|e| anyhow::anyhow!("list: {e}"))
+        }).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source, "workflow");
+        assert!(rows[0].run_id.is_none());
     }
 }

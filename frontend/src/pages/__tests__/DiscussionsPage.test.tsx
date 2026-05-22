@@ -93,6 +93,8 @@ vi.mock('../../lib/api', () => ({
   config: {
     getUiLanguage: vi.fn().mockResolvedValue('fr'),
     saveUiLanguage: vi.fn().mockResolvedValue(undefined),
+    // 0.8.6 phase 4 — NewDiscussionForm fetches the default tier on mount.
+    getServerConfig: vi.fn().mockResolvedValue({ default_model_tier: 'default' }),
   },
 }));
 

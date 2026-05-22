@@ -99,13 +99,18 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
         McpDefinition {
             id: "mcp-gitlab".into(),
             name: "GitLab".into(),
-            description: "Issues, MRs, pipelines, projects — official GitLab CLI MCP server (experimental)".into(),
+            description: "Issues, MRs, pipelines, projects — official GitLab CLI MCP server (experimental). Requires the `glab` CLI installed locally.".into(),
             transport: McpTransport::Stdio {
                 command: "glab".into(),
                 args: vec!["mcp".into(), "serve".into()],
             },
             env_keys: vec!["GITLAB_TOKEN".into(), "GITLAB_HOST".into()],
-            tags: vec!["git".into(), "ci".into(), "code".into()],
+            // `cli` first so getCategory() picks it up before `git` →
+            // surfaces this plugin under the "CLI wrappers" filter rather
+            // than the regular Git/Code bucket. The MCP wraps a local
+            // binary so it has the same prereq as a CLI agent (host
+            // install required).
+            tags: vec!["cli".into(), "git".into(), "ci".into(), "code".into()],
             token_url: Some("https://gitlab.com/-/user_settings/personal_access_tokens".into()),
             token_help: Some("Requires glab CLI (brew install glab / winget install glab). GITLAB_TOKEN: PAT with api scope. GITLAB_HOST: your GitLab hostname (e.g. gitlab.company.com). Leave GITLAB_HOST empty for gitlab.com.".into()),
             publisher: "GitLab".into(),
@@ -1475,13 +1480,16 @@ Official docs: https://dev.mailjet.com/email/reference/
         McpDefinition {
             id: "mcp-fastly".into(),
             name: "Fastly".into(),
-            description: "CDN management, cache purge, VCL, WAF, backends, domains, stats — official Fastly Go server (wraps Fastly CLI)".into(),
+            description: "CDN management, cache purge, VCL, WAF, backends, domains, stats — official Fastly Go server (wraps Fastly CLI). Requires the `fastly` CLI installed locally.".into(),
             transport: McpTransport::Stdio {
                 command: "fastly-mcp".into(),
                 args: vec![],
             },
             env_keys: vec![],
-            tags: vec!["cdn".into(), "cache".into(), "infrastructure".into(), "edge".into(), "waf".into()],
+            // `cli` first so the filter UI groups this plugin under the
+            // "CLI wrappers" category — distinct from the pure-MCP
+            // bucket (Anthropic-shipped servers, third-party MCP-only).
+            tags: vec!["cli".into(), "cdn".into(), "cache".into(), "infrastructure".into(), "edge".into(), "waf".into()],
             token_url: Some("https://manage.fastly.com/account/personal/tokens".into()),
             token_help: Some("Requires the Fastly CLI installed on the host (the MCP shells out to it). Install: `brew install fastly/tap/fastly` (macOS) or the tarball from https://github.com/fastly/cli/releases (Linux/WSL — prefer this over `npm i -g @fastly/cli` which ships a JS wrapper that breaks inside Docker). Then `fastly profile create <name>` and paste your API token. No env var needed — auth is read from CLI profiles.".into()),
             publisher: "Fastly".into(),
@@ -2529,5 +2537,61 @@ mod tests {
         let csm_ids: Vec<&String> = csm_hits.iter().map(|d| &d.id).collect();
         assert!(csm_ids.contains(&&"mcp-resend".to_string()));
         assert!(csm_ids.contains(&&"api-mailjet".to_string()));
+    }
+
+    // ── 0.8.6 phase 4 — CLI category (audit feedback 2026-05-22) ──
+    //
+    // Fastly and GitLab are MCP servers but they SHELL OUT to a local
+    // CLI binary (`fastly`, `glab`). From the user's install standpoint
+    // they have the same prereq as a CLI agent (binary on the host),
+    // so they get their own category in the McpPage filter.
+    //
+    // These tests pin the `cli` tag at the start of the tags array so
+    // `getCategory()` (which walks tags in order) routes them to the
+    // CLI bucket rather than the generic Git/Code or Cloud buckets.
+
+    #[test]
+    fn cli_wrapper_plugins_carry_the_cli_tag_first() {
+        let reg = builtin_registry();
+        let cli_wrappers = ["mcp-gitlab", "mcp-fastly"];
+        for slug in cli_wrappers {
+            let def = reg.iter().find(|d| d.id == slug)
+                .unwrap_or_else(|| panic!("missing registry entry for {}", slug));
+            assert_eq!(
+                def.tags.first().map(String::as_str),
+                Some("cli"),
+                "{} must have `cli` as its FIRST tag — McpPage.getCategory() \
+                 routes by first-matching tag, putting `cli` first ensures the \
+                 plugin lands in the CLI-wrappers bucket. Got tags: {:?}",
+                slug, def.tags,
+            );
+        }
+    }
+
+    #[test]
+    fn cli_tag_is_unique_to_cli_wrappers() {
+        // Defensive : if a non-CLI-wrapper plugin accidentally inherits
+        // the `cli` tag (e.g. through copy-paste), it would silently
+        // land in the wrong bucket. Pin the inverse contract — ONLY
+        // mcp-gitlab + mcp-fastly carry `cli`.
+        let reg = builtin_registry();
+        let cli_tagged: Vec<&String> = reg.iter()
+            .filter(|d| d.tags.iter().any(|t| t == "cli"))
+            .map(|d| &d.id)
+            .collect();
+        let expected: Vec<&String> = vec![
+            &"mcp-gitlab".to_string(),
+            &"mcp-fastly".to_string(),
+        ].into_iter().map(|s| {
+            // Find the equivalent &String in the actual collection.
+            cli_tagged.iter().find(|c| ***c == *s).copied()
+                .unwrap_or_else(|| panic!("expected `cli` tag on {}", s))
+        }).collect();
+        assert_eq!(
+            cli_tagged.len(),
+            expected.len(),
+            "ONLY mcp-gitlab + mcp-fastly should carry the `cli` tag — found: {:?}",
+            cli_tagged,
+        );
     }
 }
