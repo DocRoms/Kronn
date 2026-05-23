@@ -1,9 +1,12 @@
-import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode, type CSSProperties } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { projects as projectsApi } from '../lib/api';
+import rehypeRaw from 'rehype-raw';
+import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
+import { projects as projectsApi, getApiBase } from '../lib/api';
 import type { AiFileNode } from '../types/generated';
 import { useT } from '../lib/I18nContext';
+import { rehypeRewriteDocImages } from '../lib/docImageRewrite';
 import { MermaidDiagram } from './MermaidDiagram';
 import './AiDocViewer.css';
 import {
@@ -39,7 +42,11 @@ export function AiDocViewer({ projectId, onDiscussFile, initialExpandFolder, ban
   // etc.) so the path is visibly unfolded in the tree even if the user
   // hasn't clicked any folder yet.
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(() => {
-    const seed = new Set<string>(['ai']);
+    // Seed the docs root(s) so the folder opens expanded by default —
+    // post-0.8.6 the backend wraps the tree in an explicit `docs/` (or
+    // `doc/`/`ai/`) node, and we want its top-level contents visible at
+    // a glance rather than behind a closed folder.
+    const seed = new Set<string>(['ai', 'doc', 'docs']);
     if (initialExpandFolder) {
       const parts = initialExpandFolder.replace(/\/$/, '').split('/');
       for (let i = 1; i <= parts.length; i++) {
@@ -360,7 +367,11 @@ export function AiDocViewer({ projectId, onDiscussFile, initialExpandFolder, ban
               <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> {t('projects.docAi.loading')}
             </div>
           ) : content !== null ? (
-            <DocMarkdown content={content} />
+            <DocMarkdown
+              content={content}
+              projectId={projectId}
+              baseDir={selectedPath && selectedPath.includes('/') ? selectedPath.slice(0, selectedPath.lastIndexOf('/')) : ''}
+            />
           ) : (
             <div className="aidoc-select-file">
               {t('projects.docAi.selectFile')}
@@ -563,7 +574,11 @@ function flattenFilePaths(nodes: AiFileNode[], out: string[]) {
 // MermaidDiagram's `fullscreen` state and makes the overlay disappear
 // every 3 seconds. 0.8.3 user bug report.
 const DOC_MD_COMPONENTS = {
-  p: ({ children }: { children?: ReactNode }) => <p>{children}</p>,
+  // Honor `align` (READMEs center images/badges via `<p align="center">`).
+  // The custom component previously dropped every attribute, so embedded
+  // HTML lost its centering. Map the deprecated `align` attr → text-align.
+  p: ({ children, align }: { children?: ReactNode; align?: string }) =>
+    <p style={align ? { textAlign: align as CSSProperties['textAlign'] } : undefined}>{children}</p>,
   h1: ({ children }: { children?: ReactNode }) => <h1>{children}</h1>,
   h2: ({ children }: { children?: ReactNode }) => <h2>{children}</h2>,
   h3: ({ children }: { children?: ReactNode }) => <h3>{children}</h3>,
@@ -602,10 +617,41 @@ const DOC_MD_COMPONENTS = {
 
 const DOC_MD_REMARK_PLUGINS = [remarkGfm];
 
-const DocMarkdown = ({ content }: { content: string }) => (
-  <div className="aidoc-md">
-    <ReactMarkdown remarkPlugins={DOC_MD_REMARK_PLUGINS} components={DOC_MD_COMPONENTS}>
-      {content}
-    </ReactMarkdown>
-  </div>
-);
+// Allow the safe HTML that READMEs lean on (centered images, badges,
+// <details>/<summary>, width/align on <img>) while stripping scripts and
+// event handlers. Doc content can come from ANY project the user added,
+// including team-shared repos in self-hosted mode, so we sanitize rather
+// than render raw HTML blindly.
+const DOC_MD_SANITIZE_SCHEMA = {
+  ...defaultSchema,
+  tagNames: [...(defaultSchema.tagNames ?? []), 'details', 'summary'],
+  attributes: {
+    ...defaultSchema.attributes,
+    '*': [...(defaultSchema.attributes?.['*'] ?? []), 'align'],
+    img: [...(defaultSchema.attributes?.img ?? []), 'width', 'height', 'align'],
+    details: [...(defaultSchema.attributes?.details ?? []), 'open'],
+  },
+};
+
+const DocMarkdown = ({ content, projectId, baseDir }: { content: string; projectId: string; baseDir: string }) => {
+  // rehype-raw parses embedded HTML → rehype-sanitize scrubs the whole tree →
+  // rehypeRewriteDocImages repoints relative <img> at the doc-asset route.
+  // Order matters (raw → sanitize → rewrite). Memoized on the inputs that
+  // actually change it (project + current doc dir) so unrelated re-renders
+  // keep the same reference and don't thrash ReactMarkdown / MermaidDiagram.
+  const rehypePlugins = useMemo(
+    () => [
+      rehypeRaw,
+      [rehypeSanitize, DOC_MD_SANITIZE_SCHEMA],
+      [rehypeRewriteDocImages, { projectId, baseDir, apiBase: getApiBase() }],
+    ] as Parameters<typeof ReactMarkdown>[0]['rehypePlugins'],
+    [projectId, baseDir],
+  );
+  return (
+    <div className="aidoc-md">
+      <ReactMarkdown remarkPlugins={DOC_MD_REMARK_PLUGINS} rehypePlugins={rehypePlugins} components={DOC_MD_COMPONENTS}>
+        {content}
+      </ReactMarkdown>
+    </div>
+  );
+};

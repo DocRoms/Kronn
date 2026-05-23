@@ -17,6 +17,7 @@ import { useEffect, useRef, useState, useId, memo } from 'react';
 import { createPortal } from 'react-dom';
 import { ChevronDown, ChevronRight, AlertTriangle, Maximize2, Printer, X } from 'lucide-react';
 import { useT } from '../lib/I18nContext';
+import { sanitizeMermaidSource } from '../lib/mermaidSanitize';
 import './MermaidDiagram.css';
 
 interface MermaidDiagramProps {
@@ -111,7 +112,9 @@ function MermaidDiagramImpl({ source }: MermaidDiagramProps) {
         // `render` returns `{ svg, bindFunctions? }`. We inline the SVG
         // and don't wire bindFunctions because securityLevel:'strict'
         // disables interactive bindings anyway.
-        const { svg } = await mermaid.render(`kronn-mmd-${id}`, source);
+        // Heal reserved-keyword participant aliases (e.g. `Alt`) before the
+        // parse — see lib/mermaidSanitize. No-op when there's no collision.
+        const { svg } = await mermaid.render(`kronn-mmd-${id}`, sanitizeMermaidSource(source));
         if (cancelled) return;
         // Mermaid v11 stopped reliably throwing on parse errors and
         // returns an *error SVG* instead ("Syntax error in text"

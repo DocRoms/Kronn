@@ -183,6 +183,7 @@ Each file must include a 2-3 sentence intro before the diagram (\"This sequence 
 - **Avoid `:` and `;` inside message text**. The first `:` after the arrow is the separator (`A->>B: msg`), but additional `:` / `;` combined with parens or Unicode can confuse the lexer. Rephrase: write `Cache-Control maxage=604800` instead of `Cache-Control: maxage=604800`, `Link rel=preload` instead of `Link: ...; rel=preload`.\n\
 - **No literal `(`/`)`/`[`/`]`/`{`/`}` chains** inside a message. Short, declarative prose only: `301 redirect to /a-propos` not `301 Location: /a-propos (set by LocaleRedirectSubscriber)`. If you need the detail, add a `Note over X` block.\n\
 - **Keep each line ≤ 100 chars**. Long lines hide parser-state issues. Break into multiple messages or a `Note over` block.\n\
+- **Participant/actor aliases must NOT be Mermaid reserved words** (case-insensitive): `alt`, `else`, `end`, `opt`, `loop`, `par`, `and`, `rect`, `note`, `critical`, `break`, `activate`, `deactivate`, `box`. Declaring `participant Alt as AlternateLocaleSubscriber` then writing `Caddy->>Alt: msg` makes the lexer read `Alt` as the start of an `alt` block → parse error. Pick a non-keyword alias (`AltLoc`, `AltSub`, `Alternate`). Same for `flowchart` node ids — never name a node `end`/`alt`/etc.\n\
 - Test mentally: would `mermaid.parse` accept this verbatim? If unsure, simplify.\n\n\
 **Why Mermaid + file separation**: every viewer (GitHub, GitLab, Obsidian, VS Code) renders Mermaid natively — no external tools. \
 Sequence diagrams live in separate files so `docs/AGENTS.md` Tier 1 stays small; an agent only loads them when working on the related flow.\n\
@@ -1348,6 +1349,11 @@ mod prompt_tests {
             "Step 6 must redirect detailed info to Note blocks");
         assert!(p.contains("100 char") || p.contains("≤ 100"),
             "Step 6 must cap line length to surface parser-state issues");
+        // 0.8.6 — DOCROMS_WEB's request-lifecycle diagram broke: a participant
+        // aliased `Alt` collided with the `alt` block keyword. The prompt must
+        // forbid reserved-keyword aliases and offer a safe alternative.
+        assert!(p.contains("reserved words") && p.contains("AltLoc"),
+            "Step 6 must forbid reserved-keyword participant aliases (alt/else/end/…) with a safe-rename example");
     }
 
     #[test]

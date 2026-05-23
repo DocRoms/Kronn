@@ -83,6 +83,42 @@ This is a slow, graceful deprecation — not a flag day. The migration
 trigger is "TLS works for ≥ 80 % of self-hosted users" (we'll measure
 via opt-in telemetry on the SetupWizard's `tls_enabled` flag).
 
+## Security headers & Content-Security-Policy
+
+The HTTP security headers (CSP, `X-Frame-Options`, `X-Content-Type-Options`,
+`Referrer-Policy`) are set by the **nginx gateway**, NOT the Rust backend —
+they live in **`.docker/nginx.conf`** (the `add_header … always;` block near
+the top of the `server {}`). The desktop (Tauri) build instead serves the
+frontend via `ServeDir` and sets only COOP/COEP
+(`desktop/src-tauri/src/main.rs`) with no CSP, so the directives below apply
+to the Docker/self-hosted deployment.
+
+The CSP is a single `add_header Content-Security-Policy "…" always;` line:
+
+| Directive | Value | Why |
+|-----------|-------|-----|
+| `default-src` | `'self'` | Same-origin by default. |
+| `script-src` | `'self' 'unsafe-inline' 'unsafe-eval' blob:` | Vite runtime + web workers (Whisper STT) need inline/eval/blob. |
+| `style-src` | `'self' 'unsafe-inline'` | Inline component styles. |
+| `img-src` | `'self' data: blob: https:` | App assets + data/blob previews + **any HTTPS image** — see note. |
+| `connect-src` | `'self' ws: wss: https://huggingface.co https://cdn.jsdelivr.net https://cdnjs.cloudflare.com` | API + WS + model/lib downloads (Whisper, mermaid). |
+| `worker-src` / `media-src` | `'self' blob:` | Web workers + TTS/STT audio blobs. |
+| `font-src` | `'self' data:` | Bundled + data-URI fonts. |
+
+**`img-src https:`** (widened in 0.8.6 from a `www.gravatar.com` allowlist):
+the project-doc viewer renders README/markdown files that embed external
+images — shields.io badges, screenshots on CDNs, etc. A host allowlist would
+break them, and images can't execute code, so `https:` is an acceptable
+relaxation. To harden a locked-down deployment, replace `https:` with an
+explicit host list (expect external README images to stop rendering).
+
+**Relative-path images** in a README (e.g. `docs/screenshots/foo.png`) are
+served by the backend `doc-asset` route — image files only, confined to the
+project root, size-capped — and the doc viewer rewrites their `src` to it.
+Same-origin, so `img-src 'self'` covers them with no CSP change. See
+`backend/src/api/ai_docs.rs::read_doc_asset` +
+`frontend/src/lib/docImageRewrite.ts`.
+
 ## Test surface
 
 Auth is regression-tested in `backend/src/lib.rs::auth_tests`:
@@ -104,4 +140,6 @@ the predicate behaviour is unchanged.
 - `backend/src/lib.rs:is_local_ip` — IP classifier
 - `backend/src/api/setup.rs:regenerate_auth_token` — rotation endpoint
 - `frontend/src/pages/SettingsPage.tsx:1240-1275` — Settings UI
+- `.docker/nginx.conf` — CSP + security headers (gateway, Docker mode)
+- `desktop/src-tauri/src/main.rs` — COOP/COEP headers (desktop mode)
 - `docs/tech-debt/TD-20260314-no-tls.md` (when filed) — TLS plan
