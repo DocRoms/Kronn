@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/screenshots/Kronn_Hero.png" alt="Kronn, Many agents. Zero chaos." width="720" />
+  <img src="docs/screenshots/KronnLogo.jpg" alt="Kronn, Many agents. Zero chaos." width="720" />
 </p>
 
 <p align="center">

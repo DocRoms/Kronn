@@ -3,6 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
   <title>Kronn · Many agents. Zero chaos.</title>
   <meta name="description" content="El control plane local-first para tus CLI de IA. Tú aportas Claude Code, Codex, Gemini, Ollama. Kronn aporta la memoria, la orquestación y la continuidad.">
 
@@ -33,11 +35,17 @@
   <link rel="alternate" hreflang="es" href="https://docroms.github.io/Kronn/es.html">
   <link rel="alternate" hreflang="x-default" href="https://docroms.github.io/Kronn/">
 
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Russo+One&family=VT323&family=Inter:wght@400;500;600&display=optional" onload="this.onload=null;this.rel='stylesheet'">
-  <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Russo+One&family=VT323&family=Inter:wght@400;500;600&display=optional"></noscript>
+  <!-- Self-hosted fonts (latin subset) — no Google dependency: zero IP leak,
+       no CDN latency, stable long cache. Preload the above-the-fold display
+       fonts so the hero paints in its final font (no CLS swap). -->
+  <link rel="preload" as="font" type="font/woff2" href="fonts/inter-latin.woff2" crossorigin>
+  <link rel="preload" as="font" type="font/woff2" href="fonts/russoone-latin.woff2" crossorigin>
+  <link rel="preload" as="font" type="font/woff2" href="fonts/pressstart2p-latin.woff2" crossorigin>
   <style>
+    @font-face { font-family: 'Inter'; font-style: normal; font-weight: 100 900; font-display: swap; src: url(fonts/inter-latin.woff2) format('woff2'); }
+    @font-face { font-family: 'Russo One'; font-style: normal; font-weight: 400; font-display: swap; src: url(fonts/russoone-latin.woff2) format('woff2'); }
+    @font-face { font-family: 'Press Start 2P'; font-style: normal; font-weight: 400; font-display: swap; src: url(fonts/pressstart2p-latin.woff2) format('woff2'); }
+    @font-face { font-family: 'VT323'; font-style: normal; font-weight: 400; font-display: swap; src: url(fonts/vt323-latin.woff2) format('woff2'); }
     :root {
       --bg: #140822;
       --bg-deep: #07031a;
@@ -203,7 +211,7 @@
     }
     .ea-disclaimer {
       margin-top: 22px;
-      font-family: var(--mono);
+      font-family: var(--terminal);
       font-size: 11px;
       letter-spacing: 0.06em;
       color: var(--text-dim);
@@ -332,7 +340,7 @@
     }
     .cli-grid {
       display: grid;
-      grid-template-columns: repeat(4, 1fr);
+      grid-template-columns: repeat(5, 1fr);
       gap: 12px;
       margin-bottom: 24px;
     }
@@ -387,7 +395,7 @@
     }
     .leaves {
       display: grid;
-      grid-template-columns: repeat(3, 1fr);
+      grid-template-columns: repeat(4, 1fr);
       gap: 12px;
       margin-top: 28px;
     }
@@ -407,6 +415,78 @@
       text-shadow: 0 0 6px rgba(139, 92, 246, 0.4);
     }
     .leaf .body { font-size: 13px; line-height: 1.5; color: var(--text); }
+    /* GALLERY — vraies captures de l'app (toutes lazy-loaded). 2 colonnes
+       pour que les screenshots restent lisibles ; 1 colonne sur mobile. */
+    .gallery-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 18px;
+      margin-top: 28px;
+    }
+    .gallery-card {
+      margin: 0;
+      border: 1.5px solid var(--electric);
+      background: var(--bg-card-hi);
+      box-shadow: 0 0 12px rgba(139, 92, 246, 0.18);
+      overflow: hidden;
+    }
+    .gallery-card a { display: block; line-height: 0; }
+    .gallery-card img { width: 100%; height: auto; display: block; transition: filter 0.15s; }
+    .gallery-card a:hover img { filter: brightness(1.08); }
+    .gallery-card figcaption { padding: 10px 14px; font-size: 13px; line-height: 1.45; color: var(--text-dim); }
+    .gallery-card figcaption strong { color: var(--lila); }
+    @media (max-width: 760px) { .gallery-grid { grid-template-columns: 1fr; } }
+    /* SYSTEM MAP — boucle asymétrique : COMMANDE (Kronn → CLI, électrique) vs
+       MCP (agent → Kronn, lila). Deux arêtes étiquetées en sens inverse. */
+    .schema-loop {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+      max-width: 540px;
+      margin: 6px auto 14px;
+    }
+    .loop-edge {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      border: 1.5px solid var(--electric);
+      background: var(--bg-card-hi);
+      box-shadow: 0 0 12px rgba(139, 92, 246, 0.18);
+    }
+    .loop-mcp { flex-direction: row-reverse; text-align: right; border-color: var(--lila); }
+    .loop-glyph {
+      font-family: var(--terminal);
+      font-size: 26px;
+      line-height: 1;
+      color: var(--electric);
+      text-shadow: 0 0 6px rgba(139, 92, 246, 0.5);
+    }
+    .loop-mcp .loop-glyph { color: var(--lila); text-shadow: 0 0 6px rgba(200, 160, 255, 0.5); }
+    .loop-tag { font-size: 12px; line-height: 1.35; color: var(--text); }
+    .schema-caption { text-align: center; font-size: 13px; color: var(--text-dim); margin: 2px 0 4px; }
+    /* .pk / .li n'existent que scopés (titres) et .pk y est magenta (réservé
+       aux anti-patterns) ; helpers locaux en électrique/lila pour le schema. */
+    .schema .sk-pk {
+      font-family: var(--pixel);
+      font-size: 0.82em;
+      color: var(--electric-bright);
+      letter-spacing: 0.04em;
+      text-shadow: 0 0 6px rgba(139, 92, 246, 0.4);
+    }
+    .schema .sk-li { color: var(--lila); font-weight: 600; }
+    /* Point focal : Kronn "respire" en néon pour attirer l'œil au centre
+       (c'est le premier bloc visible). Coupé si prefers-reduced-motion. */
+    @keyframes kronn-pulse {
+      0%, 100% { box-shadow: 0 0 28px rgba(255, 27, 168, 0.45), inset 0 0 32px rgba(255, 27, 168, 0.08); }
+      50%      { box-shadow: 0 0 46px rgba(255, 27, 168, 0.72), inset 0 0 40px rgba(255, 27, 168, 0.14); }
+    }
+    .schema .center-blob { animation: kronn-pulse 3.4s ease-in-out infinite; }
+    @media (prefers-reduced-motion: reduce) { .schema .center-blob { animation: none; } }
+    @media (max-width: 760px) {
+      .schema-loop { grid-template-columns: 1fr; }
+      .loop-mcp { flex-direction: row; text-align: left; }
+    }
 
     /* COMPARE GRID (Avant/Après) */
     .compare-grid {
@@ -565,67 +645,6 @@
       color: var(--kronn);
       font-weight: 400;
       text-shadow: 0 0 6px rgba(200, 255, 0, 0.4);
-    }
-
-    /* HI-SCORE */
-    .scores {
-      border: 2px solid var(--silver);
-      padding: 28px 24px;
-      background: var(--bg-card);
-      box-shadow: 0 0 20px rgba(216, 208, 232, 0.12), inset 0 0 28px rgba(216, 208, 232, 0.04);
-      position: relative;
-    }
-    .scores-header {
-      position: absolute;
-      top: -12px;
-      left: 50%;
-      transform: translateX(-50%);
-      background: var(--bg);
-      padding: 0 16px;
-      font-family: var(--pixel);
-      font-size: 10px;
-      letter-spacing: 0.2em;
-      color: var(--silver);
-    }
-    .scores-header::before, .scores-header::after { content: '◆'; color: var(--electric); margin: 0 10px; font-family: var(--body); font-size: 9px; }
-    .score-row {
-      display: grid;
-      grid-template-columns: 40px 120px 1fr 100px;
-      gap: 20px;
-      padding: 18px 0;
-      border-bottom: 1px dashed rgba(216, 208, 232, 0.2);
-      align-items: baseline;
-      font-family: var(--terminal);
-      font-size: 20px;
-    }
-    .score-row:last-child { border-bottom: 0; }
-    .score-row:first-child { padding-top: 8px; }
-    .score-row .rank {
-      font-family: var(--pixel);
-      font-size: 11px;
-      color: var(--silver);
-      letter-spacing: 0.1em;
-    }
-    .score-row .who {
-      font-family: var(--terminal);
-      font-size: 22px;
-      color: var(--lila);
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-    }
-    .score-row .what {
-      font-family: var(--body);
-      font-size: 14px;
-      color: var(--text);
-      line-height: 1.45;
-    }
-    .score-row .num {
-      font-family: var(--display);
-      font-size: 32px;
-      color: var(--magenta);
-      text-align: right;
-      text-shadow: 0 0 8px rgba(255, 27, 168, 0.5);
-      letter-spacing: -0.02em;
     }
 
     /* INVENTORY (Loadout) · 2 cols desktop, 1 col mobile */
@@ -1088,132 +1107,6 @@
       text-shadow: 0 0 4px rgba(255, 27, 168, 0.4);
     }
 
-    /* VS Alternatives — table + tool cards */
-    .vs-legend {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 18px 28px;
-      margin: 24px 0 12px;
-      padding: 14px 20px;
-      background: var(--bg-card);
-      border-left: 3px solid var(--lila);
-      font-family: var(--body);
-      font-size: 13.5px;
-      color: var(--text-dim);
-    }
-    .vs-legend > span {
-      display: inline-flex;
-      align-items: baseline;
-      gap: 8px;
-    }
-    .vs-legend .vs-mark {
-      font-family: var(--terminal);
-      font-size: 17px;
-      flex-shrink: 0;
-    }
-    .vs-legend .vs-yes { color: var(--kronn); font-weight: 700; }
-    .vs-legend .vs-partial { color: var(--magenta-bright); }
-    .vs-legend .vs-no { color: var(--text-dim); }
-
-    .vs-table-wrap {
-      margin-top: 24px;
-      overflow-x: auto;
-      border: 1.5px solid var(--lila);
-      background: var(--bg-card);
-    }
-    .vs-table {
-      width: 100%;
-      border-collapse: collapse;
-      font-family: var(--body);
-      min-width: 600px;
-    }
-    .vs-table thead th {
-      background: var(--bg-deep);
-      font-family: var(--pixel);
-      font-size: 10px;
-      letter-spacing: 0.18em;
-      color: var(--lila);
-      text-align: center;
-      padding: 16px 8px;
-      border-bottom: 2px solid var(--lila);
-      font-weight: 400;
-      text-transform: uppercase;
-    }
-    .vs-table thead th.kronn-col {
-      color: var(--kronn);
-      text-shadow: 0 0 8px rgba(200, 255, 0, 0.5);
-      border-bottom-color: var(--kronn);
-      background: rgba(200, 255, 0, 0.05);
-    }
-    .vs-table thead th:first-child {
-      background: transparent;
-      border-bottom-color: var(--lila);
-    }
-    .vs-table tbody td {
-      padding: 14px 10px;
-      border-bottom: 1px dashed rgba(255, 255, 255, 0.06);
-      font-size: 13.5px;
-      color: var(--text);
-      text-align: center;
-    }
-    .vs-table tbody tr:last-child td { border-bottom: 0; }
-    .vs-table tbody td:first-child {
-      text-align: left;
-      font-weight: 500;
-      color: var(--lila);
-      padding-left: 18px;
-    }
-    .vs-table tbody td.kronn-col {
-      background: rgba(200, 255, 0, 0.04);
-      color: var(--kronn);
-      font-weight: 600;
-    }
-    .vs-yes { color: var(--kronn); font-weight: 700; }
-    .vs-no { color: var(--text-dim); }
-    .vs-partial { color: var(--magenta-bright); }
-    .vs-price-paid { color: var(--magenta-bright); font-size: 12.5px; font-weight: 500; }
-    .vs-price-free { color: var(--lila); font-size: 12.5px; font-weight: 500; }
-    .vs-price-mixed { color: var(--electric-bright); font-size: 12.5px; font-weight: 500; }
-    .vs-price-kronn {
-      color: var(--kronn);
-      font-size: 12.5px;
-      font-weight: 700;
-      text-shadow: 0 0 4px rgba(200, 255, 0, 0.4);
-    }
-
-    .tool-cards {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-      gap: 14px;
-      margin-top: 36px;
-    }
-    .tool-card {
-      background: var(--bg-card);
-      border: 1.5px solid var(--lila);
-      padding: 20px 20px 18px;
-    }
-    .tool-card.kronn-card {
-      border-color: var(--kronn);
-      box-shadow: 0 0 16px rgba(200, 255, 0, 0.18);
-    }
-    .tool-card .tool-name {
-      font-family: var(--display);
-      font-size: 18px;
-      color: var(--lila);
-      text-transform: uppercase;
-      margin-bottom: 8px;
-      letter-spacing: 0.02em;
-    }
-    .tool-card.kronn-card .tool-name {
-      color: var(--kronn);
-      text-shadow: 0 0 6px rgba(200, 255, 0, 0.4);
-    }
-    .tool-card .tool-use {
-      font-family: var(--body);
-      font-size: 13px;
-      color: var(--text);
-      line-height: 1.55;
-    }
     @media (max-width: 760px) {
       .security-grid { grid-template-columns: 1fr; }
     }
@@ -1292,7 +1185,6 @@
 
     /* A11Y · focus-visible */
     .btn:focus-visible,
-    .back:focus-visible,
     a:focus-visible {
       outline: 2px solid var(--kronn);
       outline-offset: 3px;
@@ -1313,14 +1205,11 @@
       .container { padding: 0 22px; }
       header { flex-direction: column; align-items: flex-start; gap: 12px; }
       .cli-grid { grid-template-columns: repeat(2, 1fr); }
-      .leaves { grid-template-columns: 1fr; }
+      .leaves { grid-template-columns: repeat(2, 1fr); }
       .compare-grid { grid-template-columns: 1fr; }
       .compound-grid { grid-template-columns: 1fr 1fr; }
       .compound-item + .compound-item::before { display: none; }
       .anti-grid { grid-template-columns: 1fr; }
-      .score-row { grid-template-columns: 40px 1fr; gap: 8px; }
-      .score-row .what { grid-column: 1 / -1; padding-left: 48px; }
-      .score-row .num { grid-column: 1 / -1; text-align: left; padding-left: 48px; }
     }
     @media (max-width: 560px) {
       .compound-grid { grid-template-columns: 1fr; }
@@ -1340,22 +1229,18 @@
       .security-grid,
       .anti-grid,
       .inventory-grid,
-      .plugin-flow-row,
-      .tool-cards {
+      .plugin-flow-row {
         grid-template-columns: 1fr !important;
         gap: 12px;
       }
-      .cli-card,
       .compound-item,
       .qs-stage,
       .concept-def,
       .sec-panel,
       .anti-card,
-      .tool-card,
       .compare-panel,
       .decomp-wrap,
-      .leaf,
-      .plugin-card {
+      .leaf {
         min-width: 0;
         max-width: 100%;
         box-sizing: border-box;
@@ -1391,7 +1276,7 @@
     </h1>
     <div class="baseline">muchos agentes · cero caos</div>
     <p class="sub-pitch">
-      Manejas <strong>varios CLI de IA</strong> (Claude Code, Codex, Gemini, Ollama) en <strong>varios proyectos</strong>. Kronn aporta la <em>memoria compartida</em>, la <em>orquestación</em> y la <em>continuidad</em>. Local-first. <strong>0 tokens en los pasos mecánicos.</strong>
+      Usas <strong>varios CLI de IA</strong> (Claude Code, Codex, Gemini, Ollama) en <strong>varios proyectos</strong>. Kronn aporta la <em>memoria compartida</em>, la <em>orquestación</em> y la <em>continuidad</em>. Local-first. <strong>0 tokens en los pasos mecánicos.</strong>
     </p>
     <div class="ctas">
       <a class="btn btn-pink" href="#level-1">▼ How to play</a>
@@ -1405,35 +1290,74 @@
     <a class="level-tag" href="#level-1">LEVEL 1 · THE BRIDGE</a>
     <h2 class="section-title">Un solo <span class="pk">cerebro</span>.<br>Todos tus CLI <span class="li">conectados a él</span>.</h2>
     <p class="section-intro">
-      Cuatro CLI de IA que se ignoran. Tres configs MCP que divergen. Catorce prompts copiados y pegados. <strong>Estado del arte aceptado.</strong> Kronn propone un cerebro compartido, local, conectado a todo.
+      Cinco CLI de IA que se ignoran. Tres configs MCP que divergen. Catorce prompts copiados y pegados. <strong>Y lo damos por normal.</strong> Kronn propone un cerebro compartido, local, conectado a todo.
     </p>
 
-    <div class="schema">
+    <div class="schema" role="img"
+         aria-label="Mapa del sistema Kronn: Kronn lanza los CLI por comando, los agentes vuelven a llamar a Kronn por MCP. Toda la comunicación entre CLIs pasa por Kronn.">
       <span class="schema-label">· SYSTEM MAP ·</span>
+
       <div class="cli-grid">
         <div class="cli-cell">Claude Code</div>
         <div class="cli-cell">Codex</div>
         <div class="cli-cell">Gemini</div>
+        <div class="cli-cell">Vibe</div>
         <div class="cli-cell">Ollama</div>
       </div>
-      <div class="arrow-down">▼</div>
+
+      <!-- Boucle asymétrique : Kronn descend en COMMANDE (spawn process),
+           l'agent remonte en MCP. Deux mécanismes distincts, pas une flèche. -->
+      <div class="schema-loop" aria-hidden="true">
+        <div class="loop-edge loop-cmd">
+          <span class="loop-glyph">▲</span>
+          <span class="loop-tag"><span class="sk-pk">COMANDO</span> · una sola UI orquesta todos tus CLIs, sin tener que abrir 20 terminales.</span>
+        </div>
+        <div class="loop-edge loop-mcp">
+          <span class="loop-glyph">▼</span>
+          <span class="loop-tag"><span class="sk-pk">MCP · 28 herramientas</span> · un agente pilota Kronn (workflow, room, API) sin abrir la UI.</span>
+        </div>
+      </div>
+
       <div class="center-blob">
         <div class="name">KRONN <span class="ac">◆</span></div>
         <div class="sub">shared brain · local-first</div>
       </div>
-      <div class="arrow-down">▼</div>
+
+      <div class="arrow-down" aria-hidden="true">▼</div>
+      <p class="schema-caption">El cerebro compartido es todo esto: con el ratón en la interfaz Web o Desktop, o pilotado directamente por tus agentes.</p>
+
       <div class="leaves">
         <div class="leaf">
+          <div class="title">AutoPilot de principio a fin</div>
+          <p class="body"><strong>El flujo más avanzado.</strong> El pipeline auditoría → tickets → PR: un <strong>preset</strong> deja casi todo preconfigurado (tracker autodetectado, owner/repo), tú completas la configuración (plugins, prompts, notify), y se ejecuta por <strong>cron</strong> o sobre una <strong>issue de GitHub</strong>, con 2 checkpoints humanos.</p>
+        </div>
+        <div class="leaf">
+          <div class="title">Auditoría IA del repo</div>
+          <p class="body">Toda la doc (arquitectura, deuda técnica, convenciones, glosario) en formato <span class="sk-pk">optimizado en tokens</span>, legible por humanos y optimizado para IA (<code>docs/AGENTS.md</code> define su estructura). Detección de drift, auditorías especializadas (Security, Docker, RGAA…) y health score.</p>
+        </div>
+        <div class="leaf">
           <div class="title">Memoria viva</div>
-          <p class="body">Discusiones persistidas en local. Mismo contexto retomado por cualquier CLI, O N CLIs en una misma conversación en vivo.</p>
+          <p class="body">Discusiones persistidas en local, retomadas por cualquier CLI, y N agentes en una misma room. Los agentes <strong>mantienen la doc y la deuda técnica</strong> al tocar el código.</p>
         </div>
         <div class="leaf">
-          <div class="title">Prompts</div>
-          <p class="body">Quick Prompts versionados, medidos, ✨ Improver IA.</p>
+          <div class="title">Quick Prompts medidos</div>
+          <p class="body">Prompts reutilizables, versionados (tokens · duración · coste), con un <span class="sk-li">✨ Improver</span> IA. Compáralos en N CLIs, y luego reutilízalos <strong>en un workflow o en batch</strong>.</p>
         </div>
         <div class="leaf">
-          <div class="title">Enrutamiento</div>
-          <p class="body">Pasos mecánicos sin agente. Coste IA = 0 tokens.</p>
+          <div class="title">Workflows desagentificados</div>
+          <p class="body"><strong>Desagentificar</strong> es sustituir los pasos mecánicos por steps deterministas (<code>Exec</code> · <code>Gate</code> · <code>Notify</code> · <code>ApiCall</code>…) a <span class="sk-pk">0 tokens</span>. <strong>8 tipos de pasos</strong> + batch fan-out; el agente solo interviene cuando es verdaderamente necesario.</p>
+        </div>
+        <div class="leaf">
+          <div class="title">Plugins MCP &amp; API</div>
+          <p class="body"><strong>55+ plugins</strong> listos, o <strong>cualquier API REST</strong> vía Custom API (un asistente IA la construye desde un <code>curl</code> o una doc). El agente la llama <strong>sin ver las claves</strong>, o vía una <strong>Quick API</strong> (una llamada de API guardada y reproducible).</p>
+        </div>
+        <div class="leaf">
+          <div class="title">Ejecución aislada</div>
+          <p class="body">Un workflow puede hacer fan-out de <strong>N discusiones de agentes en paralelo</strong>, cada una en su <strong>git worktree</strong> dedicado: código modificado en simultáneo, tu árbol de trabajo intacto, cero colisiones.</p>
+        </div>
+        <div class="leaf">
+          <div class="title">Seguridad &amp; local-first</div>
+          <p class="body">Vault cifrado (AES-256-GCM), el agente <strong>nunca</strong> ve las credenciales. SSRF guards, <code>Exec</code> en allowlist. Con <strong>Ollama</strong>: <span class="sk-pk">$0 token</span>, tu código se queda contigo.</p>
         </div>
       </div>
     </div>
@@ -1476,14 +1400,14 @@
 
     <!-- Decomposition diagram : mega-prompt vs Kronn workflow -->
     <div class="decomp-wrap">
-      <div class="decomp-wrap-label">▸ Fig. I · décomposition</div>
+      <div class="decomp-wrap-label">▸ Fig. I · descomposición</div>
       <svg viewBox="0 0 1000 460" xmlns="http://www.w3.org/2000/svg"
            role="img" aria-labelledby="decomp-title decomp-desc"
            class="decomp-diagram"
            font-family="'Inter', system-ui, sans-serif">
-        <title id="decomp-title">Mega-prompt vs Kronn workflow · mismo resultado, 5× más barato</title>
+        <title id="decomp-title">Mega-prompt vs Kronn workflow · mismo resultado, mucho más barato</title>
         <desc id="decomp-desc">
-          Diagrama de dos filas. Fila superior: el anti-patrón habitual, un mega-prompt que pide a un agente hacer doce cosas a la vez, alrededor de doce mil tokens, frágil, debug imposible. Fila inferior: el enfoque Kronn, cinco steps secuenciales (ApiCall, Agent, Exec, Agent, Notify), tres deterministas a cero tokens y dos steps Agent acotados. Mismo resultado, mucho más barato.
+          Diagrama de dos filas. Fila superior: el anti-patrón habitual, un mega-prompt que pide a un agente hacer doce cosas a la vez, miles de tokens, frágil, debug imposible. Fila inferior: el enfoque Kronn, cinco steps secuenciales (ApiCall, Agent, Exec, Agent, Notify), tres deterministas a cero tokens y dos steps Agent acotados. Mismo resultado, mucho más barato.
         </desc>
         <style>
           .d-sub  { font-size: 13px; font-weight: 600; fill: #a08fb8; letter-spacing: 0.08em; text-transform: uppercase; }
@@ -1497,7 +1421,7 @@
 
         <!-- Anti-pattern row -->
         <text x="60" y="38" class="d-sub">El enfoque habitual · un mega-prompt</text>
-        <g aria-label="Anti-pattern : un mega-prompt">
+        <g aria-label="Antipatrón: un megaprompt">
           <rect x="60" y="58" width="360" height="92" rx="8"
                 fill="#ff1ba8" fill-opacity="0.12" stroke="#ff1ba8" stroke-width="1.5"/>
           <text x="240" y="92" text-anchor="middle" class="d-lbl">"Haz las 12 cosas"</text>
@@ -1511,7 +1435,7 @@
                 fill="#ff1ba8" fill-opacity="0.12" stroke="#ff1ba8" stroke-width="1.5"/>
           <text x="620" y="92" text-anchor="middle" class="d-lbl">Caja negra IA</text>
           <text x="620" y="113" text-anchor="middle" class="d-sm">12 preocupaciones en 1 llamada</text>
-          <text x="620" y="135" text-anchor="middle" class="d-cost d-bad">❌ debug = impossible</text>
+          <text x="620" y="135" text-anchor="middle" class="d-cost d-bad">❌ debug = imposible</text>
 
           <path d="M 715 104 L 815 104" stroke="#ff1ba8" stroke-width="1.8" fill="none"/>
           <polygon points="815,104 805,99 805,109" fill="#ff1ba8"/>
@@ -1523,7 +1447,7 @@
 
         <!-- Kronn way row -->
         <text x="60" y="232" class="d-sub">El enfoque Kronn · descompón, programa cuando puedas, IA cuando debas</text>
-        <g aria-label="Workflow Kronn : 5 steps séquentiels">
+        <g aria-label="Workflow Kronn: 5 steps secuenciales">
           <rect x="60" y="258" width="140" height="88" rx="8"
                 fill="#c8ff00" fill-opacity="0.10" stroke="#c8ff00" stroke-width="1.5"/>
           <text x="130" y="284" text-anchor="middle" class="d-lbl">ApiCall</text>
@@ -1580,6 +1504,61 @@
     </div>
   </section>
 
+  <section class="section gallery-section" id="gallery">
+    <h2 class="section-title">La app, <span class="li">de verdad</span>.</h2>
+    <p class="section-intro">La teoría suena bien. Así se ve de verdad.</p>
+    <div class="gallery-grid">
+      <figure class="gallery-card">
+        <a href="screenshots/kronn_dashboard.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn_dashboard.png" loading="lazy" alt="Dashboard de Kronn: lista de proyectos, estado de auditoría, acceso rápido" />
+        </a>
+        <figcaption><strong>Dashboard</strong> · tus proyectos, estado de auditoría, acceso rápido</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn_multi-ai_discussion.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn_multi-ai_discussion.png" loading="lazy" alt="Discusión multiagente: varios CLIs en la misma room de Kronn" />
+        </a>
+        <figcaption><strong>Discusión multiagente</strong> · varios CLIs en la misma room</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-quick-prompts.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-quick-prompts.png" loading="lazy" alt="Biblioteca de Quick Prompts reutilizables y versionados" />
+        </a>
+        <figcaption><strong>Quick Prompts</strong> · reutilizables, versionados, medidos</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/kronn-qp-launch.png" target="_blank" rel="noopener">
+          <img src="screenshots/kronn-qp-launch.png" loading="lazy" alt="Compare-agents: el mismo prompt lanzado en varios CLIs en paralelo" />
+        </a>
+        <figcaption><strong>Compare-agents</strong> · el mismo prompt en N CLIs</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/KronnCaptureAutoPilot.png" target="_blank" rel="noopener">
+          <img src="screenshots/KronnCaptureAutoPilot.png" loading="lazy" alt="Workflow AutoPilot en curso: pipeline de auditoría, implementación, tests, PR con el pipeline compacto de pasos" />
+        </a>
+        <figcaption><strong>Workflow AutoPilot</strong> · auditoría → implementa → tests → PR</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/mcps.png" target="_blank" rel="noopener">
+          <img src="screenshots/mcps.png" loading="lazy" alt="Página de Plugins: 55+ plugins MCP y API, o Custom API" />
+        </a>
+        <figcaption><strong>Plugins MCP &amp; API</strong> · 55+ o cualquier API</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/KronnDocumentationView.jpg" target="_blank" rel="noopener">
+          <img src="screenshots/KronnDocumentationView.jpg" loading="lazy" alt="Vista de Documentación de Kronn: doc generada por la auditoría (arquitectura, deuda técnica) renderizada en el viewer" />
+        </a>
+        <figcaption><strong>Auditoría IA</strong> · toda la doc + deuda técnica generadas (Sí, Kronn mismo no carga mucha deuda técnica ;))</figcaption>
+      </figure>
+      <figure class="gallery-card">
+        <a href="screenshots/workflows.png" target="_blank" rel="noopener">
+          <img src="screenshots/workflows.png" loading="lazy" alt="Página de Workflows: orquestación basada en pasos" />
+        </a>
+        <figcaption><strong>Workflows</strong> · orquestación basada en pasos</figcaption>
+      </figure>
+    </div>
+  </section>
+
   <!-- MANIFESTO pull-quote -->
   <section class="manifesto" id="manifesto" aria-label="Kronn statement">
     <a class="manifesto-mark" href="#manifesto">KRONN STATEMENT</a>
@@ -1613,7 +1592,7 @@
           <li><strong>Multi-CLI en vivo</strong>: N agentes en una misma discusión (0.8.6)</li>
           <li><code>docs/AGENTS.md</code> generado por auditoría</li>
           <li>Inyección user-context <code>~/.kronn/user-context/</code></li>
-          <li>Linked repos : contexte multi-repo</li>
+          <li>Linked repos: contexto multi-repo</li>
           <li>Estado canónico <code>.kronn.json</code> por proyecto</li>
           <li>Filtro anti-secretos en la auditoría</li>
         </ul>
@@ -1625,7 +1604,7 @@
           <li>Variables <code>{{vars}}</code> + secciones condicionales</li>
           <li>Versionado + métricas tokens · duración · coste</li>
           <li>Diff visual entre versiones</li>
-          <li>✨ Improver IA : suggère et déploie en 1 clic</li>
+          <li>✨ Improver IA: sugiere y despliega en 1 clic</li>
           <li>Compare across N agentes en paralelo</li>
           <li>Chains: DnD reorder + <code>{{previous_qp.output}}</code></li>
           <li>Binding profile · skill · directive</li>
@@ -1635,13 +1614,13 @@
       <div class="inventory-col">
         <div class="inv-cat"><span class="num">03</span>Workflows</div>
         <ul class="inv-list">
-          <li>7 step types: Agent · ApiCall · Batch · Notify · Exec · Gate · BatchQP</li>
+          <li>8 step types: Agent · ApiCall · BatchApiCall · BatchQuickPrompt · JsonData · Notify · Exec · Gate</li>
           <li>0 tokens en los pasos mecánicos (por definición)</li>
-          <li>AI Workflow Architect : dry-run + 1 clic</li>
+          <li>AI Workflow Architect: dry-run + 1 clic</li>
           <li>Batch workflows (fan-out · chaining · git worktree · diff integrado)</li>
           <li>Loops + state scratchpad + guards</li>
           <li>Rollback on failure</li>
-          <li>CRON-schedulable : workflows full-auto</li>
+          <li>CRON-schedulable: workflows full-auto</li>
           <li>AutoPilot loop (audit → tickets → workflow)</li>
           <li>Feasibility-Gated implementation</li>
           <li>Export / Import per-item</li>
@@ -1652,13 +1631,14 @@
         <div class="inv-cat"><span class="num">04</span>Agentes · plugins · local</div>
         <ul class="inv-list">
           <li>7+ CLI soportados (Claude Code · Codex · Gemini · Ollama · Vibe…)</li>
+          <li>MCP <code>kronn-internal</code>: 28 herramientas para que el agente pilote Kronn</li>
           <li><strong>Eco mode</strong> vía <a href="https://github.com/rtk-ai/rtk" target="_blank" rel="noopener">RTK</a>: proxy token-killer en 1 clic en agentes soportados</li>
           <li>Ollama 100% local + TTS Piper / STT Whisper (FR · EN · ES)</li>
           <li>Plugins <strong>MCP</strong>: Atlassian · Linear · Notion · …</li>
           <li>Plugins <strong>API</strong>: Resend · Mailjet · webhooks</li>
           <li>Custom API plugin · declara tus propios endpoints</li>
           <li>Multi-usuario P2P (chat + discs compartidos)</li>
-          <li>App desktop Tauri (Mac · Windows · Linux)</li>
+          <li>Rust core · React/TS UI · empaquetado con Tauri (Mac · Windows · Linux)</li>
           <li>AGPL-3.0 · sin telemetría · sin cookies</li>
         </ul>
       </div>
@@ -1706,7 +1686,7 @@
     <div class="compound-grid">
       <div class="compound-item">
         <div class="compound-num">01</div>
-        <div class="compound-title">Auditoríaoría</div>
+        <div class="compound-title">Auditoría</div>
         <p class="compound-body">Escaneo completo del proyecto: stack, convenciones, <em>deuda técnica</em>. Genera <code>docs/AGENTS.md</code> tier-loaded. AutoPilot (opt-in) convierte la deuda en tickets de Jira vía MCP y preconfigura el workflow de tratamiento <strong>en 1 clic</strong>.</p>
       </div>
       <div class="compound-item">
@@ -1727,7 +1707,7 @@
       <div class="compound-item">
         <div class="compound-num">05</div>
         <div class="compound-title">Workflows</div>
-        <p class="compound-body">Orquestación step-based: paso <code>Agent</code> + 5 mecánicos (<code>Exec</code>, <code>Gate</code>, <code>Notify</code>, <code>ApiCall</code>) a <em>0 tokens por definición</em>. <strong style="color:var(--lila);">CRON-schedulable</strong>. Patrón <strong>Feasibility-Gated</strong> para tickets grandes: triaje YAML → human Gate → código restringido.</p>
+        <p class="compound-body">Orquestación step-based: paso <code>Agent</code> + pasos mecánicos (<code>Exec</code>, <code>Gate</code>, <code>Notify</code>, <code>ApiCall</code>…) a <em>0 tokens por definición</em>. <strong style="color:var(--lila);">CRON-schedulable</strong>. Patrón <strong>Feasibility-Gated</strong> para tickets grandes: triaje YAML → human Gate → código restringido.</p>
       </div>
     </div>
   </section>
@@ -1735,7 +1715,7 @@
   <!-- LEVEL 5 · NOT INCLUDED -->
   <section class="section" id="level-5">
     <a class="level-tag" href="#level-5">LEVEL 5 · NOT INCLUDED</a>
-    <h2 class="section-title">Ce que Kronn n'est <span class="pk">pas</span>.</h2>
+    <h2 class="section-title">Lo que Kronn <span class="pk">no</span> es.</h2>
     <p class="section-intro">Decir lo que no es gana a los escépticos. Esto es lo que Kronn no pretende ser.</p>
 
     <div class="anti-grid">
@@ -1763,6 +1743,7 @@
         <div class="ttl"><span class="x">×</span>No es un CI/CD</div>
         <p class="body">Para build, deploy, lint sobre git, quédate con GitHub Actions. Kronn orquesta CLI agentes de IA <strong>local-first</strong>, no pipelines cloud atados al repo.</p>
       </div>
+      <div class="anti-card"><div class="ttl"><span class="x">×</span>No de pago</div><p class="body">Open source bajo <strong>AGPL-3.0</strong>. Gratis para programar tu producto en local. El copyleft solo se activa si <strong>distribuyes un Kronn modificado</strong> a otros. Sin licencia que comprar, sin seat.</p></div>
     </div>
   </section>
 
@@ -1835,7 +1816,7 @@
 
       <div class="concept-card">
         <div class="concept-term">StepType</div>
-        <p class="concept-def">Los 7 tipos de step disponibles en un workflow: 2 IA (<code>Agent</code>, <code>BatchQuickPrompt</code>) y 5 <strong>mecánicos</strong> (<code>ApiCall</code>, <code>BatchApiCall</code>, <code>Notify</code>, <code>Exec</code>, <code>Gate</code>) a 0 tokens.</p>
+        <p class="concept-def">Los 8 tipos de step disponibles en un workflow: 2 IA (<code>Agent</code>, <code>BatchQuickPrompt</code>) y 6 <strong>mecánicos</strong> (<code>ApiCall</code>, <code>BatchApiCall</code>, <code>JsonData</code>, <code>Notify</code>, <code>Exec</code>, <code>Gate</code>) a 0 tokens.</p>
       </div>
 
       <div class="concept-card">
@@ -1885,7 +1866,7 @@
         <div class="sec-title">Secretos y claves</div>
         <ul class="sec-list good">
           <li>API keys almacenadas en el keychain del SO (Mac/Windows/Linux)</li>
-          <li>Filtro anti-secretos en la auditoría : <code>.env</code> et prefixes vendor filtrés avant <code>docs/AGENTS.md</code></li>
+          <li>Filtro anti-secretos en la auditoría: <code>.env</code> y prefijos de vendor filtrados antes de <code>docs/AGENTS.md</code></li>
           <li>Ninguna variable env Kronn empujada hacia los CLI terceros</li>
         </ul>
       </div>
@@ -1893,7 +1874,7 @@
       <div class="sec-panel">
         <div class="sec-title">Exec y Gate</div>
         <ul class="sec-list good">
-          <li>Paso <code>Exec</code> gated por <code>exec_allowlist</code> del workflow (argv literal, sin <code>sh -c</code>)</li>
+          <li>Paso <code>Exec</code> restringido a una allowlist (argv literal, sin shell)</li>
           <li>Paso <code>Gate</code> human-in-the-loop: el agente espera tu validación explícita</li>
           <li>Audit log: cada run persistido con timestamp, tokens, steps ejecutados</li>
         </ul>
@@ -1918,7 +1899,7 @@
   <footer>
     <div class="game-over">· Continue ? ·</div>
     <a href="https://github.com/DocRoms/Kronn" target="_blank" rel="noopener">github.com/DocRoms/Kronn</a>
-    <span class="credits">kronn v0.8.6 · agpl-3.0 · made by d.r.</span>
+    <span class="credits">kronn v0.8.6 · agpl-3.0 · rust × typescript · made by <a href="https://www.docroms.com/" target="_blank" rel="noopener">d.r.</a></span>
   </footer>
 
 </div>
