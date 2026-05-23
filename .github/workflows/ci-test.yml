@@ -20,7 +20,7 @@ jobs:
           components: clippy
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -226,7 +226,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Setup sccache (cargo cache for backend)
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -375,7 +375,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Cache cargo-audit binary
         id: cache-audit

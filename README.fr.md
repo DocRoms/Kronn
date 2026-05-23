@@ -3,7 +3,9 @@
 </p>
 
 <p align="center">
-  <a href="README.md">🇬🇧 Read in English</a>
+  <a href="https://docroms.github.io/Kronn/"><img src="https://img.shields.io/badge/%F0%9F%8C%90%20Site%20web-8b5cf6?style=flat" alt="Site web" /></a>
+  &nbsp;
+  <a href="README.md"><img src="https://img.shields.io/badge/Read%20in%20English-lightgrey?style=flat" alt="Read in English" /></a>
 </p>
 
 <p align="center">
@@ -25,7 +27,7 @@
 
 **Prompts plus petits, code déterministe quand c'est possible : moins d'hallucinations, facture tokens divisée, écoconception par conception.**
 
-> **Statut : 0.8.2.** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.
+> **Statut : 0.8.6.** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.
 > **Licence : AGPL-3.0.** Utiliser Kronn localement pour développer *ton propre* produit ne déclenche pas le copyleft ; il ne s'applique que si tu redistribues une version modifiée à d'autres. Voir [Notes sur la licence](#notes-sur-la-licence-agpl-3-0).
 
 ## Sommaire
@@ -302,6 +304,7 @@ Texte complet dans [LICENSE](LICENSE). Si ton équipe légale veut de la nuance,
 
 ## Liens
 
+- [Site web](https://docroms.github.io/Kronn/) : le site de présentation de Kronn (FR / EN / ES)
 - [docs/install.md](docs/install.md) : install par OS, Docker, WSL2, Tauri desktop
 - [docs/architecture/overview.md](docs/architecture/overview.md) : topologie backend/frontend, référence du moteur workflow
 - [docs/operations/auth-and-tls.md](docs/operations/auth-and-tls.md) : auth, TLS, data flow

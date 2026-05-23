@@ -167,6 +167,8 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       startBriefing: resolve({ discussion_id: '' }),
       saveBriefing: resolve({}),
       listAiFiles: resolve([]),
+      readAiFile: resolve({ path: '', content: '' }),
+      searchAiFiles: resolve([]),
       createPr: resolve({ url: '' }),
       bootstrap: resolve({}),
       migrateDocs: resolve({ status: 'NotApplicable' }),

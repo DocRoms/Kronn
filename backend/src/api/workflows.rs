@@ -345,23 +345,30 @@ fn validate_required_fields_per_type(steps: &[WorkflowStep]) -> Result<(), Strin
 /// `batch_items_from` requirement on top of the shared API minimum.
 fn validate_api_call_minimum(s: &WorkflowStep, is_batch: bool) -> Result<(), String> {
     let kind = if is_batch { "BatchApiCall" } else { "ApiCall" };
-    if s.api_endpoint_path.as_deref().map(str::trim).unwrap_or("").is_empty() {
-        return Err(format!(
-            "Step {} « {} » : `api_endpoint_path` est obligatoire (ex. `/rest/api/3/issue/{{{{issue_key}}}}`).",
-            kind, s.name
-        ));
-    }
-    let has_plugin = s.api_plugin_slug.as_deref().map(str::trim)
-        .map(|v| !v.is_empty())
-        .unwrap_or(false);
     let has_qa_ref = s.quick_api_id.as_deref().map(str::trim)
         .map(|v| !v.is_empty())
         .unwrap_or(false);
-    if !has_plugin && !has_qa_ref {
-        return Err(format!(
-            "Step {} « {} » : il faut soit `api_plugin_slug` (registry MCP) soit `quick_api_id` (Quick API saved).",
-            kind, s.name
-        ));
+    // A saved Quick API reference carries endpoint + plugin + config and is
+    // hydrated into the step at run-time (see `workflows::quick_api_hydrate`),
+    // so the inline fields are optional when `quick_api_id` is set — same
+    // per-field override pattern as Agent's `quick_prompt_id`. A QA is also
+    // runnable standalone, so demanding `api_endpoint_path` here was wrong.
+    if !has_qa_ref {
+        if s.api_endpoint_path.as_deref().map(str::trim).unwrap_or("").is_empty() {
+            return Err(format!(
+                "Step {} « {} » : `api_endpoint_path` est obligatoire (ex. `/rest/api/3/issue/{{{{issue_key}}}}`).",
+                kind, s.name
+            ));
+        }
+        let has_plugin = s.api_plugin_slug.as_deref().map(str::trim)
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+        if !has_plugin {
+            return Err(format!(
+                "Step {} « {} » : il faut soit `api_plugin_slug` (registry MCP) soit `quick_api_id` (Quick API saved).",
+                kind, s.name
+            ));
+        }
     }
     if is_batch && s.batch_items_from.as_deref().map(str::trim).unwrap_or("").is_empty() {
         return Err(format!(
@@ -3530,6 +3537,36 @@ mod tests {
         s.api_endpoint_path = Some("/rest/api/3/issue/EW-1".into());
         s.quick_api_id = Some("qa-jira-fetch".into());
         validate_required_fields_per_type(&[s]).expect("QA-ref ApiCall step should validate");
+    }
+
+    #[test]
+    fn required_fields_apicall_accepts_quick_api_id_without_inline_endpoint() {
+        // A QA carries endpoint + plugin + config (hydrated at run-time, and
+        // runnable standalone), so a QA-ref step needs neither inline field.
+        // Regression: the validator used to demand `api_endpoint_path` even
+        // when `quick_api_id` was set, blocking valid QA-backed workflows.
+        let mut s = mk_step("fetch_issue", StepType::ApiCall);
+        s.api_endpoint_path = None;
+        s.api_plugin_slug = None;
+        s.quick_api_id = Some("qa-jira-fetch".into());
+        validate_required_fields_per_type(&[s])
+            .expect("QA-ref ApiCall without inline fields should validate");
+    }
+
+    #[test]
+    fn required_fields_batch_apicall_with_qa_still_needs_items_from() {
+        // QA ref waives the inline endpoint/plugin, but a BATCH still needs
+        // its iteration source.
+        let mut s = mk_step("fan_out", StepType::BatchApiCall);
+        s.api_endpoint_path = None;
+        s.quick_api_id = Some("qa-x".into());
+        s.batch_items_from = None;
+        let err = validate_required_fields_per_type(std::slice::from_ref(&s))
+            .expect_err("batch must still require items_from");
+        assert!(err.contains("batch_items_from"), "got: {err}");
+        // With items_from it validates.
+        s.batch_items_from = Some("{{steps.fetch.data.items}}".into());
+        validate_required_fields_per_type(&[s]).expect("QA-ref batch with items_from should validate");
     }
 
     #[test]

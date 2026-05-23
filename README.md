@@ -3,7 +3,9 @@
 </p>
 
 <p align="center">
-  <a href="README.fr.md">🇫🇷 Lire en français</a>
+  <a href="https://docroms.github.io/Kronn/"><img src="https://img.shields.io/badge/%F0%9F%8C%90%20Website-8b5cf6?style=flat" alt="Website" /></a>
+  &nbsp;
+  <a href="README.fr.md"><img src="https://img.shields.io/badge/Lire%20en%20fran%C3%A7ais-lightgrey?style=flat" alt="Lire en français" /></a>
 </p>
 
 <p align="center">
@@ -25,7 +27,7 @@
 
 **Smaller prompts, more code where code is enough: fewer hallucinations, lower token bill, eco-design by default.**
 
-> **Status: 0.8.2.** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
+> **Status: 0.8.6.** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
 > **License: AGPL-3.0.** Using Kronn locally to build *your own* product is fine; the copyleft only kicks in if you distribute a modified Kronn to others. See [License notes](#license-notes-agpl-3-0).
 
 ## Contents
@@ -302,6 +304,7 @@ Full text in [LICENSE](LICENSE). If your legal team wants more nuance, dual-lice
 
 ## Links
 
+- [Website](https://docroms.github.io/Kronn/): the Kronn pitch site (FR / EN / ES)
 - [docs/install.md](docs/install.md): install per OS, Docker, WSL2, Tauri desktop
 - [docs/architecture/overview.md](docs/architecture/overview.md): backend/frontend topology, workflow engine reference
 - [docs/operations/auth-and-tls.md](docs/operations/auth-and-tls.md): auth, TLS, data flow

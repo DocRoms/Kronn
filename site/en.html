@@ -37,7 +37,8 @@
 
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Russo+One&family=VT323&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Russo+One&family=VT323&family=Inter:wght@400;500;600&display=swap" onload="this.onload=null;this.rel='stylesheet'">
+  <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Russo+One&family=VT323&family=Inter:wght@400;500;600&display=swap"></noscript>
   <style>
     :root {
       --bg: #140822;
@@ -747,7 +748,7 @@
       text-shadow: 0 0 8px rgba(255, 27, 168, 0.45);
     }
     .plugin-step.helper .step-sub {
-      color: var(--magenta);
+      color: var(--magenta-bright);
     }
     .plugin-step .step-icon {
       font-size: 26px;
@@ -1247,7 +1248,7 @@
     .anti-card .ttl {
       font-family: var(--display);
       font-size: 22px;
-      color: var(--magenta);
+      color: var(--magenta-bright);
       text-transform: uppercase;
       margin-bottom: 8px;
       letter-spacing: 0.02em;
@@ -1380,6 +1381,8 @@
     <span class="center">KRONN</span>
     <span class="right lang-switcher"><a href="index.html">FR</a> · <a class="lang-active" href="en.html">EN</a> · <a href="es.html">ES</a></span>
   </header>
+
+  <main>
 
   <!-- HERO -->
   <section class="hero">
@@ -1911,6 +1914,8 @@
 
     </div>
   </section>
+
+  </main>
 
   <footer>
     <div class="game-over">· Continue ? ·</div>

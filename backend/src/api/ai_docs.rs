@@ -4,12 +4,57 @@
 
 use axum::{
     extract::{Path, Query, State},
+    http::{header, StatusCode},
+    response::{IntoResponse, Response},
     Json,
 };
 
 use crate::core::scanner;
 use crate::models::*;
 use crate::AppState;
+
+/// Max size we'll serve for an inline doc image (10 MB). Guards against a
+/// README pointing at a huge binary that just happens to have an image ext.
+const MAX_DOC_ASSET_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Image extensions we serve via `doc-asset`, with their Content-Type.
+/// Image-only is the security boundary: a doc can never pull a project's
+/// source, `.env`, etc. through this route.
+const DOC_ASSET_TYPES: &[(&str, &str)] = &[
+    ("png", "image/png"),
+    ("jpg", "image/jpeg"),
+    ("jpeg", "image/jpeg"),
+    ("gif", "image/gif"),
+    ("svg", "image/svg+xml"),
+    ("webp", "image/webp"),
+    ("avif", "image/avif"),
+    ("ico", "image/x-icon"),
+    ("bmp", "image/bmp"),
+];
+
+fn doc_asset_ext(path: &str) -> String {
+    path.rsplit('.').next().unwrap_or("").to_ascii_lowercase()
+}
+
+/// Whether a requested asset path is safe + servable: relative (no leading
+/// slash), no `..`, and an allowed image extension. The on-disk
+/// canonicalize-within-root check in the handler is the second layer.
+fn is_servable_asset_path(path: &str) -> bool {
+    if path.is_empty() || path.contains("..") || path.starts_with('/') || path.starts_with('\\') {
+        return false;
+    }
+    let ext = doc_asset_ext(path);
+    DOC_ASSET_TYPES.iter().any(|(e, _)| *e == ext)
+}
+
+fn doc_asset_content_type(path: &str) -> &'static str {
+    let ext = doc_asset_ext(path);
+    DOC_ASSET_TYPES
+        .iter()
+        .find(|(e, _)| *e == ext)
+        .map(|(_, ct)| *ct)
+        .unwrap_or("application/octet-stream")
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // AI Documentation File Browser
@@ -31,17 +76,80 @@ pub async fn list_ai_files(
 
     let result = tokio::task::spawn_blocking(move || {
         let project_path = scanner::resolve_host_path(&project_path_str);
-        let docs_dir = scanner::detect_docs_dir(&project_path);
-        if !docs_dir.is_dir() {
-            return vec![];
-        }
-        // Use the actual folder name (`docs`, `doc` or `ai`) as the tree
-        // root so the frontend's display matches the on-disk reality.
-        let prefix = docs_dir.file_name().and_then(|n| n.to_str()).unwrap_or("docs");
-        build_ai_file_tree(&docs_dir, prefix)
+        assemble_doc_nodes(&project_path)
     }).await.unwrap_or_default();
 
     Json(ApiResponse::ok(result))
+}
+
+/// Assemble the top-level documentation nodes shown in the doc viewer.
+///
+/// Returns an explicit `docs/` (or `doc/`/`ai/`) folder node wrapping the
+/// recursive `.md` tree, so the user sees the folder they're browsing rather
+/// than just its loose contents (pre-0.8.6 the children were returned flat,
+/// which read as "where's the rest of my repo?"). When a root README exists
+/// (`README.md`, `readme.md`, …) it's appended as a sibling file node, so the
+/// human entry point is surfaced too and can be previewed without an IDE.
+/// Dirs-first: the `docs/` node precedes the README file.
+fn assemble_doc_nodes(project_path: &std::path::Path) -> Vec<AiFileNode> {
+    let mut nodes = Vec::new();
+
+    let docs_dir = scanner::detect_docs_dir(project_path);
+    if docs_dir.is_dir() {
+        // Use the actual folder name (`docs`, `doc` or `ai`) so the display
+        // matches the on-disk reality.
+        let prefix = docs_dir.file_name().and_then(|n| n.to_str()).unwrap_or("docs").to_string();
+        let children = build_ai_file_tree(&docs_dir, &prefix);
+        // Only surface the folder node when it actually has docs — an empty
+        // `docs/` node would suppress the "run the audit" empty state that
+        // un-audited projects rely on.
+        if !children.is_empty() {
+            nodes.push(AiFileNode { path: prefix.clone(), name: prefix, is_dir: true, children });
+        }
+    }
+
+    if let Some(readme) = find_root_readme(project_path) {
+        nodes.push(AiFileNode { path: readme.clone(), name: readme, is_dir: false, children: vec![] });
+    }
+
+    nodes
+}
+
+/// Find a root-level README markdown file (case-insensitive: `README.md`,
+/// `readme.md`, `Readme.markdown`, …). Returns the actual on-disk filename
+/// so the read path matches exactly.
+fn find_root_readme(project_path: &std::path::Path) -> Option<String> {
+    let entries = std::fs::read_dir(project_path).ok()?;
+    for entry in entries.filter_map(|e| e.ok()) {
+        if !entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let lower = name.to_ascii_lowercase();
+        if lower.starts_with("readme") && (lower.ends_with(".md") || lower.ends_with(".markdown")) {
+            return Some(name);
+        }
+    }
+    None
+}
+
+/// Whether a requested doc path is safe to read: confined to a recognised
+/// docs root (`docs/`, `doc/`, `ai/`) OR the project's root README, and
+/// never containing `..`. The root-README exception is deliberately narrow
+/// (no slash + `readme*.md` only) so it can't be used to read arbitrary
+/// root files like `.env` or `Cargo.toml`.
+fn is_readable_doc_path(path: &str) -> bool {
+    if path.contains("..") {
+        return false;
+    }
+    let in_docs_root = path.starts_with("docs/")
+        || path.starts_with("doc/")
+        || path.starts_with("ai/");
+    let is_root_readme = !path.contains('/') && {
+        let l = path.to_ascii_lowercase();
+        l.starts_with("readme") && (l.ends_with(".md") || l.ends_with(".markdown"))
+    };
+    in_docs_root || is_root_readme
 }
 
 /// Recursively build a tree of `.md` files from the project's docs folder.
@@ -177,13 +285,10 @@ pub async fn read_ai_file(
     Path(id): Path<String>,
     Query(query): Query<AiFileQuery>,
 ) -> Json<ApiResponse<AiFileContent>> {
-    // Path traversal protection — must be confined to one of the
-    // recognised docs roots and never contain `..`.
-    let allowed_prefix = query.path.starts_with("docs/")
-        || query.path.starts_with("doc/")
-        || query.path.starts_with("ai/");
-    if query.path.contains("..") || !allowed_prefix {
-        return Json(ApiResponse::err("Invalid path: must start with docs/, doc/ or ai/ and not contain .."));
+    // Path traversal protection — confined to a recognised docs root or the
+    // project's root README, and never containing `..`.
+    if !is_readable_doc_path(&query.path) {
+        return Json(ApiResponse::err("Invalid path: must be under docs/, doc/, ai/ or the root README, and not contain .."));
     }
 
     let project = match state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &id)).await {
@@ -207,6 +312,59 @@ pub async fn read_ai_file(
     match result {
         Ok(content) => Json(ApiResponse::ok(content)),
         Err(e) => Json(ApiResponse::err(e)),
+    }
+}
+
+/// GET /api/projects/:id/doc-asset?path=docs/screenshots/foo.png
+/// Serves an IMAGE file from the project repo so relative `<img>` in a
+/// README / doc renders in the viewer (the frontend rewrites relative
+/// `src` to point here). Same-origin, so `img-src 'self'` covers it.
+/// Defense in depth: image-extension allowlist + no `..` + the resolved
+/// path must canonicalize INSIDE the project root.
+pub async fn read_doc_asset(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<AiFileQuery>,
+) -> Response {
+    if !is_servable_asset_path(&query.path) {
+        return (StatusCode::BAD_REQUEST, "Invalid asset path: relative image paths only").into_response();
+    }
+
+    let project = match state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &id)).await {
+        Ok(Some(p)) => p,
+        Ok(None) => return (StatusCode::NOT_FOUND, "Project not found").into_response(),
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "DB error").into_response(),
+    };
+
+    let project_path_str = project.path.clone();
+    let rel = query.path.clone();
+
+    let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, ()> {
+        let root = scanner::resolve_host_path(&project_path_str);
+        let canon_root = root.canonicalize().map_err(|_| ())?;
+        let canon = root.join(&rel).canonicalize().map_err(|_| ())?;
+        // Reject symlinks / `..` that escape the project root.
+        if !canon.starts_with(&canon_root) {
+            return Err(());
+        }
+        let meta = std::fs::metadata(&canon).map_err(|_| ())?;
+        if !meta.is_file() || meta.len() > MAX_DOC_ASSET_BYTES {
+            return Err(());
+        }
+        std::fs::read(&canon).map_err(|_| ())
+    })
+    .await;
+
+    match bytes {
+        Ok(Ok(data)) => (
+            [
+                (header::CONTENT_TYPE, doc_asset_content_type(&query.path)),
+                (header::CACHE_CONTROL, "private, max-age=60"),
+            ],
+            data,
+        )
+            .into_response(),
+        _ => (StatusCode::NOT_FOUND, "Asset not found").into_response(),
     }
 }
 
@@ -272,5 +430,115 @@ mod tests {
         let tree = build_ai_file_tree(root, "docs");
         let names: Vec<&str> = tree.iter().map(|n| n.name.as_str()).collect();
         assert_eq!(names, vec!["apple.md", "Banana.md", "Zebra.md"]);
+    }
+
+    // ── 0.8.6 UX — explicit docs/ root node + project README ──────────────
+    #[test]
+    fn assemble_wraps_docs_in_an_explicit_root_node() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        touch(&root.join("docs/AGENTS.md"));
+        touch(&root.join("docs/architecture/overview.md"));
+
+        let nodes = assemble_doc_nodes(root);
+        // One top-level node = the `docs/` folder itself, not its loose
+        // children — so the user sees the folder they're browsing.
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].name, "docs");
+        assert_eq!(nodes[0].path, "docs");
+        assert!(nodes[0].is_dir);
+        let child_names: Vec<&str> = nodes[0].children.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(child_names, vec!["architecture", "AGENTS.md"]);
+    }
+
+    #[test]
+    fn assemble_appends_root_readme_after_docs() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        touch(&root.join("docs/AGENTS.md"));
+        touch(&root.join("README.md"));
+
+        let nodes = assemble_doc_nodes(root);
+        // dirs-first: docs/ folder, then the README file.
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].name, "docs");
+        assert_eq!(nodes[1].name, "README.md");
+        assert!(!nodes[1].is_dir);
+        assert_eq!(nodes[1].path, "README.md");
+    }
+
+    #[test]
+    fn assemble_readme_only_when_no_docs() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        touch(&tmp.path().join("README.md"));
+        let nodes = assemble_doc_nodes(tmp.path());
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].name, "README.md");
+    }
+
+    #[test]
+    fn assemble_empty_when_no_docs_no_readme() {
+        // Preserves the "run the audit" empty state for fresh projects.
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert!(assemble_doc_nodes(tmp.path()).is_empty());
+    }
+
+    #[test]
+    fn find_root_readme_case_insensitive_and_extensions() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        touch(&tmp.path().join("ReAdMe.markdown"));
+        assert_eq!(find_root_readme(tmp.path()), Some("ReAdMe.markdown".to_string()));
+    }
+
+    #[test]
+    fn find_root_readme_ignores_non_readme_files() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        touch(&tmp.path().join("CHANGELOG.md"));
+        touch(&tmp.path().join("notes.txt"));
+        assert_eq!(find_root_readme(tmp.path()), None);
+    }
+
+    #[test]
+    fn read_guard_allows_docs_roots_and_root_readme_only() {
+        // Allowed.
+        assert!(is_readable_doc_path("docs/AGENTS.md"));
+        assert!(is_readable_doc_path("doc/index.md"));
+        assert!(is_readable_doc_path("ai/index.md"));
+        assert!(is_readable_doc_path("README.md"));
+        assert!(is_readable_doc_path("readme.markdown"));
+        // Rejected — traversal + arbitrary root/nested files.
+        assert!(!is_readable_doc_path("../secret"));
+        assert!(!is_readable_doc_path("docs/../Cargo.toml"));
+        assert!(!is_readable_doc_path("Cargo.toml"));
+        assert!(!is_readable_doc_path(".env"));
+        assert!(!is_readable_doc_path("src/README.md"));
+    }
+
+    // ── 0.8.6 — doc-asset image serving (relative <img> in README/docs) ───
+    #[test]
+    fn doc_asset_serves_image_extensions_only() {
+        for ok in ["docs/screenshots/foo.png", "logo.svg", "a/b/c.jpeg", "x.WEBP", "i.GIF"] {
+            assert!(is_servable_asset_path(ok), "{ok} should be servable");
+        }
+        for bad in ["docs/notes.md", ".env", "Cargo.toml", "src/main.rs", "foo", "a/b.txt"] {
+            assert!(!is_servable_asset_path(bad), "{bad} must NOT be servable (non-image)");
+        }
+    }
+
+    #[test]
+    fn doc_asset_rejects_traversal_and_absolute() {
+        assert!(!is_servable_asset_path("../secret.png"));
+        assert!(!is_servable_asset_path("docs/../../etc/x.png"));
+        assert!(!is_servable_asset_path("/etc/passwd.png"));
+        assert!(!is_servable_asset_path("\\windows\\x.png"));
+        assert!(!is_servable_asset_path(""));
+    }
+
+    #[test]
+    fn doc_asset_content_type_maps_by_extension() {
+        assert_eq!(doc_asset_content_type("a.png"), "image/png");
+        assert_eq!(doc_asset_content_type("a.JPG"), "image/jpeg");
+        assert_eq!(doc_asset_content_type("a.svg"), "image/svg+xml");
+        assert_eq!(doc_asset_content_type("a.webp"), "image/webp");
     }
 }

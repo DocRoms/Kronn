@@ -517,6 +517,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/projects/{id}/ai-files", get(api::ai_docs::list_ai_files))
         .route("/api/projects/{id}/ai-file", get(api::ai_docs::read_ai_file))
         .route("/api/projects/{id}/ai-search", get(api::ai_docs::search_ai_files))
+        .route("/api/projects/{id}/doc-asset", get(api::ai_docs::read_doc_asset))
         .route("/api/projects/{id}/git-status", get(api::projects::git_status))
         .route("/api/projects/{id}/git-diff", get(api::projects::git_diff))
         .route("/api/projects/{id}/git-branch", post(api::projects::git_branch))
