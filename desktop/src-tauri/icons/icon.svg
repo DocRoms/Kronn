@@ -1,15 +1,15 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="Kronn">
+  <defs>
+    <linearGradient id="kf" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff2bb0"/>
+      <stop offset="0.55" stop-color="#c02bff"/>
+      <stop offset="1" stop-color="#6a3bff"/>
+    </linearGradient>
+  </defs>
   <!-- Background with rounded corners -->
-  <rect width="1024" height="1024" rx="180" ry="180" fill="#0a0c10"/>
-  <!-- Subtle radial glow behind the bolt -->
-  <radialGradient id="glow" cx="50%" cy="48%" r="35%">
-    <stop offset="0%" stop-color="#c8ff00" stop-opacity="0.12"/>
-    <stop offset="100%" stop-color="#c8ff00" stop-opacity="0"/>
-  </radialGradient>
-  <rect width="1024" height="1024" rx="180" ry="180" fill="url(#glow)"/>
-  <!-- Lightning bolt (Lucide Zap) — filled, scaled and centered -->
-  <g transform="translate(200, 120) scale(26)">
-    <path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"
-          fill="#c8ff00" stroke="none"/>
-  </g>
+  <rect width="1024" height="1024" rx="225" ry="225" fill="#0c0a14"/>
+  <!-- Rounded-square frame (magenta -> purple gradient) -->
+  <rect x="246" y="246" width="532" height="532" rx="133" fill="none" stroke="url(#kf)" stroke-width="82"/>
+  <!-- Yellow center square -->
+  <rect x="461" y="461" width="102" height="102" rx="15" fill="#ffd400"/>
 </svg>
