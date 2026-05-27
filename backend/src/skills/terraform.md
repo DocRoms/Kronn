@@ -36,3 +36,7 @@ builtin: true
 ✗ `count = length(var.bucket_names)` — index shift destroys resources
 ✓ `moved { from = aws_s3_bucket.old to = aws_s3_bucket.new }`
 ✗ Rename resource without `moved` — silent destroy + recreate
+
+## Sourcing
+
+See `docs/AGENTS.md` § Anti-Hallucination Protocol for the canonical cascade and citation grammar. Domain note: provider argument / resource default → registry URL pinned to your `required_providers` version. A `destroy` on a hallucinated arg = data loss.

@@ -4,6 +4,14 @@ on:
   pull_request:
     types: [labeled, synchronize]
 
+# Opt every JS-based action (checkout, setup-node, cache, pnpm/action-setup,
+# setup-python) into the Node 24 runtime ahead of GitHub's 2026-06-02 forced
+# cutover. Silences the "Node.js 20 actions are deprecated" annotations and
+# runs on the faster/newer V8. The pinned action versions (@v4/@v5) already
+# ship Node 24-compatible entrypoints — this just flips the runtime selector.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   test-backend:
     if: github.event.label.name == 'ci-test'
@@ -146,6 +154,25 @@ jobs:
           SCCACHE_GHA_ENABLED: "true"
           RUSTC_WRAPPER: "sccache"
 
+      # ── Coverage threshold floor ────────────────────────────────
+      # Pinned just below the 2026-05-29 measured baseline
+      # (Regions 79.02 / Functions 81.49 / Lines 77.48) so a single
+      # test removal doesn't fail the job. Drift below = job fails.
+      # When a future push raises the real coverage, bump these in
+      # lockstep — DON'T lower them, that defeats the purpose.
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: cargo llvm-cov — enforce coverage floor
+        run: |
+          cargo llvm-cov --lib --tests --summary-only \
+            --fail-under-lines 77 \
+            --fail-under-functions 81 \
+            --fail-under-regions 78
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: "sccache"
+
       # ── Desktop compilation check ───────────────────────────────────
       # The Tauri desktop app (desktop/src-tauri/) imports the backend as
       # a lib. Signature changes in the backend break the desktop build
@@ -207,8 +234,13 @@ jobs:
       - name: TypeScript check
         run: npx tsc --noEmit
 
-      - name: Run tests
-        run: pnpm test
+      - name: Run tests with coverage threshold floor
+        # Uses `vitest run --coverage` so the `coverage.thresholds` block
+        # in `vite.config.ts` enforces the 2026-05-29 baseline floor.
+        # Drift below (Statements 55 / Branches 50 / Functions 47 /
+        # Lines 58) fails the job — bump the thresholds in lockstep
+        # with any future coverage push.
+        run: pnpm test:coverage
 
   test-e2e:
     # Playwright E2E tests — drive a real Chromium against Vite + a live
@@ -218,45 +250,58 @@ jobs:
     # see).
     if: github.event.label.name == 'ci-test'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # ── Playwright official container ─────────────────────────────────
+    # Chromium + chromium_headless_shell + ffmpeg + all OS deps are BAKED
+    # INTO this image. That eliminates the `pnpm exec playwright install`
+    # download from `cdn.playwright.dev` entirely — which was the recurring
+    # job-killer: that CDN intermittently throttles / TCP-half-closes after
+    # the 170 MiB chromium .zip hits 100 %, hanging the step indefinitely
+    # until the job timeout, so the browser cache never saved and every run
+    # was cold (documented across 3 prior failed runs). The image pull comes
+    # from mcr.microsoft.com (fast, reliable, layer-cached by the runner).
+    #
+    # Image tag MUST match the resolved `@playwright/test` version in
+    # frontend/pnpm-lock.yaml (currently 1.59.1) — a mismatch makes the
+    # runner think the baked-in browser is the wrong build and re-trigger
+    # the very download we're avoiding. Bump both in lockstep.
+    container:
+      image: mcr.microsoft.com/playwright:v1.59.1-noble
+      options: --user root
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Mark workspace git-safe (container runs as root)
+        # checkout under root in a container trips git's dubious-ownership
+        # guard; whitelist the workspace so later `git` calls (version
+        # banner, etc.) don't abort.
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Install C toolchain + Rust
+        # The Playwright image ships Node + browsers + browser OS deps but
+        # NOT a C compiler or Rust. The backend needs cc/cmake (rusqlite
+        # bundled SQLite, ring) and cargo (via rustup).
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev cmake curl
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain stable --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Setup sccache (cargo cache for backend)
         uses: mozilla-actions/sccache-action@v0.0.10
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-
-      - name: Setup pnpm
-        # The pnpm version is read from `frontend/package.json`'s
-        # `packageManager` field (currently pnpm@11.0.9). Passing
-        # `version:` here on top of it makes `pnpm/action-setup@v4`
-        # error with `Multiple versions of pnpm specified` — leave
-        # this section as-is so the package.json stays the single
-        # source of truth.
-        uses: pnpm/action-setup@v4
+      - name: Enable corepack (provides pnpm pinned by package.json)
+        run: corepack enable
 
       - name: Install frontend dependencies
         working-directory: frontend
         run: pnpm install --frozen-lockfile
 
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('frontend/pnpm-lock.yaml') }}
-
-      - name: Install Playwright browsers
-        working-directory: frontend
-        # Linux deps are pre-installed on ubuntu-latest; we only need the
-        # Chromium binary itself.
-        run: pnpm exec playwright install --with-deps chromium
+      # NOTE: no `playwright install` step — browsers are pre-baked in the
+      # container image at /ms-playwright (PLAYWRIGHT_BROWSERS_PATH is set
+      # by the image). `playwright test` finds them with zero download.
 
       - name: Build backend (release)
         working-directory: backend

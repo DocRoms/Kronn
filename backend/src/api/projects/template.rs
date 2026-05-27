@@ -65,6 +65,21 @@ pub async fn install_template(
         if docs_template.is_dir() {
             copy_dir_nondestructive(&docs_template, &docs_target)?;
         }
+        // 0.8.7 — copy the anti-hallu spec embedded in the binary into
+        // the project's `docs/conventions/` so any agent running on this
+        // project (with or without Kronn) can open the convention
+        // locally. Idempotent : skip if already present (re-install
+        // doesn't clobber user edits ; PR3 endpoint `/anti-hallu/inject`
+        // is the explicit re-sync path).
+        let conventions_dir = docs_target.join("conventions");
+        let _ = std::fs::create_dir_all(&conventions_dir);
+        let spec_path = conventions_dir.join("agents-md-format-v1.md");
+        if !spec_path.exists() {
+            let _ = std::fs::write(
+                &spec_path,
+                crate::core::anti_halluc::SPEC_AGENTS_MD_V1,
+            );
+        }
         ensure_agent_writable_subfolders(&docs_target)?;
         // Human-friendly landing page for `docs/`. Idempotent.
         let _ = crate::core::docs_migration::ensure_docs_index(&docs_target);

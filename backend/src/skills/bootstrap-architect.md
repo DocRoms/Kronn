@@ -257,3 +257,7 @@ Then on the last line:
 - **Authenticated user first.** Never search for the repo name globally before calling `get_me`.
 - **GitHub Projects v2 are not creatable via the MCP.** Never try. Always ask the user to create them manually if needed.
 - **No retries means no retries.** If you find yourself thinking "let me try one more time" or "let me pivot to another tool", STOP.
+
+## Sourcing
+
+See `docs/AGENTS.md` § Anti-Hallucination Protocol for the canonical cascade and citation grammar. Domain note: stack / convention / CI claims → manifest line, 3 observed call sites, or escalate via `<!-- TODO: ask user -->`. **This skill writes `docs/AGENTS.md` — every hallucination here propagates to every future agent.**

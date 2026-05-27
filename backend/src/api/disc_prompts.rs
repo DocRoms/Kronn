@@ -602,7 +602,7 @@ mod tests {
             language: language.into(),
             participants: vec![],
             messages,
-            message_count: 0,
+            message_count: 0, non_system_message_count: 0,
             skill_ids: vec![],
             profile_ids: vec![],
             directive_ids: vec![],
@@ -628,6 +628,7 @@ mod tests {
 
     fn user_msg(content: &str) -> DiscussionMessage {
         DiscussionMessage {
+            lint_report: None,
             id: uuid::Uuid::new_v4().to_string(),
             role: MessageRole::User,
             content: content.into(),

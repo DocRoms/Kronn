@@ -3719,3 +3719,70 @@
   font-size: var(--kr-fs-2xs);
   color: var(--kr-text-secondary);
 }
+
+/* 0.8.7 anti-hallucination — per-message lint pill + detail panel. */
+.disc-msg-lint-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: var(--kr-r-sm);
+  font-size: var(--kr-fs-2xs);
+  cursor: pointer;
+  border: 1px solid transparent;
+  background: transparent;
+  line-height: 1.4;
+}
+/* High-confidence: a citation that did not verify (red). */
+.disc-msg-lint-pill[data-severity="fabricated"] {
+  color: var(--kr-error);
+  border-color: rgba(var(--kr-error-rgb), 0.35);
+  background: rgba(var(--kr-error-rgb), 0.08);
+}
+/* Low-confidence heuristic: an unsourced claim (amber). */
+.disc-msg-lint-pill[data-severity="unsourced"] {
+  color: var(--kr-warning);
+  border-color: rgba(var(--kr-warning-rgb), 0.35);
+  background: rgba(var(--kr-warning-rgb), 0.08);
+}
+/* 0.8.7 — positive signal: every cited source verified mechanically
+   (file:line resolves) or is honestly tagged unchecked (url/user/etc.),
+   and no unsourced-claim heuristic fired. Green chip, no detail panel
+   needed (clicking still opens the source list for the curious). */
+.disc-msg-lint-pill[data-severity="verified"] {
+  color: var(--kr-success);
+  border-color: rgba(var(--kr-success-rgb), 0.35);
+  background: rgba(var(--kr-success-rgb), 0.08);
+}
+.disc-msg-lint-pill:hover { filter: brightness(1.1); }
+
+.disc-msg-lint-detail {
+  margin-top: 6px;
+  padding: 8px 10px;
+  border-radius: var(--kr-r-sm);
+  background: rgba(var(--kr-warning-rgb), 0.06);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.18);
+  font-size: var(--kr-fs-2xs);
+}
+.disc-lint-group + .disc-lint-group { margin-top: 8px; }
+.disc-lint-group-title {
+  font-weight: 600;
+  color: var(--kr-text-secondary);
+  margin-bottom: 3px;
+}
+.disc-lint-item {
+  color: var(--kr-text-dim);
+  word-break: break-word;
+  padding: 1px 0;
+}
+.disc-lint-item[data-status] code {
+  color: var(--kr-error);
+  font-family: var(--kr-font-mono, monospace);
+}
+/* Honest caveat: a verified citation only means the source exists. */
+.disc-lint-caveat {
+  margin-top: 8px;
+  font-style: italic;
+  color: var(--kr-text-dim);
+  opacity: 0.85;
+}

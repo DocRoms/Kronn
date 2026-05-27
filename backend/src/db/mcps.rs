@@ -471,3 +471,162 @@ pub fn decrypt_env(encrypted: &str, secret: &str) -> Result<HashMap<String, Stri
     let json = crypto::decrypt(encrypted, &key)?;
     serde_json::from_str(&json).map_err(|e| format!("Invalid env JSON: {}", e))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{HostSyncMode, McpServer, McpSource, McpTransport};
+
+    fn test_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        conn
+    }
+
+    fn mk_server(id: &str) -> McpServer {
+        McpServer {
+            id: id.into(),
+            name: format!("Server-{id}"),
+            description: "Test".into(),
+            transport: McpTransport::Stdio { command: "echo".into(), args: vec![] },
+            source: McpSource::Registry,
+            api_spec: None,
+        }
+    }
+
+    #[test]
+    fn list_servers_empty_returns_empty_vec() {
+        let conn = test_conn();
+        assert!(list_servers(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn upsert_then_list_returns_one_row() {
+        let conn = test_conn();
+        upsert_server(&conn, &mk_server("s-1")).unwrap();
+        let list = list_servers(&conn).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, "s-1");
+    }
+
+    #[test]
+    fn upsert_is_idempotent_on_same_id() {
+        let conn = test_conn();
+        upsert_server(&conn, &mk_server("s-x")).unwrap();
+        let mut server = mk_server("s-x");
+        server.description = "Updated".into();
+        upsert_server(&conn, &server).unwrap();
+        let list = list_servers(&conn).unwrap();
+        assert_eq!(list.len(), 1, "idempotent upsert must not duplicate");
+        assert_eq!(list[0].description, "Updated");
+    }
+
+    #[test]
+    fn delete_server_unknown_returns_false() {
+        let conn = test_conn();
+        let removed = delete_server(&conn, "nope").unwrap();
+        assert!(!removed);
+    }
+
+    #[test]
+    fn delete_server_existing_returns_true_and_removes_row() {
+        let conn = test_conn();
+        upsert_server(&conn, &mk_server("s-del")).unwrap();
+        let removed = delete_server(&conn, "s-del").unwrap();
+        assert!(removed);
+        assert!(list_servers(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_configs_empty_returns_empty_vec() {
+        let conn = test_conn();
+        assert!(list_configs(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn get_config_unknown_returns_none() {
+        let conn = test_conn();
+        assert!(get_config(&conn, "nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn find_config_by_hash_unknown_returns_none() {
+        let conn = test_conn();
+        assert!(find_config_by_hash(&conn, "deadbeef").unwrap().is_none());
+    }
+
+    #[test]
+    fn insert_config_then_find_by_hash() {
+        let conn = test_conn();
+        upsert_server(&conn, &mk_server("s-cfg")).unwrap();
+        let cfg = crate::models::McpConfig {
+            id: "cfg-1".into(),
+            server_id: "s-cfg".into(),
+            label: "Prod".into(),
+            env_keys: vec!["TOKEN".into()],
+            env_encrypted: "x".into(),
+            args_override: None,
+            is_global: false,
+            config_hash: "abcdef".into(),
+            project_ids: vec![],
+            host_sync: HostSyncMode::GlobalOnly,
+            include_general: true,
+        };
+        insert_config(&conn, &cfg).unwrap();
+
+        let found = find_config_by_hash(&conn, "abcdef").unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().label, "Prod");
+    }
+
+    #[test]
+    fn update_config_unknown_id_returns_false() {
+        let conn = test_conn();
+        let changed = update_config(&conn, "nope", Some("X"),
+            None, None, None, None, None, None, None).unwrap();
+        assert!(!changed);
+    }
+
+    #[test]
+    fn delete_config_unknown_returns_false() {
+        let conn = test_conn();
+        assert!(!delete_config(&conn, "nope").unwrap());
+    }
+
+    #[test]
+    fn decrypt_env_empty_returns_empty_hashmap() {
+        let secret = crypto::generate_secret();
+        let result = decrypt_env("", &secret).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn decrypt_env_garbage_ciphertext_returns_err() {
+        let secret = crypto::generate_secret();
+        let result = decrypt_env("not-base64-and-not-ciphertext", &secret);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn decrypt_env_with_bogus_secret_returns_err() {
+        let result = decrypt_env("some-ciphertext", "not-a-hex-secret");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn encrypt_decrypt_env_roundtrip() {
+        let secret = crypto::generate_secret();
+        let key = crypto::parse_secret(&secret).unwrap();
+
+        let mut env = HashMap::new();
+        env.insert("TOKEN".to_string(), "secret-value-42".to_string());
+        env.insert("API_KEY".to_string(), "another-secret".to_string());
+
+        let json = serde_json::to_string(&env).unwrap();
+        let encrypted = crypto::encrypt(&json, &key).unwrap();
+
+        let decrypted = decrypt_env(&encrypted, &secret).unwrap();
+        assert_eq!(decrypted, env);
+    }
+}

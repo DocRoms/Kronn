@@ -477,4 +477,236 @@ mod tests {
         let text = extract_text("Makefile", b"all: build").unwrap();
         assert_eq!(text, "all: build");
     }
+
+    #[test]
+    fn extract_text_oversized_text_rejected() {
+        // Text bigger than 500KB must trip the MAX_EXTRACTED_SIZE guard.
+        let big = vec![b'a'; MAX_EXTRACTED_SIZE + 16];
+        let result = extract_text("huge.txt", &big);
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("500KB"), "expected 500KB limit error, got {err}");
+    }
+
+    #[test]
+    fn extract_content_image_oversized_rejected() {
+        // 11 MB fake-PNG payload — image branch caps at 10 MB.
+        let big = vec![0u8; 11 * 1024 * 1024];
+        let err = match extract_content("huge.png", &big) {
+            Ok(_) => panic!("11 MB image should be rejected"),
+            Err(e) => format!("{e}"),
+        };
+        assert!(err.contains("10MB"), "expected 10MB limit error, got {err}");
+    }
+
+    #[test]
+    fn extract_content_image_just_under_limit_ok() {
+        // Right under 10 MB stays accepted (boundary check).
+        let data = vec![0u8; 10 * 1024 * 1024 - 10];
+        let out = extract_content("ok.png", &data).expect("should pass");
+        match out {
+            ExtractedContent::Image { ext, .. } => assert_eq!(ext, "png"),
+            _ => panic!("expected Image"),
+        }
+    }
+
+    #[test]
+    fn save_image_to_dir_writes_and_returns_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let id = "abc12345-rest-of-uuid-here";
+        let payload = b"\x89PNG fake";
+        let path =
+            save_image_to_dir(tmp.path(), id, "screen shot.png", "png", payload).unwrap();
+        assert!(std::path::Path::new(&path).exists(), "file should exist at {path}");
+        let written = std::fs::read(&path).unwrap();
+        assert_eq!(written, payload);
+        // Replacing spaces and the id prefix should appear in the basename.
+        let basename = std::path::Path::new(&path).file_name().unwrap().to_string_lossy().to_string();
+        assert!(basename.starts_with("abc12345_"));
+        assert!(basename.contains("screen_shot.png"));
+    }
+
+    #[test]
+    fn save_image_to_disk_writes_under_config_dir_or_tmp() {
+        let id = "9999aaaa-test";
+        let payload = b"\x89PNG body";
+        let path = save_image_to_disk(id, "png", payload).unwrap();
+        assert!(std::path::Path::new(&path).exists());
+        assert!(path.ends_with(".png"));
+        // cleanup so the test doesn't litter config_dir
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn delete_image_from_disk_is_silent_on_missing() {
+        // delete_image_from_disk is fire-and-forget — must NOT panic if the path is bogus.
+        delete_image_from_disk("/tmp/does-not-exist-kronn-test.png");
+        // Sanity: it does actually remove a real file too.
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("tobe-deleted.png");
+        std::fs::write(&p, b"x").unwrap();
+        delete_image_from_disk(&p.to_string_lossy());
+        assert!(!p.exists());
+    }
+
+    #[test]
+    fn is_image_unknown_extension_false() {
+        assert!(!is_image("noext"));
+        assert!(!is_image(""));
+        assert!(!is_image("trailing.dot."));
+    }
+
+    #[test]
+    fn mime_unknown_extension_defaults_text_plain() {
+        assert_eq!(mime_from_extension("file.unknownext"), "text/plain");
+        assert_eq!(mime_from_extension("noext"), "text/plain");
+        assert_eq!(mime_from_extension("script.py"), "text/plain");
+    }
+
+    #[test]
+    fn mime_all_known_branches() {
+        assert_eq!(mime_from_extension("a.txt"), "text/plain");
+        assert_eq!(mime_from_extension("a.log"), "text/plain");
+        assert_eq!(mime_from_extension("a.json"), "application/json");
+        assert_eq!(mime_from_extension("a.csv"), "text/csv");
+        assert_eq!(mime_from_extension("a.html"), "text/html");
+        assert_eq!(mime_from_extension("a.xml"), "text/html");
+        assert_eq!(mime_from_extension("a.htm"), "text/html");
+        assert_eq!(mime_from_extension("a.yaml"), "text/yaml");
+        assert_eq!(mime_from_extension("a.yml"), "text/yaml");
+        assert_eq!(
+            mime_from_extension("a.docx"),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        );
+        assert_eq!(
+            mime_from_extension("a.pptx"),
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        );
+        assert_eq!(mime_from_extension("a.xls"), mime_from_extension("a.xlsx"));
+    }
+
+    #[test]
+    fn suggest_skills_all_known_branches() {
+        assert_eq!(suggest_skills("a.rs"), vec!["rust"]);
+        assert_eq!(suggest_skills("a.ts"), vec!["frontend"]);
+        assert_eq!(suggest_skills("a.jsx"), vec!["frontend"]);
+        assert_eq!(suggest_skills("a.vue"), vec!["frontend"]);
+        assert_eq!(suggest_skills("a.svelte"), vec!["frontend"]);
+        assert_eq!(suggest_skills("a.py"), vec!["python"]);
+        assert_eq!(suggest_skills("a.sql"), vec!["sql"]);
+        assert_eq!(suggest_skills("a.go"), vec!["golang"]);
+        assert_eq!(suggest_skills("a.kts"), vec!["java"]);
+        assert_eq!(suggest_skills("a.java"), vec!["java"]);
+        assert_eq!(suggest_skills("a.kt"), vec!["java"]);
+        assert_eq!(suggest_skills("a.swift"), vec!["swift"]);
+        assert_eq!(suggest_skills("a.rb"), vec!["ruby"]);
+        assert_eq!(suggest_skills("a.php"), vec!["php"]);
+    }
+
+    #[test]
+    fn extract_docx_minimal_zip_roundtrip() {
+        // Build a minimal docx in memory: a zip with one word/document.xml entry.
+        use std::io::Write;
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let cursor = std::io::Cursor::new(&mut buf);
+            let mut zip = zip::ZipWriter::new(cursor);
+            let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("word/document.xml", opts).unwrap();
+            zip.write_all(
+                br#"<?xml version="1.0"?>
+<w:document xmlns:w="urn:schemas">
+  <w:body>
+    <w:p><w:r><w:t>Hello</w:t></w:r><w:r><w:t>World</w:t></w:r></w:p>
+    <w:p><w:r><w:t>Line2</w:t></w:r></w:p>
+  </w:body>
+</w:document>"#,
+            )
+            .unwrap();
+            zip.finish().unwrap();
+        }
+        let text = extract_text("doc.docx", &buf).expect("docx must parse");
+        assert!(text.contains("Hello"));
+        assert!(text.contains("World"));
+        assert!(text.contains("Line2"));
+        // Paragraph break must add a newline.
+        assert!(text.contains('\n'));
+    }
+
+    #[test]
+    fn extract_docx_missing_document_xml_errors() {
+        use std::io::Write;
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let cursor = std::io::Cursor::new(&mut buf);
+            let mut zip = zip::ZipWriter::new(cursor);
+            let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("other.xml", opts).unwrap();
+            zip.write_all(b"<x/>").unwrap();
+            zip.finish().unwrap();
+        }
+        let err = extract_text("bad.docx", &buf).unwrap_err().to_string();
+        assert!(err.contains("document.xml"));
+    }
+
+    #[test]
+    fn extract_docx_garbage_bytes_errors() {
+        let result = extract_text("garbage.docx", b"not a zip at all");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Failed to open docx"), "got {err}");
+    }
+
+    #[test]
+    fn extract_pptx_minimal_zip_lists_slides_in_order() {
+        use std::io::Write;
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let cursor = std::io::Cursor::new(&mut buf);
+            let mut zip = zip::ZipWriter::new(cursor);
+            let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            // Intentionally out-of-order to verify sort
+            zip.start_file("ppt/slides/slide2.xml", opts).unwrap();
+            zip.write_all(
+                br#"<?xml version="1.0"?>
+<p:sld xmlns:a="urn:a"><a:p><a:r><a:t>Second</a:t></a:r></a:p></p:sld>"#,
+            )
+            .unwrap();
+            zip.start_file("ppt/slides/slide1.xml", opts).unwrap();
+            zip.write_all(
+                br#"<?xml version="1.0"?>
+<p:sld xmlns:a="urn:a"><a:p><a:r><a:t>First</a:t></a:r></a:p></p:sld>"#,
+            )
+            .unwrap();
+            zip.finish().unwrap();
+        }
+        let text = extract_text("deck.pptx", &buf).expect("pptx must parse");
+        assert!(text.contains("--- Slide 1 ---"));
+        assert!(text.contains("--- Slide 2 ---"));
+        assert!(text.contains("First"));
+        assert!(text.contains("Second"));
+        // slide1 must come BEFORE slide2 even though we zipped in reverse.
+        let i1 = text.find("First").unwrap();
+        let i2 = text.find("Second").unwrap();
+        assert!(i1 < i2, "Slide 1 content should appear before Slide 2");
+    }
+
+    #[test]
+    fn extract_pptx_garbage_bytes_errors() {
+        let err = extract_text("bad.pptx", b"not a zip").unwrap_err().to_string();
+        assert!(err.contains("Failed to open pptx"), "got {err}");
+    }
+
+    #[test]
+    fn extract_pdf_garbage_bytes_errors() {
+        let err = extract_text("bad.pdf", b"definitely not a pdf").unwrap_err().to_string();
+        assert!(err.contains("PDF extraction failed"), "got {err}");
+    }
+
+    #[test]
+    fn extract_xlsx_garbage_bytes_errors() {
+        let err = extract_text("bad.xlsx", b"not a real xlsx").unwrap_err().to_string();
+        assert!(err.contains("Failed to open spreadsheet"), "got {err}");
+    }
 }

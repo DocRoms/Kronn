@@ -1,6 +1,6 @@
 import { useState, useMemo, useRef, useDeferredValue, useEffect } from 'react';
 import '../pages/DiscussionsPage.css';
-import { SwipeableDiscItem } from './SwipeableDiscItem';
+import { SwipeableDiscItem, unseenBasis } from './SwipeableDiscItem';
 import type { Discussion, Project, Contact, BatchRunSummary } from '../types/generated';
 import { projects as projectsApi } from '../lib/api';
 import { getProjectGroup, isHiddenPath } from '../lib/constants';
@@ -235,7 +235,10 @@ export function DiscussionSidebar({
   const totalUnseenAll = useMemo(() => {
     let sum = 0;
     for (const disc of discussions) {
-      const total = Math.max(disc.messages.length, disc.message_count ?? 0);
+      // 0.8.7 — basis excludes System rows (tool calls + summary breadcrumbs).
+      // Pre-fix this aggregate read 400+ for ~26 discussions where each
+      // workflow run had a handful of agent replies + dozens of System lines.
+      const total = unseenBasis(disc);
       const seen = lastSeenMsgCount[disc.id] ?? 0;
       const unseen = total - seen;
       if (unseen > 0) sum += unseen;
@@ -255,7 +258,7 @@ export function DiscussionSidebar({
     for (const disc of discussions) {
       if (disc.archived) continue;
       if (disc.id === activeId) continue; // active disc is always "seen"
-      const total = disc.message_count ?? disc.messages.length;
+      const total = unseenBasis(disc);
       const seen = lastSeenMsgCount[disc.id] ?? 0;
       const unseen = total - seen;
       if (unseen <= 0) continue;

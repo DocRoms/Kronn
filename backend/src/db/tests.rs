@@ -43,7 +43,7 @@ fn sample_discussion(id: &str, project_id: Option<&str>) -> Discussion {
         language: "fr".into(),
         participants: vec![AgentType::ClaudeCode],
         messages: vec![],
-        message_count: 0,
+        message_count: 0, non_system_message_count: 0,
         skill_ids: vec![],
         profile_ids: vec![],
         directive_ids: vec![],
@@ -69,6 +69,7 @@ fn sample_discussion(id: &str, project_id: Option<&str>) -> Discussion {
 
 fn sample_message(id: &str, role: MessageRole) -> DiscussionMessage {
     DiscussionMessage {
+        lint_report: None,
         id: id.into(),
         role,
         content: format!("Message {}", id),
@@ -91,6 +92,103 @@ fn migrations_idempotent() {
     // Running migrations again should not fail
     migrations::run(&conn).unwrap();
     migrations::run(&conn).unwrap();
+}
+
+// P0-7 of the QA roadmap — strengthen `migrations_idempotent`.
+//
+// The bare "run twice without panic" check from above doesn't actually
+// PROVE idempotence : a migration could silently re-CREATE a table
+// (no error if `IF NOT EXISTS` is used, but inserting duplicate seed
+// rows would corrupt state) or add a second index on the same column.
+// Pin the stronger invariant : the final schema (tables + indices +
+// triggers + views) is BYTE-IDENTICAL between run 1 and run 2.
+//
+// This catches:
+//   - a `CREATE INDEX` without `IF NOT EXISTS` that silently fails on
+//     the 2nd run (would be caught by the bare test today — sqlite
+//     raises) — but ALSO :
+//   - a `CREATE TABLE ... IF NOT EXISTS` where the 2nd-run schema
+//     diverges (e.g. column order change between branches),
+//   - a migration that adds the same row twice via INSERT OR IGNORE
+//     vs INSERT (count mismatch on 2nd run).
+//
+// Failure mode the bare test misses : deploy → migrations re-run on
+// restart → silently doubled-rows or schema drift → user data corrupted
+// invisibly until a downstream query breaks.
+#[test]
+fn migrations_idempotent_schema_stable_across_two_runs() {
+    // First run.
+    let conn = test_db();
+    let schema_run_1 = capture_schema(&conn);
+    let row_counts_run_1 = capture_seed_row_counts(&conn);
+
+    // Re-apply migrations on the SAME connection.
+    migrations::run(&conn).expect("re-run of migrations must succeed");
+    let schema_run_2 = capture_schema(&conn);
+    let row_counts_run_2 = capture_seed_row_counts(&conn);
+
+    // Schema is the authoritative invariant — `sqlite_master` lists every
+    // table, index, trigger, view + its CREATE statement. A diff here =
+    // a non-idempotent migration.
+    assert_eq!(
+        schema_run_1, schema_run_2,
+        "Schema diverged after the 2nd migrations::run.\nRun 1:\n{}\n---\nRun 2:\n{}",
+        schema_run_1, schema_run_2,
+    );
+
+    // Seed rows (e.g. builtin agents, default skills) must not duplicate.
+    assert_eq!(
+        row_counts_run_1, row_counts_run_2,
+        "Seed row count diverged after 2nd run — a migration is INSERT-ing without OR IGNORE",
+    );
+}
+
+/// Dump `sqlite_master` to a comparable string. Sorting + filtering out
+/// the auto-generated `sqlite_autoindex_*` rows (they're a consequence of
+/// `UNIQUE` / `PRIMARY KEY` declarations, not authoritative on their own).
+fn capture_schema(conn: &rusqlite::Connection) -> String {
+    let mut stmt = conn
+        .prepare(
+            "SELECT type, name, sql FROM sqlite_master \
+             WHERE name NOT LIKE 'sqlite_autoindex_%' \
+             ORDER BY type, name",
+        )
+        .unwrap();
+    let rows: Vec<String> = stmt
+        .query_map([], |r| {
+            let ty: String = r.get(0)?;
+            let name: String = r.get(1)?;
+            // `sql` is NULL for some auto-objects ; coalesce to empty.
+            let sql: Option<String> = r.get(2)?;
+            Ok(format!("[{}] {}: {}", ty, name, sql.unwrap_or_default()))
+        })
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect();
+    rows.join("\n")
+}
+
+/// Capture row counts on a curated set of tables that migrations are
+/// known to seed (or could plausibly seed). A divergence here = a
+/// migration inserts seed rows without `INSERT OR IGNORE` and silently
+/// doubles them on re-run.
+fn capture_seed_row_counts(conn: &rusqlite::Connection) -> Vec<(String, i64)> {
+    let candidate_tables = [
+        "projects", "discussions", "messages", "mcp_servers", "mcp_configs",
+        "workflows", "workflow_runs", "quick_prompts", "skills", "profiles",
+        "directives", "contacts", "discussion_sessions",
+    ];
+    candidate_tables
+        .iter()
+        .filter_map(|t| {
+            let n: rusqlite::Result<i64> = conn.query_row(
+                &format!("SELECT COUNT(*) FROM {}", t),
+                [],
+                |r| r.get(0),
+            );
+            n.ok().map(|c| (t.to_string(), c))
+        })
+        .collect()
 }
 
 #[test]
@@ -1746,7 +1844,7 @@ fn partial_response_set_then_recover_inserts_agent_message() {
         language: "fr".into(),
         participants: vec![AgentType::ClaudeCode],
         messages: vec![],
-        message_count: 0,
+        message_count: 0, non_system_message_count: 0,
         skill_ids: vec![],
         profile_ids: vec![],
         directive_ids: vec![],
@@ -1826,7 +1924,7 @@ fn partial_response_preserves_started_at_across_checkpoints() {
     let disc = Discussion {
         id: "disc-ts".into(), project_id: None, title: "X".into(),
         agent: AgentType::ClaudeCode, language: "fr".into(),
-        participants: vec![AgentType::ClaudeCode], messages: vec![], message_count: 0,
+        participants: vec![AgentType::ClaudeCode], messages: vec![], message_count: 0, non_system_message_count: 0,
         skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
         archived: false,
         pinned: false, workspace_mode: "Direct".into(),
@@ -1875,7 +1973,7 @@ fn has_pending_partial_returns_true_when_set() {
     let disc = Discussion {
         id: "disc-pending".into(), project_id: None, title: "X".into(),
         agent: AgentType::ClaudeCode, language: "fr".into(),
-        participants: vec![AgentType::ClaudeCode], messages: vec![], message_count: 0,
+        participants: vec![AgentType::ClaudeCode], messages: vec![], message_count: 0, non_system_message_count: 0,
         skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
         archived: false,
         pinned: false, workspace_mode: "Direct".into(),
@@ -1900,7 +1998,7 @@ fn partial_response_clear_with_none_wipes_column() {
     let disc = Discussion {
         id: "disc-clear".into(), project_id: None, title: "X".into(),
         agent: AgentType::ClaudeCode, language: "fr".into(),
-        participants: vec![AgentType::ClaudeCode], messages: vec![], message_count: 0,
+        participants: vec![AgentType::ClaudeCode], messages: vec![], message_count: 0, non_system_message_count: 0,
         skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
         archived: false,
         pinned: false, workspace_mode: "Direct".into(),
@@ -2859,7 +2957,7 @@ fn quick_prompt_metrics_aggregates_first_agent_reply_per_version() {
         let d = Discussion {
             id: disc_id.into(), project_id: None, title: format!("Disc {}", disc_id),
             agent: AgentType::ClaudeCode, language: "fr".into(),
-            participants: vec![AgentType::ClaudeCode], messages: vec![], message_count: 0,
+            participants: vec![AgentType::ClaudeCode], messages: vec![], message_count: 0, non_system_message_count: 0,
             skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
             archived: false, pinned: false,
             workspace_mode: "Direct".into(), workspace_path: None, worktree_branch: None,
@@ -2875,12 +2973,14 @@ fn quick_prompt_metrics_aggregates_first_agent_reply_per_version() {
         crate::db::discussions::insert_discussion(&conn, &d).unwrap();
         // User msg + Agent msg (with tokens + duration).
         let user_msg = DiscussionMessage {
+            lint_report: None,
             id: format!("{}-u", disc_id), role: MessageRole::User, content: "ask".into(),
             agent_type: None, timestamp: Utc::now(), tokens_used: 0,
             auth_mode: None, model_tier: None, cost_usd: None,
             author_pseudo: None, author_avatar_email: None, source_msg_id: None, duration_ms: None,
         };
         let agent_msg = DiscussionMessage {
+            lint_report: None,
             id: format!("{}-a", disc_id), role: MessageRole::Agent, content: "reply".into(),
             agent_type: Some(AgentType::ClaudeCode), timestamp: Utc::now(),
             tokens_used: agent_tokens, auth_mode: None,
@@ -2994,7 +3094,7 @@ fn quick_prompt_delete_version_clears_discussion_lineage() {
     let d = Discussion {
         id: "d-orphan".into(), project_id: None, title: "T".into(),
         agent: AgentType::ClaudeCode, language: "fr".into(),
-        participants: vec![AgentType::ClaudeCode], messages: vec![], message_count: 0,
+        participants: vec![AgentType::ClaudeCode], messages: vec![], message_count: 0, non_system_message_count: 0,
         skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
         archived: false, pinned: false,
         workspace_mode: "Direct".into(), workspace_path: None, worktree_branch: None,
@@ -3044,7 +3144,7 @@ fn quick_prompt_metrics_ignores_non_first_agent_replies() {
     let d = Discussion {
         id: "d-multi".into(), project_id: None, title: "T".into(),
         agent: AgentType::ClaudeCode, language: "fr".into(),
-        participants: vec![AgentType::ClaudeCode], messages: vec![], message_count: 0,
+        participants: vec![AgentType::ClaudeCode], messages: vec![], message_count: 0, non_system_message_count: 0,
         skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
         archived: false, pinned: false,
         workspace_mode: "Direct".into(), workspace_path: None, worktree_branch: None,
@@ -3060,6 +3160,7 @@ fn quick_prompt_metrics_ignores_non_first_agent_replies() {
     crate::db::discussions::insert_discussion(&conn, &d).unwrap();
     // Three Agent replies — only the first should be counted.
     let mk = |id: &str, role: MessageRole, toks: u64, dur: u64| DiscussionMessage {
+        lint_report: None,
         id: id.into(), role, content: "x".into(),
         agent_type: Some(AgentType::ClaudeCode), timestamp: Utc::now(),
         tokens_used: toks, auth_mode: None,
@@ -3166,7 +3267,7 @@ fn cross_agent_db_round_trip_all_types() {
             language: "en".into(),
             participants: vec![agent_type.clone()],
             messages: vec![],
-            message_count: 0,
+            message_count: 0, non_system_message_count: 0,
             skill_ids: vec![],
             profile_ids: vec![],
             directive_ids: vec![],
@@ -3193,4 +3294,181 @@ fn cross_agent_db_round_trip_all_types() {
         assert_eq!(loaded.agent, *agent_type,
             "DB round-trip failed for {:?} — agent_type mutated after insert+read", agent_type);
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 0.8.7 — P0-4 of the QA roadmap.
+//
+// `create_batch_run` wraps a multi-row write (placeholder workflow + run +
+// N child discussions + their initial messages) in an explicit BEGIN /
+// COMMIT / ROLLBACK transaction (`db/workflows.rs:478-498`). The previous
+// test (`create_batch_run_pure_fn_roundtrip_toplevel`) only exercises the
+// happy path ; this one pins the rollback path : when ONE step in the
+// loop fails (here : a discussion FK violation because we point at a
+// project that doesn't exist), the WHOLE transaction must unwind — no
+// orphaned workflow row, no orphaned run, no orphaned discussion or
+// message.
+//
+// Without this guarantee, a crash mid-batch would leave half-committed
+// state that corrupts the runs list + the workflow registry forever.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn create_batch_run_rolls_back_on_discussion_fk_violation() {
+    let conn = test_db();
+    let qp = sample_qp_for_batch("qp-rollback-fk");
+    crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
+
+    // Sanity : capture row counts BEFORE the call so we can assert
+    // "nothing changed" after rollback.
+    let workflows_before: i64 = conn
+        .query_row("SELECT COUNT(*) FROM workflows", [], |r| r.get(0))
+        .unwrap();
+    let runs_before: i64 = conn
+        .query_row("SELECT COUNT(*) FROM workflow_runs", [], |r| r.get(0))
+        .unwrap();
+    let discs_before: i64 = conn
+        .query_row("SELECT COUNT(*) FROM discussions", [], |r| r.get(0))
+        .unwrap();
+    let msgs_before: i64 = conn
+        .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+        .unwrap();
+
+    // Inject the failure : route the batch at a parent_run_id that does
+    // NOT exist in workflow_runs. `workflow_runs.parent_run_id` carries an
+    // FK (migration 030_workflow_run_parent.sql) — `insert_run` raises a
+    // SQLITE_CONSTRAINT_FOREIGNKEY when the parent doesn't exist. The
+    // failure fires AFTER `ensure_batch_placeholder_workflow` has
+    // already inserted the placeholder workflow row, so the rollback
+    // has real work to undo.
+    let result = crate::db::workflows::create_batch_run(
+        &conn,
+        crate::db::workflows::CreateBatchRunInput {
+            quick_prompt: &qp,
+            items: vec![
+                crate::db::workflows::BatchItemInput {
+                    title: "EW-rollback-1".into(),
+                    prompt: "x".into(),
+                    agent_override: None,
+                },
+                crate::db::workflows::BatchItemInput {
+                    title: "EW-rollback-2".into(),
+                    prompt: "y".into(),
+                    agent_override: None,
+                },
+                crate::db::workflows::BatchItemInput {
+                    title: "EW-rollback-3".into(),
+                    prompt: "z".into(),
+                    agent_override: None,
+                },
+            ],
+            batch_name: Some("Rollback test".into()),
+            project_id: None,
+            parent_run_id: Some("run-that-does-not-exist".into()),
+            author_pseudo: Some("TestUser".into()),
+            author_avatar_email: Some("test@example.com".into()),
+            language: "fr".into(),
+            workspace_mode: "Direct".into(),
+        },
+    );
+
+    let err_msg = match result {
+        Ok(_) => panic!("create_batch_run must return Err when a child discussion FK violates"),
+        Err(e) => format!("{}", e).to_lowercase(),
+    };
+    assert!(
+        err_msg.contains("foreign") || err_msg.contains("constraint"),
+        "expected FK / constraint error, got: {err_msg}"
+    );
+
+    // The whole transaction must be unwound. Counts after the failed
+    // call MUST match counts before — no orphaned rows anywhere.
+    let workflows_after: i64 = conn
+        .query_row("SELECT COUNT(*) FROM workflows", [], |r| r.get(0))
+        .unwrap();
+    let runs_after: i64 = conn
+        .query_row("SELECT COUNT(*) FROM workflow_runs", [], |r| r.get(0))
+        .unwrap();
+    let discs_after: i64 = conn
+        .query_row("SELECT COUNT(*) FROM discussions", [], |r| r.get(0))
+        .unwrap();
+    let msgs_after: i64 = conn
+        .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+        .unwrap();
+
+    assert_eq!(
+        workflows_after, workflows_before,
+        "placeholder workflow leaked despite rollback (INSERT OR IGNORE survived)"
+    );
+    assert_eq!(
+        runs_after, runs_before,
+        "workflow_run row leaked despite rollback"
+    );
+    assert_eq!(
+        discs_after, discs_before,
+        "discussion row leaked despite rollback"
+    );
+    assert_eq!(
+        msgs_after, msgs_before,
+        "message row leaked despite rollback"
+    );
+}
+
+#[test]
+fn create_batch_run_subsequent_call_after_rollback_succeeds_cleanly() {
+    // Companion to the rollback test : after the failed call rolls back,
+    // a SECOND call with a clean (existing) project_id MUST succeed.
+    // Regression guard against "rollback leaves the connection in a bad
+    // transactional state" (a known SQLite footgun if BEGIN/ROLLBACK
+    // pairing is mishandled).
+    let conn = test_db();
+    let project = sample_project("p-clean", "CleanProject");
+    crate::db::projects::insert_project(&conn, &project).unwrap();
+    let qp = sample_qp_for_batch("qp-after-rollback");
+    crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
+
+    // 1st call — fails on bogus parent_run_id (FK on workflow_runs.id).
+    let bad = crate::db::workflows::create_batch_run(
+        &conn,
+        crate::db::workflows::CreateBatchRunInput {
+            quick_prompt: &qp,
+            items: vec![crate::db::workflows::BatchItemInput {
+                title: "EW-bad".into(),
+                prompt: "x".into(),
+                agent_override: None,
+            }],
+            batch_name: None,
+            project_id: None,
+            parent_run_id: Some("run-that-does-not-exist".into()),
+            author_pseudo: None,
+            author_avatar_email: None,
+            language: "fr".into(),
+            workspace_mode: "Direct".into(),
+        },
+    );
+    assert!(bad.is_err());
+
+    // 2nd call — points at a real project, must succeed.
+    let good = crate::db::workflows::create_batch_run(
+        &conn,
+        crate::db::workflows::CreateBatchRunInput {
+            quick_prompt: &qp,
+            items: vec![crate::db::workflows::BatchItemInput {
+                title: "EW-good".into(),
+                prompt: "y".into(),
+                agent_override: None,
+            }],
+            batch_name: None,
+            project_id: Some("p-clean".into()),
+            parent_run_id: None,
+            author_pseudo: None,
+            author_avatar_email: None,
+            language: "fr".into(),
+            workspace_mode: "Direct".into(),
+        },
+    );
+    assert!(good.is_ok(), "subsequent call after rollback must succeed");
+    let out = good.unwrap();
+    assert_eq!(out.batch_total, 1);
+    assert_eq!(out.discussion_ids.len(), 1);
 }

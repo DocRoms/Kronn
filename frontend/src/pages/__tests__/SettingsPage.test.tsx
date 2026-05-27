@@ -42,6 +42,8 @@ vi.mock('../../lib/api', () => ({
     saveGlobalContext: vi.fn().mockResolvedValue(undefined),
     getGlobalContextMode: vi.fn().mockResolvedValue('always'),
     saveGlobalContextMode: vi.fn().mockResolvedValue(undefined),
+    getAntiHallucinationMode: vi.fn().mockResolvedValue('warn'),
+    saveAntiHallucinationMode: vi.fn().mockResolvedValue(undefined),
     setScanDepth: vi.fn(),
     setScanPaths: vi.fn(),
     setScanIgnore: vi.fn(),
@@ -112,6 +114,17 @@ vi.mock('../../lib/api', () => ({
     delete: vi.fn(),
     inviteCode: vi.fn().mockResolvedValue('kronn:test@localhost:3456'),
     ping: vi.fn().mockResolvedValue(false),
+  },
+  usage: {
+    get: vi.fn().mockResolvedValue({
+      period_kind: 'daily',
+      rows: [],
+      totals: {
+        input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0,
+        cache_read_tokens: 0, total_tokens: 0, total_cost: 0,
+      },
+      agents_detected: [],
+    }),
   },
 }));
 
@@ -270,12 +283,9 @@ describe('SettingsPage', () => {
 
   it('renders the Usage section in settings', async () => {
     await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
-    const body = document.body.textContent!;
-    expect(body).toContain('Usage');
-    // Filter buttons should be present
-    expect(body).toContain('Tout');
-    expect(body).toContain('Disc.');
-    expect(body).toContain('Wf.');
+    // ccusage-based card with stable test id + powered-by attribution
+    expect(document.querySelector('[data-testid="usage-section"]')).toBeTruthy();
+    expect(document.body.textContent!).toContain('ccusage');
   });
 
   it('renders the auto-detect button for API keys', async () => {
@@ -336,15 +346,14 @@ describe('SettingsPage', () => {
     expect(keyInput).toBeTruthy();
   });
 
-  it('renders Usage section with filter and toggle buttons', async () => {
+  it('renders Usage section with always-visible period toggle', async () => {
     await wrap(<SettingsPage {...defaultProps} />);
-    const body = document.body.textContent!;
-    // Usage section should have toggle buttons
-    expect(body).toContain('Tout');
-    expect(body).toContain('Disc.');
-    expect(body).toContain('Wf.');
-    // Should show empty state when no data
-    expect(body).toContain('Aucune donnée');
+    // Daily / Weekly / Monthly period filter is in the head (always visible)
+    expect(document.querySelector('[data-testid="usage-period-daily"]')).toBeTruthy();
+    expect(document.querySelector('[data-testid="usage-period-weekly"]')).toBeTruthy();
+    expect(document.querySelector('[data-testid="usage-period-monthly"]')).toBeTruthy();
+    // Details toggle reveals the deep table
+    expect(document.querySelector('[data-testid="usage-details-toggle"]')).toBeTruthy();
   });
 
   it('renders bio textarea in Identity section', async () => {

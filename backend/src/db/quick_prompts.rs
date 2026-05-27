@@ -315,3 +315,178 @@ pub fn delete_quick_prompt(conn: &Connection, id: &str) -> Result<()> {
     conn.execute("DELETE FROM quick_prompts WHERE id = ?1", params![id])?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{AgentType, ModelTier, PromptVariable};
+
+    fn test_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        conn
+    }
+
+    fn mk_qp(id: &str, name: &str) -> QuickPrompt {
+        QuickPrompt {
+            id: id.into(),
+            name: name.into(),
+            icon: "✨".into(),
+            prompt_template: format!("template-for-{name}"),
+            variables: vec![PromptVariable {
+                name: "var".into(),
+                label: "Var".into(),
+                placeholder: String::new(),
+                description: None,
+                required: true,
+            }],
+            agent: AgentType::ClaudeCode,
+            project_id: None,
+            skill_ids: vec![],
+            profile_ids: vec![],
+            directive_ids: vec![],
+            tier: ModelTier::Default,
+            description: String::new(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn insert_seeds_version_one() {
+        let conn = test_conn();
+        let qp = mk_qp("qp-1", "first");
+        insert_quick_prompt(&conn, &qp).unwrap();
+        let cur = current_version_index(&conn, "qp-1").unwrap();
+        assert_eq!(cur, Some(1), "insert must seed v1 automatically (058 contract)");
+    }
+
+    #[test]
+    fn current_version_index_returns_none_for_unknown_qp() {
+        let conn = test_conn();
+        let cur = current_version_index(&conn, "nope").unwrap();
+        assert!(cur.is_none());
+    }
+
+    #[test]
+    fn list_quick_prompts_empty_returns_empty_vec() {
+        let conn = test_conn();
+        let list = list_quick_prompts(&conn).unwrap();
+        assert!(list.is_empty());
+    }
+
+    #[test]
+    fn list_quick_prompts_returns_inserted_ones() {
+        let conn = test_conn();
+        insert_quick_prompt(&conn, &mk_qp("qp-A", "Alpha")).unwrap();
+        insert_quick_prompt(&conn, &mk_qp("qp-B", "Beta")).unwrap();
+        let list = list_quick_prompts(&conn).unwrap();
+        assert_eq!(list.len(), 2);
+    }
+
+    #[test]
+    fn get_quick_prompt_unknown_returns_none() {
+        let conn = test_conn();
+        assert!(get_quick_prompt(&conn, "nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn get_quick_prompt_returns_inserted_qp() {
+        let conn = test_conn();
+        insert_quick_prompt(&conn, &mk_qp("qp-X", "ToFind")).unwrap();
+        let found = get_quick_prompt(&conn, "qp-X").unwrap().unwrap();
+        assert_eq!(found.name, "ToFind");
+    }
+
+    #[test]
+    fn delete_quick_prompt_unknown_id_is_silent() {
+        let conn = test_conn();
+        // Pre-058 contract : DELETE on unknown ID succeeds (no-op).
+        // The handler reports `success: true` either way — we'd break
+        // the UI flow if this returned an error.
+        delete_quick_prompt(&conn, "nope").unwrap();
+    }
+
+    #[test]
+    fn delete_quick_prompt_removes_row() {
+        let conn = test_conn();
+        insert_quick_prompt(&conn, &mk_qp("qp-D", "Doomed")).unwrap();
+        delete_quick_prompt(&conn, "qp-D").unwrap();
+        assert!(get_quick_prompt(&conn, "qp-D").unwrap().is_none());
+    }
+
+    #[test]
+    fn snapshot_creates_versions_in_ascending_order() {
+        let conn = test_conn();
+        let mut qp = mk_qp("qp-V", "Versioned");
+        insert_quick_prompt(&conn, &qp).unwrap();
+        // v1 seeded.
+
+        qp.prompt_template = "v2 body".into();
+        let v2 = snapshot_quick_prompt_version(&conn, &qp).unwrap();
+        assert_eq!(v2, 2);
+
+        qp.prompt_template = "v3 body".into();
+        let v3 = snapshot_quick_prompt_version(&conn, &qp).unwrap();
+        assert_eq!(v3, 3);
+
+        // Listing returns 3 entries.
+        let versions = list_quick_prompt_versions(&conn, "qp-V").unwrap();
+        assert_eq!(versions.len(), 3);
+        assert_eq!(current_version_index(&conn, "qp-V").unwrap(), Some(3));
+    }
+
+    #[test]
+    fn delete_quick_prompt_version_refuses_to_delete_current() {
+        let conn = test_conn();
+        let qp = mk_qp("qp-LATEST", "Latest");
+        insert_quick_prompt(&conn, &qp).unwrap();
+        // v1 = current — must refuse.
+        let result = delete_quick_prompt_version(&conn, "qp-LATEST", 1);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Cannot delete the current version"),
+            "expected anchor-protection error, got: {msg}");
+    }
+
+    #[test]
+    fn delete_quick_prompt_version_removes_old_version() {
+        let conn = test_conn();
+        let mut qp = mk_qp("qp-OLD", "Old");
+        insert_quick_prompt(&conn, &qp).unwrap();
+        qp.prompt_template = "newer body".into();
+        snapshot_quick_prompt_version(&conn, &qp).unwrap(); // v2
+
+        let deleted = delete_quick_prompt_version(&conn, "qp-OLD", 1).unwrap();
+        assert!(deleted);
+
+        // v1 is gone, v2 remains.
+        let versions = list_quick_prompt_versions(&conn, "qp-OLD").unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].version_index, 2);
+    }
+
+    #[test]
+    fn list_quick_prompt_version_metrics_empty_when_no_launches() {
+        let conn = test_conn();
+        insert_quick_prompt(&conn, &mk_qp("qp-NoLaunch", "NoLaunch")).unwrap();
+        let metrics = list_quick_prompt_version_metrics(&conn, "qp-NoLaunch").unwrap();
+        assert!(metrics.is_empty(),
+            "metrics must be empty for a QP that hasn't been launched yet");
+    }
+
+    #[test]
+    fn update_quick_prompt_modifies_fields() {
+        let conn = test_conn();
+        insert_quick_prompt(&conn, &mk_qp("qp-U", "Original")).unwrap();
+        let mut qp = get_quick_prompt(&conn, "qp-U").unwrap().unwrap();
+        qp.name = "Updated".into();
+        qp.prompt_template = "new template".into();
+        update_quick_prompt(&conn, &qp).unwrap();
+
+        let reloaded = get_quick_prompt(&conn, "qp-U").unwrap().unwrap();
+        assert_eq!(reloaded.name, "Updated");
+        assert_eq!(reloaded.prompt_template, "new template");
+    }
+}

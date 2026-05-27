@@ -492,4 +492,102 @@ mod tests {
         let preserved = result.expect("no resolvable base → defensive preserve");
         assert_eq!(preserved.ahead, 0, "ahead unknown → 0 (still preserve)");
     }
+
+    // ─── Workspace::create + cleanup (E2E worktree lifecycle) ──────────
+
+    #[tokio::test]
+    async fn workspace_create_and_cleanup_synced_branch_does_not_preserve() {
+        let (_dir, repo) = make_test_repo().await;
+        let ws = Workspace::create(&repo, "test-wf", "abcdef12-rest", None)
+            .await
+            .expect("create worktree");
+
+        assert!(ws.path.exists(), "worktree path should be on disk");
+        assert!(ws.path.starts_with(repo.join(".kronn/worktrees")));
+        assert_eq!(ws.branch, "kronn/test-wf/abcdef12");
+
+        // No new commits → cleanup() should NOT preserve.
+        let outcome = ws.cleanup().await.expect("cleanup");
+        assert!(outcome.preserved.is_none(), "synced branch should not be preserved");
+    }
+
+    #[tokio::test]
+    async fn workspace_create_and_cleanup_with_new_commit_preserves_branch() {
+        let (_dir, repo) = make_test_repo().await;
+        let ws = Workspace::create(&repo, "preservetest", "ffeeddcc-extra", None)
+            .await
+            .expect("create worktree");
+
+        // Make a real commit inside the worktree so HEAD diverges from main.
+        std::fs::write(ws.path.join("NEWFILE.md"), "extra\n").unwrap();
+        let _ = crate::core::cmd::async_cmd("git")
+            .args(["add", "."])
+            .current_dir(&ws.path)
+            .output()
+            .await
+            .unwrap();
+        let _ = crate::core::cmd::async_cmd("git")
+            .args(["commit", "-q", "-m", "feat: extra"])
+            .current_dir(&ws.path)
+            .output()
+            .await
+            .unwrap();
+
+        let outcome = ws.cleanup().await.expect("cleanup");
+        let preserved = outcome.preserved.expect("branch with new commit must be preserved");
+        assert_eq!(preserved.branch_name, "kronn/preservetest/ffeeddcc");
+        assert_eq!(preserved.ahead, 1, "exactly one commit beyond main");
+        assert!(!preserved.head_sha.is_empty());
+        assert!(!preserved.pushed_upstream, "no remote → no upstream");
+    }
+
+    #[tokio::test]
+    async fn workspace_attach_uses_provided_path_without_side_effects() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+        let repo = dir.path().to_path_buf();
+        let ws = Workspace::attach(path.clone(), repo.clone(), "wf-name", "aabbccdd-zz", None);
+        assert_eq!(ws.path, path);
+        assert_eq!(ws.branch, "kronn/wf-name/aabbccdd");
+    }
+
+    #[tokio::test]
+    async fn workspace_hook_runs_when_command_set() {
+        // Hook output goes to a sentinel file we can read back.
+        let (_dir, repo) = make_test_repo().await;
+        let sentinel = repo.join("sentinel.txt");
+        let hooks = WorkspaceHooks {
+            after_create: Some(format!("echo touched > {}", sentinel.display())),
+            before_run: None,
+            after_run: None,
+            before_remove: None,
+        };
+        let ws = Workspace::create(&repo, "hookwf", "11112222-rest", Some(hooks))
+            .await
+            .expect("create worktree");
+        // The hook should have written to the sentinel.
+        let _ = ws.before_run().await;
+        let _ = ws.after_run().await;
+        assert!(sentinel.exists(), "after_create hook should have created sentinel");
+        let outcome = ws.cleanup().await.expect("cleanup");
+        // No new commits committed → no preserve.
+        assert!(outcome.preserved.is_none());
+    }
+
+    #[tokio::test]
+    async fn workspace_no_hooks_runs_silently() {
+        // attach() bypasses git side-effects ; calling before/after/after-remove
+        // with no hooks set must be a no-op (no panic, no error).
+        let dir = tempfile::TempDir::new().unwrap();
+        let ws = Workspace::attach(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            "nohook",
+            "abababab-x",
+            None,
+        );
+        ws.before_run().await.unwrap();
+        ws.after_run().await.unwrap();
+        // No cleanup() — attach doesn't own a real worktree.
+    }
 }

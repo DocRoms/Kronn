@@ -37,14 +37,20 @@ pub struct StaleSection {
 /// Compute the SHA-256 hex digest of a file. Returns None if the file cannot be read.
 pub fn compute_sha256(path: &Path) -> Option<String> {
     let data = std::fs::read(path).ok()?;
+    Some(sha256_of_bytes(&data))
+}
+
+/// Inner helper that computes the hex SHA-256 of a byte slice. Exposed
+/// so tests can pin the exact byte-to-hex contract.
+fn sha256_of_bytes(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(&data);
+    hasher.update(data);
     let result = hasher.finalize();
     // sha2 0.11 returns `hybrid_array::Array<u8, _>` instead of
     // `GenericArray<u8, _>`. The new type does not implement `LowerHex`,
     // so `format!("{:x}", _)` no longer compiles. Use `result.iter()`
     // and a manual hex encoding (no extra dep).
-    Some(result.iter().map(|b| format!("{:02x}", b)).collect())
+    result.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 /// Expand a glob-like pattern within a directory, returning matching (relative, absolute) pairs.

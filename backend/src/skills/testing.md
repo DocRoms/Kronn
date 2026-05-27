@@ -35,6 +35,10 @@ builtin: true
 ✓ New `calculate_discount()` ships with tests covering edge cases.
 ✗ New `calculate_discount()` ships, tests planned "for later."
 
+## Sourcing
+
+See `docs/AGENTS.md` § Anti-Hallucination Protocol for the canonical cascade and citation grammar. Domain note: behaviour / contract / library claims → cite the SUT source line or the library's version-pinned docs URL ; never invent what a function returns.
+
 ## Related
 
 For the strict TDD ritual (the "iron law" of "no production code without a failing test first"), pair this skill with `test-driven-development` (vendored from obra/superpowers, MIT) — it enforces the rigorous red→verify-red→green→verify-green→refactor cycle and lists common rationalizations to reject.

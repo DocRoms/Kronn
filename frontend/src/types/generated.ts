@@ -270,10 +270,22 @@ export interface DiscoverReposRequest {
   source_ids: string[];
 }
 
+/** 0.8.7 — per-source failure surfaced to the UI (a configured source
+ * returning zero repos because the token expired / scopes are missing
+ * shows up as a chip with the error, instead of silently disappearing). */
+export interface DiscoverSourceError {
+  source_id: string;
+  source_label: string;
+  provider: string; // 'github' | 'gitlab'
+  message: string;
+}
+
 export interface DiscoverReposResponse {
   repos: RemoteRepo[];
   sources: string[];
   available_sources: RepoSource[];
+  /** Optional — older backends omit this; default to [] when consuming. */
+  errors?: DiscoverSourceError[];
 }
 
 // ─── Drift Detection ─────────────────────────────────────────────────────────
@@ -1252,6 +1264,10 @@ export interface Discussion {
   participants: AgentType[];
   messages: DiscussionMessage[];
   message_count: number;
+  /** Subset of message_count excluding System messages (tool-call + cached-summary
+   * breadcrumbs). Used as the basis for the unread badge so System rows don't
+   * inflate the "messages à lire" counter. */
+  non_system_message_count: number;
   skill_ids?: string[];
   profile_ids?: string[];
   directive_ids?: string[];
@@ -1300,9 +1316,75 @@ export interface DiscussionMessage {
   model_tier?: string | null;
   author_pseudo?: string | null;
   author_avatar_email?: string | null;
+  /** 0.8.7 anti-hallucination P2 lint report for this agent message. */
+  lint_report?: LintReport | null;
 }
 
 export type MessageRole = "User" | "Agent" | "System";
+
+// ─── Anti-hallucination (0.8.7) ──────────────────────────────────────────────
+
+export interface LintReport {
+  /** Niveau 0 — heuristic count of unsourced technical claims (low confidence). */
+  unsourced_count: number;
+  flagged_spans: FlaggedSpan[];
+  /** Niveau 1 — every [src:] marker the agent emitted + its mechanical verdict. */
+  sources: SourceCheck[];
+  /** Niveau 1 — count of citations that failed verification (high confidence). */
+  fabricated_count: number;
+}
+
+/** 0.8.7 — Agent CLI usage report (via ccusage). */
+export interface UsageModelBreakdown {
+  model_name: string;
+  cost: number;
+  total_tokens: number;
+}
+
+export interface UsageRow {
+  period: string;
+  agent: string;
+  models_used: string[];
+  model_breakdowns: UsageModelBreakdown[];
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  total_tokens: number;
+  total_cost: number;
+}
+
+export interface UsageTotals {
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  total_tokens: number;
+  total_cost: number;
+}
+
+export interface UsageReport {
+  period_kind: string;
+  rows: UsageRow[];
+  totals: UsageTotals;
+  agents_detected: string[];
+}
+
+export interface FlaggedSpan {
+  text: string;
+  reason: string;
+}
+
+export interface SourceCheck {
+  raw: string;
+  kind: SourceKind;
+  status: SourceStatus;
+  detail: string;
+}
+
+export type SourceKind = "file" | "url" | "user" | "commit" | "api" | "code_comment" | "inferred" | "hypothesis" | "training_data" | "other";
+
+export type SourceStatus = "verified" | "not_found" | "out_of_bounds" | "empty_ref" | "outside_project" | "unchecked" | "rejected";
 
 // ─── MCP Context ───────────────────────────────────────────────────────────
 

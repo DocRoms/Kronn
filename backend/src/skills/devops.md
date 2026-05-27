@@ -32,3 +32,7 @@ builtin: true
 
 ✓ Multi-stage Dockerfile, non-root, pinned base image, cached dependency layer.
 ✗ `FROM node:latest`, runs as root, `COPY . .` as first step.
+
+## Sourcing
+
+See `docs/AGENTS.md` § Anti-Hallucination Protocol for the canonical cascade and citation grammar. Domain note: image / dep / CI action / cloud-flag claims → cite the lockfile / workflow YAML / provider docs URL with version pinned ; run the tool and cite the output if uncertain.

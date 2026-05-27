@@ -31,3 +31,7 @@ builtin: true
 
 ✓ Index on `orders(user_id)` because queries filter by `user_id`.
 ✗ Indexes on every column "just in case" without checking query patterns.
+
+## Sourcing
+
+See `docs/AGENTS.md` § Anti-Hallucination Protocol for the canonical cascade and citation grammar. Domain note: schema / column / index claims → cite the migration file (`backend/src/db/sql/NNN_*.sql`) or live `\d table_name` output ; never claim a column from memory.

@@ -89,3 +89,171 @@ mod hex {
             .collect()
     }
 }
+
+// 0.8.7 — P0-1 of the QA roadmap. The whole MCP env-secret pipeline rests
+// on this 91-LOC module (Aes256Gcm + base64 framing). Zero tests until now
+// would mean any silent regression here loses every user's saved API keys
+// without a peep. The suite below pins the contract end-to-end :
+// roundtrip, AEAD tamper detection, wrong-key rejection, malformed input
+// rejection, generate_secret uniqueness + parse_secret validation.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_key(seed: u8) -> [u8; 32] {
+        let mut k = [0u8; 32];
+        for (i, b) in k.iter_mut().enumerate() {
+            *b = seed.wrapping_add(i as u8);
+        }
+        k
+    }
+
+    #[test]
+    fn encrypt_decrypt_roundtrip_ascii() {
+        let key = make_key(0xA1);
+        let pt = "GITHUB_PERSONAL_ACCESS_TOKEN=ghp_abcdefghijklmnop";
+        let ct = encrypt(pt, &key).expect("encrypt OK");
+        // Ciphertext never leaks the plaintext (Base64 of nonce||ciphertext;
+        // the pt would never be embedded verbatim under a real AEAD).
+        assert!(!ct.contains("ghp_"));
+        let back = decrypt(&ct, &key).expect("decrypt OK");
+        assert_eq!(back, pt);
+    }
+
+    #[test]
+    fn encrypt_decrypt_roundtrip_empty() {
+        let key = make_key(0);
+        let ct = encrypt("", &key).expect("empty plaintext is valid");
+        let back = decrypt(&ct, &key).expect("decrypt OK");
+        assert_eq!(back, "");
+    }
+
+    #[test]
+    fn encrypt_decrypt_roundtrip_utf8_and_emoji() {
+        // Real ENV values can carry accented chars (FR labels in custom
+        // plugins) and even emoji. UTF-8 must survive the bytes round-trip.
+        let key = make_key(0x5A);
+        let pt = "clé:été✨ — naïve / accentué — 漢字 — \n\t\0";
+        let ct = encrypt(pt, &key).expect("encrypt OK");
+        let back = decrypt(&ct, &key).expect("decrypt OK");
+        assert_eq!(back, pt);
+    }
+
+    #[test]
+    fn encrypt_decrypt_roundtrip_large() {
+        // Some custom plugins ship JSON schemas in env values (~4-8 KB).
+        let key = make_key(0x33);
+        let pt: String = (0..8_192).map(|i| ((i % 95) as u8 + 32) as char).collect();
+        let ct = encrypt(&pt, &key).expect("encrypt OK");
+        let back = decrypt(&ct, &key).expect("decrypt OK");
+        assert_eq!(back, pt);
+    }
+
+    #[test]
+    fn encrypt_produces_different_ciphertext_for_same_plaintext() {
+        // Nonce is randomised on every call — two encrypts of the same
+        // plaintext under the same key MUST diverge (otherwise a leaked
+        // ciphertext could be matched against a known pt).
+        let key = make_key(0x77);
+        let a = encrypt("same-plaintext", &key).unwrap();
+        let b = encrypt("same-plaintext", &key).unwrap();
+        assert_ne!(a, b, "nonce reuse would be a hard-security regression");
+    }
+
+    #[test]
+    fn decrypt_rejects_aead_tag_tampering() {
+        // Flip one byte of the ciphertext body — AEAD must refuse, not
+        // return garbled plaintext. This is the single most important
+        // anti-tampering guarantee of AES-GCM.
+        let key = make_key(0x42);
+        let ct = encrypt("secret-payload", &key).unwrap();
+        let mut bytes = B64.decode(&ct).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0x01;
+        let tampered = B64.encode(&bytes);
+        let err = decrypt(&tampered, &key).expect_err("tampering must fail");
+        assert!(err.contains("Decryption failed"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn decrypt_rejects_wrong_key() {
+        let k1 = make_key(0x10);
+        let k2 = make_key(0x20);
+        let ct = encrypt("payload", &k1).unwrap();
+        let err = decrypt(&ct, &k2).expect_err("wrong key must fail");
+        assert!(err.contains("Decryption failed"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn decrypt_rejects_truncated_ciphertext() {
+        // A ciphertext shorter than nonce + 1 byte cannot possibly be
+        // valid — caller-friendly explicit error instead of an aead panic.
+        let key = make_key(0xFF);
+        let err = decrypt(&B64.encode([1u8; 5]), &key).expect_err("too short");
+        assert!(err.contains("too short"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn decrypt_rejects_invalid_base64() {
+        let key = make_key(0x01);
+        let err = decrypt("===this-is-not-base64===", &key).expect_err("bad b64");
+        assert!(err.contains("Base64"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn generate_secret_is_64_hex_chars_and_unique_per_call() {
+        let s1 = generate_secret();
+        let s2 = generate_secret();
+        assert_eq!(s1.len(), 64);
+        assert!(s1.chars().all(|c| c.is_ascii_hexdigit()));
+        // Collision in 256-bit space is astronomically unlikely. Two calls
+        // returning the same value flags an OsRng wiring bug.
+        assert_ne!(s1, s2, "generate_secret must produce fresh entropy each call");
+    }
+
+    #[test]
+    fn parse_secret_roundtrip_with_generate_secret() {
+        let hex = generate_secret();
+        let key = parse_secret(&hex).expect("valid hex must parse");
+        assert_eq!(key.len(), 32);
+        // The parsed key must actually decrypt what its hex twin encrypted.
+        let ct = encrypt("token-value", &key).unwrap();
+        let pt = decrypt(&ct, &key).unwrap();
+        assert_eq!(pt, "token-value");
+    }
+
+    #[test]
+    fn parse_secret_rejects_wrong_length() {
+        let short = "deadbeef".to_string();
+        let err = parse_secret(&short).expect_err("wrong length must fail");
+        assert!(err.contains("32 bytes"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn parse_secret_rejects_non_hex() {
+        let err = parse_secret("zz".repeat(32).as_str()).expect_err("non-hex must fail");
+        assert!(err.contains("Invalid hex"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn parse_secret_rejects_odd_length() {
+        let err = parse_secret("abc").expect_err("odd-length must fail");
+        assert!(err.contains("Odd-length"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn mask_value_short_strings_fully_masked() {
+        // Display safety : values ≤ 6 chars are entirely masked (otherwise
+        // the prefix/suffix tail would dominate and leak the secret).
+        assert_eq!(mask_value(""), "");
+        assert_eq!(mask_value("a"), "*");
+        assert_eq!(mask_value("abcdef"), "******");
+    }
+
+    #[test]
+    fn mask_value_longer_strings_show_first_two_and_last_two() {
+        assert_eq!(mask_value("abcdefg"), "ab...fg");
+        assert_eq!(mask_value("ghp_abcdefghijklmnop"), "gh...op");
+    }
+}

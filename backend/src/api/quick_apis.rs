@@ -601,6 +601,41 @@ mod tests {
     }
 
     #[test]
+    fn normalize_batch_items_empty_input_returns_empty() {
+        let out = normalize_batch_items(&[], Some("host"));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn normalize_batch_items_number_passes_through_unchanged() {
+        // Numbers / bools / null are passed through unchanged — they aren't
+        // strings, so the wrap-into-object logic doesn't kick in.
+        let items = vec![serde_json::json!(42), serde_json::json!(true), serde_json::json!(null)];
+        let out = normalize_batch_items(&items, Some("host"));
+        assert_eq!(out, items);
+    }
+
+    #[test]
+    fn normalize_batch_items_array_items_pass_through() {
+        // An item that's itself an array is non-canonical, but must not
+        // panic and must not be silently coerced — pass-through is honest.
+        let items = vec![serde_json::json!([1, 2, 3])];
+        let out = normalize_batch_items(&items, Some("host"));
+        assert_eq!(out.len(), 1);
+        assert!(out[0].is_array());
+    }
+
+    #[test]
+    fn normalize_batch_items_with_empty_string_var_name_still_wraps_string() {
+        // `Some("")` is logically odd but legal — should still produce
+        // an object with an empty-string key. The downstream renderer
+        // will then ignore that key (it's unreferenceable in templates).
+        let items = vec![serde_json::json!("x")];
+        let out = normalize_batch_items(&items, Some(""));
+        assert_eq!(out, vec![serde_json::json!({ "": "x" })]);
+    }
+
+    #[test]
     fn batch_run_strip_signal_before_envelope_parse() {
         // Regression guard for the same bug we hit on `/test-api-call`:
         // the batch handler also has to strip the trailing `\n[SIGNAL: ...]`

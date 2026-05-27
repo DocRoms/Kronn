@@ -23,7 +23,7 @@ mod tests {
             language: "en".into(),
             participants: vec![AgentType::ClaudeCode],
             messages: vec![],
-            message_count: 0,
+            message_count: 0, non_system_message_count: 0,
             skill_ids: vec![],
             profile_ids: vec![],
             directive_ids: vec![],
@@ -49,6 +49,7 @@ mod tests {
 
     fn make_message(id: &str, role: MessageRole, agent: Option<AgentType>) -> DiscussionMessage {
         DiscussionMessage {
+            lint_report: None,
             id: id.into(),
             role,
             content: format!("Content of {}", id),
@@ -95,6 +96,56 @@ mod tests {
         // d1 was updated more recently, should be first (ORDER BY updated_at DESC)
         assert_eq!(all[0].id, "d1");
         assert_eq!(all[1].id, "d2");
+    }
+
+    #[test]
+    fn list_discussions_by_run_filters_and_orders_by_created_at() {
+        let conn = test_conn();
+        let base = Utc::now();
+        let ts = base.to_rfc3339();
+
+        // discussions.workflow_run_id has a FK to workflow_runs(id), which in
+        // turn FK's to workflows(id) — seed the parents so the inserts are
+        // FK-valid (foreign_keys=ON in test_conn).
+        conn.execute(
+            "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at)
+             VALUES ('wf-x', 'Test WF', '{}', '[]', ?1, ?1)",
+            rusqlite::params![ts],
+        ).unwrap();
+        for run_id in ["run-x", "run-y"] {
+            conn.execute(
+                "INSERT INTO workflow_runs (id, workflow_id, started_at) VALUES (?1, 'wf-x', ?2)",
+                rusqlite::params![run_id, ts],
+            ).unwrap();
+        }
+
+        // Two children of run-x (inserted newest-first to prove ASC sort),
+        // one child of a different run, one with no run at all.
+        let mut a = make_discussion("child-a");
+        a.workflow_run_id = Some("run-x".into());
+        a.created_at = base + chrono::Duration::seconds(10);
+        insert_discussion(&conn, &a).unwrap();
+
+        let mut b = make_discussion("child-b");
+        b.workflow_run_id = Some("run-x".into());
+        b.created_at = base; // earlier → should sort first
+        insert_discussion(&conn, &b).unwrap();
+
+        let mut other = make_discussion("child-other");
+        other.workflow_run_id = Some("run-y".into());
+        insert_discussion(&conn, &other).unwrap();
+
+        let orphan = make_discussion("orphan"); // workflow_run_id = None
+        insert_discussion(&conn, &orphan).unwrap();
+
+        let run_x = list_discussions_by_run(&conn, "run-x").unwrap();
+        assert_eq!(run_x.len(), 2, "only the two run-x children should match");
+        // ORDER BY created_at ASC → b (base) before a (base+10s).
+        assert_eq!(run_x[0].id, "child-b");
+        assert_eq!(run_x[1].id, "child-a");
+
+        // Unknown run → empty, never an error.
+        assert!(list_discussions_by_run(&conn, "run-does-not-exist").unwrap().is_empty());
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -527,6 +578,7 @@ mod tests {
 
         // Simulate the switch message insertion (same as API handler does)
         let msg = DiscussionMessage {
+            lint_report: None,
             id: "switch-msg-1".into(),
             role: MessageRole::User,
             content: "[Agent switch: ClaudeCode → Kiro] You are now the primary agent.".into(),
@@ -654,5 +706,72 @@ mod tests {
         let files = list_context_files(&conn, "d-disk").unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].disk_path, Some("/project/.kronn/context-files/abc_chart.png".to_string()));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // 0.8.7 — non_system_message_count: the unread-badge basis.
+    //
+    // The streaming layer persists every tool call + every cached-summary
+    // breadcrumb as its own `MessageRole::System` message, which inflates
+    // `message_count`. The user-facing "messages à lire" badge tracks
+    // `non_system_message_count` instead. These tests pin that contract.
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn non_system_message_count_excludes_system_rows() {
+        let conn = test_conn();
+        let disc = make_discussion("d-mix");
+        insert_discussion(&conn, &disc).unwrap();
+
+        // Two real exchanges (User → Agent) + six System breadcrumbs
+        // (simulates a workflow run with 6 tool / summary lines per reply).
+        insert_message(&conn, "d-mix", &make_message("u1", MessageRole::User, None)).unwrap();
+        insert_message(&conn, "d-mix", &make_message("a1", MessageRole::Agent, Some(AgentType::ClaudeCode))).unwrap();
+        for i in 0..6 {
+            insert_message(
+                &conn, "d-mix",
+                &make_message(&format!("s{i}"), MessageRole::System, None),
+            ).unwrap();
+        }
+
+        let listed = list_discussions(&conn).unwrap();
+        let d = listed.iter().find(|d| d.id == "d-mix").unwrap();
+        assert_eq!(d.message_count, 8, "total includes System rows");
+        assert_eq!(
+            d.non_system_message_count, 2,
+            "the badge basis must exclude System rows (1 User + 1 Agent = 2)"
+        );
+
+        // get_discussion path populates the field from the loaded messages
+        // array (not the SQL subquery) — both code paths must agree.
+        let got = get_discussion(&conn, "d-mix").unwrap().unwrap();
+        assert_eq!(got.message_count, 8);
+        assert_eq!(got.non_system_message_count, 2);
+    }
+
+    #[test]
+    fn non_system_message_count_is_zero_for_empty_discussion() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-empty")).unwrap();
+        let listed = list_discussions(&conn).unwrap();
+        let d = listed.iter().find(|d| d.id == "d-empty").unwrap();
+        assert_eq!(d.message_count, 0);
+        assert_eq!(d.non_system_message_count, 0);
+    }
+
+    #[test]
+    fn non_system_message_count_equals_message_count_when_no_system_rows() {
+        // Sanity guard: a disc with only User+Agent rows must report both
+        // counts equal (otherwise the badge would under-count real replies).
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-clean")).unwrap();
+        insert_message(&conn, "d-clean", &make_message("u1", MessageRole::User, None)).unwrap();
+        insert_message(&conn, "d-clean", &make_message("a1", MessageRole::Agent, Some(AgentType::ClaudeCode))).unwrap();
+        insert_message(&conn, "d-clean", &make_message("u2", MessageRole::User, None)).unwrap();
+
+        let listed = list_discussions(&conn).unwrap();
+        let d = listed.iter().find(|d| d.id == "d-clean").unwrap();
+        assert_eq!(d.message_count, 3);
+        assert_eq!(d.non_system_message_count, 3);
     }
 }

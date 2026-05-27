@@ -1,0 +1,51 @@
+{"text":"This is a casual greeting, nothing technical here.","expected_unsourced":0,"category":"neutral_prose"}
+{"text":"On a discuté du planning pendant la réunion d'hier.","expected_unsourced":0,"category":"neutral_prose"}
+{"text":"Bonjour, comment ça va aujourd'hui?","expected_unsourced":0,"category":"short_greeting"}
+{"text":"Voici quelques notes générales sur le projet, sans rien de spécifique.","expected_unsourced":0,"category":"neutral_prose"}
+{"text":"L'équipe d'Élodie a configuré le déploiement chez Vercel.","expected_unsourced":0,"category":"apostrophe_proper_noun"}
+{"text":"Ortiz's PR landed yesterday after O'Brien reviewed it.","expected_unsourced":0,"category":"apostrophe_proper_noun"}
+{"text":"D'après ce qu'a dit l'équipe d'André, tout est OK.","expected_unsourced":0,"category":"apostrophe_proper_noun"}
+{"text":"Version 1.2.3 sort demain selon le calendrier prévu.","expected_unsourced":0,"category":"bare_semver"}
+{"text":"On vise une release v4.5.0 pour la fin du mois.","expected_unsourced":0,"category":"bare_semver"}
+{"text":"The roadmap mentions 2.0 but nothing more concrete than that yet.","expected_unsourced":0,"category":"bare_semver"}
+{"text":"Cette fonctionnalité est disponible dans la doc mise à jour hier.","expected_unsourced":0,"category":"generic_available_in"}
+{"text":"On a ajouté dans la sidebar un raccourci vers les paramètres.","expected_unsourced":0,"category":"generic_added_in"}
+{"text":"We added in a new dropdown for the user picker last sprint.","expected_unsourced":0,"category":"generic_added_in"}
+{"text":"Reviewing the current version of the layout before we ship.","expected_unsourced":0,"category":"generic_current_version"}
+{"text":"Voici une démo du dashboard, regarde les graphiques.","expected_unsourced":0,"category":"neutral_prose"}
+{"text":"```rust\nlet endpoint = returns_default();\n// the function is implemented here\n```","expected_unsourced":0,"category":"fenced_code"}
+{"text":"Voici l'impl :\n```python\ndef the_function():\n    return the_default\n```\nDone.","expected_unsourced":0,"category":"fenced_code"}
+{"text":"Quick clarification about what we discussed earlier — nothing actionable yet.","expected_unsourced":0,"category":"short_meta"}
+{"text":"I think the API might return a 404 here, but let me check.","expected_unsourced":0,"category":"hedged_claim"}
+{"text":"I'm not sure if the route is /api/users or /api/v1/users — to verify.","expected_unsourced":0,"category":"hedged_claim"}
+{"text":"Je crois que le token expire après 1h mais à vérifier.","expected_unsourced":0,"category":"hedged_claim_fr"}
+{"text":"Probablement c'est implémenté dans le middleware d'auth, je vérifie.","expected_unsourced":0,"category":"hedged_claim_fr"}
+{"text":"Sans certitude, je dirais que la valeur par défaut est 30s.","expected_unsourced":0,"category":"hedged_claim_fr"}
+{"text":"Selon `[src: file: backend/src/lib.rs:440]`, le port par défaut est 3140.","expected_unsourced":0,"category":"anchored_with_src"}
+{"text":"Le port par défaut est 3140 d'après `backend/src/main.rs:42`.","expected_unsourced":0,"category":"anchored_with_path"}
+{"text":"La fonction `parse_url()` returns a `Result<Url, ParseError>` selon https://docs.rs/url/2.5/url/struct.Url.html.","expected_unsourced":0,"category":"anchored_with_url"}
+{"text":"This module follows the trait outlined in https://example.com/spec.","expected_unsourced":0,"category":"anchored_with_url"}
+{"text":"L'objet `User` est défini dans `src/models/user.rs:12`.","expected_unsourced":0,"category":"anchored_with_path"}
+{"text":"This is implemented via `tokio::sync::Mutex` (see https://docs.rs/tokio/latest/tokio/sync/struct.Mutex.html).","expected_unsourced":0,"category":"anchored_with_url"}
+{"text":"Look at `frontend/src/App.tsx:1` for the entry point.","expected_unsourced":0,"category":"anchored_with_path"}
+{"text":"Random observation about the weather today, nothing project-related.","expected_unsourced":0,"category":"neutral_prose"}
+{"text":"On va voir si ça passe en CI demain matin.","expected_unsourced":0,"category":"neutral_prose"}
+{"text":"Just a quick note: the next sprint planning is on Friday.","expected_unsourced":0,"category":"neutral_prose"}
+{"text":"Si tu veux, on en reparle après ta pause déjeuner.","expected_unsourced":0,"category":"neutral_prose"}
+{"text":"Merci pour le rappel, j'avais oublié.","expected_unsourced":0,"category":"short_meta"}
+{"text":"Pas de souci, on fera ça la semaine prochaine.","expected_unsourced":0,"category":"neutral_prose"}
+{"text":"OK je regarde, j'ai un créneau cet après-midi.","expected_unsourced":0,"category":"neutral_prose"}
+{"text":"Question d'organisation : qui prend la prochaine garde ?","expected_unsourced":0,"category":"neutral_prose"}
+{"text":"Quick FYI: the team retrospective notes are in the shared drive.","expected_unsourced":0,"category":"neutral_prose"}
+{"text":"On va devoir prioriser, on a trop de tickets en attente.","expected_unsourced":0,"category":"neutral_prose"}
+{"text":"Yeah, that makes sense, let's go with that approach.","expected_unsourced":0,"category":"short_meta"}
+{"text":"Right, I'll handle the ticket triage tomorrow morning.","expected_unsourced":0,"category":"short_meta"}
+{"text":"Reminder: the standup is at 10am, not 9am as usual.","expected_unsourced":0,"category":"neutral_prose"}
+{"text":"Just to clarify, we're talking about the staging environment here.","expected_unsourced":0,"category":"short_meta"}
+{"text":"Pour info, le user-1234 a finalement réussi à se connecter.","expected_unsourced":0,"category":"short_meta"}
+{"text":"Alright, sounds like a plan, let's iterate on it next week.","expected_unsourced":0,"category":"short_meta"}
+{"text":"Génial, merci ! Je rebondis là-dessus dès que possible.","expected_unsourced":0,"category":"short_meta"}
+{"text":"Hmm, je vais relire la spec, j'ai un doute sur ce point.","expected_unsourced":0,"category":"hedged_claim_fr"}
+{"text":"Je note l'idée, on en discute en archi mardi.","expected_unsourced":0,"category":"neutral_prose"}
+{"text":"On reprend ça à tête reposée demain.","expected_unsourced":0,"category":"neutral_prose"}
+{"text":"D'accord, ce que tu proposes me semble cohérent.","expected_unsourced":0,"category":"short_meta"}

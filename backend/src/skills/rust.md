@@ -28,3 +28,7 @@ Run `cargo clippy -- -D warnings && cargo test` before considering work done.
 
 `✓ let config = std::fs::read_to_string(path)?;`
 `✗ let config = std::fs::read_to_string(path).unwrap();`
+
+## Sourcing
+
+See `docs/AGENTS.md` § Anti-Hallucination Protocol for the canonical cascade and citation grammar. Domain note: crate version → `Cargo.lock` line ; signature → `docs.rs` URL pinned to that version ; MSRV → `rust-version` field. Versions move, the lie ships in a PR.

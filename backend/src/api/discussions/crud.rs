@@ -111,6 +111,7 @@ pub async fn create(
 
     let now = Utc::now();
     let initial_message = DiscussionMessage {
+        lint_report: None,
         id: Uuid::new_v4().to_string(),
         role: MessageRole::User,
         content: req.initial_prompt,
@@ -133,7 +134,7 @@ pub async fn create(
         language,
         participants: vec![req.agent.clone()],
         messages: vec![initial_message.clone()],
-        message_count: 1,
+        message_count: 1, non_system_message_count: 1,
         skill_ids: req.skill_ids,
         profile_ids: req.profile_ids,
         directive_ids: req.directive_ids,
@@ -300,6 +301,7 @@ pub async fn update(
             // (System messages are filtered from the agent prompt)
             let old_name = old_agent_name.as_deref().unwrap_or("?");
             let switch_msg = crate::models::DiscussionMessage {
+                lint_report: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 role: crate::models::MessageRole::User,
                 content: format!(

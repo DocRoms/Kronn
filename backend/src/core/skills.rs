@@ -43,6 +43,11 @@ const BUILTIN_SKILLS: &[BuiltinSkill] = &[
     // "✨ Improve with AI" button on every QP card.
     BuiltinSkill { id: "qp-improver", content: include_str!("../skills/qp-improver.md") },
     BuiltinSkill { id: "kronn-docs", content: include_str!("../skills/kronn-docs.md") },
+    // 0.8.7 — authoring cheat-sheet for the AGENTS.md convention v1.
+    // Attach to discs where the agent will write/maintain docs/AGENTS.md.
+    // Full spec is one `convention_get` MCP call away (defers the cost
+    // until the agent actually needs the long form).
+    BuiltinSkill { id: "kronn-doc-author", content: include_str!("../skills/kronn-doc-author.md") },
     // Business
     BuiltinSkill { id: "seo", content: include_str!("../skills/seo.md") },
     BuiltinSkill { id: "web-performance", content: include_str!("../skills/web-performance.md") },
@@ -486,6 +491,41 @@ mod tests {
     fn build_skills_prompt_unknown_ids_ignored() {
         let prompt = build_skills_prompt(&["nonexistent-1".into(), "nonexistent-2".into()]);
         assert!(prompt.is_empty());
+    }
+
+    // 0.8.7 — Kronn AGENTS.md convention v1 was just shipped. The
+    // `kronn-doc-author` builtin skill is the *cheat-sheet* surface
+    // (the full ~200-line spec is fetched on-demand via the
+    // `convention_get` MCP tool). These tests pin the contract so a
+    // future PR doesn't accidentally drop the skill from the registry
+    // or strip its key authoring rules.
+    #[test]
+    fn kronn_doc_author_is_registered_and_builtin() {
+        let skill = get_skill("kronn-doc-author").expect("kronn-doc-author must be registered");
+        assert!(skill.is_builtin);
+        assert_eq!(skill.category, SkillCategory::Domain);
+        assert!(!skill.name.is_empty());
+        assert!(!skill.icon.is_empty());
+    }
+
+    #[test]
+    fn kronn_doc_author_covers_the_convention_essentials() {
+        let skill = get_skill("kronn-doc-author").unwrap();
+        let body = skill.content.as_str();
+        // Section markers — without these the agent can't produce a
+        // section the lint will recognise.
+        assert!(body.contains("kronn:section"));
+        assert!(body.contains("curated=\"ai\""));
+        assert!(body.contains("curated=\"human\""));
+        // The [src: …] grammar in a form an agent can copy.
+        assert!(body.contains("[src:"));
+        // The three trust extremes that drive author behaviour.
+        assert!(body.contains("training-data")); // forbidden tier
+        assert!(body.contains("inferred"));      // honest fallback
+        assert!(body.contains("file"));          // mechanically verified
+        // The pointer to the canonical spec — keeps the cheat-sheet
+        // small + sends the agent to fetch the full spec when needed.
+        assert!(body.contains("convention_get"));
     }
 
     #[test]

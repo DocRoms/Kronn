@@ -16,6 +16,11 @@ async fn main() -> anyhow::Result<()> {
         None => config::default_config(),
     };
 
+    // 0.8.7 anti-hallucination — arm the process-global mode flag from config
+    // so the runner chokepoint can gate P1/P2 without threading config through
+    // every agent-spawn site. Re-set on every save (see api::setup).
+    kronn::core::anti_halluc::set_mode(&app_config.server.anti_hallucination_mode);
+
     // Initialize tracing — write to stdout (Docker best practice: stdout for
     // logs, stderr for panics) AND to the in-memory ringbuffer that the
     // Settings > Debug viewer reads via `GET /api/debug/logs`.

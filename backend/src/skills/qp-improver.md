@@ -143,3 +143,7 @@ After calling, echo the returned `id` back to the user: `Quick Prompt drafted as
 - **Never claim a model tier improvement** without naming the specific reasoning the prompt needs.
 - **Don't lose the user's intent.** Your job is to sharpen the prompt, not to repurpose it.
 - **One refactor per turn.** If the user asks for a second pass, you re-audit the previous output.
+
+## Sourcing
+
+See `docs/AGENTS.md` § Anti-Hallucination Protocol for the canonical cascade and citation grammar. Domain note: skill / profile / directive bindings → only ids confirmed via `qp_list` or the relevant list endpoint ; an invented UUID silently strips the binding at run time.

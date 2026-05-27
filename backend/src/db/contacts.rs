@@ -225,4 +225,119 @@ mod tests {
         assert!(found.is_some());
         assert_eq!(found.unwrap().pseudo, "PeerDelta");
     }
+
+    #[test]
+    fn parse_invite_code_trims_whitespace() {
+        // Defensive — pasted invite codes commonly have leading/trailing spaces.
+        let parsed = parse_invite_code("  kronn:user@host:3456  \n").unwrap();
+        assert_eq!(parsed.0, "user");
+        assert_eq!(parsed.1, "http://host:3456");
+    }
+
+    #[test]
+    fn parse_invite_code_keeps_complex_pseudo_and_host() {
+        // Hyphens, underscores, dots in pseudo / host — must all survive.
+        let (pseudo, url) = parse_invite_code("kronn:user-with_dots.x@100.65.0.1:9999").unwrap();
+        assert_eq!(pseudo, "user-with_dots.x");
+        assert_eq!(url, "http://100.65.0.1:9999");
+    }
+
+    #[test]
+    fn get_contact_returns_none_for_unknown_id() {
+        let conn = test_conn();
+        let res = get_contact(&conn, "nope").unwrap();
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn update_contact_status_unknown_id_returns_false() {
+        let conn = test_conn();
+        let changed = update_contact_status(&conn, "does-not-exist", "accepted").unwrap();
+        assert!(!changed, "updating an unknown id must report false");
+    }
+
+    #[test]
+    fn delete_contact_unknown_id_returns_false() {
+        let conn = test_conn();
+        let removed = delete_contact(&conn, "does-not-exist").unwrap();
+        assert!(!removed, "deleting an unknown id must report false");
+    }
+
+    #[test]
+    fn find_contact_by_invite_code_unknown_returns_none() {
+        let conn = test_conn();
+        let res = find_contact_by_invite_code(&conn, "kronn:nobody@nowhere:0").unwrap();
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn list_contacts_returns_empty_vec_when_table_empty() {
+        let conn = test_conn();
+        let contacts = list_contacts(&conn).unwrap();
+        assert!(contacts.is_empty());
+    }
+
+    #[test]
+    fn insert_contact_preserves_optional_avatar_none() {
+        let conn = test_conn();
+        let now = Utc::now();
+        let contact = Contact {
+            id: "c-no-avatar".into(),
+            pseudo: "PeerNoAvatar".into(),
+            avatar_email: None,
+            kronn_url: "http://100.64.5.5:3456".into(),
+            invite_code: "kronn:noavatar@100.64.5.5:3456".into(),
+            status: "pending".into(),
+            created_at: now,
+            updated_at: now,
+        };
+        insert_contact(&conn, &contact).unwrap();
+        let loaded = get_contact(&conn, "c-no-avatar").unwrap().unwrap();
+        assert!(loaded.avatar_email.is_none());
+        assert_eq!(loaded.pseudo, "PeerNoAvatar");
+        assert_eq!(loaded.status, "pending");
+    }
+
+    #[test]
+    fn insert_contact_duplicate_id_errors() {
+        // The PK on contacts.id must reject duplicates — verifies the
+        // migrations declare it (regression guard against schema drift).
+        let conn = test_conn();
+        let now = Utc::now();
+        let contact = Contact {
+            id: "dup-id".into(),
+            pseudo: "PeerOne".into(),
+            avatar_email: None,
+            kronn_url: "http://100.64.6.6:3456".into(),
+            invite_code: "kronn:one@100.64.6.6:3456".into(),
+            status: "accepted".into(),
+            created_at: now,
+            updated_at: now,
+        };
+        insert_contact(&conn, &contact).unwrap();
+        // Second insert with same id must fail.
+        let result = insert_contact(&conn, &contact);
+        assert!(result.is_err(), "duplicate id must be rejected");
+    }
+
+    #[test]
+    fn list_contacts_orders_by_creation() {
+        let conn = test_conn();
+        let now = Utc::now();
+        for (i, pseudo) in ["First", "Second", "Third"].iter().enumerate() {
+            let contact = Contact {
+                id: format!("ord-{}", i),
+                pseudo: (*pseudo).into(),
+                avatar_email: None,
+                kronn_url: format!("http://100.64.7.{}:3456", i),
+                invite_code: format!("kronn:{}@100.64.7.{}:3456", pseudo, i),
+                status: "accepted".into(),
+                created_at: now + chrono::Duration::seconds(i as i64),
+                updated_at: now,
+            };
+            insert_contact(&conn, &contact).unwrap();
+        }
+        let contacts = list_contacts(&conn).unwrap();
+        assert_eq!(contacts.len(), 3);
+    }
 }

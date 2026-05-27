@@ -239,6 +239,7 @@ pub async fn orchestrate(
         // Save system message
         {
             let msg = DiscussionMessage {
+                lint_report: None,
                 id: Uuid::new_v4().to_string(),
                 role: MessageRole::System,
                 content: sys_text.clone(),
@@ -398,6 +399,7 @@ pub async fn orchestrate(
                         // Save to DB — always runs even if client is gone
                         {
                             let msg = DiscussionMessage {
+                                lint_report: None,
                                 id: Uuid::new_v4().to_string(),
                                 role: MessageRole::Agent,
                                 content: result.response.clone(),
@@ -472,6 +474,7 @@ pub async fn orchestrate(
                     // Save synthesis to DB — always runs even if client is gone
                     {
                         let msg = DiscussionMessage {
+                            lint_report: None,
                             id: Uuid::new_v4().to_string(),
                             role: MessageRole::Agent,
                             content: format!("[Synthesis]\n\n{}", result.response),
@@ -746,6 +749,7 @@ pub(super) async fn maybe_generate_summary(
                     if let Err(e) = (|| -> anyhow::Result<()> {
                         crate::db::discussions::update_summary_cache(conn, &did, &summary, non_system_count)?;
                         let sys_msg = crate::models::DiscussionMessage {
+                            lint_report: None,
                             id: uuid::Uuid::new_v4().to_string(),
                             role: MessageRole::System,
                             content: format!(
@@ -1160,5 +1164,189 @@ mod error_hint_tests {
         let hint = detect_agent_error_hint("rate limit", &AgentType::Ollama)
             .expect("rate-limit pattern should match");
         assert!(hint.contains("Local Ollama server"), "got: {hint}");
+    }
+
+    // ── Coverage on other error patterns ────────────────────────────
+
+    #[test]
+    fn mcp_config_error_surfaces_actionable_hint() {
+        let hint = detect_agent_error_hint("Invalid MCP configuration: foo", &AgentType::ClaudeCode)
+            .expect("MCP config pattern should match");
+        assert!(hint.contains("MCP"), "hint should mention MCP: {hint}");
+        assert!(hint.contains("Refresh") || hint.contains("re-sync"),
+            "hint should suggest re-sync: {hint}");
+    }
+
+    #[test]
+    fn mcp_server_failed_to_start_pattern_matches() {
+        let hint = detect_agent_error_hint(
+            "MCP server github failed to start: command not found",
+            &AgentType::ClaudeCode,
+        ).expect("MCP server pattern should match");
+        assert!(hint.contains("MCP"));
+    }
+
+    #[test]
+    fn auth_error_401_returns_session_hint() {
+        let hint = detect_agent_error_hint("API error: 401 Unauthorized", &AgentType::ClaudeCode)
+            .expect("401 should match");
+        assert!(hint.contains("session") || hint.contains("API key"),
+            "auth error should mention session/key: {hint}");
+        assert!(hint.contains("/login"), "should suggest /login command");
+    }
+
+    #[test]
+    fn auth_error_authentication_error_keyword() {
+        // Common Anthropic SDK error string.
+        let hint = detect_agent_error_hint("authentication_error: invalid token", &AgentType::ClaudeCode)
+            .expect("authentication_error should match");
+        assert!(hint.contains("session") || hint.contains("API key"));
+    }
+
+    #[test]
+    fn auth_error_invalid_x_api_key_pattern() {
+        let hint = detect_agent_error_hint("Invalid x-api-key header", &AgentType::Codex)
+            .expect("x-api-key should match");
+        assert!(hint.contains("session") || hint.contains("API key"));
+    }
+
+    #[test]
+    fn server_overloaded_pattern_covers_capacity_keyword() {
+        let hint = detect_agent_error_hint("server at capacity", &AgentType::ClaudeCode)
+            .expect("capacity should match overloaded");
+        assert!(hint.contains("overloaded") || hint.contains("at capacity"),
+            "got: {hint}");
+    }
+
+    #[test]
+    fn server_overloaded_server_busy_keyword() {
+        let hint = detect_agent_error_hint("server_busy: try again", &AgentType::ClaudeCode)
+            .expect("server_busy should match");
+        assert!(hint.contains("overloaded") || hint.contains("Retry"));
+    }
+
+    #[test]
+    fn server_error_500_pattern_matches() {
+        let hint = detect_agent_error_hint("API error: 500 Internal Server Error", &AgentType::ClaudeCode)
+            .expect("500 should match");
+        assert!(hint.contains("server error") || hint.contains("unavailable"));
+    }
+
+    #[test]
+    fn server_error_502_pattern_matches() {
+        let hint = detect_agent_error_hint("502 Bad Gateway", &AgentType::Codex)
+            .expect("502 should match");
+        assert!(hint.contains("server error") || hint.contains("unavailable"));
+    }
+
+    #[test]
+    fn server_error_503_pattern_matches() {
+        let hint = detect_agent_error_hint("503 Service Unavailable", &AgentType::ClaudeCode)
+            .expect("503 should match");
+        assert!(hint.contains("server error") || hint.contains("unavailable"));
+    }
+
+    #[test]
+    fn quota_exhausted_insufficient_quota_matches() {
+        let hint = detect_agent_error_hint("insufficient_quota: free tier exhausted", &AgentType::Codex)
+            .expect("quota should match");
+        assert!(hint.contains("Quota") || hint.contains("billing"),
+            "got: {hint}");
+    }
+
+    #[test]
+    fn quota_payment_required_402_matches() {
+        let hint = detect_agent_error_hint("Payment required: 402", &AgentType::ClaudeCode)
+            .expect("402 should match");
+        assert!(hint.contains("Quota") || hint.contains("billing"));
+    }
+
+    #[test]
+    fn network_econnrefused_pattern_matches() {
+        let hint = detect_agent_error_hint("Error: ECONNREFUSED 127.0.0.1:443", &AgentType::ClaudeCode)
+            .expect("ECONNREFUSED should match");
+        assert!(hint.contains("Network"));
+    }
+
+    #[test]
+    fn network_dns_resolution_matches() {
+        let hint = detect_agent_error_hint("DNS resolution failed for api.anthropic.com", &AgentType::ClaudeCode)
+            .expect("DNS pattern should match");
+        assert!(hint.contains("Network"));
+    }
+
+    #[test]
+    fn network_timeout_pattern_matches() {
+        let hint = detect_agent_error_hint("Request timed out after 30s", &AgentType::ClaudeCode)
+            .expect("timeout should match");
+        assert!(hint.contains("Network"));
+    }
+
+    #[test]
+    fn permission_denied_pattern_matches() {
+        let hint = detect_agent_error_hint("Error: permission denied on /workspace/repos", &AgentType::ClaudeCode)
+            .expect("permission denied should match");
+        assert!(hint.contains("Permission denied"), "got: {hint}");
+        assert!(hint.contains("KRONN_REPOS_DIR") || hint.contains("Docker"),
+            "should give actionable Docker/repos guidance: {hint}");
+    }
+
+    #[test]
+    fn no_match_returns_none() {
+        // A generic error that doesn't match any pattern should yield
+        // None so the caller can fall back to the raw stderr.
+        let result = detect_agent_error_hint("something unspecific", &AgentType::ClaudeCode);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn empty_output_returns_none() {
+        assert!(detect_agent_error_hint("", &AgentType::ClaudeCode).is_none());
+    }
+
+    #[test]
+    fn case_insensitive_match() {
+        // Production errors come in mixed case (HTTP server messages,
+        // stderr, JSON error objects). All matchers must be case-insensitive.
+        let hint = detect_agent_error_hint("RATE LIMIT REACHED", &AgentType::ClaudeCode);
+        assert!(hint.is_some(), "uppercase rate limit should still match");
+    }
+
+    // ── provider_status_line — per-agent URL contract ─────────────────
+
+    #[test]
+    fn provider_status_returns_anthropic_for_claude_code_via_rate_limit_hint() {
+        let hint = detect_agent_error_hint("rate limit", &AgentType::ClaudeCode).unwrap();
+        assert!(hint.contains("status.anthropic.com"));
+    }
+
+    #[test]
+    fn provider_status_returns_openai_for_codex_via_rate_limit_hint() {
+        let hint = detect_agent_error_hint("rate limit", &AgentType::Codex).unwrap();
+        assert!(hint.contains("status.openai.com"));
+    }
+
+    #[test]
+    fn provider_status_returns_gemini_status_url() {
+        let hint = detect_agent_error_hint("rate limit", &AgentType::GeminiCli).unwrap();
+        assert!(hint.contains("status.cloud.google.com"));
+    }
+
+    #[test]
+    fn provider_status_returns_github_for_copilot() {
+        let hint = detect_agent_error_hint("rate limit", &AgentType::CopilotCli).unwrap();
+        assert!(hint.contains("githubstatus.com"));
+    }
+
+    #[test]
+    fn provider_status_vibe_points_at_mistral_status() {
+        let hint = detect_agent_error_hint("rate limit", &AgentType::Vibe).unwrap();
+        assert!(hint.contains("status.mistral.ai"));
+    }
+
+    #[test]
+    fn provider_status_kiro_points_at_kiro_dev() {
+        let hint = detect_agent_error_hint("rate limit", &AgentType::Kiro).unwrap();
+        assert!(hint.contains("kiro.dev"));
     }
 }

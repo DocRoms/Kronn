@@ -517,4 +517,106 @@ mod tests {
         inject_item_vars(&mut ctx, &Value::String("EW-1".into()), 0);
         assert_eq!(ctx.render("{{batch.item}}").unwrap(), "EW-1");
     }
+
+    #[test]
+    fn value_kind_covers_all_serde_variants() {
+        assert_eq!(value_kind(&Value::Null), "null");
+        assert_eq!(value_kind(&Value::Bool(true)), "bool");
+        assert_eq!(value_kind(&Value::Number(1.into())), "number");
+        assert_eq!(value_kind(&Value::String("x".into())), "string");
+        assert_eq!(value_kind(&Value::Array(vec![])), "array");
+        assert_eq!(
+            value_kind(&Value::Object(serde_json::Map::new())),
+            "object"
+        );
+    }
+
+    #[test]
+    fn parse_items_rejects_number_root() {
+        let err = parse_items_as_objects("42").unwrap_err().to_string();
+        assert!(err.contains("expected a JSON array"), "got {err}");
+        assert!(err.contains("number"), "kind should be reported: {err}");
+    }
+
+    #[test]
+    fn parse_items_rejects_bool_root() {
+        let err = parse_items_as_objects("true").unwrap_err().to_string();
+        assert!(err.contains("expected a JSON array"));
+        assert!(err.contains("bool"));
+    }
+
+    #[test]
+    fn parse_items_rejects_null_root() {
+        let err = parse_items_as_objects("null").unwrap_err().to_string();
+        assert!(err.contains("null"));
+    }
+
+    #[test]
+    fn parse_items_object_without_any_array_field_errors() {
+        // Object with NO array-valued field → fall-through error.
+        let raw = r#"{"x": 1, "y": "z"}"#;
+        let err = parse_items_as_objects(raw).unwrap_err().to_string();
+        assert!(err.contains("did not contain an array field"), "got {err}");
+    }
+
+    #[test]
+    fn parse_items_invalid_json_reports_parser_error() {
+        let err = parse_items_as_objects("{not json").unwrap_err().to_string();
+        assert!(err.contains("expected a JSON array (or envelope)"), "got {err}");
+    }
+
+    #[test]
+    fn parse_items_envelope_data_must_be_array_or_fallback() {
+        // `data` is a string (not array) — falls through to "no array field" error.
+        let raw = r#"{"data": "not-an-array"}"#;
+        let result = parse_items_as_objects(raw);
+        // Either it falls through to the no-array error, or it surfaces the bad shape.
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_items_object_first_array_field_wins() {
+        // When multiple array fields exist, the iteration picks one (HashMap order
+        // is not stable but at least one IS picked — we just verify no error).
+        let raw = r#"{"a":[1,2], "b":[3,4,5]}"#;
+        let items = parse_items_as_objects(raw).unwrap();
+        assert!(items.len() == 2 || items.len() == 3, "got {items:?}");
+    }
+
+    #[test]
+    fn inject_item_vars_bool_and_null_field_values_render_safely() {
+        let mut ctx = TemplateContext::new();
+        let item = serde_json::json!({ "enabled": true, "deleted": null, "n": 5 });
+        inject_item_vars(&mut ctx, &item, 0);
+        assert_eq!(ctx.render("{{batch.item.enabled}}").unwrap(), "true");
+        assert_eq!(ctx.render("{{batch.item.deleted}}").unwrap(), "");
+        assert_eq!(ctx.render("{{batch.item.n}}").unwrap(), "5");
+    }
+
+    #[test]
+    fn inject_item_vars_number_item_jsonifies() {
+        // A bare number item must not panic — falls into the `_` arm
+        // and gets JSON-stringified into `batch.item`.
+        let mut ctx = TemplateContext::new();
+        inject_item_vars(&mut ctx, &Value::Number(42.into()), 0);
+        assert_eq!(ctx.render("{{batch.item}}").unwrap(), "42");
+    }
+
+    #[test]
+    fn fail_helper_builds_failed_outcome_with_message() {
+        // Smoke test the `fail` helper — it MUST mark the step Failed,
+        // copy the step name, and surface our message verbatim.
+        let step = WorkflowStep {
+            name: "test-step".into(),
+            step_type: crate::models::StepType::BatchApiCall,
+            ..Default::default()
+        };
+        let start = std::time::Instant::now();
+        let outcome = fail(&step, start, "boom");
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        assert_eq!(outcome.result.step_name, "test-step");
+        assert_eq!(outcome.result.output, "boom");
+        assert_eq!(outcome.result.tokens_used, 0);
+        assert!(outcome.condition_action.is_none());
+    }
 }

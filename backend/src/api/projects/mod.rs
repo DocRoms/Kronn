@@ -7,6 +7,7 @@ use crate::core::scanner;
 use crate::models::*;
 use crate::AppState;
 
+pub mod anti_hallu_inject;
 pub mod bootstrap;
 pub mod clone;
 pub mod crud;
@@ -14,6 +15,7 @@ pub mod git;
 pub mod migrate;
 pub mod template;
 
+pub use anti_hallu_inject::*;
 pub use bootstrap::*;
 pub use clone::*;
 pub use crud::*;

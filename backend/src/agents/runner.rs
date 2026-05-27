@@ -377,6 +377,14 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // Combine all context parts with explicit section markers
     // (helps non-Claude agents distinguish instructions from task)
     let mut parts = Vec::new();
+    // 0.8.7 anti-hallucination P1 — the sourcing directive goes FIRST, before
+    // any other context, so it frames everything the agent reads. Gated by the
+    // global mode (off → nothing injected, zero added tokens). This single
+    // chokepoint covers every agent surface (disc, audit, architect, QP
+    // improver, batch, summarization, orchestration) — see core::anti_halluc.
+    if let Some(preamble) = crate::core::anti_halluc::preamble_if_active() {
+        parts.push(preamble.to_string());
+    }
     if !user_context.is_empty() { parts.push(format!("=== USER CONTEXT (cross-project) ===\n\n{}", user_context)); }
     if !profiles_prompt.is_empty() { parts.push(format!("=== YOUR ROLE ===\n\n{}", profiles_prompt)); }
     if !skills_prompt.is_empty() { parts.push(format!("=== YOUR EXPERTISE ===\n\n{}", skills_prompt)); }

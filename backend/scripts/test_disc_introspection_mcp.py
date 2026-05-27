@@ -2426,5 +2426,269 @@ class McpRemoteControlToolListingTests(unittest.TestCase):
                 f"`{required}` listed but not dispatched")
 
 
+class QpBatchRunTests(unittest.TestCase):
+    """`qp_batch_run` MCP wrapper forwards to `POST /api/mcp/qp-batch-run`.
+
+    Contract:
+      - missing `qp_id` → RuntimeError, no HTTP
+      - missing / empty / non-list `items` → RuntimeError, no HTTP
+      - non-dict item → RuntimeError
+      - each item's `vars` coerced to {str: str}; `title` str-coerced; absent
+        title/vars keys omitted from the item
+      - `project_id` auto-inherited from current disc when absent
+      - explicit `project_id` / `batch_name` pass through
+    """
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.fake_http = mock.MagicMock(return_value={
+            "success": True,
+            "data": {
+                "run_id": "batch-run-1",
+                "qp_id": "qp-audit",
+                "qp_name": "Audit Quick Prompt",
+                "disc_ids": ["disc-1", "disc-2"],
+                "batch_total": 2,
+                "expected_duration_ms": 60_000,
+                "samples": 4,
+                "next_check": {"wait_seconds": 30, "reason": "…", "confidence": "baseline"},
+            },
+        })
+        self.http_patch = mock.patch.object(self.mod, "_http", self.fake_http)
+        self.http_patch.start()
+        self.addCleanup(self.http_patch.stop)
+        # No current disc by default — inheritance sub-test overrides.
+        self.mod._CURRENT_DISC_META_CACHE.update({"checked": True, "value": None})
+
+    def test_missing_qp_id_raises_before_http(self):
+        with self.assertRaises(RuntimeError):
+            self.mod.call_qp_batch_run({"items": [{"vars": {}}]})
+        self.fake_http.assert_not_called()
+
+    def test_missing_items_raises_before_http(self):
+        with self.assertRaises(RuntimeError):
+            self.mod.call_qp_batch_run({"qp_id": "qp-audit"})
+        self.fake_http.assert_not_called()
+
+    def test_empty_items_list_raises_before_http(self):
+        with self.assertRaises(RuntimeError):
+            self.mod.call_qp_batch_run({"qp_id": "qp-audit", "items": []})
+        self.fake_http.assert_not_called()
+
+    def test_non_list_items_raises_before_http(self):
+        with self.assertRaises(RuntimeError):
+            self.mod.call_qp_batch_run({"qp_id": "qp-audit", "items": "nope"})
+        self.fake_http.assert_not_called()
+
+    def test_non_dict_item_raises(self):
+        with self.assertRaises(RuntimeError):
+            self.mod.call_qp_batch_run({"qp_id": "qp-audit", "items": ["nope"]})
+        self.fake_http.assert_not_called()
+
+    def test_forwards_items_with_coerced_vars_and_title(self):
+        out = self.mod.call_qp_batch_run({
+            "qp_id": "qp-audit",
+            "items": [
+                {"title": "First", "vars": {"count": 3, "name": "TestUser"}},
+                {"vars": {"count": 4}},
+            ],
+        })
+        method, path, body = self.fake_http.call_args.args
+        self.assertEqual(method, "POST")
+        self.assertEqual(path, "/api/mcp/qp-batch-run")
+        self.assertEqual(body["qp_id"], "qp-audit")
+        self.assertEqual(
+            body["items"][0],
+            {"title": "First", "vars": {"count": "3", "name": "TestUser"}},
+        )
+        # Second item had no title key — it stays absent, vars coerced.
+        self.assertEqual(body["items"][1], {"vars": {"count": "4"}})
+        self.assertEqual(out["run_id"], "batch-run-1")
+
+    def test_auto_inherits_project_id_when_absent(self):
+        self.mod._CURRENT_DISC_META_CACHE.update({
+            "checked": True,
+            "value": {"id": "disc-parent", "project_id": "proj-inherited"},
+        })
+        self.mod.call_qp_batch_run({"qp_id": "qp-audit", "items": [{"vars": {}}]})
+        _, _, body = self.fake_http.call_args.args
+        self.assertEqual(body["project_id"], "proj-inherited")
+
+    def test_explicit_project_id_and_batch_name_pass_through(self):
+        self.mod.call_qp_batch_run({
+            "qp_id": "qp-audit",
+            "items": [{"vars": {}}],
+            "project_id": "proj-explicit",
+            "batch_name": "My Batch",
+        })
+        _, _, body = self.fake_http.call_args.args
+        self.assertEqual(body["project_id"], "proj-explicit")
+        self.assertEqual(body["batch_name"], "My Batch")
+
+
+class WorkflowRunDiscussionsTests(unittest.TestCase):
+    """`workflow_run_discussions` wrapper → GET /api/mcp/workflow-run-discussions/<run_id>."""
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.fake_http = mock.MagicMock(return_value={
+            "success": True,
+            "data": {
+                "run_id": "batch-run-1",
+                "disc_count": 1,
+                "discussions": [
+                    {
+                        "disc_id": "disc-1", "title": "First", "agent": "ClaudeCode",
+                        "message_count": 3, "archived": False,
+                        "created_at": "2026-05-25T10:00:00Z",
+                    },
+                ],
+            },
+        })
+        self.http_patch = mock.patch.object(self.mod, "_http", self.fake_http)
+        self.http_patch.start()
+        self.addCleanup(self.http_patch.stop)
+
+    def test_missing_run_id_raises_before_http(self):
+        with self.assertRaises(RuntimeError):
+            self.mod.call_workflow_run_discussions({})
+        self.fake_http.assert_not_called()
+
+    def test_forwards_get_with_run_id_in_path(self):
+        out = self.mod.call_workflow_run_discussions({"run_id": "batch-run-1"})
+        args = self.fake_http.call_args.args
+        self.assertEqual(args[0], "GET")
+        self.assertEqual(args[1], "/api/mcp/workflow-run-discussions/batch-run-1")
+        self.assertEqual(out["disc_count"], 1)
+        self.assertEqual(out["discussions"][0]["disc_id"], "disc-1")
+
+
+class WorkflowWaitForCompletionTests(unittest.TestCase):
+    """`workflow_wait_for_completion` wrapper → POST /api/mcp/workflow-wait-for-completion."""
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.fake_http = mock.MagicMock(return_value={
+            "success": True,
+            "data": {
+                "run_id": "run-abc",
+                "workflow_id": "wf-1",
+                "status": "Success",
+                "finished_at": "2026-05-25T10:05:00Z",
+                "elapsed_ms": 42_000,
+                "tokens_used": 2200,
+                "timed_out": False,
+                "next_check": None,
+            },
+        })
+        self.http_patch = mock.patch.object(self.mod, "_http", self.fake_http)
+        self.http_patch.start()
+        self.addCleanup(self.http_patch.stop)
+
+    def test_missing_run_id_raises_before_http(self):
+        with self.assertRaises(RuntimeError):
+            self.mod.call_workflow_wait_for_completion({})
+        self.fake_http.assert_not_called()
+
+    def test_forwards_post_with_run_id(self):
+        out = self.mod.call_workflow_wait_for_completion({"run_id": "run-abc"})
+        method, path, body = self.fake_http.call_args.args
+        self.assertEqual(method, "POST")
+        self.assertEqual(path, "/api/mcp/workflow-wait-for-completion")
+        self.assertEqual(body, {"run_id": "run-abc"})
+        self.assertEqual(out["status"], "Success")
+
+    def test_coerces_timeout_s_to_int(self):
+        # An LLM may emit "30" (str) — coerce so the backend u64 parses.
+        self.mod.call_workflow_wait_for_completion({"run_id": "run-abc", "timeout_s": "30"})
+        _, _, body = self.fake_http.call_args.args
+        self.assertEqual(body["timeout_s"], 30)
+        self.assertIsInstance(body["timeout_s"], int)
+
+    def test_invalid_timeout_s_raises(self):
+        with self.assertRaises(RuntimeError):
+            self.mod.call_workflow_wait_for_completion({"run_id": "run-abc", "timeout_s": "abc"})
+
+    def test_omits_timeout_s_when_absent(self):
+        self.mod.call_workflow_wait_for_completion({"run_id": "run-abc"})
+        _, _, body = self.fake_http.call_args.args
+        self.assertNotIn("timeout_s", body)
+
+
+class McpRemoteControlPr2Pr3ToolListingTests(unittest.TestCase):
+    """PR2/PR3 tools must be discoverable via tools/list AND dispatched."""
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.tool_names = {t["name"] for t in self.mod.TOOLS}
+
+    def test_new_tools_present(self):
+        for name in ("qp_batch_run", "workflow_run_discussions", "workflow_wait_for_completion"):
+            self.assertIn(name, self.tool_names, f"`{name}` missing from TOOLS")
+
+    def test_new_tools_dispatched(self):
+        for name in ("qp_batch_run", "workflow_run_discussions", "workflow_wait_for_completion"):
+            self.assertIn(name, self.mod.DISPATCH, f"`{name}` listed but not dispatched")
+
+    def test_required_fields_pinned(self):
+        qb = next(t for t in self.mod.TOOLS if t["name"] == "qp_batch_run")
+        self.assertIn("qp_id", qb["inputSchema"]["required"])
+        self.assertIn("items", qb["inputSchema"]["required"])
+        rd = next(t for t in self.mod.TOOLS if t["name"] == "workflow_run_discussions")
+        self.assertIn("run_id", rd["inputSchema"]["required"])
+        ww = next(t for t in self.mod.TOOLS if t["name"] == "workflow_wait_for_completion")
+        self.assertIn("run_id", ww["inputSchema"]["required"])
+
+    def test_wait_description_mentions_timeout_and_non_terminal_gate(self):
+        ww = next(t for t in self.mod.TOOLS if t["name"] == "workflow_wait_for_completion")
+        self.assertIn("timeout_s", ww["description"])
+        # WaitingApproval is explicitly NOT terminal — the description must
+        # warn so an agent doesn't assume a Gate'd workflow will resolve here.
+        self.assertIn("WaitingApproval", ww["description"])
+
+
+class ConventionGetTests(unittest.TestCase):
+    """0.8.7 — `convention_get` lets an agent pull a Kronn doc convention
+    spec on demand (cheap if not called). Pins the allowlist (refuse
+    unknown names — no arbitrary URL fetch surface) and the response
+    shape (`{name, version, content_markdown}`)."""
+
+    def setUp(self):
+        self.mod = _load_module()
+
+    def test_registered_in_tools_and_dispatch(self):
+        names = [t["name"] for t in self.mod.TOOLS]
+        self.assertIn("convention_get", names)
+        self.assertIn("convention_get", self.mod.DISPATCH)
+
+    def test_defaults_to_agents_md_format_v1_and_hits_text_endpoint(self):
+        with mock.patch.object(self.mod, "_http_text", return_value="# spec body") as m:
+            out = self.mod.call_convention_get({})
+        m.assert_called_once_with("GET", "/api/conventions/agents-md-format-v1")
+        self.assertEqual(out["name"], "agents-md-format")
+        self.assertEqual(out["version"], "v1")
+        self.assertEqual(out["content_markdown"], "# spec body")
+
+    def test_explicit_args_passed_through(self):
+        with mock.patch.object(self.mod, "_http_text", return_value="x") as m:
+            self.mod.call_convention_get({"name": "agents-md-format", "version": "v1"})
+        m.assert_called_once_with("GET", "/api/conventions/agents-md-format-v1")
+
+    def test_unknown_convention_raises_without_issuing_http(self):
+        # Allowlist guard — protects against an agent baiting the tool into
+        # fetching an arbitrary backend path.
+        with mock.patch.object(self.mod, "_http_text") as m:
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod.call_convention_get({"name": "../etc/passwd"})
+        m.assert_not_called()
+        self.assertIn("unknown convention", str(ctx.exception))
+
+    def test_unknown_version_raises(self):
+        with mock.patch.object(self.mod, "_http_text") as m:
+            with self.assertRaises(RuntimeError):
+                self.mod.call_convention_get({"name": "agents-md-format", "version": "v99"})
+        m.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

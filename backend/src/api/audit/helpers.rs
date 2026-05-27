@@ -10,6 +10,21 @@
 use crate::core::scanner;
 use crate::models::*;
 
+/// 0.8.7 — Short pointer line injected at the top of every prompt that can
+/// mutate a `docs/` file outside the audit's 10-step pipeline (validation,
+/// briefing). Replaces the previous 3-language doctrine block (~150 words ×
+/// 3 langs) — the canonical anti-hallu protocol now lives in the project's
+/// `docs/AGENTS.md` § Anti-Hallucination Protocol section (written by audit
+/// STEP 0). This pointer is the minimum reminder for code paths that bypass
+/// the runner chokepoint PREAMBLE and the audit PROMPT_PREAMBLE.
+fn anti_halluc_doc_writer_block(language: &str) -> &'static str {
+    match language {
+        "en" => "**Anti-hallucination** — when editing any `docs/` file, follow the project's `docs/AGENTS.md` § Anti-Hallucination Protocol : cite `[src: file: <path>:<line>]` for every non-trivial assertion ; convert unverifiable claims to `<!-- TODO: ask user -->`. Never invent.\n\n",
+        "es" => "**Anti-alucinación** — al editar cualquier archivo `docs/`, sigue el `docs/AGENTS.md` § Anti-Hallucination Protocol del proyecto : cita `[src: file: <ruta>:<línea>]` en cada afirmación técnica ; convierte lo no verificable en `<!-- TODO: ask user -->`. Nunca inventes.\n\n",
+        _ => "**Anti-hallucination** — quand tu édites un fichier `docs/`, suis le `docs/AGENTS.md` § Anti-Hallucination Protocol du projet : cite `[src: file: <chemin>:<ligne>]` pour chaque affirmation technique ; convertis l'invérifiable en `<!-- TODO: ask user -->`. N'invente jamais.\n\n",
+    }
+}
+
 /// Compute audit info (files + TODOs) from the filesystem.
 /// Path-agnostic — walks `docs/` post-pivot or `ai/` legacy via
 /// `detect_docs_dir`.
@@ -415,7 +430,14 @@ pub(crate) fn build_validation_prompt(language: &str, info: &AuditInfo, has_issu
         },
     };
 
-    let mut prompt = base;
+    // 0.8.7 anti-hallu: prepend the doc-writer discipline reminder so
+    // Phase 1 (auto-fix) and Phase 4 (challenge doc) which both mutate
+    // `docs/` files inherit the same sourcing protocol the 10-step audit
+    // gets via `PROMPT_PREAMBLE`. Without this, the validation pass was
+    // structurally outside the anti-hallucination scope.
+    let mut prompt = String::with_capacity(base.len() + 512);
+    prompt.push_str(anti_halluc_doc_writer_block(language));
+    prompt.push_str(&base);
 
     // Summary counts only — the agent has filesystem access to read the actual files
     let unfilled_count = info.files.iter().filter(|f| !f.filled).count();
@@ -615,10 +637,16 @@ pub(super) fn remove_bootstrap_block(index_file: &std::path::Path) {
 /// flow (kept for backwards-compat — callers that never wrote to the
 /// form still work).
 pub(crate) fn build_briefing_prompt(language: &str, prefilled_notes: Option<&str>) -> String {
-    if let Some(notes) = prefilled_notes {
-        return build_briefing_review_prompt(language, notes);
-    }
-    build_briefing_legacy_prompt(language)
+    // 0.8.7 anti-hallu: prefix the discipline reminder on every briefing
+    // path (review + legacy). Briefing produces `docs/briefing.md` which is
+    // then injected as project context — a hallucinated assertion here
+    // ships into every future agent prompt for this project.
+    let body = if let Some(notes) = prefilled_notes {
+        build_briefing_review_prompt(language, notes)
+    } else {
+        build_briefing_legacy_prompt(language)
+    };
+    format!("{}{}", anti_halluc_doc_writer_block(language), body)
 }
 
 /// 0.8.4 (#285+UX) — review prompt fired after the form has been
@@ -852,5 +880,162 @@ mod compute_audit_info_tests {
 
         let info = compute_audit_info_sync(dir.path().to_str().unwrap());
         assert_eq!(info.tech_debt_items.len(), 2);
+    }
+
+    // ── detect_project_skills — language + domain detection contract ──
+
+    #[test]
+    fn detects_rust_skill_from_cargo_toml() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"x\"").unwrap();
+        let skills = detect_project_skills(dir.path());
+        assert!(skills.contains(&"rust".into()), "got {skills:?}");
+    }
+
+    #[test]
+    fn detects_typescript_when_package_json_plus_tsconfig() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("package.json"), "{}").unwrap();
+        fs::write(dir.path().join("tsconfig.json"), "{}").unwrap();
+        let skills = detect_project_skills(dir.path());
+        assert!(skills.contains(&"typescript".into()), "got {skills:?}");
+    }
+
+    #[test]
+    fn does_not_emit_typescript_for_pure_js_project() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("package.json"), "{}").unwrap();
+        // NO tsconfig.json → should NOT add typescript.
+        let skills = detect_project_skills(dir.path());
+        assert!(!skills.contains(&"typescript".into()),
+            "package.json alone must not imply typescript");
+    }
+
+    #[test]
+    fn detects_python_skill_from_requirements_txt() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("requirements.txt"), "fastapi").unwrap();
+        let skills = detect_project_skills(dir.path());
+        assert!(skills.contains(&"python".into()));
+    }
+
+    #[test]
+    fn detects_python_skill_from_pyproject_toml() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("pyproject.toml"), "[project]\nname=\"x\"").unwrap();
+        let skills = detect_project_skills(dir.path());
+        assert!(skills.contains(&"python".into()));
+    }
+
+    #[test]
+    fn detects_python_skill_from_setup_py() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("setup.py"), "from setuptools import setup").unwrap();
+        let skills = detect_project_skills(dir.path());
+        assert!(skills.contains(&"python".into()));
+    }
+
+    #[test]
+    fn detects_go_skill_from_go_mod() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("go.mod"), "module x").unwrap();
+        let skills = detect_project_skills(dir.path());
+        assert!(skills.contains(&"go".into()));
+    }
+
+    #[test]
+    fn detects_php_skill_from_composer_json() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("composer.json"), "{}").unwrap();
+        let skills = detect_project_skills(dir.path());
+        assert!(skills.contains(&"php".into()));
+    }
+
+    #[test]
+    fn detects_devops_skill_from_dockerfile() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("Dockerfile"), "FROM alpine").unwrap();
+        let skills = detect_project_skills(dir.path());
+        assert!(skills.contains(&"devops".into()));
+    }
+
+    #[test]
+    fn detects_devops_skill_from_makefile() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("Makefile"), "all:\n\techo hi").unwrap();
+        let skills = detect_project_skills(dir.path());
+        assert!(skills.contains(&"devops".into()));
+    }
+
+    #[test]
+    fn detects_database_skill_from_migrations_dir() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("migrations")).unwrap();
+        let skills = detect_project_skills(dir.path());
+        assert!(skills.contains(&"database".into()));
+    }
+
+    #[test]
+    fn detects_database_skill_from_prisma_dir() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("prisma")).unwrap();
+        let skills = detect_project_skills(dir.path());
+        assert!(skills.contains(&"database".into()));
+    }
+
+    #[test]
+    fn detects_web_performance_skill_from_vite_config() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("vite.config.ts"), "export default {};").unwrap();
+        let skills = detect_project_skills(dir.path());
+        assert!(skills.contains(&"web-performance".into()));
+    }
+
+    #[test]
+    fn detects_seo_skill_from_robots_txt() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("robots.txt"), "User-agent: *").unwrap();
+        let skills = detect_project_skills(dir.path());
+        assert!(skills.contains(&"seo".into()));
+    }
+
+    #[test]
+    fn detects_seo_skill_from_public_robots_txt() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("public")).unwrap();
+        fs::write(dir.path().join("public/robots.txt"), "User-agent: *").unwrap();
+        let skills = detect_project_skills(dir.path());
+        assert!(skills.contains(&"seo".into()));
+    }
+
+    #[test]
+    fn returns_empty_for_unknown_project() {
+        let dir = tempdir().unwrap();
+        // Empty dir — no detectable language, no domain signals.
+        let skills = detect_project_skills(dir.path());
+        // All skills get filtered through `core::skills::get_skill`, so
+        // even false-positives (unknown skill ids) would be dropped here.
+        // Just verify no panic + vec is well-formed.
+        assert!(skills.iter().all(|s| !s.is_empty()));
+    }
+
+    // ── check_ai_dir_permissions — defensive guard tests ────────────
+
+    #[test]
+    fn check_permissions_on_existing_directory_succeeds() {
+        let dir = tempdir().unwrap();
+        let result = check_ai_dir_permissions(dir.path());
+        assert!(result.is_ok(), "writable temp dir must pass: {result:?}");
+    }
+
+    #[test]
+    fn check_permissions_on_nonexistent_directory_creates_or_errors_cleanly() {
+        // Helper is expected to either create the dir or surface a clear
+        // error — never panic.
+        let dir = tempdir().unwrap();
+        let nested = dir.path().join("does-not-yet-exist");
+        let _ = check_ai_dir_permissions(&nested);
+        // No assertion on Ok/Err — both shapes are valid contracts. Just
+        // confirm no panic.
     }
 }

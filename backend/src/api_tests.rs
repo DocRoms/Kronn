@@ -486,7 +486,7 @@ mod tests {
                 agent: crate::models::AgentType::ClaudeCode,
                 language: "en".into(),
                 participants: vec![crate::models::AgentType::ClaudeCode],
-                message_count: 0,
+                message_count: 0, non_system_message_count: 0,
                 messages: vec![],
                 skill_ids: vec![],
                 profile_ids: vec![],
@@ -624,7 +624,7 @@ mod tests {
                 agent: crate::models::AgentType::Vibe,
                 language: "fr".into(),
                 participants: vec![],
-                message_count: 0, messages: vec![],
+                message_count: 0, non_system_message_count: 0, messages: vec![],
                 skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
                 archived: false, pinned: false, workspace_mode: "Direct".into(),
                 workspace_path: None, worktree_branch: None,
@@ -853,7 +853,7 @@ mod tests {
                     agent: crate::models::AgentType::ClaudeCode,
                     language: "en".into(),
                     participants: vec![crate::models::AgentType::ClaudeCode],
-                    message_count: 0, messages: vec![],
+                    message_count: 0, non_system_message_count: 0, messages: vec![],
                     skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
                     archived: false, pinned: false, workspace_mode: "Direct".into(),
                     workspace_path: None, worktree_branch: None,
@@ -881,6 +881,7 @@ mod tests {
             let content = content.to_string();
             move |conn| {
                 let msg = crate::models::DiscussionMessage {
+                    lint_report: None,
                     id: uuid::Uuid::new_v4().to_string(),
                     role: match role.as_str() {
                         "User" => crate::models::MessageRole::User,
@@ -1599,7 +1600,7 @@ mod tests {
                 agent: crate::models::AgentType::ClaudeCode,
                 language: "en".into(),
                 participants: vec![crate::models::AgentType::ClaudeCode],
-                message_count: 0, messages: vec![],
+                message_count: 0, non_system_message_count: 0, messages: vec![],
                 skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
                 archived: false, pinned: false, workspace_mode: "Direct".into(),
                 workspace_path: None, worktree_branch: None,
@@ -2425,5 +2426,45 @@ mod tests {
         assert!(resp["data"]["quick_prompts"].as_array().unwrap().is_empty());
         assert!(resp["data"]["quick_apis"].as_array().unwrap().is_empty());
         assert!(resp["data"]["workflow"]["id"].as_str().is_some());
+    }
+
+    // ─── 0.8.7 — GET /api/conventions/agents-md-format-v1 ──────────────────
+    //
+    // The Settings → Sourcing section links here to render the local spec.
+    // A constant-only test (in setup.rs) doesn't catch a router-misregistration
+    // regression that would silently 404. This pins the full route.
+
+    #[tokio::test]
+    async fn conventions_route_returns_markdown_spec() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/conventions/agents-md-format-v1")
+            .body(Body::empty())
+            .unwrap();
+        let app = build_router_with_auth(state, false);
+        let resp = app.oneshot(req).await.expect("oneshot failed");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|h| h.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        assert!(
+            ct.starts_with("text/markdown"),
+            "expected text/markdown content-type, got {ct:?}",
+        );
+
+        let bytes = resp.into_body().collect().await.expect("body collect").to_bytes();
+        let body = std::str::from_utf8(&bytes).expect("utf-8 body");
+        assert!(body.contains("Kronn `AGENTS.md` convention"));
+        assert!(body.contains("kronn:doc-version"));
+        assert_eq!(
+            body,
+            crate::core::anti_halluc::SPEC_AGENTS_MD_V1,
+            "route body must match the embedded constant byte-for-byte",
+        );
     }
 }

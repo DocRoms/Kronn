@@ -78,6 +78,17 @@ export default defineConfig({
         'src/main.tsx',
         'src/vite-env.d.ts',
       ],
+      // Regression floors — pinned just below the 2026-05-29 baseline
+      // (Statements 56.18 / Branches 50.79 / Functions 48.41 / Lines 59.16)
+      // so a single test removal doesn't tank CI. Bump these up when
+      // we land another coverage push. Don't lower them — that's the
+      // whole point of the floor.
+      thresholds: {
+        statements: 55,
+        branches: 50,
+        functions: 47,
+        lines: 58,
+      },
     },
   },
 });

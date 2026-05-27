@@ -63,7 +63,7 @@ describe('regression tests', () => {
         language: 'fr',
         participants: ['ClaudeCode'],
         messages: [],
-        message_count: 5,
+        message_count: 5, non_system_message_count: 5,
         archived: false, pinned: false,
         workspace_mode: 'Direct',
         created_at: '2026-01-01T00:00:00Z',
@@ -74,8 +74,12 @@ describe('regression tests', () => {
       expect(listDisc.messages).toHaveLength(0);
     });
 
-    it('unseen count uses message_count, not messages.length', () => {
-      // Simulates the real calculation from Dashboard/DiscussionsPage
+    it('unseen count uses non_system_message_count, not message_count or messages.length', () => {
+      // 0.8.7 regression: System messages (tool calls + summary breadcrumbs)
+      // inflate `message_count` from the user's POV — the badge tracks
+      // `non_system_message_count` instead. Here a discussion has 10 total
+      // messages with 8 of them being System (tool breadcrumbs); only 2
+      // User+Agent. With lastSeen=2 the unseen count must read 0, not 8.
       const disc: Discussion = {
         id: 'd1',
         project_id: null,
@@ -84,18 +88,18 @@ describe('regression tests', () => {
         language: 'fr',
         participants: [],
         messages: [],       // empty from list endpoint
-        message_count: 10,  // real count from backend
+        message_count: 10,            // inflated by 8 System rows
+        non_system_message_count: 2,  // the real "to read" count
         archived: false, pinned: false,
         workspace_mode: 'Direct',
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
       };
-      const lastSeenCount = 7;
-      // Correct: use message_count (not messages.length which would be 0)
-      const unseen = (disc.message_count ?? disc.messages.length) - lastSeenCount;
-      expect(unseen).toBe(3);
-      // Wrong: using messages.length would give -7
-      expect(disc.messages.length - lastSeenCount).toBe(-7);
+      const lastSeenCount = 2;
+      const unseen = (disc.non_system_message_count ?? disc.messages.length) - lastSeenCount;
+      expect(unseen).toBe(0);
+      // Wrong: the pre-fix calc would have read 10 → unseen = 8 (bug).
+      expect(disc.message_count - lastSeenCount).toBe(8);
     });
   });
 

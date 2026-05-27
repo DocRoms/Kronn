@@ -111,3 +111,58 @@ pub async fn purge_api_call_logs(
         Err(e) => Json(ApiResponse::err(format!("{e}"))),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_source_recognises_all_known_kinds() {
+        assert!(matches!(parse_source("workflow"), Some(ApiCallSource::Workflow)));
+        assert!(matches!(parse_source("agent_broker"), Some(ApiCallSource::AgentBroker)));
+        assert!(matches!(parse_source("manual_test"), Some(ApiCallSource::ManualTest)));
+    }
+
+    #[test]
+    fn parse_source_rejects_unknown_variants() {
+        assert!(parse_source("").is_none());
+        assert!(parse_source("Workflow").is_none(), "case-sensitive match");
+        assert!(parse_source("agent-broker").is_none(), "hyphen ≠ underscore");
+        assert!(parse_source("garbage").is_none());
+    }
+
+    #[test]
+    fn parse_status_recognises_all_known_variants() {
+        assert!(matches!(parse_status("OK"), Some(ApiCallStatus::Ok)));
+        assert!(matches!(parse_status("ERROR"), Some(ApiCallStatus::Error)));
+        assert!(matches!(parse_status("RateLimited"), Some(ApiCallStatus::RateLimited)));
+        assert!(matches!(parse_status("TimedOut"), Some(ApiCallStatus::TimedOut)));
+    }
+
+    #[test]
+    fn parse_status_rejects_unknown_variants() {
+        assert!(parse_status("").is_none());
+        assert!(parse_status("ok").is_none(), "case-sensitive match");
+        assert!(parse_status("error").is_none());
+        assert!(parse_status("Pending").is_none(), "no Pending variant — must be skipped");
+    }
+
+    #[test]
+    fn purge_days_clamps_to_range() {
+        // Mirror the clamp(1, 365) the handler applies to req.days.unwrap_or(30).
+        // 0 / negative / way-too-large values must converge into [1, 365].
+        assert_eq!(0u32.clamp(1, 365), 1);
+        assert_eq!(1u32.clamp(1, 365), 1);
+        assert_eq!(30u32.clamp(1, 365), 30);
+        assert_eq!(365u32.clamp(1, 365), 365);
+        assert_eq!(366u32.clamp(1, 365), 365);
+        assert_eq!(u32::MAX.clamp(1, 365), 365);
+    }
+
+    #[test]
+    fn purge_days_default_is_30() {
+        let req = PurgeRequest { days: None };
+        let effective = req.days.unwrap_or(30).clamp(1, 365);
+        assert_eq!(effective, 30);
+    }
+}

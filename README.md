@@ -27,7 +27,7 @@
 
 **Smaller prompts, more code where code is enough: fewer hallucinations, lower token bill, eco-design by default.**
 
-> **Status: 0.8.6.** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
+> **Status: 0.8.7.** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
 > **License: AGPL-3.0.** Using Kronn locally to build *your own* product is fine; the copyleft only kicks in if you distribute a modified Kronn to others. See [License notes](#license-notes-agpl-3-0).
 
 ## Contents
@@ -227,6 +227,20 @@ Main command:     bin/phpunit -c phpunit.xml.dist
 Same allowlist + same timeout. Setup fails → main is NOT executed and you see the install logs. Setup succeeds → main runs in the prepared worktree. Common patterns are pre-listed (composer, npm ci, pnpm, yarn, poetry, pip) — pick one, override if needed.
 
 For dockerized projects, the `docker-in-docker` volume mismatch is solved at the infra layer (self-mount + host-path translation), so `docker compose run --rm svc <cmd>` works from a worktree without any extra config.
+
+### 7. Catch hallucinations before they spread (0.8.7)
+
+AI agents confidently assert file paths that don't exist, functions they invented, versions that aren't yours. When one of those lies gets persisted into `docs/AGENTS.md`, every future agent inherits it as "established truth". **0.8.7 ships a two-tier guard that runs on every agent reply.**
+
+Three modes, defaulting to `warn`, picked in **Settings → Sourcing &amp; Anti-hallucination** (or `config.toml`) :
+
+- **`off`** — no directive, no checking. The pre-0.8.7 behaviour.
+- **`warn` (default)** — each agent receives a sourcing directive : *"cite a `file:line`, URL, or `user-confirmed` for every non-trivial claim; if you can't, say so plainly and verify before asserting."* Kronn then mechanically inspects each `[src: …]` citation the agent emits — path-jailed to the project root (no FS escape), checks the file exists and the line range is in bounds. A non-blocking per-message pill surfaces problems : **red** for fabricated citations (the cited file/line does not exist, or the source type is `training-data` = model's prior knowledge, auto-rejected), **amber** for confident claims left without any anchor. Clicking the pill opens a detail panel listing the bad citations.
+- **`enforce` (preview · 0.8.8)** — same as warn today ; in 0.8.8 will refuse writes to `AGENTS.md curated="ai"` sections whose citations don't resolve.
+
+**Honest by design** : `verified` means the citation *exists*, not that the claim is *true* (catching "real but irrelevant" citations is the job of a future LLM-judge layer). The pill is non-blocking — it's a signal you decide to act on, not a hard gate. Language-agnostic + compression-proof + ungameable : you can't fabricate a file or line number that actually exists in your repo.
+
+The full convention is an open spec (`backend/docs/conventions/agents-md-format-v1.md`, served on `/api/conventions/agents-md-format-v1` and linked from the Settings section) — anyone can emit Kronn-compatible documentation with or without Kronn.
 
 ---
 

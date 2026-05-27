@@ -1186,6 +1186,38 @@ html[data-density="large"] .dash-main {
   margin-bottom: var(--kr-sp-4);
 }
 
+/* 0.8.7 — per-source failure list. Distinct from `.dash-discover-error`
+   (which is a fatal request-level error) : these are partial failures,
+   shown amber to convey "the rest of the data is still usable, fix me
+   when you can". */
+.dash-discover-source-errors {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+  margin-bottom: var(--kr-sp-4);
+}
+.dash-discover-source-error {
+  display: flex;
+  align-items: baseline;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-2) var(--kr-sp-4);
+  border-radius: var(--kr-r-sm);
+  background: rgba(var(--kr-warning-rgb), 0.08);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.2);
+  font-size: var(--kr-fs-sm);
+}
+.dash-discover-source-error-label {
+  font-weight: 600;
+  color: var(--kr-warning);
+  white-space: nowrap;
+}
+.dash-discover-source-error-msg {
+  color: var(--kr-text-secondary);
+  font-family: var(--kr-font-mono);
+  font-size: var(--kr-fs-xs);
+  word-break: break-word;
+}
+
 /* ── Repo search input ─────────────────────────────────── */
 .dash-repo-search {
   width: 100%;
